@@ -75,6 +75,11 @@ struct MinimaxMusic3Config {
     std::string caption;
     int32_t max_frames{9000};
     int64_t seed{-1};
+    // The checkpoint's draw. Kept here rather than rewriting the request's
+    // GenerateConfig, whose top_k default of 1 is indistinguishable from an
+    // explicit request for greedy decoding.
+    int32_t top_k{50};
+    float temperature{1.0F};
 };
 
 // The five engines a bundle carries. Ownership is the pipeline's.
@@ -152,8 +157,11 @@ class MinimaxMusic3TextToMusicPipeline final : public IPipeline {
     // autoregressive stage's, or, under TRTMC_MM3_FRAME_HIDDEN, ones recorded
     // elsewhere so a fault in how codes are drawn can be told apart from a
     // fault in what is done with them.
+    // `emitted` returns the frames the model actually produced, which is fewer
+    // than `frames` when it draws the audio-end token. Everything downstream
+    // must use that count or it denoises and emits the zero-filled tail.
     std::vector<float> collect_frame_states(const std::vector<int32_t>& prompt_ids, int32_t frames,
-                                            const GenerateConfig& cfg);
+                                            const GenerateConfig& cfg, int32_t& emitted);
 
     // The slice of a denoised window that the next one blends its head toward.
     std::vector<float> carry_overlap(const std::vector<float>& latents,
@@ -165,7 +173,7 @@ class MinimaxMusic3TextToMusicPipeline final : public IPipeline {
 
     // The parameters the autoregressive draw runs with, defaulted from the
     // checkpoint where the request left them unset.
-    static GenerateConfig sampling_config(const GenerateConfig& cfg);
+    GenerateConfig sampling_config(const GenerateConfig& cfg) const;
 
     // Print the drawn semantic codes under TRTMC_MM3_DEBUG. A degenerate loop
     // shows up here before it shows up in the audio.
@@ -182,7 +190,8 @@ class MinimaxMusic3TextToMusicPipeline final : public IPipeline {
     // reads. The language model emits codebook 0 and the depth decoder the
     // seven residual codebooks for the same frame, so one step drives both.
     std::vector<int32_t> generate_codes(const std::vector<int32_t>& prompt_ids, int32_t frames,
-                                        const GenerateConfig& cfg, std::vector<float>& hidden);
+                                        const GenerateConfig& cfg, std::vector<float>& hidden,
+                                        int32_t& emitted);
 
     //: The autoregressive stage runs two sequences: the assembled prompt and
     //: its classifier-free counterpart. Each carries its own key/value cache.
@@ -267,6 +276,9 @@ class MinimaxMusic3TextToMusicPipeline final : public IPipeline {
     // The seven depth states for the frame being drawn.
     std::vector<float> depth_hidden_;
     std::vector<float> depth_scratch_;
+    // Rows the engine's cache was compiled for. commit_branch writes by
+    // position, so it has to know where the cache ends.
+    int32_t cache_rows_{0};
     std::vector<DeviceTensor> cache_k_;
     std::vector<DeviceTensor> cache_v_;
     std::vector<DeviceTensor> present_k_;

@@ -140,7 +140,7 @@ def test_runtime_config_schema_registers() -> None:
 
     assert schema is not None
     assert {field.name for field in schema.fields} == {
-        "caption", "max_frames", "seed"}
+        "caption", "max_frames", "seed", "top_k", "temperature"}
 
 
 def _field(name: str):
@@ -183,7 +183,13 @@ def test_max_frames_honours_the_upstream_limit() -> None:
 
 
 def _fake_checkpoint(tmp_path):
-    """A snapshot with the four buildable components' tensors, at real shapes."""
+    """A snapshot carrying the components' tensor *names*.
+
+    The three callers assert routing, a missing name, and a missing directory
+    -- none reads a shape or a value. Writing the real shapes serialises about
+    3.25 GB per call (``_rvq_depth_decoder`` alone is 2.58 GB), so each name
+    gets a scalar instead. ``test_checkpoint`` keeps the shape inventory.
+    """
 
     import numpy as np
     from safetensors.numpy import save_file
@@ -203,7 +209,7 @@ def _fake_checkpoint(tmp_path):
         directory = tmp_path / component
         directory.mkdir(parents=True, exist_ok=True)
         save_file(
-            {k: np.zeros(v, dtype=np.float32) for k, v in build().items()},
+            {k: np.zeros(1, dtype=np.float32) for k in build()},
             str(directory / "model.safetensors"),
         )
     for name, tensor in (

@@ -76,24 +76,34 @@ class TextToMusicComparator:
             "two folded streams through one mono decoder",
         )
 
+        # A measurement that did not arrive is a failure, not an exemption.
+        # Skipping it would let a run with only a sampling rate and a channel
+        # count pass, which silently drops the non-silence, duration and
+        # intelligibility gates -- the three that say the audio is real.
+        floor = float(threshold.metrics["contract_min_rms"])
         rms = data.get("rms")
-        if rms is not None:
-            floor = float(threshold.metrics["contract_min_rms"])
+        if rms is None:
+            metrics["rms"] = _metric(0.0, floor, ">=", False, "no RMS was measured")
+        else:
             metrics["rms"] = _metric(float(rms), floor, ">=", float(rms) >= floor,
                                      "non-silence")
 
+        low = float(threshold.metrics["contract_min_duration_s"])
+        high = float(threshold.metrics["contract_max_duration_s"])
         duration = data.get("duration_s")
-        if duration is not None:
-            low = float(threshold.metrics["contract_min_duration_s"])
-            high = float(threshold.metrics["contract_max_duration_s"])
+        if duration is None:
+            metrics["duration_s"] = _metric(0.0, low, ">=", False, "no duration was measured")
+        else:
             metrics["duration_s"] = _metric(
                 float(duration), low, ">=", low <= float(duration) <= high,
                 f"range [{low}, {high}]",
             )
 
+        limit = float(threshold.metrics["contract_asr_ned_threshold"])
         ned = data.get("asr_ned")
-        if ned is not None:
-            limit = float(threshold.metrics["contract_asr_ned_threshold"])
+        if ned is None:
+            metrics["asr_ned"] = _metric(1.0, limit, "<=", False, "no transcript was scored")
+        else:
             metrics["asr_ned"] = _metric(
                 float(ned), limit, "<=", float(ned) <= limit,
                 "transcribed lyrics against the prompt",

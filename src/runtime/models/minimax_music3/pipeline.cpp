@@ -102,6 +102,8 @@ std::vector<float> sigma_schedule(int32_t steps) {
 std::vector<int32_t> chunk_starts(int32_t frames, int32_t chunk_frames, int32_t chunk_hop) {
     if (frames <= 0)
         throw std::invalid_argument("frame count must be positive");
+    if (chunk_hop <= 0)
+        throw std::invalid_argument("chunk hop must be positive");
     if (frames <= chunk_frames)
         return {0};
     std::vector<int32_t> starts;
@@ -272,6 +274,15 @@ void MinimaxMusic3TextToMusicPipeline::bind_cache() {
             // The engine decides the width. A bf16 build carries a bf16 cache, and
             // a float32 buffer would be twice the size and read as noise.
             const auto dtype = lm.tensor_dtype(key);
+            // Rank-2 (rows, width) or rank-3 (1, rows, width): divide out the
+            // width so either layout gives the row count.
+            std::int64_t cache_elements = 1;
+            for (const auto extent : shape)
+                cache_elements *= extent;
+            const auto rows =
+                static_cast<int32_t>(cache_elements / std::max(1, config_.language_model_kv_width));
+            if (cache_rows_ == 0)
+                cache_rows_ = rows;
             cache_k_[index] = DeviceTensor(shape, dtype, stream);
             cache_v_[index] = DeviceTensor(shape, dtype, stream);
             present_k_[index] = DeviceTensor(shape, dtype, stream);
@@ -351,17 +362,32 @@ void MinimaxMusic3TextToMusicPipeline::commit_branch(int32_t branch, int32_t pos
     // whole cache with a single row every step. The model then saw only the
     // token in front of it, and sang one syllable over and over.
     auto& lm = *engines_.language_model;
+    // A prompt at the token cap plus a full-length generation reaches the last
+    // row; one more step would write past the cache the engine was built for.
+    if (position < 0 || position >= cache_rows_)
+        throw std::runtime_error("MiniMax-Music3 ran past its key/value cache at position " +
+                                 std::to_string(position) + " of " + std::to_string(cache_rows_) +
+                                 " rows; shorten the prompt or the requested frame count");
     const auto row_bytes = static_cast<std::size_t>(config_.language_model_kv_width) *
                            dtype_size(lm.tensor_dtype(layer_name("cache_k_{i}", 0)));
+    const auto copy_row = [&](DeviceTensor& cache, const DeviceTensor& present) {
+        const auto offset = static_cast<std::size_t>(position) * row_bytes;
+        const auto status =
+            cudaMemcpyAsync(static_cast<char*>(cache.data()) + offset, present.data(), row_bytes,
+                            cudaMemcpyDeviceToDevice, lm.stream());
+        if (status != cudaSuccess)
+            throw std::runtime_error(std::string("MiniMax-Music3 cache update failed: ") +
+                                     cudaGetErrorString(status));
+    };
     for (int32_t layer = 0; layer < config_.language_model_layers; ++layer) {
         const auto index = slot(branch, layer);
-        const auto offset = static_cast<std::size_t>(position) * row_bytes;
-        cudaMemcpyAsync(static_cast<char*>(cache_k_[index].data()) + offset,
-                        present_k_[index].data(), row_bytes, cudaMemcpyDeviceToDevice, lm.stream());
-        cudaMemcpyAsync(static_cast<char*>(cache_v_[index].data()) + offset,
-                        present_v_[index].data(), row_bytes, cudaMemcpyDeviceToDevice, lm.stream());
+        copy_row(cache_k_[index], present_k_[index]);
+        copy_row(cache_v_[index], present_v_[index]);
     }
-    cudaStreamSynchronize(lm.stream());
+    const auto status = cudaStreamSynchronize(lm.stream());
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("MiniMax-Music3 cache update did not complete: ") +
+                                 cudaGetErrorString(status));
 }
 
 int32_t MinimaxMusic3TextToMusicPipeline::latent_length_for(int32_t frames) const {
@@ -398,7 +424,8 @@ MinimaxMusic3TextToMusicPipeline::tokenize_prompt(const std::string& lyrics) con
 
 std::vector<float>
 MinimaxMusic3TextToMusicPipeline::collect_frame_states(const std::vector<int32_t>& prompt_ids,
-                                                       int32_t frames, const GenerateConfig& cfg) {
+                                                       int32_t frames, const GenerateConfig& cfg,
+                                                       int32_t& emitted) {
     std::vector<float> frame_hidden;
     if (const char* injected = std::getenv("TRTMC_MM3_FRAME_HIDDEN")) {
         // Bisection aid: run the conditioning, the denoiser and the vocoder on
@@ -412,8 +439,10 @@ MinimaxMusic3TextToMusicPipeline::collect_frame_states(const std::vector<int32_t
         frame_hidden.resize(bytes / sizeof(float));
         in.read(reinterpret_cast<char*>(frame_hidden.data()), static_cast<std::streamsize>(bytes));
         std::cerr << "[mm3] injected frame states: " << frame_hidden.size() << " floats\n";
+        emitted = static_cast<int32_t>(frame_hidden.size() /
+                                       static_cast<std::size_t>(config_.frame_hidden_width));
     } else {
-        generate_codes(prompt_ids, frames, cfg, frame_hidden);
+        generate_codes(prompt_ids, frames, cfg, frame_hidden, emitted);
     }
     report_stage("frame_hidden", frame_hidden.data(), frame_hidden.size());
     if (const char* dump = std::getenv("TRTMC_MM3_DUMP")) {
@@ -455,8 +484,14 @@ void MinimaxMusic3TextToMusicPipeline::append_window(const std::vector<float>& c
     const int32_t right = window + 1 == window_count ? 0 : config_.crop_right_latent;
     const auto begin =
         static_cast<std::size_t>(left) * config_.latent_hop_length * config_.output_channels;
-    const auto end = chunk.size() - static_cast<std::size_t>(right) * config_.latent_hop_length *
-                                        config_.output_channels;
+    const auto trailing = static_cast<std::size_t>(right) *
+                          static_cast<std::size_t>(config_.latent_hop_length) *
+                          static_cast<std::size_t>(config_.output_channels);
+    // Guard before subtracting: an oversized crop would wrap `end` to a huge
+    // value, pass the emptiness check below, and build an out-of-range iterator.
+    if (trailing > chunk.size())
+        throw std::runtime_error("MiniMax-Music3 window crop is wider than the window");
+    const auto end = chunk.size() - trailing;
     if (begin >= end)
         throw std::runtime_error("MiniMax-Music3 window crop removed the whole window");
     samples.insert(samples.end(), chunk.begin() + static_cast<std::ptrdiff_t>(begin),
@@ -469,10 +504,16 @@ AudioResult MinimaxMusic3TextToMusicPipeline::generate_audio(const std::string& 
         throw std::runtime_error("MiniMax-Music3 needs a tokenizer to read its prompt");
 
     const auto prompt_ids = tokenize_prompt(prompt);
-    const int32_t frames = std::min(
+    const int32_t requested = std::min(
         config_.max_frames, cfg.max_new_tokens > 0 ? cfg.max_new_tokens : config_.max_audio_frames);
 
-    const auto frame_hidden = collect_frame_states(prompt_ids, frames, cfg);
+    int32_t emitted = 0;
+    const auto frame_hidden = collect_frame_states(prompt_ids, requested, cfg, emitted);
+    if (emitted <= 0)
+        throw std::runtime_error("MiniMax-Music3 produced no frame states");
+    // The model can stop at the audio-end token before the requested count.
+    // Everything past that point is zero, so window and crop to what it drew.
+    const int32_t frames = std::min(requested, emitted);
 
     const int32_t steps = cfg.num_steps > 0 ? cfg.num_steps : config_.default_inference_steps;
     const auto starts = chunk_starts(frames, config_.chunk_frames, config_.chunk_hop);
@@ -774,14 +815,16 @@ void MinimaxMusic3TextToMusicPipeline::record_frame(const EmittedFrame& frame,
     }
 }
 
-// The checkpoint samples with a fixed top-k; a request that leaves the draw
-// unset gets that rather than greedy decoding, which loops on this model.
-GenerateConfig MinimaxMusic3TextToMusicPipeline::sampling_config(const GenerateConfig& cfg) {
+// The checkpoint's draw comes from this family's own namespace, which defaults
+// to the reference's top-k 50. Only a request that moved GenerateConfig off its
+// struct defaults overrides it -- so `music_minimax_music3.top_k = 1` still
+// reaches the argmax path, which rewriting GenerateConfig made unreachable.
+GenerateConfig MinimaxMusic3TextToMusicPipeline::sampling_config(const GenerateConfig& cfg) const {
     GenerateConfig draw = cfg;
-    if (draw.top_k <= 1)
-        draw.top_k = minimax_music3::kArSamplingTopK;
-    if (draw.temperature <= 0.0F)
-        draw.temperature = 1.0F;
+    if (draw.top_k == 1)
+        draw.top_k = config_.top_k;
+    if (draw.temperature == 1.0F)
+        draw.temperature = config_.temperature;
     return draw;
 }
 
@@ -815,7 +858,7 @@ void MinimaxMusic3TextToMusicPipeline::report_denoise_step(std::size_t index,
 std::vector<int32_t>
 MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& prompt_ids,
                                                  int32_t frames, const GenerateConfig& cfg,
-                                                 std::vector<float>& hidden) {
+                                                 std::vector<float>& hidden, int32_t& emitted) {
     const int32_t streams = config_.num_codebooks;
     std::vector<int32_t> codes(static_cast<std::size_t>(streams) *
                                static_cast<std::size_t>(frames));
@@ -861,7 +904,7 @@ MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& pro
     // The reference runs max_frames + 1 draws and keeps the last max_frames of
     // them: the first advances the state past <|audio_start|> and is not a
     // frame the model emits.
-    int32_t emitted = 0;
+    emitted = 0;
     std::vector<int32_t> residual(static_cast<std::size_t>(config_.num_residual_codebooks));
     for (int32_t step = 0; step <= frames; ++step) {
         guide_logits(conditional, unconditional, guided_);

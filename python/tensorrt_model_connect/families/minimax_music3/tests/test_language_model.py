@@ -125,5 +125,14 @@ def test_context_covers_the_longest_generation() -> None:
         "tensorrt_model_connect.families.minimax_music3.pipeline_spec"
     )
 
-    # 9000 audio frames plus a 5000-token prompt still fits the 10240 context.
+    lme = importlib.import_module(
+        "tensorrt_model_connect.families.minimax_music3.language_model_engine"
+    )
+
+    # The two caps do not both fit: 9000 frames plus a 5000-token prompt is
+    # 14000, and the checkpoint has 10240 trained positions. The cache the
+    # engine is built with must stop at the position table, not at the sum.
     assert spec.MAX_AUDIO_FRAMES < lm.MAX_POSITION_EMBEDDINGS
+    assert spec.MAX_PROMPT_TOKENS + spec.MAX_AUDIO_FRAMES > lm.MAX_POSITION_EMBEDDINGS
+    assert lme.DEFAULT_MAX_CACHE_LENGTH == lm.MAX_POSITION_EMBEDDINGS
+    assert lme.DEFAULT_MAX_CACHE_LENGTH <= lm.MAX_POSITION_EMBEDDINGS
