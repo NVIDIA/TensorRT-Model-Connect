@@ -54,10 +54,6 @@ _DIRECT_GATE_SPECS = {
     "temporal_consistency": ("min_temporal_consistency", ">="),
 }
 _REFERENCE_PLUS_GATE_SPECS = {
-    "candidate_20nn_top1_accuracy_max_drop_from_reference": (
-        "candidate_20nn_top1_accuracy",
-        "reference_20nn_top1_accuracy",
-    ),
     "candidate_nonocc_epe_max_reference_plus_px": (
         "candidate_nonocc_epe_px",
         "reference_nonocc_epe_px",
@@ -65,6 +61,12 @@ _REFERENCE_PLUS_GATE_SPECS = {
     "candidate_nonocc_bp2_max_reference_plus_fraction": (
         "candidate_nonocc_bp2_fraction",
         "reference_nonocc_bp2_fraction",
+    ),
+}
+_REFERENCE_MINUS_GATE_SPECS = {
+    "candidate_20nn_top1_accuracy_max_drop_from_reference": (
+        "candidate_20nn_top1_accuracy",
+        "reference_20nn_top1_accuracy",
     ),
 }
 
@@ -78,6 +80,8 @@ def _gate_spec(gate: str) -> tuple[str, str] | None:
         return gate.removeprefix("max_"), "<="
     if gate in _REFERENCE_PLUS_GATE_SPECS:
         return _REFERENCE_PLUS_GATE_SPECS[gate][0], "<="
+    if gate in _REFERENCE_MINUS_GATE_SPECS:
+        return _REFERENCE_MINUS_GATE_SPECS[gate][0], ">="
     return _DIRECT_GATE_SPECS.get(gate)
 
 
@@ -389,11 +393,13 @@ def describe_shadow_gate_policy(
             "required": required,
             "effective": effective,
         }
-        reference_plus = _REFERENCE_PLUS_GATE_SPECS.get(gate_name)
-        if reference_plus:
+        reference_relative = _REFERENCE_PLUS_GATE_SPECS.get(
+            gate_name
+        ) or _REFERENCE_MINUS_GATE_SPECS.get(gate_name)
+        if reference_relative:
             gate_description.update(
                 {
-                    "reference_metric": reference_plus[1],
+                    "reference_metric": reference_relative[1],
                     "allowance": required,
                 }
             )
@@ -468,7 +474,9 @@ def evaluate_shadow_gates(
                 checks.append(exact_check)
                 continue
         reference_plus = _REFERENCE_PLUS_GATE_SPECS.get(gate_name)
-        reference_metric = reference_plus[1] if reference_plus else ""
+        reference_minus = _REFERENCE_MINUS_GATE_SPECS.get(gate_name)
+        reference_relative = reference_plus or reference_minus
+        reference_metric = reference_relative[1] if reference_relative else ""
         if reference_metric and metrics.get(reference_metric) is None:
             issues.append(
                 {
@@ -515,7 +523,9 @@ def evaluate_shadow_gates(
                 )
                 continue
             allowance = required
-            required = reference + allowance
+            required = (
+                reference + allowance if reference_plus else reference - allowance
+            )
         configured_kind = str(resolved_metric_kinds.get(gate_name, "") or "")
         if configured_kind and configured_kind not in _METRIC_KINDS:
             issues.append(

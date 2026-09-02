@@ -192,6 +192,34 @@ def test_reference_plus_gate_requires_the_reference_metric() -> None:
     ]
 
 
+def test_reference_minus_accuracy_drop_gate_uses_reference_floor() -> None:
+    evaluation = evaluate_shadow_gates(
+        metrics={
+            "candidate_20nn_top1_accuracy": 0.78,
+            "reference_20nn_top1_accuracy": 0.80,
+        },
+        configured_gates={"candidate_20nn_top1_accuracy_max_drop_from_reference": 0.01},
+        sample_count=128,
+    )
+
+    assert evaluation["status"] == "fail"
+    assert evaluation["checks"] == [
+        {
+            "gate": "candidate_20nn_top1_accuracy_max_drop_from_reference",
+            "metric": "candidate_20nn_top1_accuracy",
+            "reference_metric": "reference_20nn_top1_accuracy",
+            "operator": ">=",
+            "actual": 0.78,
+            "reference": 0.80,
+            "allowance": 0.01,
+            "required": 0.79,
+            "verdict": "fail",
+            "effective": {"kind": "continuous", "sample_count": 128},
+        }
+    ]
+    assert evaluation["issues"] == []
+
+
 def test_missing_metric_is_an_invalid_shadow_policy() -> None:
     evaluation = evaluate_shadow_gates(
         metrics={},
