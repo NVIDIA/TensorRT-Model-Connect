@@ -228,7 +228,12 @@ def _group_norm(network, hidden, weights, prefix: str, channels: int):
     )
     gamma = op.cast(network, gamma, hidden.dtype)
     beta = op.cast(network, beta, hidden.dtype)
-    axes = sum(1 << axis for axis in range(1, rank))
+    # TensorRT group normalization treats the second NCHW dimension as the
+    # grouped channel axis.  When num_groups != 1, the reduction mask must
+    # therefore contain only dimensions after C (NvInfer.h, INormalizationLayer
+    # contract), rather than C itself.  Including bit 1 is rejected by
+    # TensorRT-RTX before the graph can be serialized.
+    axes = sum(1 << axis for axis in range(2, rank))
     layer = network.add_normalization_v2(hidden, gamma, beta, axes)
     if layer is None:
         raise RuntimeError(f"TensorRT rejected MiniMax-H3 VAE group norm {prefix}")

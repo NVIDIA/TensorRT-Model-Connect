@@ -288,3 +288,42 @@ def test_checkpoint_partitions_are_exhaustive_and_fail_closed_when_trt_is_availa
     ):
         with pytest.raises(ValueError, match="checkpoint partition mismatch"):
             builder({})
+
+
+def test_keyframe_group_norm_micrograph_serializes() -> None:
+    """Exercise the TensorRT GroupNorm axes contract used by FL2VA."""
+
+    import numpy as np
+
+    from tensorrt_model_connect import trt_compat
+
+    if trt_compat.is_available("tensorrt"):
+        pass
+    elif trt_compat.is_available("tensorrt_rtx"):
+        trt_compat.configure_backend(rtx=True)
+    else:
+        pytest.skip("TensorRT or TensorRT-RTX bindings are unavailable")
+
+    from tensorrt_model_connect.families.minimax_h3 import graph_ops as op
+    from tensorrt_model_connect.families.minimax_h3.fl2va_vae_encoder_builder import (
+        _group_norm,
+    )
+
+    trt = trt_compat.get_trt()
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 20)
+    hidden = network.add_input("hidden", trt.float32, (1, 32, 8, 8))
+    weights = {
+        "norm.weight": np.ones((32,), dtype=np.float32),
+        "norm.bias": np.zeros((32,), dtype=np.float32),
+    }
+    output = _group_norm(network, hidden, weights, "norm", 32)
+    output.name = "normalized"
+    network.mark_output(output)
+
+    plan = builder.build_serialized_network(network, config)
+    assert plan is not None and len(bytes(plan)) > 0
+    op.release_weight_buffers(network)
