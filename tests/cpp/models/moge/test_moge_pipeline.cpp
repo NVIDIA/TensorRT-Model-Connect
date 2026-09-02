@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -50,13 +51,39 @@ std::vector<float> affine_points(int32_t height, int32_t width, float focal, flo
     return points;
 }
 
+std::vector<float> affine_depth(const std::vector<float>& points) {
+    std::vector<float> depth(points.size() / 3U);
+    for (std::size_t pixel = 0; pixel < depth.size(); ++pixel)
+        depth[pixel] = points[pixel * 3U + 2U];
+    return depth;
+}
+
+std::vector<float> focal_samples(const std::vector<float>& points, int32_t height, int32_t width) {
+    constexpr int32_t sample_size = 64;
+    std::vector<float> samples(static_cast<std::size_t>(sample_size) * sample_size * 3U);
+    for (int32_t out_y = 0; out_y < sample_size; ++out_y) {
+        const int32_t y = static_cast<int32_t>(static_cast<int64_t>(out_y) * height / sample_size);
+        for (int32_t out_x = 0; out_x < sample_size; ++out_x) {
+            const int32_t x =
+                static_cast<int32_t>(static_cast<int64_t>(out_x) * width / sample_size);
+            const auto source = (static_cast<std::size_t>(y) * width + x) * 3U;
+            const auto target = (static_cast<std::size_t>(out_y) * sample_size + out_x) * 3U;
+            std::copy_n(points.data() + source, 3, samples.data() + target);
+        }
+    }
+    return samples;
+}
+
 class FakeMogeModule final : public trtmc::ITrtModule {
   public:
-    FakeMogeModule(int32_t height, int32_t width, bool invalidate_pixel = false)
+    FakeMogeModule(int32_t height, int32_t width, bool invalidate_pixel = false,
+                   trtmc::DType valid_dtype = trtmc::DType::kFloat16)
         : height_(height), width_(width), points_(affine_points(height, width, 0.8F, 1.25F)),
-          mask_(static_cast<std::size_t>(height) * width, 0.9F) {
+          depth_(affine_depth(points_)), samples_(focal_samples(points_, height, width)),
+          valid_(static_cast<std::size_t>(height) * width, uint16_t{0x3C00}),
+          valid_dtype_(valid_dtype) {
         if (invalidate_pixel)
-            mask_[5] = 0.1F;
+            valid_[5] = 0;
     }
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
@@ -67,8 +94,9 @@ class FakeMogeModule final : public trtmc::ITrtModule {
             input_values.assign(values, values + image->second.numel());
         }
         return {
-            {"points", {points_.data(), {1, height_, width_, 3}, trtmc::DType::kFloat32}},
-            {"mask", {mask_.data(), {1, height_, width_}, trtmc::DType::kFloat32}},
+            {"affine_depth", {depth_.data(), {1, height_, width_}, trtmc::DType::kFloat32}},
+            {"valid", {valid_.data(), {1, height_, width_}, valid_dtype_}},
+            {"focal_samples", {samples_.data(), {1, 64, 64, 3}, trtmc::DType::kFloat32}},
             {"metric_scale", {scale_.data(), {1}, trtmc::DType::kFloat32}},
         };
     }
@@ -84,16 +112,19 @@ class FakeMogeModule final : public trtmc::ITrtModule {
     std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
     bool has_input(const std::string& name) const override { return name == "image"; }
     bool has_output(const std::string& name) const override {
-        return name == "points" || name == "mask" || name == "metric_scale";
+        return name == "affine_depth" || name == "valid" || name == "focal_samples" ||
+               name == "metric_scale";
     }
-    trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
+    trtmc::DType tensor_dtype(const std::string& name) const override {
+        return name == "valid" ? valid_dtype_ : trtmc::DType::kFloat32;
+    }
     std::vector<int64_t> tensor_shape(const std::string& name) const override {
         if (name == "image")
             return {1, height_, width_, 3};
-        if (name == "points")
-            return {1, height_, width_, 3};
-        if (name == "mask")
+        if (name == "affine_depth" || name == "valid")
             return {1, height_, width_};
+        if (name == "focal_samples")
+            return {1, 64, 64, 3};
         if (name == "metric_scale")
             return {1};
         throw std::runtime_error("unknown fake tensor");
@@ -108,7 +139,23 @@ class FakeMogeModule final : public trtmc::ITrtModule {
     bool ok() const override { return true; }
     void keep_alive(std::shared_ptr<void>) override {}
 
-    void invalidate_all() { std::fill(mask_.begin(), mask_.end(), 0.1F); }
+    void invalidate_all() { std::fill(valid_.begin(), valid_.end(), uint16_t{0}); }
+    void set_valid(int32_t y, int32_t x, bool value) {
+        valid_.at(static_cast<std::size_t>(y) * width_ + x) = value ? uint16_t{0x3C00} : 0;
+    }
+    void set_valid_neighborhood(int32_t y, int32_t x) {
+        for (int32_t neighbor_y = y - 1; neighbor_y <= y + 1; ++neighbor_y) {
+            for (int32_t neighbor_x = x - 1; neighbor_x <= x + 1; ++neighbor_x)
+                set_valid(neighbor_y, neighbor_x, true);
+        }
+    }
+    void set_focal_sample(int32_t y, int32_t x, float px, float py, float pz) {
+        const auto sample = (static_cast<std::size_t>(y) * 64U + x) * 3U;
+        samples_.at(sample) = px;
+        samples_.at(sample + 1U) = py;
+        samples_.at(sample + 2U) = pz;
+    }
+    uint16_t valid_bits(std::size_t pixel) const { return valid_.at(pixel); }
 
     std::vector<int64_t> input_shape;
     std::vector<float> input_values;
@@ -117,7 +164,10 @@ class FakeMogeModule final : public trtmc::ITrtModule {
     int32_t height_;
     int32_t width_;
     std::vector<float> points_;
-    std::vector<float> mask_;
+    std::vector<float> depth_;
+    std::vector<float> samples_;
+    std::vector<uint16_t> valid_;
+    trtmc::DType valid_dtype_;
     std::vector<float> scale_{2.0F};
 };
 
@@ -163,11 +213,13 @@ void test_pipeline_recovers_metric_geometry_from_hwc_input() {
     check(dynamic_cast<trtmc::moge::IGeometryEstimator*>(&pipeline) != nullptr,
           "MoGe exposes its family-owned geometry contract");
     check(std::string(pipeline.model_id()) == "moge-2-vitl", "MoGe model id");
+    check(module_ptr->valid_bits(0) == 0x3C00, "MoGe valid=true uses FP16 one bits");
 }
 
 void test_invalid_mask_materializes_infinity() {
     constexpr int32_t size = 64;
     auto module = std::make_unique<FakeMogeModule>(size, size, true);
+    auto* module_ptr = module.get();
     trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl");
     auto image = rgb_image(size, size);
 
@@ -176,6 +228,24 @@ void test_invalid_mask_materializes_infinity() {
     check(result.mask[5] == 0, "MoGe invalid pixel mask cleared");
     check(std::isinf(result.depth[5]), "MoGe invalid depth is infinity");
     check(std::isinf(result.points[15]), "MoGe invalid point is infinity");
+    check(module_ptr->valid_bits(5) == 0x0000, "MoGe valid=false uses FP16 zero bits");
+    check(module_ptr->valid_bits(0) == 0x3C00, "MoGe retained valid pixel uses FP16 one bits");
+}
+
+void test_legacy_int8_valid_contract_is_rejected() {
+    constexpr int32_t size = 64;
+    auto module = std::make_unique<FakeMogeModule>(size, size, false, trtmc::DType::kInt8);
+    trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl");
+    auto image = rgb_image(size, size);
+
+    try {
+        (void)pipeline.estimate_geometry(image.data(), size, size);
+        check(false, "MoGe rejects legacy INT8 valid output");
+    } catch (const std::runtime_error& error) {
+        check(std::string(error.what()).find("output contract mismatch for 'valid'") !=
+                  std::string::npos,
+              "MoGe legacy INT8 valid rejection is explicit");
+    }
 }
 
 void test_focal_recovery_failure_is_reported() {
@@ -192,6 +262,88 @@ void test_focal_recovery_failure_is_reported() {
         check(std::string(error.what()).find("recover camera focal") != std::string::npos,
               "MoGe focal recovery error is explicit");
     }
+}
+
+void test_invalid_rgb_values_are_rejected() {
+    constexpr int32_t size = 64;
+    const std::vector<float> invalid_values = {
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity(),
+        -0.01F,
+        1.01F,
+    };
+    for (const float value : invalid_values) {
+        auto module = std::make_unique<FakeMogeModule>(size, size);
+        trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl");
+        auto image = rgb_image(size, size);
+        image[0] = value;
+        try {
+            (void)pipeline.estimate_geometry(image.data(), size, size);
+            check(false, "MoGe rejects non-finite or out-of-range RGB input");
+        } catch (const std::invalid_argument& error) {
+            check(std::string(error.what()).find("RGB input values") != std::string::npos,
+                  "MoGe RGB rejection is explicit");
+        }
+    }
+}
+
+void test_focal_sampling_excludes_mapped_image_edges() {
+    constexpr int32_t size = 64;
+    auto module = std::make_unique<FakeMogeModule>(size, size);
+    for (int32_t index = 0; index < size; ++index) {
+        module->set_focal_sample(0, index, 1000.0F, -1000.0F, 0.1F);
+        module->set_focal_sample(size - 1, index, 1000.0F, -1000.0F, 0.1F);
+        module->set_focal_sample(index, 0, 1000.0F, -1000.0F, 0.1F);
+        module->set_focal_sample(index, size - 1, 1000.0F, -1000.0F, 0.1F);
+    }
+    trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl");
+    auto image = rgb_image(size, size);
+
+    const auto result = pipeline.estimate_geometry(image.data(), size, size);
+
+    check(close(result.intrinsics[0], 0.5656854F),
+          "MoGe focal sampling excludes mapped image-edge points");
+    check(close(result.intrinsics[4], 0.5656854F),
+          "MoGe image-edge exclusion preserves normalized fy");
+}
+
+void test_focal_sampling_excludes_invalid_three_by_three_neighborhood() {
+    constexpr int32_t size = 64;
+    constexpr int32_t sample_y = 20;
+    constexpr int32_t sample_x = 20;
+    auto module = std::make_unique<FakeMogeModule>(size, size);
+    module->set_focal_sample(sample_y, sample_x, 1000.0F, -1000.0F, 0.1F);
+    module->set_valid(sample_y, sample_x + 1, false);
+    auto* module_ptr = module.get();
+    trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl");
+    auto image = rgb_image(size, size);
+
+    const auto result = pipeline.estimate_geometry(image.data(), size, size);
+
+    check(module_ptr->valid_bits(static_cast<std::size_t>(sample_y) * size + sample_x) == 0x3C00,
+          "MoGe focal center remains valid when its neighbor is invalid");
+    check(close(result.intrinsics[0], 0.5656854F),
+          "MoGe focal sampling excludes a center with an invalid neighbor");
+}
+
+void test_focal_sampling_retains_complete_interior_neighborhoods() {
+    constexpr int32_t size = 64;
+    auto module = std::make_unique<FakeMogeModule>(size, size);
+    module->invalidate_all();
+    for (int32_t y : {16, 32, 48}) {
+        for (int32_t x : {16, 32, 48})
+            module->set_valid_neighborhood(y, x);
+    }
+    trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl");
+    auto image = rgb_image(size, size);
+
+    const auto result = pipeline.estimate_geometry(image.data(), size, size);
+
+    check(close(result.intrinsics[0], 0.5656854F),
+          "MoGe focal sampling retains complete interior neighborhoods");
+    check(result.mask[32U * size + 32U] == 1,
+          "MoGe retained interior focal center remains valid geometry");
 }
 
 void test_fast_path_rejects_non_960x540_input() {
@@ -214,7 +366,12 @@ void test_fast_path_rejects_non_960x540_input() {
 int main() {
     test_pipeline_recovers_metric_geometry_from_hwc_input();
     test_invalid_mask_materializes_infinity();
+    test_legacy_int8_valid_contract_is_rejected();
     test_focal_recovery_failure_is_reported();
+    test_invalid_rgb_values_are_rejected();
+    test_focal_sampling_excludes_mapped_image_edges();
+    test_focal_sampling_excludes_invalid_three_by_three_neighborhood();
+    test_focal_sampling_retains_complete_interior_neighborhoods();
     test_fast_path_rejects_non_960x540_input();
     if (g_failures != 0) {
         std::cerr << g_failures << " MoGe pipeline test(s) failed\n";
