@@ -7,8 +7,6 @@
 #include "runtime/registry/bundle_materialization.h"
 #include "test_helpers.h"
 
-#include <cerrno>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -29,11 +27,7 @@ void check(bool condition, const char* name) {
 }
 
 std::filesystem::path temporary_directory() {
-    char pattern[] = "/tmp/bundle_materialization_XXXXXX";
-    char* directory = mkdtemp(pattern);
-    if (directory == nullptr)
-        throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
-    return directory;
+    return trtmc_test::make_temp_dir_or_throw("/tmp/bundle_materialization_XXXXXX");
 }
 
 void write_bundle(const std::filesystem::path& path, const std::string& header,
@@ -52,6 +46,32 @@ std::string two_section_header(std::size_t config_size, std::uint64_t plan_size)
     header << R"({"model_id":"test","sections":{)"
            << R"("config.json":{"offset":0,"size":)" << config_size << "},"
            << R"("denoiser_plan":{"offset":)" << config_size << R"(,"size":)" << plan_size << "}}}";
+    return header.str();
+}
+
+std::string many_section_policy(std::size_t lazy_section_count) {
+    std::ostringstream config;
+    config
+        << R"({"bundle_loading":{"mode":"staged","eager_sections":["config.json","tokenizer.json"],"lazy_sections":[)";
+    for (std::size_t index = 0; index < lazy_section_count; ++index) {
+        if (index != 0)
+            config << ',';
+        config << '"' << "plan_" << index << '"';
+    }
+    config << "]}}";
+    return config.str();
+}
+
+std::string many_section_header(std::size_t config_size, std::size_t lazy_section_count) {
+    std::ostringstream header;
+    header << R"({"model_id":"test","sections":{)"
+           << R"("config.json":{"offset":0,"size":)" << config_size << "},"
+           << R"("tokenizer.json":{"offset":)" << config_size << R"(,"size":1})";
+    for (std::size_t index = 0; index < lazy_section_count; ++index) {
+        header << ",\"plan_" << index << R"(":{"offset":)" << (config_size + 1 + index)
+               << R"(,"size":1})";
+    }
+    header << "}}";
     return header.str();
 }
 
@@ -85,6 +105,30 @@ void test_staged_policy_leaves_plan_bytes_unread() {
     trtmc_test::remove_all_safe(directory);
 }
 
+void test_staged_policy_supports_more_than_sixteen_lazy_sections() {
+    constexpr std::size_t lazy_section_count = 61;
+    const auto directory = temporary_directory();
+    const auto path = directory / "many_staged.bundle";
+    const std::string config = many_section_policy(lazy_section_count);
+    std::vector<char> payload(config.begin(), config.end());
+    payload.push_back('T');
+    write_bundle(path, many_section_header(config.size(), lazy_section_count), payload);
+
+    const auto materialized = trtmc::detail::materialize_pipeline_bundle(path.string());
+    check(materialized.bundle.sections.size() == 2,
+          "large staged policy materializes only eager sections");
+    check(find_section(materialized.bundle, "config.json") != nullptr,
+          "large staged policy materializes config");
+    check(find_section(materialized.bundle, "tokenizer.json") != nullptr,
+          "large staged policy materializes tokenizer");
+    check(find_section(materialized.bundle, "plan_60") == nullptr,
+          "large staged policy leaves all plans lazy");
+    check(materialized.bundle.info.sections.size() == lazy_section_count + 2,
+          "large staged policy retains all lazy section metadata");
+
+    trtmc_test::remove_all_safe(directory);
+}
+
 void test_invalid_partition_fails_before_plan_read() {
     const auto directory = temporary_directory();
     const auto path = directory / "invalid.bundle";
@@ -103,6 +147,28 @@ void test_invalid_partition_fails_before_plan_read() {
           "invalid staged partition is rejected");
     check(error.find("extends outside file") == std::string::npos,
           "invalid policy is rejected before plan bytes are read");
+
+    trtmc_test::remove_all_safe(directory);
+}
+
+void test_non_string_policy_entry_fails_before_plan_read() {
+    const auto directory = temporary_directory();
+    const auto path = directory / "invalid_type.bundle";
+    const std::string config =
+        R"({"bundle_loading":{"mode":"staged","eager_sections":["config.json"],"lazy_sections":["denoiser_plan",7]}})";
+    write_bundle(path, two_section_header(config.size(), 1ULL << 40),
+                 std::vector<char>(config.begin(), config.end()));
+
+    std::string error;
+    try {
+        (void)trtmc::detail::materialize_pipeline_bundle(path.string());
+    } catch (const std::runtime_error& exception) {
+        error = exception.what();
+    }
+    check(error == "Invalid staged bundle_loading policy",
+          "non-string staged policy entry is rejected");
+    check(error.find("extends outside file") == std::string::npos,
+          "non-string policy is rejected before plan bytes are read");
 
     trtmc_test::remove_all_safe(directory);
 }
@@ -130,7 +196,9 @@ void test_bundle_without_policy_preserves_read_all_behavior() {
 
 int main() {
     test_staged_policy_leaves_plan_bytes_unread();
+    test_staged_policy_supports_more_than_sixteen_lazy_sections();
     test_invalid_partition_fails_before_plan_read();
+    test_non_string_policy_entry_fails_before_plan_read();
     test_bundle_without_policy_preserves_read_all_behavior();
     if (failures != 0) {
         std::cerr << failures << " test(s) FAILED\n";

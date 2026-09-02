@@ -157,6 +157,7 @@ if ($BuildTests) {
         "test_backend_loader",
         "test_runtime_cache_persistence",
         "test_bundle_format",
+        "test_bundle_materialization",
         "test_bundle_sha256",
         "test_cli_args",
         "test_cli_args_locked_h3_runtime",
@@ -188,7 +189,7 @@ if ($BuildTests) {
         throw "Native Windows test build failed with exit code $LASTEXITCODE"
     }
     & ctest --test-dir $BuildPath --output-on-failure `
-        -R "^(test_dynamic_library|test_backend_loader|test_runtime_cache_persistence|test_bundle_format|test_bundle_sha256|test_cli_args|test_cli_args_locked_h3_runtime|test_cli_args_runtime_only|test_config_cli_support|test_minimax_h3_video_contract|test_trt_version|test_windows_process_lockdown|test_windows_utf8_argv|test_windows_h3_installer|test_windows_media|test_pipeline_registry|test_model_plugin_loader|test_pipeline_api|test_c_abi_entry|test_trtmc_io|test_minimax_h3_config_schema|test_minimax_h3_math|test_minimax_h3_denoiser_abi|test_minimax_h3_conditioning|test_minimax_h3_fl2va_runtime|test_minimax_h3_ref2va_runtime|test_minimax_h3_vsa_layout|test_minimax_h3_vsa_cuda|test_minimax_h3_cuda_rng)$"
+        -R "^(test_dynamic_library|test_backend_loader|test_runtime_cache_persistence|test_bundle_format|test_bundle_materialization|test_bundle_sha256|test_cli_args|test_cli_args_locked_h3_runtime|test_cli_args_runtime_only|test_config_cli_support|test_minimax_h3_video_contract|test_trt_version|test_windows_process_lockdown|test_windows_utf8_argv|test_windows_h3_installer|test_windows_media|test_pipeline_registry|test_model_plugin_loader|test_pipeline_api|test_c_abi_entry|test_trtmc_io|test_minimax_h3_config_schema|test_minimax_h3_math|test_minimax_h3_denoiser_abi|test_minimax_h3_conditioning|test_minimax_h3_fl2va_runtime|test_minimax_h3_ref2va_runtime|test_minimax_h3_vsa_layout|test_minimax_h3_vsa_cuda|test_minimax_h3_cuda_rng)$"
     if ($LASTEXITCODE -ne 0) {
         throw "Native Windows tests failed with exit code $LASTEXITCODE"
     }

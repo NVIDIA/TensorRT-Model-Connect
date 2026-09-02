@@ -65,16 +65,27 @@ void validate_staged_loading_policy(const BundleInfo& info, const std::string& m
         throw std::runtime_error("Invalid staged bundle_loading policy");
     }
 
+    std::unordered_set<std::string> policy_names;
+    for (const auto& name : eager) {
+        if (!policy_names.insert(name).second)
+            throw std::runtime_error(
+                "Staged bundle_loading must partition bundle sections exactly");
+    }
+    for (const auto& name : lazy) {
+        if (!policy_names.insert(name).second)
+            throw std::runtime_error(
+                "Staged bundle_loading must partition bundle sections exactly");
+    }
+
     std::unordered_set<std::string> header_names;
     for (const auto& section : info.sections) {
-        if (!header_names.insert(section.name).second ||
-            std::count(eager.begin(), eager.end(), section.name) +
-                    std::count(lazy.begin(), lazy.end(), section.name) !=
-                1) {
+        if (!header_names.insert(section.name).second || policy_names.erase(section.name) != 1) {
             throw std::runtime_error(
                 "Staged bundle_loading must partition bundle sections exactly");
         }
     }
+    if (!policy_names.empty())
+        throw std::runtime_error("Staged bundle_loading must partition bundle sections exactly");
 }
 
 } // namespace
@@ -98,8 +109,19 @@ PipelineBundleMaterialization materialize_pipeline_bundle(const std::string& bun
     }
 
     const std::string mode = extract_json_string(policy_text, "mode", "");
-    const auto eager = extract_json_string_array(policy_text, "eager_sections");
-    const auto lazy = extract_json_string_array(policy_text, "lazy_sections");
+    // The generic JSON helper intentionally defaults to small arrays. Bundle
+    // policies, however, contain one entry for every section (61 lazy plans in
+    // the MiniMax-H3 bundle). The exact partition validation below rejects
+    // policies whose parsed names do not match the header one-for-one.
+    const std::size_t policy_section_limit = info.sections.size();
+    std::vector<std::string> eager;
+    std::vector<std::string> lazy;
+    if (!extract_json_string_array_strict(policy_text, "eager_sections", policy_section_limit,
+                                          eager) ||
+        !extract_json_string_array_strict(policy_text, "lazy_sections", policy_section_limit,
+                                          lazy)) {
+        throw std::runtime_error("Invalid staged bundle_loading policy");
+    }
     validate_staged_loading_policy(info, mode, eager, lazy);
 
     BundleFile bundle;

@@ -15,6 +15,10 @@ std::string extract_json_string(const std::string& text, const std::string& key,
                                 const std::string& fallback);
 std::vector<std::string> extract_json_string_array(const std::string& text, const std::string& key,
                                                    std::size_t max_count = 16);
+// Strict variant for security-sensitive policy parsing. Returns false unless
+// the key is an array containing only strings and no more than max_count items.
+bool extract_json_string_array_strict(const std::string& text, const std::string& key,
+                                      std::size_t max_count, std::vector<std::string>& out);
 int32_t extract_json_int(const std::string& text, const std::string& key, int32_t fallback);
 int32_t extract_json_int_or_first_array(const std::string& text, const std::string& key,
                                         int32_t fallback);
