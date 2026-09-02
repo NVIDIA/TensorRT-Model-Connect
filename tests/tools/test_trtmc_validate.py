@@ -64,7 +64,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 121
+    assert len(bindings) == 119
     assert {
         binding.model for binding in bindings if binding.workload == "mmlu_continuation_parity"
     } >= {
@@ -113,6 +113,19 @@ def test_lerobot_act_catalog_binds_recorded_control_parity() -> None:
     assert catalog["models"]["act-aloha-sim-transfer-cube"] == {
         "workloads": ["lerobot_act_recorded_control_fp32_parity"],
     }
+
+
+def test_dinov3_catalog_binds_only_public_task_accuracy() -> None:
+    catalog = trtmc_validate.load_catalog()
+
+    for model in (
+        "dinov3-convnext-tiny-pretrain-lvd1689m",
+        "dinov3-vits16-pretrain-lvd1689m",
+    ):
+        assert catalog["models"][model]["workloads"] == [
+            "dinov3_beans_knn_task_accuracy"
+        ]
+    assert "dinov3_image_feature_extraction_parity" not in catalog["sample_limits"]
 
 
 def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
@@ -224,7 +237,6 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     }
     assert min(catalog["sample_limits"].values()) >= 1
     assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
-        "dinov3_image_feature_extraction_parity",
         "fast_foundation_stereo_synthetic_parity",
         "lfm2_model_card_sampling_parity",
         "lerobot_act_recorded_control_fp32_parity",

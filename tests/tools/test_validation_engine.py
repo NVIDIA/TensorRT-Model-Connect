@@ -828,20 +828,9 @@ def test_default_suites_include_media_generation_gap_models() -> None:
 def test_default_suites_include_model_aligned_vision_tasks() -> None:
     suites = validation_engine.load_suites()
 
-    features = validation_engine.suite_by_id(
-        suites, "dinov3_image_feature_extraction_parity"
+    assert all(
+        suite["id"] != "dinov3_image_feature_extraction_parity" for suite in suites
     )
-    assert features["dataset"] == {
-        "kind": "model_plugin_json",
-        "default_path": "tests/e2e/models/dinov3/data/validation.json",
-        "input_asset_fields": ["image"],
-    }
-    assert features["scoring"] == {"scorer": "model_plugin_parity"}
-    assert features["gates"] == {"min_sample_pass_rate": 1.0}
-    assert features["default_model_names"] == [
-        "dinov3-convnext-tiny-pretrain-lvd1689m",
-        "dinov3-vits16-pretrain-lvd1689m",
-    ]
 
     geometry = validation_engine.suite_by_id(suites, "moge_monocular_geometry_fp32_parity")
     assert geometry["dataset"] == {
@@ -897,14 +886,6 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
         "min_pass_rate": 0.95,
         "min_allowed_failures": 1,
     }
-
-    selected = validation_engine.selected_models_for_suite(
-        features,
-        validation_engine.load_manifest_records(),
-        single_device_only=True,
-    )
-    assert [model["name"] for model in selected] == features["default_model_names"]
-
 
 def test_default_suites_include_scifact_reranking_parity() -> None:
     suite = validation_engine.suite_by_id(validation_engine.load_suites(), "beir_scifact_reranking")
