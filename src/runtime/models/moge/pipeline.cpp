@@ -22,10 +22,9 @@ namespace {
 constexpr int32_t kFocalRecoverySize = 64;
 constexpr double kDenominatorEpsilon = 1.0e-9;
 constexpr int32_t kMinImageSize = 64;
-constexpr int32_t kMaxImageSize = 2048;
+constexpr int32_t kMaxImageSize = 4096;
 constexpr float kMinAspectRatio = 0.5F;
 constexpr float kMaxAspectRatio = 2.0F;
-constexpr float kMaskThreshold = 0.5F;
 
 struct FocalSample {
     double u{0.0};
@@ -44,7 +43,26 @@ double normalized_coordinate(int32_t index, int32_t size, double span) {
     return span * (2.0 * index + 1.0 - size) / size;
 }
 
-std::vector<FocalSample> make_focal_samples(const float* points, const std::vector<uint8_t>& mask,
+int32_t nearest_sample_index(int32_t output_index, int32_t input_size) {
+    return std::min(input_size - 1, static_cast<int32_t>(static_cast<int64_t>(output_index) *
+                                                         input_size / kFocalRecoverySize));
+}
+
+bool valid_focal_neighborhood(const uint16_t* valid, int32_t height, int32_t width, int32_t y,
+                              int32_t x) {
+    if (y <= 0 || x <= 0 || y >= height - 1 || x >= width - 1)
+        return false;
+    for (int32_t neighbor_y = y - 1; neighbor_y <= y + 1; ++neighbor_y) {
+        for (int32_t neighbor_x = x - 1; neighbor_x <= x + 1; ++neighbor_x) {
+            const auto neighbor = static_cast<std::size_t>(neighbor_y) * width + neighbor_x;
+            if (valid[neighbor] == 0)
+                return false;
+        }
+    }
+    return true;
+}
+
+std::vector<FocalSample> make_focal_samples(const float* sampled_points, const uint16_t* valid,
                                             int32_t height, int32_t width) {
     const double aspect = static_cast<double>(width) / height;
     const double diagonal_factor = std::sqrt(1.0 + aspect * aspect);
@@ -57,18 +75,18 @@ std::vector<FocalSample> make_focal_samples(const float* points, const std::vect
     // floor(output_index * input_size / output_size). The official MoGe
     // recovery downsamples points, UVs, and the mask this way to 64x64.
     for (int32_t out_y = 0; out_y < kFocalRecoverySize; ++out_y) {
-        const int32_t y = std::min(height - 1, static_cast<int32_t>(static_cast<int64_t>(out_y) *
-                                                                    height / kFocalRecoverySize));
+        const int32_t y = nearest_sample_index(out_y, height);
         for (int32_t out_x = 0; out_x < kFocalRecoverySize; ++out_x) {
-            const int32_t x = std::min(width - 1, static_cast<int32_t>(static_cast<int64_t>(out_x) *
-                                                                       width / kFocalRecoverySize));
+            const int32_t x = nearest_sample_index(out_x, width);
             const auto pixel = static_cast<std::size_t>(y) * width + x;
-            if (mask[pixel] == 0)
+            if (valid[pixel] == 0)
                 continue;
-            const auto point = pixel * 3U;
-            const double px = points[point];
-            const double py = points[point + 1U];
-            const double pz = points[point + 2U];
+            if (!valid_focal_neighborhood(valid, height, width, y, x))
+                continue;
+            const auto sample = (static_cast<std::size_t>(out_y) * kFocalRecoverySize + out_x) * 3U;
+            const double px = sampled_points[sample];
+            const double py = sampled_points[sample + 1U];
+            const double pz = sampled_points[sample + 2U];
             if (!std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz))
                 continue;
             samples.push_back({normalized_coordinate(x, width, span_x),
@@ -171,27 +189,22 @@ const float* require_float_output(const TensorMap& outputs, const char* name,
     return static_cast<const float*>(tensor.data);
 }
 
+const uint16_t* require_float16_output(const TensorMap& outputs, const char* name,
+                                       const std::vector<int64_t>& shape) {
+    const auto iterator = outputs.find(name);
+    if (iterator == outputs.end())
+        throw std::runtime_error(std::string("MoGe engine did not return required output '") +
+                                 name + "'");
+    const auto& tensor = iterator->second;
+    if (tensor.data == nullptr || tensor.dtype != DType::kFloat16 || tensor.shape != shape) {
+        throw std::runtime_error(std::string("MoGe output contract mismatch for '") + name + "'");
+    }
+    return static_cast<const uint16_t*>(tensor.data);
+}
+
 void validate_metric_scale(float metric_scale) {
     if (!std::isfinite(metric_scale) || metric_scale <= 0.0F)
         throw std::invalid_argument("MoGe metric scale must be finite and positive");
-}
-
-bool valid_raw_geometry_pixel(const float* affine_points, const float* mask_probabilities,
-                              std::size_t pixel) {
-    const auto point = pixel * 3U;
-    return std::isfinite(mask_probabilities[pixel]) && mask_probabilities[pixel] > kMaskThreshold &&
-           std::isfinite(affine_points[point]) && std::isfinite(affine_points[point + 1U]) &&
-           std::isfinite(affine_points[point + 2U]);
-}
-
-std::vector<uint8_t> make_raw_mask(const float* affine_points, const float* mask_probabilities,
-                                   std::size_t area) {
-    std::vector<uint8_t> raw_mask(area, 0);
-    for (std::size_t pixel = 0; pixel < area; ++pixel) {
-        raw_mask[pixel] = static_cast<uint8_t>(
-            valid_raw_geometry_pixel(affine_points, mask_probabilities, pixel));
-    }
-    return raw_mask;
 }
 
 struct MogeCalibration {
@@ -243,8 +256,8 @@ void write_invalid_geometry(moge::GeometryResult& result, std::size_t pixel, flo
     result.points[point + 2U] = infinity;
 }
 
-void populate_geometry_result(moge::GeometryResult& result, const float* affine_points,
-                              const std::vector<uint8_t>& raw_mask, const FocalShift& recovered,
+void populate_geometry_result(moge::GeometryResult& result, const float* affine_depth,
+                              const uint16_t* valid_pixels, const FocalShift& recovered,
                               const MogeCalibration& calibration, float metric_scale) {
     const float infinity = std::numeric_limits<float>::infinity();
     for (int32_t y = 0; y < result.height; ++y) {
@@ -253,8 +266,9 @@ void populate_geometry_result(moge::GeometryResult& result, const float* affine_
             const auto pixel = static_cast<std::size_t>(y) * result.width + x;
             const auto point = pixel * 3U;
             const double depth_unscaled =
-                static_cast<double>(affine_points[point + 2U]) + recovered.shift;
-            const bool valid = valid_metric_depth(raw_mask[pixel], depth_unscaled);
+                static_cast<double>(affine_depth[pixel]) + recovered.shift;
+            const bool valid =
+                valid_metric_depth(static_cast<uint8_t>(valid_pixels[pixel] != 0), depth_unscaled);
             result.mask[pixel] = static_cast<uint8_t>(valid);
             if (!valid) {
                 write_invalid_geometry(result, pixel, infinity);
@@ -281,7 +295,7 @@ bool supported_aspect_ratio(int32_t height, int32_t width) {
 }
 
 bool valid_rgb_value(float value) {
-    return std::isfinite(value) && value >= 0.0F && value <= 1.0F;
+    return value >= 0.0F && value <= 1.0F;
 }
 
 void validate_image_input(const float* pixels, int32_t height, int32_t width) {
@@ -298,10 +312,9 @@ void validate_image_input(const float* pixels, int32_t height, int32_t width) {
     }
 }
 
-std::optional<FocalShift> recover_focal_shift(const float* affine_points,
-                                              const std::vector<uint8_t>& mask, int32_t height,
-                                              int32_t width) {
-    const auto samples = make_focal_samples(affine_points, mask, height, width);
+std::optional<FocalShift> recover_focal_shift(const float* focal_samples, const uint16_t* valid,
+                                              int32_t height, int32_t width) {
+    const auto samples = make_focal_samples(focal_samples, valid, height, width);
     if (samples.size() < 2U)
         return std::nullopt;
 
@@ -336,20 +349,17 @@ std::optional<FocalShift> recover_focal_shift(const float* affine_points,
     return FocalShift{static_cast<float>(current.focal), static_cast<float>(shift)};
 }
 
-moge::GeometryResult postprocess_geometry(const float* affine_points,
-                                          const float* mask_probabilities, float metric_scale,
+moge::GeometryResult postprocess_geometry(const float* affine_depth, const uint16_t* valid,
+                                          const float* focal_samples, float metric_scale,
                                           int32_t height, int32_t width) {
     const auto area = static_cast<std::size_t>(height) * width;
     validate_metric_scale(metric_scale);
-    const auto raw_mask = make_raw_mask(affine_points, mask_probabilities, area);
-
-    const auto recovered = recover_focal_shift(affine_points, raw_mask, height, width);
+    const auto recovered = recover_focal_shift(focal_samples, valid, height, width);
     if (!recovered)
         throw std::runtime_error("MoGe could not recover camera focal length and shift");
     const auto calibration = make_calibration(*recovered, height, width);
     auto result = make_geometry_result(height, width, area, calibration);
-    populate_geometry_result(result, affine_points, raw_mask, *recovered, calibration,
-                             metric_scale);
+    populate_geometry_result(result, affine_depth, valid, *recovered, calibration, metric_scale);
     return result;
 }
 
@@ -372,10 +382,12 @@ moge::GeometryResult MogePipeline::estimate_geometry(const float* pixels, int32_
 
     Tensor image{const_cast<float*>(pixels), {1, height, width, 3}, DType::kFloat32};
     const auto outputs = model_->forward({{"image", image}});
-    const auto* points = require_float_output(outputs, "points", {1, height, width, 3});
-    const auto* mask = require_float_output(outputs, "mask", {1, height, width});
+    const auto* affine_depth = require_float_output(outputs, "affine_depth", {1, height, width});
+    const auto* valid = require_float16_output(outputs, "valid", {1, height, width});
+    const auto* focal_samples = require_float_output(
+        outputs, "focal_samples", {1, kFocalRecoverySize, kFocalRecoverySize, 3});
     const auto* scale = require_float_output(outputs, "metric_scale", {1});
-    return postprocess_geometry(points, mask, scale[0], height, width);
+    return postprocess_geometry(affine_depth, valid, focal_samples, scale[0], height, width);
 }
 
 } // namespace trtmc

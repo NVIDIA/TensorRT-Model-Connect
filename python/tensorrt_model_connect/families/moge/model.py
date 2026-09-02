@@ -29,11 +29,66 @@ _HEAD_DIM = 64
 _PATCH = 14
 _POSITION_GRID = 37
 _NUM_TOKENS = 1800
+_FOCAL_RECOVERY_SIZE = 64
 _MIN_IMAGE_SIZE = 64
 _OPT_IMAGE_SIZE = 518
 _MAX_IMAGE_SIZE = 2048
-_FAST_IMAGE_HEIGHT = 540
-_FAST_IMAGE_WIDTH = 960
+_FAST_MIN_IMAGE_HEIGHT = 1074
+_FAST_MIN_IMAGE_WIDTH = 608
+_FAST_OPT_IMAGE_HEIGHT = 1080
+_FAST_OPT_IMAGE_WIDTH = 1920
+_FAST_MAX_IMAGE_HEIGHT = 2160
+_FAST_MAX_IMAGE_WIDTH = 3840
+_ZERO_PAD_SELECTION = frozenset(
+    {
+        "mask_head.res_blocks.1.0.layers.5",
+        "mask_head.res_blocks.2.0.layers.2",
+        "mask_head.res_blocks.2.0.layers.5",
+        "mask_head.res_blocks.3.0.layers.2",
+        "mask_head.res_blocks.3.0.layers.5",
+        "mask_head.resamplers.1.1",
+        "mask_head.resamplers.2.1",
+        "neck.res_blocks.2.0.layers.2",
+        "neck.res_blocks.2.0.layers.5",
+        "neck.res_blocks.2.1.layers.2",
+        "neck.res_blocks.2.1.layers.5",
+        "neck.res_blocks.3.0.layers.2",
+        "neck.res_blocks.3.0.layers.5",
+        "neck.res_blocks.3.1.layers.2",
+        "neck.res_blocks.3.1.layers.5",
+        "points_head.res_blocks.1.0.layers.2",
+        "points_head.res_blocks.1.0.layers.5",
+        "points_head.res_blocks.2.0.layers.2",
+        "points_head.res_blocks.2.0.layers.5",
+        "points_head.res_blocks.3.0.layers.2",
+        "points_head.res_blocks.3.0.layers.5",
+        "points_head.resamplers.0.1",
+        "points_head.resamplers.1.1",
+        "points_head.resamplers.2.1",
+    }
+)
+
+
+def _fuse_half_pixel_x2_conv_weight(weight: np.ndarray) -> np.ndarray:
+    """Compose HALF_PIXEL bilinear x2 followed by a 3x3 cross-correlation."""
+
+    if weight.ndim != 4 or tuple(weight.shape[2:]) != (3, 3):
+        raise ValueError(f"MoGe fused resample requires OI33 weights, got {weight.shape}")
+    coefficients = np.asarray((0.25, 0.75, 0.75, 0.25), dtype=weight.dtype)
+    fused = np.zeros((weight.shape[1], weight.shape[0], 6, 6), dtype=weight.dtype)
+    transposed = weight.transpose(1, 0, 2, 3)
+    for resize_y, coefficient_y in enumerate(coefficients):
+        for resize_x, coefficient_x in enumerate(coefficients):
+            coefficient = coefficient_y * coefficient_x
+            for kernel_y in range(3):
+                for kernel_x in range(3):
+                    fused[
+                        :,
+                        :,
+                        resize_y - kernel_y + 2,
+                        resize_x - kernel_x + 2,
+                    ] += coefficient * transposed[:, :, kernel_y, kernel_x]
+    return np.ascontiguousarray(fused)
 
 
 def _require_torch():
@@ -185,6 +240,41 @@ class _NativeMogeGraph:
             layer.mode = mode
         return layer.get_output(0)
 
+    def gather(self, tensor: Any, indices: Any, axis: int, name: str) -> Any:
+        return self._layer(
+            self.network.add_gather(tensor, indices, axis), "gather", name
+        ).get_output(0)
+
+    def nearest_sample_indices(self, size: Any, name: str) -> Any:
+        positions = self.constant(
+            np.arange(_FOCAL_RECOVERY_SIZE, dtype=np.int64),
+            dtype=np.int64,
+            name=f"{name}.positions",
+        )
+        scaled = self.binary(positions, size, self.trt.ElementWiseOperation.PROD, f"{name}.scaled")
+        divisor = self.shape_value(_FOCAL_RECOVERY_SIZE, f"{name}.divisor")
+        return self.binary(
+            scaled,
+            divisor,
+            self.trt.ElementWiseOperation.FLOOR_DIV,
+            f"{name}.indices",
+        )
+
+    def is_finite(self, tensor: Any, name: str) -> Any:
+        absolute = self.unary(tensor, self.trt.UnaryOperation.ABS, f"{name}.abs")
+        if tensor.dtype == self.trt.float16:
+            constant_dtype = np.float16
+        elif tensor.dtype == self.trt.float32:
+            constant_dtype = np.float32
+        else:
+            raise ValueError(f"MoGe finite check {name!r} requires FP16 or FP32 input")
+        infinity = self.constant(
+            np.full((1,) * len(tuple(tensor.shape)), np.inf, dtype=constant_dtype),
+            dtype=constant_dtype,
+            name=f"{name}.infinity",
+        )
+        return self.binary(absolute, infinity, self.trt.ElementWiseOperation.LESS, name)
+
     def resize(
         self,
         tensor: Any,
@@ -255,7 +345,19 @@ class _NativeMogeGraph:
         elif compute_dtype != self.trt.float32:
             raise ValueError(f"Unsupported MoGe convolution compute dtype: {compute_dtype}")
         tensor = self.cast(tensor, compute_dtype, f"{name}.input_cast")
-        padded = self.replicate_pad(tensor, replicate_padding, f"{name}.pad")
+        zero_pad = module in _ZERO_PAD_SELECTION
+        if zero_pad and (
+            replicate_padding != 1
+            or stride != 1
+            or tuple(int(value) for value in weight.shape[2:]) != (3, 3)
+        ):
+            raise ValueError(
+                f"MoGe selected zero-pad convolution {module!r} must be stride-1 3x3 "
+                "with one pixel of source replicate padding"
+            )
+        padded = (
+            tensor if zero_pad else self.replicate_pad(tensor, replicate_padding, f"{name}.pad")
+        )
         layer = self._layer(
             self.network.add_convolution_nd(
                 padded,
@@ -268,7 +370,7 @@ class _NativeMogeGraph:
             name,
         )
         layer.stride_nd = (stride, stride)
-        layer.padding_nd = (0, 0)
+        layer.padding_nd = (1, 1) if zero_pad else (0, 0)
         return layer.get_output(0)
 
     def deconvolution(
@@ -305,6 +407,53 @@ class _NativeMogeGraph:
         )
         layer.stride_nd = tuple(int(value) for value in weight.shape[2:])
         layer.padding_nd = (0, 0)
+        return layer.get_output(0)
+
+    def fused_half_pixel_resample(
+        self,
+        tensor: Any,
+        module: str,
+        name: str,
+        *,
+        compute_dtype: Any,
+    ) -> Any:
+        """Fuse bilinear x2, replicate padding and a 3x3 convolution exactly."""
+
+        weight = self._array(f"{module}.weight")
+        bias = self._array(f"{module}.bias", (int(weight.shape[0]),))
+        if compute_dtype == self.trt.float16:
+            # Match the source convolution's effective checkpoint precision
+            # before composing its weights with the exact bilinear kernel.
+            weight = np.ascontiguousarray(weight, dtype=np.float16)
+            bias = np.ascontiguousarray(bias, dtype=np.float16)
+            fused_weight = np.ascontiguousarray(
+                _fuse_half_pixel_x2_conv_weight(weight.astype(np.float32)),
+                dtype=np.float16,
+            )
+        elif compute_dtype == self.trt.float32:
+            fused_weight = _fuse_half_pixel_x2_conv_weight(weight)
+        else:
+            raise ValueError(f"Unsupported MoGe fused resample dtype: {compute_dtype}")
+        self._host_weights.extend((weight, bias, fused_weight))
+
+        tensor = self.cast(tensor, compute_dtype, f"{name}.input_cast")
+        # Replicating one low-resolution pixel supplies the two high-resolution
+        # border samples consumed by the original post-resize replicate pad.
+        tensor = self.replicate_pad(tensor, 1, f"{name}.input_pad")
+        layer = self._layer(
+            self.network.add_deconvolution_nd(
+                tensor,
+                int(weight.shape[0]),
+                (6, 6),
+                self.trt.Weights(fused_weight),
+                self.trt.Weights(bias),
+            ),
+            "fused resample deconvolution",
+            name,
+        )
+        layer.stride_nd = (2, 2)
+        # For padded input H+2, (H+2-1)*2 + 6 - 2*4 == 2H.
+        layer.padding_nd = (4, 4)
         return layer.get_output(0)
 
     def linear(
@@ -369,6 +518,8 @@ class _NativeMogeGraph:
         return result
 
     def layer_norm(self, tensor: Any, module: str, name: str) -> Any:
+        if self.fast_path:
+            tensor = self.cast(tensor, self.trt.float32, f"{name}.input_fp32")
         rank = len(tuple(tensor.shape))
         width = int(self.state[f"{module}.weight"].numel())
         parameter_shape = (1,) * (rank - 1) + (width,)
@@ -592,7 +743,7 @@ class _NativeMogeGraph:
                 f"{prefix}.proj",
                 f"{name}.projection",
                 compute_dtype=self.trt.float16,
-                output_dtype=self.trt.float32,
+                output_dtype=self.trt.float16,
             )
         return self.linear(context, f"{prefix}.proj", f"{name}.projection")
 
@@ -607,6 +758,8 @@ class _NativeMogeGraph:
             shape=(1, 1, _HIDDEN),
             name=f"{name}.ls1",
         )
+        if self.fast_path:
+            gamma1 = self.cast(gamma1, self.trt.float16, f"{name}.ls1_fp16")
         attention = self.binary(
             attention, gamma1, self.trt.ElementWiseOperation.PROD, f"{name}.scaled_attention"
         )
@@ -630,7 +783,7 @@ class _NativeMogeGraph:
                 f"{prefix}.mlp.fc2",
                 f"{name}.mlp.fc2",
                 compute_dtype=self.trt.float16,
-                output_dtype=self.trt.float32,
+                output_dtype=self.trt.float16,
             )
         else:
             mlp = self.linear(mlp, f"{prefix}.mlp.fc2", f"{name}.mlp.fc2")
@@ -640,6 +793,8 @@ class _NativeMogeGraph:
             shape=(1, 1, _HIDDEN),
             name=f"{name}.ls2",
         )
+        if self.fast_path:
+            gamma2 = self.cast(gamma2, self.trt.float16, f"{name}.ls2_fp16")
         mlp = self.binary(mlp, gamma2, self.trt.ElementWiseOperation.PROD, f"{name}.scaled_mlp")
         return self.binary(hidden, mlp, self.trt.ElementWiseOperation.SUM, f"{name}.mlp_residual")
 
@@ -685,6 +840,7 @@ class _NativeMogeGraph:
             image,
             f"encoder.output_projections.{projection_index}",
             f"{name}.projection",
+            compute_dtype=self.trt.float16 if self.fast_path else self.trt.float32,
         )
         return projected, class_token
 
@@ -758,7 +914,11 @@ class _NativeMogeGraph:
         pixels = self.binary(pixels, mean, self.trt.ElementWiseOperation.SUB, "input.center")
         pixels = self.binary(pixels, std, self.trt.ElementWiseOperation.DIV, "input.normalize")
         patches = self.convolution(
-            pixels, "encoder.backbone.patch_embed.proj", "vit.patch_embed", stride=_PATCH
+            pixels,
+            "encoder.backbone.patch_embed.proj",
+            "vit.patch_embed",
+            stride=_PATCH,
+            compute_dtype=self.trt.float16 if self.fast_path else self.trt.float32,
         )
         patch_tokens = self.binary(
             base_h, base_w, self.trt.ElementWiseOperation.PROD, "vit.patch_tokens"
@@ -788,6 +948,8 @@ class _NativeMogeGraph:
             expected=(1, 1, _HIDDEN),
             name="vit.class_token",
         )
+        if self.fast_path:
+            class_token = self.cast(class_token, self.trt.float16, "vit.class_token_fp16")
         token_concat = self._layer(
             self.network.add_concatenation([class_token, hidden]), "token concat", "vit.tokens"
         )
@@ -829,12 +991,17 @@ class _NativeMogeGraph:
             "vit.position.tokens",
         )
         position_concat.axis = 1
+        position_tokens = position_concat.get_output(0)
+        if self.fast_path:
+            position_tokens = self.cast(position_tokens, self.trt.float16, "vit.position_fp16")
         hidden = self.binary(
             hidden,
-            position_concat.get_output(0),
+            position_tokens,
             self.trt.ElementWiseOperation.SUM,
             "vit.tokens_plus_position",
         )
+        if self.fast_path:
+            hidden = self.cast(hidden, self.trt.float16, "vit.residual_fp16")
 
         captured: list[Any] = []
         last_class = None
@@ -887,6 +1054,13 @@ class _NativeMogeGraph:
                 tensor,
                 f"{module}.0",
                 f"{name}.deconvolution",
+                compute_dtype=compute_dtype,
+            )
+        elif level == 3 and self.fast_path:
+            return self.fused_half_pixel_resample(
+                tensor,
+                f"{module}.1",
+                f"{name}.fused_deconvolution",
                 compute_dtype=compute_dtype,
             )
         else:
@@ -973,6 +1147,8 @@ class _NativeMogeGraph:
                 base_w, multiplier, self.trt.ElementWiseOperation.PROD, f"uv.level.{level}.width"
             )
             uv = self.uv(height, width, aspect, f"uv.level.{level}")
+            if self.fast_path:
+                uv = self.cast(uv, self.trt.float16, f"uv.level.{level}.fp16")
             if level == 0:
                 concat = self._layer(
                     self.network.add_concatenation([features[0], uv]),
@@ -1015,64 +1191,111 @@ class _NativeMogeGraph:
         input_shape = self.shape(image, "output.input_shape")
         input_h = self.shape_index(input_shape, 2, "output.height")
         input_w = self.shape_index(input_shape, 3, "output.width")
-        points = self.resize_nchw_to_hw(
+        raw_points = self.resize_nchw_to_hw(
             points, input_h, input_w, self.trt.InterpolationMode.LINEAR, "output.points_resize"
         )
         mask = self.resize_nchw_to_hw(
             mask, input_h, input_w, self.trt.InterpolationMode.LINEAR, "output.mask_resize"
         )
-        points_shape = self.shape_concat(
-            [
-                self.shape_value(1, "output.points_batch"),
-                input_h,
-                input_w,
-                self.shape_value(3, "output.points_channels"),
-            ],
-            "output.points_shape",
-        )
-        points = self.reshape(
-            points,
-            points_shape,
-            "output.points_nhwc",
-            first_transpose=(0, 2, 3, 1),
-        )
         xy_shape = self.shape_concat(
             [
                 self.shape_value(1, "output.xy_batch"),
+                self.shape_value(2, "output.xy_channels"),
                 input_h,
                 input_w,
-                self.shape_value(2, "output.xy_channels"),
             ],
             "output.xy_shape",
         )
         z_shape = self.shape_concat(
             [
                 self.shape_value(1, "output.z_batch"),
+                self.shape_value(1, "output.z_channels"),
                 input_h,
                 input_w,
-                self.shape_value(1, "output.z_channels"),
             ],
             "output.z_shape",
         )
-        xy = self.dynamic_slice(points, (0, 0, 0, 0), xy_shape, "output.xy")
-        z = self.dynamic_slice(points, (0, 0, 0, 2), z_shape, "output.z")
-        z = self.unary(z, self.trt.UnaryOperation.EXP, "output.z_exp")
-        xy = self.binary(xy, z, self.trt.ElementWiseOperation.PROD, "output.xy_scaled")
-        point_concat = self._layer(
-            self.network.add_concatenation([xy, z]), "point concat", "output.points_remap"
-        )
-        point_concat.axis = 3
-        points = point_concat.get_output(0)
+        raw_xy = self.dynamic_slice(raw_points, (0, 0, 0, 0), xy_shape, "output.raw_xy")
+        raw_z = self.dynamic_slice(raw_points, (0, 2, 0, 0), z_shape, "output.raw_z")
+        z = self.unary(raw_z, self.trt.UnaryOperation.EXP, "output.z_exp")
+        xy = self.binary(raw_xy, z, self.trt.ElementWiseOperation.PROD, "output.xy_scaled")
 
         mask_shape = self.shape_concat(
             [self.shape_value(1, "output.mask_batch"), input_h, input_w],
             "output.mask_shape",
         )
+        affine_depth = self.reshape(z, mask_shape, "output.affine_depth_squeeze")
+        affine_depth = self.cast(affine_depth, self.trt.float32, "output.affine_depth_fp32")
+
+        row_indices = self.nearest_sample_indices(input_h, "output.focal_rows")
+        column_indices = self.nearest_sample_indices(input_w, "output.focal_columns")
+        sampled_xy = self.gather(xy, row_indices, 2, "output.focal_xy_rows")
+        sampled_xy = self.gather(sampled_xy, column_indices, 3, "output.focal_xy_columns")
+        sampled_z = self.gather(z, row_indices, 2, "output.focal_z_rows")
+        sampled_z = self.gather(sampled_z, column_indices, 3, "output.focal_z_columns")
+        sampled_concat = self._layer(
+            self.network.add_concatenation([sampled_xy, sampled_z]),
+            "sampled point concat",
+            "output.focal_samples_nchw",
+        )
+        sampled_concat.axis = 1
+        focal_samples = self.reshape(
+            sampled_concat.get_output(0),
+            (1, _FOCAL_RECOVERY_SIZE, _FOCAL_RECOVERY_SIZE, 3),
+            "output.focal_samples_nhwc",
+            first_transpose=(0, 2, 3, 1),
+        )
+        focal_samples = self.cast(focal_samples, self.trt.float32, "output.focal_samples_fp32")
+
+        x = self.dynamic_slice(xy, (0, 0, 0, 0), z_shape, "output.valid.x")
+        y = self.dynamic_slice(xy, (0, 1, 0, 0), z_shape, "output.valid.y")
+        x_finite = self.is_finite(x, "output.valid.x_finite")
+        y_finite = self.is_finite(y, "output.valid.y_finite")
+        z_finite = self.is_finite(z, "output.valid.z_finite")
+        points_finite = self.binary(
+            x_finite,
+            y_finite,
+            self.trt.ElementWiseOperation.AND,
+            "output.valid.xy_finite",
+        )
+        points_finite = self.binary(
+            points_finite,
+            z_finite,
+            self.trt.ElementWiseOperation.AND,
+            "output.valid.xyz_finite",
+        )
+        points_finite = self.reshape(points_finite, mask_shape, "output.valid.points_squeeze")
+
+        # Keep the legacy sigmoid and FP16->FP32 boundary. For a tiny positive
+        # FP16 logit, sigmoid can round to exactly 0.5, so logit > 0 is not an
+        # exact replacement for the public mask predicate.
         mask = self.reshape(mask, mask_shape, "output.mask_squeeze")
         mask = self.sigmoid(mask, "output.mask_sigmoid")
+        mask = self.cast(mask, self.trt.float32, "output.mask_fp32")
+        mask_threshold = self.constant(
+            [[[0.5]]], dtype=np.float32, name="output.valid.mask_threshold"
+        )
+        mask_selected = self.binary(
+            mask,
+            mask_threshold,
+            self.trt.ElementWiseOperation.GREATER,
+            "output.valid.mask_selected",
+        )
+        # GREATER is ordered: NaN compares false. Sigmoid maps finite values
+        # and +/-infinity to finite probabilities, so the legacy isfinite(mask)
+        # term cannot reject anything that this comparison would select.
+        valid = self.binary(
+            points_finite,
+            mask_selected,
+            self.trt.ElementWiseOperation.AND,
+            "output.valid.selected",
+        )
+        valid = self.cast(valid, self.trt.float16, "output.valid_fp16")
+
         scale = self.unary(scale, self.trt.UnaryOperation.EXP, "output.metric_scale_exp")
         scale = self.reshape(scale, (1,), "output.metric_scale_squeeze")
-        return points, mask, scale
+        scale = self.cast(scale, self.trt.float32, "output.metric_scale_fp32")
+        return affine_depth, valid, focal_samples, scale
 
 
 def _build_native_engine(
@@ -1090,7 +1313,7 @@ def _build_native_engine(
     )
     if network is None:
         raise RuntimeError("TensorRT failed to create the MoGe network")
-    input_dims = (1, _FAST_IMAGE_HEIGHT, _FAST_IMAGE_WIDTH, 3) if fast_path else (1, -1, -1, 3)
+    input_dims = (1, -1, -1, 3)
     image = network.add_input("image", trt.float32, input_dims)
     if image is None:
         raise RuntimeError("TensorRT rejected the MoGe image input")
@@ -1113,14 +1336,13 @@ def _build_native_engine(
         "input_hwc.to_nchw",
         first_transpose=(0, 3, 1, 2),
     )
-    points, mask, metric_scale = graph.outputs(image)
+    affine_depth, valid, focal_samples, metric_scale = graph.outputs(image)
     for name, tensor in (
-        ("points", points),
-        ("mask", mask),
+        ("affine_depth", affine_depth),
+        ("valid", valid),
+        ("focal_samples", focal_samples),
         ("metric_scale", metric_scale),
     ):
-        if tensor.dtype != trt.float32:
-            tensor = graph.cast(tensor, trt.float32, f"output.{name}_fp32")
         tensor.name = name
         network.mark_output(tensor)
 
@@ -1134,8 +1356,12 @@ def _build_native_engine(
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
     profile = builder.create_optimization_profile()
     if fast_path:
-        fast_shape = (1, _FAST_IMAGE_HEIGHT, _FAST_IMAGE_WIDTH, 3)
-        profile.set_shape("image", fast_shape, fast_shape, fast_shape)
+        profile.set_shape(
+            "image",
+            (1, _FAST_MIN_IMAGE_HEIGHT, _FAST_MIN_IMAGE_WIDTH, 3),
+            (1, _FAST_OPT_IMAGE_HEIGHT, _FAST_OPT_IMAGE_WIDTH, 3),
+            (1, _FAST_MAX_IMAGE_HEIGHT, _FAST_MAX_IMAGE_WIDTH, 3),
+        )
     else:
         profile.set_shape(
             "image",
@@ -1157,7 +1383,9 @@ def _build_native_engine(
         config.max_aux_streams = 0
     if verbose:
         profile_label = (
-            f"{_FAST_IMAGE_WIDTH}x{_FAST_IMAGE_HEIGHT}"
+            f"{_FAST_MIN_IMAGE_WIDTH}x{_FAST_MIN_IMAGE_HEIGHT}.."
+            f"{_FAST_MAX_IMAGE_WIDTH}x{_FAST_MAX_IMAGE_HEIGHT}"
+            f"@{_FAST_OPT_IMAGE_WIDTH}x{_FAST_OPT_IMAGE_HEIGHT}"
             if fast_path
             else f"{_MIN_IMAGE_SIZE}..{_MAX_IMAGE_SIZE}"
         )
