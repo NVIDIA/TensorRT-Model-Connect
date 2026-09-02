@@ -43,6 +43,7 @@ class HFDiffusersReference:
 
         import json
         import os
+        import shutil
         import subprocess
         import tempfile
         import textwrap
@@ -60,18 +61,31 @@ class HFDiffusersReference:
             wav_path = os.path.join(tmpdir, "reference.wav")
             script = textwrap.dedent(
                 """
-                import glob, json, struct, sys
+                import glob, json, os, struct, sys
                 import numpy as np
                 import torch
                 from diffusers.modular_pipelines.minimax_music3.modular_blocks_minimax_music3 \
                     import MiniMaxMusic3Blocks
 
                 payload = json.loads(sys.argv[1])
+                revision = payload.get("hf_revision") or ""
                 snapshots = glob.glob(payload["snapshot_glob"])
                 if not snapshots:
                     raise SystemExit("no MiniMax-Music3 snapshot in the cache")
+                if revision:
+                    # The manifest pins a revision; the cache may hold several.
+                    # Take that one or stop -- comparing against a different
+                    # checkpoint than the run used is worse than not comparing.
+                    snapshots = [s for s in snapshots
+                                 if os.path.basename(s.rstrip("/")) == revision]
+                    if not snapshots:
+                        raise SystemExit(
+                            "no MiniMax-Music3 snapshot for revision " + revision
+                        )
+                else:
+                    snapshots = sorted(snapshots)
 
-                pipe = MiniMaxMusic3Blocks().init_pipeline(sorted(snapshots)[0])
+                pipe = MiniMaxMusic3Blocks().init_pipeline(snapshots[0])
                 pipe.load_components(torch_dtype=torch.bfloat16)
                 pipe.to("cuda")
                 generator = torch.Generator("cuda").manual_seed(payload["seed"])
@@ -105,6 +119,7 @@ class HFDiffusersReference:
                 "snapshot_glob": os.path.expanduser(
                     "~/.cache/huggingface/hub/models--MiniMaxAI--MiniMax-Music3/snapshots/*"
                 ),
+                "hf_revision": getattr(case, "hf_revision", "") or "",
                 "wav_path": wav_path,
                 "lyrics": lyrics,
                 "caption": caption,
@@ -135,7 +150,11 @@ class HFDiffusersReference:
                     f"{case.name}_reference.wav",
                 )
                 os.makedirs(os.path.dirname(kept), exist_ok=True)
-                os.replace(wav_path, kept)
+                # shutil.move, not os.replace: TMPDIR and the artifacts
+                # directory are often separate mounts in CI, and a
+                # cross-device rename raises EXDEV after the reference has
+                # already run to completion.
+                shutil.move(wav_path, kept)
                 data.update(_describe_wav(kept))
             return StageOutput(stage_name=stage.name, data=data)
 

@@ -65,6 +65,7 @@ def test_causal_mask_rejects_a_sequence_past_the_table() -> None:
 
 
 def test_rms_norm_normalises_then_scales() -> None:
+    # A real signal, not zeros: this asserts unit RMS, which zeros cannot show.
     rng = np.random.default_rng(0)
     x = rng.standard_normal((1, 3, 8)).astype(np.float32)
     w = np.full(8, 2.0, dtype=np.float32)
@@ -118,24 +119,27 @@ _TRT = SimpleNamespace(
 )
 
 
+    # np.zeros, not standard_normal: the _TRT.Weights stub records only
+    # np.shape and no assertion reads a value, so drawing production-width
+    # randoms (and the float64 intermediates standard_normal makes) is
+    # pure cost -- 2.28 GB per call here.
 def _weights():
-    rng = np.random.default_rng(0)
     w = {
-        "pos_embedding.weight": rng.standard_normal(
-            (dd.MAX_POSITION_EMBEDDINGS, dd.HIDDEN_SIZE)).astype(np.float32),
+        "pos_embedding.weight": np.zeros(
+            (dd.MAX_POSITION_EMBEDDINGS, dd.HIDDEN_SIZE), dtype=np.float32),
         "norm.weight": np.ones(dd.HIDDEN_SIZE, dtype=np.float32),
     }
     for layer in range(dd.NUM_LAYERS):
         p = f"layers.{layer}"
         for name in ("to_q", "to_k", "to_v", "to_out"):
-            w[f"{p}.attn.{name}.weight"] = rng.standard_normal(
-                (dd.HIDDEN_SIZE, dd.HIDDEN_SIZE)).astype(np.float32) * 0.01
-        w[f"{p}.gate_proj.weight"] = rng.standard_normal(
-            (dd.INTERMEDIATE_SIZE, dd.HIDDEN_SIZE)).astype(np.float32) * 0.01
-        w[f"{p}.up_proj.weight"] = rng.standard_normal(
-            (dd.INTERMEDIATE_SIZE, dd.HIDDEN_SIZE)).astype(np.float32) * 0.01
-        w[f"{p}.down_proj.weight"] = rng.standard_normal(
-            (dd.HIDDEN_SIZE, dd.INTERMEDIATE_SIZE)).astype(np.float32) * 0.01
+            w[f"{p}.attn.{name}.weight"] = np.zeros(
+                (dd.HIDDEN_SIZE, dd.HIDDEN_SIZE), dtype=np.float32)
+        w[f"{p}.gate_proj.weight"] = np.zeros(
+            (dd.INTERMEDIATE_SIZE, dd.HIDDEN_SIZE), dtype=np.float32)
+        w[f"{p}.up_proj.weight"] = np.zeros(
+            (dd.INTERMEDIATE_SIZE, dd.HIDDEN_SIZE), dtype=np.float32)
+        w[f"{p}.down_proj.weight"] = np.zeros(
+            (dd.HIDDEN_SIZE, dd.INTERMEDIATE_SIZE), dtype=np.float32)
         w[f"{p}.input_layernorm.weight"] = np.ones(dd.HIDDEN_SIZE, dtype=np.float32)
         w[f"{p}.post_attention_layernorm.weight"] = np.ones(
             dd.HIDDEN_SIZE, dtype=np.float32)

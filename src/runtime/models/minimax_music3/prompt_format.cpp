@@ -6,6 +6,7 @@
 #include "runtime/models/minimax_music3/prompt_format.h"
 
 #include <algorithm>
+#include <cctype>
 #include <regex>
 #include <sstream>
 #include <vector>
