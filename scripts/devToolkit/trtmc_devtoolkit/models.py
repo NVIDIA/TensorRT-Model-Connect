@@ -94,18 +94,6 @@ class LocalTarget:
 
 
 @dataclass(frozen=True)
-class ModelRequest:
-    """Optional model smoke requested after the environment is ready."""
-
-    model_id: str
-    revision: str | None = None
-    precision: str = "bf16"
-    max_cache_length: int = 16384
-    prompt: str = "What is the capital of France? Answer in one word."
-    max_new_tokens: int = 16
-
-
-@dataclass(frozen=True)
 class PrepareRequest:
     tensorrt: str
     cuda: str
@@ -114,7 +102,7 @@ class PrepareRequest:
     python_version: str = "3.12"
     architecture: str | None = None
     allow_experimental: bool = False
-    model: ModelRequest | None = None
+    model: object | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +119,7 @@ class PreparationPlan:
     repository: Path
     architecture: str
     source_revision: str
+    environment_id: str
     run_id: str
     state_dir: Path
     image_fingerprint: str | None
@@ -152,6 +141,22 @@ class ProbeResult:
 
 
 @dataclass(frozen=True)
+class ToolchainObservation:
+    """Facts measured from the environment that will execute TRTMC."""
+
+    python_version: str
+    cuda_version: str
+    tensorrt_python_version: str
+    tensorrt_native_version: str
+    tensorrt_header_version: str
+    tensorrt_include_dir: str
+    tensorrt_library: str
+    cuda_root: str | None = None
+    image_id: str | None = None
+    architecture: str | None = None
+
+
+@dataclass(frozen=True)
 class EnvironmentHandle:
     kind: Literal["docker", "local"]
     fingerprint: str
@@ -161,6 +166,7 @@ class EnvironmentHandle:
     image_ref: str | None = None
     container_name: str | None = None
     environment: dict[str, str] = field(default_factory=dict)
+    observation: ToolchainObservation | None = None
 
 
 @dataclass(frozen=True)

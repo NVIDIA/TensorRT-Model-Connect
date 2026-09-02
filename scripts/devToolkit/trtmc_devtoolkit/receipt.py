@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import EnvironmentHandle, PreparationPlan, ProbeResult
+from .models import DevToolkitError, EnvironmentHandle, PreparationPlan, ProbeResult
 
 
 def _json_default(value: Any) -> str:
@@ -52,6 +52,20 @@ def write_success(
     wheel: Path | None,
     bundle: Path | None,
 ) -> Path:
+    observation = environment.observation
+    if observation is None:
+        raise DevToolkitError("A success receipt requires observed toolchain attestation")
+    observed_tensorrt = {
+        observation.tensorrt_python_version,
+        observation.tensorrt_native_version,
+        observation.tensorrt_header_version,
+    }
+    if observed_tensorrt != {plan.cohort.tensorrt_version}:
+        raise DevToolkitError(
+            "Observed TensorRT Python/native/header versions do not match the plan"
+        )
+    if observation.cuda_version != plan.cohort.cuda_version:
+        raise DevToolkitError("Observed CUDA version does not match the plan")
     (plan.state_dir / "failure-summary.json").unlink(missing_ok=True)
     return write_json(
         plan.state_dir / "receipt.json",
@@ -60,13 +74,15 @@ def write_success(
             "status": "ready",
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "run_id": plan.run_id,
+            "environment_id": plan.environment_id,
             "source_revision": plan.source_revision,
             "cohort": plan.cohort.id,
-            "tensorrt": plan.cohort.tensorrt_version,
-            "cuda": plan.cohort.cuda_version,
+            "tensorrt": observation.tensorrt_native_version,
+            "cuda": observation.cuda_version,
             "architecture": plan.architecture,
             "mode": plan.request.mode,
             "environment": asdict(environment),
+            "attestation": asdict(observation),
             "artifacts": {
                 "wheel": str(wheel) if wheel else None,
                 "bundle": str(bundle) if bundle else None,
@@ -84,6 +100,7 @@ def write_failure(plan: PreparationPlan, error: BaseException) -> Path:
             "status": "failed",
             "failed_at": datetime.now(timezone.utc).isoformat(),
             "run_id": plan.run_id,
+            "environment_id": plan.environment_id,
             "source_revision": plan.source_revision,
             "error_type": type(error).__name__,
             "error": str(error),

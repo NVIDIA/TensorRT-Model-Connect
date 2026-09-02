@@ -287,6 +287,25 @@ class InstalledWheelValidator:
             raise CiError(f"{path} is not the native ELF trtmc executable")
 
 
+def _validate_manylinux_audit(
+    wheel: Path,
+    audit: str,
+    *,
+    platform: str,
+    architecture: str,
+    max_glibc_minor: int,
+) -> None:
+    pattern = rf"manylinux_2_([0-9]+)_{re.escape(architecture)}"
+    minors = [
+        int(value)
+        for line in audit.splitlines()
+        if "platform tag" in line
+        for value in re.findall(pattern, line)
+    ]
+    if not minors or max(minors) > max_glibc_minor:
+        raise CiError(f"{wheel}: auditwheel did not confirm compatibility with {platform} or older")
+
+
 class WheelArchiveValidator:
     """Check native layout, dependency metadata, and manylinux compatibility."""
 
@@ -475,17 +494,13 @@ class WheelArchiveValidator:
                 raise CiError(f"{wheel}: {message}")
         audit = self.context.output([sys.executable, "-m", "auditwheel", "show", wheel])
         print(audit)
-        minors = [
-            int(value)
-            for line in audit.splitlines()
-            if "platform tag" in line
-            for value in re.findall(r"manylinux_2_([0-9]+)_aarch64", line)
-        ]
-        if not minors or max(minors) > self.max_glibc_minor:
-            raise CiError(
-                f"{wheel}: auditwheel did not confirm compatibility with "
-                f"manylinux_2_{self.max_glibc_minor}_aarch64 or older"
-            )
+        _validate_manylinux_audit(
+            wheel,
+            audit,
+            platform=self.platform,
+            architecture=self.architecture,
+            max_glibc_minor=self.max_glibc_minor,
+        )
         print(f"validated wheel={wheel}")
         for entry in sorted(
             [

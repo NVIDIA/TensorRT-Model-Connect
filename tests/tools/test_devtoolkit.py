@@ -19,7 +19,11 @@ from types import SimpleNamespace
 import jsonschema
 import pytest
 
-from tools.ci.package import WheelArchiveValidator, WheelPackageManager
+from tools.ci.package import (
+    WheelArchiveValidator,
+    WheelPackageManager,
+    _validate_manylinux_audit,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,7 +39,11 @@ from trtmc_devtoolkit import (  # noqa: E402
 )
 from trtmc_devtoolkit.cohorts import CohortRegistry, normalize_architecture  # noqa: E402
 from trtmc_devtoolkit.doctor import EnvironmentDoctor  # noqa: E402
-from trtmc_devtoolkit.models import DevToolkitError, EnvironmentHandle  # noqa: E402
+from trtmc_devtoolkit.models import (  # noqa: E402
+    DevToolkitError,
+    EnvironmentHandle,
+    ToolchainObservation,
+)
 from trtmc_devtoolkit.planner import image_fingerprint  # noqa: E402
 from trtmc_devtoolkit.receipt import write_failure, write_success  # noqa: E402
 from trtmc_devtoolkit.targets import (  # noqa: E402
@@ -83,6 +91,10 @@ class RecordingRunner:
         elif arguments[:2] == ["docker", "exec"]:
             if "import ctypes, sys, tensorrt" in " ".join(arguments):
                 output = "3.12 11.1.0.106 11.1.0.106\n"
+            elif "import ctypes, re, sys, tensorrt" in " ".join(arguments):
+                output = "3.12 11.1.0.106 11.1.0.106 11.1.0.106\n"
+            elif arguments[-2:] == ["nvcc", "--version"]:
+                output = "Cuda compilation tools, release 13.3, V13.3.0\n"
             elif "--query-gpu=compute_cap" in arguments:
                 output = "10.0\n"
             elif arguments[-3:-1] == ["sh", "-c"]:
@@ -112,7 +124,7 @@ class LocalProbeRunner(RecordingRunner):
         output = result.stdout
         if arguments[0] == "nvcc":
             output = "Cuda compilation tools, release 13.3, V13.3.0\n"
-        elif arguments[0] == "python3.12" and "-c" in arguments:
+        elif "-c" in arguments:
             script = arguments[-1]
             if "sys.version_info" in script:
                 output = f"{self.python_version}\n"
@@ -121,6 +133,56 @@ class LocalProbeRunner(RecordingRunner):
             elif "getInferLib" in script:
                 output = f"{self.native_version}\n"
         return subprocess.CompletedProcess(arguments, result.returncode, output, result.stderr)
+
+
+class TimeoutRunner(RecordingRunner):
+    def run(self, command, **kwargs) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        raise subprocess.TimeoutExpired([str(item) for item in command], 30)
+
+
+class DockerHeaderMismatchRunner(RecordingRunner):
+    def run(self, command, **kwargs) -> subprocess.CompletedProcess[str]:
+        result = super().run(command, **kwargs)
+        arguments = [str(item) for item in command]
+        if arguments[:2] == ["docker", "exec"] and "NvInferVersion.h" in " ".join(arguments):
+            return subprocess.CompletedProcess(
+                arguments,
+                result.returncode,
+                "3.12 11.1.0.106 11.1.0.106 11.0.0.1\n",
+                result.stderr,
+            )
+        return result
+
+
+class DockerCudaMismatchRunner(RecordingRunner):
+    def run(self, command, **kwargs) -> subprocess.CompletedProcess[str]:
+        result = super().run(command, **kwargs)
+        arguments = [str(item) for item in command]
+        if arguments[:2] == ["docker", "exec"] and arguments[-2:] == ["nvcc", "--version"]:
+            return subprocess.CompletedProcess(
+                arguments,
+                result.returncode,
+                "Cuda compilation tools, release 12.8, V12.8.0\n",
+                result.stderr,
+            )
+        return result
+
+
+def _write_trt_header(path: Path, version: str = "11.1.0.106") -> None:
+    major, minor, patch, build = version.split(".")
+    path.write_text(
+        "\n".join(
+            (
+                f"#define NV_TENSORRT_MAJOR {major}",
+                f"#define NV_TENSORRT_MINOR {minor}",
+                f"#define NV_TENSORRT_PATCH {patch}",
+                f"#define NV_TENSORRT_BUILD {build}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _minimal_repository(tmp_path: Path) -> Path:
@@ -253,7 +315,7 @@ def test_local_doctor_checks_exact_python_and_native_tensorrt(tmp_path: Path) ->
     cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
     include_dir = tmp_path / "include"
     include_dir.mkdir()
-    (include_dir / "NvInferVersion.h").touch()
+    _write_trt_header(include_dir / "NvInferVersion.h")
     architecture = replace(
         cohort.architectures["aarch64"],
         tensorrt_include_dir=str(include_dir),
@@ -293,7 +355,7 @@ def test_local_doctor_rejects_version_mismatch(
     cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
     include_dir = tmp_path / "include"
     include_dir.mkdir()
-    (include_dir / "NvInferVersion.h").touch()
+    _write_trt_header(include_dir / "NvInferVersion.h")
     architecture = replace(
         cohort.architectures["aarch64"],
         tensorrt_include_dir=str(include_dir),
@@ -309,6 +371,64 @@ def test_local_doctor_rejects_version_mismatch(
 
     with pytest.raises(DevToolkitError, match=re.escape(failure)):
         EnvironmentDoctor(repository, runner).inspect(request, cohort, "aarch64")
+
+
+def test_local_doctor_rejects_tensorrt_header_version_mismatch(tmp_path: Path) -> None:
+    repository = _minimal_repository(tmp_path)
+    cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
+    include_dir = tmp_path / "include"
+    include_dir.mkdir()
+    _write_trt_header(include_dir / "NvInferVersion.h", "11.0.0.1")
+    architecture = replace(
+        cohort.architectures["aarch64"],
+        tensorrt_include_dir=str(include_dir),
+        tensorrt_library_dir=str(tmp_path / "lib"),
+    )
+    cohort = replace(cohort, architectures={"aarch64": architecture})
+    request = PrepareRequest(
+        tensorrt="11.1.0.106",
+        cuda="13.3",
+        architecture="aarch64",
+        target=LocalTarget(python="python3.12", dependency_mode="system"),
+    )
+
+    with pytest.raises(
+        DevToolkitError,
+        match="tensorrt-headers: requested 11.1.0.106; found 11.0.0.1",
+    ):
+        EnvironmentDoctor(repository, LocalProbeRunner()).inspect(request, cohort, "aarch64")
+
+
+def test_system_local_build_uses_the_tensorrt_path_validated_by_doctor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _minimal_repository(tmp_path)
+    include_dir = tmp_path / "custom-trt-include"
+    include_dir.mkdir()
+    _write_trt_header(include_dir / "NvInferVersion.h")
+    monkeypatch.setenv("TRTMC_TRT_INCLUDE_DIR", str(include_dir))
+    runner = LocalProbeRunner()
+    toolkit = DevToolkit.from_checkout(
+        repository,
+        state_root=tmp_path / "runs",
+        source_revision_override="a" * 40,
+        runner=runner,
+    )
+    plan = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.1.0.106",
+            cuda="13.3",
+            architecture="aarch64",
+            target=LocalTarget(python="python3.12", dependency_mode="system"),
+        )
+    )
+
+    result = toolkit.apply(plan)
+
+    configure = next(command for command in runner.commands if command[:2] == ["cmake", "-S"])
+    assert f"-DTRTMC_TRT_INCLUDE_DIR={include_dir}" in configure
+    assert result.environment.environment["TRTMC_TRT_INCLUDE_DIR"] == str(include_dir)
 
 
 def test_managed_local_doctor_checks_bootstrap_prerequisites_not_system_toolchain(
@@ -332,6 +452,62 @@ def test_managed_local_doctor_checks_bootstrap_prerequisites_not_system_toolchai
     assert "cuda-toolkit" not in names
     assert "tensorrt-python" not in names
     assert not any(command[0] == "nvcc" for command in runner.commands)
+
+
+def test_environment_doctor_classifies_probe_timeout(tmp_path: Path) -> None:
+    repository = _minimal_repository(tmp_path)
+    cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
+    request = PrepareRequest(
+        tensorrt="11.1.0.106",
+        cuda="13.3",
+        architecture="aarch64",
+        target=LocalTarget(python="python3.12", dependency_mode="managed"),
+    )
+
+    with pytest.raises(DevToolkitError, match="gpu: Command.*timed out after 30 seconds"):
+        EnvironmentDoctor(repository, TimeoutRunner()).inspect(request, cohort, "aarch64")
+
+
+def test_docker_prepare_rejects_tensorrt_header_version_mismatch(tmp_path: Path) -> None:
+    repository = _minimal_repository(tmp_path)
+    toolkit = DevToolkit.from_checkout(
+        repository,
+        state_root=tmp_path / "runs",
+        source_revision_override="a" * 40,
+        runner=DockerHeaderMismatchRunner(),
+    )
+    plan = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.1.0.106",
+            cuda="13.3",
+            architecture="aarch64",
+            target=DockerTarget(),
+        )
+    )
+
+    with pytest.raises(DevToolkitError, match="Container TensorRT .*header mismatch"):
+        toolkit.apply(plan)
+
+
+def test_docker_prepare_rejects_cuda_version_mismatch(tmp_path: Path) -> None:
+    repository = _minimal_repository(tmp_path)
+    toolkit = DevToolkit.from_checkout(
+        repository,
+        state_root=tmp_path / "runs",
+        source_revision_override="a" * 40,
+        runner=DockerCudaMismatchRunner(),
+    )
+    plan = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.1.0.106",
+            cuda="13.3",
+            architecture="aarch64",
+            target=DockerTarget(),
+        )
+    )
+
+    with pytest.raises(DevToolkitError, match="Container CUDA mismatch"):
+        toolkit.apply(plan)
 
 
 def test_managed_toolchain_header_and_linker_contract(tmp_path: Path) -> None:
@@ -486,6 +662,15 @@ def test_terminal_receipts_are_mutually_exclusive(tmp_path: Path) -> None:
         trtmc="/run/trtmc",
         python="/run/python",
         activate_command=". /run/activate.sh",
+        observation=ToolchainObservation(
+            python_version="3.12",
+            cuda_version="13.3",
+            tensorrt_python_version="11.2.1.2",
+            tensorrt_native_version="11.2.1.2",
+            tensorrt_header_version="11.2.1.2",
+            tensorrt_include_dir="/usr/include/aarch64-linux-gnu",
+            tensorrt_library="/usr/lib/aarch64-linux-gnu/libnvinfer.so",
+        ),
     )
 
     write_failure(plan, RuntimeError("first attempt"))
@@ -498,6 +683,47 @@ def test_terminal_receipts_are_mutually_exclusive(tmp_path: Path) -> None:
 
     assert not (plan.state_dir / "receipt.json").exists()
     assert (plan.state_dir / "failure-summary.json").is_file()
+
+
+def test_success_receipt_uses_observed_toolchain_identity(tmp_path: Path) -> None:
+    toolkit = DevToolkit.from_checkout(
+        REPO_ROOT,
+        state_root=tmp_path / "runs",
+        source_revision_override="a" * 40,
+    )
+    plan = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.2.1.2",
+            cuda="13.3",
+            architecture="aarch64",
+            target=LocalTarget(),
+        )
+    )
+    observation = ToolchainObservation(
+        python_version="3.12",
+        cuda_version="13.3",
+        tensorrt_python_version="11.2.1.2",
+        tensorrt_native_version="11.2.1.2",
+        tensorrt_header_version="11.2.1.2",
+        tensorrt_include_dir="/resolved/include",
+        tensorrt_library="/resolved/lib/libnvinfer.so",
+    )
+    environment = EnvironmentHandle(
+        kind="local",
+        fingerprint=plan.run_id,
+        trtmc="/run/trtmc",
+        python="/run/python",
+        activate_command=". /run/activate.sh",
+        observation=observation,
+    )
+
+    receipt = json.loads(
+        write_success(plan, environment, wheel=None, bundle=None).read_text(encoding="utf-8")
+    )
+
+    assert receipt["tensorrt"] == observation.tensorrt_native_version
+    assert receipt["cuda"] == observation.cuda_version
+    assert receipt["attestation"]["tensorrt_header_version"] == "11.2.1.2"
 
 
 @pytest.mark.parametrize(
@@ -563,7 +789,7 @@ def test_plan_is_read_only_and_apply_prepares_owned_container(
     )
     assert docker_build[-1] == str(repository / "requirements")
     docker_run = next(command for command in runner.commands if command[:2] == ["docker", "run"])
-    assert f"org.nvidia.trtmc.devtoolkit-run={plan.run_id}" in docker_run
+    assert f"org.nvidia.trtmc.devtoolkit-environment={plan.environment_id}" in docker_run
     assert ["--gpus", "device=0"] == docker_run[
         docker_run.index("--gpus") : docker_run.index("--gpus") + 2
     ]
@@ -578,6 +804,30 @@ def test_plan_is_read_only_and_apply_prepares_owned_container(
     assert handoff.command[:3] == ("docker", "exec", "--env")
     assert "tools/trtmc_validate.py" in handoff.command
     assert "/trtmc-devtoolkit-run/qwen.bundle" in handoff.command
+
+
+def test_legacy_environment_state_survives_source_revisions(tmp_path: Path) -> None:
+    repository = _minimal_repository(tmp_path)
+    request = PrepareRequest(
+        tensorrt="11.1.0.106",
+        cuda="13.3",
+        architecture="aarch64",
+        target=LocalTarget(),
+    )
+    first = DevToolkit.from_checkout(
+        repository,
+        state_root=tmp_path / "runs",
+        source_revision_override="a" * 40,
+    ).plan(request)
+    second = DevToolkit.from_checkout(
+        repository,
+        state_root=tmp_path / "runs",
+        source_revision_override="b" * 40,
+    ).plan(request)
+
+    assert first.environment_id == second.environment_id
+    assert first.state_dir == second.state_dir
+    assert first.run_id != second.run_id
 
 
 def test_rejects_invalid_source_revision_override(tmp_path: Path) -> None:
@@ -600,3 +850,15 @@ def test_x86_64_wheel_platform_is_accepted_and_selected(tmp_path: Path) -> None:
 
     assert validator.architecture == "x86_64"
     assert WheelPackageManager(context).select_wheel("py312") == wheel
+
+
+def test_x86_64_auditwheel_result_is_validated_for_its_architecture(tmp_path: Path) -> None:
+    wheel = tmp_path / "tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_x86_64.whl"
+
+    _validate_manylinux_audit(
+        wheel,
+        'The wheel is consistent with the following platform tag: "manylinux_2_39_x86_64".',
+        platform="manylinux_2_39_x86_64",
+        architecture="x86_64",
+        max_glibc_minor=39,
+    )

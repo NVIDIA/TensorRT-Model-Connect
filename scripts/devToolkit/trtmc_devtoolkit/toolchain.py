@@ -14,11 +14,130 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import DevToolkitError, DownloadArtifact, PreparationPlan
+from .models import (
+    ArchitectureContract,
+    DevToolkitError,
+    DownloadArtifact,
+    PreparationPlan,
+    ToolchainObservation,
+)
 from .runner import Runner, command_output
 
 
 CUDA_RELEASE = re.compile(r"release\s+([0-9]+\.[0-9]+)", re.IGNORECASE)
+
+
+def tensorrt_header_version(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    definitions = dict(
+        re.findall(r"^#define\s+([A-Za-z0-9_]+)\s+([A-Za-z0-9_]+)\b", text, re.MULTILINE)
+    )
+    parts: list[str] = []
+    for name in ("MAJOR", "MINOR", "PATCH", "BUILD"):
+        value = definitions.get(f"NV_TENSORRT_{name}", "")
+        value = definitions.get(value, value)
+        if not value.isdigit():
+            raise DevToolkitError(f"Could not resolve TensorRT {name.lower()} from {path}")
+        parts.append(value)
+    return ".".join(parts)
+
+
+def system_tensorrt_paths(contract: ArchitectureContract) -> tuple[Path, Path]:
+    include_dir = Path(
+        os.environ.get("TRTMC_TRT_INCLUDE_DIR")
+        or os.environ.get("TRT_INC_DIR")
+        or contract.tensorrt_include_dir
+    )
+    library_dir = Path(
+        os.environ.get("TRTMC_TRT_LIBRARY_DIR")
+        or os.environ.get("TRT_LIB_DIR")
+        or contract.tensorrt_library_dir
+    )
+    library = Path(os.environ.get("TRTMC_TRT_LIBRARY") or library_dir / "libnvinfer.so")
+    return include_dir, library
+
+
+def observe_local_toolchain(
+    runner: Runner,
+    *,
+    repository: Path,
+    python: str | Path,
+    nvcc: str | Path,
+    tensorrt_include_dir: Path,
+    tensorrt_library: Path,
+    environment: dict[str, str],
+    cuda_root: Path | None = None,
+) -> ToolchainObservation:
+    python_version = command_output(
+        runner,
+        [python, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        cwd=repository,
+        env=environment,
+    )
+    nvcc_output = command_output(
+        runner,
+        [nvcc, "--version"],
+        cwd=repository,
+        env=environment,
+    )
+    match = CUDA_RELEASE.search(nvcc_output)
+    if match is None:
+        raise DevToolkitError(f"Could not resolve CUDA version from nvcc: {nvcc_output}")
+    tensorrt_python = command_output(
+        runner,
+        [python, "-c", "import tensorrt; print(tensorrt.__version__)"],
+        cwd=repository,
+        env=environment,
+    )
+    tensorrt_native = command_output(
+        runner,
+        [
+            python,
+            "-c",
+            (
+                "import ctypes; "
+                f"lib=ctypes.CDLL({str(tensorrt_library)!r}); "
+                "names=('Major','Minor','Patch','Build'); "
+                "fs=[getattr(lib, f'getInferLib{name}Version') for name in names]; "
+                "[setattr(f, 'restype', ctypes.c_int32) for f in fs]; "
+                "print('.'.join(str(f()) for f in fs))"
+            ),
+        ],
+        cwd=repository,
+        env=environment,
+    )
+    return ToolchainObservation(
+        python_version=python_version,
+        cuda_version=match.group(1),
+        tensorrt_python_version=tensorrt_python,
+        tensorrt_native_version=tensorrt_native,
+        tensorrt_header_version=tensorrt_header_version(tensorrt_include_dir / "NvInferVersion.h"),
+        tensorrt_include_dir=str(tensorrt_include_dir),
+        tensorrt_library=str(tensorrt_library),
+        cuda_root=str(cuda_root) if cuda_root is not None else None,
+    )
+
+
+def require_toolchain_observation(
+    observation: ToolchainObservation,
+    *,
+    tensorrt: str,
+    cuda: str,
+    python: str,
+) -> None:
+    if observation.python_version != python:
+        raise DevToolkitError(f"Python must be {python}; got {observation.python_version}")
+    versions = {
+        observation.tensorrt_python_version,
+        observation.tensorrt_native_version,
+        observation.tensorrt_header_version,
+    }
+    if versions != {tensorrt}:
+        raise DevToolkitError(
+            f"TensorRT Python/native/header must all be {tensorrt}; got {sorted(versions)}"
+        )
+    if observation.cuda_version != cuda:
+        raise DevToolkitError(f"nvcc must report CUDA {cuda}; got {observation.cuda_version}")
 
 
 @dataclass(frozen=True)
@@ -237,73 +356,29 @@ class ManagedLocalProvisioner:
         plan: PreparationPlan,
         python: Path,
         toolchain: ManagedToolchain,
-    ) -> None:
+    ) -> ToolchainObservation:
         environment = toolchain.environment(
             python.parent.parent,
             gpu=plan.request.target.gpu,
         )
-        nvcc_output = command_output(
+        observation = observe_local_toolchain(
             self.runner,
-            [toolchain.cuda_root / "bin" / "nvcc", "--version"],
-            cwd=self.repository,
-            env=environment,
+            repository=self.repository,
+            python=python,
+            nvcc=toolchain.cuda_root / "bin" / "nvcc",
+            tensorrt_include_dir=toolchain.tensorrt_include_dir,
+            tensorrt_library=toolchain.tensorrt_library,
+            environment=environment,
+            cuda_root=toolchain.cuda_root,
         )
-        match = CUDA_RELEASE.search(nvcc_output)
-        if match is None or match.group(1) != plan.cohort.cuda_version:
-            raise DevToolkitError(
-                f"Managed nvcc must report CUDA {plan.cohort.cuda_version}; got {nvcc_output}"
-            )
-        python_version = command_output(
-            self.runner,
-            [python, "-c", "import tensorrt; print(tensorrt.__version__)"],
-            cwd=self.repository,
-            env=environment,
+        require_toolchain_observation(
+            observation,
+            tensorrt=plan.cohort.tensorrt_version,
+            cuda=plan.cohort.cuda_version,
+            python=plan.request.python_version,
         )
-        if python_version != plan.cohort.tensorrt_version:
-            raise DevToolkitError(
-                f"Managed TensorRT Python must be {plan.cohort.tensorrt_version}; "
-                f"got {python_version}"
-            )
-        native_version = command_output(
-            self.runner,
-            [
-                python,
-                "-c",
-                (
-                    "import ctypes; "
-                    f"lib=ctypes.CDLL({str(toolchain.tensorrt_library)!r}); "
-                    "names=('Major','Minor','Patch','Build'); "
-                    "fs=[getattr(lib, f'getInferLib{name}Version') for name in names]; "
-                    "[setattr(f, 'restype', ctypes.c_int32) for f in fs]; "
-                    "print('.'.join(str(f()) for f in fs))"
-                ),
-            ],
-            cwd=self.repository,
-            env=environment,
-        )
-        if native_version != plan.cohort.tensorrt_version:
-            raise DevToolkitError(
-                f"Managed TensorRT native library must be {plan.cohort.tensorrt_version}; "
-                f"got {native_version}"
-            )
-        header_version = self._header_version(toolchain.tensorrt_include_dir / "NvInferVersion.h")
-        if header_version != plan.cohort.tensorrt_version:
-            raise DevToolkitError(
-                f"Managed TensorRT headers must be {plan.cohort.tensorrt_version}; "
-                f"got {header_version}"
-            )
+        return observation
 
     @staticmethod
     def _header_version(path: Path) -> str:
-        text = path.read_text(encoding="utf-8")
-        definitions = dict(
-            re.findall(r"^#define\s+([A-Za-z0-9_]+)\s+([A-Za-z0-9_]+)\b", text, re.MULTILINE)
-        )
-        parts: list[str] = []
-        for name in ("MAJOR", "MINOR", "PATCH", "BUILD"):
-            value = definitions.get(f"NV_TENSORRT_{name}", "")
-            value = definitions.get(value, value)
-            if not value.isdigit():
-                raise DevToolkitError(f"Could not resolve TensorRT {name.lower()} from {path}")
-            parts.append(value)
-        return ".".join(parts)
+        return tensorrt_header_version(path)

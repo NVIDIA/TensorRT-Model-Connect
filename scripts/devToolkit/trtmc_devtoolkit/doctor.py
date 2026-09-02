@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 from .models import DevToolkitError, EnvironmentCohort, PrepareRequest, ProbeResult
 from .runner import Runner, command_output
+from .toolchain import system_tensorrt_paths, tensorrt_header_version
 
 
 CUDA_RELEASE = re.compile(r"release\s+([0-9]+\.[0-9]+)", re.IGNORECASE)
@@ -37,7 +38,7 @@ def _probe_command(
 ) -> tuple[ProbeResult, str]:
     try:
         output = command_output(runner, command, cwd=cwd, timeout=30)
-    except (DevToolkitError, OSError) as error:
+    except (DevToolkitError, OSError, subprocess.TimeoutExpired) as error:
         return ProbeResult(name, "fail", str(error)), ""
     return ProbeResult(name, "pass", output or "available"), output
 
@@ -162,7 +163,7 @@ class EnvironmentDoctor:
                     f"requested {cohort.tensorrt_version}; found {trt_output}",
                 )
             results.append(trt_result)
-            library = Path(selected.tensorrt_library_dir) / "libnvinfer.so"
+            include_dir, library = system_tensorrt_paths(selected)
             native_result, native_output = _probe_command(
                 self.runner,
                 [
@@ -180,19 +181,23 @@ class EnvironmentDoctor:
                     f"requested {cohort.tensorrt_version}; found {native_output}",
                 )
             results.append(native_result)
-            include_dir = Path(
-                os.environ.get("TRTMC_TRT_INCLUDE_DIR")
-                or os.environ.get("TRT_INC_DIR")
-                or selected.tensorrt_include_dir
-            )
             header = include_dir / "NvInferVersion.h"
-            results.append(
-                ProbeResult(
-                    "tensorrt-headers",
-                    "pass" if header.is_file() else "fail",
-                    str(header),
-                )
-            )
+            if not header.is_file():
+                header_result = ProbeResult("tensorrt-headers", "fail", str(header))
+            else:
+                try:
+                    header_version = tensorrt_header_version(header)
+                except (DevToolkitError, OSError) as error:
+                    header_result = ProbeResult("tensorrt-headers", "fail", str(error))
+                else:
+                    status = "pass" if header_version == cohort.tensorrt_version else "fail"
+                    detail = (
+                        str(header)
+                        if status == "pass"
+                        else (f"requested {cohort.tensorrt_version}; found {header_version}")
+                    )
+                    header_result = ProbeResult("tensorrt-headers", status, detail)
+            results.append(header_result)
         failures = [result for result in results if result.status == "fail"]
         if failures:
             detail = "; ".join(f"{result.name}: {result.detail}" for result in failures)

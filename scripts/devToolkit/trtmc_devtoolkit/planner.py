@@ -59,6 +59,25 @@ def request_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def environment_fingerprint(
+    request: PrepareRequest,
+    *,
+    cohort_id: str,
+    architecture: str,
+) -> str:
+    request_payload = asdict(request)
+    request_payload.pop("model", None)
+    request_payload.pop("mode", None)
+    payload = {
+        "schema_version": 2,
+        "cohort": cohort_id,
+        "architecture": architecture,
+        "request": request_payload,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(b"trtmc-devtoolkit-legacy-environment-v2\0" + encoded).hexdigest()
+
+
 class Planner:
     def __init__(
         self,
@@ -76,11 +95,14 @@ class Planner:
                 "hexadecimal source identifier"
             )
         self.source_revision_override = source_revision_override
-        self.registry = CohortRegistry(
-            self.repository / "configs" / "environment-cohorts"
-        )
+        self.registry = CohortRegistry(self.repository / "configs" / "environment-cohorts")
 
     def create(self, request: PrepareRequest) -> PreparationPlan:
+        if request.model is not None:
+            raise DevToolkitError(
+                "PrepareRequest.model was removed from the shared core; compose the "
+                "model family's CLI through DevToolkit.run_trtmc() after provisioning"
+            )
         architecture = normalize_architecture(request.architecture)
         cohort = self.registry.resolve(
             tensorrt=request.tensorrt,
@@ -107,7 +129,12 @@ class Planner:
             architecture=architecture,
             revision=revision,
         )
-        state_dir = self.state_root / fingerprint[:16]
+        environment_id = environment_fingerprint(
+            request,
+            cohort_id=cohort.id,
+            architecture=architecture,
+        )[:16]
+        state_dir = self.state_root / environment_id
         docker_fingerprint = None
         if request.target.kind == "docker" and request.target.image is None:
             docker_fingerprint = image_fingerprint(
@@ -125,14 +152,6 @@ class Planner:
             ),
             PlanStep("verify-install", "Verify Python, CLI, native DSOs, and TensorRT ABI", False),
         ]
-        if request.model is not None:
-            steps.append(
-                PlanStep(
-                    "model-smoke",
-                    f"Build, inspect, and run {request.model.model_id}",
-                    True,
-                )
-            )
         steps.append(PlanStep("receipt", "Write a reproducible preparation receipt", True))
         return PreparationPlan(
             request=request,
@@ -140,6 +159,7 @@ class Planner:
             repository=self.repository,
             architecture=architecture,
             source_revision=revision,
+            environment_id=environment_id,
             run_id=fingerprint[:16],
             state_dir=state_dir,
             image_fingerprint=docker_fingerprint,

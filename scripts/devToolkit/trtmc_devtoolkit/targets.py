@@ -15,13 +15,20 @@ from .models import (
     DevToolkitError,
     EnvironmentHandle,
     PreparationPlan,
+    ToolchainObservation,
 )
 from .runner import Runner, command_output
-from .toolchain import ManagedLocalProvisioner
+from .toolchain import (
+    CUDA_RELEASE,
+    ManagedLocalProvisioner,
+    observe_local_toolchain,
+    require_toolchain_observation,
+    system_tensorrt_paths,
+)
 
 
 IMAGE_FINGERPRINT_LABEL = "org.nvidia.trtmc.devtoolkit-input-fingerprint"
-RUN_LABEL = "org.nvidia.trtmc.devtoolkit-run"
+ENVIRONMENT_LABEL = "org.nvidia.trtmc.devtoolkit-environment"
 CONTAINER_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+")
 
 
@@ -87,27 +94,6 @@ def _docker_exec(
     return arguments
 
 
-def _model_command(
-    trtmc: str,
-    request,
-    bundle: str,
-) -> list[str]:
-    command = [
-        trtmc,
-        "build",
-        request.model_id,
-        "--precision",
-        request.precision,
-        "--max-cache-length",
-        str(request.max_cache_length),
-        "--output",
-        bundle,
-    ]
-    if request.revision:
-        command.extend(["--model-revision", request.revision])
-    return command
-
-
 def _write_local_activation(
     destination: Path,
     venv: Path,
@@ -154,11 +140,10 @@ class DockerEnvironment:
             self._ensure_image(plan, image)
         container = target.container_name or self._default_container_name(plan)
         self._ensure_container(plan, image, container, sm)
-        self._verify_container(plan, container, sm)
+        observation = self._verify_container(plan, container, sm)
         wheel = self._build_install(plan, container, sm)
-        handle = self._verify_install(plan, image, container)
-        bundle = self._model_smoke(plan, container, handle) if plan.request.model else None
-        return handle, wheel, bundle
+        handle = self._verify_install(plan, image, container, observation)
+        return handle, wheel, None
 
     def _ensure_image(self, plan: PreparationPlan, image: str) -> None:
         target = plan.request.target
@@ -203,7 +188,7 @@ class DockerEnvironment:
 
     def _default_container_name(self, plan: PreparationPlan) -> str:
         workspace = re.sub(r"[^a-z0-9]+", "-", self.repository.name.lower()).strip("-")
-        return f"trtmc-devtoolkit-{workspace}-{plan.run_id[:8]}"
+        return f"trtmc-devtoolkit-{workspace}-{plan.environment_id[:8]}"
 
     def _ensure_container(
         self,
@@ -230,12 +215,12 @@ class DockerEnvironment:
                     "container",
                     "inspect",
                     "--format",
-                    f'{{{{ index .Config.Labels "{RUN_LABEL}" }}}}',
+                    f'{{{{ index .Config.Labels "{ENVIRONMENT_LABEL}" }}}}',
                     container,
                 ],
                 cwd=self.repository,
             )
-            if owner != plan.run_id:
+            if owner != plan.environment_id:
                 raise DevToolkitError(
                     f"Docker container {container} already exists and is not owned by "
                     f"this preparation plan (label={owner or 'missing'})"
@@ -257,7 +242,7 @@ class DockerEnvironment:
             "--name",
             container,
             "--label",
-            f"{RUN_LABEL}={plan.run_id}",
+            f"{ENVIRONMENT_LABEL}={plan.environment_id}",
             "--gpus",
             f"device={target.gpu}",
             "--ipc=host",
@@ -285,17 +270,23 @@ class DockerEnvironment:
             cwd=self.repository,
         )
 
-    def _verify_container(self, plan: PreparationPlan, container: str, sm: str) -> None:
+    def _verify_container(
+        self, plan: PreparationPlan, container: str, sm: str
+    ) -> ToolchainObservation:
         contract = plan.cohort.architectures[plan.architecture]
         script = (
-            "import ctypes, sys, tensorrt; "
+            "import ctypes, re, sys, tensorrt; from pathlib import Path; "
             f"assert tensorrt.__version__ == {plan.cohort.tensorrt_version!r}; "
             f"lib=ctypes.CDLL({str(Path(contract.tensorrt_library_dir) / 'libnvinfer.so')!r}); "
             "names=('Major','Minor','Patch','Build'); "
             "funcs=[getattr(lib, f'getInferLib{name}Version') for name in names]; "
             "[setattr(func, 'restype', ctypes.c_int32) for func in funcs]; "
+            f"text=Path({str(Path(contract.tensorrt_include_dir) / 'NvInferVersion.h')!r}).read_text(); "
+            "defs=dict(re.findall(r'^#define\\s+([A-Za-z0-9_]+)\\s+([A-Za-z0-9_]+)\\b', text, re.M)); "
+            "header='.'.join(defs.get(defs.get(f'NV_TENSORRT_{name}', ''), "
+            "defs.get(f'NV_TENSORRT_{name}', '')) for name in ('MAJOR','MINOR','PATCH','BUILD')); "
             "python=f'{sys.version_info.major}.{sys.version_info.minor}'; "
-            "print(python, tensorrt.__version__, '.'.join(str(func()) for func in funcs))"
+            "print(python, tensorrt.__version__, '.'.join(str(func()) for func in funcs), header)"
         )
         output = command_output(
             self.runner,
@@ -304,11 +295,22 @@ class DockerEnvironment:
         )
         expected = (
             f"{plan.request.python_version} {plan.cohort.tensorrt_version} "
-            f"{plan.cohort.tensorrt_version}"
+            f"{plan.cohort.tensorrt_version} {plan.cohort.tensorrt_version}"
         )
         if output != expected:
             raise DevToolkitError(
-                f"Container TensorRT Python/native mismatch: expected {expected}, got {output}"
+                "Container TensorRT Python/native/header mismatch: "
+                f"expected {expected}, got {output}"
+            )
+        nvcc_output = command_output(
+            self.runner,
+            _docker_exec(container, ["nvcc", "--version"]),
+            cwd=self.repository,
+        )
+        match = CUDA_RELEASE.search(nvcc_output)
+        if match is None or match.group(1) != plan.cohort.cuda_version:
+            raise DevToolkitError(
+                f"Container CUDA mismatch: expected {plan.cohort.cuda_version}, got {nvcc_output}"
             )
         observed_sm = (
             command_output(
@@ -329,6 +331,16 @@ class DockerEnvironment:
         )
         if observed_sm != sm:
             raise DevToolkitError(f"Container sees SM {observed_sm}; host selected SM {sm}")
+        python_version, tensorrt_python, tensorrt_native, tensorrt_headers = output.split()
+        return ToolchainObservation(
+            python_version=python_version,
+            cuda_version=match.group(1),
+            tensorrt_python_version=tensorrt_python,
+            tensorrt_native_version=tensorrt_native,
+            tensorrt_header_version=tensorrt_headers,
+            tensorrt_include_dir=contract.tensorrt_include_dir,
+            tensorrt_library=str(Path(contract.tensorrt_library_dir) / "libnvinfer.so"),
+        )
 
     def _build_install(
         self,
@@ -427,6 +439,7 @@ class DockerEnvironment:
         plan: PreparationPlan,
         image: str,
         container: str,
+        observation: ToolchainObservation,
     ) -> EnvironmentHandle:
         state = _container_path(plan, plan.state_dir)
         if plan.request.mode == "development":
@@ -454,13 +467,14 @@ class DockerEnvironment:
         )
         return EnvironmentHandle(
             kind="docker",
-            fingerprint=plan.run_id,
+            fingerprint=plan.environment_id,
             trtmc=trtmc,
             python="/opt/venv/bin/python",
             activate_command=f"docker exec -it {container} bash",
             image_ref=image,
             container_name=container,
             environment=environment,
+            observation=observation,
         )
 
     def _container_sm(self, container: str) -> str:
@@ -469,49 +483,6 @@ class DockerEnvironment:
             _docker_exec(container, ["sh", "-c", 'printf %s "$TRTMC_SM"']),
             cwd=self.repository,
         )
-
-    def _model_smoke(
-        self,
-        plan: PreparationPlan,
-        container: str,
-        handle: EnvironmentHandle,
-    ) -> Path:
-        assert plan.request.model is not None
-        bundle_host = plan.state_dir / "model-smoke.bundle"
-        bundle = str(_container_path(plan, bundle_host))
-        self.runner.run(
-            _docker_exec(
-                container,
-                _model_command(handle.trtmc, plan.request.model, bundle),
-                environment=handle.environment,
-            ),
-            cwd=self.repository,
-        )
-        self.runner.run(
-            _docker_exec(
-                container,
-                [handle.trtmc, "inspect", bundle, "--list-engines"],
-                environment=handle.environment,
-            ),
-            cwd=self.repository,
-        )
-        self.runner.run(
-            _docker_exec(
-                container,
-                [
-                    handle.trtmc,
-                    "run",
-                    bundle,
-                    "--prompt",
-                    plan.request.model.prompt,
-                    "--max-new-tokens",
-                    str(plan.request.model.max_new_tokens),
-                ],
-                environment=handle.environment,
-            ),
-            cwd=self.repository,
-        )
-        return bundle_host
 
 
 class LocalEnvironment:
@@ -543,14 +514,35 @@ class LocalEnvironment:
             managed = provisioner.prepare(plan, venv)
             environment = managed.environment(venv, gpu=target.gpu)
         else:
+            contract = plan.cohort.architectures[plan.architecture]
+            tensorrt_include_dir, tensorrt_library = system_tensorrt_paths(contract)
             environment = {
                 "PATH": f"{venv / 'bin'}:{os.environ.get('PATH', '')}",
                 "VIRTUAL_ENV": str(venv),
                 "CUDA_VISIBLE_DEVICES": target.gpu,
+                "TRTMC_TRT_INCLUDE_DIR": str(tensorrt_include_dir),
+                "TRTMC_TRT_LIBRARY": str(tensorrt_library),
+                "TRTMC_TRT_LIBRARY_DIR": str(tensorrt_library.parent),
             }
         wheel = self._build_install(plan, python, environment, sm)
         if provisioner is not None and managed is not None:
-            provisioner.verify(plan, python, managed)
+            observation = provisioner.verify(plan, python, managed)
+        else:
+            observation = observe_local_toolchain(
+                self.runner,
+                repository=self.repository,
+                python=python,
+                nvcc="nvcc",
+                tensorrt_include_dir=tensorrt_include_dir,
+                tensorrt_library=tensorrt_library,
+                environment=environment,
+            )
+            require_toolchain_observation(
+                observation,
+                tensorrt=plan.cohort.tensorrt_version,
+                cuda=plan.cohort.cuda_version,
+                python=plan.request.python_version,
+            )
         if plan.request.mode == "development":
             build = plan.state_dir / f"build-sm{sm}"
             trtmc = build / "trtmc"
@@ -573,14 +565,14 @@ class LocalEnvironment:
         )
         handle = EnvironmentHandle(
             kind="local",
-            fingerprint=plan.run_id,
+            fingerprint=plan.environment_id,
             trtmc=str(trtmc),
             python=str(python),
             activate_command=f". {shlex.quote(str(activation))}",
             environment=runtime_env,
+            observation=observation,
         )
-        bundle = self._model_smoke(plan, handle) if plan.request.model else None
-        return handle, wheel, bundle
+        return handle, wheel, None
 
     def _build_install(
         self,
@@ -696,31 +688,3 @@ class LocalEnvironment:
         if len(wheels) != 1:
             raise DevToolkitError(f"Expected one installed wheel, found {wheels}")
         return wheels[0]
-
-    def _model_smoke(self, plan: PreparationPlan, handle: EnvironmentHandle) -> Path:
-        assert plan.request.model is not None
-        bundle = plan.state_dir / "model-smoke.bundle"
-        self.runner.run(
-            _model_command(handle.trtmc, plan.request.model, str(bundle)),
-            cwd=self.repository,
-            env=handle.environment,
-        )
-        self.runner.run(
-            [handle.trtmc, "inspect", bundle, "--list-engines"],
-            cwd=self.repository,
-            env=handle.environment,
-        )
-        self.runner.run(
-            [
-                handle.trtmc,
-                "run",
-                bundle,
-                "--prompt",
-                plan.request.model.prompt,
-                "--max-new-tokens",
-                str(plan.request.model.max_new_tokens),
-            ],
-            cwd=self.repository,
-            env=handle.environment,
-        )
-        return bundle

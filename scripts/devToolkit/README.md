@@ -1,16 +1,27 @@
-# TRTMC devToolkit
+# TRTMC DevToolkit
 
-`scripts/devToolkit` is a repository-local Python API for preparing a
-TensorRT-Model-Connect build and installation environment. It is not installed
-as a console command and does not modify the host NVIDIA driver, CUDA toolkit,
-or TensorRT installation.
+`scripts/devToolkit` is a repository-local Python toolkit for composing TRTMC
+development environments and commands. It is not a workflow engine: Python is
+the composition language, and each operation can be called independently.
 
-Checked-in Local cohorts cover TensorRT `11.1.0.106` and `11.2.1.2` with CUDA
-`13.3` on Linux `x86_64` and `aarch64`. The checked-in Docker development
-images currently cover TensorRT `11.1.0.106` only; unsupported target/version
-combinations fail during planning.
+The core has four stages:
 
-## Docker development environment
+```text
+EnvironmentRequest -> resolve() -> EnvironmentLock
+EnvironmentLock    -> provision() -> ProvisionedEnvironment
+ProvisionedEnvironment + BuildSpec -> build() -> BuildResult
+ProvisionedEnvironment + CommandSpec -> run() -> CommandResult
+```
+
+Attestation and receipts are automatic postconditions of these operations.
+There is no cohort admission check in this path.
+
+## Resolve and use the target's existing toolchain
+
+The TensorRT request accepts any exact four-part version. When CUDA is omitted,
+resolution first looks for a complete target CUDA toolkit: `nvcc`, headers,
+`libcudart`, `libcublas`, and `libcurand` must all be present. If no complete
+target CUDA is available, the policy falls back to managed CUDA 13.3.
 
 ```python
 from pathlib import Path
@@ -19,106 +30,178 @@ import sys
 repo = Path.cwd()
 sys.path.insert(0, str(repo / "scripts" / "devToolkit"))
 
-from trtmc_devtoolkit import DevToolkit, DockerTarget, PrepareRequest
+from trtmc_devtoolkit import (
+    BuildSpec,
+    CommandSpec,
+    DevToolkit,
+    EnvironmentRequest,
+    ExecutionTarget,
+    repository_path,
+)
 
 toolkit = DevToolkit.from_checkout(repo)
-plan = toolkit.plan(
-    PrepareRequest(
-        tensorrt="11.1.0.106",
-        cuda="13.3",
-        target=DockerTarget(gpu="0"),
-        mode="development",
+lock = toolkit.resolve(
+    EnvironmentRequest(
+        tensorrt="11.2.0.113",
+        target=ExecutionTarget.local(python="python3.12", gpu="0"),
     )
 )
-result = toolkit.apply(plan)
-print(result.environment.activate_command)
+environment = toolkit.provision(lock)
+build = toolkit.build(
+    environment,
+    BuildSpec(
+        targets=("trtmc", "trtmc_backend_trt", "trtmc_model_qwen"),
+        outputs={"trtmc": "trtmc"},
+    ),
+)
+
+toolkit.run(
+    environment,
+    CommandSpec(
+        (build.artifacts[0].path, "version"),
+        cwd=repository_path("."),
+    ),
+)
 ```
 
-When a checkout was deployed without Git metadata (for example, by `rsync`),
-pass its externally verified commit or content digest through
-`source_revision_override`. The value must be 40 or 64 lowercase hexadecimal
-characters and is included in the deterministic run ID and receipt.
+`build()` installs the checkout's Python package editable with `--no-deps`,
+configures CMake against the exact observed TensorRT headers and library, and
+builds only the requested targets. Dependency installation remains an explicit
+environment-composition decision.
 
-The development layout installs the Python package editable, builds the CLI,
-TensorRT backend, and model DSOs in a checkout-local build directory, and
-leaves a labelled container running for later work.
+For a user-owned unified CUDA/TensorRT installation, pass
+`ExecutionTarget.local(prefix="/path/to/toolchain")`. Resolution checks the
+prefix rather than ambient host locations. If its CUDA is complete but its
+TensorRT does not match, a pinned managed TensorRT request still follows that
+prefix CUDA.
 
-Use `mode="installed"` to build a native wheel, install it into the target
-environment, and validate that the installed CLI and native payload do not
-fall back to the checkout.
+## Adopt an existing campaign container
 
-## Local environment
+The built-in Docker provider is adoption-only. It does not assume an NGC image,
+`/opt/venv`, `--gpus device=...`, or a checked-in Dockerfile. It inspects a
+running container, records its image ID, and probes its actual Python, CUDA,
+TensorRT Python package, native library, and headers before producing the lock.
 
 ```python
-from trtmc_devtoolkit import DevToolkit, LocalTarget, PrepareRequest
+lock = toolkit.resolve(
+    EnvironmentRequest(
+        tensorrt="11.0.2.2",
+        architecture="aarch64",
+        target=ExecutionTarget.docker(
+            container="jedha-campaign",
+            workspace="/workspace/TensorRT-Model-Connect",
+        ),
+    )
+)
+environment = toolkit.provision(lock)
 
-request = PrepareRequest(
+toolkit.run_trtmc(
+    environment,
+    ["build", "qwen3-0.6b", "--precision", "fp8", "--output", "/tmp/q.bundle"],
+)
+```
+
+The CLI arguments are opaque to DevToolkit. Model-specific flags, validation,
+and performance policy stay with the model family or caller recipe.
+
+## Managed fallback and arbitrary TensorRT
+
+Arbitrary-version support is accept-and-attempt, not accept-and-download-
+unverified. The built-in managed source requires a complete caller-supplied set
+of wheel artifacts plus a `tensorrt-headers` Debian artifact. Every artifact
+must have an immutable SHA-256 digest. With no complete system CUDA, omitted
+CUDA selects managed 13.3:
+
+```python
+from trtmc_devtoolkit import ArtifactPin
+
+lock = toolkit.resolve(
+    EnvironmentRequest(
+        tensorrt="11.0.0.114",
+        target=ExecutionTarget.local(),
+        artifacts=(
+            ArtifactPin(
+                name="tensorrt-headers",
+                uri="https://artifact.example/libnvinfer-headers.deb",
+                sha256="<64 lowercase hex characters>",
+                verification="pinned-digest",
+            ),
+            # Include the complete, mutually compatible wheel closure.
+            ArtifactPin(
+                name="tensorrt-wheel",
+                uri="https://artifact.example/tensorrt.whl",
+                sha256="<64 lowercase hex characters>",
+                verification="pinned-digest",
+            ),
+        ),
+    )
+)
+```
+
+If no trusted artifacts or custom `ToolchainSource` can satisfy the request,
+resolution raises `ArtifactUnavailable`; it never silently weakens verification.
+Use `CudaPolicy.exact("12.8")`, `CudaPolicy.system_only()`, or
+`CudaPolicy.managed("13.3")` to override the default policy.
+
+## Cohorts are optional qualification records
+
+Files in `configs/environment-cohorts/` may annotate a resolved environment as
+known-qualified. They do not control which TensorRT version can be attempted.
+Additional record directories can be supplied with `qualification_roots=`.
+
+```python
+toolkit = DevToolkit.from_checkout(repo, qualification_roots=(Path("my-presets"),))
+
+# Optional provenance, fail closed only because the caller explicitly asks.
+request = EnvironmentRequest(
     tensorrt="11.2.1.2",
-    cuda="13.3",
-    target=LocalTarget(python="python3.12", gpu="0"),
-    mode="development",
+    target=ExecutionTarget.local(),
+    preset="trt112-cu133",
+    require_qualification=True,
 )
-
-toolkit = DevToolkit.from_checkout()
-result = toolkit.apply(toolkit.plan(request))
-print(result.environment.activate_command)
 ```
 
-Source the printed command to enter the prepared environment. The generated
-activation script restores the venv, selected CUDA/TensorRT paths, GPU
-selection, and development model-plugin path in a new shell.
+The record's content digest is stored as provenance but does not alter the
+identity of an otherwise identical environment.
+Malformed qualification metadata is ignored for unrestricted resolution; it
+fails closed when the caller requests a preset or requires qualification.
 
-The default managed Local mode creates an isolated venv under `.devtoolkit/`,
-installs the cohort's exact pinned CUDA compiler/runtime and TensorRT
-Python/native packages, downloads a checksum-pinned TensorRT header artifact,
-and builds against those user-owned paths. It does not run `apt`, change system
-library links, or install a driver. The NVIDIA driver and a host C++ compiler
-remain prerequisites. The first preparation downloads several GiB; pip's cache
-is reused by later runs.
+## Identity and evidence
 
-To validate and reuse an already provisioned system toolchain instead, opt into
-the fail-closed system mode:
+| Identity | Includes | Excludes |
+|---|---|---|
+| Environment lock | resolved context, exact Python/CUDA/TRT, provider versions, artifact digests | source revision, GPU SM, preset spelling, container/GPU locator |
+| Build request | environment ID, source snapshot, SM set, CMake/build inputs | command occurrence |
+| Build result | build request ID and output digests | later runs |
+| Command invocation | environment ID, arguments, path scopes, environment-value digest | occurrence ID |
+
+Provisioning writes `environment-lock.json`, `provision-receipt.json`, and an
+observed attestation under `.devtoolkit/environments/<lock-id>/`. Builds and
+commands write their own v2 receipts below that environment directory. Receipts
+do not serialize provider secrets or environment variable values.
+
+## Extension points
+
+There are two provider protocols:
+
+- `ToolchainSource`: discover, materialize, and observe a CUDA/TensorRT toolchain.
+- `ExecutionContext`: resolve/provision a target and execute mapped commands.
+
+Register providers explicitly through `ProviderRegistry`; there is no implicit
+entry-point discovery or workflow DAG.
 
 ```python
-target = LocalTarget(
-    python="python3.12",
-    gpu="0",
-    dependency_mode="system",
-)
+registry = ProviderRegistry.with_builtins()
+registry.register_context(MyRemoteContext())
+registry.register_toolchain(MyTensorRTSource())
+toolkit = DevToolkit.from_checkout(repo, providers=registry.freeze())
 ```
 
-System mode requires exact CUDA, TensorRT Python/native libraries, headers,
-CMake, and Ninja before preparation starts. Managed mode ignores conflicting
-system CUDA/TensorRT installations and records the selected user-owned paths in
-the environment handle and receipt.
+## Legacy recipe
 
-## Optional model smoke
-
-Attach `ModelRequest` to build, inspect, and run one model after installation.
-This is an environment smoke test, not a correctness or performance claim.
-
-Every run writes `plan.json`, `environment.json`, `commands.log`, and either
-`receipt.json` or `failure-summary.json` under `.devtoolkit/runs/<run-id>/`.
-Existing containers with unrelated ownership labels are never removed or
-reused.
-
-## Downstream handoff
-
-The toolkit can generate commands for the existing validation, profiling, and
-performance owners without reimplementing their comparison or gating logic:
-
-```python
-from trtmc_devtoolkit import validation_handoff
-
-handoff = validation_handoff(
-    result,
-    model="qwen3-0.6b",
-    workload="qwen.generate",
-    bundle=result.bundle,
-    output=repo / ".devtoolkit" / "validation",
-)
-print(handoff.command)
-```
-
-Docker handoffs run in the prepared container. Local handoffs return the
-managed environment variables together with the direct command.
+`DevToolkit.plan(PrepareRequest(...))` and `apply()` remain as a compatibility
+recipe for the checked-in cohort-based local/Docker setup. It is not the
+arbitrary-version capability API. Its old model-smoke field now fails with a
+message directing callers to compose the appropriate family CLI through
+`run_trtmc()`. Handoff helpers remain under `trtmc_devtoolkit.recipes` with
+top-level compatibility imports.

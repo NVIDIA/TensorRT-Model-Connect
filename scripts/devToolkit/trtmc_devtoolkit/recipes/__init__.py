@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Backward-compatible imports for handoff recipes."""
+"""Optional workflow recipes built from the DevToolkit capability API."""
 
-from .recipes.handoffs import performance_handoff, profiling_handoff, validation_handoff
+from .handoffs import performance_handoff, profiling_handoff, validation_handoff
 
 __all__ = ["performance_handoff", "profiling_handoff", "validation_handoff"]
