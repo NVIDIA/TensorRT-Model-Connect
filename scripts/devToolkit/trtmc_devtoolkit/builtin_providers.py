@@ -204,6 +204,29 @@ def _docker_daemon_id(runner: Runner, repository: Path, docker_context: str) -> 
     return daemon_id
 
 
+def _require_docker_client_version(
+    runner: Runner,
+    repository: Path,
+    docker_context: str,
+) -> None:
+    output = command_output(
+        runner,
+        _docker_command(
+            docker_context,
+            "version",
+            "--format",
+            "{{.Client.Version}}",
+        ),
+        cwd=repository,
+        timeout=30,
+    )
+    match = re.match(r"([0-9]+)\.([0-9]+)", output)
+    if match is None or tuple(int(part) for part in match.groups()) < (20, 10):
+        raise DevToolkitError(
+            f"Docker CLI 20.10 or newer is required for private exec env files; found {output}"
+        )
+
+
 def _docker_inspect(
     runner: Runner,
     repository: Path,
@@ -245,6 +268,7 @@ def _require_docker_binding(
     container_id: str,
     image_id: str,
 ) -> None:
+    _require_docker_client_version(runner, repository, docker_context)
     observed_daemon = _docker_daemon_id(runner, repository, docker_context)
     if observed_daemon != daemon_id:
         raise DevToolkitError(
@@ -454,7 +478,7 @@ def _container_observation(
 class DockerExecutionContext:
     """Adopt a running user container without imposing a Dockerfile or image version."""
 
-    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-adoption==3", 1)
+    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-adoption==4", 1)
 
     def resolve(
         self,
@@ -478,6 +502,7 @@ class DockerExecutionContext:
             )
         if not isinstance(docker_context, str) or not docker_context:
             raise DevToolkitError("Docker resolution requires a non-empty context name")
+        _require_docker_client_version(runner, repository, docker_context)
         daemon_id = _docker_daemon_id(runner, repository, docker_context)
         inspected = _docker_inspect(runner, repository, docker_context, container)
         container_id = inspected.get("Id")
@@ -611,7 +636,7 @@ class DockerExecutionContext:
 
 
 class ContainerImageToolchainSource:
-    descriptor = ProviderDescriptor("container-image", "trtmc-devtoolkit-container-image==3", 1)
+    descriptor = ProviderDescriptor("container-image", "trtmc-devtoolkit-container-image==4", 1)
 
     def resolve(
         self,

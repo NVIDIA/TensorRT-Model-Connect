@@ -46,7 +46,7 @@ print(build.receipt)
 The Docker environment lock records the daemon, immutable container, and image
 identities and rechecks them before later execution. A reused container name or
 changed Docker context therefore fails closed instead of silently selecting a
-different environment.
+different environment. Docker CLI 20.10 or newer is required.
 
 `resolve()` is read-only. With CUDA omitted, it prefers a complete target CUDA
 toolkit and otherwise selects the managed CUDA 13.3 policy. Managed provisioning

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Mapping
+from uuid import uuid4
 
 from .commands import CommandSpec, EnvironmentPath, repository_path, state_path
 from .models import DevToolkitError
@@ -200,14 +201,36 @@ class NativeBuilder:
         environment: ProvisionedEnvironment,
         spec: BuildSpec,
     ) -> BuildResult:
-        attest_environment(
-            environment,
-            repository=self.repository,
-            providers=self.providers,
-            runner=self.runner,
-        )
-        source = self._source_snapshot(environment, spec.source_identity)
-        architectures = self._architectures(environment, spec.cuda_architectures)
+        preflight_occurrence = uuid4().hex
+        preflight_stage = "attestation"
+        try:
+            attest_environment(
+                environment,
+                repository=self.repository,
+                providers=self.providers,
+                runner=self.runner,
+            )
+            preflight_stage = "source-snapshot"
+            source = self._source_snapshot(environment, spec.source_identity)
+            preflight_stage = "architecture-resolution"
+            architectures = self._architectures(environment, spec.cuda_architectures)
+        except Exception as error:
+            write_json(
+                environment.state_dir
+                / "builds"
+                / "preflight"
+                / f"{preflight_occurrence}.json",
+                {
+                    "schema_version": 2,
+                    "status": "failed",
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "environment_id": environment.environment_id,
+                    "occurrence_id": preflight_occurrence,
+                    "stage": preflight_stage,
+                    "error_type": type(error).__name__,
+                },
+            )
+            raise
         input_payload = {
             "schema_version": 2,
             "environment_id": environment.environment_id,

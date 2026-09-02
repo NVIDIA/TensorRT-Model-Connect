@@ -81,6 +81,8 @@ The built-in Docker provider is adoption-only. It does not assume an NGC image,
 `/opt/venv`, `--gpus device=...`, or a checked-in Dockerfile. It inspects a
 running container, records its image ID, and probes its actual Python, CUDA,
 TensorRT Python package, native library, and headers before producing the lock.
+Docker CLI 20.10 or newer is required so command environment values can use
+`docker exec --env-file` without appearing in process arguments.
 The lock binds the Docker daemon ID, immutable container ID, and image ID. The
 binding is rechecked before provisioning, attestation, builds, and commands, so
 a recycled container name or changed Docker context fails closed.
@@ -187,6 +189,8 @@ commands write their own v2 receipts below that environment directory. Receipts
 do not serialize provider secrets or environment variable values. JSON receipts
 are replaced atomically, and provisioning for one environment ID is serialized
 across processes to avoid partial or competing terminal state.
+Build failures before a build request ID can be computed are recorded below
+`builds/preflight/` with the environment ID and failed stage.
 
 ## Extension points
 

@@ -82,6 +82,7 @@ class DockerAdoptionRunner:
         self.commands: list[list[str]] = []
         self.environments: list[dict[str, str] | None] = []
         self.environment_files: list[tuple[Path, str, int]] = []
+        self.client_version = "28.0.0"
         self.daemon_id = "daemon-789"
         self.container_id = "container-123"
         self.tensorrt_version = "11.0.2.2"
@@ -102,6 +103,8 @@ class DockerAdoptionRunner:
         self.environments.append(dict(env) if env is not None else None)
         if arguments == ["docker", "context", "show"]:
             output = "test-context\n"
+        elif arguments[:4] == ["docker", "--context", "test-context", "version"]:
+            output = self.client_version + "\n"
         elif arguments[:4] == ["docker", "--context", "test-context", "info"]:
             output = self.daemon_id + "\n"
         elif arguments[:4] == ["docker", "--context", "test-context", "inspect"]:
@@ -358,6 +361,24 @@ class ExistingToolchainSource:
 
 class ReplacementToolchainSource(ExistingToolchainSource):
     descriptor = ProviderDescriptor("test-system", "tests==2", 1)
+
+
+class FailingReattestationSource(ExistingToolchainSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.observations = 0
+
+    def observe(self, lock, context, *, execution, repository, runner):
+        self.observations += 1
+        if self.observations > 1:
+            raise RuntimeError("preflight contained super-secret")
+        return super().observe(
+            lock,
+            context,
+            execution=execution,
+            repository=repository,
+            runner=runner,
+        )
 
 
 class EmptySystemToolchainSource:
@@ -772,6 +793,23 @@ def test_builtin_docker_provider_adopts_a_probed_campaign_container(
     assert not any("run" in command[:5] for command in runner.commands)
 
 
+def test_docker_provider_rejects_cli_without_private_exec_env_files(
+    tmp_path: Path,
+) -> None:
+    runner = DockerAdoptionRunner()
+    runner.client_version = "19.03.15"
+    toolkit = DevToolkit.from_checkout(tmp_path, runner=runner)
+
+    with pytest.raises(DevToolkitError, match="Docker CLI 20.10 or newer"):
+        toolkit.resolve(
+            EnvironmentRequest(
+                tensorrt="11.0.2.2",
+                target=ExecutionTarget.docker(container="jedha-campaign"),
+                architecture="aarch64",
+            )
+        )
+
+
 def test_docker_environment_identity_distinguishes_container_instances(
     tmp_path: Path,
 ) -> None:
@@ -846,8 +884,8 @@ def test_docker_command_rejects_a_changed_daemon_after_attestation(tmp_path: Pat
         toolkit.run(environment, CommandSpec(("trtmc", "version")))
 
     new_commands = runner.commands[command_count:]
-    assert len(new_commands) == 1
-    assert new_commands[0][:4] == ["docker", "--context", "test-context", "info"]
+    assert len(new_commands) == 2
+    assert new_commands[1][:4] == ["docker", "--context", "test-context", "info"]
 
 
 def test_docker_command_rejects_a_replaced_container_after_attestation(
@@ -874,7 +912,7 @@ def test_docker_command_rejects_a_replaced_container_after_attestation(
         toolkit.run(environment, CommandSpec(("trtmc", "version")))
 
     new_commands = runner.commands[command_count:]
-    assert len(new_commands) == 2
+    assert len(new_commands) == 3
     assert not any("trtmc" in command for command in new_commands)
 
 
@@ -1045,6 +1083,37 @@ def test_native_build_identity_includes_source_sm_options_and_outputs(
     assert receipt["environment_id"] == environment.environment_id
     assert receipt["source"]["revision"] == "b" * 40
     assert receipt["artifacts"][0]["sha256"] == "c" * 64
+
+
+def test_native_build_records_attestation_preflight_failure(tmp_path: Path) -> None:
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(FailingReattestationSource())
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock)
+
+    with pytest.raises(RuntimeError, match="super-secret"):
+        toolkit.build(environment, BuildSpec(source_identity="b" * 40))
+
+    receipts = list((environment.state_dir / "builds" / "preflight").glob("*.json"))
+    assert len(receipts) == 1
+    payload = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["stage"] == "attestation"
+    assert payload["environment_id"] == environment.environment_id
+    assert payload["error_type"] == "RuntimeError"
+    assert "super-secret" not in receipts[0].read_text(encoding="utf-8")
 
 
 def test_cohort_is_optional_qualification_provenance_not_an_allowlist(
