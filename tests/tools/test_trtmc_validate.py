@@ -119,7 +119,7 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     assert catalog["models"]["minimax-h3-768p"] == {
         "workloads": [
             "minimax_h3_official_profile_parity",
-            "minimax_h3_avgen_bench_vis_task_accuracy",
+            "minimax_h3_vbench_siglip_task_quality",
         ],
     }
     assert validation_catalog.suite_match_reason(suite, model) == (
@@ -152,30 +152,26 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
         "num_inference_steps": 50,
     }
 
-    task_accuracy = next(
-        value for value in suites if value["id"] == "minimax_h3_avgen_bench_vis_task_accuracy"
+    task_quality = next(
+        value for value in suites if value["id"] == "minimax_h3_vbench_siglip_task_quality"
     )
-    assert catalog["sample_limits"][task_accuracy["id"]] == 235
-    assert task_accuracy["reference"] == {"mode": "metric_only"}
-    assert task_accuracy["dataset"] == {
+    assert catalog["sample_limits"][task_quality["id"]] == 100
+    assert task_quality["reference"] == {"mode": "metric_only"}
+    assert task_quality["dataset"] == {
         "kind": "model_plugin_json",
-        "default_path": ("/mnt/data/avgen-bench-prompts-1049eaba-minimax-h3-video-v1/dataset.json"),
+        "default_path": ("/mnt/data/vbench-fd18b3d-minimax-h3-siglip-v1/dataset.json"),
         "input_asset_fields": ["prompt_file"],
     }
-    assert task_accuracy["scoring"] == {
-        "scorer": "avgen_bench_vis",
-        "python_profile": "minimax_h3_avgen_vis_evaluator",
-        "evaluator_root_env": "TRTMC_AVGEN_BENCH_REPO",
-        "model_id": "q-future/one-align",
-        "model_revision": "dcc603b95aa0ebd82afa696d4a1e20d11fc80ddb",
+    assert task_quality["scoring"] == {
+        "scorer": "vbench_siglip",
+        "python_profile": "reference_common",
         "device": "cuda:0",
     }
-    assert task_accuracy["gates"] == {
-        "required_sample_count": 235,
+    assert task_quality["gates"] == {
+        "required_sample_count": 100,
         "min_structural_pass_rate": 1.0,
-        "min_avgen_vis_mean": 0.8,
     }
-    assert validation_catalog.suite_match_reason(task_accuracy, model) == (
+    assert validation_catalog.suite_match_reason(task_quality, model) == (
         True,
         "selected",
     )
@@ -255,7 +251,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
     }
-    assert max(catalog["sample_limits"].values()) == 235
+    assert max(catalog["sample_limits"].values()) == 150
     assert catalog["sample_limits"]["full_duplex_bench_behavior_parity"] == 150
     assert catalog["sample_limits"]["mmlu_five_shot_mcq"] == 20
     assert catalog["sample_limits"]["dpg_bench_diffusion_image"] == 5
@@ -2723,9 +2719,9 @@ def test_suite_specific_scorer_environment_is_materialized_on_demand() -> None:
     )
 
 
-def test_minimax_h3_avgen_scorer_uses_authorized_external_environment() -> None:
+def test_minimax_h3_vbench_scorer_reuses_common_environment() -> None:
     profiles = trtmc_validate.binding_profiles(
-        trtmc_validate.Binding("minimax-h3-768p", "minimax_h3_avgen_bench_vis_task_accuracy"),
+        trtmc_validate.Binding("minimax-h3-768p", "minimax_h3_vbench_siglip_task_quality"),
         task_models={
             "minimax-h3-768p": {
                 "family": "minimax_h3",
@@ -2734,8 +2730,8 @@ def test_minimax_h3_avgen_scorer_uses_authorized_external_environment() -> None:
             }
         },
         suites={
-            "minimax_h3_avgen_bench_vis_task_accuracy": {
-                "scoring": {"python_profile": "minimax_h3_avgen_vis_evaluator"}
+            "minimax_h3_vbench_siglip_task_quality": {
+                "scoring": {"python_profile": "reference_common"}
             }
         },
     )
@@ -2743,7 +2739,6 @@ def test_minimax_h3_avgen_scorer_uses_authorized_external_environment() -> None:
     assert profiles == (
         trtmc_validate.COMMON_REFERENCE_PROFILE,
         "minimax_h3_reference",
-        "minimax_h3_avgen_vis_evaluator",
     )
 
 

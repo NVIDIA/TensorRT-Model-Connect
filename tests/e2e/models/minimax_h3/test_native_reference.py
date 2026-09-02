@@ -26,8 +26,17 @@ def test_cache_threshold_cli_args_are_model_namespaced() -> None:
     ]
 
 
-def test_parse_retained_frame_indices_accepts_official_avgen_one_fps_subset() -> None:
-    assert MODULE.parse_retained_frame_indices("0,24,48,72,96") == (0, 24, 48, 72, 96)
+def test_parse_retained_frame_indices_accepts_vbench_siglip_subset() -> None:
+    assert MODULE.parse_retained_frame_indices("0,18,35,53,70,88,105,123") == (
+        0,
+        18,
+        35,
+        53,
+        70,
+        88,
+        105,
+        123,
+    )
     assert MODULE.parse_retained_frame_indices("") == ()
 
 

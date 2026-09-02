@@ -138,13 +138,10 @@ def test_full_duplex_bench_scorer_rejects_stale_summary_after_crash(
         )
 
 
-def test_avgen_bench_vis_scorer_runs_in_declared_environment(
+def test_vbench_siglip_scorer_runs_in_declared_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen: list[str] = []
-    evaluator = tmp_path / "AVGen-Bench"
-    evaluator.mkdir()
-    monkeypatch.setenv("TRTMC_AVGEN_BENCH_REPO", str(evaluator))
 
     def fake_run(command, **_kwargs):
         seen.extend(command)
@@ -153,13 +150,17 @@ def test_avgen_bench_vis_scorer_runs_in_declared_environment(
             json.dumps(
                 {
                     "status": "passed",
-                    "sample_count": 235,
-                    "valid_count": 235,
-                    "passed_count": 235,
+                    "sample_count": 100,
+                    "valid_count": 100,
+                    "passed_count": 100,
                     "structural_pass_rate": 1.0,
-                    "avgen_vis_mean": 0.85,
-                    "avgen_vis_min": 0.7,
-                    "avgen_vis_max": 0.95,
+                    "metrics": {
+                        "siglip_alignment": {"mean": 0.3, "min": 0.1, "max": 0.5},
+                        "temporal_consistency": {"mean": 0.9, "min": 0.8, "max": 1.0},
+                        "motion_l1": {"mean": 0.1, "min": 0.01, "max": 0.2},
+                    },
+                    "calibration_status": "pending_reference_baseline",
+                    "quality_gate_status": "report_only",
                     "gates": {},
                     "gate_failures": [],
                 }
@@ -170,45 +171,26 @@ def test_avgen_bench_vis_scorer_runs_in_declared_environment(
 
     monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
 
-    result = validation_engine.run_avgen_bench_vis_scoring(
-        python="/profiles/qalign/bin/python",
+    result = validation_engine.run_vbench_siglip_scoring(
+        python="/profiles/reference_common/bin/python",
         bundle_predictions=tmp_path / "trtmc.json",
         answers=tmp_path / "answers.json",
         work_dir=tmp_path,
-        scoring={
-            "evaluator_root_env": "TRTMC_AVGEN_BENCH_REPO",
-            "model_id": "q-future/one-align",
-            "model_revision": "dcc603b95aa0ebd82afa696d4a1e20d11fc80ddb",
-            "device": "cuda:0",
-        },
+        scoring={"device": "cuda:0"},
         gates={
-            "required_sample_count": 235,
+            "required_sample_count": 100,
             "min_structural_pass_rate": 1.0,
-            "min_avgen_vis_mean": 0.8,
+            "min_siglip_alignment_mean": 0.2,
         },
+        local_files_only=True,
     )
 
-    assert result["avgen_vis_mean"] == 0.85
-    assert seen[0] == "/profiles/qalign/bin/python"
-    assert seen[1].endswith("tools/avgen_bench_vis_score.py")
-    assert seen[seen.index("--evaluator-root") + 1] == str(evaluator)
-    assert seen[seen.index("--required-sample-count") + 1] == "235"
-
-
-def test_avgen_bench_vis_scorer_requires_explicit_evaluator_checkout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.delenv("TRTMC_AVGEN_BENCH_REPO", raising=False)
-
-    with pytest.raises(ValueError, match="TRTMC_AVGEN_BENCH_REPO"):
-        validation_engine.run_avgen_bench_vis_scoring(
-            python="python",
-            bundle_predictions=tmp_path / "trtmc.json",
-            answers=tmp_path / "answers.json",
-            work_dir=tmp_path,
-            scoring={},
-            gates={},
-        )
+    assert result["metrics"]["siglip_alignment"]["mean"] == 0.3
+    assert seen[0] == "/profiles/reference_common/bin/python"
+    assert seen[1].endswith("tools/vbench_siglip_score.py")
+    assert seen[seen.index("--required-sample-count") + 1] == "100"
+    assert seen[seen.index("--min-siglip-alignment-mean") + 1] == "0.2"
+    assert "--local-files-only" in seen
 
 
 def test_full_duplex_gate_actuals_use_worst_aggregate_delta() -> None:

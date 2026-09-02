@@ -11295,7 +11295,7 @@ def run_full_duplex_bench_comparison(
 
 
 
-def run_avgen_bench_vis_scoring(
+def run_vbench_siglip_scoring(
     *,
     python: str,
     bundle_predictions: Path,
@@ -11303,67 +11303,60 @@ def run_avgen_bench_vis_scoring(
     work_dir: Path,
     scoring: Mapping[str, Any],
     gates: Mapping[str, Any],
+    local_files_only: bool,
 ) -> dict[str, Any]:
-    """Run the dependency-heavy pinned AVGen-Bench Vis evaluator."""
+    """Run the pinned SigLIP candidate-quality evaluator."""
 
-    evaluator_root_env = str(scoring.get("evaluator_root_env", "TRTMC_AVGEN_BENCH_REPO"))
-    evaluator_root = os.environ.get(evaluator_root_env, "").strip()
-    if not evaluator_root:
-        raise ValueError(
-            f"AVGen-Bench Vis scoring requires {evaluator_root_env} to point to "
-            "the pinned evaluator checkout"
-        )
     output_path = work_dir / "summary.json"
     command = [
         python,
-        str(REPO_ROOT / "tools" / "avgen_bench_vis_score.py"),
+        str(REPO_ROOT / "tools" / "vbench_siglip_score.py"),
         "--predictions",
         str(bundle_predictions),
         "--answers",
         str(answers),
         "--output",
         str(output_path),
-        "--evaluator-root",
-        evaluator_root,
-        "--model-id",
-        str(scoring.get("model_id", "q-future/one-align")),
-        "--model-revision",
-        str(
-            scoring.get(
-                "model_revision",
-                "dcc603b95aa0ebd82afa696d4a1e20d11fc80ddb",
-            )
-        ),
         "--device",
         str(scoring.get("device", "cuda:0")),
         "--required-sample-count",
-        str(int(gates.get("required_sample_count", 235))),
+        str(int(gates.get("required_sample_count", 100))),
         "--min-structural-pass-rate",
         str(float(gates.get("min_structural_pass_rate", 1.0))),
-        "--min-avgen-vis-mean",
-        str(float(gates.get("min_avgen_vis_mean", 0.8))),
     ]
+    for gate_name in (
+        "min_siglip_alignment_mean",
+        "min_temporal_consistency_mean",
+        "min_motion_l1_mean",
+        "max_motion_l1_mean",
+    ):
+        if gate_name in gates:
+            command.extend(
+                (f"--{gate_name.replace('_', '-')}", str(float(gates[gate_name])))
+            )
+    if local_files_only:
+        command.append("--local-files-only")
     completed = subprocess.run(command, check=False, text=True, capture_output=True)
-    (work_dir / "avgen_bench_vis_score.log").write_text(
+    (work_dir / "vbench_siglip_score.log").write_text(
         f"$ {shlex.join(command)}\n{completed.stdout}{completed.stderr}",
         encoding="utf-8",
     )
     if completed.returncode not in {0, 1}:
         raise RuntimeError(
-            "AVGen-Bench Vis scorer failed "
-            f"(rc={completed.returncode}); see {work_dir / 'avgen_bench_vis_score.log'}"
+            "VBench/SigLIP scorer failed "
+            f"(rc={completed.returncode}); see {work_dir / 'vbench_siglip_score.log'}"
         )
     if not output_path.is_file():
         raise RuntimeError(
-            "AVGen-Bench Vis scorer produced no summary; see "
-            f"{work_dir / 'avgen_bench_vis_score.log'}"
+            "VBench/SigLIP scorer produced no summary; see "
+            f"{work_dir / 'vbench_siglip_score.log'}"
         )
     summary = json.loads(output_path.read_text(encoding="utf-8"))
     expected_status = "passed" if completed.returncode == 0 else "failed"
     if summary.get("status") != expected_status:
         raise RuntimeError(
-            "AVGen-Bench Vis scorer exit status does not match summary; see "
-            f"{work_dir / 'avgen_bench_vis_score.log'}"
+            "VBench/SigLIP scorer exit status does not match summary; see "
+            f"{work_dir / 'vbench_siglip_score.log'}"
         )
     return summary
 
@@ -11687,22 +11680,23 @@ def eval_one_model(
                     ),
                 }
             )
-    elif scorer == "avgen_bench_vis":
+    elif scorer == "vbench_siglip":
         scoring = suite.get("scoring", {})
         scorer_profile = str(scoring.get("python_profile", "") or "")
         if not scorer_profile:
-            raise ValueError("AVGen-Bench Vis scoring requires scoring.python_profile")
+            raise ValueError("VBench/SigLIP scoring requires scoring.python_profile")
         scorer_python = resolve_profile_python(
             scorer_profile,
             str(getattr(args, "hf_python", "") or sys.executable),
         )
-        summary = run_avgen_bench_vis_scoring(
+        summary = run_vbench_siglip_scoring(
             python=scorer_python,
             bundle_predictions=work_dir / "bundle_predictions.json",
             answers=answers_path,
             work_dir=work_dir,
             scoring=scoring,
             gates=suite.get("gates", {}),
+            local_files_only=bool(args.local_files_only),
         )
         result = {
             **base_result,
@@ -11712,16 +11706,20 @@ def eval_one_model(
             "valid_count": summary["valid_count"],
             "passed_count": summary["passed_count"],
             "structural_pass_rate": summary["structural_pass_rate"],
-            "avgen_vis_mean": summary["avgen_vis_mean"],
-            "avgen_vis_min": summary["avgen_vis_min"],
-            "avgen_vis_max": summary["avgen_vis_max"],
-            "metrics": {
-                "avgen_vis": {
-                    "mean": summary["avgen_vis_mean"],
-                    "min": summary["avgen_vis_min"],
-                    "max": summary["avgen_vis_max"],
-                }
-            },
+            "siglip_alignment_mean": summary["metrics"]["siglip_alignment"]["mean"],
+            "siglip_alignment_min": summary["metrics"]["siglip_alignment"]["min"],
+            "siglip_alignment_max": summary["metrics"]["siglip_alignment"]["max"],
+            "temporal_consistency_mean": summary["metrics"]["temporal_consistency"][
+                "mean"
+            ],
+            "temporal_consistency_min": summary["metrics"]["temporal_consistency"]["min"],
+            "temporal_consistency_max": summary["metrics"]["temporal_consistency"]["max"],
+            "motion_l1_mean": summary["metrics"]["motion_l1"]["mean"],
+            "motion_l1_min": summary["metrics"]["motion_l1"]["min"],
+            "motion_l1_max": summary["metrics"]["motion_l1"]["max"],
+            "metrics": summary["metrics"],
+            "calibration_status": summary["calibration_status"],
+            "quality_gate_status": summary["quality_gate_status"],
             "gates": summary["gates"],
             "gate_failures": summary["gate_failures"],
             "benchmark_provenance": summary.get("benchmark_provenance", {}),
@@ -11731,7 +11729,7 @@ def eval_one_model(
                 {
                     "error_type": "BenchmarkGateError",
                     "error": (
-                        f"{len(summary['gate_failures'])} AVGen-Bench Vis aggregate gate(s) failed"
+                        f"{len(summary['gate_failures'])} VBench/SigLIP gate(s) failed"
                     ),
                 }
             )

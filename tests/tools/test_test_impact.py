@@ -1807,7 +1807,7 @@ class TestUnitTiers:
         "path",
         [
             "tools/validation/engine.py",
-            "tools/avgen_bench_vis_score.py",
+            "tools/vbench_siglip_score.py",
             "tools/elf_hf_reference.py",
             "tools/full_duplex_bench_score.py",
             "tools/prepare_elf_validation_datasets.py",

@@ -53,8 +53,8 @@ def build_native_command(
         "--source-revision",
         source_revision(case, ctx),
     ]
-    if case.inputs.get("validation_mode") == "avgen_vis":
-        command.extend(("--retain-frame-indices", "0,24,48,72,96"))
+    if case.inputs.get("validation_mode") == "vbench_siglip":
+        command.extend(("--retain-frame-indices", "0,18,35,53,70,88,105,123"))
     return command
 
 
