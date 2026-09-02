@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 
 
-DEFAULT_MODEL_ID = "timm/vit_base_patch16_224.augreg_in21k_ft_in1k"
+DEFAULT_MODEL_ID = "timm/resnet50.a1_in1k"
 
 
 def _repo_root() -> Path:
