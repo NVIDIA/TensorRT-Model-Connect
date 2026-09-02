@@ -104,6 +104,50 @@ class MinimaxMusic3TextToMusicPipeline final : public IPipeline {
     int32_t chunk_hop() const { return config_.chunk_hop; }
 
   private:
+    //: One emitted frame: where it belongs and what it carries.
+    struct EmittedFrame {
+        int32_t index{0};
+        int32_t total{0};
+        int32_t semantic{0};
+        const float* hidden{nullptr};
+    };
+
+    // Assemble the prompt the checkpoint expects and tokenize it.
+    std::vector<int32_t> tokenize_prompt(const std::string& lyrics) const;
+
+    //: What the prompt pass leaves behind, for both guidance branches.
+    struct BranchState {
+        const float* conditional_hidden{nullptr};
+        const float* unconditional_hidden{nullptr};
+        const float* conditional_logits{nullptr};
+        const float* unconditional_logits{nullptr};
+    };
+
+    // Run the prompt through both branches. Returns the next free position.
+    int32_t prime_caches(const std::vector<int32_t>& prompt_ids,
+                         const std::vector<int32_t>& unconditional_ids, BranchState& state);
+
+    // The classifier-free counterpart of a tokenised prompt.
+    static std::vector<int32_t> build_unconditional_ids(const std::vector<int32_t>& prompt_ids);
+
+    // Print what the deterministic prompt pass produced, under TRTMC_MM3_DEBUG.
+    void report_prompt_pass(const float* hidden, const float* logits) const;
+
+    // Store one frame's eight conditioning streams and its eight codes.
+    void record_frame(const EmittedFrame& frame, const std::vector<int32_t>& residual,
+                      std::vector<float>& hidden, std::vector<int32_t>& codes) const;
+
+    // Blend a window's head toward its neighbour's trailing latents. At sigma 1
+    // the neighbour's values win outright, which is how the seam is settled
+    // once the window is denoised.
+    void blend_overlap(std::vector<float>& latents, const std::vector<float>& noise,
+                       const std::vector<float>& neighbour, int32_t latent_length,
+                       std::size_t carry, float sigma) const;
+
+    // Combine the conditional velocity with an unconditional one, in place.
+    void guide_velocity(ITrtModule& dit, TensorMap& inputs, const std::vector<float>& condition,
+                        int32_t latent_length, std::vector<float>& guided) const;
+
     // Autoregressive stage. Returns num_codebooks streams of `frames` codes,
     // laid out codebook-major so a window is a contiguous slice per stream,
     // and fills `hidden` with the frame hidden states the condition encoder
@@ -125,12 +169,20 @@ class MinimaxMusic3TextToMusicPipeline final : public IPipeline {
     const float* decode_step(int32_t branch, int32_t token_id, int32_t position,
                              const float** hidden_out, const float* frame_embed = nullptr);
 
+    //: One frame's depth step. The two branches' hidden states and the frame's
+    //: semantic code go in; the seven residual codes and the seven hidden
+    //: states that follow the language model's come out.
+    struct DepthStep {
+        const float* conditional_hidden{nullptr};
+        const float* unconditional_hidden{nullptr};
+        int32_t semantic_code{0};
+        int32_t* codes_out{nullptr};
+        float* hidden_out{nullptr};
+    };
+
     // The seven residual codebooks for one frame, given its hidden state.
-    // Draws the seven residual codes and writes the seven hidden states
-    // that follow the language model's in the condition encoder's window.
-    void sample_residual_codes(const float* conditional_hidden, const float* unconditional_hidden,
-                               int32_t semantic_code, const GenerateConfig& cfg,
-                               uint64_t& rng_state, int32_t* codes_out, float* depth_hidden_out);
+    void sample_residual_codes(const DepthStep& step, const GenerateConfig& cfg,
+                               uint64_t& rng_state);
 
     // One window of frame hidden states -> its conditioning signal.
     std::vector<float> encode_condition(const std::vector<float>& frame_hidden,
