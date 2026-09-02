@@ -1,0 +1,340 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Alert on external community activity
+
+on:
+  issues:
+    types: [opened, reopened]
+  issue_comment:
+    types: [created]
+  discussion:
+    types: [created]
+  discussion_comment:
+    types: [created]
+  workflow_run:
+    workflows: ["Community CPU"]
+    types: [completed]
+
+# Community CPU completion is a trusted, default-branch event. The readiness
+# job consumes only GitHub metadata and never downloads artifacts, checks out a
+# pull-request head, or executes contributor-controlled code.
+# General pull-request comments arrive through issue_comment. Maintainer
+# mentions and Internal CI requests receive a higher-priority Slack heading.
+# Review and diff comment events are intentionally excluded because
+# fork-triggered merge-ref workflows do not receive Actions secrets.
+# These trusted events read GitHub metadata only. They never check out or
+# execute contributor-controlled code.
+permissions: {}
+
+jobs:
+  notify-ready-pr:
+    if: >-
+      github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    permissions:
+      actions: read
+      checks: read
+      pull-requests: read
+    steps:
+      - name: Post ready external PR alert
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_NAME: ${{ github.event.workflow_run.display_title }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::Missing SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL repository or organization secret."
+            exit 1
+          fi
+
+          run_name_pattern='^PR #([1-9][0-9]*) · public CPU · merge [0-9a-f]{40}$'
+          if [[ ! "$WORKFLOW_RUN_NAME" =~ $run_name_pattern ]]; then
+            echo "::error::Unexpected Community CPU run name: $WORKFLOW_RUN_NAME"
+            exit 1
+          fi
+          pr_number="${BASH_REMATCH[1]}"
+
+          pr_json="$(gh api "repos/$REPOSITORY/pulls/$pr_number")"
+          current_head_sha="$(jq -r ".head.sha" <<<"$pr_json")"
+          if [ "$current_head_sha" != "$HEAD_SHA" ]; then
+            echo "::notice::PR #$pr_number advanced beyond $HEAD_SHA; skipping the stale readiness alert."
+            exit 0
+          fi
+          if [ "$(jq -r ".state" <<<"$pr_json")" != "open" ]; then
+            echo "::notice::PR #$pr_number is no longer open; skipping the readiness alert."
+            exit 0
+          fi
+          if [ "$(jq -r ".draft" <<<"$pr_json")" = "true" ]; then
+            echo "::notice::PR #$pr_number is still a draft; skipping the readiness alert."
+            exit 0
+          fi
+          if [ "$(jq -r ".base.ref" <<<"$pr_json")" != "main" ]; then
+            echo "::notice::PR #$pr_number does not target main; skipping the readiness alert."
+            exit 0
+          fi
+
+          author_association="$(jq -r ".author_association" <<<"$pr_json")"
+          case "$author_association" in
+            OWNER|MEMBER|COLLABORATOR)
+              echo "::notice::PR #$pr_number is authored by a repository collaborator; skipping the community alert."
+              exit 0
+              ;;
+          esac
+
+          required_checks=(
+            "Community CPU / Required"
+            "PR Metadata / Required"
+            "DCO"
+          )
+          checks_ready=false
+          for attempt in {1..30}; do
+            pr_json="$(gh api "repos/$REPOSITORY/pulls/$pr_number")"
+            current_head_sha="$(jq -r ".head.sha" <<<"$pr_json")"
+            if [ "$current_head_sha" != "$HEAD_SHA" ]; then
+              echo "::notice::PR #$pr_number advanced while checking readiness; skipping the stale alert."
+              exit 0
+            fi
+
+            checks_json="$(gh api -H "Accept: application/vnd.github+json" "repos/$REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100")"
+            checks_ready=true
+            for required_check in "${required_checks[@]}"; do
+              conclusion="$(
+                jq -r --arg name "$required_check" \
+                  '[.check_runs[] | select(.name == $name)]
+                   | sort_by(.started_at) | last | .conclusion // ""' \
+                  <<<"$checks_json"
+              )"
+              if [ "$conclusion" != "success" ]; then
+                checks_ready=false
+                echo "Waiting for $required_check on $HEAD_SHA (latest conclusion: ${conclusion:-missing})."
+              fi
+            done
+
+            if [ "$checks_ready" = "true" ]; then
+              break
+            fi
+            if [ "$attempt" -lt 30 ]; then
+              sleep 10
+            fi
+          done
+
+          if [ "$checks_ready" != "true" ]; then
+            echo "::notice::PR #$pr_number did not satisfy all alert gates; no Slack notification was sent."
+            exit 0
+          fi
+
+          item_author="$(jq -r ".user.login" <<<"$pr_json")"
+          item_title="$(jq -r ".title" <<<"$pr_json")"
+          item_url="$(jq -r ".html_url" <<<"$pr_json")"
+          head_display="${HEAD_SHA:0:12}"
+
+          payload="$(jq -cn \
+            --arg author "$item_author" \
+            --arg association "$author_association" \
+            --arg number "$pr_number" \
+            --arg title "$item_title" \
+            --arg url "$item_url" \
+            --arg head "$head_display" \
+            'def slack_escape:
+              gsub("&"; "&amp;") |
+              gsub("<"; "&lt;") |
+              gsub(">"; "&gt;");
+             ($title | slack_escape) as $safe_title |
+             {
+               text: ("✅ 🔀 External PR ready for maintainer\n" +
+                 "Pull request #" + $number + " · required checks passed\n" +
+                 $author + " (" + $association + ")"),
+               blocks: [
+                 {
+                   type: "header",
+                   text: {
+                     type: "plain_text",
+                     text: "✅ 🔀 External PR ready for maintainer",
+                     emoji: true
+                   }
+                 },
+                 {
+                   type: "section",
+                   fields: [
+                     {type: "mrkdwn", text: "*Event:*\nPull request · required checks passed"},
+                     {type: "mrkdwn", text: ("*Author:*\n" + $author + " (" + $association + ")")}
+                   ]
+                 },
+                 {
+                   type: "section",
+                   fields: [
+                     {type: "mrkdwn", text: "*Checks:*\nCommunity CPU · DCO · PR Metadata"},
+                     {type: "mrkdwn", text: ("*Head:*\n" + $head)}
+                   ]
+                 },
+                 {
+                   type: "section",
+                   text: {
+                     type: "mrkdwn",
+                     text: ("*Pull request #" + $number + "*\n" +
+                       "<" + $url + "|" + $safe_title + ">")
+                   }
+                 }
+               ]
+             }')"
+
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "$payload" \
+            "$SLACK_WEBHOOK_URL"
+
+  notify-activity:
+    if: >-
+      github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.event.sender.type != 'Bot' &&
+      (
+        (
+          github.event_name == 'issues' &&
+          github.event.issue.author_association != 'OWNER' &&
+          github.event.issue.author_association != 'MEMBER' &&
+          github.event.issue.author_association != 'COLLABORATOR'
+        ) ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.comment.author_association != 'OWNER' &&
+          github.event.comment.author_association != 'MEMBER' &&
+          github.event.comment.author_association != 'COLLABORATOR'
+        ) ||
+        (
+          github.event_name == 'discussion' &&
+          github.event.discussion.author_association != 'OWNER' &&
+          github.event.discussion.author_association != 'MEMBER' &&
+          github.event.discussion.author_association != 'COLLABORATOR'
+        ) ||
+        (
+          github.event_name == 'discussion_comment' &&
+          github.event.comment.author_association != 'OWNER' &&
+          github.event.comment.author_association != 'MEMBER' &&
+          github.event.comment.author_association != 'COLLABORATOR'
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Post Slack alert
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          ITEM_AUTHOR: ${{ github.event.comment.user.login || github.event.issue.user.login || github.event.discussion.user.login }}
+          ITEM_AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association || github.event.issue.author_association || github.event.discussion.author_association }}
+          ITEM_NUMBER: ${{ github.event.issue.number || github.event.discussion.number }}
+          ITEM_TITLE: ${{ github.event.issue.title || github.event.discussion.title }}
+          ITEM_URL: ${{ github.event.comment.html_url || github.event.issue.html_url || github.event.discussion.html_url }}
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          IS_PULL_REQUEST: ${{ github.event.issue.pull_request != null }}
+          IS_COMMENT: ${{ github.event_name == 'issue_comment' || github.event_name == 'discussion_comment' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::Missing SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL repository or organization secret."
+            exit 1
+          fi
+
+          case "$EVENT_NAME" in
+            issue_comment)
+              if [ "$IS_PULL_REQUEST" = "true" ]; then
+                item_kind="Pull request"
+                item_icon="🔀"
+                item_heading="External pull request activity"
+              else
+                item_kind="Issue"
+                item_icon="🎫"
+                item_heading="External issue activity"
+              fi
+              ;;
+            issues)
+              item_kind="Issue"
+              item_icon="🎫"
+              item_heading="External issue activity"
+              ;;
+            discussion|discussion_comment)
+              item_kind="Discussion"
+              item_icon="💬"
+              item_heading="External discussion activity"
+              ;;
+            *) echo "::error::Unsupported community event: $EVENT_NAME"; exit 1 ;;
+          esac
+
+          alert_heading="$item_heading"
+          alert_emoji="$item_icon"
+          comment_lower="$(printf '%s' "$COMMENT_BODY" | tr '[:upper:]' '[:lower:]')"
+          if [ "$IS_COMMENT" = "true" ] &&
+            {
+              [[ "$comment_lower" == *"@yifeif-nv"* ]] ||
+              [[ "$comment_lower" == *"@chaofengw-nv"* ]] ||
+              [[ "$comment_lower" == *"/request-internal-ci"* ]] ||
+              [[ "$comment_lower" == *"internal ci"* ]] ||
+              [[ "$comment_lower" == *"internal-ci"* ]] ||
+              [[ "$comment_lower" == *"trigger ci"* ]]
+            }; then
+            alert_heading="External maintainer request"
+            alert_emoji="🚨 $item_icon"
+          fi
+
+          payload="$(jq -cn \
+            --arg heading "$alert_heading" \
+            --arg emoji "$alert_emoji" \
+            --arg kind "$item_kind" \
+            --arg action "$EVENT_ACTION" \
+            --arg author "$ITEM_AUTHOR" \
+            --arg association "$ITEM_AUTHOR_ASSOCIATION" \
+            --arg number "$ITEM_NUMBER" \
+            --arg title "$ITEM_TITLE" \
+            --arg url "$ITEM_URL" \
+            'def slack_escape:
+              gsub("&"; "&amp;") |
+              gsub("<"; "&lt;") |
+              gsub(">"; "&gt;");
+             ($title | slack_escape) as $safe_title |
+             {
+               text: ($emoji + " " + $heading + "\n" +
+                 $kind + " #" + $number + " · " + $action + "\n" +
+                 $author + " (" + $association + ")"),
+               blocks: [
+                 {
+                   type: "header",
+                   text: {
+                     type: "plain_text",
+                     text: ($emoji + " " + $heading),
+                     emoji: true
+                   }
+                 },
+                 {
+                   type: "section",
+                   fields: [
+                     {type: "mrkdwn", text: ("*Event:*\n" + $kind + " · " + $action)},
+                     {type: "mrkdwn", text: ("*Author:*\n" + $author + " (" + $association + ")")}
+                   ]
+                 },
+                 {
+                   type: "section",
+                   text: {
+                     type: "mrkdwn",
+                     text: ("*" + $kind + " #" + $number + "*\n" +
+                       "<" + $url + "|" + $safe_title + ">")
+                   }
+                 }
+               ]
+             }')"
+
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "$payload" \
+            "$SLACK_WEBHOOK_URL"

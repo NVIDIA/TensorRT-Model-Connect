@@ -23,13 +23,19 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+pytest.importorskip("tensorrt", reason="native graph tests require TensorRT")
+
 from tests.builder.conftest import requires_trt
 from tests.builder.owned_graph_modules import load_family_graph_ops, load_graph_ops
+from tensorrt_model_connect.native_kv_attention_builder import (
+    add_active_prefix_causal_masks,
+)
 
-pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+pytest.importorskip("tensorrt_model_connect")
 graph_ops = load_graph_ops()
 eagle_vlm_graph_ops = load_family_graph_ops("eagle_vlm")
 qwen_graph_ops = load_family_graph_ops("qwen")
+llama_graph_ops = load_family_graph_ops("llama")
 qwen_vl_graph_ops = load_family_graph_ops("qwen_vl")
 
 
@@ -37,7 +43,12 @@ qwen_vl_graph_ops = load_family_graph_ops("qwen_vl")
 # Helper: run a small TRT graph on a STRONGLY_TYPED network
 # ---------------------------------------------------------------------------
 
-def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def _run_strongly_typed(
+    build_fn,
+    inputs: dict[str, np.ndarray],
+    *,
+    output_aliases: dict[str, str] | None = None,
+) -> dict[str, np.ndarray]:
     """Build and run a STRONGLY_TYPED TRT engine from build_fn.
 
     IAttention and IRotaryEmbeddingLayer require a STRONGLY_TYPED network;
@@ -50,6 +61,26 @@ def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np
         from cuda.bindings import runtime as cudart
     except ImportError:
         from cuda import cudart  # type: ignore[no-redef]
+
+    try:
+        import ml_dtypes
+    except ImportError:
+        ml_dtypes = None
+
+    def numpy_dtype(dtype):
+        if dtype == trt.float16:
+            return np.dtype(np.float16)
+        if dtype == trt.bfloat16:
+            if ml_dtypes is None:
+                raise RuntimeError("BF16 TensorRT tests require ml_dtypes")
+            return np.dtype(ml_dtypes.bfloat16)
+        if dtype == trt.float32:
+            return np.dtype(np.float32)
+        if dtype == trt.int32:
+            return np.dtype(np.int32)
+        if dtype == trt.bool:
+            return np.dtype(np.bool_)
+        raise TypeError(f"Unsupported TensorRT test dtype: {dtype}")
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -64,6 +95,8 @@ def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np
             dt = trt.int32
         elif arr.dtype == np.float16:
             dt = trt.float16
+        elif ml_dtypes is not None and arr.dtype == np.dtype(ml_dtypes.bfloat16):
+            dt = trt.bfloat16
         else:
             dt = trt.float32
         t = network.add_input(name, dt, tuple(arr.shape))
@@ -81,29 +114,47 @@ def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np
     runtime = trt.Runtime(logger)
     engine = runtime.deserialize_cuda_engine(plan)
     ctx = engine.create_execution_context()
+    output_aliases = output_aliases or {}
 
     err, stream = cudart.cudaStreamCreate()
     assert err == 0, f"cudaStreamCreate failed: {err}"
 
-    device_bufs = {}
-    host_out = {}
+    io_tensors = {}
     for i in range(engine.num_io_tensors):
         tname = engine.get_tensor_name(i)
-        shape = tuple(engine.get_tensor_shape(tname))
-        dtype_trt = engine.get_tensor_dtype(tname)
-        np_dtype = np.float16 if dtype_trt == trt.float16 else np.float32
-        nbytes = int(np.prod(shape)) * np.dtype(np_dtype).itemsize
+        io_tensors[tname] = (
+            tuple(engine.get_tensor_shape(tname)),
+            engine.get_tensor_dtype(tname),
+            engine.get_tensor_mode(tname),
+        )
+
+    device_bufs = {}
+    host_out = {}
+    host_inputs = {}
+    for tname, (shape, dtype_trt, mode) in io_tensors.items():
+        if tname in output_aliases:
+            continue
+        np_dtype = numpy_dtype(dtype_trt)
+        nbytes = int(np.prod(shape)) * np_dtype.itemsize
         err, ptr = cudart.cudaMallocAsync(nbytes, stream)
         assert err == 0, f"cudaMalloc failed: {err}"
         device_bufs[tname] = (ptr, nbytes, np_dtype)
-        mode = engine.get_tensor_mode(tname)
         if mode == trt.TensorIOMode.INPUT:
-            arr = inputs[tname].astype(np_dtype if np_dtype != np.float32 else inputs[tname].dtype)
+            arr = np.ascontiguousarray(inputs[tname], dtype=np_dtype)
+            host_inputs[tname] = arr
             cudart.cudaMemcpyAsync(
                 ptr, arr.ctypes.data, arr.nbytes,
                 cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, stream)
         else:
             host_out[tname] = np.zeros(shape, dtype=np_dtype)
+
+    for output_name, input_name in output_aliases.items():
+        assert io_tensors[output_name][2] == trt.TensorIOMode.OUTPUT
+        assert io_tensors[input_name][2] == trt.TensorIOMode.INPUT
+        assert io_tensors[output_name][:2] == io_tensors[input_name][:2]
+        device_bufs[output_name] = device_bufs[input_name]
+
+    for tname, (ptr, _nbytes, _np_dtype) in device_bufs.items():
         ctx.set_tensor_address(tname, ptr)
 
     ctx.execute_async_v3(stream)
@@ -115,11 +166,203 @@ def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np
             cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost, stream)
 
     cudart.cudaStreamSynchronize(stream)
-    for ptr, nbytes, _ in device_bufs.values():
+    unique_device_bufs = {ptr: (ptr, nbytes) for ptr, nbytes, _ in device_bufs.values()}
+    for ptr, nbytes in unique_device_bufs.values():
         cudart.cudaFreeAsync(ptr, stream)
     cudart.cudaStreamDestroy(stream)
 
     return host_out
+
+
+@requires_trt
+def test_qwen_native_kv_mask_matches_active_causal_prefix():
+    inputs = {
+        "token_id": np.array([11, 12, 13], dtype=np.int32),
+        "cache_write_indices": np.array([2], dtype=np.int32),
+        "key_value_lengths": np.array([5], dtype=np.int32),
+    }
+
+    def build(network, trt_inputs):
+        return {
+            "mask": add_active_prefix_causal_masks(
+                network,
+                trt_inputs["token_id"],
+                trt_inputs["cache_write_indices"],
+                trt_inputs["key_value_lengths"],
+                8,
+            ).attention
+        }
+
+    actual = _run_strongly_typed(build, inputs)["mask"]
+    expected = np.zeros((1, 1, 3, 8), dtype=np.bool_)
+    expected[0, 0, 0, :3] = True
+    expected[0, 0, 1, :4] = True
+    expected[0, 0, 2, :5] = True
+    np.testing.assert_array_equal(actual, expected)
+
+
+@requires_trt
+@pytest.mark.parametrize(
+    ("family_name", "model_dtype_name", "model_numpy_dtype"),
+    [
+        pytest.param("qwen", "bfloat16", "bfloat16", id="qwen-bf16"),
+        pytest.param("qwen", "float16", "float16", id="qwen-fp16"),
+        pytest.param("llama", "bfloat16", "bfloat16", id="llama-bf16"),
+    ],
+)
+@pytest.mark.parametrize("query_length", [1, 3])
+def test_native_kv_attention_masks_poisoned_inactive_suffix(
+    family_name,
+    model_dtype_name,
+    model_numpy_dtype,
+    query_length,
+):
+    """Explicit GQA matches an independent active-prefix causal reference."""
+    import tensorrt as trt
+
+    ml_dtypes = pytest.importorskip("ml_dtypes")
+    model_dtype = getattr(trt, model_dtype_name)
+    model_numpy_dtype = (
+        ml_dtypes.bfloat16
+        if model_numpy_dtype == "bfloat16"
+        else np.float16
+    )
+    attention_numpy_dtype = model_numpy_dtype
+    native_graph_ops = (
+        qwen_graph_ops if family_name == "qwen" else llama_graph_ops
+    )
+
+    cache_capacity = 16
+    cache_write_index = 2
+    active_length = cache_write_index + query_length
+    num_heads = 4
+    num_kv_heads = 2
+    head_dim = 128
+    groups = num_heads // num_kv_heads
+    scale = 1.0 / np.sqrt(head_dim)
+    rng = np.random.default_rng(20260826 + query_length)
+
+    q = rng.normal(
+        0.0, 0.3, (query_length, num_heads, head_dim)
+    ).astype(model_numpy_dtype)
+    k_update = rng.normal(
+        0.0, 0.3, (query_length, num_kv_heads, head_dim)
+    ).astype(model_numpy_dtype)
+    v_update = rng.normal(
+        0.0, 0.3, (query_length, num_kv_heads, head_dim)
+    ).astype(model_numpy_dtype)
+
+    cache_k = rng.normal(
+        0.0, 0.3, (1, num_kv_heads, cache_capacity, head_dim)
+    ).astype(np.float32)
+    cache_v = rng.normal(
+        0.0, 0.3, (1, num_kv_heads, cache_capacity, head_dim)
+    ).astype(np.float32)
+    # Non-finite inactive cache data catches both score-mask leakage and the
+    # otherwise subtle 0 * NaN hazard in the context matmul.
+    cache_k[:, :, active_length:, :] = np.nan
+    cache_v[:, :, active_length:, :] = np.nan
+    cache_k = cache_k.astype(attention_numpy_dtype)
+    cache_v = cache_v.astype(attention_numpy_dtype)
+
+    q_rows = q.reshape(query_length, num_heads * head_dim)
+    k_update_rows = k_update.reshape(
+        query_length, num_kv_heads * head_dim
+    )
+    v_update_rows = v_update.reshape(
+        query_length, num_kv_heads * head_dim
+    )
+    inputs = {
+        "q": q_rows,
+        "k_update": k_update_rows,
+        "v_update": v_update_rows,
+        "cache_k": cache_k,
+        "cache_v": cache_v,
+        "cache_write_indices": np.array([cache_write_index], dtype=np.int32),
+        "key_value_lengths": np.array([active_length], dtype=np.int32),
+    }
+
+    def build(network, trt_inputs):
+        masks = add_active_prefix_causal_masks(
+            network,
+            trt_inputs["q"],
+            trt_inputs["cache_write_indices"],
+            trt_inputs["key_value_lengths"],
+            cache_capacity,
+        )
+        result = native_graph_ops.add_native_kv_cache_attention_from_rows(
+            network,
+            trt_inputs["q"],
+            trt_inputs["k_update"],
+            trt_inputs["v_update"],
+            trt_inputs["cache_k"],
+            trt_inputs["cache_v"],
+            trt_inputs["cache_write_indices"],
+            masks,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            q_seq=query_length,
+        )
+        assert result["context"].dtype == model_dtype
+        return {
+            "context": result["context"],
+            "present_k": result["present_k"],
+            "present_v": result["present_v"],
+        }
+
+    actual = _run_strongly_typed(
+        build,
+        inputs,
+        output_aliases={"present_k": "cache_k", "present_v": "cache_v"},
+    )["context"].astype(np.float32)
+
+    actual = actual.reshape(query_length, num_heads, head_dim)
+    present_k = cache_k[0, :, :active_length, :].astype(
+        np.float32, copy=True
+    )
+    present_v = cache_v[0, :, :active_length, :].astype(
+        np.float32, copy=True
+    )
+    present_k[:, cache_write_index:active_length, :] = np.asarray(
+        k_update, dtype=np.float32
+    ).transpose(1, 0, 2)
+    present_v[:, cache_write_index:active_length, :] = np.asarray(
+        v_update, dtype=np.float32
+    ).transpose(1, 0, 2)
+    scaled_q = (np.asarray(q, dtype=np.float32) * scale).astype(
+        model_numpy_dtype
+    ).astype(np.float32)
+    expected = np.empty(
+        (query_length, num_heads, head_dim), dtype=np.float32
+    )
+    for row in range(query_length):
+        valid_length = cache_write_index + row + 1
+        for head in range(num_heads):
+            kv_head = head // groups
+            scores = np.matmul(
+                scaled_q[row, head],
+                present_k[kv_head, :valid_length].T,
+            ).astype(model_numpy_dtype).astype(np.float32)
+            scores -= np.max(scores)
+            probabilities = np.exp(scores)
+            probabilities /= np.sum(probabilities)
+            probabilities = probabilities.astype(model_numpy_dtype).astype(
+                np.float32
+            )
+            expected[row, head] = np.matmul(
+                probabilities,
+                present_v[kv_head, :valid_length],
+            ).astype(model_numpy_dtype).astype(np.float32)
+
+    assert np.isfinite(actual).all()
+    tolerance = 0.01 if model_dtype_name == "float16" else 0.02
+    np.testing.assert_allclose(
+        actual,
+        expected,
+        rtol=tolerance,
+        atol=tolerance,
+    )
 
 
 # ---------------------------------------------------------------------------

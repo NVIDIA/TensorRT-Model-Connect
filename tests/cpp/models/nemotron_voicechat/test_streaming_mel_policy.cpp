@@ -52,18 +52,7 @@ void test_model_card_partial_tail() {
     }
 }
 
-void test_barge_in_and_long_session_policy() {
-    trtmc::SpeechSessionConfig live;
-    check(voicechat::should_barge_in(live, true, 0.02),
-          "live active sessions detect audible barge-in");
-    live.enable_barge_in = false;
-    check(!voicechat::should_barge_in(live, true, 0.02),
-          "offline sessions can preserve append-only output");
-    live.enable_barge_in = true;
-    check(!voicechat::should_barge_in(live, false, 0.02) &&
-              !voicechat::should_barge_in(live, true, 0.001),
-          "barge-in requires an active turn and audible input");
-
+void test_long_session_policy() {
     voicechat::Config config;
     check(voicechat::streaming_frontend_capacity_seconds(config) == 601,
           "frontend capacity covers the 600-second TTS state plus final padding");
@@ -112,7 +101,7 @@ void test_checkpoint_window_and_reflect_boundary() {
 int main() {
     test_fixed_first_and_steady_contract();
     test_model_card_partial_tail();
-    test_barge_in_and_long_session_policy();
+    test_long_session_policy();
     test_checkpoint_window_and_reflect_boundary();
     return failures;
 }

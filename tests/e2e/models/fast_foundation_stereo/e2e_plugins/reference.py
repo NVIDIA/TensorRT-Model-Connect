@@ -17,6 +17,10 @@ from tensorrt_model_connect.families.fast_foundation_stereo.prepare_model import
 )
 
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageOutput, StageSpec
+try:
+    from .input_contract import attach_ground_truth, stage_stereo_inputs
+except ImportError:  # Loaded as a top-level model plugin.
+    from input_contract import attach_ground_truth, stage_stereo_inputs
 
 
 def _checkpoint_snapshot(case: E2ECase, *, local_files_only: bool) -> Path:
@@ -54,13 +58,7 @@ class FastFoundationStereoTorchReference:
         model_root = staged or checkpoint
         artifact_dir = Path(ctx.artifacts_dir or "/tmp") / case.name
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        left_path = artifact_dir / "left.png"
-        right_path = artifact_dir / "right.png"
-        if not left_path.is_file() or not right_path.is_file():
-            return StageOutput(
-                stage_name=stage.name,
-                data={"error": "Stereo input artifacts are missing"},
-            )
+        left_path, right_path = stage_stereo_inputs(artifact_dir, case.inputs)
         output_path = artifact_dir / "torch_disparity.npy"
         script = Path(__file__).resolve().parents[1] / "official_reference.py"
         command = [
@@ -101,6 +99,7 @@ class FastFoundationStereoTorchReference:
                 requires_nonnegative=True,
                 output_path=str(output_path),
             )
+            attach_ground_truth(data, case.inputs)
         return StageOutput(
             stage_name=stage.name,
             data=data,

@@ -45,7 +45,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(ready_models) == 115
+    assert len(catalog["models"]) == len(ready_models) == 119
     assert sum("not_compared_reason" in spec for spec in catalog["models"].values()) == 0
     assert all("e2e" not in spec.get("workloads", []) for spec in catalog["models"].values())
     assert "reference_cache_identity" not in catalog["models"]["personaplex-7b"]
@@ -64,7 +64,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 115
+    assert len(bindings) == 120
     assert {
         binding.model for binding in bindings if binding.workload == "mmlu_continuation_parity"
     } >= {
@@ -93,6 +93,16 @@ def test_model_workload_catalog_covers_every_ready_model():
     )
     assert [binding.workload for binding in bindings if binding.model == "qwen25vl-3b"] == [
         "vlm_mmmu_pro_vision_fixed_mcq"
+    ]
+
+
+def test_fast_foundation_stereo_catalog_binds_middlebury_task_accuracy() -> None:
+    catalog = trtmc_validate.load_catalog()
+
+    assert catalog["sample_limits"]["fast_foundation_stereo_middlebury_q_task_accuracy"] == 15
+    assert catalog["models"]["fast-foundation-stereo"]["workloads"] == [
+        "fast_foundation_stereo_synthetic_parity",
+        "fast_foundation_stereo_middlebury_q_task_accuracy",
     ]
 
 
@@ -209,6 +219,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         "fast_foundation_stereo_synthetic_parity",
         "lfm2_model_card_sampling_parity",
         "minimax_h3_official_profile_parity",
+        "moge_monocular_geometry_fp32_parity",
         "nemotron_voicechat_model_card_general_conversation",
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
@@ -245,7 +256,25 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 115
+    assert len({model for model, _workload in bindings}) == 119
+
+
+def test_shadow_gate_metrics_include_plugin_task_accuracy() -> None:
+    metrics = trtmc_validate._shadow_gate_metrics(
+        {"metrics": {"sample_pass_rate": 1.0}},
+        {
+            "task_accuracy": {
+                "candidate_nonocc_epe_px": 0.44,
+                "reference_nonocc_epe_px": 0.43,
+            }
+        },
+    )
+
+    assert metrics == {
+        "sample_pass_rate": 1.0,
+        "candidate_nonocc_epe_px": 0.44,
+        "reference_nonocc_epe_px": 0.43,
+    }
 
 
 def test_resolve_binding_requires_an_explicit_choice_for_multi_workload_model():
@@ -797,7 +826,11 @@ def test_binding_scoped_engines_are_isolated_across_suites_and_deleted_on_pass(
     monkeypatch.setattr(
         trtmc_validate,
         "write_report",
-        lambda output: (output / "report.json", output / "report.html", {}),
+        lambda output: (
+            output / "report.json",
+            output / "report.html",
+            {"model_source_identity": {"consistent": True}},
+        ),
     )
     monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
 
@@ -1085,6 +1118,7 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     tmp_path,
     monkeypatch,
 ):
+    revision = "a" * 40
     output = tmp_path / "results"
     arguments = trtmc_validate.build_parser().parse_args(
         [
@@ -1107,7 +1141,7 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     (output / "run.json").write_text(
         json.dumps(
             {
-                "source_revision": "same-revision",
+                    "source_revision": revision,
                 "command": "tools/trtmc_validate.py --binding model-a=suite-a "
                 f"--output {output} --model-work-dir {tmp_path / 'work'} "
                 "--engine-retention delete_on_pass "
@@ -1119,8 +1153,9 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     (case_dir / "comparison.json").write_text(
         json.dumps(
             {
-                "model": "model-a",
-                "workload": "suite-a",
+                    "model": "model-a",
+                    "workload": "suite-a",
+                    "source_revision": revision,
                 "execution": {"status": "completed"},
                 "validation": {"status": "passed"},
             }
@@ -1128,7 +1163,7 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "same-revision")
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: revision)
     monkeypatch.setattr(
         trtmc_validate.sys,
         "argv",
@@ -1157,7 +1192,11 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     monkeypatch.setattr(
         trtmc_validate,
         "write_report",
-        lambda output: (output / "report.json", output / "report.html", {}),
+        lambda output: (
+            output / "report.json",
+            output / "report.html",
+            {"model_source_identity": {"consistent": True}},
+        ),
     )
     monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
 
@@ -1574,17 +1613,33 @@ def test_accuracy_adapter_records_each_worker_retry_and_reference_stage(
     assert report["results"][0]["issue"]["stage"] == "reference"
 
 
-def test_resume_existing_rejects_different_source_revision(tmp_path, monkeypatch):
+def test_resume_existing_allows_a_new_execution_revision(tmp_path, monkeypatch):
     output = tmp_path / "results"
     output.mkdir()
     (output / "run.json").write_text(
-        json.dumps({"source_revision": "old-revision"}),
+        json.dumps(
+            {
+                "source_revision": "a" * 40,
+                "command": "tools/trtmc_validate.py --model model-a",
+            }
+        ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "new-revision")
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "b" * 40)
+    monkeypatch.setattr(
+        trtmc_validate.sys,
+        "argv",
+        ["tools/trtmc_validate.py", "--model", "model-a", "--resume-existing"],
+    )
 
-    with pytest.raises(trtmc_validate.ValidationError, match="different source revision"):
-        trtmc_validate._validate_resume_request(output)
+    trtmc_validate._validate_resume_request(output)
+
+
+def test_resume_command_ignores_model_invalidation_control() -> None:
+    assert trtmc_validate._resume_command(
+        "tools/trtmc_validate.py --model model-a --resume-existing "
+        "--invalidate-model model-a --verbose"
+    ) == ["tools/trtmc_validate.py", "--model", "model-a"]
 
 
 def test_resume_existing_rejects_different_command(tmp_path, monkeypatch):
@@ -1976,7 +2031,7 @@ def test_all_supervisor_applies_model_failure_policy(
         lambda output: (
             output / "report.json",
             output / "report.html",
-            {},
+            {"model_source_identity": {"consistent": True}},
         ),
     )
     monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
@@ -2250,7 +2305,7 @@ def test_all_supervisor_records_not_compared_without_launching_worker(
         lambda output: (
             output / "report.json",
             output / "report.html",
-            {},
+            {"model_source_identity": {"consistent": True}},
         ),
     )
     monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
@@ -2599,7 +2654,7 @@ def test_default_reference_backends_share_common_environment(reference_backend):
 
 
 def test_model_specific_reference_environment_keeps_common_validation_base() -> None:
-    profiles = trtmc_validate._binding_profiles(
+    profiles = trtmc_validate.binding_profiles(
         trtmc_validate.Binding("elf", "dataset"),
         task_models={
             "elf": {
@@ -2617,7 +2672,7 @@ def test_model_specific_reference_environment_keeps_common_validation_base() -> 
 
 
 def test_suite_specific_scorer_environment_is_materialized_on_demand() -> None:
-    profiles = trtmc_validate._binding_profiles(
+    profiles = trtmc_validate.binding_profiles(
         trtmc_validate.Binding("personaplex-7b", "full-duplex"),
         task_models={
             "personaplex-7b": {
@@ -2706,6 +2761,21 @@ def test_reference_sources_create_once_then_reuse(
     assert f"Using reference source: {cold}" in cold_output
     assert "Creating reference source" not in warm_output
     assert f"Using reference source: {warm}" in warm_output
+
+
+def test_reference_source_prebuilt_only_rejects_a_missing_checkout(tmp_path: Path) -> None:
+    source = trtmc_validate.ReferenceSource(
+        name="ELF",
+        repository="https://example.invalid/ELF.git",
+        revision="0123456789abcdef",
+        relative_checkout=Path("elf/reference/ELF-0123456789ab"),
+        entrypoint=Path("src/entrypoint.py"),
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="prepare"):
+        trtmc_validate._ensure_reference_source(source, tmp_path, prebuilt_only=True)
+
+    assert not (tmp_path / source.relative_checkout).exists()
 
 
 def test_elf_reference_source_is_pinned_to_upstream_pytorch_implementation() -> None:
@@ -4660,6 +4730,19 @@ def test_build_identity_preflight_rejects_missing_worker(monkeypatch, tmp_path):
     with pytest.raises(
         trtmc_validate.ValidationError,
         match="benchmark worker is missing",
+    ):
+        trtmc_validate._validate_build_identity(arguments)
+
+
+def test_build_identity_preflight_rejects_non_executable_worker(monkeypatch, tmp_path):
+    arguments = _build_identity_arguments(tmp_path)
+    worker = arguments.benchmark_binary.parent / "trtmc_benchmark_worker"
+    worker.chmod(0o644)
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "tested-revision")
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="benchmark worker is not executable",
     ):
         trtmc_validate._validate_build_identity(arguments)
 

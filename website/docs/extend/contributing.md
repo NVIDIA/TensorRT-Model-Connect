@@ -51,7 +51,7 @@ depending on host-installed binaries.
 
 The local hook intentionally stays lightweight and does not build the CLI or
 run the complete CPU suite. After pushing, the pull request automatically runs
-source quality, ownership analysis, and the selected source-only C++ and Python
+source quality, ownership analysis, and all source-only CPU-safe C++ and Python
 units on GitHub-hosted public CPU runners. The protected suite retains
 the filesystem-specific cache-reflink contract that public runners cannot
 portably execute.
@@ -124,13 +124,24 @@ git rebase upstream/main
 git push --set-upstream origin docs/improve-getting-started
 ```
 
-The pull request should record:
+Complete every pull-request template section. Use
+`Not applicable: <reason>` when a field does not apply instead of deleting it.
+Follow the repository's established PR-description structure:
 
-- exact scope and non-goals;
-- exact base and tested head revisions;
-- commands actually executed;
-- model, artifact, hardware, and environment for GPU claims;
-- remaining risks and paths not executed.
+- **Background** for the problem, motivation, and linked issue;
+- **Exit Criteria** for completion conditions and non-goals;
+- **Implementation** for the approach, affected models/components, and
+  compatibility surface;
+- **Validation** for exact commands and results, tested revisions, hardware and
+  environment, and paths not executed; and
+- **Notes For Future Readers** for remaining risk, provenance, rollout, and
+  follow-up context.
+
+`PR Metadata / Required` verifies this evidence contract, while trusted triage
+automation derives model and component labels from the actual diff and
+repository ownership metadata. Risk and compatibility-change labels come from
+the corresponding template selections. DCO sign-off is enforced separately by
+the repository's DCO check.
 
 Compilation, source tests, model parity, target-hardware execution,
 performance, and release qualification are different evidence tiers.
@@ -140,8 +151,15 @@ performance, and release qualification are different evidence tiers.
 Opening the pull request or pushing a new commit automatically starts
 contributor-visible, GitHub-hosted `Community CPU` validation against GitHub's
 exact pull-request merge revision. Separate jobs run source quality, ownership
-and impact, and source-only C++ and Python units. No comment or maintainer action
-is required.
+and impact, and all source-only CPU-safe C++ and Python units. No comment or
+maintainer action is required.
+
+The CPU unit job is intentionally non-selective: every pull request runs all
+CPU-safe Python tests and all CTests labeled `cpu`, including model-owned mock
+and contract tests. Tests marked `gpu`, `trt`, or `e2e` remain excluded. Pure
+model E2E entrypoints use the controlled `test_*_e2e.py` filename contract; a
+separate pass still runs any CPU contracts colocated in those files while
+deselecting only `test_model_e2e`.
 
 The test jobs have read-only repository permission and no access to private
 runners, secrets, or GPUs, and every public job uses a GitHub-hosted
@@ -171,7 +189,7 @@ premerge validation for that exact revision. The public result is contributor
 feedback, not an authorization token; `run-internal-ci` remains the
 protected-resource security boundary.
 
-Wait for the `trtmc/premerge/required` status on the same head SHA to complete
+Wait for the `TRTMC Internal CI / Automated premerge gate` status on the same head SHA to complete
 successfully. If the head changes intentionally, finish the update and local
 validation before mentioning `@yifeif-nv` once to request a new run. Only a
 maintainer with repository `maintain` or `admin` permission can authorize the

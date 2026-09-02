@@ -812,6 +812,7 @@ class HfTransformersReference:
         audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        revision = getattr(case, "hf_revision", "") or None
         torch_dtype_expr = _torch_dtype_for_case(case)
         max_new_tokens = int(case.inputs.get("max_new_tokens", 100))
 
@@ -821,15 +822,16 @@ class HfTransformersReference:
             import scipy.io.wavfile as wav
 
             hf_id = {hf_id!r}
+            revision = {revision!r}
             audio_path = {audio_path!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
             max_new_tokens = {max_new_tokens}
 
             processor = AutoProcessor.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
+                hf_id, revision=revision, trust_remote_code=trust_remote_code)
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code,
+                hf_id, revision=revision, trust_remote_code=trust_remote_code,
                 torch_dtype={torch_dtype_expr})
             model.eval()
 
@@ -877,6 +879,7 @@ class HfTransformersReference:
             env=_reference_env(ctx),
             output_readers=(_json_output_reader(output_path),),
             text_reader=_json_text_reader(output_path),
+            metadata={"hf_id": hf_id, "hf_revision": revision or ""},
             failure_label="HF speech-to-text",
         )
 

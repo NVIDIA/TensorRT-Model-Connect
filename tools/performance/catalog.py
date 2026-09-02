@@ -36,6 +36,7 @@ TASK_REFERENCE_ADAPTERS = {
     "pytorch-personaplex",
     "pytorch-timeseries",
     "upstream-elf",
+    "upstream-fast-foundation-stereo",
     "upstream-lance",
     "upstream-sana-wm",
 }
@@ -310,6 +311,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
                 "pytorch-personaplex",
                 "pytorch-timeseries",
                 "upstream-elf",
+                "upstream-fast-foundation-stereo",
                 "upstream-lance",
                 "upstream-sana-wm",
             }
@@ -345,6 +347,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
     output_contract = baseline.get("output_contract", "exact-token-ids")
     if output_contract not in {
         "audio-shape",
+        "disparity-parity",
         "exact-token-ids",
         "exact-text",
         "generated-token-count",
@@ -372,6 +375,32 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
                 raise PerformanceSuiteError(
                     f"case {case['id']} token-agreement contract has invalid {name}"
                 )
+    if output_contract == "disparity-parity":
+        bounded = {
+            "min_disparity_cosine": (0.0, 1.0),
+            "max_disparity_bad_2px_fraction": (0.0, 1.0),
+        }
+        for name, (minimum, maximum) in bounded.items():
+            value = baseline.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not minimum <= float(value) <= maximum
+            ):
+                raise PerformanceSuiteError(
+                    f"case {case['id']} disparity contract has invalid {name}"
+                )
+        error_limit = baseline.get("max_disparity_mean_abs_error")
+        if (
+            isinstance(error_limit, bool)
+            or not isinstance(error_limit, (int, float))
+            or not math.isfinite(float(error_limit))
+            or float(error_limit) < 0.0
+        ):
+            raise PerformanceSuiteError(
+                f"case {case['id']} disparity contract has invalid "
+                "max_disparity_mean_abs_error"
+            )
     if output_contract == "localization":
         bounded = {
             "min_localization_box_iou": (0.0, 1.0),

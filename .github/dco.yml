@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Let an author add a missing sign-off without rewriting shared history. Do not
+# permit another contributor to certify a commit on the author's behalf.
+allowRemediationCommits:
+  individual: true
+  thirdParty: false

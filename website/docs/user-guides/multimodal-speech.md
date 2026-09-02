@@ -73,34 +73,88 @@ sampling is deterministic for a given seed, but its C++ random generator is
 not bitwise identical to Torch CUDA Philox, so the native and reference WAV
 files are not expected to have the same checksum.
 
-For live use, cast the loaded pipeline to the optional C++
-`ISpeechSessionProvider` declared in `trtmc/speech_session.h`, then create a
-persistent `ISpeechSession`. Append arbitrary mono chunks and drain interleaved
-agent-audio, agent-text, user-transcript, and lifecycle events. Sessions retain
-model state across calls and support barge-in, finish, cancel, and reset.
-Keeping the provider separate preserves the base
-`IPipeline` ABI for existing optimized-runtime integrations.
+For local streaming, cast the loaded pipeline to the optional C++
+`ISpeechSessionProvider` declared in `trtmc/speech_session.h` and feed mono
+float32 chunks directly:
+
+```cpp
+trtmc::SpeechSessionConfig config;
+config.input_sample_rate = microphone_sample_rate;
+auto* provider = dynamic_cast<trtmc::ISpeechSessionProvider*>(pipeline.get());
+if (provider == nullptr)
+    throw std::runtime_error("pipeline does not support speech streaming");
+auto session = provider->create_speech_session(config);
+for (const auto& chunk : microphone_chunks) {
+    session->append_audio(chunk.data(), static_cast<int32_t>(chunk.size()));
+    for (auto& event : session->take_events())
+        consume(event);
+}
+session->finish_input();
+bool finished = false;
+while (!finished) {
+    for (auto& event : session->wait_events(-1)) {
+        finished |= event.kind == trtmc::SpeechSessionEventKind::kInputFinished;
+        consume(event);
+    }
+}
+```
+
+`wait_events()` can drain agent audio/text and lifecycle events while the next
+input chunk is being captured. The persistent session retains conversation
+state and supports barge-in, multiple turns, bounded backpressure, cancel, and
+reset. Cast the session to `ISpeechRealtimeControl` for explicit input
+commit/clear and response create/cancel/truncate; tool-enabled sessions expose
+`ISpeechToolSession`. Finite WAV inference uses `ISpeechBatchSessionProvider`,
+so this live path does not change the model-card `trtmc speak` result.
+
+### Full-duplex microphone example
+
+The repository includes a local Linux ALSA
+[microphone application](https://github.com/NVIDIA/TensorRT-Model-Connect/tree/main/examples/models/nemotron_voicechat/full_duplex).
+Build its image once from the repository root; the example README documents
+the pinned x86_64 override:
+
+```bash
+docker build --platform linux/arm64 \
+  --file examples/models/nemotron_voicechat/full_duplex/Dockerfile \
+  --tag trtmc-voicechat-full-duplex:local \
+  .
+```
+
+After that build, start each conversation with one offline `docker run`. The
+bundle remains a read-only host file and is not copied into the image:
+
+```bash
+docker run --rm --interactive --tty \
+  --network none \
+  --gpus 'device=0' \
+  --device /dev/snd:/dev/snd \
+  --mount "type=bind,src=$PWD/nemotron-voicechat-11b.bundle,dst=/models/model.bundle,readonly" \
+  trtmc-voicechat-full-duplex:local
+```
+
+Use a headset or hardware acoustic echo cancellation so speaker output does
+not look like a user interruption. See the example README for explicit ALSA
+devices, x86_64 builds, and desktop audio boundaries.
 
 For an opt-in real-engine lifecycle check, build the standalone model-owned
 probe and run it against a prebuilt bundle and the pinned public sample:
 
 ```bash
-c++ -std=c++17 -O2 -pthread -Iinclude -Isrc \
-  tests/e2e/models/nemotron_voicechat/native_lifecycle_probe.cpp \
-  -Lbuild -ltrtmc_core -Wl,-rpath,"$PWD/build" \
-  -o /tmp/voicechat_native_lifecycle_probe
+cmake --build build --target test_nemotron_voicechat_native_lifecycle
 
 LD_LIBRARY_PATH="$PWD/build:${LD_LIBRARY_PATH:-}" \
-/tmp/voicechat_native_lifecycle_probe \
+build/test_nemotron_voicechat_native_lifecycle \
   nemotron-voicechat-11b.bundle \
   "$VOICECHAT_SPEECH/examples/speechlm2/sample_audio/sample_general.wav" \
   build build/models response.wav lifecycle-receipt.json
 ```
 
-The probe covers arbitrary chunk boundaries, output before input completion,
-mid-response barge-in and same-session recovery, cancel, reset, and bounded
-finish behavior. It is a large-memory-GPU local check rather than a normal
-source-only unit test.
+The probe covers batch parity, arbitrary chunk boundaries, output before input
+completion, model-confirmed mid-response barge-in and same-session recovery,
+cancel/reset, exact bounded finish behavior, normal multi-turn conversation,
+producer/consumer backpressure, and a real function-call/result continuation.
+These are large-memory-GPU checks rather than normal source-only unit tests.
 
 Use exact checkpoints from [Model Recipes](../models-recipes/model-recipes.md),
 organized by the corresponding Hugging Face multimodal or audio task.

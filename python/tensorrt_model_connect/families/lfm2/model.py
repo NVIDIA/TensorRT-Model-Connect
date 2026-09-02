@@ -9,6 +9,11 @@ import sys
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
+from ...native_kv_attention_builder import (
+    NativeKvMasks,
+    add_active_prefix_causal_masks,
+    add_explicit_masked_grouped_query_attention,
+)
 
 from .checkpoint_mapper import WeightDict
 from .config import DenseLfm2Config, validate_dense_lfm2_config
@@ -332,7 +337,7 @@ def add_native_kv_attention(
     cache_k: trt.ITensor,
     cache_v: trt.ITensor,
     cache_write_indices: trt.ITensor,
-    key_value_lengths: trt.ITensor,
+    attention_masks: NativeKvMasks,
     *,
     num_heads: int,
     num_kv_heads: int,
@@ -340,13 +345,10 @@ def add_native_kv_attention(
     work_dtype: trt.DataType,
     tag: str,
 ) -> dict[str, trt.ITensor]:
-    """Use TensorRT's in-place KV update and fused attention-v2 contract."""
+    """Use TensorRT's in-place KV update and explicit masked attention."""
 
-    if not hasattr(network, "add_kv_cache_update") or not hasattr(
-        network,
-        "add_attention_v2",
-    ):
-        raise RuntimeError("LFM2 requires TensorRT add_kv_cache_update and add_attention_v2")
+    if not hasattr(network, "add_kv_cache_update"):
+        raise RuntimeError("LFM2 requires TensorRT add_kv_cache_update")
     if work_dtype not in {trt.float16, trt.bfloat16}:
         raise ValueError("LFM2 native KV attention requires FP16 or BF16")
 
@@ -387,35 +389,21 @@ def add_native_kv_attention(
         num_heads=num_heads,
         head_dim=head_dim,
     )
-    # Keep 1/sqrt(D) exact until the multiplication for both FP16 and BF16.
-    q_fp32 = _cast(network, q_4d, trt.float32)
-    scale = _constant(
+    context_4d = add_explicit_masked_grouped_query_attention(
         network,
-        (1, 1, 1, 1),
-        np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32),
-    )
-    q_scaled = network.add_elementwise(
-        q_fp32,
-        scale,
-        trt.ElementWiseOperation.PROD,
-    ).get_output(0)
-    q_scaled = _cast(network, q_scaled, work_dtype)
-
-    attention = network.add_attention_v2(
-        q_scaled,
+        q_4d,
         present_k,
         present_v,
-        trt.AttentionNormalizationOp.SOFTMAX,
-        trt.CausalMaskKind.LOWER_RIGHT,
+        attention_masks,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        scale=float(1.0 / np.sqrt(head_dim)),
+        tag=tag,
     )
-    if attention is None:
-        raise RuntimeError("TensorRT failed to create LFM2 native attention")
-    attention.name = tag
-    attention.decomposable = False
-    attention.key_value_lengths = key_value_lengths
     context = _reshape_heads_to_rows(
         network,
-        attention.get_output(0),
+        context_4d,
         width=num_heads * head_dim,
     )
     return {
@@ -655,6 +643,13 @@ def build_lfm2_engine(
         trt.int32,
         (1,),
     )
+    attention_masks = add_active_prefix_causal_masks(
+        network,
+        token_id,
+        cache_write_indices,
+        key_value_lengths,
+        max_cache_length,
+    )
 
     cache_shape = (
         1,
@@ -809,7 +804,7 @@ def build_lfm2_engine(
                 cache_k_inputs[attention_index],
                 cache_v_inputs[attention_index],
                 cache_write_indices,
-                key_value_lengths,
+                attention_masks,
                 num_heads=cfg.num_attention_heads,
                 num_kv_heads=cfg.num_key_value_heads,
                 head_dim=cfg.head_dim,

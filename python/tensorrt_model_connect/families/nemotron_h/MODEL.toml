@@ -7,6 +7,10 @@ module = "plugin"
 python_profile_specs = [
   "nemotron_h_reference|families/nemotron_h/python_profile_requirements/nemotron_h_reference.lock.txt|families/nemotron_h/python_profile_verify.py|true",
 ]
+python_profile_build_environment = [
+  "nemotron_h_reference|CAUSAL_CONV1D_FORCE_BUILD|TRUE",
+  "nemotron_h_reference|MAMBA_FORCE_BUILD|TRUE",
+]
 default_execution_profiles = [
   "reference|nemotron_h_reference",
 ]

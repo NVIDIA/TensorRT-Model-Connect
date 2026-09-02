@@ -70,6 +70,7 @@ class CommunityCI:
         scope = str(result["unit_scope"])
         if scope not in UNIT_SCOPES:
             raise CiError(f"Impact analysis returned an invalid unit scope: {scope}")
+        python_test_targets = self._python_test_targets(resolved_base)
 
         paths = sorted(
             {
@@ -95,12 +96,42 @@ class CommunityCI:
         print(json.dumps(summary, indent=2, sort_keys=True))
         self.github.output("run_unit_tests", str(summary["run_unit_tests"]).lower())
         self.github.output("unit_scope", scope)
+        self.github.output(
+            "python_test_targets",
+            json.dumps(python_test_targets, separators=(",", ":")),
+        )
         self.github.summary("### Community CPU ownership and impact")
         self.github.summary(f"- Unit scope: `{scope}`")
+        self.github.summary(f"- Additional Python test targets: `{len(python_test_targets)}`")
         self.github.summary(
             "- Changed paths: " + (", ".join(f"`{path}`" for path in paths) or "none")
         )
         return result
+
+    def _python_test_targets(self, base: str) -> list[str]:
+        selection = self.commands.run(
+            [
+                "python3",
+                "tools/test_impact.py",
+                "--base",
+                base,
+                "--head",
+                "HEAD",
+                "--json",
+            ],
+            capture_output=True,
+        )
+        try:
+            payload = json.loads(selection.stdout)
+        except json.JSONDecodeError as error:
+            raise CiError(f"Test impact analysis returned invalid JSON: {error}") from error
+        targets: list[str] = []
+        for key in ("builder_tests", "tools_tests"):
+            values = payload.get(key, [])
+            if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+                raise CiError(f"Test impact analysis returned invalid {key}")
+            targets.extend(values)
+        return sorted(set(targets))
 
     def unit(self, scope: str) -> None:
         if scope not in UNIT_SCOPES:

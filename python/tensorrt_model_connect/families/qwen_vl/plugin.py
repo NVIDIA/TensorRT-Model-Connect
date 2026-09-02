@@ -372,6 +372,22 @@ class QwenVLPlugin:
 
         return vl_cfg
 
+    def get_bundle_config_overrides(
+        self, config: ModelConfig
+    ) -> dict[str, int] | None:
+        """Expose Qwen3-VL's nested text decoder contract at bundle scope."""
+        if not _is_qwen3_vl(config):
+            return None
+        return {
+            "vocab_size": config.vocab_size,
+            "hidden_size": config.hidden_size,
+            "num_hidden_layers": config.num_hidden_layers,
+            "num_attention_heads": config.num_attention_heads,
+            "num_key_value_heads": config.num_key_value_heads,
+            "head_dim": config.head_dim,
+            "bos_token_id": config.bos_token_id,
+        }
+
     def get_lora_config(self, config: ModelConfig) -> dict[str, object]:
         """Persist the dynamic binding contract in the bundle config."""
         return DynamicLoraConfig.from_model_config(config).bundle_config()

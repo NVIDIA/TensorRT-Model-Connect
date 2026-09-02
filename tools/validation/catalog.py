@@ -162,6 +162,9 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "fp32_layers": raw.get("fp32_layers", []),
         "quantization": raw.get("quantization", {}),
         "build_args": build_args if isinstance(build_args, dict) else {},
+        "build_cli_args": (
+            raw.get("build_cli_args", []) if isinstance(raw.get("build_cli_args", []), list) else []
+        ),
         "fp8_scales": raw.get("fp8_scales", ""),
         "image_height": raw.get("image_height"),
         "image_width": raw.get("image_width"),

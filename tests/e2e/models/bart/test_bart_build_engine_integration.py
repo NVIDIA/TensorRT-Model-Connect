@@ -108,6 +108,8 @@ class TestBartBuildEngine:
             t[f"{pfx}.final_layer_norm.bias"] = _rand(hidden)
         return t
 
+    @pytest.mark.gpu
+    @pytest.mark.trt
     def test_build_engine(self, tmp_path):
         from tensorrt_model_connect.families.bart import plugin
         config = {

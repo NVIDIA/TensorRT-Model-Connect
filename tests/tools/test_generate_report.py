@@ -1920,6 +1920,92 @@ class TestEvidenceCompleteness:
         assert any("TRT/base numeric feature" in issue for issue in issues)
         assert any("reference numeric feature" in issue for issue in issues)
 
+    def test_monocular_geometry_requires_complete_artifacts(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "moge"
+        model_dir.mkdir()
+        _make_tiny_png(tmp_path / "input.png")
+        height, width = 2, 3
+        (model_dir / "points.f32").write_bytes(bytes(height * width * 3 * 4))
+        (model_dir / "depth.f32").write_bytes(bytes(height * width * 4))
+        (model_dir / "mask.u8").write_bytes(bytes(height * width))
+        valid_intrinsics = {
+            "normalized": True,
+            "height": height,
+            "width": width,
+            "intrinsics": [[1.0, 0.0, 0.5], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]],
+        }
+        (model_dir / "intrinsics.json").write_text(
+            json.dumps(valid_intrinsics),
+            encoding="utf-8",
+        )
+        (model_dir / "reference.npz").write_bytes(b"reference")
+        result = _make_result(
+            name="moge",
+            task_strategy="monocular_geometry",
+            stage_outputs={
+                "trt_full_inference": {"data": {"height": height, "width": width}},
+                "ref_full_inference": {"data": {"output_path": "reference.npz"}},
+            },
+            artifacts={
+                "trt_points": "points.f32",
+                "trt_depth": "depth.f32",
+                "trt_mask": "mask.u8",
+                "trt_intrinsics": "intrinsics.json",
+                "ref_output": "reference.npz",
+            },
+        )
+        result["case_config"]["inputs"] = {"image": "input.png"}
+        result["_artifact_dir"] = str(model_dir)
+
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
+
+        intrinsics_path = model_dir / "intrinsics.json"
+        for malformed_intrinsics in (
+            {key: value for key, value in valid_intrinsics.items() if key != "height"},
+            {**valid_intrinsics, "width": width + 1},
+            {
+                **valid_intrinsics,
+                "intrinsics": [["invalid", 0.0, 0.5], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]],
+            },
+            {
+                **valid_intrinsics,
+                "intrinsics": [[float("inf"), 0.0, 0.5], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]],
+            },
+            {
+                **valid_intrinsics,
+                "intrinsics": [[0.0, 0.0, 0.5], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]],
+            },
+            {
+                **valid_intrinsics,
+                "intrinsics": [[1.0, 9.0, 0.7], [4.0, 1.0, -3.0], [2.0, 8.0, 7.0]],
+            },
+        ):
+            intrinsics_path.write_text(json.dumps(malformed_intrinsics), encoding="utf-8")
+            assert any(
+                "missing or malformed TRT/base intrinsics.json" in issue
+                for issue in mod.validate_evidence([result], project_dir=tmp_path)
+            )
+        intrinsics_path.write_bytes(b"\xff")
+        assert any(
+            "missing or malformed TRT/base intrinsics.json" in issue
+            for issue in mod.validate_evidence([result], project_dir=tmp_path)
+        )
+        intrinsics_path.write_text(json.dumps(valid_intrinsics), encoding="utf-8")
+
+        result["stage_outputs"]["trt_full_inference"]["data"]["height"] = height + 0.5
+        assert any(
+            "missing valid TRT/base geometry dimensions" in issue
+            for issue in mod.validate_evidence([result], project_dir=tmp_path)
+        )
+        result["stage_outputs"]["trt_full_inference"]["data"]["height"] = height
+
+        (model_dir / "mask.u8").unlink()
+        assert any(
+            "missing or malformed TRT/base mask.u8" in issue
+            for issue in mod.validate_evidence([result], project_dir=tmp_path)
+        )
+
     def test_failed_audio_can_render_partial_failure_evidence(self, tmp_path):
         mod = _import_report()
         model_dir = tmp_path / "failed-audio"

@@ -109,6 +109,55 @@ class StereoDisparityComparator:
                 passed=bad_2px_fraction <= bad_2px_threshold,
             ),
         }
+        ground_truth = trt.data.get("ground_truth_disparity")
+        valid_mask = trt.data.get("valid_nonocc_mask")
+        if ground_truth is not None or valid_mask is not None:
+            if ground_truth is None or valid_mask is None:
+                return CompareResult(
+                    stage_name=stage.name,
+                    status=StageStatus.ERROR.value,
+                    message="Task-accuracy output has incomplete ground-truth evidence",
+                )
+            truth = np.asarray(ground_truth, dtype=np.float32)
+            valid = np.asarray(valid_mask, dtype=bool)
+            if truth.shape != actual.shape or valid.shape != actual.shape or not valid.any():
+                return CompareResult(
+                    stage_name=stage.name,
+                    status=StageStatus.ERROR.value,
+                    message="Task-accuracy ground truth/mask does not match disparity output",
+                )
+            if not np.isfinite(truth[valid]).all():
+                return CompareResult(
+                    stage_name=stage.name,
+                    status=StageStatus.ERROR.value,
+                    message="Task-accuracy ground truth is non-finite on valid pixels",
+                )
+            candidate_error = np.abs(actual[valid].astype(np.float64) - truth[valid])
+            reference_error = np.abs(expected[valid].astype(np.float64) - truth[valid])
+            valid_count = int(valid.sum())
+            task_values = {
+                "valid_nonocc_pixels": float(valid_count),
+                "candidate_nonocc_abs_error_sum_px": float(candidate_error.sum()),
+                "reference_nonocc_abs_error_sum_px": float(reference_error.sum()),
+                "candidate_nonocc_bad2_pixel_count": float((candidate_error > 2.0).sum()),
+                "reference_nonocc_bad2_pixel_count": float((reference_error > 2.0).sum()),
+                "candidate_nonocc_epe_px": float(candidate_error.mean()),
+                "reference_nonocc_epe_px": float(reference_error.mean()),
+                "candidate_nonocc_bp2_fraction": float(np.mean(candidate_error > 2.0)),
+                "reference_nonocc_bp2_fraction": float(np.mean(reference_error > 2.0)),
+            }
+            metrics.update(
+                {
+                    name: MetricResult(
+                        value=value,
+                        threshold=None,
+                        operator="informational",
+                        passed=True,
+                        note="Per-scene task statistic; gates are pixel-weighted over all scenes",
+                    )
+                    for name, value in task_values.items()
+                }
+            )
         passed = all(metric.passed for metric in metrics.values())
         return CompareResult(
             stage_name=stage.name,
@@ -121,6 +170,101 @@ class StereoDisparityComparator:
                 f"bad-2px fraction={bad_2px_fraction:.6f}"
             ),
         )
+
+    def aggregate(self, cases: list[dict], gates: dict) -> dict:
+        """Apply the approved pixel-weighted task gates across prepared scenes."""
+        epe_allowance_key = "candidate_nonocc_epe_max_reference_plus_px"
+        bp2_allowance_key = "candidate_nonocc_bp2_max_reference_plus_fraction"
+        requested = epe_allowance_key in gates or bp2_allowance_key in gates
+        if not requested:
+            return {"evaluated": False, "passed": True}
+        if epe_allowance_key not in gates or bp2_allowance_key not in gates:
+            return {
+                "evaluated": True,
+                "passed": False,
+                "gate_failures": ["task-accuracy workload must configure both EPE and BP-2 gates"],
+            }
+
+        required = (
+            "valid_nonocc_pixels",
+            "candidate_nonocc_abs_error_sum_px",
+            "reference_nonocc_abs_error_sum_px",
+            "candidate_nonocc_bad2_pixel_count",
+            "reference_nonocc_bad2_pixel_count",
+        )
+        missing = [
+            str(case.get("sample_id", ""))
+            for case in cases
+            if any(name not in case.get("metrics", {}) for name in required)
+        ]
+        if missing:
+            return {
+                "evaluated": True,
+                "passed": False,
+                "gate_failures": [
+                    "task-accuracy sufficient statistics are missing for: " + ", ".join(missing)
+                ],
+            }
+
+        totals = {
+            name: sum(float(case["metrics"][name]["value"]) for case in cases)
+            for name in required
+        }
+        valid_pixels = totals["valid_nonocc_pixels"]
+        if valid_pixels <= 0:
+            return {
+                "evaluated": True,
+                "passed": False,
+                "gate_failures": ["task-accuracy aggregate has no valid non-occluded pixels"],
+            }
+        task_accuracy = {
+            "valid_nonocc_pixels": int(valid_pixels),
+            "candidate_nonocc_epe_px": (
+                totals["candidate_nonocc_abs_error_sum_px"] / valid_pixels
+            ),
+            "reference_nonocc_epe_px": (
+                totals["reference_nonocc_abs_error_sum_px"] / valid_pixels
+            ),
+            "candidate_nonocc_bp2_fraction": (
+                totals["candidate_nonocc_bad2_pixel_count"] / valid_pixels
+            ),
+            "reference_nonocc_bp2_fraction": (
+                totals["reference_nonocc_bad2_pixel_count"] / valid_pixels
+            ),
+        }
+        epe_limit = task_accuracy["reference_nonocc_epe_px"] + float(
+            gates[epe_allowance_key]
+        )
+        bp2_limit = task_accuracy["reference_nonocc_bp2_fraction"] + float(
+            gates[bp2_allowance_key]
+        )
+        epe_passed = task_accuracy["candidate_nonocc_epe_px"] <= epe_limit
+        bp2_passed = task_accuracy["candidate_nonocc_bp2_fraction"] <= bp2_limit
+        failures = []
+        if not epe_passed:
+            failures.append(
+                "candidate pixel-weighted non-occluded EPE exceeds reference plus allowance"
+            )
+        if not bp2_passed:
+            failures.append(
+                "candidate pixel-weighted non-occluded BP-2 exceeds reference plus allowance"
+            )
+        return {
+            "evaluated": True,
+            "passed": epe_passed and bp2_passed,
+            "task_accuracy": task_accuracy,
+            "gates": {
+                epe_allowance_key: float(gates[epe_allowance_key]),
+                bp2_allowance_key: float(gates[bp2_allowance_key]),
+                "candidate_nonocc_epe_px_max": epe_limit,
+                "candidate_nonocc_bp2_fraction_max": bp2_limit,
+            },
+            "gate_results": {
+                "candidate_nonocc_epe": epe_passed,
+                "candidate_nonocc_bp2": bp2_passed,
+            },
+            "gate_failures": failures,
+        }
 
 
 comparator = StereoDisparityComparator()

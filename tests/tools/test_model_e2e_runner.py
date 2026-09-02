@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -78,7 +79,7 @@ def test_ci_tier_filters_children_without_changing_model_identity() -> None:
     assert [case.name for case in selected] == ["canary-1b-v2"]
 
 
-def test_category_filter_separates_e2e_from_historical_regressions() -> None:
+def test_category_filter_selects_every_qwen_regression_child() -> None:
     qwen_dir = MODELS_DIR / "qwen"
     regression = get_model_by_name(
         "qwen3-0.6b-regression-native-kv-chunked-prefill", qwen_dir
@@ -107,9 +108,12 @@ def test_category_filter_separates_e2e_from_historical_regressions() -> None:
     )
 
     assert [case.name for case in selected_regressions] == [
-        "qwen3-0.6b-regression-native-kv-chunked-prefill"
+        "qwen3-0.6b-regression-native-kv-chunked-prefill",
+        "qwen3-0.6b-bf16-native-kv-two-chunk-parity",
     ]
-    assert selected_ordinary == []
+    assert [case.name for case in selected_ordinary] == [
+        "qwen3-0.6b-fp16-native-kv-two-chunk-parity",
+    ]
 
 
 def test_platform_threshold_overrides_are_scoped_to_matching_platform() -> None:
@@ -187,6 +191,10 @@ def test_model_runner_builds_once_then_runs_all_children(monkeypatch, tmp_path) 
     build_calls = []
     run_calls = []
 
+    monkeypatch.setenv(
+        "TRTMC_PYTHON_PROFILE_CANARY_REFERENCE_PYTHON",
+        sys.executable,
+    )
     monkeypatch.setattr(model_runner, "get_model_by_name", lambda *_args: model)
 
     def resolve_bundle(self, case, ctx):
@@ -243,6 +251,10 @@ def test_model_runner_does_not_build_when_all_preflights_skip(
     build_calls = []
     run_calls = []
 
+    monkeypatch.setenv(
+        "TRTMC_PYTHON_PROFILE_CANARY_REFERENCE_PYTHON",
+        sys.executable,
+    )
     monkeypatch.setattr(model_runner, "get_model_by_name", lambda *_args: model)
     monkeypatch.setattr(model_runner, "run_preflight", lambda *_args: (False, []))
 

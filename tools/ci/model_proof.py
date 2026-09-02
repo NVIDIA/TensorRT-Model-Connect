@@ -18,6 +18,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
+    import tomli as tomllib
+
 from .context import CiContext
 from .gpu_lease import GpuLease
 from .model_reference_cache import ModelReferenceCacheWarmer, ModelReferenceContract
@@ -55,6 +60,28 @@ except BaseException:
     subprocess.run(["chown", "-hR", "--", f"{uid}:{gid}", destination], check=False)
     raise
 """
+
+PREPARED_PROFILE_ROOT = "/opt/trtmc-python-profiles"
+PROFILE_PACKAGES_ROOT = "/opt/trtmc-python-profile-packages"
+_EXACT_PROFILE_REQUIREMENT_RE = re.compile(
+    r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9,._-]+\])?==([^\s;]+)$"
+)
+_EXACT_PROFILE_VERSION_RE = re.compile(
+    r"(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*"
+    r"(?:(?:a|b|rc)[0-9]+)?"
+    r"(?:\.post[0-9]+)?"
+    r"(?:\.dev[0-9]+)?"
+    r"(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _PythonProfilePlan:
+    """Exact projected profiles and packages prepared before offline proof."""
+
+    names: tuple[str, ...]
+    packages: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -274,8 +301,10 @@ class ModelProofRunner:
         projection = output / "projection"
         self.artifacts_dir = output / "artifacts"
         work = output / "work"
+        python_profiles = output / "python-profiles"
+        python_profile_packages = output / "python-profile-packages"
         output.mkdir(parents=True, exist_ok=True)
-        for path in (self.artifacts_dir, work):
+        for path in (self.artifacts_dir, work, python_profiles, python_profile_packages):
             if path.exists():
                 shutil.rmtree(path)
             path.mkdir(parents=True)
@@ -305,6 +334,12 @@ class ModelProofRunner:
             ["docker", "image", "inspect", image], check=False, capture_output=True
         ).returncode:
             raise CiError(f"CI image is not present: {image}")
+        self._prepare_python_profiles(
+            projection,
+            python_profiles,
+            python_profile_packages,
+            image,
+        )
         runtime_model = str(selection.payload["owners"]["runtime"])
         validation_container = self._base_container_name() + "-validation-data"
         self.container_name = validation_container
@@ -351,6 +386,7 @@ class ModelProofRunner:
             image,
             selection,
             validation_dir,
+            python_profiles,
         )
         for name in ("proof.json", "model-proof-report.html"):
             if not (self.artifacts_dir / name).is_file():
@@ -393,6 +429,352 @@ class ModelProofRunner:
         if not (projection / ".trtmc-model-projection.json").is_file():
             raise CiError("model_ci.py did not produce a projection manifest")
 
+    def _prepare_python_profiles(
+        self,
+        projection: Path,
+        profile_dir: Path,
+        package_dir: Path,
+        image: str,
+    ) -> None:
+        """Materialize projected profiles online for one later offline proof."""
+        assert self.artifacts_dir is not None
+        plan = self._projected_python_profile_plan(projection)
+        if plan is None:
+            return
+        if plan.packages:
+            self._download_python_profile_packages(
+                package_dir,
+                image,
+                plan.packages,
+            )
+        name = self._base_container_name() + "-python-profiles"
+        self.container_name = name
+        self.context.run(["docker", "rm", "-f", name], check=False, capture_output=True)
+        command = [
+            "timeout",
+            "--kill-after=2m",
+            "6h",
+            "docker",
+            "run",
+            "--rm",
+            "--name",
+            name,
+            *self._job_labels(),
+            "--read-only",
+            "--network",
+            "none",
+            "--runtime",
+            "runc",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--ipc",
+            "private",
+            "--pids-limit",
+            "512",
+            "--memory",
+            "48g",
+            "--cpus",
+            "8",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--mount",
+            f"type=bind,src={projection},dst=/src,readonly",
+            "--mount",
+            f"type=bind,src={profile_dir},dst={PREPARED_PROFILE_ROOT}",
+            "--mount",
+            f"type=bind,src={package_dir},dst={PROFILE_PACKAGES_ROOT},readonly",
+            "--tmpfs",
+            "/tmp:rw,exec,nosuid,nodev,size=8g",
+            "--workdir",
+            "/src",
+            "-e",
+            "HOME=/tmp",
+            "-e",
+            "USER=trtmc-ci",
+            "-e",
+            "LOGNAME=trtmc-ci",
+            "-e",
+            "NVIDIA_VISIBLE_DEVICES=void",
+            "-e",
+            "CUDA_VISIBLE_DEVICES=",
+            "-e",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "-e",
+            "PIP_DISABLE_PIP_VERSION_CHECK=1",
+            "-e",
+            "PIP_CONFIG_FILE=/dev/null",
+            "-e",
+            f"PIP_FIND_LINKS={PROFILE_PACKAGES_ROOT}",
+            "-e",
+            "PIP_NO_CACHE_DIR=1",
+            "-e",
+            "PIP_NO_INDEX=1",
+            "-e",
+            "TRTMC_PYTHON_PROFILE_SOURCE=/src/python/tensorrt_model_connect",
+            "-e",
+            f"TRTMC_PYTHON_PROFILE_ROOT={PREPARED_PROFILE_ROOT}",
+            "-e",
+            "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=0",
+            image,
+            "/opt/venv/bin/python",
+            "/src/.github/scripts/build-python-profiles.py",
+            *(item for name in plan.names for item in ("--profile", name)),
+        ]
+        result = self._run_logged(
+            command,
+            self.artifacts_dir / "python-profiles-prepare.log",
+            max_output_chars=2_000_000,
+        )
+        if result:
+            raise CiError(
+                f"Python profile preparation failed for {self.request.model} (exit {result})"
+            )
+
+    def _projected_python_profile_plan(
+        self,
+        projection: Path,
+    ) -> _PythonProfilePlan | None:
+        """Return selected profiles and pins, or None when none need preparation."""
+        package_root = projection / "python/tensorrt_model_connect"
+        manifests = sorted((package_root / "families").glob("*/MODEL.toml"))
+        if len(manifests) > 1:
+            raise CiError("projected Python ownership contains multiple families")
+        family = (
+            tomllib.loads(manifests[0].read_text(encoding="utf-8"))
+            if manifests
+            else {}
+        )
+        family_profiles: list[tuple[str, str]] = []
+        for raw_spec in family.get("python_profile_specs", []):
+            if not isinstance(raw_spec, str):
+                raise CiError("projected python_profile_specs must contain strings")
+            parts = [part.strip() for part in raw_spec.split("|")]
+            if len(parts) not in {3, 4, 5} or any(not part for part in parts[:3]):
+                raise CiError(f"invalid projected python_profile_specs entry: {raw_spec!r}")
+            prebuild = True
+            if len(parts) == 5:
+                value = parts[4].lower()
+                if value in {"0", "false", "no", "off"}:
+                    prebuild = False
+                elif value not in {"1", "true", "yes", "on"}:
+                    raise CiError(f"invalid projected profile prebuild flag: {parts[4]!r}")
+            if prebuild:
+                family_profiles.append((parts[0], parts[1]))
+
+        registry_path = package_root / "python_profiles.toml"
+        registry = tomllib.loads(registry_path.read_text(encoding="utf-8"))
+        selected_profiles = self._projected_selected_profile_names(
+            projection,
+            family,
+            registry,
+        )
+        generic_requirements: list[tuple[str, str]] = []
+        for profile, spec in registry.get("profiles", {}).items():
+            if profile == "base" or not isinstance(spec, dict):
+                continue
+            if spec.get("kind") == "venv" and bool(spec.get("prebuild", True)):
+                value = spec.get("requirements")
+                if not isinstance(value, str) or not value.strip():
+                    raise CiError(
+                        f"projected Python profile {profile!r} has no requirements"
+                    )
+                generic_requirements.append((str(profile), value.strip()))
+        selected_generic = [
+            item for item in generic_requirements if item[0] in selected_profiles
+        ]
+        profiles = [*family_profiles, *selected_generic]
+        if not profiles:
+            return None
+
+        result: set[str] = set()
+        for _profile, value in profiles:
+            relative = Path(value)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise CiError(f"projected Python profile has an unsafe requirements path: {value!r}")
+            path = package_root / relative
+            if not path.is_file() or not path.resolve().is_relative_to(package_root.resolve()):
+                raise CiError(f"projected Python profile requirements are missing: {value!r}")
+            for line_number, raw_line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                match = _EXACT_PROFILE_REQUIREMENT_RE.fullmatch(line)
+                if match is None or _EXACT_PROFILE_VERSION_RE.fullmatch(match.group(2)) is None:
+                    raise CiError(
+                        f"projected Python profile lock must contain exact pins; "
+                        f"{relative}:{line_number} is {raw_line!r}"
+                    )
+                result.add(line)
+        if len(result) > 256:
+            raise CiError("projected Python profiles declare more than 256 packages")
+        return _PythonProfilePlan(
+            names=tuple(sorted(profile for profile, _requirements in profiles)),
+            packages=tuple(sorted(result)),
+        )
+
+    @staticmethod
+    def _projected_selected_profile_names(
+        projection: Path,
+        family: dict[str, object],
+        registry: dict[str, object],
+    ) -> set[str]:
+        """Return profiles selected by projected family and E2E metadata."""
+        selected: set[str] = set()
+
+        raw_defaults = family.get("default_execution_profiles", [])
+        if not isinstance(raw_defaults, list):
+            raise CiError("projected default_execution_profiles must be a list")
+        for raw_default in raw_defaults:
+            if not isinstance(raw_default, str):
+                raise CiError("projected default_execution_profiles must contain strings")
+            parts = [part.strip() for part in raw_default.split("|")]
+            if len(parts) != 2 or any(not part for part in parts):
+                raise CiError(
+                    f"invalid projected default_execution_profiles entry: {raw_default!r}"
+                )
+            selected.add(parts[1])
+
+        def add_profiles(value: object, label: str) -> None:
+            if value is None:
+                return
+            if not isinstance(value, dict):
+                raise CiError(f"projected {label} must be an object")
+            for profile in value.values():
+                if not isinstance(profile, str) or not profile.strip():
+                    raise CiError(f"projected {label} must select non-empty profiles")
+                selected.add(profile.strip())
+
+        e2e_root = projection / "tests/e2e/models"
+        for manifest_path in sorted(e2e_root.glob("*/manifests/*.json")):
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise CiError(f"projected E2E manifest must be an object: {manifest_path}")
+            index_path = manifest_path.parent.parent / "MODEL.toml"
+            e2e_index = (
+                tomllib.loads(index_path.read_text(encoding="utf-8"))
+                if index_path.is_file()
+                else {}
+            )
+            e2e_defaults = e2e_index.get("e2e_defaults", {})
+            if not isinstance(e2e_defaults, dict):
+                raise CiError(f"projected E2E defaults must be an object: {index_path}")
+            testcases = manifest.get("testcases", [])
+            if not isinstance(testcases, list):
+                raise CiError(f"projected E2E testcases must be a list: {manifest_path}")
+            cases = [manifest]
+            for testcase in testcases:
+                if not isinstance(testcase, dict):
+                    raise CiError(f"projected E2E testcase must be an object: {manifest_path}")
+                cases.append({**manifest, **testcase})
+            for case in cases:
+                add_profiles(case.get("execution_profiles"), "execution_profiles")
+                task_strategy = case.get("task_strategy")
+                task_defaults = (
+                    e2e_defaults.get(task_strategy, {})
+                    if isinstance(task_strategy, str)
+                    else {}
+                )
+                if not isinstance(task_defaults, dict):
+                    raise CiError(
+                        f"projected E2E defaults for {task_strategy!r} must be an object"
+                    )
+                for section_name, selector_field in (
+                    ("runtime_strategy_defaults", "runtime_strategy"),
+                    ("reference_backend_defaults", "reference_backend"),
+                ):
+                    selector = case.get(selector_field, task_defaults.get(selector_field))
+                    if not isinstance(selector, str) or not selector.strip():
+                        continue
+                    section = registry.get(section_name, {})
+                    if not isinstance(section, dict):
+                        raise CiError(f"projected {section_name} must be an object")
+                    add_profiles(
+                        section.get(selector.strip()),
+                        f"{section_name}.{selector.strip()}",
+                    )
+        return selected
+
+    def _download_python_profile_packages(
+        self,
+        package_dir: Path,
+        image: str,
+        packages: tuple[str, ...],
+    ) -> None:
+        """Download wheels online without executing contributor-controlled package code."""
+        assert self.artifacts_dir is not None
+        name = self._base_container_name() + "-python-profile-download"
+        self.container_name = name
+        self.context.run(["docker", "rm", "-f", name], check=False, capture_output=True)
+        command = [
+            "timeout",
+            "--kill-after=1m",
+            "45m",
+            "docker",
+            "run",
+            "--rm",
+            "--name",
+            name,
+            *self._job_labels(),
+            "--read-only",
+            "--network",
+            "bridge",
+            "--runtime",
+            "runc",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--ipc",
+            "private",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "4g",
+            "--cpus",
+            "2",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--mount",
+            f"type=bind,src={package_dir},dst={PROFILE_PACKAGES_ROOT}",
+            "--tmpfs",
+            "/tmp:rw,exec,nosuid,nodev,size=2g",
+            "--workdir",
+            "/tmp",
+            "-e",
+            "HOME=/tmp",
+            "-e",
+            "USER=trtmc-ci",
+            "-e",
+            "LOGNAME=trtmc-ci",
+            "-e",
+            "NVIDIA_VISIBLE_DEVICES=void",
+            "-e",
+            "CUDA_VISIBLE_DEVICES=",
+            "-e",
+            "PIP_CONFIG_FILE=/dev/null",
+            "-e",
+            "PIP_EXTRA_INDEX_URL=",
+            image,
+            "/opt/venv/bin/python",
+            "/opt/trtmc-profile-downloader.py",
+            PROFILE_PACKAGES_ROOT,
+            *packages,
+        ]
+        result = self._run_logged(
+            command,
+            self.artifacts_dir / "python-profile-download.log",
+            max_output_chars=2_000_000,
+        )
+        if result:
+            raise CiError(
+                f"Python profile package download failed for {self.request.model} "
+                f"(exit {result})"
+            )
+
     def _job_labels(self) -> list[str]:
         return [
             "--label",
@@ -423,6 +805,22 @@ class ModelProofRunner:
         hub = Path(self.context.env.get("TRTMC_HF_HUB_CACHE", str(Path(root) / "hub"))).resolve()
         if hub in {Path("/"), self.context.repository}:
             raise CiError("unsafe HF Hub cache path")
+        # Premerge fills the current runner's cache on first use. Nightly keeps
+        # this per-model step offline after its separate cache-warm job.
+        online_cache_warm = self.request.suite == "premerge"
+        if online_cache_warm:
+            try:
+                hub.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                raise CiError(f"could not prepare writable HF Hub cache: {hub}") from error
+        cache_mount = f"type=bind,src={hub},dst=/hf-cache/hub"
+        if not online_cache_warm:
+            cache_mount += ",readonly"
+        online_environment = (
+            ["env", "-u", "HF_HUB_OFFLINE", "-u", "TRANSFORMERS_OFFLINE"]
+            if online_cache_warm
+            else []
+        )
         name = self._base_container_name() + "-cache-check"
         self.container_name = name
         self.context.run(["docker", "rm", "-f", name], check=False, capture_output=True)
@@ -435,7 +833,7 @@ class ModelProofRunner:
             *self._job_labels(),
             "--read-only",
             "--network",
-            "none",
+            "bridge" if online_cache_warm else "none",
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -447,7 +845,7 @@ class ModelProofRunner:
             "--mount",
             f"type=bind,src={self.artifacts_dir},dst=/artifacts",
             "--mount",
-            f"type=bind,src={hub},dst=/hf-cache/hub,readonly",
+            cache_mount,
             "--tmpfs",
             "/tmp:rw,exec,nosuid,nodev,size=1g",
             "--workdir",
@@ -465,19 +863,25 @@ class ModelProofRunner:
             "-e",
             "PYTHONDONTWRITEBYTECODE=1",
             image,
+            *online_environment,
             "/opt/venv/bin/python",
             "/src/scripts/warm_hf_cache.py",
             "--models-file",
             "/artifacts/cache-check-models.txt",
-            "--local-only",
+            *([] if online_cache_warm else ["--local-only"]),
             "--strict",
             "--emit-cache-repos",
             "/artifacts/hf-cache-repos.json",
         ]
         result = self._run_logged(command, self.artifacts_dir / "cache-check.log")
         if result:
+            action = (
+                "online HF cache warm"
+                if online_cache_warm
+                else "offline HF cache readiness check"
+            )
             raise CiError(
-                f"offline HF cache readiness check failed for {self.request.model} (exit {result})"
+                f"{action} failed for {self.request.model} (exit {result})"
             )
         try:
             evidence = self._validated_cache_evidence(hub)
@@ -600,6 +1004,7 @@ class ModelProofRunner:
         image: str,
         selection: ModelProofSelection,
         validation_dir: Path | None,
+        python_profiles: Path,
     ) -> None:
         assert self.lease and self.artifacts_dir is not None and self.lease.gpu_id is not None
         name = self._base_container_name()
@@ -616,6 +1021,11 @@ class ModelProofRunner:
             f"type=bind,src={self.artifacts_dir},dst=/artifacts",
             "--mount",
             f"type=bind,src={private_hub},dst=/hf-cache/hub",
+            "--mount",
+            (
+                f"type=bind,src={python_profiles},dst={PREPARED_PROFILE_ROOT},"
+                "readonly"
+            ),
         ]
         if validation_dir is not None:
             mounts.extend(
@@ -704,7 +1114,10 @@ class ModelProofRunner:
             "TORCHINDUCTOR_CACHE_DIR": "/work/torch-cache",
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",
+            "PIP_NO_INDEX": "1",
             "PYTHONHASHSEED": "0",
+            "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY": "1",
+            "TRTMC_PYTHON_PROFILE_ROOT": PREPARED_PROFILE_ROOT,
             "TRTMC_MODEL_PLUGIN_STRICT": "1",
             "TRTMC_MODEL_PROOF_GPU_ID": str(self.lease.gpu_id),
             "TRTMC_MODEL_PROOF_GPU_SLOT_IDS": slots,
@@ -789,7 +1202,13 @@ class ModelProofRunner:
                 if container in remaining:
                     raise CiError(f"could not remove orphaned model-proof container {container}")
 
-    def _run_logged(self, command: list[object], path: Path) -> int:
+    def _run_logged(
+        self,
+        command: list[object],
+        path: Path,
+        *,
+        max_output_chars: int | None = None,
+    ) -> int:
         with path.open("w", encoding="utf-8") as output:
             process = subprocess.Popen(
                 [str(item) for item in command],
@@ -800,9 +1219,22 @@ class ModelProofRunner:
                 stderr=subprocess.STDOUT,
             )
             assert process.stdout is not None
-            for line in process.stdout:
-                print(line, end="")
-                output.write(line)
+            written = 0
+            while chunk := process.stdout.read(8192):
+                if max_output_chars is not None and written + len(chunk) > max_output_chars:
+                    remaining = max(0, max_output_chars - written)
+                    if remaining:
+                        print(chunk[:remaining], end="")
+                        output.write(chunk[:remaining])
+                    message = "\nERROR: subprocess output limit exceeded\n"
+                    print(message, end="")
+                    output.write(message)
+                    process.kill()
+                    process.wait()
+                    return 125
+                print(chunk, end="")
+                output.write(chunk)
+                written += len(chunk)
             return process.wait()
 
     def _record_host_error(self, error: BaseException) -> None:

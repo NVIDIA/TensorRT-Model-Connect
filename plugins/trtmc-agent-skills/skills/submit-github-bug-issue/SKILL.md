@@ -69,7 +69,7 @@ If the finding is too vague to create an actionable issue, ask for the missing
 critical detail instead of filing a weak report.
 
 For a CI-generated finding, anchor the report to the exact source commit and
-the public, sanitized `trtmc/premerge/required` status. Include a minimal public
+the public, automated `TRTMC Internal CI / Automated premerge gate` status. Include a minimal public
 reproduction whenever possible. Internal CI logs, artifacts, package details,
 runner details, and internal URLs are private evidence: do not copy them into a
 Source issue. When authorized internal evidence is needed to establish the root

@@ -840,6 +840,11 @@ class ModelProofInnerPipeline:
                 self.source,
                 "--models-file",
                 models_file,
+                *[
+                    item
+                    for name in self.selection.e2e_cases
+                    for item in ("--result-case", name)
+                ],
                 "--artifacts-dir",
                 self.artifacts / "e2e",
                 "--build-verification-report",

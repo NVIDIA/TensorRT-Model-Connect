@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e_harness.manifest_loader import load_manifest
+from tests.e2e_harness.manifest_loader import load_manifest, load_model_manifest
 from tools.validation import catalog as validation_catalog
 
 
@@ -29,7 +29,7 @@ def test_premerge_native_manifest_uses_family_build_defaults() -> None:
     assert case.metadata["reference_precision"] == "bf16"
 
 
-def test_fp16_manifest_keeps_legacy_build_contract() -> None:
+def test_fp16_manifest_keeps_fixed_native_kv_build_contract() -> None:
     manifest_path = (
         Path(__file__).with_name("manifests") / "qwen3-0.6b-fp16.json"
     )
@@ -37,6 +37,60 @@ def test_fp16_manifest_keeps_legacy_build_contract() -> None:
 
     assert case.metadata["precision"] == "fp16"
     assert case.inputs["max_cache_length"] == 256
+
+
+@pytest.mark.parametrize(
+    (
+        "manifest_name",
+        "case_name",
+        "precision",
+        "reference_precision",
+        "cache_rows",
+    ),
+    [
+        (
+            "qwen3-0.6b-regression-native-kv-chunked-prefill.json",
+            "qwen3-0.6b-bf16-native-kv-two-chunk-parity",
+            None,
+            "bf16",
+            40960,
+        ),
+        (
+            "qwen3-0.6b-fp16.json",
+            "qwen3-0.6b-fp16-native-kv-two-chunk-parity",
+            "fp16",
+            "fp32",
+            256,
+        ),
+    ],
+)
+def test_native_kv_two_chunk_cases_use_external_text_oracle(
+    manifest_name,
+    case_name,
+    precision,
+    reference_precision,
+    cache_rows,
+) -> None:
+    model = load_model_manifest(
+        Path(__file__).with_name("manifests") / manifest_name
+    )
+    case = next(case for case in model.testcases if case.name == case_name)
+
+    assert case.reference_backend == "hf_transformers"
+    assert case.oracle_level == "L1_external_reference"
+    assert case.reference_family == "chat_qwen3_posttrained"
+    assert case.user_contract == "chat_response"
+    assert case.metadata.get("precision") == precision
+    assert case.metadata["reference_precision"] == reference_precision
+    assert case.inputs["prompt"].count("Context filler.") == 24
+    assert case.metadata["expected_prefill_chunks"] == 2
+    assert case.metadata["expected_prefill_chunk_limit"] == 64
+    assert case.metadata["expected_kv_cache_rows"] == cache_rows
+    assert case.inputs["max_new_tokens"] == 2
+    assert case.metadata["contract_config"] == {
+        "use_chat_template": True,
+        "enable_thinking": False,
+    }
 
 
 def test_native_kv_regression_exceeds_one_prefill_profile() -> None:
@@ -66,8 +120,8 @@ def test_native_kv_regression_exceeds_one_prefill_profile() -> None:
     }
     assert case.inputs["expected_prompt_tokens"] == 32769
     assert case.metadata["expected_kv_cache_rows"] == 40960
-    assert case.metadata["expected_prefill_chunks"] == 2
-    assert case.metadata["expected_prefill_chunk_limit"] == 32768
+    assert case.metadata["expected_prefill_chunks"] == 513
+    assert case.metadata["expected_prefill_chunk_limit"] == 64
     assert case.inputs["max_new_tokens"] == 2
     assert case.inputs["temperature"] == 0.0
     assert case.inputs["top_k"] == 1

@@ -142,6 +142,17 @@ def test_builders_apply_default_or_overridden_workspace(
         observed.update(supplied=supplied, default_bytes=default_bytes)
         raise WorkspaceConfigured
 
+    class FakeBuilder:
+        @staticmethod
+        def create_network(_flags):
+            return object()
+
+        @staticmethod
+        def create_builder_config():
+            return object()
+
+    monkeypatch.setattr(trt, "Builder", lambda _logger: FakeBuilder())
+    monkeypatch.setattr(op, "configure_builder", lambda _config: None)
     monkeypatch.setattr(op, "configure_workspace", capture)
     kwargs = {"workspace_bytes": workspace_bytes}
     if builder is build_text_encoder_engine:
@@ -486,6 +497,8 @@ def test_native_linear_serializes_checkpoint_bf16_without_fp32_constant() -> Non
     assert plan
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 def test_native_network_contract_counts_iattention_and_fails_closed() -> None:
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)

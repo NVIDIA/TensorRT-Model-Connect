@@ -420,7 +420,8 @@ bool batched_prefill_supported(const TrtModule* prefill, const NemotronTextGenCo
 } // namespace
 
 bool NemotronTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
-                                                         std::vector<float>& logits) {
+                                                         std::vector<float>& logits,
+                                                         bool retain_device_logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
     if (!batched_prefill_supported(prefill_.get(), config_, sq, state_.get()))
         return false;
@@ -445,12 +446,22 @@ bool NemotronTextGenerationPipeline::run_prefill_batched(const std::vector<int32
         return false;
 
     const auto vocab = static_cast<std::size_t>(config_.vocab_size);
-    const auto& lt = logits_it->second;
-    if (static_cast<std::size_t>(lt.numel()) < vocab)
+    const auto& logits_tensor = logits_it->second;
+    if (static_cast<std::size_t>(logits_tensor.numel()) < vocab)
         return false;
     logits.resize(vocab);
-    const auto offset = static_cast<std::size_t>(lt.numel()) - vocab;
-    std::memcpy(logits.data(), static_cast<const float*>(lt.data) + offset, vocab * sizeof(float));
+    const auto logits_offset = static_cast<std::size_t>(logits_tensor.numel()) - vocab;
+    std::memcpy(logits.data(), static_cast<const float*>(logits_tensor.data) + logits_offset,
+                vocab * sizeof(float));
+    if (retain_device_logits) {
+        const auto* device_logits =
+            static_cast<const float*>(prefill_->device_ptr(config_.logits_output_name));
+        if (device_logits == nullptr) {
+            throw std::runtime_error(
+                "NemotronTextGenerationPipeline: prefill logits have no device buffer");
+        }
+        d_logits_ptr_ = device_logits + logits_offset;
+    }
 
     std::vector<const void*> pk, pv;
     if (!gather_prefill_kv_pointers(*prefill_, config_, pk, pv))
@@ -468,34 +479,12 @@ bool NemotronTextGenerationPipeline::run_prefill_batched(const std::vector<int32
     return true;
 }
 
-void NemotronTextGenerationPipeline::prime_decoder_after_batched_prefill(
-    const std::vector<int32_t>& input_ids) {
-    if (input_ids.empty())
-        return;
-
-    TrtModule& decoder = bind_decoder_for_step();
-    if (!decoder.cuda_graph_active())
-        return;
-
-    int32_t token_id = input_ids.back();
-    TensorMap inputs;
-    Tensor token_tensor;
-    token_tensor.data = &token_id;
-    token_tensor.shape = {1};
-    token_tensor.dtype = DType::kInt32;
-    inputs[config_.token_id_name] = token_tensor;
-
-    state_->prepare_step(inputs);
-    decoder.forward_async(inputs);
-    decoder.sync();
-}
-
 void NemotronTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                                  std::vector<float>& logits, bool gpu_sampling) {
     // Fast path: batched prefill engine writes K/V for the whole prompt in
-    // one forward and returns last-token logits on host.
-    if (!gpu_sampling && run_prefill_batched(input_ids, logits)) {
-        prime_decoder_after_batched_prefill(input_ids);
+    // one forward and exposes last-token logits on the sampler's requested
+    // host or device path.
+    if (run_prefill_batched(input_ids, logits, gpu_sampling)) {
         state_->mark_prefill_complete();
         return;
     }
@@ -959,6 +948,8 @@ int32_t NemotronTextGenerationPipeline::run_decode_loop(
                                   result.is_eos))
             break;
         if (result.is_eos)
+            break;
+        if (step + 1 >= max_new_tokens)
             break;
         if (gpu_sampling)
             run_step_device(result.token_id);

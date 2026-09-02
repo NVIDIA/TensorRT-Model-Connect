@@ -14,6 +14,7 @@ const TASK_LABELS = {
   encoder_only_nlp: 'Encoder NLP',
   image_classification: 'Image classification',
   image_feature_extraction: 'Image feature extraction',
+  monocular_geometry: 'Monocular geometry',
   neural_operator: 'Time-series / neural operator',
   omni_multimodal: 'Omni multimodal',
   prompted_segmentation: 'Prompted segmentation',
@@ -34,7 +35,7 @@ const TASK_GROUPS = {
   ],
   'image-video': [
     'diffusion_media_generation', 'image_classification', 'image_feature_extraction',
-    'segmentation', 'prompted_segmentation',
+    'monocular_geometry', 'segmentation', 'prompted_segmentation',
   ],
   'time-series': ['neural_operator', 'diffusion_text_generation'],
 };

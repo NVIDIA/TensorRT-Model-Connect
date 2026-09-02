@@ -403,16 +403,16 @@ def test_mapper_loads_all_biases_when_conv_bias_is_true(monkeypatch) -> None:
     assert weights["layer.0.conv_out_bias"].shape == (4,)
 
 
-def test_model_source_uses_only_family_local_native_graph_contract() -> None:
+def test_model_source_uses_shared_explicit_native_graph_contract() -> None:
     source = _MODEL_SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
     assert "add_kv_cache_update" in source
     assert "KVCacheMode.LINEAR" in source
-    assert "add_attention_v2" in source
-    assert "CausalMaskKind.LOWER_RIGHT" in source
-    assert "attention.key_value_lengths" in source
-    assert "attention.decomposable = False" in source
+    assert "add_attention_v2" not in source
+    assert "attention.key_value_lengths" not in source
+    assert "add_active_prefix_causal_masks" in source
+    assert "add_explicit_masked_grouped_query_attention" in source
     assert "add_rotary_embedding" in source
     assert "conv_state" in source and "present_conv" in source
     assert "16 << 30" in source

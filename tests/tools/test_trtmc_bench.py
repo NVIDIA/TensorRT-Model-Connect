@@ -26,9 +26,11 @@ from tensorrt_model_connect.benchmark.catalog import (
 from tensorrt_model_connect.benchmark.cli import main
 from tensorrt_model_connect.benchmark.metrics import reduce_metrics
 from tensorrt_model_connect.benchmark.operations import registered_operations
+from tensorrt_model_connect.benchmark.service import BenchmarkService
 from tensorrt_model_connect.benchmark.task_adapters import registered_task_adapters
 from tensorrt_model_connect.benchmark.types import BenchmarkError
 from tensorrt_model_connect.benchmark.worker import worker_backend_abi, worker_metadata
+from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
 
 
 pytestmark = pytest.mark.unit
@@ -163,12 +165,30 @@ def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: P
         "flux-schnell-l0": ("generate_image", 1, 5),
         "chronos-bolt-tiny-official": ("solve", 50, 500),
         "nemotron-embed-vl-1b-v2": ("embed", 50, 500),
+        "whisper-small-fp16": ("transcribe", 1, 10),
         "whisper-tiny-fp16": ("transcribe", 1, 10),
         "fast-foundation-stereo": ("disparity", 3, 100),
     }
     for model_name, expected in expectations.items():
         case = resolve_case(catalog.resolve(model_name), _bundle(tmp_path, model_name))
         assert (case.operation, case.measurement.warmup, case.measurement.iterations) == expected
+
+
+def test_stereo_benchmark_uses_the_repo_owned_office_pair(tmp_path: Path) -> None:
+    model = ManifestCatalog().resolve("fast-foundation-stereo")
+    case = resolve_case(model, _bundle(tmp_path, model.name))
+
+    assert case.request == {
+        "batch_size": 1,
+        "height": 700,
+        "width": 700,
+        "max_disp": 192,
+        "valid_iters": 8,
+        "left_image_path": "data/office_left.png",
+        "right_image_path": "data/office_right.png",
+        "left_image_sha256": "73cc585a0e38493a5588137fea302b8472f63e76443759bd8ba0a19ce8be76a6",
+        "right_image_sha256": "6c56733d64567e198fa75375ab7042bd26a8aa1fdd8f8fb4908186ca7f2f51c5",
+    }
 
 
 def test_benchmark_uses_qualified_minitron_width_precision(tmp_path: Path) -> None:
@@ -820,6 +840,86 @@ def test_builder_source_digest_participates_in_bundle_cache_identity(
     assert first.cache_key != second.cache_key
 
 
+def test_source_revision_participates_in_bundle_cache_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = ManifestCatalog().resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "pending.bundle")
+    builder = BundleBuilder(tmp_path / "cache")
+
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "a" * 40)
+    first = builder._plan(model, (case,))
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "b" * 40)
+    second = builder._plan(model, (case,))
+
+    assert first.cache_key != second.cache_key
+
+
+def test_external_bundle_must_match_requested_source_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revision = "a" * 40
+    bundle = tmp_path / "external.bundle"
+    write_bundle(
+        bundle,
+        BundleInfo(),
+        [BundleSection("config.json", json.dumps({"source_revision": "b" * 40}).encode())],
+    )
+    model = ManifestCatalog().resolve("distilgpt2")
+    case = resolve_case(model, bundle)
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", revision)
+
+    with pytest.raises(BenchmarkError, match="source revision"):
+        BundleBuilder(tmp_path / "cache").prepare(
+            (case,), allow_build=False, rebuild=False, dry_run=False
+        )
+
+
+def test_prepare_only_builds_bundle_without_starting_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    revision = "a" * 40
+    worker = _worker(tmp_path)
+    cache = tmp_path / "cache"
+
+    def fake_build(command, _environment, _timeout_s):
+        output = Path(command[command.index("-o") + 1])
+        write_bundle(
+            output,
+            BundleInfo(),
+            [BundleSection("config.json", json.dumps({"source_revision": revision}).encode())],
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", revision)
+    monkeypatch.setenv("TRTMC_BENCH_BUILD_PLATFORM", "test-sm80")
+    monkeypatch.setattr(BundleBuilder, "_execute", staticmethod(fake_build))
+    monkeypatch.setattr(
+        BenchmarkService,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("measurement must not start"),
+    )
+
+    assert (
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle-cache",
+                str(cache),
+                "--worker",
+                str(worker),
+                "--prepare-only",
+            ]
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["bundles"][0]["status"] == "built"
+    assert receipt["bundles"][0]["source_revision"] == revision
+
+
 def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
     metrics = reduce_metrics(
         "generate_image",
@@ -880,6 +980,19 @@ def test_sana_runtime_config_resolves_manifest_assets_for_native_worker(tmp_path
     assert case.runtime["config"]["sana_wm.image_path"] == "assets/demo_0.png"
     worker_config = case.worker_request()["runtime"]["config"]
     assert Path(worker_config["sana_wm.image_path"]).is_file()
+
+
+def test_gpu_greedy_override_reaches_native_runtime_config(tmp_path: Path) -> None:
+    case = resolve_case(
+        ManifestCatalog().resolve("nemotron-mini-4b"),
+        tmp_path / "pending.bundle",
+        overrides={"runtime.prefer_gpu_greedy": True},
+    )
+
+    assert case.runtime["prefer_gpu_greedy"] is True
+    assert case.worker_request()["runtime"]["config"] == {
+        "runtime.prefer_gpu_greedy": True
+    }
 
 
 def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: Path) -> None:

@@ -600,6 +600,7 @@ class TestManifestValidation:
             "golden_snapshot_path",
             "edit_condition_image",
             "fp8_scales",
+            "benchmark_assets",
         }
         global_refs = []
         missing_assets = []

@@ -6,6 +6,10 @@
   "family": "fast_foundation_stereo",
   "runtime_strategy": "fast_foundation_stereo_disparity",
   "task_strategy": "stereo_disparity",
+  "benchmark_assets": [
+    "data/office_left.png",
+    "data/office_right.png"
+  ],
   "precision": "fp16",
   "e2e_parallel_resource": "exclusive_gpu",
   "testcases": [

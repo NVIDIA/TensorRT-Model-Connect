@@ -138,6 +138,9 @@ them without compiling an engine:
   --snapshot "$WORK/decode.graph.json" \
   "${BUILD_ARGS[@]}"
 
+"$TRTMC" graph list "$WORK/decode.graph.json" \
+  > "$WORK/decode.nodes.txt"
+
 "$TRTMC" graph recipes "$WORK/decode.graph.json" \
   | tee "$WORK/decode.recipes.txt"
 ```
@@ -146,11 +149,11 @@ For the pinned Qwen3-8B revision, the output includes:
 
 ```text
 RECIPE                               INSTANCE                           NODES
-qwen.decode_attention_region@2       decoder.layers.0.decode_attention  node:83,node:84
-...
-qwen.decode_attention_region@2       decoder.layers.35.decode_attention node:3548,node:3549
-qwen.decode_logits_copy@1            decoder.logits_zero_bias           node:3598,node:3599,node:3600
+qwen.decode_logits_copy@1            decoder.logits_zero_bias           node:<id>,node:<id>,node:<id>
 ```
+
+Exact node IDs are graph-fingerprint-specific; use the IDs printed by your
+snapshot.
 
 Recipe IDs are versioned. Instances are explicit because a model may contain
 many copies of the same pattern. The command never silently chooses the first
@@ -306,109 +309,23 @@ PY
 The 2% margin covers ordinary measurement noise; it is not permission to
 accept a known regression. Repeat an edge result on an idle GPU.
 
-### 5. Apply the same Recipe flow to attention
+### 5. Attention regions use manual selection
 
-Qwen also records one decode-attention Recipe per layer:
+Fixed-KV decoder attention no longer publishes the former Qwen or Llama
+attention Recipes. Those Recipe ABIs exposed
+`IAttention.key_value_lengths`, the same TensorRT contract that can expose an
+inactive cache suffix or reject FP16 graphs on some targets. Current bundles
+construct a BOOL active-prefix causal mask and express attention with primitive
+matrix, select, and softmax operations instead.
 
-```bash
-"$TRTMC" build "${BUILD_ARGS[@]}" \
-  --recipe qwen.decode_attention_region@2 \
-           decoder.layers.0.decode_attention \
-  -o "$WORK/qwen3-attention-slot.bundle"
-```
-
-For Qwen3-8B layer 0, the printed boundary in
-`qwen3-attention-slot.selection.json` defines this ordered contract:
-
-```text
-input[0]  scaled query       BF16  [1, 32, -1, 128]
-input[1]  key cache          BF16  [1, 8, 40960, 128]
-input[2]  value cache        BF16  [1, 8, 40960, 128]
-input[3]  key/value lengths  INT32 [1]
-output[0] context            BF16  [1, 32, -1, 128]
-```
-
-The Qwen builder applies the model's query scale and BF16 rounding before the
-selected region. The external kernel therefore consumes the already-scaled
-query and uses a softmax scale of `1.0`.
-
-Export any CUDA DSL, FlashInfer, or custom CUDA kernel through TVM-FFI with
-that exact ABI and then reuse the slot-ready build and load-time binding steps.
-No Model Connect change is required for another DSO with this contract.
-
-The Qwen family contains a small FlashInfer linear-KV POC for this exact
-Recipe boundary. Building the DSO is kernel-integrator work; an ordinary model
-user can receive the resulting `.so` and start at the binding command below.
-
-:::warning SM 10.3 proof of concept
-The supplied FlashInfer exporter currently refuses GPUs whose CUDA compute
-capability is not exactly SM 10.3. It is an integration example for that target,
-not a portable prebuilt kernel.
-:::
-
-FlashInfer 0.6.15 currently needs a small optional device-length patch because
-Model Connect keeps a fixed-capacity KV tensor and passes its active length as
-an `int32[1]` CUDA tensor:
-
-```bash
-python -m pip install \
-  "nvidia-cutlass-dsl==4.5.0" \
-  "apache-tvm-ffi==0.1.12" \
-  "flashinfer-python==0.6.15"
-
-git clone --branch v0.6.15 --depth 1 \
-  https://github.com/flashinfer-ai/flashinfer.git \
-  "$WORK/flashinfer-v0.6.15"
-
-git -C "$WORK/flashinfer-v0.6.15" apply \
-  "$PWD/python/tensorrt_model_connect/families/qwen/kernels/flashinfer_device_kv_length.patch"
-
-PYTHONPATH="$WORK/flashinfer-v0.6.15:$PWD/python" \
-  python python/tensorrt_model_connect/families/qwen/kernels/export_flashinfer_decode_attention.py \
-  --output "$WORK/qwen3-flashinfer-linear.so"
-```
-
-Bind that DSO to the attention Recipe when constructing a pipeline:
-
-```bash
-export ATTENTION_BINDING_ID=qwen.decode_attention_region@2
-export ATTENTION_ABI_SHA256="$(
-  python -c 'import json,sys; print(json.load(open(sys.argv[1]))["abi_sha256"])' \
-    "$WORK/qwen3-attention-slot.selection.json"
-)"
-
-cat > "$WORK/attention-kernel-bindings.json" <<EOF
-{
-  "schema_version": 1,
-  "bindings": [
-    {
-      "id": "$ATTENTION_BINDING_ID",
-      "abi_sha256": "$ATTENTION_ABI_SHA256",
-      "library": "./qwen3-flashinfer-linear.so",
-      "function": "run"
-    }
-  ]
-}
-EOF
-
-"$TRTMC" run "$WORK/qwen3-attention-slot.bundle" \
-  --kernel-bindings "$WORK/attention-kernel-bindings.json" \
-  --prompt "Explain grouped-query attention in one sentence." \
-  --max-new-tokens 32 \
-  --greedy
-```
-
-The DSO is external to the bundle. To try another implementation of the same
-ABI, point a new binding manifest at it and construct a new pipeline; the
-slot-ready bundle does not change.
-
-This FlashInfer exporter is an integration POC for the documented boundary,
-not a generally qualified built-in kernel. Before shipping a kernel, run the
-same deterministic output and native-versus-external performance checks shown
-above on every model shape and GPU you support. Successfully loading a DSO
-proves only that the binding manifest matched and its named function resolved;
-it does not prove that the function implements the ABI, model accuracy, or a
-performance improvement.
+Derive a replacement attention kernel's ABI from a current graph snapshot; do
+not reuse an old `qwen.decode_attention_region@2` or
+`llama.decode_attention_region@1` selection receipt. Step 6 includes an
+attention-specific selection after snapshot capture. Its separate logits-copy
+example demonstrates the general mechanism only; it is not an attention
+receipt. The historical Qwen FlashInfer exporter is retained as reference code,
+but its `int32` length input is incompatible with the current explicit-mask
+graph.
 
 ## Level 2: choose an arbitrary region yourself
 
@@ -417,17 +334,63 @@ The build and runtime mechanisms stay identical; only selection changes.
 
 ### 6. Inspect and circle raw TRT nodes
 
-Capture the raw decode graph, then list its final layers:
+Capture the raw decode graph:
 
 ```bash
 "$TRTMC" graph inspect \
   --engine-role decode \
   --snapshot "$WORK/decode.graph.json" \
   "${BUILD_ARGS[@]}"
+```
+
+#### Select the current primitive attention core
+
+Save the complete node listing for boundary tracing and the later logits
+example, then display the named layer-0 attention nodes:
+
+```bash
+"$TRTMC" graph list "$WORK/decode.graph.json" \
+  | tee "$WORK/decode.nodes.txt"
 
 "$TRTMC" graph list "$WORK/decode.graph.json" \
-  | tee "$WORK/decode.nodes.txt" \
-  | tail -n 10
+  --match "*layer.0.attn*" \
+  | tee "$WORK/decode.attention.nodes.txt"
+```
+
+`--match` is discovery-only. The explicit attention core also contains unnamed
+reshape, cast, select, and scale nodes, so follow tensor edges in the complete
+listing before selecting it. For the pinned Qwen3-8B build used in this
+tutorial, the connected, convex core is this receipt:
+
+```bash
+ATTENTION_NODES=(
+  node:99 node:100 node:101 node:102 node:103
+  node:104 node:105 node:106 node:107 node:108
+  node:109 node:110 node:111 node:112 node:113
+  node:114 node:115 node:116 node:117 node:118
+)
+
+"$TRTMC" graph select "$WORK/decode.graph.json" \
+  --nodes "${ATTENTION_NODES[@]}" \
+  --binding-id qwen3.decode.attention.layer0.manual@1 \
+  --workspace-bytes 0 \
+  --output-shape-like-input 0 \
+  -o "$WORK/attention.selection.json"
+```
+
+Copy node IDs from your own snapshot because any graph change can renumber
+them. This boundary has five inputs: query, present K, present V, the causal
+mask, and the active-prefix mask. Its output is the attention context. The
+identity-copy DSO used later in this tutorial does not implement that ABI; an
+attention replacement must provide a matching five-input kernel.
+
+#### Select the logits-copy example
+
+The remaining example selects final logits to demonstrate the same manual
+selection and binding mechanics with the supplied identity-copy DSO:
+
+```bash
+tail -n 10 "$WORK/decode.nodes.txt"
 ```
 
 For the pinned revision, the tail includes:

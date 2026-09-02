@@ -5,497 +5,167 @@
 
 #include "utils/json_helpers.h"
 
-#include <cctype>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <stdexcept>
-#include <string>
+#include <nlohmann/json.hpp>
 
 namespace trtmc {
+
 namespace {
 
-enum class ArrayParseState { kReady, kEnd };
-
-bool is_digit_char(char c) {
-    return std::isdigit(static_cast<unsigned char>(c)) != 0;
-}
-
-bool is_space_char(char c) {
-    return std::isspace(static_cast<unsigned char>(c)) != 0;
-}
-
-bool is_space_or_comma(char c) {
-    if (c == ',') {
-        return true;
+nlohmann::json parse_json_prefix(const std::string& text) {
+    if (text.empty()) {
+        return nlohmann::json::object();
     }
-    return is_space_char(c);
-}
-
-bool is_int_char(char c) {
-    if (is_digit_char(c)) {
-        return true;
+    auto it = text.begin();
+    nlohmann::json j = nlohmann::json::parse(it, text.end(), nullptr, false, true);
+    if (j.is_discarded() || !j.is_object()) {
+        return nlohmann::json::object();
     }
-    return c == '-';
-}
-
-bool is_float_char(char c) {
-    if (is_digit_char(c)) {
-        return true;
-    }
-    return c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E';
-}
-
-std::size_t skip_whitespace(const std::string& text, std::size_t pos) {
-    while (pos < text.size() && is_space_char(text[pos])) {
-        ++pos;
-    }
-    return pos;
-}
-
-std::size_t skip_space_or_commas(const std::string& text, std::size_t pos) {
-    while (pos < text.size() && is_space_or_comma(text[pos])) {
-        ++pos;
-    }
-    return pos;
-}
-
-bool find_key_colon(const std::string& text, const std::string& key, std::size_t& colon) {
-    const std::string needle = "\"" + key + "\"";
-    const std::size_t key_pos = text.find(needle);
-    if (key_pos == std::string::npos) {
-        return false;
-    }
-
-    colon = text.find(':', key_pos);
-    return colon != std::string::npos;
-}
-
-bool find_array_start(const std::string& text, std::size_t colon, std::size_t& open_bracket) {
-    open_bracket = skip_whitespace(text, colon + 1);
-    return open_bracket < text.size() && text[open_bracket] == '[';
-}
-
-std::size_t scan_while(const std::string& text, std::size_t pos, bool (*is_allowed)(char)) {
-    std::size_t end = pos;
-    while (end < text.size() && is_allowed(text[end])) {
-        ++end;
-    }
-    return end;
-}
-
-ArrayParseState advance_array_pos(const std::string& text, std::size_t& pos) {
-    pos = skip_space_or_commas(text, pos);
-    if (pos >= text.size()) {
-        return ArrayParseState::kEnd;
-    }
-    if (text[pos] == ']') {
-        return ArrayParseState::kEnd;
-    }
-    return ArrayParseState::kReady;
-}
-
-int hex_digit_value(char c) {
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    return -1;
-}
-
-bool parse_hex_quad(const std::string& text, std::size_t pos, uint32_t& value) {
-    if (pos + 4 > text.size())
-        return false;
-    value = 0;
-    for (std::size_t i = 0; i < 4; ++i) {
-        const int digit = hex_digit_value(text[pos + i]);
-        if (digit < 0)
-            return false;
-        value = (value << 4U) | static_cast<uint32_t>(digit);
-    }
-    return true;
-}
-
-bool append_utf8(uint32_t codepoint, std::string& out) {
-    if (codepoint <= 0x7FU) {
-        out.push_back(static_cast<char>(codepoint));
-    } else if (codepoint <= 0x7FFU) {
-        out.push_back(static_cast<char>(0xC0U | (codepoint >> 6U)));
-        out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
-    } else if (codepoint <= 0xFFFFU) {
-        if (codepoint >= 0xD800U && codepoint <= 0xDFFFU)
-            return false;
-        out.push_back(static_cast<char>(0xE0U | (codepoint >> 12U)));
-        out.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
-        out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
-    } else if (codepoint <= 0x10FFFFU) {
-        out.push_back(static_cast<char>(0xF0U | (codepoint >> 18U)));
-        out.push_back(static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3FU)));
-        out.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
-        out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
-    } else {
-        return false;
-    }
-    return true;
-}
-
-bool append_simple_escape(char escaped, std::string& out) {
-    constexpr std::string_view escape_codes = "\"\\/bfnrt";
-    constexpr std::string_view escape_values = "\"\\/\b\f\n\r\t";
-    const auto index = escape_codes.find(escaped);
-    if (index == std::string_view::npos)
-        return false;
-    out.push_back(escape_values[index]);
-    return true;
-}
-
-bool append_unicode_escape(const std::string& text, std::size_t& pos, std::string& out) {
-    uint32_t codepoint = 0;
-    if (!parse_hex_quad(text, pos, codepoint))
-        return false;
-    pos += 4;
-    if (codepoint < 0xD800U || codepoint > 0xDBFFU)
-        return append_utf8(codepoint, out);
-    if (pos + 6 > text.size() || text[pos] != '\\' || text[pos + 1] != 'u')
-        return false;
-    uint32_t low = 0;
-    if (!parse_hex_quad(text, pos + 2, low) || low < 0xDC00U || low > 0xDFFFU)
-        return false;
-    pos += 6;
-    codepoint = 0x10000U + ((codepoint - 0xD800U) << 10U) + (low - 0xDC00U);
-    return append_utf8(codepoint, out);
-}
-
-bool append_escape(const std::string& text, std::size_t& pos, std::string& out) {
-    if (pos >= text.size())
-        return false;
-    const char escaped = text[pos++];
-    return escaped == 'u' ? append_unicode_escape(text, pos, out)
-                          : append_simple_escape(escaped, out);
-}
-
-bool read_quoted_token(const std::string& text, std::size_t& pos, std::string& out) {
-    if (pos >= text.size() || text[pos] != '"') {
-        return false;
-    }
-
-    out.clear();
-    ++pos;
-    while (pos < text.size()) {
-        const char c = text[pos++];
-        if (c == '"')
-            return !out.empty();
-        if (static_cast<unsigned char>(c) < 0x20U)
-            return false;
-        if (c != '\\') {
-            out.push_back(c);
-            continue;
-        }
-        if (!append_escape(text, pos, out))
-            return false;
-    }
-    return false;
-}
-
-template <typename T, typename Parser>
-std::vector<T> extract_numeric_array_impl(const std::string& text, const std::string& key,
-                                          std::size_t max_count, bool (*is_allowed)(char),
-                                          Parser parse) {
-    std::size_t colon = 0;
-    if (!find_key_colon(text, key, colon)) {
-        return {};
-    }
-
-    std::size_t open_bracket = 0;
-    if (!find_array_start(text, colon, open_bracket)) {
-        return {};
-    }
-
-    std::vector<T> out;
-    std::size_t pos = open_bracket + 1;
-    while (pos < text.size() && out.size() < max_count) {
-        if (advance_array_pos(text, pos) != ArrayParseState::kReady) {
-            break;
-        }
-
-        const std::size_t end = scan_while(text, pos, is_allowed);
-        if (end == pos) {
-            break;
-        }
-
-        if (!parse(text.substr(pos, end - pos), out)) {
-            break;
-        }
-        pos = end;
-    }
-
-    return out;
+    return j;
 }
 
 } // namespace
 
 std::string extract_json_string(const std::string& text, const std::string& key,
                                 const std::string& fallback) {
-    std::size_t colon = 0;
-    if (!find_key_colon(text, key, colon)) {
-        return fallback;
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    if (it != j.end() && it->is_string()) {
+        return it->get<std::string>();
     }
-
-    const std::size_t first_quote = text.find('"', colon + 1);
-    if (first_quote == std::string::npos) {
-        return fallback;
-    }
-
-    std::size_t pos = first_quote;
-    std::string parsed;
-    if (!read_quoted_token(text, pos, parsed)) {
-        return fallback;
-    }
-    return parsed;
-}
-
-std::vector<std::string> extract_json_string_array(const std::string& text,
-                                                   const std::string& key) {
-    std::size_t colon = 0;
-    if (!find_key_colon(text, key, colon)) {
-        return {};
-    }
-
-    std::size_t open_bracket = 0;
-    if (!find_array_start(text, colon, open_bracket)) {
-        return {};
-    }
-
-    std::vector<std::string> out;
-    std::size_t pos = open_bracket + 1;
-    while (pos < text.size()) {
-        if (advance_array_pos(text, pos) != ArrayParseState::kReady) {
-            break;
-        }
-
-        std::string parsed;
-        if (!read_quoted_token(text, pos, parsed)) {
-            break;
-        }
-        out.push_back(parsed);
-    }
-
-    return out;
+    return fallback;
 }
 
 int32_t extract_json_int(const std::string& text, const std::string& key, int32_t fallback) {
-    std::size_t colon = 0;
-    if (!find_key_colon(text, key, colon)) {
-        return fallback;
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    if (it != j.end()) {
+        if (it->is_number_integer() || it->is_number_unsigned()) {
+            return it->get<int32_t>();
+        } else if (it->is_number_float()) {
+            return static_cast<int32_t>(it->get<double>());
+        }
     }
-
-    const std::size_t pos = skip_whitespace(text, colon + 1);
-    const std::size_t end = scan_while(text, pos, is_int_char);
-
-    if (end == pos) {
-        return fallback;
-    }
-
-    return static_cast<int32_t>(std::stoi(text.substr(pos, end - pos)));
+    return fallback;
 }
 
 int32_t extract_json_int_or_first_array(const std::string& text, const std::string& key,
                                         int32_t fallback) {
-    std::size_t colon = 0;
-    if (!find_key_colon(text, key, colon)) {
-        return fallback;
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    if (it != j.end()) {
+        if (it->is_number()) {
+            return it->is_number_float() ? static_cast<int32_t>(it->get<double>())
+                                         : it->get<int32_t>();
+        } else if (it->is_array() && !it->empty()) {
+            auto first = it->at(0);
+            if (first.is_number()) {
+                return first.is_number_float() ? static_cast<int32_t>(first.get<double>())
+                                               : first.get<int32_t>();
+            }
+        }
     }
-
-    std::size_t pos = skip_whitespace(text, colon + 1);
-
-    if (pos < text.size() && text[pos] == '[') {
-        pos = skip_whitespace(text, pos + 1);
-    }
-
-    const std::size_t end = scan_while(text, pos, is_int_char);
-
-    if (end == pos) {
-        return fallback;
-    }
-
-    return static_cast<int32_t>(std::stoi(text.substr(pos, end - pos)));
+    return fallback;
 }
 
 float extract_json_float(const std::string& text, const std::string& key, float fallback) {
-    std::size_t colon = 0;
-    if (!find_key_colon(text, key, colon)) {
-        return fallback;
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    if (it != j.end() && it->is_number()) {
+        return it->get<float>();
     }
-
-    const std::size_t pos = skip_whitespace(text, colon + 1);
-    const std::size_t end = scan_while(text, pos, is_float_char);
-
-    if (end == pos) {
-        return fallback;
-    }
-
-    try {
-        return std::stof(text.substr(pos, end - pos));
-    } catch (const std::exception&) {
-        return fallback;
-    }
-}
-
-std::vector<float> extract_json_float_array(const std::string& text, const std::string& key,
-                                            std::size_t max_count) {
-    auto parse_float = [](const std::string& token, std::vector<float>& out) {
-        try {
-            out.push_back(std::stof(token));
-            return true;
-        } catch (const std::exception&) {
-            return false;
-        }
-    };
-    return extract_numeric_array_impl<float>(text, key, max_count, is_float_char, parse_float);
+    return fallback;
 }
 
 std::vector<int32_t> extract_json_int_array(const std::string& text, const std::string& key,
                                             std::size_t max_count) {
-    auto parse_int = [](const std::string& token, std::vector<int32_t>& out) {
-        try {
-            out.push_back(static_cast<int32_t>(std::stoi(token)));
-            return true;
-        } catch (const std::exception&) {
-            return false;
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    std::vector<int32_t> out;
+    if (it != j.end() && it->is_array()) {
+        for (const auto& elem : *it) {
+            if (out.size() >= max_count)
+                break;
+            if (elem.is_number()) {
+                out.push_back(elem.is_number_float() ? static_cast<int32_t>(elem.get<double>())
+                                                     : elem.get<int32_t>());
+            } else {
+                break;
+            }
         }
-    };
-    return extract_numeric_array_impl<int32_t>(text, key, max_count, is_int_char, parse_int);
-}
-
-namespace {
-
-// Match either JSON literal `true`/`false` or numeric 0/1 at `pos`. Returns
-// {parsed_value, end_index} on success; `end == pos` on failure.
-struct BoolMatch {
-    bool value;
-    std::size_t end;
-    bool ok;
-};
-
-BoolMatch read_bool_token(const std::string& text, std::size_t pos) {
-    BoolMatch m{false, pos, false};
-    if (pos >= text.size()) {
-        return m;
-    }
-    if (text.compare(pos, 4, "true") == 0) {
-        m.value = true;
-        m.end = pos + 4;
-        m.ok = true;
-        return m;
-    }
-    if (text.compare(pos, 5, "false") == 0) {
-        m.value = false;
-        m.end = pos + 5;
-        m.ok = true;
-        return m;
-    }
-    if (is_digit_char(text[pos])) {
-        const std::size_t end = scan_while(text, pos, is_digit_char);
-        try {
-            const int v = std::stoi(text.substr(pos, end - pos));
-            m.value = (v != 0);
-            m.end = end;
-            m.ok = true;
-        } catch (const std::exception&) {
-            // fall through
-        }
-    }
-    return m;
-}
-
-} // namespace
-
-bool extract_json_bool(const std::string& text, const std::string& key, bool fallback) {
-    std::size_t colon = 0;
-    if (!find_key_colon(text, key, colon)) {
-        return fallback;
-    }
-    const std::size_t pos = skip_whitespace(text, colon + 1);
-    const BoolMatch m = read_bool_token(text, pos);
-    if (!m.ok) {
-        return fallback;
-    }
-    return m.value;
-}
-
-std::vector<bool> extract_json_bool_array(const std::string& text, const std::string& key,
-                                          std::size_t max_count) {
-    std::vector<bool> out;
-    std::size_t colon = 0;
-    if (!find_key_colon(text, key, colon)) {
-        return out;
-    }
-    std::size_t open_bracket = 0;
-    if (!find_array_start(text, colon, open_bracket)) {
-        return out;
-    }
-    std::size_t pos = open_bracket + 1;
-    while (pos < text.size() && out.size() < max_count) {
-        if (advance_array_pos(text, pos) != ArrayParseState::kReady) {
-            break;
-        }
-        const BoolMatch m = read_bool_token(text, pos);
-        if (!m.ok) {
-            break;
-        }
-        out.push_back(m.value);
-        pos = m.end;
     }
     return out;
 }
 
-namespace {
-// Updates in_string / escape based on c. Returns true if c is inside a string
-// (or a quote that toggled string state) and should be ignored by the
-// brace-depth tracker.
-bool inside_string_state(char c, bool& in_string, bool& escape) {
-    if (in_string) {
-        if (escape) {
-            escape = false;
-        } else if (c == '\\') {
-            escape = true;
-        } else if (c == '"') {
-            in_string = false;
+std::vector<std::string> extract_json_string_array(const std::string& text, const std::string& key,
+                                                   std::size_t max_count) {
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    std::vector<std::string> out;
+    if (it != j.end() && it->is_array()) {
+        for (const auto& elem : *it) {
+            if (out.size() >= max_count)
+                break;
+            if (elem.is_string()) {
+                out.push_back(elem.get<std::string>());
+            } else {
+                break;
+            }
         }
-        return true;
     }
-    if (c == '"') {
-        in_string = true;
-        return true;
-    }
-    return false;
+    return out;
 }
-} // namespace
+std::vector<float> extract_json_float_array(const std::string& text, const std::string& key,
+                                            std::size_t max_count) {
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    std::vector<float> out;
+    if (it != j.end() && it->is_array()) {
+        for (const auto& elem : *it) {
+            if (out.size() >= max_count)
+                break;
+            if (elem.is_number()) {
+                out.push_back(elem.get<float>());
+            } else {
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+bool extract_json_bool(const std::string& text, const std::string& key, bool fallback) {
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    if (it != j.end() && it->is_boolean()) {
+        return it->get<bool>();
+    }
+    return fallback;
+}
+
+std::vector<bool> extract_json_bool_array(const std::string& text, const std::string& key,
+                                          std::size_t max_count) {
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    std::vector<bool> out;
+    if (it != j.end() && it->is_array()) {
+        for (const auto& elem : *it) {
+            if (out.size() >= max_count)
+                break;
+            if (elem.is_boolean()) {
+                out.push_back(elem.get<bool>());
+            } else {
+                break;
+            }
+        }
+    }
+    return out;
+}
 
 std::string extract_json_object_text(const std::string& text, const std::string& key) {
-    std::size_t colon = 0;
-    if (!find_key_colon(text, key, colon)) {
-        return "";
-    }
-    const std::size_t brace = text.find('{', colon + 1);
-    if (brace == std::string::npos) {
-        return "";
-    }
-    int depth = 0;
-    bool in_string = false;
-    bool escape = false;
-    for (std::size_t i = brace; i < text.size(); ++i) {
-        const char c = text[i];
-        if (inside_string_state(c, in_string, escape)) {
-            continue;
-        }
-        if (c == '{') {
-            ++depth;
-        } else if (c == '}' && --depth == 0) {
-            return text.substr(brace, i - brace + 1);
-        }
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    if (it != j.end() && it->is_object()) {
+        return it->dump();
     }
     return "";
 }

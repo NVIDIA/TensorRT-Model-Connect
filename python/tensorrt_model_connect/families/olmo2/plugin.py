@@ -41,8 +41,12 @@ from ...parallel_config import (
 )
 
 
+_BUILDER_WORKSPACE_BYTES = 256 << 20
+
+
 class Olmo2Plugin:
     name = "olmo2"
+    staged_bundle_sections = ("engine_plan", "prefill_engine_plan")
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "olmo2"
@@ -172,6 +176,7 @@ class Olmo2Plugin:
                 max_cache_length,
                 precision=precision,
                 verbose=verbose,
+                workspace_bytes=_BUILDER_WORKSPACE_BYTES,
             )
 
         import sys
@@ -204,6 +209,8 @@ class Olmo2Plugin:
         network = builder.create_network(
             1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.set_memory_pool_limit(
+            trt.MemoryPoolType.WORKSPACE, _BUILDER_WORKSPACE_BYTES)
         trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # Inputs

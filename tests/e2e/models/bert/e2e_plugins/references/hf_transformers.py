@@ -116,7 +116,7 @@ def _decode_vl_generated_text(
     return ""
 
 
-def _resolve_cached_model_ref(hf_id: str) -> str:
+def _resolve_cached_model_ref(hf_id: str, revision: str | None = None) -> str:
     """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
     if not hf_id:
         return hf_id
@@ -127,7 +127,7 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     try:
         from huggingface_hub import snapshot_download
 
-        return snapshot_download(hf_id, local_files_only=True)
+        return snapshot_download(hf_id, revision=revision, local_files_only=True)
     except Exception:
         return hf_id
 
@@ -567,7 +567,8 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "What is machine learning?")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        revision = case.hf_revision or None
+        model_ref = _resolve_cached_model_ref(hf_id, revision=revision)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -576,14 +577,15 @@ class HfTransformersReference:
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
+            revision = {revision!r}
             prompt = {prompt!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
 
             tokenizer = AutoTokenizer.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code)
+                model_ref, revision=revision, trust_remote_code=trust_remote_code)
             model = AutoModel.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code,
+                model_ref, revision=revision, trust_remote_code=trust_remote_code,
                 torch_dtype={torch_dtype_expr})
             model.eval()
 
@@ -622,6 +624,7 @@ class HfTransformersReference:
             stage_name=stage.name,
             env=_reference_env(ctx),
             output_readers=(_json_output_reader(output_path),),
+            metadata={"hf_id": hf_id, "hf_revision": revision or ""},
             failure_label="HF embedding ref",
         )
 

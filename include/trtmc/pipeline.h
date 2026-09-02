@@ -354,6 +354,23 @@ enum class SpeechSessionEventKind {
     // worker, including its configured bounded response tail. This is input
     // lifecycle completion, not necessarily an agent-turn completion.
     kInputFinished,
+    // The first recognized speech token for a new user utterance and the
+    // model-owned end-of-utterance decision, respectively. User transcript
+    // deltas between these markers belong to the same utterance.
+    kUserSpeechStarted,
+    kUserSpeechStopped,
+    // A complete model function-channel request. text contains one JSON object
+    // with call_id, name, and arguments. Tool-capable sessions correlate a
+    // response with this event's epoch and call_id.
+    kFunctionCall,
+    // Function-channel boundary markers. kFunctionCallStarted corresponds to
+    // SOTC; kFunctionCall is emitted at EOTC with the complete request; and
+    // kFunctionResponseFinished corresponds to EOTR after result injection.
+    kFunctionCallStarted,
+    kFunctionResponseFinished,
+    // The asynchronous clear_pending_input() rollback has completed. Audio
+    // appended after the clear request is processed only after this marker.
+    kInputCleared,
 };
 
 struct SpeechSessionEvent {
@@ -394,10 +411,10 @@ struct SpeechSessionConfig {
     bool emit_agent_text{true};
     bool emit_user_transcript{true};
 
-    // Live sessions detect non-silent user audio while the agent is speaking
-    // and invalidate queued agent output. Offline convenience paths can
-    // disable this when a complete recording is pushed in one append rather
-    // than arriving in real time.
+    // Live sessions use their model-owned streaming speech detector while the
+    // agent is speaking and invalidate queued agent output after speech is
+    // confirmed. Offline convenience paths can disable this when a complete
+    // recording is pushed faster than real time.
     bool enable_barge_in{true};
 
     // Native stochastic TTS refinement is deterministic for a given seed.

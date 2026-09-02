@@ -53,16 +53,22 @@ def _target_tensorrt_version(
     return version
 
 
-def _package_variant_version(repository: Path, tensorrt_version: str) -> str:
-    from tensorrt_model_connect import trt_compat
+def _tensorrt_abi(version: str) -> str:
+    """Return an exact package target's major.minor ABI without importing the package."""
+    if not EXACT_TENSORRT_VERSION.fullmatch(version):
+        raise CiError(f"TensorRT ABI requires an exact four-part version, got {version!r}")
+    major, minor, *_ = version.split(".")
+    return f"{major}.{minor}"
 
+
+def _package_variant_version(repository: Path, tensorrt_version: str) -> str:
     with (repository / "pyproject.toml").open("rb") as stream:
         pyproject = tomllib.load(stream)
     package = pyproject["tool"]["tensorrt-model-connect"]["package"]
     base_version = str(package["base-version"])
     if "+" in base_version:
         raise CiError("base package version must not contain a local version segment")
-    abi = trt_compat.tensorrt_abi(tensorrt_version)
+    abi = _tensorrt_abi(tensorrt_version)
     return f"{base_version}+trt{abi.replace('.', '')}"
 
 
@@ -127,9 +133,7 @@ def _validate_backend_files(
     tensorrt_version: str,
     backends: dict[str, bytes],
 ) -> None:
-    from tensorrt_model_connect import trt_compat
-
-    abi = trt_compat.tensorrt_abi(tensorrt_version).replace(".", "_")
+    abi = _tensorrt_abi(tensorrt_version).replace(".", "_")
     generic = "libtrtmc_backend_trt.so"
     versioned = f"libtrtmc_backend_trt_{abi}.so"
     expected = {generic, versioned}
@@ -148,9 +152,7 @@ def _validate_backend_identity(
     backend_abi: str,
     runtime_version: str,
 ) -> None:
-    from tensorrt_model_connect import trt_compat
-
-    expected_abi = trt_compat.tensorrt_abi(tensorrt_version).replace(".", "_")
+    expected_abi = _tensorrt_abi(tensorrt_version).replace(".", "_")
     if backend_abi.replace(".", "_") != expected_abi:
         raise CiError(
             f"{location}: TensorRT backend reports ABI {backend_abi}; expected "
@@ -291,10 +293,14 @@ class WheelArchiveValidator:
     def __init__(self, context: CiContext, platform: str):
         self.context = context
         self.platform = platform
-        match = re.fullmatch(r"manylinux_2_([0-9]+)_aarch64", platform)
+        match = re.fullmatch(r"manylinux_2_([0-9]+)_(aarch64|x86_64)", platform)
         if not match:
-            raise CiError(f"expected a manylinux aarch64 platform tag, got {platform}")
+            raise CiError(
+                "expected a manylinux aarch64 or x86_64 platform tag, "
+                f"got {platform}"
+            )
         self.max_glibc_minor = int(match.group(1))
+        self.architecture = match.group(2)
         self.target_tensorrt_version = _target_tensorrt_version(
             getattr(self.context, "env", {}),
             required=False,
@@ -366,6 +372,16 @@ class WheelArchiveValidator:
                 for name in names
                 if "/benchmark/_catalog/" in name and name.endswith("/data/test_img.jpeg")
             ]
+            benchmark_stereo_assets = [
+                name
+                for name in names
+                if name.endswith(
+                    (
+                        "/benchmark/_catalog/fast_foundation_stereo/data/office_left.png",
+                        "/benchmark/_catalog/fast_foundation_stereo/data/office_right.png",
+                    )
+                )
+            ]
             package_cores = [name for name in names if "/bin/libtrtmc_core.so" in name]
             script_cores = [name for name in names if ".data/scripts/libtrtmc_core.so" in name]
             backends = [
@@ -426,6 +442,10 @@ class WheelArchiveValidator:
                 "packaged Wan2.2 FP8 scale asset is missing",
             ),
             (bool(benchmark_image_assets), "packaged benchmark image assets are missing"),
+            (
+                len(benchmark_stereo_assets) == 2,
+                "packaged Fast Foundation Stereo benchmark assets are missing",
+            ),
             (bool(package_cores), "packaged core DSO is missing"),
             (bool(script_cores), "core DSO beside native trtmc script is missing"),
             (
@@ -515,6 +535,35 @@ class WheelPackageManager:
 
     def __init__(self, context: CiContext):
         self.context = context
+
+    def preflight(self) -> None:
+        """Validate pre-install package metadata without build tools or network access."""
+        tensorrt_version = _target_tensorrt_version(self.context.env, required=True)
+        assert tensorrt_version is not None
+        package_version = _package_variant_version(
+            self.context.repository,
+            tensorrt_version,
+        )
+        abi = _tensorrt_abi(tensorrt_version).replace(".", "_")
+        payload = b"package-preflight"
+        _validate_backend_files(
+            "package preflight",
+            tensorrt_version,
+            {
+                "libtrtmc_backend_trt.so": payload,
+                f"libtrtmc_backend_trt_{abi}.so": payload,
+            },
+        )
+        _validate_backend_identity(
+            "package preflight",
+            tensorrt_version,
+            abi,
+            tensorrt_version,
+        )
+        print(
+            f"package_preflight=TensorRT {tensorrt_version} package {package_version} "
+            f"backend ABI {abi}"
+        )
 
     def build(self) -> None:
         target_tensorrt_version = _target_tensorrt_version(
@@ -713,36 +762,48 @@ class WheelPackageManager:
     def select_compatible_wheel(self, directory: str = "dist") -> Path:
         tag = f"py{sys.version_info.major}{sys.version_info.minor}"
         platform = self.context.env.get("TRTMC_PACKAGE_WHEEL_ARCH", "manylinux_2_39_aarch64")
+        architecture = self._wheel_architecture(platform)
         root = self.context.repository / directory
         patterns = (
             f"*-{tag}-none-{platform}.whl",
             f"*-py3-none-{platform}.whl",
-            f"*-{tag}-none-linux_aarch64.whl",
-            "*-py3-none-linux_aarch64.whl",
+            f"*-{tag}-none-linux_{architecture}.whl",
+            f"*-py3-none-linux_{architecture}.whl",
         )
         candidates = sorted({path for pattern in patterns for path in root.glob(pattern)})
         if len(candidates) != 1:
             raise CiError(
-                f"expected exactly one {tag}-compatible Linux aarch64 wheel under {root}, "
+                f"expected exactly one {tag}-compatible Linux {architecture} wheel under {root}, "
                 f"found {len(candidates)}: {candidates}"
             )
         return candidates[0]
 
     def select_wheel(self, tag: str, directory: str = "dist") -> Path:
         platform = self.context.env.get("TRTMC_PACKAGE_WHEEL_ARCH", "manylinux_2_39_aarch64")
+        architecture = self._wheel_architecture(platform)
         root = self.context.repository / directory
         candidates = sorted(
             {
                 *root.glob(f"*-{tag}-none-{platform}.whl"),
-                *root.glob(f"*-{tag}-none-linux_aarch64.whl"),
+                *root.glob(f"*-{tag}-none-linux_{architecture}.whl"),
             }
         )
         if len(candidates) != 1:
             raise CiError(
-                f"expected exactly one {tag} Linux aarch64 wheel under {root}, "
+                f"expected exactly one {tag} Linux {architecture} wheel under {root}, "
                 f"found {len(candidates)}: {candidates}"
             )
         return candidates[0]
+
+    @staticmethod
+    def _wheel_architecture(platform: str) -> str:
+        match = re.fullmatch(r"manylinux_2_[0-9]+_(aarch64|x86_64)", platform)
+        if match is None:
+            raise CiError(
+                "TRTMC_PACKAGE_WHEEL_ARCH must select a manylinux aarch64 or "
+                f"x86_64 platform, got {platform}"
+            )
+        return match.group(1)
 
     def model_smoke(self) -> None:
         if sys.version_info[:2] != (3, 12):
@@ -874,7 +935,7 @@ class WheelPackageManager:
         )
 
     def _validate_build_platform(self, platform: str) -> None:
-        match = re.fullmatch(r"manylinux_2_([0-9]+)_aarch64", platform)
+        match = re.fullmatch(r"manylinux_2_([0-9]+)_(aarch64|x86_64)", platform)
         if match:
             version = self.context.output(["getconf", "GNU_LIBC_VERSION"]).split()[-1]
             try:

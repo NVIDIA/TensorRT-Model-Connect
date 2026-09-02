@@ -140,6 +140,11 @@ def _make_repo(
         _write(repo, f"tools/ci/{source.name}", f"# projected CI module: {source.name}\n")
     _write(
         repo,
+        ".github/scripts/build-python-profiles.py",
+        "#!/usr/bin/env python3\n",
+    )
+    _write(
+        repo,
         ".github/scripts/write-model-proof-fallback-report.py",
         "#!/usr/bin/env python3\n",
     )
@@ -423,7 +428,171 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     assert result["fallback_models"] == []
     assert result["matrix"] == {"include": [{"model": "model_a", "selection_kind": "direct"}]}
     assert result["run_unit_tests"] is True
-    assert result["unit_scope"] == "builder"
+    assert result["unit_scope"] == "all"
+
+
+@pytest.mark.parametrize("move_nested_contract", (False, True))
+def test_runtime_test_manifest_metadata_runs_units_without_model_proof(
+    tmp_path: Path,
+    move_nested_contract: bool,
+) -> None:
+    repo, _ = _make_repo(tmp_path)
+    manifest = repo / "src/runtime/models/model_a/MODEL.toml"
+    prefix = (
+        'id = "model_a"\n'
+        'runtime_library = "libtrtmc_model_model_a.so"\n'
+        'runtime_strategies = ["model_a_runtime"]\n'
+    )
+    test_entry = '  "test_model_a|test_model_a.cpp|_|_|REQUIRES_TRT",\n'
+    if move_nested_contract:
+        manifest.write_text(
+            prefix
+            + '[validation_profiles]\n'
+            + 'decoder_debug = ["model_a_runtime"]\n'
+            + "runtime_tests = [\n"
+            + test_entry
+            + "]\n",
+            encoding="utf-8",
+        )
+    else:
+        manifest.write_text(
+            prefix + "runtime_tests = [\n" + test_entry + "]\n",
+            encoding="utf-8",
+        )
+    base = _commit(repo, "add runtime test metadata")
+
+    head_entry = test_entry.replace("REQUIRES_TRT", "REQUIRES_TRT,REQUIRES_GPU")
+    suffix = (
+        '[validation_profiles]\n'
+        'decoder_debug = ["model_a_runtime"]\n'
+        if move_nested_contract
+        else ""
+    )
+    manifest.write_text(
+        prefix + "runtime_tests = [\n" + head_entry + "]\n" + suffix,
+        encoding="utf-8",
+    )
+    head = _commit(repo, "update runtime test metadata")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == []
+    assert result["matrix"] == {"include": []}
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+    assert {
+        classification["kind"]
+        for change in result["changes"]
+        for classification in change["classifications"]
+    } == {"unit_tests"}
+
+
+def test_runtime_manifest_semantic_change_keeps_direct_model_proof(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    manifest = repo / "src/runtime/models/model_a/MODEL.toml"
+    manifest.write_text(
+        'id = "model_a"\n'
+        'runtime_library = "libtrtmc_model_model_a.so"\n'
+        'runtime_strategies = ["model_a_runtime"]\n'
+        'runtime_tests = ["test_model_a|test_model_a.cpp|_|_|REQUIRES_TRT"]\n',
+        encoding="utf-8",
+    )
+    base = _commit(repo, "add runtime test metadata")
+    manifest.write_text(
+        'id = "model_a"\n'
+        'runtime_library = "libtrtmc_model_model_a_v2.so"\n'
+        'runtime_strategies = ["model_a_runtime"]\n'
+        'runtime_tests = '
+        '["test_model_a|test_model_a.cpp|_|_|REQUIRES_TRT,REQUIRES_GPU"]\n',
+        encoding="utf-8",
+    )
+    head = _commit(repo, "change runtime library and tests")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_a"]
+    assert result["direct_models"] == ["model_a"]
+    assert result["matrix"] == {
+        "include": [{"model": "model_a", "selection_kind": "direct"}]
+    }
+
+
+@pytest.mark.parametrize("module_marker", (False, True))
+def test_pytest_resource_marker_only_change_runs_units_without_model_proof(
+    tmp_path: Path,
+    module_marker: bool,
+) -> None:
+    repo, _ = _make_repo(tmp_path)
+    path = "tests/e2e/models/model_a/test_builder_contract.py"
+    _write(repo, path, "import pytest\n\ndef test_contract():\n    assert True\n")
+    base = _commit(repo, "add model test contract")
+    if module_marker:
+        updated = (
+            "import pytest\n\n"
+            "pytestmark = [pytest.mark.gpu, pytest.mark.trt]\n\n"
+            "def test_contract():\n    assert True\n"
+        )
+    else:
+        updated = (
+            "import pytest\n\n"
+            "@pytest.mark.gpu\n"
+            "@pytest.mark.trt\n"
+            "def test_contract():\n    assert True\n"
+        )
+    _write(repo, path, updated)
+    head = _commit(repo, "classify model test resources")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["direct_models"] == []
+    assert result["matrix"] == {"include": []}
+    assert result["unit_scope"] == "all"
+
+
+def test_pytest_marker_and_test_semantic_change_keeps_direct_model_proof(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _make_repo(tmp_path)
+    path = "tests/e2e/models/model_a/test_builder_contract.py"
+    _write(repo, path, "import pytest\n\ndef test_contract():\n    assert True\n")
+    base = _commit(repo, "add model test contract")
+    _write(
+        repo,
+        path,
+        "import pytest\n\n"
+        "@pytest.mark.gpu\n"
+        "def test_contract():\n    assert 2 + 2 == 4\n",
+    )
+    head = _commit(repo, "change marker and test behavior")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["direct_models"] == ["model_a"]
+
+
+def test_family_python_unit_test_change_does_not_select_model_proof(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(
+        repo,
+        "python/tensorrt_model_connect/families/model_a/tests/test_family.py",
+        "def test_family():\n    assert True\n",
+    )
+    head = _commit(repo, "add family unit test")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["direct_models"] == []
+    assert result["matrix"] == {"include": []}
+    assert result["unit_scope"] == "all"
 
 
 @pytest.mark.parametrize(
@@ -437,7 +606,7 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
         "src/runtime/models/model_a/model_a.cpp",
     ),
 )
-def test_model_owned_change_runs_builder_units(
+def test_model_owned_change_runs_all_cpu_units(
     tmp_path: Path,
     path: str,
 ) -> None:
@@ -451,10 +620,10 @@ def test_model_owned_change_runs_builder_units(
     assert result["affected_models"] == ["model_a"]
     assert result["direct_models"] == ["model_a"]
     assert result["run_unit_tests"] is True
-    assert result["unit_scope"] == "builder"
+    assert result["unit_scope"] == "all"
 
 
-def test_model_owned_deletion_runs_builder_units(tmp_path: Path) -> None:
+def test_model_owned_deletion_runs_all_cpu_units(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path)
     path = "python/tensorrt_model_connect/families/model_a/graph_ops.py"
     _write(repo, path, "# graph implementation\n")
@@ -467,7 +636,7 @@ def test_model_owned_deletion_runs_builder_units(tmp_path: Path) -> None:
     assert result["mode"] == "models"
     assert result["affected_models"] == ["model_a"]
     assert result["run_unit_tests"] is True
-    assert result["unit_scope"] == "builder"
+    assert result["unit_scope"] == "all"
 
 
 def test_mixed_model_and_cli_change_runs_all_units(tmp_path: Path) -> None:
@@ -597,8 +766,8 @@ def test_impact_treats_legal_and_docs_as_no_model_change(tmp_path: Path) -> None
     assert result["mode"] == "none"
     assert result["has_models"] is False
     assert result["matrix"] == {"include": []}
-    assert result["run_unit_tests"] is False
-    assert result["unit_scope"] == "none"
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
 
 
 @pytest.mark.parametrize(
@@ -606,7 +775,7 @@ def test_impact_treats_legal_and_docs_as_no_model_change(tmp_path: Path) -> None
     (
         (
             "website/docs/wiki/Agentic-Quantization-Core-Minimal-Plan.md",
-            "builder",
+            "all",
             "unit_builder",
         ),
         ("tools/ci/README.md", "all", "unit_tests"),
@@ -801,13 +970,18 @@ def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "path, expected_scope",
     (
-        ("src/runtime/config/cli_support.cpp", "cli"),
-        ("include/trtmc/config/cli_support.h", "cli"),
-        ("python/tensorrt_model_connect/build_cli.py", "cli"),
-        ("python/tensorrt_model_connect/runtime_config/cli_support.py", "cli"),
+        ("src/runtime/config/cli_support.cpp", "all"),
+        ("include/trtmc/config/cli_support.h", "all"),
+        ("python/tensorrt_model_connect/build_cli.py", "all"),
+        ("python/tensorrt_model_connect/runtime_config/cli_support.py", "all"),
         ("tests/builder/test_cli.py", "all"),
         ("tests/cpp/test_cli_args.cpp", "all"),
         ("tests/tools/test_cli_contract.py", "all"),
+        ("examples/models/cosmos3/dual_spark/run_dual_spark.py", "all"),
+        ("examples/models/cosmos3/dual_spark/Dockerfile", "all"),
+        ("examples/models/nemotron_voicechat/full_duplex/main.cpp", "all"),
+        ("examples/models/nemotron_voicechat/full_duplex/Dockerfile", "all"),
+        ("examples/models/nemotron_voicechat/full_duplex/CMakeLists.txt", "all"),
     ),
 )
 def test_cli_and_unit_test_changes_run_units_without_model_proofs(
@@ -1225,6 +1399,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert fallback.is_file()
     assert not os.access(fallback, os.X_OK)
     for report_path in (
+        ".github/scripts/build-python-profiles.py",
         "scripts/generate_e2e_report.py",
         "scripts/generate_e2e_report_assets/e2e_report.css",
         "scripts/generate_e2e_report_assets/e2e_report.js",
@@ -1301,6 +1476,8 @@ def test_projection_includes_only_the_selected_family_adapter_subtrees(
 ) -> None:
     repo, _ = _make_repo(tmp_path)
     selected_paths = (
+        "python/tensorrt_model_connect/families/model_b/python_profile_requirements/reference.lock.txt",
+        "python/tensorrt_model_connect/families/model_b/python_profile_verify.py",
         "python/tensorrt_model_connect/families/model_b/optimized_adapter/adapter.py",
         "python/tensorrt_model_connect/families/model_b/optimized_adapter/dependency.lock",
         "python/tensorrt_model_connect/families/model_b/optimized_adapter/profiles/example.toml",
@@ -1312,6 +1489,18 @@ def test_projection_includes_only_the_selected_family_adapter_subtrees(
         _write(repo, path, "# selected model adapter\n")
     for path in sibling_paths:
         _write(repo, path, "# sibling model adapter\n")
+    for model in ("model_a", "model_b"):
+        manifest = repo / f"python/tensorrt_model_connect/families/{model}/MODEL.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "python_profile_specs = [\n"
+            + (
+                f'  "{model}_reference|families/{model}/python_profile_requirements/'
+                f'reference.lock.txt|families/{model}/python_profile_verify.py|true",\n'
+            )
+            + "]\n",
+            encoding="utf-8",
+        )
     generic_host = "src/runtime/providers/optimized_runtime_host.cpp"
     _write(repo, generic_host, "// shared provider host\n")
     revision = _commit(repo, "add model-owned adapters")

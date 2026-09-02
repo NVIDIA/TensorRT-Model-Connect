@@ -102,15 +102,19 @@ root graph helpers, or paths copied from another branch.
 
 ## CI Documentation Contract
 
-Source contains only the Internal CI Bridge and Pages workflows. Premerge,
-including legal compliance, and nightly orchestration are private Internal CI.
+Source contains Community CPU, PR Metadata, the Internal CI Bridge, and Pages
+workflows. Premerge, including legal compliance, and nightly orchestration are
+private Internal CI.
 
 - `run-internal-ci` is the one-shot trusted trigger; `run-ci` is retired.
 - The bridge verifies the label event, current PR metadata head, and successful
   Community CPU result for that head before dispatching it.
-- Source receives only `trtmc/premerge/required` as `PENDING`, `PASS`, or
-  `FAIL` on that exact head.
+- Source receives only `TRTMC Internal CI / Automated premerge gate` as
+  `PENDING`, `PASS`, or `FAIL` on that exact head.
 - A successful bridge dispatch is not a successful premerge result.
+- `tools/public_failure/` is the closed public-report validator and plain-text
+  renderer used by the trusted bridge. It never publishes protected raw logs or
+  arbitrary diagnostic text.
 - Never copy private logs, artifacts, package coordinates, runner details, or
   internal URLs into Source docs, Actions, Pages, or PR comments.
 
@@ -182,7 +186,7 @@ Creating or pushing the PR does not start premerge. After confirming that the
 PR's `headRefOid` equals the pushed SHA, follow `$submit-github-pr` and
 `$pr-babysitter`: an authorized collaborator applies the one-shot
 `run-internal-ci` label, and the exact head must receive a successful
-`trtmc/premerge/required` status. Never use the retired `run-ci` label or
+`TRTMC Internal CI / Automated premerge gate` status. Never use the retired `run-ci` label or
 publish private Internal CI logs, artifacts, runner details, or URLs in Source.
 
 Use `$write-git-messages` for the commit and PR text.

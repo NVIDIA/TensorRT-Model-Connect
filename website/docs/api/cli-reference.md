@@ -156,6 +156,7 @@ trtmc segment-prompted <bundle.bundle> --image PATH --output DIR [--point-x F --
 trtmc segment-prompted <bundle.bundle> --image PATH --output DIR --prompt "object"
 trtmc classify <bundle.bundle> --image PATH [--benchmark N --warmup N]
 trtmc detect <bundle.bundle> --image PATH [--output-json PATH]
+trtmc geometry <bundle.bundle> --image PATH --output DIR
 trtmc generate-audio <bundle.bundle> --prompt "text" --output PATH
 trtmc serve-audio <bundle.bundle>
 trtmc generate-video <bundle.bundle> --prompt "text" --output DIR

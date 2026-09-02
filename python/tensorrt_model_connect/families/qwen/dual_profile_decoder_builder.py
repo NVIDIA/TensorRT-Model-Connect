@@ -33,13 +33,13 @@ Tensor contract for the Qwen3 TensorRT native KV-cache path:
     position_id     int32   (-1,)
     cache_write_indices int32 (1,)                    # update start slot
     key_value_lengths   int32 (1,)                    # valid length after update
-    cache_k_i       bf16 (1, Hkv, capacity, D)        # static, user-owned
-    cache_v_i       bf16 (1, Hkv, capacity, D)        # static, user-owned
+    cache_k_i       fp16/bf16 (1, Hkv, capacity, D)   # static, user-owned
+    cache_v_i       fp16/bf16 (1, Hkv, capacity, D)   # static, user-owned
   Outputs
     logits          float32 (1, vocab)               # last-row sliced inside the engine
                     or (Sq, vocab) for full-logits diffusion builds
-    present_k_i     bf16 (1, Hkv, capacity, D)        # aliases cache_k_i
-    present_v_i     bf16 (1, Hkv, capacity, D)        # aliases cache_v_i
+    present_k_i     fp16/bf16 (1, Hkv, capacity, D)   # aliases cache_k_i
+    present_v_i     fp16/bf16 (1, Hkv, capacity, D)   # aliases cache_v_i
 
 The legacy dense-mask/row-cache contract remains available for the other model
 types handled by this family.
@@ -53,6 +53,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
+from ...native_kv_attention_builder import (
+    EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS,
+    add_active_prefix_causal_masks,
+)
 
 from . import graph_ops
 from . import graph_blocks
@@ -66,7 +70,22 @@ if TYPE_CHECKING:
     from ...quantization.context import QuantContext
 
 
-_NATIVE_PREFILL_CHUNK_TOKENS = 32768
+def _resolve_prefill_lengths(
+    max_cache_length: int,
+    opt_prefill_length: int,
+    requested: int | None,
+    *,
+    native_kv_cache: bool,
+    profile_mode: str,
+) -> tuple[int, int]:
+    """Resolve one enqueue's query limit independently of cache capacity."""
+    if requested is None:
+        requested = max_cache_length
+    if native_kv_cache and profile_mode != "decode":
+        requested = min(requested, EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS)
+    resolved_max = max(1, min(requested, max_cache_length))
+    resolved_opt = max(1, min(opt_prefill_length, resolved_max))
+    return resolved_opt, resolved_max
 
 
 def _const_in_work_dtype(
@@ -304,10 +323,10 @@ def build_dual_profile_decoder_engine(
     * ``"decode"``: one fixed-Sq=1 profile only. This is the decode half of a
       split-engine bundle.
 
-    ``native_kv_cache`` selects TensorRT's ``IKVCacheUpdateLayer`` and
-    ``IAttention.key_value_lengths`` contract. It is an internal model-family
-    choice, not a user-facing build flag. The legacy dense-mask graph remains
-    available for non-Qwen3 models handled by this family.
+    ``native_kv_cache`` selects TensorRT's ``IKVCacheUpdateLayer`` contract and
+    a platform-independent primitive attention graph with an explicit BOOL
+    active-prefix causal mask. The legacy dense-mask graph remains available
+    for non-Qwen3 models handled by this family.
     """
     _supports_config(config, weights)
     if profile_mode not in ("dual_profile", "prefill", "decode"):
@@ -321,18 +340,17 @@ def build_dual_profile_decoder_engine(
     if native_kv_cache and position_type == "alibi":
         raise NotImplementedError(
             "TensorRT native KV cache prototype does not support ALiBi")
-    if max_prefill_length is None:
-        # Physical KV capacity and one TensorRT enqueue's query length are
-        # separate limits. Keep the complete model context in the cache while
-        # bounding activation/workspace pressure for very long prompts; the
-        # family runtime transparently advances through multiple chunks.
-        max_prefill_length = (
-            min(max_cache_length, _NATIVE_PREFILL_CHUNK_TOKENS)
-            if native_kv_cache
-            else max_cache_length
-        )
-    max_prefill_length = max(1, min(max_prefill_length, max_cache_length))
-    opt_prefill_length = max(1, min(opt_prefill_length, max_prefill_length))
+    # Physical KV capacity and one TensorRT enqueue's query length are
+    # separate limits. Keep the complete model context in the cache while
+    # bounding activation/workspace pressure for very long prompts; the
+    # family runtime transparently advances through multiple chunks.
+    opt_prefill_length, max_prefill_length = _resolve_prefill_lengths(
+        max_cache_length,
+        opt_prefill_length,
+        max_prefill_length,
+        native_kv_cache=native_kv_cache,
+        profile_mode=profile_mode,
+    )
 
     multi_bucket_decode = bool(dynamic_kv_profile_rows)
     if multi_bucket_decode:
@@ -399,6 +417,12 @@ def build_dual_profile_decoder_engine(
         work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
     else:
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    native_cache_trt_dtype = work_trt_dtype
+    if native_kv_cache:
+        metadata = config.raw.setdefault("_native_kv_cache_metadata", {})
+        metadata["native_kv_cache"] = True
+        metadata["native_kv_contract_version"] = 1
+        metadata.pop("native_kv_cache_dtype", None)
 
     # ---- Inputs (dynamic Sq) ---------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (-1,))
@@ -427,10 +451,10 @@ def build_dual_profile_decoder_engine(
     for i in range(num_layers):
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
-            work_trt_dtype, cache_shape)
+            native_cache_trt_dtype, cache_shape)
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
-            work_trt_dtype, cache_shape)
+            native_cache_trt_dtype, cache_shape)
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
@@ -633,8 +657,8 @@ def build_dual_profile_decoder_engine(
             network, hidden_state, hidden, embed_norm, embed_norm_beta,
             eps_tensor, "layernorm", work_np_dtype)
 
-    # Native attention uses LOWER_RIGHT causal alignment plus active lengths.
-    # Legacy attention retains its explicit additive mask.
+    # Native attention uses one shared explicit active-prefix causal mask.
+    # Legacy attention retains its existing additive mask.
     mask_4d: trt.ITensor | None
     if native_kv_cache:
         mask_4d = None
@@ -650,6 +674,17 @@ def build_dual_profile_decoder_engine(
 
     present_k_outs: list[trt.ITensor] = []
     present_v_outs: list[trt.ITensor] = []
+    native_attention_masks = None
+    if native_kv_cache:
+        assert cache_write_indices is not None
+        assert key_value_lengths is not None
+        native_attention_masks = add_active_prefix_causal_masks(
+            network,
+            token_id,
+            cache_write_indices,
+            key_value_lengths,
+            max_cache_length,
+        )
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
@@ -718,7 +753,7 @@ def build_dual_profile_decoder_engine(
 
         if native_kv_cache:
             assert cache_write_indices is not None
-            assert key_value_lengths is not None
+            assert native_attention_masks is not None
             native_attention = graph_ops.add_native_kv_cache_attention_from_rows(
                 network,
                 q,
@@ -727,16 +762,12 @@ def build_dual_profile_decoder_engine(
                 cache_k_inputs[layer_idx],
                 cache_v_inputs[layer_idx],
                 cache_write_indices,
-                key_value_lengths,
+                native_attention_masks,
                 num_heads=num_heads, head_dim=head_dim,
                 num_kv_heads=num_kv_heads,
                 q_seq=None,
                 scale=attn_scale, tag=f"{prefix}.attn",
-                recipe_instance=(
-                    f"decoder.layers.{layer_idx}.decode_attention"
-                    if profile_mode == "decode"
-                    else None
-                ))
+            )
             context = native_attention["context"]
             present_k_outs.append(native_attention["present_k"])
             present_v_outs.append(native_attention["present_v"])

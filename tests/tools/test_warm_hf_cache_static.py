@@ -116,6 +116,7 @@ def _load_cache_helpers() -> dict:
         "_ENTRYPOINT_PATTERNS": [
             "config.json",
             "model_index.json",
+            "model.pt",
             "*.yml",
             "*.yaml",
             "*/config.json",
@@ -124,6 +125,7 @@ def _load_cache_helpers() -> dict:
             "*.safetensors",
             "*.bin",
             "*.pth",
+            "model.pt",
             "*.nemo",
             "model.npz",
             "elf_params.npz",
@@ -327,6 +329,18 @@ def test_pytorch_pth_checkpoint_counts_as_complete_snapshot(tmp_path: Path) -> N
     assert helpers["_snapshot_has_required_files"](snapshot)
 
 
+def test_self_contained_model_pt_counts_as_complete_snapshot(tmp_path: Path) -> None:
+    assert "model.pt" in _literal_string_list("_ENTRYPOINT_PATTERNS")
+    assert "model.pt" in _literal_string_list("_WEIGHT_PATTERNS")
+
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.pt").write_bytes(b"checkpoint")
+
+    assert helpers["_snapshot_has_required_files"](snapshot)
+
+
 def test_tokenizer_dependency_does_not_require_model_weights(tmp_path: Path) -> None:
     helpers = _load_cache_helpers()
     snapshot = tmp_path / "snapshots" / "abc"
@@ -517,6 +531,30 @@ def test_selective_warm_of_cached_snapshot_makes_no_network_download() -> None:
 
     assert (status, detail) == ("cached", "")
     assert downloads == []
+
+
+def test_selective_warm_of_uncached_public_snapshot_downloads() -> None:
+    helpers = _load_cache_helpers()
+    downloads: list[tuple[str, str, str]] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: False
+
+    def fake_download(operation: str, hf_id: str, **kwargs):
+        downloads.append((operation, hf_id, kwargs["revision"]))
+        return "/cache/snapshot", "downloaded once"
+
+    helpers["_run_download_attempts"] = fake_download
+
+    status, detail = helpers["_warm_snapshot"](
+        "org/model",
+        revision="0123456789abcdef",
+        gated=False,
+        token_available=False,
+        selective=True,
+        local_only=False,
+    )
+
+    assert (status, detail) == ("downloaded", "downloaded once")
+    assert downloads == [("snapshot", "org/model", "0123456789abcdef")]
 
 
 def test_uncached_gated_snapshot_without_token_fails_before_download() -> None:

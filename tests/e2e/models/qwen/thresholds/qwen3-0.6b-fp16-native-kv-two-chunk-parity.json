@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "contract_ned_threshold": 0.0
+  }
+}

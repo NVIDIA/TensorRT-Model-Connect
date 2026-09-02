@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "cli/args.h"
 #include "cli/jsonl_io.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/schema_registry.h"
@@ -108,28 +109,10 @@ void usage() {
 }
 
 std::uint64_t parse_size_bytes(const std::string& text) {
-    if (text.empty())
-        throw std::runtime_error("Empty kv-cache-size");
-    std::size_t idx = 0;
-    const double value = std::stod(text, &idx);
-    std::string suffix = text.substr(idx);
-    for (char& ch : suffix)
-        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-    double multiplier = 1.0;
-    if (suffix.empty() || suffix == "B") {
-        multiplier = 1.0;
-    } else if (suffix == "K" || suffix == "KB" || suffix == "KIB") {
-        multiplier = 1024.0;
-    } else if (suffix == "M" || suffix == "MB" || suffix == "MIB") {
-        multiplier = 1024.0 * 1024.0;
-    } else if (suffix == "G" || suffix == "GB" || suffix == "GIB") {
-        multiplier = 1024.0 * 1024.0 * 1024.0;
-    } else if (suffix == "T" || suffix == "TB" || suffix == "TIB") {
-        multiplier = 1024.0 * 1024.0 * 1024.0 * 1024.0;
-    } else {
-        throw std::runtime_error("Unsupported kv-cache-size suffix: " + suffix);
-    }
-    return static_cast<std::uint64_t>(value * multiplier);
+    auto parsed = trtmc::cli::parse_byte_size(text);
+    if (!parsed.has_value())
+        throw std::runtime_error("Invalid kv-cache-size: " + text);
+    return *parsed;
 }
 
 } // namespace

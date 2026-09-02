@@ -195,7 +195,8 @@ class LlamaTextGenerationPipeline final : public IPipeline {
                            const std::vector<const void*>& present_k,
                            const std::vector<const void*>& present_v, LlamaKvCache& kv,
                            std::vector<float>& logits, bool retain_device_logits);
-    void log_batched_prefill(int32_t token_count, int32_t chunk_count, int32_t chunk_limit) const;
+    void log_batched_prefill(int32_t token_count, int32_t chunk_count,
+                             int32_t max_chunk_size) const;
     const TrtModule* generation_capacity_module() const;
     void prime_decoder_after_batched_prefill(const std::vector<int32_t>& input_ids);
     bool should_stop_on_answer(const std::vector<int32_t>& output, int32_t prompt_token_count,

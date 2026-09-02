@@ -4,6 +4,8 @@
 """llama-owned E2E contract plugins."""
 from __future__ import annotations
 
+import re
+
 from tests.e2e_harness.contracts import (
     CompareResult,
     E2ECase,
@@ -12,6 +14,23 @@ from tests.e2e_harness.contracts import (
     StageStatus,
     ThresholdProfile,
 )
+
+
+_PREFILL_OBSERVATION_RE = re.compile(
+    r"^\[trtmc\.prefill\] tokens=(\d+) launches=(\d+) max_chunk=(\d+)$"
+)
+
+
+def _parse_prefill_observations(stderr: str) -> tuple[tuple[int, int, int], ...]:
+    """Return all runtime token, launch, and observed-max-chunk counters."""
+    observations = []
+    for line in stderr.splitlines():
+        match = _PREFILL_OBSERVATION_RE.fullmatch(line.strip())
+        if match is not None:
+            observations.append(tuple(int(value) for value in match.groups()))
+    return tuple(observations)
+
+
 # Model-owned contract helpers. Keep behavior here so contract semantics do not
 # drift across model families through shared harness code.
 def contract_config(case):
@@ -72,7 +91,6 @@ def strip_chat_markup(text: str) -> str:
             cut = min(cut, idx)
     if cut < len(out):
         out = out[:cut]
-    import re
     out = re.sub(r"(?:\s*#{2,}\s*)+$", "", out).strip()
     return out
 
@@ -349,16 +367,32 @@ class LlamaNativeKvChunkedPrefillRegressionPlugin:
         expected_rows = int(case.metadata.get("expected_kv_cache_rows", -1))
         expected_chunks = int(case.metadata.get("expected_prefill_chunks", -1))
         expected_limit = int(case.metadata.get("expected_prefill_chunk_limit", -1))
+        # The harness counts the raw prompt without special tokens, while the
+        # runtime observation counts the exact engine inputs (including BOS).
+        expected_runtime_tokens = int(
+            case.metadata.get("expected_runtime_prefill_tokens", -1)
+        )
         cache_marker = f"KV cache rows={expected_rows} (bundle max={expected_rows}"
         prefill_marker = 'label="prefill_engine_plan:prefill"'
+        prefill_observations = _parse_prefill_observations(stderr)
+        observed_tokens = sum(item[0] for item in prefill_observations)
+        observed_launches = sum(item[1] for item in prefill_observations)
+        observed_max_chunk = max((item[2] for item in prefill_observations), default=0)
         chunk_plan_is_consistent = (
             expected_limit > 0
+            and expected_runtime_tokens > 0
             and expected_chunks
-            == (expected_prompt + expected_limit - 1) // expected_limit
+            == (expected_runtime_tokens + expected_limit - 1) // expected_limit
         )
         chunked_prefill_observed = chunk_plan_is_consistent and any(
-            prefill_marker in line and f"launches={expected_chunks}" in line
+            prefill_marker in line and f"launches={expected_chunks}" in line.split()
             for line in stderr.splitlines()
+        )
+        chunk_limit_observed = (
+            bool(prefill_observations)
+            and observed_tokens == expected_runtime_tokens
+            and observed_launches == expected_chunks
+            and 0 < observed_max_chunk <= expected_limit
         )
 
         checks = {
@@ -376,8 +410,12 @@ class LlamaNativeKvChunkedPrefillRegressionPlugin:
             ),
             "chunked_prefill_executed": (
                 chunked_prefill_observed,
-                f"max_chunk={expected_limit}; {prefill_marker} with "
-                f"launches={expected_chunks}",
+                f"{prefill_marker} with launches={expected_chunks}",
+            ),
+            "prefill_chunk_limit_observed": (
+                chunk_limit_observed,
+                f"expected tokens={expected_runtime_tokens}, launches={expected_chunks}, "
+                f"max_chunk<={expected_limit}; observed={prefill_observations}",
             ),
             "requested_tokens_generated": (
                 isinstance(token_ids, list) and len(token_ids) == expected_generated,

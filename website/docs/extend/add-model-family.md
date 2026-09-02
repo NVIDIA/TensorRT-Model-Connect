@@ -103,6 +103,41 @@ policy, and optional debug hooks in this family package. The old repository-root
 `graph_ops.py`, `graph_blocks.py`, and `standard_decoder_builder.py` ownership
 model has been retired.
 
+### Optional Python execution profile
+
+If build or reference code needs Python packages that conflict with the common
+environment, keep the declaration and exact pins in the owning family:
+
+```toml
+python_profile_specs = [
+  "example_reference|families/example/python_profile_requirements/reference.lock.txt|families/example/python_profile_verify.py|true|true",
+]
+default_execution_profiles = [
+  "reference|example_reference",
+]
+```
+
+The fields are `name|requirements|verifier|system_site_packages|prebuild`.
+`prebuild=true` means CI prepares the profile before a network-disabled proof;
+it does not bake the profile into the shared base image or change the base
+runtime fingerprint. Requirements must be exact public PyPI `name==version`
+pins. CI downloads their artifacts with the reviewed base-image downloader,
+then installs, source-builds, and verifies them in a separate offline container.
+
+When an sdist must disable its own network-wheel lookup, declare only the
+package build setting in the family descriptor:
+
+```toml
+python_profile_build_environment = [
+  "example_reference|PACKAGE_FORCE_BUILD|TRUE",
+]
+```
+
+This surface is for package build switches, not credentials, package indexes,
+runtime configuration, or system dependencies. A new APT, CUDA, compiler, or
+system-library requirement still changes the reviewed base runtime and needs
+maintainer qualification.
+
 ### Optional split decoder contract
 
 Opt into separate prefill/decode engines only when the family builder and

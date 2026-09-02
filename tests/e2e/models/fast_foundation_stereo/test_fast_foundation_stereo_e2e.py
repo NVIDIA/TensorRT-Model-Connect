@@ -56,3 +56,18 @@ def test_validation_contract_uses_model_plugin_parity() -> None:
             '"inputs":{"fixture":"generated-office-v1"}}]'
         ),
     )
+
+
+def test_middlebury_q_task_accuracy_contract() -> None:
+    suites = {item["id"]: item for item in validation_catalog.load_suites()}
+    task_accuracy = suites["fast_foundation_stereo_middlebury_q_task_accuracy"]
+    assert task_accuracy["dataset"] == {
+        "kind": "model_plugin_json",
+        "default_path": "/mnt/data/Middlebury-v3-trainingQ-profile-700x700/dataset.json",
+    }
+    assert task_accuracy["scoring"] == {"scorer": "model_plugin_parity"}
+    assert task_accuracy["gates"] == {
+        "min_sample_pass_rate": 1.0,
+        "candidate_nonocc_epe_max_reference_plus_px": 0.5,
+        "candidate_nonocc_bp2_max_reference_plus_fraction": 0.03,
+    }

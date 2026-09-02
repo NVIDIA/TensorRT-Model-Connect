@@ -15,6 +15,7 @@ The CLI is task-oriented; it is not one generic tensor runner.
 | Text-to-audio / speech-to-speech | `trtmc generate-audio`, `trtmc speak` | Audio file or stream |
 | Image/video diffusion | `trtmc generate-video` | One or more frames |
 | Segmentation / classification | `trtmc segment`, `segment-prompted`, `classify` | Mask, prompted result, or class scores |
+| Monocular geometry | `trtmc geometry` | Metric points/depth, validity mask, and normalized intrinsics |
 | Time-series / neural operator | `trtmc solve` | Numeric output vector |
 
 Example deterministic text request:

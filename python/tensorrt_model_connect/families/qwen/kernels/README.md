@@ -1,11 +1,20 @@
 # Qwen family kernels
 
-This directory contains kernel-integration code owned by the Qwen family. It
-does not add another Model Connect runtime abstraction: graph Recipes still
-select the TensorRT region, and the shared TVM-FFI plugin still invokes the
-selected DSO.
+This directory contains historical kernel-integration code owned by the Qwen
+family. It does not add another Model Connect runtime abstraction; the current
+fixed-KV attention graph uses manual graph selection for replacement kernels.
 
-## FlashInfer linear decode POC
+## Historical FlashInfer linear decode POC
+
+Current fixed-KV Qwen bundles do not publish the
+`qwen.decode_attention_region@2` Recipe. That boundary passed native
+`IAttention.key_value_lengths`, whose behavior is not correctness-safe across
+TensorRT/GPU combinations. Native Qwen now uses an explicit BOOL mask and a
+primitive attention graph instead.
+
+The exporter below is retained as reference code for old graph snapshots. Its
+fourth `int32` input is not ABI-compatible with the current explicit-mask
+graph, and the resulting DSO cannot be bound to a newly built bundle.
 
 `export_flashinfer_decode_attention.py` exports a Qwen3-8B decode-attention DSO
 for the `qwen.decode_attention_region@2` Recipe boundary:
@@ -45,8 +54,10 @@ PYTHONPATH="$PWD/artifacts/flashinfer-v0.6.15:$PWD/python" \
 ```
 
 The exporter is intentionally fixed to the tutorial's Qwen3-8B BF16 decode
-shape and SM 10.3. Use the ordinary Recipe build and load-time binding flow in
-the [Bring Your Own Kernel with TVM-FFI tutorial](../../../../../website/docs/tutorials/beginner/bring-your-own-kernel.md).
+shape and SM 10.3. It can only use the ordinary Recipe build and load-time
+binding flow with an old graph snapshot that still publishes that Recipe.
+Current bundles require manual graph selection as described in the
+[Bring Your Own Kernel tutorial](../../../../../website/docs/tutorials/advanced/bring-your-own-kernel.md).
 
 This is a POC of the integration boundary, not a vendored FlashInfer fork. The
 small optional-length change should live upstream before this becomes a

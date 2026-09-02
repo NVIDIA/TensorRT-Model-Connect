@@ -133,13 +133,25 @@ branch that other people are using.
 ### 7. Open a pull request against upstream `main`
 
 Open the pull request from your fork branch to
-`NVIDIA/TensorRT-Model-Connect:main`. Include:
+`NVIDIA/TensorRT-Model-Connect:main`. Complete every section of the pull-request
+template; use `Not applicable: <reason>` instead of deleting a section. Include:
 
-- the problem, scope, and important non-goals;
-- a linked issue or design discussion when applicable;
-- exact validation commands and their results;
-- the model revision, artifacts, environment, and hardware for GPU claims; and
-- tests or paths that were not run, plus any remaining risk.
+- **Background**: the problem, motivation, current behavior, and linked issue;
+- **Exit Criteria**: the conditions that define completion, including important
+  non-goals;
+- **Implementation**: the approach, affected models and components, and any
+  API, ABI, bundle, dependency, compatibility, migration, or rollout changes;
+- **Validation**: exact commands and results, tested head and dependency/model
+  revisions, environment and hardware, plus paths that were not run; and
+- **Notes For Future Readers**: remaining risk, compatibility or rollout notes,
+  third-party provenance, and useful follow-up context.
+
+`PR Metadata / Required` checks that these sections and the structured
+validation evidence are present. The trusted triage workflow derives model and
+component labels from the actual diff and repository ownership metadata; it
+uses the template only for declared risk and compatibility-change labels. DCO
+sign-off is enforced by the repository's DCO check rather than a self-attested
+template checkbox.
 
 Compilation, unit tests, inference, model parity, target-hardware execution,
 performance, and release qualification are separate evidence levels. Claim only
@@ -183,7 +195,9 @@ If authorization rejects the request, ask the maintainer to remove and re-add
 the retained label after satisfying the reported prerequisite. Adding an
 already-present label does not create a new trigger event.
 
-Wait for `trtmc/premerge/required` to pass on the exact pull-request head SHA.
+Wait for `TRTMC Internal CI / Automated premerge gate` to pass on the exact
+pull-request head SHA. This is an automated test result, not a request for an
+individual maintainer review.
 If you push another commit, the previous result no longer validates the current
 head; finish the update, wait for automatic Community CPU validation, and
 mention `@yifeif-nv` once to request a new protected run. Private runner details,

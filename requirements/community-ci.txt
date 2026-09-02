@@ -9,4 +9,6 @@ clang-format==22.1.8
 lizard==1.24.0
 pytest==8.4.2
 pytest-xdist==3.8.0
+jsonschema==4.26.0
 Pillow==12.2.0
+pyarrow==25.0.1

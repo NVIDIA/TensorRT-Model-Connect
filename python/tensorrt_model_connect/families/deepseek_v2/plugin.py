@@ -44,6 +44,7 @@ from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
+from . import native_moe
 from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -932,6 +933,91 @@ def _add_swiglu_expert(
     return down
 
 
+def _stack_expert_weights(
+    weights: WeightDict,
+    prefix: str,
+    n_routed_experts: int,
+    key: str,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Stack one per-expert projection into a single [experts, rows, cols] array."""
+    return np.ascontiguousarray(
+        np.stack(
+            [
+                np.asarray(weights[f"{prefix}.expert.{index}.{key}"])
+                for index in range(n_routed_experts)
+            ]
+        ).astype(dtype)
+    )
+
+
+def _add_native_routed_experts(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    n_routed_experts: int,
+    num_experts_per_tok: int,
+    top_indices: trt.ITensor,
+    scaled_weights: trt.ITensor,
+    dtype: np.dtype,
+) -> trt.ITensor:
+    """Routed-expert output computed by the native TensorRT MoE layer.
+
+    ``set_gated_weights`` takes one stacked tensor per projection covering every
+    expert, in the orientation this family already stores them: gate and up as
+    ``[experts, hidden, intermediate]`` and down as
+    ``[experts, intermediate, hidden]``. No transposition is required.
+
+    The layer applies the routing scores itself, so its output is the weighted
+    sum over the selected experts and only those experts are evaluated.
+    """
+    w_gate = _stack_expert_weights(
+        weights, prefix, n_routed_experts, "w_gate", dtype)
+    w_up = _stack_expert_weights(
+        weights, prefix, n_routed_experts, "w_up", dtype)
+    w_down = _stack_expert_weights(
+        weights, prefix, n_routed_experts, "w_down", dtype)
+
+    # IMoELayer requires rank-3 hidden states [batch, tokens, hidden]; the
+    # decoder carries rank-2 [tokens, hidden].
+    def _with_batch_dim(tensor: trt.ITensor, last_dim: int) -> trt.ITensor:
+        shuffle = network.add_shuffle(tensor)
+        shuffle.reshape_dims = (1, -1, last_dim)
+        return shuffle.get_output(0)
+
+    rank = len(tuple(inp.shape))
+    if rank == 2:
+        moe_hidden = _with_batch_dim(inp, hidden_size)
+        moe_indices = _with_batch_dim(top_indices, num_experts_per_tok)
+        moe_scores = _with_batch_dim(scaled_weights, num_experts_per_tok)
+    elif rank == 3:
+        moe_hidden, moe_indices, moe_scores = inp, top_indices, scaled_weights
+    else:
+        raise ValueError(
+            f"DeepSeek-V2 MoE expects rank-2 or rank-3 hidden states, got rank {rank}")
+
+    moe = network.add_moe(moe_hidden, moe_indices, moe_scores)
+    if moe is None:
+        raise RuntimeError(
+            "TensorRT rejected addMoE for this build; the per-expert path "
+            "should have been selected instead")
+    moe.set_gated_weights(
+        graph_ops.add_constant(network, w_gate.shape, w_gate, dtype=dtype),
+        graph_ops.add_constant(network, w_up.shape, w_up, dtype=dtype),
+        graph_ops.add_constant(network, w_down.shape, w_down, dtype=dtype),
+        trt.MoEActType.SILU,
+    )
+    routed_out = moe.get_output(0)
+
+    if rank == 2:
+        restore = network.add_shuffle(routed_out)
+        restore.reshape_dims = (-1, hidden_size)
+        routed_out = restore.get_output(0)
+    return routed_out
+
+
 def _add_moe_with_shared_experts(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -952,12 +1038,19 @@ def _add_moe_with_shared_experts(
 ) -> trt.ITensor:
     """MoE block with shared experts (DeepSeek-V2 style).
 
-    1. Router logits -> softmax -> top-k selection
+    1. Router logits -> softmax/sigmoid -> top-k selection
     2. Scale weights: renormalize (norm_topk_prob=True) or multiply by
        routed_scaling_factor (norm_topk_prob=False)
-    3. Compute all routed expert outputs, select top-k, weighted sum
+    3. Routed-expert output, by one of two paths:
+       - native TensorRT MoE layer, which evaluates only the selected experts
+         (SM 10.x, see ``native_moe``);
+       - otherwise the portable path, which evaluates every expert and then
+         gathers the top-k and takes their weighted sum.
     4. Compute shared expert output (always active)
     5. Final = routed_output + shared_output
+
+    Both paths share the router in step 1-2 and the shared-expert residual in
+    step 4-5, so they differ only in how the routed experts are evaluated.
     """
     top_indices, scaled_weights = moe_routing.add_router(
         network,
@@ -974,6 +1067,17 @@ def _add_moe_with_shared_experts(
         norm_topk_prob=norm_topk_prob,
         routed_scaling_factor=routed_scaling_factor,
     )
+
+    if native_moe.use_native_moe():
+        # Native TensorRT MoE layer: evaluates only the routed experts.
+        result = _add_native_routed_experts(
+            network, inp, weights, prefix,
+            hidden_size, n_routed_experts, num_experts_per_tok,
+            top_indices, scaled_weights, dtype,
+        )
+        return _add_shared_expert_residual(
+            network, inp, weights, prefix, hidden_size, shared_intermediate,
+            result, dtype)
 
     # 5. Compute ALL routed expert outputs and stack
     expert_outputs = []
@@ -1028,7 +1132,23 @@ def _add_moe_with_shared_experts(
                 trt.ElementWiseOperation.SUM)
             result = sum_layer.get_output(0)
 
-    # 7. Shared expert output (always active)
+    # 7 & 8. Shared expert output (always active) + routed output
+    return _add_shared_expert_residual(
+        network, inp, weights, prefix, hidden_size, shared_intermediate,
+        result, dtype)
+
+
+def _add_shared_expert_residual(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    shared_intermediate: int,
+    routed_out: trt.ITensor,
+    dtype: np.dtype,
+) -> trt.ITensor:
+    """Add the always-active shared-expert output to the routed-expert output."""
     shared_out = _add_swiglu_expert(
         network, inp, hidden_size, shared_intermediate,
         weights[f"{prefix}.shared.w_gate"],
@@ -1036,11 +1156,10 @@ def _add_moe_with_shared_experts(
         weights[f"{prefix}.shared.w_down"],
         dtype=dtype,
     )
-
-    # 8. Combine: routed_output + shared_output
+    if routed_out.dtype != shared_out.dtype:
+        routed_out = network.add_cast(routed_out, shared_out.dtype).get_output(0)
     combined = network.add_elementwise(
-        result, shared_out, trt.ElementWiseOperation.SUM)
-
+        routed_out, shared_out, trt.ElementWiseOperation.SUM)
     return combined.get_output(0)
 
 

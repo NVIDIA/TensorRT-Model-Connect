@@ -823,20 +823,30 @@ class TestBuildBundleOrchestration:
                 with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                            return_value=""):
                     with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
-                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
+                        captured = {}
+
+                        def capture_bundle(_output, _info, sections):
+                            captured["sections"] = sections
+                            captured["prefill_path"] = sections[1].source_path
+                            assert sections[1].source_path.read_bytes() == b"prefill:prefill"
+
+                        with patch(
+                            "tensorrt_model_connect.engine_builder.write_bundle",
+                            side_effect=capture_bundle,
+                        ):
                             build_bundle(
                                 str(model_dir),
                                 output_path,
                                 precision="bf16",
                             )
 
-        sections = mock_write.call_args[0][2]
+        sections = captured["sections"]
         assert [section.name for section in sections[:2]] == [
             "engine_plan",
             "prefill_engine_plan",
         ]
         assert sections[0].data == b"decode:dual_profile"
-        assert sections[1].data == b"prefill:prefill"
+        assert not captured["prefill_path"].exists()
         assert scopes == [
             "split-example_decoder-h64-l2-bf16-noquant-prefill",
             "split-example_decoder-h64-l2-bf16-noquant-decode",

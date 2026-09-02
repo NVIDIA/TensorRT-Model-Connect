@@ -44,6 +44,21 @@ def test_bundle_section_public_constructor_remains_name_and_bytes_only():
     assert not hasattr(BundleSection, "from_file")
 
 
+def test_write_bundle_embeds_exact_build_source_revision(tmp_path, monkeypatch):
+    revision = "a" * 40
+    output = tmp_path / "source-bound.bundle"
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", revision)
+
+    write_bundle(
+        output,
+        BundleInfo(),
+        [BundleSection("config.json", b'{"model_type": "synthetic_decoder"}')],
+    )
+
+    _header, sections = read_bundle_file(output)
+    assert json.loads(sections["config.json"])["source_revision"] == revision
+
+
 class TestWriteBundle:
     def _read_bundle(self, path: str) -> tuple[dict, dict[str, bytes]]:
         return read_bundle_file(path)

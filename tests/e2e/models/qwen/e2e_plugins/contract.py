@@ -5,7 +5,26 @@
 
 from __future__ import annotations
 
+import re
+
 from tests.e2e_harness.contracts import E2ECase, MetricResult, StageOutput, ThresholdProfile
+
+
+_PREFILL_OBSERVATION_RE = re.compile(
+    r"^\[trtmc\.prefill\] tokens=(\d+) launches=(\d+) max_chunk=(\d+)$"
+)
+
+
+def _parse_prefill_observations(stderr: str) -> tuple[tuple[int, int, int], ...]:
+    """Return all runtime token, launch, and observed-max-chunk counters."""
+    observations = []
+    for line in stderr.splitlines():
+        match = _PREFILL_OBSERVATION_RE.fullmatch(line.strip())
+        if match is not None:
+            observations.append(tuple(int(value) for value in match.groups()))
+    return tuple(observations)
+
+
 # Model-owned contract helpers. Keep behavior here so contract semantics do not
 # drift across model families through shared harness code.
 def contract_config(case):
@@ -66,7 +85,6 @@ def strip_chat_markup(text: str) -> str:
             cut = min(cut, idx)
     if cut < len(out):
         out = out[:cut]
-    import re
     out = re.sub(r"(?:\s*#{2,}\s*)+$", "", out).strip()
     return out
 
@@ -205,9 +223,70 @@ class QwenPostTrainedChatPlugin:
             ),
         }
 
-        rule = "exact_match OR ned <= threshold"
-        if exact_match or ned <= ned_threshold:
+        stderr = str((trt_output.metadata or {}).get("cpp", {}).get("stderr", ""))
+        prefill_observations = _parse_prefill_observations(stderr)
+        expected_chunks = int(case.metadata.get("expected_prefill_chunks", 0) or 0)
+        chunking_matches = True
+        if expected_chunks > 0:
+            marker = 'label="prefill_engine_plan:prefill"'
+            chunking_matches = any(
+                marker in line and f"launches={expected_chunks}" in line.split()
+                for line in stderr.splitlines()
+            )
+            metrics["prefill_chunks"] = MetricResult(
+                value=1.0 if chunking_matches else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=chunking_matches,
+                note=f"{marker} with launches={expected_chunks}",
+            )
+
+        expected_chunk_limit = int(case.metadata.get("expected_prefill_chunk_limit", 0) or 0)
+        chunk_limit_matches = True
+        if expected_chunk_limit > 0:
+            observed_launches = sum(item[1] for item in prefill_observations)
+            observed_max_chunk = max((item[2] for item in prefill_observations), default=0)
+            chunk_limit_matches = (
+                bool(prefill_observations)
+                and (expected_chunks <= 0 or observed_launches == expected_chunks)
+                and 0 < observed_max_chunk <= expected_chunk_limit
+            )
+            metrics["prefill_chunk_limit"] = MetricResult(
+                value=float(observed_max_chunk),
+                threshold=float(expected_chunk_limit),
+                operator="<=",
+                passed=chunk_limit_matches,
+                note=(
+                    "[trtmc.prefill] with "
+                    f"launches={observed_launches}, max_chunk={observed_max_chunk}"
+                ),
+            )
+
+        expected_rows = int(case.metadata.get("expected_kv_cache_rows", 0) or 0)
+        cache_capacity_matches = True
+        if expected_rows > 0:
+            cache_marker = f"KV cache rows={expected_rows} (bundle max={expected_rows}"
+            cache_capacity_matches = cache_marker in stderr
+            metrics["native_kv_capacity"] = MetricResult(
+                value=1.0 if cache_capacity_matches else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=cache_capacity_matches,
+                note=cache_marker,
+            )
+
+        text_matches = exact_match or ned <= ned_threshold
+        runtime_matches = chunking_matches and chunk_limit_matches and cache_capacity_matches
+        rule = "(exact_match OR ned <= threshold) AND optional_native_kv_runtime_contract"
+        if text_matches and runtime_matches:
             return make_pass("full_generation", metrics, rule)
+        if text_matches:
+            return make_fail(
+                "full_generation",
+                metrics,
+                rule,
+                "Qwen text matched but native-KV runtime markers diverged",
+            )
         return make_fail(
             "full_generation",
             metrics,
@@ -344,14 +423,24 @@ class QwenNativeKvChunkedPrefillRegressionPlugin:
         expected_limit = int(case.metadata.get("expected_prefill_chunk_limit", -1))
         cache_marker = f"KV cache rows={expected_rows} (bundle max={expected_rows}"
         prefill_marker = 'label="prefill_engine_plan:prefill"'
+        prefill_observations = _parse_prefill_observations(stderr)
+        observed_tokens = sum(item[0] for item in prefill_observations)
+        observed_launches = sum(item[1] for item in prefill_observations)
+        observed_max_chunk = max((item[2] for item in prefill_observations), default=0)
         chunk_plan_is_consistent = (
             expected_limit > 0
             and expected_chunks
             == (expected_prompt + expected_limit - 1) // expected_limit
         )
         chunked_prefill_observed = chunk_plan_is_consistent and any(
-            prefill_marker in line and f"launches={expected_chunks}" in line
+            prefill_marker in line and f"launches={expected_chunks}" in line.split()
             for line in stderr.splitlines()
+        )
+        chunk_limit_observed = (
+            bool(prefill_observations)
+            and observed_tokens == expected_prompt
+            and observed_launches == expected_chunks
+            and 0 < observed_max_chunk <= expected_limit
         )
 
         checks = {
@@ -369,8 +458,12 @@ class QwenNativeKvChunkedPrefillRegressionPlugin:
             ),
             "chunked_prefill_executed": (
                 chunked_prefill_observed,
-                f"max_chunk={expected_limit}; {prefill_marker} with "
-                f"launches={expected_chunks}",
+                f"{prefill_marker} with launches={expected_chunks}",
+            ),
+            "prefill_chunk_limit_observed": (
+                chunk_limit_observed,
+                f"expected tokens={expected_prompt}, launches={expected_chunks}, "
+                f"max_chunk<={expected_limit}; observed={prefill_observations}",
             ),
             "requested_tokens_generated": (
                 isinstance(token_ids, list) and len(token_ids) == expected_generated,

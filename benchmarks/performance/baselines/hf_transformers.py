@@ -102,6 +102,23 @@ def _ensure_transformers_generic_api(generic_module: Any) -> None:
         setattr(generic_module, "check_model_inputs", check_model_inputs)
 
 
+def _load_model(
+    model_class: Any,
+    arguments: argparse.Namespace,
+    torch_module: Any,
+    common: Mapping[str, Any],
+) -> Any:
+    model_options = {
+        "torch_dtype": _dtype(torch_module, arguments.precision),
+        "low_cpu_mem_usage": True,
+        "device_map": "cuda",
+        **common,
+    }
+    if arguments.experts_implementation:
+        model_options["experts_implementation"] = arguments.experts_implementation
+    return model_class.from_pretrained(arguments.model, **model_options).eval()
+
+
 def _load(arguments: argparse.Namespace) -> tuple[Any, Any, str]:
     import torch
     from transformers import (
@@ -132,15 +149,7 @@ def _load(arguments: argparse.Namespace) -> tuple[Any, Any, str]:
             "causal-lm": AutoModelForCausalLM,
             "seq2seq-lm": AutoModelForSeq2SeqLM,
         }[arguments.task]
-    model_options = {
-        "torch_dtype": _dtype(torch, arguments.precision),
-        "low_cpu_mem_usage": True,
-        **common,
-    }
-    if arguments.experts_implementation:
-        model_options["experts_implementation"] = arguments.experts_implementation
-    model = model_class.from_pretrained(arguments.model, **model_options)
-    model.eval().to("cuda")
+    model = _load_model(model_class, arguments, torch, common)
     resolved_revision = str(
         getattr(model.config, "_commit_hash", None) or arguments.revision or "unresolved"
     )

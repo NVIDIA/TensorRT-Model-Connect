@@ -94,6 +94,7 @@ STB_IMAGE_TASK_STRATEGIES = [
     "diffusion_media_generation",
     "image_classification",
     "image_feature_extraction",
+    "monocular_geometry",
     "object_detection",
     "omni_multimodal",
     "prompted_segmentation",
@@ -134,6 +135,7 @@ _ORCHESTRATOR_MODULES = {
 _NO_IMPACT_PATTERNS = [
     r"^docs/",
     r"^website/",
+    r"^\.coderabbit\.yaml$",
     r"^\.gitignore$",
     r"^\.clang-format$",
     r"^\.editorconfig$",
@@ -1863,6 +1865,32 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestNoImpact.test_local_qwen3_fixture_scopes_to_qwen3",),
         ),
         ClassificationRule(
+            priority=453,
+            name="cosmos3_dual_spark_example",
+            matcher=_regex_rule(r"examples/models/(cosmos3)/dual_spark/.+$"),
+            resolver=_match_result(
+                "cosmos3_dual_spark_example",
+                _family_models,
+                ["cpp", "tools"],
+                True,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_cosmos3_dual_spark_example_is_model_owned",
+            ),
+        ),
+        ClassificationRule(
+            priority=454,
+            name="nemotron_voicechat_full_duplex_example",
+            matcher=_regex_rule(r"examples/models/(nemotron_voicechat)/full_duplex/.+$"),
+            resolver=_match_result(
+                "nemotron_voicechat_full_duplex_example",
+                _family_models,
+                ["cpp", "tools"],
+                True,
+            ),
+            covered_by=("TestUnitTiers.test_voicechat_full_duplex_example_is_model_owned",),
+        ),
+        ClassificationRule(
             priority=455,
             name="cpp_example_tool",
             matcher=_regex_rule(r"examples/.+\.cpp$"),
@@ -1929,6 +1957,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="report_generation_tool",
             matcher=_path_in(
                 {
+                    "tools/case_evidence.py",
                     "tools/execution_ledger.py",
                     "tools/performance/__init__.py",
                     "tools/performance/catalog.py",
@@ -1945,6 +1974,17 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
             covered_by=(
                 "TestUnitTiers.test_report_generation_tool_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
+            priority=481,
+            name="public_failure_report_tool",
+            matcher=_path_startswith("tools/public_failure/"),
+            resolver=_match_result(
+                "public_failure_report_tool", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestUnitTiers.test_public_failure_report_tool_triggers_tools_tier",
             ),
         ),
         ClassificationRule(
@@ -2015,6 +2055,19 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=491,
+            name="devtoolkit_contract",
+            matcher=_path_startswith_any(
+                ("configs/environment-cohorts/", "scripts/devToolkit/")
+            ),
+            resolver=_match_result(
+                "devtoolkit_contract", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestNoImpact.test_devtoolkit_contract_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
+            priority=492,
             name="source_container_contract",
             matcher=_path_in({"Dockerfile.dev.aarch64", "Dockerfile.dev.x86"}),
             resolver=_match_result(
@@ -2025,7 +2078,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=492,
+            priority=493,
             name="community_cpu_contract",
             matcher=_path_in(
                 {
@@ -2033,6 +2086,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                     "Dockerfile.community-cpu",
                     "requirements/community-ci.txt",
                     "tools/community_ci.py",
+                    "tools/pr_metadata.py",
                 }
             ),
             resolver=_match_result(
@@ -2043,14 +2097,14 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=493,
+            priority=494,
             name="github_ci_config",
             matcher=_path_startswith(".github/"),
             resolver=_match_result("github_ci_config", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_github_ci_config_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=494,
+            priority=495,
             name="no_impact",
             matcher=_no_impact_matcher,
             resolver=_no_impact_resolver,

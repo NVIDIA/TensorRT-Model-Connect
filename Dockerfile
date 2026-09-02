@@ -84,6 +84,7 @@ RUN pip install "nvidia-modelopt==${MODELOPT_VERSION}"
 RUN pip install \
     "pytest<9" \
     pytest-cov \
+    "jsonschema==4.26.0" \
     coverage \
     gcovr \
     pytest-xdist \
@@ -134,43 +135,19 @@ RUN pip install --force-reinstall \
 # reference inference on the system cuBLAS instead of pip-installed CUDA libs.
 ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 
+# This model-agnostic downloader is part of the reviewed base runtime. It may
+# fetch exact public PyPI artifacts, but never imports or builds package code.
+COPY tools/ci/profile_downloader.py /opt/trtmc-profile-downloader.py
+
 # Coverage tooling verification (run inside container):
 #   python3 -m coverage --version && pytest --version && \
 #   python3 -m pytest --help | grep -- '--cov' && \
 #   gcovr --version && lcov --version && genhtml --version
 
-# Build every declarative Python execution profile while network access is
-# available. Family-owned declarations, lock files, and verification scripts
-# are the package source of truth; python_profiles.py rejects non-exact pins and
-# verifies every installed distribution before marking a profile ready.
-FROM ci-common-base AS python-profile-builder
-
-ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
-# sphn publishes no aarch64 wheel. Keep its Rust build toolchain in this
-# throwaway builder stage; the final development stage receives only the
-# verified profile.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends cargo rustc && \
-    rm -rf /var/lib/apt/lists/* && \
-    pip install "maturin==1.14.1"
-# Avoid compiling profile-local CUDA extensions for every architecture known
-# to a GPU-less Docker build. Keep 10.0 as the GB300 target.
-COPY python/tensorrt_model_connect /opt/trtmc-profile-source/tensorrt_model_connect
-COPY .github/scripts/build-python-profiles.py /opt/trtmc-build-python-profiles.py
-RUN python3 /opt/trtmc-build-python-profiles.py \
-    && chmod -R a+rX /opt/trtmc-python-profiles
-
-# Do not retain the full builder source tree in the development image. Only the
-# verified virtual environments cross the stage boundary, so sibling model
-# implementations cannot satisfy imports in an isolated source projection.
+# Keep the reusable runtime independent of family-owned Python environments.
+# Online CI preparation materializes the selected family's exact-pinned
+# profiles before a network-disabled proof and mounts them read-only there.
 FROM ci-common-base AS ci-common
-
-COPY --from=python-profile-builder \
-    /opt/trtmc-python-profiles /opt/trtmc-python-profiles
-ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
-# Execution-profile environments are part of the dev-image contract. Rebuild
-# the image after changing their lock or verification files.
-ENV TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1
 
 # Keep the reusable common layer independent of every TensorRT release. The
 # version overlay below is the only stage allowed to add bindings, headers, or

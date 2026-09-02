@@ -126,8 +126,10 @@ def load_standard_weights(
     if embedding_key is None:
         embedding_key = f"{model_prefix}.embed_tokens.weight"
     embedding = _load_tensor_as_dtype(readers, embedding_key, target_dtype)
-    assert embedding.shape == (vocab, hidden), (
-        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+    if embedding.shape != (vocab, hidden):
+        raise ValueError(
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
     weights["embedding"] = embedding
 
     def _load_layer(layer_idx: int) -> tuple[int, WeightDict, int, int]:

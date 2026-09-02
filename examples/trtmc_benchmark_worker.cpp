@@ -254,9 +254,8 @@ double finite_sum(const std::vector<float>& values) {
 }
 
 std::size_t nonfinite_count(const std::vector<float>& values) {
-    return static_cast<std::size_t>(std::count_if(values.begin(), values.end(), [](float value) {
-        return !std::isfinite(value);
-    }));
+    return static_cast<std::size_t>(std::count_if(
+        values.begin(), values.end(), [](float value) { return !std::isfinite(value); }));
 }
 
 Json run_generate(trtmc::IPipeline& pipeline, const Json& request, const TimingConfig& timing) {
@@ -543,11 +542,11 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request,
             auto single_config = config;
             single_config.seed = static_cast<int32_t>(seeds.front());
             const IterationTimer timer(timing.scope);
-            auto image = input_image.empty()
-                             ? pipeline.generate_image(prompts.front(), single_config)
-                             : pipeline.generate_image(prompts.front(), input_image.pixels.data(),
-                                                       input_image.height, input_image.width,
-                                                       single_config);
+            auto image =
+                input_image.empty()
+                    ? pipeline.generate_image(prompts.front(), single_config)
+                    : pipeline.generate_image(prompts.front(), input_image.pixels.data(),
+                                              input_image.height, input_image.width, single_config);
             measured_ms = timer.elapsed_ms();
             current.push_back(std::move(image));
         } else {
@@ -902,32 +901,24 @@ Json run_detect(trtmc::IPipeline& pipeline, const Json& request, const TimingCon
     };
 }
 
-std::vector<float> synthetic_stereo_image(int32_t height, int32_t width, int32_t pixel_shift) {
-    std::vector<float> pixels(static_cast<std::size_t>(height) * width * 3);
-    for (int32_t y = 0; y < height; ++y) {
-        for (int32_t x = 0; x < width; ++x) {
-            const int32_t source_x = std::min(x + pixel_shift, width - 1);
-            const auto offset = (static_cast<std::size_t>(y) * width + x) * 3;
-            pixels[offset] = static_cast<float>(source_x % 256) / 255.0F;
-            pixels[offset + 1] = static_cast<float>(y % 256) / 255.0F;
-            pixels[offset + 2] = static_cast<float>((source_x + y) % 256) / 255.0F;
-        }
-    }
-    return pixels;
-}
-
 Json run_disparity(trtmc::IPipeline& pipeline, const Json& request, const TimingConfig& timing) {
     const int32_t height = optional_value<int32_t>(request, "height", 700);
     const int32_t width = optional_value<int32_t>(request, "width", 700);
-    const int32_t pixel_shift = optional_value<int32_t>(request, "pixel_shift", 12);
-    if (height <= 0 || width <= 0 || pixel_shift < 0 || pixel_shift >= width) {
-        throw std::runtime_error("invalid synthetic stereo dimensions or pixel shift");
+    const int32_t max_disp = optional_value<int32_t>(request, "max_disp", 192);
+    const int32_t valid_iters = optional_value<int32_t>(request, "valid_iters", 8);
+    if (height <= 0 || width <= 0 || max_disp != 192 || valid_iters != 8) {
+        throw std::runtime_error("invalid Fast Foundation Stereo benchmark contract");
     }
-    const auto left = synthetic_stereo_image(height, width, 0);
-    const auto right = synthetic_stereo_image(height, width, pixel_shift);
+    const auto left = trtmc::io::read_image(request.at("left_image_path").get<std::string>());
+    const auto right = trtmc::io::read_image(request.at("right_image_path").get<std::string>());
+    if (left.empty() || right.empty() || left.height != height || left.width != width ||
+        right.height != height || right.width != width) {
+        throw std::runtime_error(
+            "stereo benchmark images must both match the requested dimensions");
+    }
     trtmc::StereoDisparityResult last;
     const auto estimate = [&]() {
-        return pipeline.estimate_disparity(left.data(), right.data(), height, width);
+        return pipeline.estimate_disparity(left.pixels.data(), right.pixels.data(), height, width);
     };
     for (int index = 0; index < timing.warmup; ++index) {
         last = estimate();
@@ -945,6 +936,21 @@ Json run_disparity(trtmc::IPipeline& pipeline, const Json& request, const Timing
             {"disparity_pixels", last.disparity.size()},
         });
     }
+    const std::string artifact_path = request.at("output_artifact_path").get<std::string>();
+    std::ofstream artifact(artifact_path, std::ios::binary);
+    if (!artifact || last.disparity.empty()) {
+        throw std::runtime_error("failed to create disparity artifact: " + artifact_path);
+    }
+    artifact.write(reinterpret_cast<const char*>(last.disparity.data()),
+                   static_cast<std::streamsize>(last.disparity.size() * sizeof(float)));
+    if (!artifact) {
+        throw std::runtime_error("failed to write disparity artifact: " + artifact_path);
+    }
+    const auto finite_count = std::count_if(last.disparity.begin(), last.disparity.end(),
+                                            [](float value) { return std::isfinite(value); });
+    const auto nonnegative_count =
+        std::count_if(last.disparity.begin(), last.disparity.end(),
+                      [](float value) { return std::isfinite(value) && value >= 0.0F; });
     return {
         {"observations", std::move(observations)},
         {"output_summary",
@@ -953,6 +959,11 @@ Json run_disparity(trtmc::IPipeline& pipeline, const Json& request, const Timing
              {"width", last.width},
              {"element_count", last.disparity.size()},
              {"finite_sum", finite_sum(last.disparity)},
+             {"finite_fraction",
+              static_cast<double>(finite_count) / static_cast<double>(last.disparity.size())},
+             {"nonnegative_fraction",
+              static_cast<double>(nonnegative_count) / static_cast<double>(last.disparity.size())},
+             {"disparity_artifact", artifact_path},
          }},
     };
 }
@@ -1117,14 +1128,17 @@ TimingConfig timing_config(const Json& measurement, const std::string& operation
     return timing;
 }
 
-Json execute(const Json& request) {
+Json execute(const Json& request, const std::string& output_path) {
     if (request.value("schema_version", 0) != 1) {
         throw std::runtime_error("unsupported request schema_version");
     }
     const std::string bundle = request.at("bundle").get<std::string>();
     const std::string operation = request.at("operation").get<std::string>();
     const Json runtime = request.value("runtime", Json::object());
-    const Json& operation_request = request.at("request");
+    Json operation_request = request.at("request");
+    if (operation == "disparity") {
+        operation_request["output_artifact_path"] = output_path + ".disparity.f32";
+    }
     const TimingConfig timing =
         timing_config(request.at("measurement"), operation, operation_request);
 
@@ -1185,7 +1199,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         output_path = arguments.output_path;
-        write_json(output_path, execute(read_json(arguments.request_path)));
+        write_json(output_path, execute(read_json(arguments.request_path), output_path));
         // This executable is an isolated worker and has no useful process-global
         // teardown after its result file is closed. TensorRT-RTX may retain DLL
         // globals past pipeline destruction on Windows, so an opt-in immediate

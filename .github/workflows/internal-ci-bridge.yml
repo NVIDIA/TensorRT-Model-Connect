@@ -47,11 +47,13 @@ jobs:
     outputs:
       pr_number: ${{ steps.snapshot.outputs.pr_number }}
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
+      base_sha: ${{ steps.snapshot.outputs.base_sha }}
+      policy_sha: ${{ steps.snapshot.outputs.policy_sha }}
 
     steps:
       # This trusted workflow reads PR metadata only. It never checks out or
       # executes the pull-request head.
-      - name: Capture the exact pull-request head
+      - name: Capture the exact pull-request snapshot
         id: snapshot
         env:
           GH_TOKEN: ${{ github.token }}
@@ -59,12 +61,12 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          POLICY_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]
 
-          # The legacy .permission field maps maintain to write. Use
-          # .role_name so maintainers remain distinct from write users.
           actor_role="$(
             gh api --method GET \
               "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
@@ -86,11 +88,13 @@ jobs:
           state="$(jq -er '.state' <<<"$pull")"
           base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
+          base_sha="$(jq -er '.base.sha' <<<"$pull")"
           head_sha="$(jq -er '.head.sha' <<<"$pull")"
 
           test "$state" = "open"
           test "$base_repo" = "$GITHUB_REPOSITORY"
           test "$base_ref" = "main"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
           if [ "$EVENT_NAME" = "pull_request_target" ] \
             && [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
@@ -98,9 +102,6 @@ jobs:
             exit 1
           fi
 
-          # This contributor-visible result is a readiness prerequisite. The
-          # maintainer-owned label and this default-branch workflow remain the
-          # authorization boundary for protected resources.
           community_cpu_run="$(
             gh api --method GET \
               "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
@@ -113,6 +114,8 @@ jobs:
           {
             echo "pr_number=$PR_NUMBER"
             echo "head_sha=$head_sha"
+            echo "base_sha=$base_sha"
+            echo "policy_sha=$POLICY_SHA"
           } >> "$GITHUB_OUTPUT"
 
       - name: Consume the trusted trigger label
@@ -125,44 +128,459 @@ jobs:
           gh api --silent --method DELETE \
             "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci"
 
+  announce:
+    name: Publish pending result
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      statuses: write
+
+    steps:
+      - name: Publish the pending automated status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=pending \
+            -f context="TRTMC Internal CI / Automated premerge gate" \
+            -f description="Automated internal CI is running" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Remove the previous automated failure comment
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate \
+            "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
+            --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- trtmc-internal-ci-result -->")) | .id' \
+            | while read -r comment_id; do
+                [[ "$comment_id" =~ ^[1-9][0-9]*$ ]] || continue
+                gh api --silent --method DELETE \
+                  "/repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" || true
+              done
+
   dispatch:
     name: Internal CI dispatch
-    needs: authorize
+    needs:
+      - authorize
+      - announce
+    if: ${{ always() && needs.authorize.result == 'success' }}
     runs-on: ubuntu-24.04
     environment:
       name: ci-dispatch
       deployment: false
-    timeout-minutes: 5
-    permissions: {}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    outputs:
+      private_conclusion: ${{ steps.private_result.outputs.conclusion }}
+      public_log_ready: ${{ steps.render.outputs.ready }}
 
     steps:
       - name: Dispatch internal premerge CI
+        id: private_run
         env:
-          # Fine-grained PAT scoped only to the internal CI repository with
-          # Actions: write. The protected environment owns this secret.
           GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
           PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
           PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
           PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          POLICY_SHA: ${{ needs.authorize.outputs.policy_sha }}
         run: |
           set -euo pipefail
           [[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]
           [[ "$PRIVATE_CI_REPOSITORY" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$ ]]
 
           umask 077
+          dispatch_nonce="$(openssl rand -hex 16)"
+          [[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]
+          echo "::add-mask::$dispatch_nonce"
           payload="$RUNNER_TEMP/internal-ci-dispatch.json"
           trap 'rm -f "$payload"' EXIT
           jq -n \
             --arg pr_number "$PR_NUMBER" \
             --arg head_sha "$HEAD_SHA" \
+            --arg base_sha "$BASE_SHA" \
+            --arg policy_sha "$POLICY_SHA" \
+            --arg dispatch_nonce "$dispatch_nonce" \
             '{
               ref: "main",
               inputs: {
                 pr_number: $pr_number,
-                head_sha: $head_sha
+                head_sha: $head_sha,
+                base_sha: $base_sha,
+                policy_sha: $policy_sha,
+                dispatch_nonce: $dispatch_nonce
               }
             }' > "$payload"
           gh api --silent --method POST \
             "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/dispatches" \
             --input "$payload"
+
+          expected_title="Source PR #$PR_NUMBER · $HEAD_SHA · dispatch $dispatch_nonce"
+          run_id=""
+          for _ in $(seq 1 20); do
+            runs="$(
+              gh api --method GET \
+                "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/runs?event=workflow_dispatch&per_page=100"
+            )"
+            run_id="$(
+              jq -r \
+                --arg title "$expected_title" \
+                '[
+                  .workflow_runs[]
+                  | select(.display_title == $title)
+                ]
+                | sort_by(.created_at)
+                | last
+                | .id // empty' <<<"$runs"
+            )"
+            if [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+              break
+            fi
+            sleep 3
+          done
+          if ! [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::The exact dispatched Internal CI run was not found."
+            exit 1
+          fi
+          echo "::add-mask::$run_id"
+          {
+            echo "run_id=$run_id"
+            echo "dispatch_nonce=$dispatch_nonce"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the exact Internal CI result
+        id: private_result
+        env:
+          GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
+          PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
+          RUN_ID: ${{ steps.private_run.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          # The exact private run can queue behind GPU work. Let the job-level
+          # timeout bound this wait instead of misreporting queue delay as a
+          # terminal Internal CI failure.
+          while true; do
+            run="$(
+              gh api --method GET \
+                "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/runs/$RUN_ID"
+            )"
+            status="$(jq -er '.status' <<<"$run")"
+            if [ "$status" = "completed" ]; then
+              conclusion="$(jq -r '.conclusion // "unknown"' <<<"$run")"
+              case "$conclusion" in
+                success|failure|cancelled|timed_out|skipped|neutral|action_required) ;;
+                *) conclusion=unknown ;;
+              esac
+              echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::Timed out waiting for the exact Internal CI run."
+          exit 1
+
+      - name: Download bounded public failure payload
+        if: ${{ steps.private_result.outputs.conclusion != 'success' }}
+        id: payload
+        env:
+          GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
+          PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
+          RUN_ID: ${{ steps.private_run.outputs.run_id }}
+          PAYLOAD_DIR: ${{ runner.temp }}/private-public-failure
+        run: |
+          set -euo pipefail
+          mkdir -p "$PAYLOAD_DIR"
+          if ! gh run download "$RUN_ID" \
+            --repo "$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY" \
+            --name public-failure-payload \
+            --dir "$PAYLOAD_DIR"; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          entry_count="$(find "$PAYLOAD_DIR" -mindepth 1 -maxdepth 1 -printf . | wc -c)"
+          payload="$PAYLOAD_DIR/public-failure.json"
+          if [ "$entry_count" -ne 1 ] || [ ! -f "$payload" ] || [ -L "$payload" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          payload_size="$(wc -c < "$payload")"
+          if [ "$payload_size" -lt 1 ] || [ "$payload_size" -gt 65536 ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check out trusted failure-report tooling
+        if: ${{ steps.payload.outputs.available == 'true' }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.authorize.outputs.policy_sha }}
+          persist-credentials: false
+
+      - name: Validate payload and render public-failure.log
+        if: ${{ steps.payload.outputs.available == 'true' }}
+        id: render
+        continue-on-error: true
+        env:
+          PUBLIC_FAILURE_JSON: ${{ runner.temp }}/private-public-failure/public-failure.json
+          PUBLIC_FAILURE_LOG: ${{ runner.temp }}/public-failure.log
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_DISPATCH_NONCE: ${{ steps.private_run.outputs.dispatch_nonce }}
+          EXPECTED_HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          EXPECTED_BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          EXPECTED_PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from tools.public_failure.contract import validate_public_failure
+          from tools.public_failure.identity import GitHubCommitGraph, validate_failure_identity
+          from tools.public_failure.render import render_failure_report
+          from tools.public_failure.safety import assert_public_payload_safe
+
+          report = json.loads(
+              Path(os.environ["PUBLIC_FAILURE_JSON"]).read_text(encoding="utf-8")
+          )
+          validate_public_failure(report)
+          graph = GitHubCommitGraph(os.environ["GITHUB_REPOSITORY"])
+          validate_failure_identity(
+              report,
+              expected_dispatch_nonce=os.environ["EXPECTED_DISPATCH_NONCE"],
+              expected_head_sha=os.environ["EXPECTED_HEAD_SHA"],
+              expected_base_sha=os.environ["EXPECTED_BASE_SHA"],
+              expected_pr_number=int(os.environ["EXPECTED_PR_NUMBER"]),
+              commit_parents=graph.commit_parents,
+              is_ancestor=graph.is_ancestor,
+          )
+          document = render_failure_report(report)
+          assert_public_payload_safe(report, document)
+          Path(os.environ["PUBLIC_FAILURE_LOG"]).write_bytes(document)
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write("ready=true\n")
+          PY
+
+      - name: Upload validated public-failure.log
+        if: ${{ steps.render.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-failure-log
+          path: ${{ runner.temp }}/public-failure.log
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish automated result
+    needs:
+      - authorize
+      - announce
+      - dispatch
+    if: ${{ always() && needs.authorize.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+      statuses: write
+
+    steps:
+      - name: Check out trusted publication tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.authorize.outputs.policy_sha }}
+          persist-credentials: false
+
+      - name: Resolve the contributor-visible result
+        id: result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          DISPATCH_RESULT: ${{ needs.dispatch.result }}
+          PRIVATE_CONCLUSION: ${{ needs.dispatch.outputs.private_conclusion }}
+          PUBLIC_LOG_READY: ${{ needs.dispatch.outputs.public_log_ready }}
+        run: |
+          set -euo pipefail
+          state=failure
+          description="Automated internal CI did not complete; details withheld"
+          publish_comment=true
+          use_validated_log=false
+
+          # Main is allowed to advance while this exact PR head is in CI. The
+          # private resolver separately binds testing to an authorized merge.
+          snapshot_current=false
+          if pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
+            current_state="$(jq -r '.state // ""' <<<"$pull")"
+            current_repo="$(jq -r '.base.repo.full_name // ""' <<<"$pull")"
+            current_ref="$(jq -r '.base.ref // ""' <<<"$pull")"
+            current_head="$(jq -r '.head.sha // ""' <<<"$pull")"
+            if [ "$current_state" = "open" ] \
+              && [ "$current_repo" = "$GITHUB_REPOSITORY" ] \
+              && [ "$current_ref" = "main" ] \
+              && [ "$current_head" = "$HEAD_SHA" ]; then
+              snapshot_current=true
+            elif [ "$current_head" != "$HEAD_SHA" ]; then
+              description="Automated internal CI result was superseded by a newer PR head"
+              publish_comment=false
+            fi
+          fi
+
+          if [ "$snapshot_current" = "true" ] && [ "$DISPATCH_RESULT" = "success" ]; then
+            case "$PRIVATE_CONCLUSION" in
+              success)
+                state=success
+                description="Automated internal CI passed"
+                publish_comment=false
+                ;;
+              failure)
+                description="Automated internal CI failed; open the public failure log"
+                if [ "$PUBLIC_LOG_READY" = "true" ]; then
+                  use_validated_log=true
+                fi
+                ;;
+              cancelled|timed_out|skipped|neutral|action_required|unknown|"")
+                description="Automated internal CI did not complete; details withheld"
+                ;;
+            esac
+          fi
+
+          {
+            echo "state=$state"
+            echo "description=$description"
+            echo "publish_comment=$publish_comment"
+            echo "use_validated_log=$use_validated_log"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download validated public-failure.log
+        if: ${{ steps.result.outputs.state != 'success' && steps.result.outputs.use_validated_log == 'true' }}
+        id: public_log
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: public-failure-log
+          path: ${{ runner.temp }}/contributor-result
+
+      - name: Prepare the contributor-visible log and comment
+        if: ${{ steps.result.outputs.state != 'success' }}
+        env:
+          PUBLIC_FAILURE_LOG: ${{ runner.temp }}/contributor-result/public-failure.log
+          COMMENT_BODY: ${{ runner.temp }}/internal-ci-comment.md
+          DESCRIPTION: ${{ steps.result.outputs.description }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$PUBLIC_FAILURE_LOG")"
+          if [ ! -s "$PUBLIC_FAILURE_LOG" ] || [ "$(wc -c < "$PUBLIC_FAILURE_LOG")" -gt 65536 ]; then
+            {
+              echo "TRTMC Protected CI result"
+              echo "========================="
+              echo
+              echo "Status: FAILED"
+              echo "Pull request: #$PR_NUMBER"
+              echo "Head commit: $HEAD_SHA"
+              echo "Reason: $DESCRIPTION"
+              echo
+              echo "Additional failure details were withheld or unavailable."
+            } > "$PUBLIC_FAILURE_LOG"
+          fi
+          {
+            echo '<!-- trtmc-internal-ci-result -->'
+            echo 'This is an automated Internal CI result; no review from an individual maintainer is requested.'
+            echo
+            echo '```text'
+            sed -n '1,240p' "$PUBLIC_FAILURE_LOG"
+            echo '```'
+            echo
+            echo 'Open the public Source Actions run from the automated status link above.'
+          } > "$COMMENT_BODY"
+          python3 - "$COMMENT_BODY" <<'PY'
+          import sys
+          from pathlib import Path
+
+          from tools.public_failure.safety import assert_public_text_safe
+
+          body = Path(sys.argv[1]).read_bytes()
+          if len(body) > 60000:
+              raise SystemExit("The public Internal CI comment exceeds 60000 bytes.")
+          assert_public_text_safe(body)
+          PY
+
+      - name: Publish the terminal automated status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          STATE: ${{ steps.result.outputs.state }}
+          DESCRIPTION: ${{ steps.result.outputs.description }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$STATE" \
+            -f context="TRTMC Internal CI / Automated premerge gate" \
+            -f description="$DESCRIPTION" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Print public-failure.log
+        if: ${{ steps.result.outputs.state != 'success' }}
+        run: cat "${{ runner.temp }}/contributor-result/public-failure.log"
+
+      - name: Upload fallback public-failure.log
+        if: ${{ steps.result.outputs.state != 'success' && steps.result.outputs.use_validated_log != 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-failure-log
+          path: ${{ runner.temp }}/contributor-result/public-failure.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upsert the automated failure comment
+        if: ${{ steps.result.outputs.state != 'success' && steps.result.outputs.publish_comment == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          COMMENT_BODY: ${{ runner.temp }}/internal-ci-comment.md
+        run: |
+          set -euo pipefail
+          mapfile -t comment_ids < <(
+            gh api --paginate \
+              "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
+              --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- trtmc-internal-ci-result -->")) | .id'
+          )
+          payload="$RUNNER_TEMP/internal-ci-comment.json"
+          jq -n --rawfile body "$COMMENT_BODY" '{body: $body}' > "$payload"
+          if [ "${#comment_ids[@]}" -eq 0 ]; then
+            gh api --silent --method POST \
+              "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --input "$payload"
+          else
+            gh api --silent --method PATCH \
+              "/repos/$GITHUB_REPOSITORY/issues/comments/${comment_ids[0]}" \
+              --input "$payload"
+            for comment_id in "${comment_ids[@]:1}"; do
+              gh api --silent --method DELETE \
+                "/repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" || true
+            done
+          fi
+
+      - name: Preserve the failed automated verdict
+        if: ${{ steps.result.outputs.state != 'success' }}
+        run: exit 1

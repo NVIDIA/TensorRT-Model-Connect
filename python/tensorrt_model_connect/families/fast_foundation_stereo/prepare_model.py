@@ -39,9 +39,15 @@ def configure_official_model_args(
 def install_official_io_import_shims() -> None:
     """Satisfy unused official visualization imports during model loading."""
     if "imageio" not in sys.modules and importlib.util.find_spec("imageio") is None:
-        sys.modules["imageio"] = types.ModuleType("imageio")
+        imageio = types.ModuleType("imageio")
+        imageio.__spec__ = importlib.util.spec_from_loader(
+            "imageio", loader=None, is_package=True
+        )
+        imageio.__path__ = []
+        sys.modules["imageio"] = imageio
     if "cv2" not in sys.modules and importlib.util.find_spec("cv2") is None:
         cv2 = types.ModuleType("cv2")
+        cv2.__spec__ = importlib.util.spec_from_loader("cv2", loader=None)
         cv2.COLORMAP_TURBO = 20
         sys.modules["cv2"] = cv2
 

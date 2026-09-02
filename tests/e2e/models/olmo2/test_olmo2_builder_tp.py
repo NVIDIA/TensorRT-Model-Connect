@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
+from tensorrt_model_connect.bundle_writer import BundleSection
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 
@@ -170,4 +172,40 @@ def test_olmo2_plugin_routes_split_prefill_builds(monkeypatch) -> None:
     assert calls["build"]["kwargs"] == {
         "precision": "fp32",
         "verbose": False,
+        "workspace_bytes": 256 << 20,
     }
+
+
+def test_split_plan_spool_releases_temporary_artifact(tmp_path: Path) -> None:
+    from tensorrt_model_connect.engine_builder import _spool_split_plan
+
+    spool, plan_path = _spool_split_plan(
+        b"prefill-plan",
+        tmp_path / "olmo2.bundle",
+    )
+    assert plan_path.read_bytes() == b"prefill-plan"
+
+    spool.cleanup()
+    assert not plan_path.exists()
+
+
+def test_olmo2_stages_engine_plans_in_bundle_config() -> None:
+    from tensorrt_model_connect.engine_builder import _apply_staged_bundle_loading
+    from tensorrt_model_connect.families.olmo2.plugin import plugin
+
+    sections = [
+        BundleSection("engine_plan", b"decode"),
+        BundleSection("prefill_engine_plan", b"prefill"),
+        BundleSection("tokenizer.json", b"{}"),
+        BundleSection("config.json", b"{}"),
+    ]
+
+    _apply_staged_bundle_loading(plugin, sections)
+
+    config = next(section for section in sections if section.name == "config.json")
+    assert config.data == (
+        b'{\n  "bundle_loading": {\n    "mode": "staged",\n'
+        b'    "eager_sections": [\n      "tokenizer.json",\n'
+        b'      "config.json"\n    ],\n    "lazy_sections": [\n'
+        b'      "engine_plan",\n      "prefill_engine_plan"\n    ]\n  }\n}'
+    )

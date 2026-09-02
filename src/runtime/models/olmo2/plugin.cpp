@@ -59,6 +59,34 @@ struct DecoderProfileRoles {
     std::vector<DecoderProfileInfo> decode_profiles;
 };
 
+const BundleSectionInfo* find_bundle_section_info(const BundleInfo& info, const std::string& name) {
+    const auto section =
+        std::find_if(info.sections.begin(), info.sections.end(),
+                     [&](const BundleSectionInfo& candidate) { return candidate.name == name; });
+    return section == info.sections.end() ? nullptr : &*section;
+}
+
+bool has_bundle_section(const BundleFile& bundle, const std::string& name) {
+    const auto* eager = find_section(bundle, name);
+    if (eager != nullptr && !eager->empty())
+        return true;
+    const auto* section = find_bundle_section_info(bundle.info, name);
+    return section != nullptr && section->size > 0;
+}
+
+const std::vector<char>& load_bundle_section(const PipelineContext& ctx, const std::string& name,
+                                             std::vector<char>& staged) {
+    const auto* eager = find_section(ctx.bundle, name);
+    if (eager != nullptr && !eager->empty())
+        return *eager;
+
+    const auto* section = find_bundle_section_info(ctx.bundle.info, name);
+    if (section == nullptr || section->size == 0)
+        throw std::runtime_error(name + " section is missing");
+    staged = ReadBundleSection(ctx.bundle_path, *section);
+    return staged;
+}
+
 int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
     if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
         return -1;
@@ -331,7 +359,7 @@ class Olmo2DecoderPlugin final : public IPipelinePlugin {
     load_split_prefill_module(const PipelineContext& ctx, cudaStream_t stream, const IoMap& io,
                               const Olmo2KvCacheNames& kv_names, int32_t& prefill_profile_idx,
                               int32_t& prefill_max_length, std::string& prefill_log_label) {
-        if (find_section(ctx.bundle, "prefill_engine_plan") == nullptr)
+        if (!has_bundle_section(ctx.bundle, "prefill_engine_plan"))
             return nullptr;
 
         auto split_prefill_modules =
@@ -368,9 +396,8 @@ class Olmo2DecoderPlugin final : public IPipelinePlugin {
     static BackendProfileModules
     load_decoder_profile_modules(const PipelineContext& ctx, const std::string& section_name,
                                  cudaStream_t stream, const TensorParallelRuntime* tp_runtime) {
-        auto* plan = find_section(ctx.bundle, section_name);
-        if (plan == nullptr || plan->empty())
-            throw std::runtime_error(section_name + " section is missing");
+        std::vector<char> staged_plan;
+        const auto& plan = load_bundle_section(ctx, section_name, staged_plan);
         if (ctx.backend == nullptr)
             throw std::runtime_error("No backend loaded");
 
@@ -393,10 +420,10 @@ class Olmo2DecoderPlugin final : public IPipelinePlugin {
 
         const auto t0 = std::chrono::steady_clock::now();
         auto modules =
-            ctx.backend->create_profile_modules(plan->data(), plan->size(), opts, profile_indices);
+            ctx.backend->create_profile_modules(plan.data(), plan.size(), opts, profile_indices);
         const auto t1 = std::chrono::steady_clock::now();
         const double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        log_trt_load_timing(section_name.c_str(), load_ms, plan->size());
+        log_trt_load_timing(section_name.c_str(), load_ms, plan.size());
         for (auto& entry : modules.modules) {
             entry.module->set_timing_label(entry.profile_idx == 0 ? section_name + ":profile0"
                                                                   : section_name + ":decode");

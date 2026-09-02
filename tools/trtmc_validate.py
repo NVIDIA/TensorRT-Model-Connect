@@ -60,6 +60,7 @@ from tools.reporting_html import (  # noqa: E402
 )
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tools.validation.gate_census import build_gate_census  # noqa: E402
+from tools import case_evidence  # noqa: E402
 from tools import trtmc_disagreements  # noqa: E402
 from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
 from tools import model_selection  # noqa: E402
@@ -554,7 +555,7 @@ def _declared_profile(
     return profile
 
 
-def _binding_profiles(
+def binding_profiles(
     binding: Binding,
     *,
     task_models: Mapping[str, dict[str, Any]],
@@ -612,7 +613,15 @@ def ensure_environments(
     )
 
 
-def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
+REFERENCE_SOURCES_PREBUILT_ONLY_ENV = "TRTMC_REFERENCE_SOURCES_PREBUILT_ONLY"
+
+
+def _ensure_reference_source(
+    source: ReferenceSource,
+    cache_root: Path,
+    *,
+    prebuilt_only: bool = False,
+) -> Path:
     checkout = cache_root / source.relative_checkout
     entrypoint = checkout / source.entrypoint
     if entrypoint.exists():
@@ -620,6 +629,11 @@ def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
         return checkout
     if checkout.exists():
         raise ValidationError(f"Incomplete cached {source.name} reference: {checkout}")
+    if prebuilt_only:
+        raise ValidationError(
+            f"Missing prepared {source.name} reference source: {checkout}; "
+            "qualification prepare phase did not materialize it"
+        )
 
     checkout.parent.mkdir(parents=True, exist_ok=True)
     print(f"Creating reference source: {source.name}", flush=True)
@@ -671,9 +685,18 @@ def ensure_reference_sources(
     model_reference_cache: Mapping[str, Any] | None = None,
     *,
     source_cache_root: Path | None = None,
+    prebuilt_only: bool | None = None,
 ) -> ReferenceSourceSelection:
     environment = {"TRTMC_STORAGE_ROOT": str(cache_root)}
     checkout_root = source_cache_root or cache_root
+    if prebuilt_only is None:
+        prebuilt_only = os.environ.get(REFERENCE_SOURCES_PREBUILT_ONLY_ENV) == "1"
+
+    def prepare(source: ReferenceSource) -> Path:
+        if prebuilt_only:
+            return _ensure_reference_source(source, checkout_root, prebuilt_only=True)
+        return _ensure_reference_source(source, checkout_root)
+
     declared_source = None
     if model_reference_cache:
         required = ("repository", "revision", "relative_path", "entrypoint")
@@ -689,7 +712,7 @@ def ensure_reference_sources(
             relative_checkout=Path(str(model_reference_cache["relative_path"])),
             entrypoint=Path(str(model_reference_cache["entrypoint"])),
         )
-        checkout = _ensure_reference_source(declared_source, checkout_root)
+        checkout = prepare(declared_source)
         environment_variable = str(
             model_reference_cache.get("environment_variable", "") or ""
         ).strip()
@@ -702,7 +725,7 @@ def ensure_reference_sources(
             environment[environment_variable] = str(checkout)
 
     if family == "elf_flow":
-        checkout = _ensure_reference_source(ELF_SOURCE, checkout_root)
+        checkout = prepare(ELF_SOURCE)
         return ReferenceSourceSelection(
             environment=environment,
             elf_reference_repo=checkout,
@@ -710,12 +733,12 @@ def ensure_reference_sources(
     if family == "sana_wm":
         if declared_source is None:
             declared_source = SANA_WM_SOURCE
-            checkout = _ensure_reference_source(declared_source, checkout_root)
+            checkout = prepare(declared_source)
         environment["SANA_WM_SCRIPT"] = str(checkout / declared_source.entrypoint)
     return ReferenceSourceSelection(environment=environment)
 
 
-def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
+def dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
     raw = str(suite.get("dataset", {}).get("default_path", "") or "")
     if not raw:
         raise ValidationError(f"workload {suite.get('id')} has no default dataset path")
@@ -729,6 +752,10 @@ def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
     except ValueError:
         relative = Path(path.name)
     return dataset_root / relative
+
+
+def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
+    return dataset_path(suite, dataset_root)
 
 
 def _run_subprocess(command: Sequence[str], log_path: Path, env: Mapping[str, str]) -> int:
@@ -1828,7 +1855,7 @@ def run_binding(
             encoding="utf-8",
         )
         return result
-    profiles = _binding_profiles(
+    profiles = binding_profiles(
         binding,
         task_models=task_models,
         suites=suites,
@@ -1948,23 +1975,29 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
-    """Fail before GPU work when source and native build provenance differ."""
-    expected_revision = _source_revision()
+def validate_build_identity(
+    *,
+    trtmc_binary: Path,
+    benchmark_binary: Path,
+    backend_dir: Path | None,
+    model_plugin_dir: Path | None,
+    expected_revision: str,
+) -> dict[str, Any]:
+    """Validate one native build before dependency preparation or GPU work."""
     if not expected_revision:
         raise ValidationError(
             "cannot determine the validation source revision for build identity preflight"
         )
 
-    benchmark_binary = arguments.benchmark_binary.expanduser().resolve()
+    benchmark_binary = benchmark_binary.expanduser().resolve()
     build_root = benchmark_binary.parent
-    trtmc_binary = arguments.trtmc_binary.expanduser().resolve()
+    trtmc_binary = trtmc_binary.expanduser().resolve()
     backend_dir = (
-        arguments.backend_dir.expanduser().resolve() if arguments.backend_dir else build_root
+        backend_dir.expanduser().resolve() if backend_dir else build_root
     )
     model_plugin_dir = (
-        arguments.model_plugin_dir.expanduser().resolve()
-        if arguments.model_plugin_dir
+        model_plugin_dir.expanduser().resolve()
+        if model_plugin_dir
         else build_root / "models"
     )
     worker = build_root / "trtmc_benchmark_worker"
@@ -1998,6 +2031,12 @@ def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
     for label, path in required_files.items():
         if not path.is_file():
             raise ValidationError(f"{label} is missing for build identity preflight: {path}")
+    for label in ("trtmc binary", "dataset benchmark", "benchmark worker"):
+        path = required_files[label]
+        if not os.access(path, os.X_OK):
+            raise ValidationError(
+                f"{label} is not executable for build identity preflight: {path}"
+            )
     if not model_plugin_dir.is_dir():
         raise ValidationError(
             f"model plugin directory is missing for build identity preflight: {model_plugin_dir}"
@@ -2037,6 +2076,17 @@ def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
         "model_plugin_dir": str(model_plugin_dir),
         "artifacts": artifacts,
     }
+
+
+def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
+    """Fail before GPU work when source and native build provenance differ."""
+    return validate_build_identity(
+        trtmc_binary=arguments.trtmc_binary,
+        benchmark_binary=arguments.benchmark_binary,
+        backend_dir=arguments.backend_dir,
+        model_plugin_dir=arguments.model_plugin_dir,
+        expected_revision=_source_revision(),
+    )
 
 
 def _write_build_identity(
@@ -3159,6 +3209,15 @@ def _shadow_gate_metrics(
                 if isinstance(metric, (int, float)) and not isinstance(metric, bool):
                     key = str(name) if statistic == "mean" else f"{statistic}_{name}"
                     metrics[key] = metric
+    task_accuracy = raw_result.get("task_accuracy", {})
+    if isinstance(task_accuracy, Mapping):
+        metrics.update(
+            {
+                str(name): metric
+                for name, metric in task_accuracy.items()
+                if isinstance(metric, (int, float)) and not isinstance(metric, bool)
+            }
+        )
     return metrics
 
 
@@ -3607,6 +3666,13 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
             summary["duration_seconds"] = duration_seconds
     if any(row["state"] != "terminal" for row in public_results):
         validation_status = "running"
+    revision_summary = case_evidence.summarize_model_revisions(
+        {**row, "task": "accuracy"} for row in public_results
+    )
+    source_revisions = revision_summary["source_revisions"]
+    report_revision = source_revisions[0] if len(source_revisions) == 1 else None
+    run["source_revision"] = report_revision
+    run["source_revisions"] = source_revisions
     return qualification_report.materialize_report(
         output,
         report_kind="accuracy",
@@ -3614,13 +3680,14 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
         identity={
             "run_id": output.name,
             "disposition": validation_status,
-            "source_revision": run.get("source_revision"),
+            "source_revision": report_revision,
         },
         run=run,
         results=public_results,
         metadata={
             "validation_status": validation_status,
             "summary": summary,
+            "model_source_identity": revision_summary,
         },
     )
 
@@ -3799,8 +3866,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume-existing",
         action="store_true",
         help=(
-            "keep terminal results for exact bindings in an existing output "
-            "from the same source revision"
+            "keep terminal results for exact bindings and retry interrupted or "
+            "retryable cases in an existing output"
+        ),
+    )
+    parser.add_argument(
+        "--invalidate-model",
+        action="append",
+        default=[],
+        help=(
+            "with --resume-existing, reopen every selected Accuracy case for this "
+            "model; repeatable"
         ),
     )
     parser.add_argument("--list", action="store_true", help="list model-first workloads")
@@ -4278,6 +4354,7 @@ def _accuracy_worker_attempt_evidence(
     worker_command = _worker_command(binding, arguments)
     worker_environment = _worker_environment(arguments)
     return {
+        "source_revision": case_evidence.exact_source_revision(_source_revision()),
         "commands": {
             "worker": {
                 "argv": worker_command,
@@ -4710,6 +4787,10 @@ def _resumable_binding_result(
         "skipped",
     }:
         return None
+    try:
+        case_evidence.exact_source_revision(result.get("source_revision"))
+    except case_evidence.CaseEvidenceError:
+        return None
     return result
 
 
@@ -4718,8 +4799,21 @@ def _resume_command(command: str) -> list[str]:
         arguments = shlex.split(command)
     except ValueError as exc:
         raise ValidationError(f"cannot parse recorded Accuracy command: {exc}") from exc
-    presentation_only = {"--resume-existing", "--verbose"}
-    return [argument for argument in arguments if argument not in presentation_only]
+    normalized: list[str] = []
+    skip_value = False
+    for argument in arguments:
+        if skip_value:
+            skip_value = False
+            continue
+        if argument in {"--resume-existing", "--verbose"}:
+            continue
+        if argument == "--invalidate-model":
+            skip_value = True
+            continue
+        normalized.append(argument)
+    if skip_value:
+        raise ValidationError("--invalidate-model requires a model name")
+    return normalized
 
 
 def _validate_resume_request(output: Path) -> None:
@@ -4732,13 +4826,6 @@ def _validate_resume_request(output: Path) -> None:
         raise ValidationError(f"cannot read resume metadata {run_path}: {exc}") from exc
     if not isinstance(run, Mapping):
         raise ValidationError(f"resume metadata must contain a JSON object: {run_path}")
-    previous = str(run.get("source_revision", "") or "")
-    current = _source_revision()
-    if not previous or previous != current:
-        raise ValidationError(
-            "cannot resume Accuracy results from a different source revision: "
-            f"recorded={previous or '<missing>'}, current={current or '<missing>'}"
-        )
     recorded_command = str(run.get("command", "") or "")
     current_command = shlex.join(sys.argv)
     if not recorded_command or _resume_command(recorded_command) != _resume_command(
@@ -4756,10 +4843,7 @@ def _open_accuracy_ledger(
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
 ) -> ExecutionLedger:
-    fingerprint_input = {
-        "source_revision": _source_revision(),
-        "command": _resume_command(shlex.join(sys.argv)),
-    }
+    fingerprint_input = {"command": _resume_command(shlex.join(sys.argv))}
     fingerprint = hashlib.sha256(
         json.dumps(fingerprint_input, sort_keys=True).encode("utf-8")
     ).hexdigest()
@@ -4799,6 +4883,17 @@ def _run_all_bindings(
     catalog: Mapping[str, Any],
 ) -> int:
     bindings = tuple(bindings)
+    selected_models = {binding.model for binding in bindings}
+    invalidated_models = set(arguments.invalidate_model)
+    if invalidated_models and not arguments.resume_existing:
+        raise ValidationError("--invalidate-model requires --resume-existing")
+    unknown_invalidations = sorted(invalidated_models - selected_models)
+    if unknown_invalidations:
+        raise ValidationError(
+            "--invalidate-model is not selected by this Accuracy run: "
+            + ", ".join(unknown_invalidations)
+        )
+    execution_revision = case_evidence.exact_source_revision(_source_revision())
     _prepare_run_directories(arguments)
     _reused_bundle_revalidation_budget(arguments)
     if arguments.resume_existing:
@@ -4810,6 +4905,22 @@ def _run_all_bindings(
     ledger = _open_accuracy_ledger(bindings, arguments, catalog)
     if arguments.resume_existing:
         ledger.recover_interrupted()
+        ledger.reopen_retryable()
+        invalidated_case_ids = [
+            _accuracy_case_id(binding)
+            for binding in bindings
+            if binding.model in invalidated_models
+            and ledger.receipt(_accuracy_case_id(binding))["state"] == "terminal"
+        ]
+        if invalidated_case_ids:
+            ledger.reopen_cases(
+                invalidated_case_ids,
+                reason="model_invalidation",
+                evidence={
+                    "models": sorted(invalidated_models),
+                    "requested_revision": execution_revision,
+                },
+            )
     write_report(arguments.output)
     failed = False
     not_compared = False
@@ -4833,7 +4944,11 @@ def _run_all_bindings(
                     binding,
                     arguments.output,
                 )
-                normalized = _normalize_result(result)
+                normalized = case_evidence.stamp_case(result, execution_revision)
+                comparison.write_text(
+                    json.dumps(normalized, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
                 ledger.finish(
                     case_id,
                     result=_traffic_light_status(normalized),
@@ -4881,6 +4996,8 @@ def _run_all_bindings(
         result = (
             _resumable_binding_result(arguments.output, binding)
             if arguments.resume_existing
+            and binding.model not in invalidated_models
+            and not receipt["attempts"]
             else None
         )
         if result is None:
@@ -4960,6 +5077,7 @@ def _run_all_bindings(
             for resource in (cleanup["engine"], cleanup["hf_cache"])
         )
         failed = failed or cleanup_failed
+        result = case_evidence.stamp_case(result, execution_revision)
         comparison = _case_directory(arguments.output, binding) / "comparison.json"
         comparison.parent.mkdir(parents=True, exist_ok=True)
         comparison.write_text(
@@ -5000,8 +5118,15 @@ def _run_all_bindings(
             )
             break
     finalize_run_metadata(arguments.output)
-    write_report(arguments.output)
-    if failed:
+    _, _, final_report = write_report(arguments.output)
+    source_identity_failed = not final_report["model_source_identity"]["consistent"]
+    if source_identity_failed:
+        print(
+            "Accuracy source identity is mixed, missing, or incomplete; "
+            "re-run the affected model with --invalidate-model",
+            file=sys.stderr,
+        )
+    if failed or source_identity_failed:
         return 1
     return 2 if not_compared and not arguments.all else 0
 

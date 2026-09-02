@@ -51,6 +51,7 @@ from tensorrt_model_connect import trt_compat
 from . import graph_ops
 from . import graph_blocks
 from .utils import (
+    builder_workspace_bytes,
     const_in_work_dtype as _const_in_work_dtype,
     create_builder_context,
     norm_multi as _norm_multi,
@@ -187,7 +188,10 @@ def build_dual_profile_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim
     )
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
-    builder_context = create_builder_context(verbose=verbose)
+    builder_context = create_builder_context(
+        verbose=verbose,
+        workspace_bytes=builder_workspace_bytes(config),
+    )
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config

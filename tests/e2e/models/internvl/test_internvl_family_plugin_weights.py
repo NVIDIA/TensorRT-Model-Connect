@@ -9,7 +9,8 @@ Shared test code is limited to filesystem and serialization helpers.
 
 from __future__ import annotations
 
-
+import json
+from unittest.mock import patch
 
 from tests.builder.family_plugin_test_support import (
     ModelConfig,
@@ -230,6 +231,128 @@ class TestInternVLPlugin:
         assert vl_cfg["vision_output_dim"] == self.HIDDEN
         assert "image_token_id" in vl_cfg
         assert "vl_prompt_template" in vl_cfg
+
+    def test_bundle_config_overrides_flatten_text_decoder(self, tmp_path):
+        """The native runtime receives InternVL's nested decoder geometry."""
+        from tensorrt_model_connect.families.internvl import plugin
+
+        config = {
+            "model_type": "internvl",
+            "text_config": {
+                "vocab_size": 151674,
+                "hidden_size": 1536,
+                "num_hidden_layers": 28,
+                "num_attention_heads": 12,
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "bos_token_id": 151643,
+            },
+            "vision_config": {
+                "hidden_size": 1024,
+                "num_hidden_layers": 24,
+            },
+        }
+        _write_config(tmp_path, config)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+
+        assert plugin.get_bundle_config_overrides(cfg) == {
+            "vocab_size": 151674,
+            "hidden_size": 1536,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 12,
+            "num_key_value_heads": 2,
+            "head_dim": 128,
+            "bos_token_id": 151643,
+        }
+
+    def test_mock_bundle_serializes_decoder_geometry_at_top_level(self, tmp_path):
+        """Mock engines while exercising the real InternVL bundle boundary."""
+        from tensorrt_model_connect.engine_builder import build_bundle
+        from tensorrt_model_connect.families.internvl.plugin import (
+            plugin as production_plugin,
+        )
+
+        source_config = {
+            "model_type": "internvl",
+            "text_config": {
+                "vocab_size": 151674,
+                "hidden_size": 1536,
+                "num_hidden_layers": 28,
+                "num_attention_heads": 12,
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "bos_token_id": 151643,
+            },
+            "vision_config": {
+                "hidden_size": 1024,
+                "num_hidden_layers": 24,
+                "patch_size": 14,
+            },
+        }
+        _write_config(tmp_path, source_config)
+
+        class MockInternVLPlugin:
+            name = "internvl"
+            runtime_strategy = "internvl_vision_language"
+            requires_tokenizer = False
+
+            @staticmethod
+            def load_weights(_model_dir, _config):
+                return {}
+
+            @staticmethod
+            def build_engine(_config, _weights, _max_cache_length, **_kwargs):
+                return b"MOCK_DECODER_PLAN"
+
+            @staticmethod
+            def build_vision_engine(_model_dir, _config, _weights, **_kwargs):
+                return b"MOCK_VISION_PLAN"
+
+            @staticmethod
+            def get_vl_config(config):
+                return production_plugin.get_vl_config(config)
+
+            @staticmethod
+            def get_bundle_config_overrides(config):
+                return production_plugin.get_bundle_config_overrides(config)
+
+        with (
+            patch(
+                "tensorrt_model_connect.engine_builder.find_plugin",
+                return_value=MockInternVLPlugin(),
+            ),
+            patch(
+                "tensorrt_model_connect.engine_builder._get_trt_version",
+                return_value="11.1.0",
+            ),
+            patch(
+                "tensorrt_model_connect.engine_builder._get_gpu_name",
+                return_value="CPU unit mock",
+            ),
+            patch("tensorrt_model_connect.engine_builder.write_bundle") as write_bundle,
+        ):
+            build_bundle(
+                str(tmp_path),
+                str(tmp_path / "internvl.bundle"),
+                max_cache_length=256,
+            )
+
+        sections = {section.name: section.data for section in write_bundle.call_args.args[2]}
+        runtime_config = json.loads(sections["config.json"])
+        assert runtime_config["text_config"] == source_config["text_config"]
+        assert {
+            key: runtime_config[key]
+            for key in (
+                "vocab_size",
+                "hidden_size",
+                "num_hidden_layers",
+                "num_attention_heads",
+                "num_key_value_heads",
+                "head_dim",
+                "bos_token_id",
+            )
+        } == source_config["text_config"]
 
     def test_no_vl_config_without_vision(self, tmp_path):
         """get_vl_config returns None when no vision_config present."""

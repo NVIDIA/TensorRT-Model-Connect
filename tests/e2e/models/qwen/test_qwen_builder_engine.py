@@ -9,6 +9,8 @@ Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU re
 Postconditions: All standard decoder weight keys are present with correct shapes and the engine builds successfully.
 """
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -71,10 +73,36 @@ class Qwen3NativePluginTester(FamilyPluginTester):
         ("decode", [(1,), (1,), (1,)]),
     ],
 )
+@pytest.mark.parametrize("precision", ["fp16", "bf16"])
 @pytest.mark.trt
 @pytest.mark.gpu
-def test_native_qwen3_split_role_engine_contract(tmp_path, role, profile_shapes):
+def test_native_qwen3_split_role_engine_contract(
+    tmp_path,
+    role,
+    profile_shapes,
+    precision,
+    monkeypatch,
+):
     import tensorrt as trt
+
+    importlib.import_module("tensorrt_model_connect.families.qwen.plugin")
+    graph_ops = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.graph_ops"
+    )
+    native_attention_calls = []
+    original_native_attention = graph_ops.add_native_kv_cache_attention_from_rows
+
+    def _record_native_attention(*args, **kwargs):
+        native_attention_calls.append(
+            (args[7].attention.dtype, args[7].active_prefix.dtype)
+        )
+        return original_native_attention(*args, **kwargs)
+
+    monkeypatch.setattr(
+        graph_ops,
+        "add_native_kv_cache_attention_from_rows",
+        _record_native_attention,
+    )
 
     tester = Qwen3NativePluginTester()
     config, weights, _ = tester.prepare_config_and_weights(tmp_path)
@@ -83,12 +111,18 @@ def test_native_qwen3_split_role_engine_contract(tmp_path, role, profile_shapes)
         config,
         weights,
         tester.spec.max_cache_length,
-        precision="bf16",
-        verbose=False,
+        precision=precision,
+        verbose=precision == "fp16" and role == "prefill",
     )
     engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
 
     assert engine is not None
+    assert len(native_attention_calls) == tester.spec.num_hidden_layers
+    precision_dtype = trt.float16 if precision == "fp16" else trt.bfloat16
+    expected_cache_dtype = precision_dtype
+    assert native_attention_calls == [
+        (trt.bool, trt.bool)
+    ] * tester.spec.num_hidden_layers
     assert engine.num_optimization_profiles == 1
     assert [
         tuple(shape) for shape in engine.get_tensor_profile_shape("token_id", 0)
@@ -129,8 +163,14 @@ def test_native_qwen3_split_role_engine_contract(tmp_path, role, profile_shapes)
         present_name = f"present_{stem}_0"
         assert tuple(engine.get_tensor_shape(cache_name)) == expected_cache_shape
         assert tuple(engine.get_tensor_shape(present_name)) == expected_cache_shape
-        assert engine.get_tensor_dtype(cache_name) == trt.bfloat16
+        assert engine.get_tensor_dtype(cache_name) == expected_cache_dtype
         assert engine.get_aliased_input_tensor(present_name) == cache_name
+
+    expected_metadata = {
+        "native_kv_contract_version": 1,
+        "native_kv_cache": True,
+    }
+    assert tester.get_plugin().get_bundle_config_overrides(config) == expected_metadata
 
 
 def _qwen_tp_builder_module():

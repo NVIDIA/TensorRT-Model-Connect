@@ -571,7 +571,14 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype), dtype=work_np_dtype
     )
-    mel_input = network.add_input("mel_features", work_trt_dtype, (num_mel_bins, mel_length))
+    # The mel edge stays FP32 whatever the encoder's compute precision. The
+    # runtime copies host tensors into engine buffers with an untyped memcpy, so
+    # a half input would reinterpret the FP32 mel values the pipeline supplies
+    # rather than converting them. One chunk is under a megabyte, so holding
+    # this edge at FP32 costs nothing measurable.
+    mel_input = network.add_input("mel_features", trt.float32, (num_mel_bins, mel_length))
+    if work_trt_dtype != trt.float32:
+        mel_input = network.add_cast(mel_input, work_trt_dtype).get_output(0)
 
     # TRT requires 2D+ convolutions; reshape 1D conv weights [out, in, k] -> [out, in, 1, k]
     # and input from [1, C, L] -> [1, C, 1, L]

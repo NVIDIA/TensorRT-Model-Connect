@@ -649,7 +649,7 @@ def _read_result_json(ctx: RunContext, case: E2ECase) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_auto_register_artifacts_includes_reference_visuals_and_metadata_audio(
+def test_auto_register_artifacts_includes_reference_visuals_audio_and_geometry(
     tmp_path: Path,
 ) -> None:
     class Sink:
@@ -689,6 +689,32 @@ def test_auto_register_artifacts_includes_reference_visuals_and_metadata_audio(
     )
     orchestrator._auto_register_artifacts(sink, outside, "trt")
     assert sink.artifacts["trt_wav"] == str(sibling_prefix)
+
+    geometry_sink = Sink()
+    paths = {
+        "points_path": tmp_path / "points.f32",
+        "depth_path": tmp_path / "depth.f32",
+        "mask_path": tmp_path / "mask.u8",
+        "intrinsics_path": tmp_path / "intrinsics.json",
+    }
+    for path in paths.values():
+        path.write_bytes(b"evidence")
+
+    orchestrator._auto_register_artifacts(
+        geometry_sink,
+        StageOutput(
+            stage_name="full_inference",
+            data={key: str(path) for key, path in paths.items()},
+        ),
+        "trt",
+    )
+
+    assert geometry_sink.artifacts == {
+        "trt_points": "points.f32",
+        "trt_depth": "depth.f32",
+        "trt_mask": "mask.u8",
+        "trt_intrinsics": "intrinsics.json",
+    }
 
 
 def test_run_returns_preflight_skip_without_resolving_bundle(

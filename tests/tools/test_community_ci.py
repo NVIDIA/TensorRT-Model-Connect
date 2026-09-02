@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -63,7 +64,7 @@ def test_contributor_guides_match_the_live_ci_flow(path: Path) -> None:
         "git push --set-upstream origin",
         "Community CPU / Required",
         "run-internal-ci",
-        "trtmc/premerge/required",
+        "TRTMC Internal CI / Automated premerge gate",
     ]
 
     positions = [source.index(marker) for marker in ordered_markers]
@@ -81,6 +82,8 @@ def test_contributor_guides_match_the_live_ci_flow(path: Path) -> None:
         "py -3 -m pip",
     ):
         assert marker in source
+    if path == REPO_ROOT / "website" / "docs" / "extend" / "contributing.md":
+        assert "all source-only CPU-safe" in source
     assert "/run-ci" not in source
     assert "status comment" not in source
 
@@ -107,7 +110,7 @@ def test_impact_publishes_only_the_public_cpu_scope(
         lambda *_args, **_kwargs: {
             "mode": "unit",
             "run_unit_tests": True,
-            "unit_scope": "cli",
+            "unit_scope": "all",
             "changes": [
                 {
                     "classifications": [
@@ -117,13 +120,34 @@ def test_impact_publishes_only_the_public_cpu_scope(
             ],
         },
     )
+    monkeypatch.setattr(
+        runner.commands,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "builder_tests": [
+                        "tests/e2e/models/qwen/test_qwen_native_kv_routing.py"
+                    ],
+                    "tools_tests": [],
+                }
+            ),
+            stderr="",
+        ),
+    )
 
     result = runner.impact(None)
 
-    assert result["unit_scope"] == "cli"
-    assert github_output.read_text(encoding="utf-8") == ("run_unit_tests=true\nunit_scope=cli\n")
+    assert result["unit_scope"] == "all"
+    assert github_output.read_text(encoding="utf-8") == (
+        "run_unit_tests=true\n"
+        "unit_scope=all\n"
+        'python_test_targets=["tests/e2e/models/qwen/test_qwen_native_kv_routing.py"]\n'
+    )
     summary = github_summary.read_text(encoding="utf-8")
-    assert "Unit scope: `cli`" in summary
+    assert "Unit scope: `all`" in summary
     assert "src/runtime/config/cli_support.cpp" in summary
 
 
@@ -138,7 +162,7 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     assert workflow["permissions"] == {}
     assert "pull_request:" in source
     assert "branches: [main]" in source
-    assert "types: [opened, synchronize, reopened]" in source
+    assert "types: [opened, synchronize, reopened, ready_for_review]" in source
     assert "issue_comment:" not in source
     assert "pull_request_target" not in source
     assert "workflow_dispatch:" not in source
@@ -167,8 +191,22 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     for job_name in ("source-quality", "docs", "ownership-impact", "unit"):
         assert jobs[job_name]["permissions"] == {"contents": "read"}
-    assert jobs["unit"]["if"] == "${{ !cancelled() }}"
-    assert jobs["unit"]["needs"] == "ownership-impact"
+    assert "if" not in jobs["unit"]
+    assert "needs" not in jobs["unit"]
+    assert jobs["ownership-impact"]["outputs"]["python_test_targets"] == (
+        "${{ steps.impact.outputs.python_test_targets }}"
+    )
+    unit_steps = {step["name"]: step for step in jobs["unit"]["steps"]}
+    assert list(unit_steps) == [
+        "Check out the exact PR merge",
+        "Set up Python",
+        "Run hardened source-only units",
+    ]
+    assert unit_steps["Run hardened source-only units"] == {
+        "name": "Run hardened source-only units",
+        "run": "python3 -m tools.community_ci unit --scope all",
+    }
+    assert all("if" not in step for step in unit_steps.values())
     assert jobs["required"]["needs"] == [
         "source-quality",
         "docs",
@@ -228,7 +266,7 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
         ("failure", "success", "success", "success", 1),
         ("success", "failure", "success", "success", 1),
         ("success", "skipped", "success", "success", 1),
-        ("success", "success", "failure", "failure", 1),
+        ("success", "success", "failure", "success", 1),
     ],
 )
 def test_public_required_job_fails_closed(
@@ -277,6 +315,9 @@ def test_cpu_image_installs_the_same_pinned_community_requirements() -> None:
     assert "COPY community-ci.txt" in dockerfile
     assert "pip install --requirement /tmp/trtmc-community-ci.txt" in dockerfile
     assert '"libnvinfer11=${TENSORRT_APT_VERSION}"' in dockerfile
+    assert "libcurand-dev-13-3" in dockerfile
+    requirements = (REPO_ROOT / "requirements" / "community-ci.txt").read_text()
+    assert "pyarrow==25.0.1" in requirements
     assert "pip install --no-deps" in dockerfile
     assert '"tensorrt_cu13_bindings==${TENSORRT_VERSION}"' in dockerfile
     assert '"tensorrt==${TENSORRT_VERSION}"' not in dockerfile

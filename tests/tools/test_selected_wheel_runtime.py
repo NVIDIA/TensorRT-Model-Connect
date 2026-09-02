@@ -211,6 +211,8 @@ def test_model_proof_mounts_selected_wheels_read_only_and_forwards_contract(
     runner.artifacts_dir = tmp_path / "artifacts"
     runner.artifacts_dir.mkdir()
     runner.revision = "a" * 40
+    python_profiles = tmp_path / "python-profiles"
+    python_profiles.mkdir()
     captured: list[list[object]] = []
     monkeypatch.setattr(
         context,
@@ -230,9 +232,16 @@ def test_model_proof_mounts_selected_wheels_read_only_and_forwards_contract(
         "fixture-image",
         SimpleNamespace(reference_cache=None),
         None,
+        python_profiles,
     )
 
     command = captured[0]
+    assert (
+        f"type=bind,src={python_profiles},dst=/opt/trtmc-python-profiles,readonly"
+        in command
+    )
+    assert "TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles" in command
+    assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1" in command
     assert f"type=bind,src={selected.resolve()},dst=/selected-wheel,readonly" in command
     assert "TRTMC_SELECTED_WHEEL_DIR=/selected-wheel" in command
     assert f"TRTMC_SELECTED_WHEEL_PYTHON_TAG={PYTHON_TAG}" in command

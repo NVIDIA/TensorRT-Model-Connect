@@ -474,7 +474,7 @@ void Olmo2TextGenerationPipeline::prime_decoder_after_batched_prefill(
         return;
 
     TrtModule& decoder = bind_decoder_for_step();
-    if (!decoder.cuda_graph_active())
+    if (!decoder.cuda_graph_active() || decoder.cuda_graph_captured())
         return;
 
     int32_t token_id = input_ids.back();

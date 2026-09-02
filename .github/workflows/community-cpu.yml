@@ -9,7 +9,7 @@ run-name: >-
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions: {}
 
@@ -90,6 +90,7 @@ jobs:
     outputs:
       run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
       unit_scope: ${{ steps.impact.outputs.unit_scope }}
+      python_test_targets: ${{ steps.impact.outputs.python_test_targets }}
     steps:
       - name: Check out the exact PR merge
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -109,31 +110,12 @@ jobs:
 
   unit:
     name: Community CPU / Unit / C++ and Python
-    if: ${{ !cancelled() }}
-    needs: ownership-impact
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
     steps:
-      - name: Require successful impact analysis
-        if: ${{ needs.ownership-impact.result != 'success' }}
-        env:
-          IMPACT_RESULT: ${{ needs.ownership-impact.result }}
-        run: |
-          echo "::error::Ownership and impact did not succeed: $IMPACT_RESULT"
-          exit 1
-
-      - name: Explain an empty unit scope
-        if: >-
-          needs.ownership-impact.result == 'success' &&
-          needs.ownership-impact.outputs.run_unit_tests != 'true'
-        run: echo "No source-only C++ or Python unit tests are required for this change."
-
       - name: Check out the exact PR merge
-        if: >-
-          needs.ownership-impact.result == 'success' &&
-          needs.ownership-impact.outputs.run_unit_tests == 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ github.sha }}
@@ -141,20 +123,12 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        if: >-
-          needs.ownership-impact.result == 'success' &&
-          needs.ownership-impact.outputs.run_unit_tests == 'true'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.12"
 
       - name: Run hardened source-only units
-        if: >-
-          needs.ownership-impact.result == 'success' &&
-          needs.ownership-impact.outputs.run_unit_tests == 'true'
-        env:
-          TRTMC_UNIT_SCOPE: ${{ needs.ownership-impact.outputs.unit_scope }}
-        run: python3 -m tools.community_ci unit --scope "$TRTMC_UNIT_SCOPE"
+        run: python3 -m tools.community_ci unit --scope all
 
   required:
     name: Community CPU / Required

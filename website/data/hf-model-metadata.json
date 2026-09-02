@@ -301,6 +301,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "qwen3_5",
+      "architectures": [
+        "Qwen3_5ForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "RWKV/rwkv-4-169m-pile",
       "revision": "46bdc280eb97b6141d5d51a935e0c4870ecaefcc",
       "revision_source": "resolved",
@@ -310,6 +321,15 @@
         "RwkvForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "Ruicheng/moge-2-vitl",
+      "revision": "39c4d5e957afe587e04eec59dc2bcc3be5ecd968",
+      "revision_source": "declared",
+      "metadata_file": null,
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
     },
     {
       "hf_id": "Salesforce/codegen-350M-mono",
@@ -840,6 +860,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "intfloat/multilingual-e5-small",
+      "revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "bert",
+      "architectures": [
+        "BertModel"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "katuni4ka/tiny-random-deepseek-v3",
       "revision": "ba144b0d3331a5892aa588d82722d382be2b6e6b",
       "revision_source": "declared",
@@ -902,6 +933,17 @@
         "MistralForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "nvidia/Cosmos3-Nano",
+      "revision": "411f42a8fdfb8c5b2583cb8786e0938f49796eaa",
+      "revision_source": "declared",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "Cosmos3OmniDiffusersPipeline"
+      ],
+      "architecture_source": "model_index._class_name"
     },
     {
       "hf_id": "nvidia/Llama-3.1-Minitron-4B-Depth-Base",
@@ -1132,6 +1174,17 @@
       "hf_id": "openai/whisper-large-v3-turbo",
       "revision": "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
       "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "whisper",
+      "architectures": [
+        "WhisperForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "openai/whisper-small",
+      "revision": "973afd24965f72e36ca33b3055d56a652f456b4d",
+      "revision_source": "declared",
       "metadata_file": "config.json",
       "model_type": "whisper",
       "architectures": [

@@ -12,8 +12,8 @@ namespace trtmc {
 
 struct DistributedRuntimeGroup {
     int world_size{1};
-    // Single-node tensor-parallel rank. Used for communicator position,
-    // engine shard selection, and CUDA device binding in this initial runtime.
+    // Global tensor-parallel rank. Used for communicator position and engine
+    // shard selection. CUDA device binding uses launcher-provided local rank.
     int rank{0};
     int tp_size{1};
     void* communicator{nullptr};
@@ -22,9 +22,14 @@ struct DistributedRuntimeGroup {
 
 // Initialize an NCCL communicator for TensorRT 11.0+ distributed collective layers.
 //
-// Linux avoids compile-time MPI/NCCL dependencies: ranks are discovered from
-// common mpirun environment variables and NCCL is loaded at runtime. Native
-// Windows builds support only the single-device case and reject tp_size > 1.
+// POSIX builds intentionally avoid compile-time MPI/NCCL dependencies: ranks
+// are discovered from common launcher environment variables, and NCCL is
+// loaded with dlopen at runtime. Rank 0 writes the NCCL unique ID to a small
+// rendezvous file under /tmp unless TRTMC_NCCL_RENDEZVOUS points elsewhere.
+// Multi-node launchers must set that variable to a unique path shared by every
+// rank; node-local /tmp is not a cross-node rendezvous.
+// Native Windows builds support only the single-device case and reject
+// tp_size > 1.
 DistributedRuntimeGroup initialize_tensor_parallel_group(int tp_size);
 
 } // namespace trtmc

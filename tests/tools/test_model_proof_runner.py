@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 import fcntl
+import hashlib
+import io
 import json
 import os
 import re
@@ -23,10 +25,17 @@ from types import SimpleNamespace
 import pytest
 
 from tools.ci import gpu_lease as gpu_lease_module
+from tools.ci import profile_downloader
 from tools.ci.context import CiContext
 from tools.ci.gpu_lease import GpuLease
 from tools.ci.model_reference_cache import ModelReferenceCacheWarmer
-from tools.ci.model_proof import ModelProofRequest, ModelProofRunner, ModelReferenceCache
+from tools.ci.model_proof import (
+    PREPARED_PROFILE_ROOT,
+    PROFILE_PACKAGES_ROOT,
+    ModelProofRequest,
+    ModelProofRunner,
+    ModelReferenceCache,
+)
 from tools.ci.model_proof_inner import (
     ModelProofInnerPipeline,
     _classify_e2e_proof_kinds,
@@ -111,6 +120,27 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         "    exit 0\n"
         "    ;;\n"
         "  run)\n"
+        '    if [[ " $* " == *" /opt/trtmc-profile-downloader.py "* ]]; then\n'
+        "      exit 0\n"
+        "    fi\n"
+        '    if [[ " $* " == *" /src/.github/scripts/build-python-profiles.py "* ]]; then\n'
+        '      profile_root=""\n'
+        '      for argument in "$@"; do\n'
+        '        case "$argument" in\n'
+        '          type=bind,src=*,dst=/opt/trtmc-python-profiles)\n'
+        '            profile_root="${argument#type=bind,src=}"\n'
+        '            profile_root="${profile_root%,dst=/opt/trtmc-python-profiles}"\n'
+        "            ;;\n"
+        "        esac\n"
+        "      done\n"
+        '      [ -n "$profile_root" ] || exit 95\n'
+        '      profile="$profile_root/reference_common-fake"\n'
+        '      mkdir -p "$profile/bin"\n'
+        '      ln -s /opt/venv/bin/python "$profile/bin/python"\n'
+        '      printf \'%s\\n\' \'profile=reference_common\' > "$profile/.ready"\n'
+        '      printf \'%s\\n\' \'{"schema_version":1,"profiles":{"reference_common":{"python":"/opt/trtmc-python-profiles/reference_common-fake/bin/python","ready":"/opt/trtmc-python-profiles/reference_common-fake/.ready"}}}\' > "$profile_root/.prepared-profiles.json"\n'
+        "      exit 0\n"
+        "    fi\n"
         '    if [[ " $* " == *" /src/scripts/warm_hf_cache.py "* ]]; then\n'
         '      mkdir -p "$FAKE_ARTIFACTS"\n'
         '      if [ "${FAKE_CACHE_EVIDENCE_MODE:-valid}" = escape ]; then\n'
@@ -232,6 +262,19 @@ def _fake_gpu_lease_context(
     return CiContext(REPO_ROOT, env)
 
 
+def _use_deterministic_gpu_lease_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SimpleNamespace(now=0.0)
+
+    def advance_clock(seconds: float) -> None:
+        clock.now += seconds
+
+    monkeypatch.setattr(
+        gpu_lease_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock.now, sleep=advance_clock),
+    )
+
+
 def _fake_proof_environment(
     tmp_path: Path,
     fake_bin: Path,
@@ -261,12 +304,17 @@ def _fake_proof_environment(
     return env
 
 
-def _run_fake_proof(env: dict[str, str], output: Path) -> subprocess.CompletedProcess[str]:
+def _run_fake_proof(
+    env: dict[str, str],
+    output: Path,
+    *,
+    model: str = "convbert",
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             *RUNNER_COMMAND,
             "--model",
-            "convbert",
+            model,
             "--revision",
             "HEAD",
             "--output-dir",
@@ -662,13 +710,22 @@ def test_premerge_selects_smoke_and_native_kv_regression(
     selection = _run_test_selection(tmp_path, family, "premerge")
 
     assert selection["suite"] == "premerge"
-    assert [case["name"] for case in selection["e2e_cases"]] == [
-        smoke_case,
-        regression_case,
-    ]
+    expected_cases = [smoke_case]
+    if family == "qwen":
+        expected_cases.extend(
+            [
+                "qwen3-0.6b-bf16-native-kv-two-chunk-parity",
+                "qwen3-0.6b-fp16-native-kv-two-chunk-parity",
+            ]
+        )
+    expected_cases.append(regression_case)
+    assert [case["name"] for case in selection["e2e_cases"]] == expected_cases
     assert selection["e2e_cases"][0]["test_category"] == "e2e"
-    assert selection["e2e_cases"][1]["test_category"] == "regression"
-    assert selection["e2e_cases"][1]["ci_tier"] == "default"
+    assert all(
+        case["test_category"] == "regression"
+        and case["ci_tier"] == "default"
+        for case in selection["e2e_cases"][1:]
+    )
 
 
 def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -> None:
@@ -676,7 +733,9 @@ def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -
 
     assert selection["suite"] == "nightly"
     assert {case["name"] for case in selection["e2e_cases"]} == {
+        "qwen3-0.6b-bf16-native-kv-two-chunk-parity",
         "qwen3-0.6b-fp16",
+        "qwen3-0.6b-fp16-native-kv-two-chunk-parity",
         "qwen3-0.6b-fp8",
         "qwen3-0.6b-regression-native-kv-chunked-prefill",
         "qwen3-0.6b-topp",
@@ -871,9 +930,10 @@ def test_whisper_nightly_selection_leases_one_complete_gpu(
         },
     )
 
-    assert len(selection["e2e_cases"]) == 16
+    assert len(selection["e2e_cases"]) == 17
     assert {case["manifest"] for case in selection["e2e_cases"]} == {
         "whisper-large-v3-turbo.json",
+        "whisper-small-fp16.json",
         "whisper-tiny-fp16.json",
     }
     assert {case["resource_class"] for case in selection["e2e_cases"]} == {"exclusive_gpu"}
@@ -1384,8 +1444,9 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
         assert contract in text
     assert "scratch build produced" in inner
     assert "staged plugin DSO does not byte-match" in inner
-    assert '"--network"' in warm and '"none"' in warm
-    assert "dst=/hf-cache/hub,readonly" in warm
+    assert '"bridge" if online_cache_warm else "none"' in warm
+    assert 'cache_mount = f"type=bind,src={hub},dst=/hf-cache/hub"' in warm
+    assert 'cache_mount += ",readonly"' in warm
     assert "dst=/hf-cache/modules" not in warm
     assert '"HF_HOME=/tmp/hf-home"' in warm
     assert '"HF_MODULES_CACHE=/tmp/hf-modules"' in warm
@@ -1422,10 +1483,12 @@ def test_runner_warms_the_exact_shared_selection_before_the_proof() -> None:
     assert "cache-check-models.txt" in warm
     assert "scripts/warm_hf_cache.py" in warm
     assert '"--models-file"' in warm and '"/artifacts/cache-check-models.txt"' in warm
+    assert 'online_cache_warm = self.request.suite == "premerge"' in warm
     assert '"--local-only"' in warm and '"--strict"' in warm
     assert '"--emit-cache-repos"' in warm and '"/artifacts/hf-cache-repos.json"' in warm
     assert host.index("_prepare_hf_cache") < host.index("_run_proof_container")
-    assert "offline HF cache readiness check failed" in warm
+    assert "online HF cache warm" in warm
+    assert "offline HF cache readiness check" in warm
 
 
 
@@ -1685,6 +1748,8 @@ def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None
         "self.request.revision",
         'self.artifacts / "engine-build-verification.json"',
         '"--build-verification-report"',
+        '"--result-case"',
+        "self.selection.e2e_cases",
         'self.status.step("engine_build_budget", "passed")',
         '"engine_builds_per_model": verification["builds_per_model"]',
         '"engine_build_count": len(verification["records"])',
@@ -1745,6 +1810,416 @@ def test_model_proof_report_assets_are_inside_the_positive_projection() -> None:
         assert path.is_file(), path
 
 
+def test_profile_preparation_uses_a_minimal_online_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projection = tmp_path / "projection"
+    family = projection / "python/tensorrt_model_connect/families/demo"
+    family.mkdir(parents=True)
+    (family / "MODEL.toml").write_text(
+        'id = "demo"\n'
+        'python_profile_specs = ['
+        '"demo|families/demo/requirements.lock.txt|families/demo/verify.py|true"'
+        "]\n",
+        encoding="utf-8",
+    )
+    (family / "requirements.lock.txt").write_text(
+        "demo-package==1.0.0\n",
+        encoding="utf-8",
+    )
+    (family / "verify.py").write_text("import demo_package\n", encoding="utf-8")
+    package_root = projection / "python/tensorrt_model_connect"
+    (package_root / "python_profiles.toml").write_text(
+        'version = 1\n[profiles.base]\nkind = "passthrough"\n',
+        encoding="utf-8",
+    )
+    profiles = tmp_path / "python-profiles"
+    profiles.mkdir()
+    packages = tmp_path / "python-profile-packages"
+    packages.mkdir()
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    runner = ModelProofRunner(
+        CiContext(REPO_ROOT, {}),
+        ModelProofRequest(model="demo"),
+    )
+    runner.artifacts_dir = artifacts
+    monkeypatch.setattr(
+        runner.context,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+    commands: list[list[object]] = []
+
+    def prepare(command: list[object], _log: Path, **_kwargs) -> int:
+        commands.append(command)
+        return 0
+
+    monkeypatch.setattr(runner, "_run_logged", prepare)
+
+    runner._prepare_python_profiles(
+        projection,
+        profiles,
+        packages,
+        "qualified-base@sha256:test",
+    )
+
+    assert len(commands) == 2
+    download = " ".join(map(str, commands[0]))
+    install = " ".join(map(str, commands[1]))
+    assert "--network bridge" in download
+    assert "--runtime runc" in download
+    assert "/opt/trtmc-profile-downloader.py" in download
+    assert "demo-package==1.0.0" in download
+    assert f"src={packages},dst={PROFILE_PACKAGES_ROOT}" in download
+    assert f"src={projection}" not in download
+    assert "HOME=/tmp" in download
+    assert "USER=trtmc-ci" in download
+    assert "LOGNAME=trtmc-ci" in download
+    assert "NVIDIA_VISIBLE_DEVICES=void" in download
+    assert "CUDA_VISIBLE_DEVICES=" in download
+
+    assert "--network none" in install
+    assert "--runtime runc" in install
+    assert "--read-only" in install
+    assert "--cap-drop ALL" in install
+    assert "--security-opt no-new-privileges" in install
+    assert "--ipc private" in install
+    assert "PIP_CONFIG_FILE=/dev/null" in install
+    assert f"PIP_FIND_LINKS={PROFILE_PACKAGES_ROOT}" in install
+    assert "PIP_NO_INDEX=1" in install
+    assert "HOME=/tmp" in install
+    assert "USER=trtmc-ci" in install
+    assert "LOGNAME=trtmc-ci" in install
+    assert f"src={projection},dst=/src,readonly" in install
+    assert f"src={profiles},dst={PREPARED_PROFILE_ROOT}" in install
+    assert f"src={packages},dst={PROFILE_PACKAGES_ROOT},readonly" in install
+    assert f"dst={PREPARED_PROFILE_ROOT},readonly" not in install
+    for command in (download, install):
+        assert "--gpus" not in command
+        assert "HF_TOKEN" not in command
+        assert "/var/run/docker.sock" not in command
+        assert "dst=/work" not in command
+        assert "dst=/artifacts" not in command
+
+
+def test_profile_owning_family_runs_download_prepare_then_offline_proof(
+    tmp_path: Path,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    environment = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+
+    result = _run_fake_proof(environment, output, model="chronos_bolt")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    runs = [
+        line
+        for line in docker_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("run ")
+    ]
+    download_index = next(
+        index for index, command in enumerate(runs) if "/opt/trtmc-profile-downloader.py" in command
+    )
+    prepare_index = next(
+        index
+        for index, command in enumerate(runs)
+        if "/src/.github/scripts/build-python-profiles.py" in command
+    )
+    proof_index = next(index for index, command in enumerate(runs) if " --inner " in command)
+    assert download_index < prepare_index < proof_index
+    assert "--network bridge" in runs[download_index]
+    assert "--network none" in runs[prepare_index]
+    assert "--network none" in runs[proof_index]
+    assert f"dst={PREPARED_PROFILE_ROOT},readonly" in runs[proof_index]
+    assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1" in runs[proof_index]
+
+
+@pytest.mark.parametrize("profile_owner", ("family", "generic"))
+def test_empty_profile_lock_still_runs_offline_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile_owner: str,
+) -> None:
+    projection = tmp_path / "projection"
+    family = projection / "python/tensorrt_model_connect/families/demo"
+    family.mkdir(parents=True)
+    package_root = projection / "python/tensorrt_model_connect"
+    if profile_owner == "family":
+        (family / "MODEL.toml").write_text(
+            'id = "demo"\n'
+            'python_profile_specs = ['
+            '"demo|families/demo/requirements.lock.txt|families/demo/verify.py|true"'
+            "]\n",
+            encoding="utf-8",
+        )
+        (family / "requirements.lock.txt").write_text(
+            "# no additional packages\n",
+            encoding="utf-8",
+        )
+        (family / "verify.py").write_text("assert True\n", encoding="utf-8")
+        registry = 'version = 1\n[profiles.base]\nkind = "passthrough"\n'
+    else:
+        (family / "MODEL.toml").write_text(
+            'id = "demo"\n'
+            'default_execution_profiles = ["reference|generic"]\n',
+            encoding="utf-8",
+        )
+        requirements = package_root / "python_profile_requirements"
+        requirements.mkdir()
+        (requirements / "generic.lock.txt").write_text(
+            "# no additional packages\n",
+            encoding="utf-8",
+        )
+        (requirements / "unselected.lock.txt").write_text(
+            "unselected-package==1.0.0\n",
+            encoding="utf-8",
+        )
+        registry = (
+            'version = 1\n[profiles.base]\nkind = "passthrough"\n'
+            '[profiles.generic]\nkind = "venv"\n'
+            'requirements = "python_profile_requirements/generic.lock.txt"\n'
+            'verification_script = "assert True"\n'
+            '[profiles.unselected]\nkind = "venv"\n'
+            'requirements = "python_profile_requirements/unselected.lock.txt"\n'
+            'verification_script = "assert True"\n'
+        )
+    (package_root / "python_profiles.toml").write_text(registry, encoding="utf-8")
+    profiles = tmp_path / "python-profiles"
+    profiles.mkdir()
+    packages = tmp_path / "python-profile-packages"
+    packages.mkdir()
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    runner = ModelProofRunner(
+        CiContext(REPO_ROOT, {}),
+        ModelProofRequest(model="demo"),
+    )
+    runner.artifacts_dir = artifacts
+    monkeypatch.setattr(
+        runner.context,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+    commands: list[list[object]] = []
+    monkeypatch.setattr(
+        runner,
+        "_run_logged",
+        lambda command, _log, **_kwargs: commands.append(command) or 0,
+    )
+
+    runner._prepare_python_profiles(
+        projection,
+        profiles,
+        packages,
+        "qualified-base@sha256:test",
+    )
+
+    assert len(commands) == 1
+    preparation = " ".join(map(str, commands[0]))
+    assert "--network none" in preparation
+    assert "/src/.github/scripts/build-python-profiles.py" in preparation
+    assert "/opt/trtmc-profile-downloader.py" not in preparation
+    assert f"--profile {'demo' if profile_owner == 'family' else 'generic'}" in preparation
+
+
+def test_e2e_defaults_select_a_generic_profile_for_preparation(tmp_path: Path) -> None:
+    projection = tmp_path / "projection"
+    package_root = projection / "python/tensorrt_model_connect"
+    requirements = package_root / "python_profile_requirements"
+    requirements.mkdir(parents=True)
+    (requirements / "generic.lock.txt").write_text(
+        "generic-package==1.2.3\n",
+        encoding="utf-8",
+    )
+    (package_root / "python_profiles.toml").write_text(
+        'version = 1\n[profiles.base]\nkind = "passthrough"\n'
+        '[profiles.generic]\nkind = "venv"\n'
+        'requirements = "python_profile_requirements/generic.lock.txt"\n'
+        'verification_script = "assert True"\n'
+        '[reference_backend_defaults.hf_transformers]\nreference = "generic"\n',
+        encoding="utf-8",
+    )
+    e2e = projection / "tests/e2e/models/demo"
+    (e2e / "manifests").mkdir(parents=True)
+    (e2e / "MODEL.toml").write_text(
+        '[e2e_defaults.demo_task]\nreference_backend = "hf_transformers"\n',
+        encoding="utf-8",
+    )
+    (e2e / "manifests/demo.json").write_text(
+        json.dumps({
+            "name": "demo",
+            "task_strategy": "demo_task",
+            "testcases": [{"name": "demo"}],
+        }),
+        encoding="utf-8",
+    )
+    runner = ModelProofRunner(CiContext(REPO_ROOT, {}), ModelProofRequest("demo"))
+
+    plan = runner._projected_python_profile_plan(projection)
+
+    assert plan is not None
+    assert plan.names == ("generic",)
+    assert plan.packages == ("generic-package==1.2.3",)
+
+
+def test_offline_proof_consumes_prepared_profiles_read_only() -> None:
+    source = RUNNER.read_text(encoding="utf-8")
+    proof = source.split("def _run_proof_container(", maxsplit=1)[1].split(
+        "def _proof_environment", maxsplit=1
+    )[0]
+    environment = source.split("def _proof_environment(", maxsplit=1)[1].split(
+        "def _reclaim_orphans", maxsplit=1
+    )[0]
+
+    assert "dst={PREPARED_PROFILE_ROOT},\"" in proof
+    assert '"readonly"' in proof
+    assert '"--network"' in proof and '"none"' in proof
+    assert '"TRTMC_PYTHON_PROFILE_PREBUILT_ONLY": "1"' in environment
+    assert '"TRTMC_PYTHON_PROFILE_ROOT": PREPARED_PROFILE_ROOT' in environment
+    assert '"PIP_NO_INDEX": "1"' in environment
+    assert source.index("self._prepare_python_profiles(") < source.index("self.lease = GpuLease(")
+
+
+def test_profile_download_program_fetches_a_digest_verified_sdist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = b"source archive"
+    digest = hashlib.sha256(artifact).hexdigest()
+    metadata = json.dumps(
+        {
+            "urls": [
+                {
+                    "packagetype": "sdist",
+                    "filename": "demo-1.0.0.tar.gz",
+                    "url": "https://files.pythonhosted.org/packages/demo-1.0.0.tar.gz",
+                    "digests": {"sha256": digest},
+                }
+            ]
+        }
+    ).encode()
+
+    class Response(io.BytesIO):
+        def __init__(self, payload: bytes, url: str):
+            super().__init__(payload)
+            self.url = url
+
+        def geturl(self) -> str:
+            return self.url
+
+    def urlopen(request, timeout):
+        del timeout
+        url = str(request.full_url)
+        return Response(
+            metadata if url.endswith("/demo/1.0.0/json") else artifact,
+            url,
+        )
+
+    monkeypatch.setattr(profile_downloader.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        profile_downloader.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+
+    profile_downloader.main([str(tmp_path), "demo==1.0.0"])
+
+    assert (tmp_path / "demo-1.0.0.tar.gz").read_bytes() == artifact
+
+
+@pytest.mark.parametrize(
+    ("artifact_url", "expected_digest", "message"),
+    (
+        (
+            "https://example.invalid/demo-1.0.0.tar.gz",
+            hashlib.sha256(b"source archive").hexdigest(),
+            "untrusted source URL",
+        ),
+        (
+            "https://files.pythonhosted.org/packages/demo-1.0.0.tar.gz",
+            "0" * 64,
+            "digest mismatch",
+        ),
+    ),
+)
+def test_profile_download_program_rejects_untrusted_sdist_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_url: str,
+    expected_digest: str,
+    message: str,
+) -> None:
+    artifact = b"source archive"
+    metadata = json.dumps(
+        {
+            "urls": [
+                {
+                    "packagetype": "sdist",
+                    "filename": "demo-1.0.0.tar.gz",
+                    "url": artifact_url,
+                    "digests": {"sha256": expected_digest},
+                }
+            ]
+        }
+    ).encode()
+
+    class Response(io.BytesIO):
+        def __init__(self, payload: bytes, url: str):
+            super().__init__(payload)
+            self.url = url
+
+        def geturl(self) -> str:
+            return self.url
+
+    def urlopen(request, timeout):
+        del timeout
+        url = str(request.full_url)
+        return Response(metadata if url.endswith("/demo/1.0.0/json") else artifact, url)
+
+    monkeypatch.setattr(profile_downloader.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        profile_downloader.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        profile_downloader.main([str(tmp_path), "demo==1.0.0"])
+
+    assert not (tmp_path / "demo-1.0.0.tar.gz").exists()
+
+
+def test_projected_profile_packages_include_source_only_nemotron_dependencies(
+    tmp_path: Path,
+) -> None:
+    projection = tmp_path / "projection"
+    package = projection / "python/tensorrt_model_connect"
+    family = package / "families/nemotron_h"
+    family.mkdir(parents=True)
+    shutil.copy2(
+        REPO_ROOT / "python/tensorrt_model_connect/families/nemotron_h/MODEL.toml",
+        family / "MODEL.toml",
+    )
+    shutil.copytree(
+        REPO_ROOT
+        / "python/tensorrt_model_connect/families/nemotron_h/python_profile_requirements",
+        family / "python_profile_requirements",
+    )
+    (package / "python_profiles.toml").write_text(
+        'version = 1\n[profiles.base]\nkind = "passthrough"\n',
+        encoding="utf-8",
+    )
+    runner = ModelProofRunner(CiContext(REPO_ROOT, {}), ModelProofRequest("nemotron_h"))
+
+    plan = runner._projected_python_profile_plan(projection)
+
+    assert plan is not None
+    assert "mamba-ssm==2.3.2.post1" in plan.packages
+    assert "causal-conv1d==1.6.2.post1" in plan.packages
+
+
 def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -1752,6 +2227,16 @@ def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
         "model-ci: error: unknown model <unsafe>\n",
         encoding="utf-8",
     )
+    (artifacts / "python-profiles-prepare.log").write_text(
+        "profile install failed\n",
+        encoding="utf-8",
+    )
+    (artifacts / "console.log").write_text(
+        "discarded-prefix\n" + ("x" * 20_000) + "\nbounded-tail\n",
+        encoding="utf-8",
+    )
+    (artifacts / "configure.log").symlink_to("/dev/zero")
+    os.mkfifo(artifacts / "build.log")
 
     result = subprocess.run(
         [
@@ -1775,6 +2260,7 @@ def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
+        timeout=5,
     )
 
     assert result.returncode == 0, result.stderr
@@ -1782,6 +2268,10 @@ def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
     status = json.loads((artifacts / "model-proof-status.json").read_text(encoding="utf-8"))
     assert "host-error.log" in report
     assert "unknown model &lt;unsafe&gt;" in report
+    assert "python-profiles-prepare.log" in report
+    assert "profile install failed" in report
+    assert "bounded-tail" in report
+    assert "discarded-prefix" not in report
     assert status["outcome"] == "failed"
     assert status["exit_code"] == 2
 
@@ -1836,7 +2326,43 @@ def test_host_projection_failure_preserves_error_and_html(tmp_path: Path) -> Non
     assert status["exit_code"] == result.returncode
 
 
-def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    (
+        "suite",
+        "expected_error",
+        "expected_network",
+        "expected_local_only",
+        "expected_readonly",
+        "expected_online_environment",
+    ),
+    [
+        (
+            "premerge",
+            "online HF cache warm failed for convbert",
+            "bridge",
+            False,
+            False,
+            True,
+        ),
+        (
+            "nightly",
+            "offline HF cache readiness check failed for convbert",
+            "none",
+            True,
+            True,
+            False,
+        ),
+    ],
+)
+def test_strict_cache_preparation_failure_stops_before_hermetic_proof(
+    tmp_path: Path,
+    suite: str,
+    expected_error: str,
+    expected_network: str,
+    expected_local_only: bool,
+    expected_readonly: bool,
+    expected_online_environment: bool,
+) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     docker_log = tmp_path / "docker.log"
@@ -1851,8 +2377,7 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
     )
     docker.chmod(0o755)
     output = tmp_path / "proof"
-    (tmp_path / "hf-cache" / "hub").mkdir(parents=True)
-    (tmp_path / "hf-cache" / "modules").mkdir(parents=True)
+    hub_cache = tmp_path / "hf-cache" / "hub"
     env = os.environ.copy()
     env.update(
         {
@@ -1867,6 +2392,8 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
             *RUNNER_COMMAND,
             "--model",
             "convbert",
+            "--suite",
+            suite,
             "--revision",
             "HEAD",
             "--output-dir",
@@ -1880,7 +2407,8 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
     )
 
     assert result.returncode != 0
-    assert "offline HF cache readiness check failed for convbert" in result.stderr
+    assert expected_error in result.stderr
+    assert hub_cache.exists() is (suite == "premerge")
     assert (output / "artifacts" / "cache-check-models.txt").read_text().splitlines() == [
         "convbert-base"
     ]
@@ -1891,9 +2419,16 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
     ]
     assert len(docker_runs) == 1
     assert "scripts/warm_hf_cache.py" in docker_runs[0]
-    assert "--local-only" in docker_runs[0]
+    assert "--read-only" in docker_runs[0]
+    assert ("--local-only" in docker_runs[0]) is expected_local_only
     assert "--strict" in docker_runs[0]
-    assert "--network none" in docker_runs[0]
+    assert "--emit-cache-repos /artifacts/hf-cache-repos.json" in docker_runs[0]
+    assert f"--network {expected_network}" in docker_runs[0]
+    online_environment = "env -u HF_HUB_OFFLINE -u TRANSFORMERS_OFFLINE"
+    assert (online_environment in docker_runs[0]) is expected_online_environment
+    cache_mount = f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub"
+    assert cache_mount in docker_runs[0]
+    assert (f"{cache_mount},readonly" in docker_runs[0]) is expected_readonly
 
 
 def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -> None:
@@ -1908,7 +2443,8 @@ def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -
     assert "HF Hub cache directory does not exist" not in host
     assert 'hub in {Path("/"), self.context.repository}' in host
     assert "hf_modules_cache" not in host
-    assert 'f"type=bind,src={hub},dst=/hf-cache/hub,readonly"' in cache_check
+    assert 'cache_mount = f"type=bind,src={hub},dst=/hf-cache/hub"' in cache_check
+    assert 'cache_mount += ",readonly"' in cache_check
     assert "dst=/hf-cache/modules" not in cache_check
     assert 'f"type=bind,src={private_hub},dst=/hf-cache/hub"' in proof
     assert "src={private_hub},dst=/hf-cache/hub,readonly" not in proof
@@ -2088,8 +2624,26 @@ def test_sana_reference_cache_wrong_revision_fails_before_docker(
         )
 
 
+@pytest.mark.parametrize(
+    (
+        "suite",
+        "expected_network",
+        "expected_local_only",
+        "expected_readonly",
+        "expected_online_environment",
+    ),
+    [
+        ("premerge", "bridge", False, False, True),
+        ("nightly", "none", True, True, False),
+    ],
+)
 def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     tmp_path: Path,
+    suite: str,
+    expected_network: str,
+    expected_local_only: bool,
+    expected_readonly: bool,
+    expected_online_environment: bool,
 ) -> None:
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"
@@ -2112,6 +2666,8 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
             *RUNNER_COMMAND,
             "--model",
             "convbert",
+            "--suite",
+            suite,
             "--revision",
             "HEAD",
             "--output-dir",
@@ -2132,7 +2688,16 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     ]
     assert len(docker_runs) == 3
     warm, cache_copy, proof = docker_runs
-    assert f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub,readonly" in warm
+    cache_mount = f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub"
+    assert cache_mount in warm
+    assert (f"{cache_mount},readonly" in warm) is expected_readonly
+    assert f"--network {expected_network}" in warm
+    online_environment = "env -u HF_HUB_OFFLINE -u TRANSFORMERS_OFFLINE"
+    assert (online_environment in warm) is expected_online_environment
+    assert "--read-only" in warm
+    assert ("--local-only" in warm) is expected_local_only
+    assert "--strict" in warm
+    assert "--emit-cache-repos /artifacts/hf-cache-repos.json" in warm
     assert f"src={modules_cache}" not in warm
     assert f"--mount type=bind,src={selected_repo},dst=/selected-hf-repo,readonly" in cache_copy
     private_repo = output / "work" / "hf-private" / "hub" / "models--fixture--model"
@@ -2145,6 +2710,7 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     assert f"src={hub_cache},dst=/hf-cache/hub" not in proof
     assert f"src={selected_repo}" not in proof
     assert f"src={modules_cache}" not in proof
+    assert "--network none" in proof
     private_hub = output / "work" / "hf-private" / "hub"
     assert f"--mount type=bind,src={private_hub},dst=/hf-cache/hub" in proof
     assert f"src={private_hub},dst=/hf-cache/hub,readonly" not in proof
@@ -2290,7 +2856,7 @@ def test_selected_hf_cache_evidence_rejects_path_escape_before_proof(
     assert "warm_hf_cache.py" in docker_runs[0]
 
 
-def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
+def test_premerge_online_warm_creates_missing_host_cache_source(
     tmp_path: Path,
 ) -> None:
     fake_bin = tmp_path / "bin"
@@ -2336,16 +2902,19 @@ def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
     )
 
     assert result.returncode != 0
-    assert "offline HF cache readiness check failed for convbert" in result.stderr
+    assert "online HF cache warm failed for convbert" in result.stderr
+    assert hub_cache.is_dir()
     docker_runs = [
         line
         for line in docker_log.read_text(encoding="utf-8").splitlines()
         if line.startswith("run ")
     ]
     assert len(docker_runs) == 1
-    assert f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub,readonly" in docker_runs[0]
+    assert f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub" in docker_runs[0]
+    assert "dst=/hf-cache/hub,readonly" not in docker_runs[0]
     assert "dst=/hf-cache/modules" not in docker_runs[0]
-    assert "--network none" in docker_runs[0]
+    assert "--network bridge" in docker_runs[0]
+    assert "--local-only" not in docker_runs[0]
 
 
 def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> None:
@@ -2403,12 +2972,15 @@ def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> N
 @pytest.mark.model_proof_allocator
 def test_capacity_gated_exclusive_lease_skips_a_memory_busy_gpu(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Keep subprocess scheduling from consuming the deliberately short lease
+    # deadline while preserving the queue and capacity transitions under test.
+    _use_deterministic_gpu_lease_clock(monkeypatch)
     context = _fake_gpu_lease_context(
         tmp_path,
         "2, 284208, 184208, 100000\n3, 284208, 34208, 250000",
     )
-    context.env["FAKE_NVIDIA_SMI_DELAY_SECONDS"] = "0.25"
     artifacts = tmp_path / "artifacts"
     lease = GpuLease(
         context,
@@ -2778,16 +3350,7 @@ def test_capacity_gated_lease_waits_for_memory_reclaim_without_requeueing(
 ) -> None:
     # Drive the short capacity settle window explicitly so host scheduling
     # cannot turn the second memory sample into an unrelated GPU requeue.
-    clock = SimpleNamespace(now=0.0)
-
-    def advance_clock(seconds: float) -> None:
-        clock.now += seconds
-
-    monkeypatch.setattr(
-        gpu_lease_module,
-        "time",
-        SimpleNamespace(monotonic=lambda: clock.now, sleep=advance_clock),
-    )
+    _use_deterministic_gpu_lease_clock(monkeypatch)
     context = _fake_gpu_lease_context(
         tmp_path,
         "2, 284208, 184208, 100000\n3, 284208, 174208, 110000",

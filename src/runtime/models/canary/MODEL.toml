@@ -9,5 +9,5 @@ runtime_tests = [
   "test_canary_mel_spectrogram|test_canary_mel_spectrogram.cpp|_|canary_mel_spectrogram.cpp|_",
   "test_canary_host_plan|test_canary_host_plan.cpp|_|_|_",
   "test_canary_decode_policy|test_canary_decode_policy.cpp|_|_|_",
-  "test_canary_pipeline|test_canary_pipeline.cpp|trtmc_model_canary|_|REQUIRES_TRT",
+  "test_canary_pipeline|test_canary_pipeline.cpp|trtmc_model_canary|_|REQUIRES_TRT,REQUIRES_GPU",
 ]

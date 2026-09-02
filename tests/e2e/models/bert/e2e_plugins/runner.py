@@ -11,4 +11,13 @@ from .runners.encoder_only import EncoderOnlyRunner
 class BertEncoderOnlyNlpRunner(EncoderOnlyRunner):
     """bert local runner for encoder_only_nlp."""
 
-runner = BertEncoderOnlyNlpRunner()
+
+class BertEmbeddingRunner(EncoderOnlyRunner):
+    """BERT local runner for pooled embedding checkpoints."""
+
+    @property
+    def strategy_name(self) -> str:
+        return "embedding"
+
+
+runner = [BertEncoderOnlyNlpRunner(), BertEmbeddingRunner()]

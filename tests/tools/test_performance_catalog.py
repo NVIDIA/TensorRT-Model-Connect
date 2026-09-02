@@ -18,13 +18,15 @@ def test_release_suite_loads_and_selects_models_in_request_order() -> None:
     selected = suite.select(models=["distilgpt2", "gpt2-125m"])
 
     assert [case["model"] for case in selected] == ["distilgpt2", "gpt2-125m"]
-    assert len(suite.cases) == 107
+    assert len(suite.cases) == 111
 
 
-def test_release_suite_exposes_explicit_exclusions() -> None:
+def test_release_suite_includes_fast_foundation_stereo() -> None:
     suite = performance_catalog.load_suite(SUITE)
 
-    assert suite.excluded_profiles["fast-foundation-stereo"]
+    assert "fast-foundation-stereo" not in suite.excluded_profiles
+    case = next(case for case in suite.cases if case["model"] == "fast-foundation-stereo")
+    assert case["id"] == "fast_foundation_stereo.disparity"
 
 
 def test_selection_rejects_multiple_modes() -> None:

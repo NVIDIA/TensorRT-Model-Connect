@@ -69,6 +69,7 @@
     "qwen3-moe-tiny-random": 26,
     "qwen3-vl-2b": 167,
     "qwen35-9b": 310,
+    "qwen38-27b": 900,
     "riva-translate-4b": 232,
     "roberta-base": 30,
     "roberta-large": 46,

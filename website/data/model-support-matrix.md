@@ -90,6 +90,7 @@ SPDX-License-Identifier: Apache-2.0
 | `Qwen/Qwen3-Omni-30B-A3B-Instruct` | `qwen3-omni-30b-a3b-instruct` | `BF16` | None | — | 🔴 Red |
 | `Qwen/Qwen3-VL-2B-Instruct` | `qwen3-vl-2b` | `FP16`<br />FP32 layers: `0, 1, 2` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `Qwen/Qwen3.5-9B` | `qwen35-9b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
+| `Qwen/Qwen3.8-27B` | `qwen38-27b` | `FP16` | None | — | 🟡 Yellow |
 | `nvidia/Riva-Translate-4B-Instruct-v1.1` | `riva-translate-4b` | `FP16` | None | — | 🟢 Green |
 | `FacebookAI/roberta-base` | `roberta-base` | `FP16` | None | — | 🟢 Green |
 | `FacebookAI/roberta-large` | `roberta-large` | `FP16` | None | — | 🟢 Green |

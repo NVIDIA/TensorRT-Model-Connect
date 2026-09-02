@@ -221,14 +221,18 @@ bool engine_uses_native_kv_updates(const TrtModule& module, const QwenKvCacheNam
     return has_write_indices;
 }
 
+int32_t native_kv_contract_version(const std::string& config_json) {
+    return extract_json_int(config_json, "native_kv_contract_version", 0);
+}
+
 void validate_native_kv_marker(const std::string& config_json, bool engine_uses_native_kv) {
     const bool declares_native_kv = extract_json_bool(config_json, "native_kv_cache", false);
     const bool has_version =
         config_json.find("\"native_kv_contract_version\"") != std::string::npos;
     if (!declares_native_kv && !has_version && !engine_uses_native_kv)
         return;
-    if (!declares_native_kv || !engine_uses_native_kv ||
-        extract_json_int(config_json, "native_kv_contract_version", 0) != 1) {
+    const int32_t version = native_kv_contract_version(config_json);
+    if (!declares_native_kv || !engine_uses_native_kv || (version != 1 && version != 2)) {
         throw std::runtime_error("Qwen native KV metadata does not match the engine contract");
     }
 }
@@ -253,6 +257,11 @@ bool validate_native_kv_runtime(const PipelineContext& ctx, const TrtModule& mod
         throw std::runtime_error(
             "Qwen native KV requires cache shape [1,num_kv_heads,capacity,128]");
     }
+    if (module.tensor_dtype(kv_names.cache_k.front()) != cache_dtype ||
+        module.tensor_dtype(kv_names.cache_v.front()) != cache_dtype) {
+        throw std::runtime_error(
+            "Qwen native KV cache dtype metadata does not match the engine contract");
+    }
     return true;
 }
 
@@ -262,31 +271,20 @@ std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs) {
     return lhs * rhs;
 }
 
-void admit_native_kv_allocation(const PipelineContext& ctx, bool native_kv,
-                                const KvCacheRuntimeSizing& sizing) {
-    if (!native_kv)
-        return;
-
+std::runtime_error qwen_kv_cache_allocation_failure(const KvCacheRuntimeSizing& sizing) {
+    std::ostringstream message;
+    message << "Qwen KV cache allocation failed after attempting "
+            << format_bytes(sizing.cache_bytes) << " for " << sizing.runtime_rows << " rows";
     std::size_t free_bytes = 0;
     std::size_t total_bytes = 0;
     const cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
-    if (status != cudaSuccess) {
-        throw std::runtime_error(std::string("Qwen native KV CUDA memory query failed: ") +
-                                 cudaGetErrorString(status));
+    if (status == cudaSuccess) {
+        message << "; free after failure=" << format_bytes(static_cast<std::uint64_t>(free_bytes))
+                << ", total=" << format_bytes(static_cast<std::uint64_t>(total_bytes));
+    } else {
+        message << "; CUDA memory diagnostics failed: " << cudaGetErrorString(status);
     }
-
-    constexpr std::uint64_t kTwoGiB = 2ULL << 30;
-    const auto free = static_cast<std::uint64_t>(free_bytes);
-    const auto total = static_cast<std::uint64_t>(total_bytes);
-    const auto reserve = std::max(kTwoGiB, total / 10);
-    const auto available = free > reserve ? free - reserve : 0;
-    if (sizing.cache_bytes > available) {
-        throw std::runtime_error(
-            "Qwen native KV cache admission failed before allocation: capacity=" +
-            std::to_string(ctx.config.max_cache_length) +
-            " tokens, required=" + format_bytes(sizing.cache_bytes) +
-            ", free=" + format_bytes(free) + ", reserve=" + format_bytes(reserve));
-    }
+    return std::runtime_error(message.str());
 }
 
 void reject_native_kv_size_override(const PipelineContext& ctx) {
@@ -376,7 +374,8 @@ class QwenDecoderPlugin final : public IPipelinePlugin {
         QwenKvCacheNames kv_names;
         build_kv_names(ctx, io, kv_names);
 
-        const DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
+        const DType cache_dtype =
+            resolve_qwen_native_kv_cache_dtype(ctx.config_json, ctx.config.precision);
         QwenTriAttentionConfig tri_cfg = qwen_parse_triattention_bundle_config(
             ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
 
@@ -419,10 +418,6 @@ class QwenDecoderPlugin final : public IPipelinePlugin {
                 prefill_module = std::move(split_prefill_module);
         }
 
-        // Split prefill deserialization can consume additional execution-context
-        // memory. Admit the KV allocation against the free memory that remains
-        // after every engine/context needed by this pipeline has been loaded.
-        admit_native_kv_allocation(ctx, native_kv, sizing);
         auto state =
             build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
         log_kv_cache_sizing(ctx, sizing, state.get());
@@ -617,7 +612,7 @@ class QwenDecoderPlugin final : public IPipelinePlugin {
                                                   kv_dim, stream, cache_dtype, std::move(kv_names));
         }
         if (!state->ok())
-            throw std::runtime_error("Failed to create QwenKvCache");
+            throw qwen_kv_cache_allocation_failure(sizing);
         return state;
     }
 

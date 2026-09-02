@@ -156,11 +156,11 @@ test "$PR_HEAD_SHA" = "$PUSHED_SHA"
 gh api \
   "repos/$REPOSITORY/commits/$PR_HEAD_SHA/status" \
   --jq '[.statuses[] |
-    select(.context == "trtmc/premerge/required")][0]'
+    select(.context == "TRTMC Internal CI / Automated premerge gate")][0]'
 ```
 
 If the exact head already has `PENDING` or `PASS` for
-`trtmc/premerge/required`, do not trigger it again. Otherwise an actor with
+`TRTMC Internal CI / Automated premerge gate`, do not trigger it again. Otherwise an actor with
 `maintain` or `admin` permission may run:
 
 ```bash
@@ -175,7 +175,7 @@ already-present label is a no-op and does not trigger the bridge.
 
 Never use the legacy `run-ci` label. The bridge consumes the trigger, verifies
 the exact head, and dispatches private Internal CI. A successful Source bridge
-run is not a passing premerge result: only `trtmc/premerge/required=PASS` on
+run is not a passing premerge result: only `TRTMC Internal CI / Automated premerge gate=PASS` on
 the current head is a pass. Raw Internal CI logs, artifacts, packages, runner
 details, and URLs stay private and must not be copied to the Source PR.
 

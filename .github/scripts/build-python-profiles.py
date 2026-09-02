@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Materialize every declared Python profile during the CI image build."""
+"""Prepare exact-pinned Python profiles before network-disabled execution."""
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
-import json
 import os
 import sys
 import types
@@ -39,33 +39,34 @@ def _load_profile_api():
     return module
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", action="append", default=[])
+    args = parser.parse_args(argv)
     profile_api = _load_profile_api()
-    names = profile_api.prebuilt_python_profile_names(
+    available = profile_api.prebuilt_python_profile_names(
         profile_api.load_python_profile_registry()
     )
-    if not names:
+    if not available:
         raise SystemExit("no prebuilt Python profiles were declared")
+    requested = tuple(args.profile)
+    if requested:
+        if len(set(requested)) != len(requested):
+            raise SystemExit("requested Python profiles must be unique")
+        unknown = sorted(set(requested) - set(available))
+        if unknown:
+            raise SystemExit("requested Python profiles are not prebuilt: " + ",".join(unknown))
+        names = tuple(sorted(requested))
+    else:
+        names = available
 
     base_python = os.environ.get("TRTMC_BASE_PYTHON", "/opt/venv/bin/python")
-    resolved: dict[str, dict[str, str]] = {}
     for name in names:
         python = profile_api.resolve_profile_python(name, base_python)
         ready = Path(python).parent.parent / ".ready"
         if not ready.is_file():
             raise SystemExit(f"profile {name!r} was not marked ready: {ready}")
-        resolved[name] = {"python": python, "ready": str(ready)}
-
-    manifest = {
-        "schema_version": 1,
-        "profiles": resolved,
-    }
-    root = profile_api.profile_root()
-    (root / ".image-ready.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    print("prebuilt_python_profiles=" + ",".join(names))
+    print("prepared_python_profiles=" + ",".join(names))
 
 
 if __name__ == "__main__":

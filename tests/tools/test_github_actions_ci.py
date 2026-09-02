@@ -15,10 +15,12 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tools.ci.container import CiContainer
 from tools.ci.environment import OPTIONAL_TUNING_ENVIRONMENT
+from tools.ci.process import CiError
 from tools.ci.quality import UnitTestRunner
 from tools.ci.stage import ContainerStageRunner
 
@@ -100,15 +102,11 @@ else:
 
 def _internal_ci_snapshot_script() -> str:
     workflow = yaml.safe_load(
-        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
-            encoding="utf-8"
-        )
+        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(encoding="utf-8")
     )
     steps = workflow["jobs"]["authorize"]["steps"]
     return next(
-        step["run"]
-        for step in steps
-        if step["name"] == "Capture the exact pull-request head"
+        step["run"] for step in steps if step["name"] == "Capture the exact pull-request snapshot"
     )
 
 
@@ -168,6 +166,7 @@ else:
         "state": "open",
         "base": {
             "ref": "main",
+            "sha": "d" * 40,
             "repo": {"full_name": "NVIDIA/TensorRT-Model-Connect"},
         },
         "head": {"sha": pr_head_sha},
@@ -188,6 +187,7 @@ else:
             "GITHUB_OUTPUT": str(output),
             "GITHUB_REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
             "PATH": f"{fake_bin}:{system_path or environment['PATH']}",
+            "POLICY_SHA": "e" * 40,
             "PR_NUMBER": "715",
         }
     )
@@ -199,6 +199,227 @@ else:
         text=True,
         check=False,
     )
+
+
+def _community_ready_alert_script() -> str:
+    workflow = yaml.safe_load(
+        (
+            REPO_ROOT
+            / ".github"
+            / "workflows"
+            / "community-activity-slack-alert.yml"
+        ).read_text(encoding="utf-8")
+    )
+    return workflow["jobs"]["notify-ready-pr"]["steps"][0]["run"]
+
+
+def _run_community_ready_alert(
+    tmp_path: Path,
+    *,
+    current_head_sha: str,
+    check_conclusions: dict[str, str],
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/usr/bin/env python3
+import os
+import sys
+
+endpoint = next(
+    (argument for argument in sys.argv[1:] if argument.startswith("repos/")),
+    "",
+)
+if "/pulls/" in endpoint:
+    print(os.environ["FAKE_PULL_JSON"])
+elif "/check-runs" in endpoint:
+    print(os.environ["FAKE_CHECKS_JSON"])
+else:
+    print(f"unexpected gh invocation: {sys.argv[1:]}", file=sys.stderr)
+    raise SystemExit(2)
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    fake_jq = fake_bin / "jq"
+    fake_jq.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+
+arguments = sys.argv[1:]
+if "-cn" in arguments:
+    values = {}
+    index = 0
+    while index < len(arguments):
+        if arguments[index] == "--arg":
+            values[arguments[index + 1]] = arguments[index + 2]
+            index += 3
+        else:
+            index += 1
+    safe_title = (
+        values["title"]
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    print(
+        json.dumps(
+            {
+                "text": (
+                    "✅ 🔀 External PR ready for maintainer\\n"
+                    f"Pull request #{values['number']} · required checks passed\\n"
+                    f"{values['author']} ({values['association']})"
+                ),
+                "blocks": [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "✅ 🔀 External PR ready for maintainer",
+                            "emoji": True,
+                        },
+                    },
+                    {
+                        "type": "section",
+                        "fields": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "*Event:*\\nPull request · required checks passed",
+                            },
+                            {
+                                "type": "mrkdwn",
+                                "text": (
+                                    f"*Author:*\\n{values['author']} "
+                                    f"({values['association']})"
+                                ),
+                            },
+                        ],
+                    },
+                    {
+                        "type": "section",
+                        "fields": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "*Checks:*\\nCommunity CPU · DCO · PR Metadata",
+                            },
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*Head:*\\n{values['head']}",
+                            },
+                        ],
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"*Pull request #{values['number']}*\\n"
+                                f"<{values['url']}|{safe_title}>"
+                            ),
+                        },
+                    },
+                ],
+            }
+        )
+    )
+    raise SystemExit
+
+document = json.load(sys.stdin)
+expression = arguments[-1]
+if "--arg" in arguments:
+    name = arguments[arguments.index("--arg") + 2]
+    matching = [run for run in document["check_runs"] if run["name"] == name]
+    latest = max(matching, key=lambda run: run["started_at"], default={})
+    value = latest.get("conclusion", "")
+else:
+    paths = {
+        ".head.sha": ("head", "sha"),
+        ".state": ("state",),
+        ".draft": ("draft",),
+        ".base.ref": ("base", "ref"),
+        ".author_association": ("author_association",),
+        ".user.login": ("user", "login"),
+        ".title": ("title",),
+        ".html_url": ("html_url",),
+    }
+    value = document
+    for component in paths[expression]:
+        value = value[component]
+
+if isinstance(value, bool):
+    print(json.dumps(value))
+else:
+    print(value)
+""",
+        encoding="utf-8",
+    )
+    fake_jq.chmod(0o755)
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        """#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+arguments = sys.argv[1:]
+payload = arguments[arguments.index("--data") + 1]
+Path(os.environ["FAKE_SLACK_PAYLOAD"]).write_text(payload, encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    fake_sleep = fake_bin / "sleep"
+    fake_sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_sleep.chmod(0o755)
+
+    pull = {
+        "number": 1127,
+        "state": "open",
+        "draft": False,
+        "title": "External contribution",
+        "html_url": "https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1127",
+        "author_association": "CONTRIBUTOR",
+        "user": {"login": "external-author"},
+        "base": {"ref": "main"},
+        "head": {"sha": current_head_sha},
+    }
+    checks = {
+        "check_runs": [
+            {
+                "name": name,
+                "started_at": f"2026-09-02T05:00:0{index}Z",
+                "conclusion": conclusion,
+            }
+            for index, (name, conclusion) in enumerate(check_conclusions.items())
+        ]
+    }
+    payload_path = tmp_path / "slack-payload.json"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FAKE_CHECKS_JSON": json.dumps(checks),
+            "FAKE_PULL_JSON": json.dumps(pull),
+            "FAKE_SLACK_PAYLOAD": str(payload_path),
+            "GH_TOKEN": "test-token",
+            "HEAD_SHA": "a" * 40,
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
+            "SLACK_WEBHOOK_URL": "https://hooks.slack.test/community",
+            "WORKFLOW_RUN_NAME": f"PR #1127 · public CPU · merge {'b' * 40}",
+        }
+    )
+    process = subprocess.run(
+        ["bash", "-c", _community_ready_alert_script()],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return process, payload_path
 
 
 def _ci_source(*filenames: str) -> str:
@@ -227,9 +448,11 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
         *workflows.glob("*.yaml"),
     }
     assert sorted(path.name for path in workflow_files) == [
+        "community-activity-slack-alert.yml",
         "community-cpu.yml",
         "internal-ci-bridge.yml",
         "pages.yml",
+        "pr-metadata.yml",
     ]
 
     bridge = (workflows / "internal-ci-bridge.yml").read_text(encoding="utf-8")
@@ -247,6 +470,232 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
     assert '      - "website/**"' in pages
     assert "python3 -m tools.ci" not in pages
     assert "actions/workflows/premerge.yml/dispatches" not in pages
+
+
+def test_community_activity_alert_only_posts_trusted_external_metadata() -> None:
+    path = REPO_ROOT / ".github" / "workflows" / "community-activity-slack-alert.yml"
+    source = path.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(source)
+    ready_job = workflow["jobs"]["notify-ready-pr"]
+    activity_job = workflow["jobs"]["notify-activity"]
+    activity_post = activity_job["steps"][0]
+
+    assert "issues:" in source
+    assert "issue_comment:" in source
+    assert "discussion:" in source
+    assert "discussion_comment:" in source
+    assert "workflow_run:" in source
+    assert 'workflows: ["Community CPU"]' in source
+    assert "types: [completed]" in source
+    assert "pull_request_target:" not in source
+    assert source.count("types: [created]") == 3
+    assert workflow["permissions"] == {}
+    assert ready_job["permissions"] == {
+        "actions": "read",
+        "checks": "read",
+        "pull-requests": "read",
+    }
+    assert activity_job["permissions"] == {}
+    assert ready_job["timeout-minutes"] == 7
+    assert activity_job["timeout-minutes"] == 5
+    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in ready_job["if"]
+    assert "github.event.workflow_run.conclusion == 'success'" in ready_job["if"]
+    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in activity_job["if"]
+    assert "github.event.sender.type != 'Bot'" in activity_job["if"]
+    association_fields = {
+        "issues": "github.event.issue.author_association",
+        "issue_comment": "github.event.comment.author_association",
+        "discussion": "github.event.discussion.author_association",
+        "discussion_comment": "github.event.comment.author_association",
+    }
+    for event_name, association in association_fields.items():
+        assert f"github.event_name == '{event_name}'" in activity_job["if"]
+        for trusted in ("OWNER", "MEMBER", "COLLABORATOR"):
+            assert f"{association} != '{trusted}'" in activity_job["if"]
+
+    assert all(
+        "uses" not in step
+        for job in (ready_job, activity_job)
+        for step in job["steps"]
+    )
+    assert "actions/checkout" not in source
+    assert set(re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", source)) == {
+        "SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL"
+    }
+    assert activity_post["env"]["SLACK_WEBHOOK_URL"] == (
+        "${{ secrets.SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL }}"
+    )
+    assert activity_post["env"]["EVENT_NAME"] == "${{ github.event_name }}"
+    assert activity_post["env"]["EVENT_ACTION"] == "${{ github.event.action }}"
+    assert activity_post["env"]["ITEM_TITLE"] == (
+        "${{ github.event.issue.title || github.event.discussion.title }}"
+    )
+    assert activity_post["env"]["ITEM_URL"].startswith(
+        "${{ github.event.comment.html_url ||"
+    )
+    assert "github.event.issue.pull_request != null" in activity_post["env"][
+        "IS_PULL_REQUEST"
+    ]
+
+    script = activity_post["run"]
+    assert "${{" not in script
+    assert 'if [ -z "$SLACK_WEBHOOK_URL" ]; then' in script
+    for kind in ("Pull request", "Issue", "Discussion"):
+        assert f'item_kind="{kind}"' in script
+    assert 'gsub("&"; "&amp;")' in script
+    assert 'gsub("<"; "&lt;")' in script
+    assert 'gsub(">"; "&gt;")' in script
+    assert "($title | slack_escape)" in script
+    assert '" + $title +' not in script
+    for icon, heading in (
+        ("🔀", "External pull request activity"),
+        ("🎫", "External issue activity"),
+        ("💬", "External discussion activity"),
+    ):
+        assert f'item_icon="{icon}"' in script
+        assert f'item_heading="{heading}"' in script
+    assert '"*Event:*\\n" + $kind + " · " + $action' in script
+    assert "curl --fail-with-body --silent --show-error" in script
+    assert '--data "$payload"' in script
+    assert '"$SLACK_WEBHOOK_URL"' in script
+
+
+def test_community_pr_alerts_wait_for_required_checks_and_keep_requests() -> None:
+    path = REPO_ROOT / ".github" / "workflows" / "community-activity-slack-alert.yml"
+    source = path.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(source)
+    ready_job = workflow["jobs"]["notify-ready-pr"]
+    activity_job = workflow["jobs"]["notify-activity"]
+    activity_condition = activity_job["if"]
+    ready_post = ready_job["steps"][0]
+    activity_post = activity_job["steps"][0]
+
+    assert "synchronize" not in source
+    assert "github.event.comment.body" not in activity_condition
+    assert activity_post["env"]["COMMENT_BODY"] == (
+        "${{ github.event.comment.body || '' }}"
+    )
+    activity_script = activity_post["run"]
+    for icon, heading in (
+        ("🔀", "External pull request activity"),
+        ("🎫", "External issue activity"),
+        ("💬", "External discussion activity"),
+    ):
+        assert f'item_icon="{icon}"' in activity_script
+        assert f'item_heading="{heading}"' in activity_script
+    for activity_signal in (
+        "@yifeif-nv",
+        "@chaofengw-nv",
+        "/request-internal-ci",
+        "internal ci",
+        "internal-ci",
+        "trigger ci",
+    ):
+        assert activity_signal in activity_script
+
+    assert activity_post["env"]["IS_COMMENT"] == (
+        "${{ github.event_name == 'issue_comment' || "
+        "github.event_name == 'discussion_comment' }}"
+    )
+    assert 'alert_heading="External maintainer request"' in activity_script
+    assert 'alert_emoji="🚨 $item_icon"' in activity_script
+
+    assert ready_post["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert ready_post["env"]["HEAD_SHA"] == (
+        "${{ github.event.workflow_run.head_sha }}"
+    )
+    assert ready_post["env"]["WORKFLOW_RUN_NAME"] == (
+        "${{ github.event.workflow_run.display_title }}"
+    )
+    ready_script = ready_post["run"]
+    assert "repos/$REPOSITORY/pulls/$pr_number" in ready_script
+    assert 'current_head_sha="$(jq -r ".head.sha"' in ready_script
+    assert '[ "$(jq -r ".draft"' in ready_script
+    assert "for attempt in {1..30}; do" in ready_script
+    assert "sleep 10" in ready_script
+    for required_check in (
+        "Community CPU / Required",
+        "PR Metadata / Required",
+        "DCO",
+    ):
+        assert required_check in ready_script
+    assert "sort_by(.started_at) | last" in ready_script
+    assert "✅ 🔀 External PR ready for maintainer" in ready_script
+
+
+def test_community_ready_alert_posts_only_after_all_required_checks(
+    tmp_path: Path,
+) -> None:
+    process, payload_path = _run_community_ready_alert(
+        tmp_path,
+        current_head_sha="a" * 40,
+        check_conclusions={
+            "Community CPU / Required": "success",
+            "PR Metadata / Required": "success",
+            "DCO": "success",
+        },
+    )
+
+    assert process.returncode == 0, process.stderr
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert payload["text"].startswith("✅ 🔀 External PR ready for maintainer")
+    assert payload["blocks"][0]["text"]["text"] == (
+        "✅ 🔀 External PR ready for maintainer"
+    )
+    assert "Community CPU · DCO · PR Metadata" in json.dumps(
+        payload, ensure_ascii=False
+    )
+
+
+def test_community_ready_alert_skips_a_stale_pr_head(tmp_path: Path) -> None:
+    process, payload_path = _run_community_ready_alert(
+        tmp_path,
+        current_head_sha="c" * 40,
+        check_conclusions={
+            "Community CPU / Required": "success",
+            "PR Metadata / Required": "success",
+            "DCO": "success",
+        },
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert "advanced beyond" in process.stdout
+    assert not payload_path.exists()
+
+
+def test_community_ready_alert_skips_when_a_required_check_is_not_green(
+    tmp_path: Path,
+) -> None:
+    process, payload_path = _run_community_ready_alert(
+        tmp_path,
+        current_head_sha="a" * 40,
+        check_conclusions={
+            "Community CPU / Required": "success",
+            "PR Metadata / Required": "success",
+            "DCO": "failure",
+        },
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert "did not satisfy all alert gates" in process.stdout
+    assert not payload_path.exists()
+
+
+def test_community_activity_alert_uses_structured_slack_blocks() -> None:
+    path = REPO_ROOT / ".github" / "workflows" / "community-activity-slack-alert.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    scripts = [job["steps"][0]["run"] for job in workflow["jobs"].values()]
+
+    for script in scripts:
+        assert r"\\n" not in script
+        assert 'type: "header"' in script
+        assert 'type: "plain_text"' in script
+        assert 'type: "section"' in script
+        assert 'fields: [' in script
+        for label in ("Event", "Author"):
+            assert f'"*{label}:*\\n' in script
+        assert '"*Repository:*\\n"' not in script
+        assert '"*Association:*\\n"' not in script
 
 
 def test_only_pages_workflow_creates_deployment_objects() -> None:
@@ -269,9 +718,7 @@ def test_only_pages_workflow_creates_deployment_objects() -> None:
 def test_community_docs_gate_matches_pages_predeploy_contract() -> None:
     workflows = REPO_ROOT / ".github" / "workflows"
     pages = yaml.safe_load((workflows / "pages.yml").read_text(encoding="utf-8"))
-    community = yaml.safe_load(
-        (workflows / "community-cpu.yml").read_text(encoding="utf-8")
-    )
+    community = yaml.safe_load((workflows / "community-cpu.yml").read_text(encoding="utf-8"))
 
     pages_build = pages["jobs"]["build"]
     pages_steps = {step["name"]: step for step in pages_build["steps"]}
@@ -299,20 +746,14 @@ def test_community_docs_gate_matches_pages_predeploy_contract() -> None:
 
 
 def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
-    workflow = (
-        REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml"
-    ).read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
+        encoding="utf-8"
+    )
     workflow_config = yaml.safe_load(workflow)
-    authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split(
-        "\n  dispatch:", maxsplit=1
-    )[0]
-    dispatch = workflow.split("\n  dispatch:", maxsplit=1)[1]
-    authorize_permissions = authorize.split(
-        "    permissions:", maxsplit=1
-    )[1].split("\n    outputs:", maxsplit=1)[0]
-    dispatch_permissions = dispatch.split("    permissions:", maxsplit=1)[1].split(
-        "\n\n", maxsplit=1
-    )[0]
+    authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split("\n  announce:", maxsplit=1)[0]
+    announce = workflow.split("\n  announce:", maxsplit=1)[1].split("\n  dispatch:", maxsplit=1)[0]
+    dispatch = workflow.split("\n  dispatch:", maxsplit=1)[1].split("\n  publish:", maxsplit=1)[0]
+    publish = workflow.split("\n  publish:", maxsplit=1)[1]
 
     assert "pull_request_target:" in workflow
     assert "name: TensorRT-Model-Connect Internal CI Bridge" in workflow
@@ -325,10 +766,23 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "github.event_name == 'pull_request_target'" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "permissions: {}" in workflow
-    assert authorize_permissions.strip() == (
-        "actions: read\n      contents: read\n      pull-requests: write"
-    )
-    assert dispatch_permissions.strip() == "{}"
+    assert workflow_config["jobs"]["authorize"]["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "write",
+    }
+    assert workflow_config["jobs"]["announce"]["permissions"] == {
+        "pull-requests": "write",
+        "statuses": "write",
+    }
+    assert workflow_config["jobs"]["dispatch"]["permissions"] == {"contents": "read"}
+    assert workflow_config["jobs"]["dispatch"]["timeout-minutes"] == 360
+    assert workflow_config["jobs"]["publish"]["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "write",
+        "statuses": "write",
+    }
 
     assert "collaborators/$ACTOR/permission" in authorize
     assert "--jq '.role_name'" in authorize
@@ -359,21 +813,13 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert 'if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then' in authorize
     assert 'echo "head_sha=$head_sha"' in authorize
     assert "pr_number=$PR_NUMBER" in authorize
-    for legacy in (
-        "base_sha",
-        "BASE_SHA",
-        "merge_sha",
-        "MERGE_SHA",
-        "EVENT_BASE_SHA",
-    ):
-        assert legacy not in workflow
-    assert (
-        "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci"
-    ) in authorize
+    assert 'echo "base_sha=$base_sha"' in authorize
+    assert 'echo "policy_sha=$POLICY_SHA"' in authorize
+    assert ("/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci") in authorize
     assert "gh api --silent --method DELETE" in authorize
     assert "success() && github.event_name == 'pull_request_target'" in authorize
 
-    assert "needs: authorize" in dispatch
+    assert "needs:" in dispatch
     assert workflow_config["jobs"]["dispatch"]["environment"] == {
         "name": "ci-dispatch",
         "deployment": False,
@@ -387,20 +833,22 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     for secret in secret_references:
         assert secret not in authorize
         assert secret in dispatch
-    assert workflow.count("${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}") == 1
+        assert secret not in announce
+        assert secret not in publish
+    assert workflow.count("${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}") == 3
 
     assert "actions/create-github-app-token@" not in workflow
     assert "permission-checks:" not in workflow
-    assert "actions/checkout@" not in workflow
+    assert "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" in workflow
+    assert "persist-credentials: false" in dispatch
     assert "private_ci_bridge.py" not in workflow
     assert "self-hosted" not in workflow
     assert "secrets: inherit" not in workflow
     assert "report-guard-failure" not in workflow
-    assert "/statuses/" not in workflow
-    assert "/comments" not in workflow
+    assert workflow.count("/statuses/") == 2
+    assert "/comments" in workflow
     assert (
-        "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/"
-        "actions/workflows/premerge.yml/dispatches"
+        "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/dispatches"
     ) in workflow
     assert re.search(r'"/repos/[A-Za-z0-9]', workflow) is None
     assert '[[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]' in workflow
@@ -408,14 +856,56 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert 'echo "$PRIVATE_CI_' not in dispatch
     assert "GITHUB_STEP_SUMMARY" not in dispatch
 
-    assert dispatch.count("HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}") == 1
+    assert dispatch.count("HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}") >= 1
 
     assert 'ref: "main"' in dispatch
-    for name in ("pr_number", "head_sha"):
+    for name in (
+        "pr_number",
+        "head_sha",
+        "base_sha",
+        "policy_sha",
+        "dispatch_nonce",
+    ):
         assert f"{name}: ${name}" in dispatch
+    assert "BASE_SHA: ${{ needs.authorize.outputs.base_sha }}" in dispatch
+    assert "POLICY_SHA: ${{ needs.authorize.outputs.policy_sha }}" in dispatch
     assert "umask 077" in dispatch
-    assert 'trap \'rm -f "$payload"\' EXIT' in dispatch
-    assert 'if: ${{ failure() }}' not in dispatch
+    assert "openssl rand -hex 16" in dispatch
+    assert '[[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]' in dispatch
+    assert (
+        'expected_title="Source PR #$PR_NUMBER · $HEAD_SHA · dispatch $dispatch_nonce"' in dispatch
+    )
+    assert ".display_title == $title" in dispatch
+    assert ".created_at >= $dispatched_at" not in dispatch
+    assert "actions/workflows/premerge.yml/runs?event=workflow_dispatch" in dispatch
+    assert "actions/runs/$RUN_ID" in dispatch
+    assert "while true; do" in dispatch
+    assert "seq 1 220" not in dispatch
+    assert "--name public-failure-payload" in dispatch
+    assert "--log" not in dispatch
+    assert "validate_public_failure(report)" in dispatch
+    assert "validate_failure_identity(" in dispatch
+    assert "commit_parents=graph.commit_parents" in dispatch
+    assert "is_ancestor=graph.is_ancestor" in dispatch
+    assert "EXPECTED_DISPATCH_NONCE" in dispatch
+    assert 'expected_dispatch_nonce=os.environ["EXPECTED_DISPATCH_NONCE"]' in dispatch
+    assert "assert_public_payload_safe(report, document)" in dispatch
+    assert "name: public-failure-log" in dispatch
+    assert "Automated internal CI failed; open the public failure log" in publish
+    assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 2
+    assert "always() && needs.authorize.result == 'success'" in workflow
+    assert "cancelled|timed_out|skipped|neutral|action_required" in workflow
+    assert 'payload_size" -gt 65536' in dispatch
+    assert '"base_sha": os.environ["EXPECTED_BASE_SHA"]' not in dispatch
+    assert "current_base" not in publish
+    assert "The PR base changed during internal CI" not in publish
+    assert publish.index("- name: Publish the terminal automated status") < publish.index(
+        "- name: Print public-failure.log"
+    )
+    assert "github-actions[bot]" in publish
+    assert "<!-- trtmc-internal-ci-result -->" in publish
+    assert "trap 'rm -f \"$payload\"' EXIT" in dispatch
+    assert "if: ${{ failure() }}" not in workflow
 
 
 def test_internal_ci_bridge_rejects_a_new_push_after_label(
@@ -558,9 +1048,7 @@ def test_internal_ci_bridge_tests_do_not_depend_on_host_jq(tmp_path: Path) -> No
 
 def test_internal_ci_trigger_label_is_consumed_only_after_authorization() -> None:
     workflow = yaml.safe_load(
-        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
-            encoding="utf-8"
-        )
+        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(encoding="utf-8")
     )
     step = next(
         item
@@ -568,9 +1056,7 @@ def test_internal_ci_trigger_label_is_consumed_only_after_authorization() -> Non
         if item["name"] == "Consume the trusted trigger label"
     )
 
-    assert step["if"] == (
-        "${{ success() && github.event_name == 'pull_request_target' }}"
-    )
+    assert step["if"] == ("${{ success() && github.event_name == 'pull_request_target' }}")
     assert step["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}"
 
 
@@ -609,6 +1095,7 @@ def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
         "ContainerStageRunner",
     ):
         assert f"class {class_name}" in source
+
 
 def test_ci_modules_have_minimal_role_comments_and_a_complete_tutorial() -> None:
     ci_directory = REPO_ROOT / "tools" / "ci"
@@ -658,14 +1145,11 @@ def test_source_quality_pipeline_keeps_the_full_static_gate() -> None:
     assert '"Check model architecture contracts"' in source_quality
     assert "self.quality.architecture_contracts" in source_quality
 
-    architecture_contract = source.split(
-        "def architecture_contracts", maxsplit=1
-    )[1].split("def _changed_files", maxsplit=1)[0]
+    architecture_contract = source.split("def architecture_contracts", maxsplit=1)[1].split(
+        "def _changed_files", maxsplit=1
+    )[0]
     assert '"pytest"' in architecture_contract
-    assert (
-        "tests/tools/test_model_plugin_encapsulation_static.py"
-        in architecture_contract
-    )
+    assert "tests/tools/test_model_plugin_encapsulation_static.py" in architecture_contract
     assert '"-q"' in architecture_contract
     assert '"no:cacheprovider"' in architecture_contract
 
@@ -674,8 +1158,7 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert (
         "ARG CUDA_IMAGE=nvidia/cuda:13.3.0-devel-ubuntu24.04"
-        "@sha256:ef2203909e80b8b976cfc672f7e2ae2b00bc0e25c404ee86d89e10a3802f1c52"
-        in dockerfile
+        "@sha256:ef2203909e80b8b976cfc672f7e2ae2b00bc0e25c404ee86d89e10a3802f1c52" in dockerfile
     )
     assert dockerfile.count("ARG TENSORRT_VERSION=11.1.0.106") == 1
     assert dockerfile.count("ARG TENSORRT_APT_VERSION=11.1.0.106-1+cuda13.3") == 1
@@ -685,21 +1168,16 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert "--system-site-packages" not in dockerfile
     assert "ENV TRT_ROOT=" not in dockerfile
     assert "ENV PIP_FIND_LINKS=" not in dockerfile
-    assert (
-        "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs"
-        in dockerfile
-    )
+    assert "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs" in dockerfile
     assert "ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu" in dockerfile
     assert "ghcr.io" not in dockerfile
     assert "TENSORRT_SDK_IMAGE" not in dockerfile
     assert "/opt/tensorrt/python" not in dockerfile
+    assert "COPY tools/ci/profile_downloader.py /opt/trtmc-profile-downloader.py" in dockerfile
 
-    from_lines = [
-        line for line in dockerfile.splitlines() if line.startswith("FROM ")
-    ]
+    from_lines = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
     assert from_lines == [
         "FROM ${CUDA_IMAGE} AS ci-common-base",
-        "FROM ci-common-base AS python-profile-builder",
         "FROM ci-common-base AS ci-common",
         "FROM ci-common AS ci-runtime",
     ]
@@ -707,8 +1185,9 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     common = dockerfile.split("FROM ci-common-base AS ci-common", maxsplit=1)[1].split(
         "FROM ci-common AS ci-runtime", maxsplit=1
     )[0]
-    assert "COPY --from=python-profile-builder" in common
-    assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1" in common
+    assert "COPY --from=python-profile-builder" not in common
+    assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY" not in dockerfile
+    assert "/opt/trtmc-python-profiles" not in dockerfile
     assert 'find_spec("tensorrt") is None' in common
     assert "NvInferVersion.h" in common
     assert "NvOnnxParser.h" in common
@@ -748,12 +1227,8 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert "c++ -x c++" in overlay
 
     source_dockerfiles = {
-        "aarch64": (REPO_ROOT / "Dockerfile.dev.aarch64").read_text(
-            encoding="utf-8"
-        ),
-        "x86_64": (REPO_ROOT / "Dockerfile.dev.x86").read_text(
-            encoding="utf-8"
-        ),
+        "aarch64": (REPO_ROOT / "Dockerfile.dev.aarch64").read_text(encoding="utf-8"),
+        "x86_64": (REPO_ROOT / "Dockerfile.dev.x86").read_text(encoding="utf-8"),
     }
     assert (
         "@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541"
@@ -765,14 +1240,8 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     )
     for architecture, source_dockerfile in source_dockerfiles.items():
         assert "FROM ${TENSORRT_IMAGE}" in source_dockerfile
-        assert (
-            "COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt"
-            in source_dockerfile
-        )
-        assert (
-            "pip install --requirement /tmp/trtmc-community-ci.txt"
-            in source_dockerfile
-        )
+        assert "COPY community-ci.txt /tmp/trtmc-community-ci.txt" in source_dockerfile
+        assert "pip install --requirement /tmp/trtmc-community-ci.txt" in source_dockerfile
         assert "pre-commit>=" not in source_dockerfile
         assert "https://download.pytorch.org/whl/cpu" in source_dockerfile
         assert "torch.version.cuda is None" in source_dockerfile
@@ -781,19 +1250,13 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
         assert "nemo_toolkit" not in source_dockerfile
         assert "ln -s /usr/bin/cmake ${VIRTUAL_ENV}/bin/cmake" in source_dockerfile
         assert "RUN cmake --version" in source_dockerfile
-        assert (
-            f"ENV TRT_LIB_DIR=/usr/lib/{architecture}-linux-gnu"
-            in source_dockerfile
-        )
-        assert (
-            f"ENV TRT_INC_DIR=/usr/include/{architecture}-linux-gnu"
-            in source_dockerfile
-        )
+        assert f"ENV TRT_LIB_DIR=/usr/lib/{architecture}-linux-gnu" in source_dockerfile
+        assert f"ENV TRT_INC_DIR=/usr/include/{architecture}-linux-gnu" in source_dockerfile
     assert "x86_64-linux-gnu" not in dockerfile
 
-    source_build = (
-        REPO_ROOT / "website/docs/getting-started/source-build.md"
-    ).read_text(encoding="utf-8")
+    source_build = (REPO_ROOT / "website/docs/getting-started/source-build.md").read_text(
+        encoding="utf-8"
+    )
     assert "Dockerfile.dev.aarch64" in source_build
     assert "Dockerfile.dev.x86" in source_build
     assert "trtmc_model_qwen" in source_build
@@ -801,9 +1264,7 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert "TRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF" in source_build
     assert "TRTMC_TORCH_CUDA_ARCH_LIST" not in source_build
 
-    ci_docker_build = (REPO_ROOT / "scripts/docker_build_gb300.sh").read_text(
-        encoding="utf-8"
-    )
+    ci_docker_build = (REPO_ROOT / "scripts/docker_build_gb300.sh").read_text(encoding="utf-8")
     assert '"$REPO_ROOT/Dockerfile"' in ci_docker_build
     assert "Dockerfile.dev.aarch64" not in ci_docker_build
     assert "Dockerfile.dev.x86" not in ci_docker_build
@@ -865,16 +1326,19 @@ def test_hardened_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
         "TRUSTED_ENVIRONMENT =", maxsplit=1
     )[0]
     assert "TRTMC_PREMERGE_UNIT_SCOPE" in common
+    assert "TRTMC_PREMERGE_PYTHON_TEST_TARGETS" in common
+    for name in (
+        "TRTMC_PACKAGE_PYTHON_TAGS",
+        "TRTMC_PACKAGE_TENSORRT_VERSION",
+        "TRTMC_PACKAGE_WHEEL_ARCH",
+    ):
+        assert name in common
+    assert "TRTMC_PACKAGE_BUILD_ROOT" not in common
     assert "HF_TOKEN" not in common
     assert "HUGGING_FACE_HUB_TOKEN" not in common
 
     stage = _ci_source("stage.py")
-    assert (
-        "COMMON_ENVIRONMENT if self.config.hardened else TRUSTED_ENVIRONMENT"
-        in stage
-    )
-
-
+    assert "COMMON_ENVIRONMENT if self.config.hardened else TRUSTED_ENVIRONMENT" in stage
 
 
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
@@ -1027,9 +1491,7 @@ def test_github_container_only_exports_nonempty_tuning_controls(tmp_path: Path) 
                 env[name] = value
             arguments = CiContainer(env)._environment_arguments()
             forwarded = [
-                arguments[index + 1]
-                for index, item in enumerate(arguments[:-1])
-                if item == "-e"
+                arguments[index + 1] for index, item in enumerate(arguments[:-1]) if item == "-e"
             ]
             stage_command = ContainerStageRunner("package", env)._docker_command()
             if value == "3":
@@ -1137,12 +1599,8 @@ def test_diffusion_vlm_shared_ci_has_no_model_owned_default() -> None:
 
 def test_full_python_builder_preserves_parallel_and_allocator_coverage() -> None:
     text = _ci_source("coverage.py")
-    builder = text.split("def python_builder_tests", maxsplit=1)[1].split(
-        "def cpp", maxsplit=1
-    )[0]
-    builder_conftest = (
-        REPO_ROOT / "tests" / "builder" / "conftest.py"
-    ).read_text(encoding="utf-8")
+    builder = text.split("def python_builder_tests", maxsplit=1)[1].split("def cpp", maxsplit=1)[0]
+    builder_conftest = (REPO_ROOT / "tests" / "builder" / "conftest.py").read_text(encoding="utf-8")
 
     assert 'glob("test_*.py")' in builder
     assert "--ignore=tests/builder/test_cli.py" not in builder
@@ -1154,14 +1612,9 @@ def test_full_python_builder_preserves_parallel_and_allocator_coverage() -> None
     assert '"TRTMC_TEST_INSTALLED_WHEEL": "1"' in builder
     assert "source_pkgs =" in text
     assert "tensorrt_model_connect" in text
-    assert (
-        'os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1"'
-        in builder_conftest
-    )
+    assert 'os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1"' in builder_conftest
     assert "imported tensorrt_model_connect" in builder_conftest
-    assert builder.index('"-n", "auto"') < builder.index(
-        '"tests/tools/test_model_proof_runner.py"'
-    )
+    assert builder.index('"-n", "auto"') < builder.index('"tests/tools/test_model_proof_runner.py"')
 
 
 def test_selective_python_always_runs_static_ci_smoke_tests() -> None:
@@ -1214,9 +1667,7 @@ def test_source_quality_lint_uses_resolved_ci_base_ref() -> None:
     assert "f\"origin/{self.context.env.get('GITHUB_REF_NAME', 'main')}\"" in text
 
 
-
-
-def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
+def test_premerge_unit_stage_runs_all_cpu_tests_without_native_wheel() -> None:
     script = _ci_source("quality.py")
     stage = script.split("def premerge", maxsplit=1)[1].split("def _premerge_scope", maxsplit=1)[0]
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
@@ -1227,17 +1678,25 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert '"TRTMC_CI_SCRATCH_DIR", "/tmp"' in stage
     assert "TRTMC_PREMERGE_UNIT_BUILD_DIR" in stage
     assert '"not gpu and not trt and not e2e and not model_proof_allocator"' in stage
-    assert "tests/builder/" in stage
-    assert "tests/tools/" in stage
-    assert 'glob("test_*.py")' in script
+    assert '["tests/builder/", "tests/tools/", "tests/e2e_harness/"]' in script
+    assert "tests/e2e/models" in script
+    assert "python/tensorrt_model_connect/families" in script
+    assert "tests/test_e2e_selection.py" in script
+    assert "tests/e2e/test_diffusion_image_parity_inputs.py" in script
+    assert "tests/e2e/test_error_handling.py" in stage
+    assert '"--ignore-glob=*_e2e.py"' in stage
+    assert "_mixed_e2e_cpu_contract_files" in script
+    assert 'f"--deselect={path}::test_model_e2e"' in stage
     assert '"-q"' in stage and '"-x"' in stage
     assert '"--dist=worksteal"' in stage
+    assert '"--import-mode=importlib"' in stage
     assert 'if scope == "community-all"' in stage
     assert "test_distinct_explicit_hf_cache_paths_reach_both_containers" in stage
     assert 'not model_proof_allocator"' in stage
     assert '"-m"' in stage and '"model_proof_allocator"' in stage
     assert '["trtmc", "test_cli_args", "test_config_cli_support"]' in script
-    assert '["trtmc", "trtmc_platform_cpp_tests"]' in script
+    assert '["trtmc", "trtmc_cpu_cpp_tests"]' in script
+    assert '["-L", "cpu"]' in script
     assert '"TRTMC_PREMERGE_UNIT_SCOPE", "all"' in stage
     assert "tests/builder/test_cli.py" in script
     assert 'if scope == "builder"' in script
@@ -1246,18 +1705,29 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert '[build / "trtmc", "version"]' in stage
     assert '[build / "trtmc", "--help"]' in stage
     assert "--stop-on-failure" in stage
-    assert "libtrtmc_model_*.so*" in stage
     assert "-DTRTMC_ENABLE_TRT=OFF" not in stage
     assert "-DTRTMC_BUILD_BACKEND_TRT=OFF" not in stage
     assert "-DTRTMC_ENABLE_TVM_FFI=OFF" not in stage
     assert "conan " not in stage
     assert "build_pip_package" not in stage
+    assert "--ignore=tests/builder/test_flashinfer_benchmark.py" in stage
+    assert "--ignore=tests/builder/test_tvm_ffi_plugin.py" in stage
     assert "trtmc_model_plugins" not in stage
     assert "add_custom_target(trtmc_platform_cpp_tests)" in cmake
+    assert "add_custom_target(trtmc_cpu_cpp_tests)" in cmake
+    assert "if(ARG_UNPARSED_ARGUMENTS)" in cmake
+    assert (
+        "add_dependencies(trtmc_cpu_cpp_tests test_optimized_runtime_bundle_contract)" in cmake
+    )
+    assert len(re.findall(r"(?m)^\s*add_test\(", cmake)) == 2
+    assert "add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})" in cmake
+    assert "NAME test_optimized_runtime_bundle_contract" in cmake
+    assert '"${_trtmc_test_owner_label};${_trtmc_test_resource_label}"' in cmake
     assert "trtmc_add_test(test_model_plugin_loader MODEL_OWNED)" in cmake
     assert "test_c_abi_runtime_regression" not in cmake
     assert (
-        "test_c_abi_runtime_regression|test_c_abi_runtime_regression.cpp|trtmc_model_qwen|_|_"
+        "test_c_abi_runtime_regression|test_c_abi_runtime_regression.cpp|"
+        "trtmc_model_qwen|_|REQUIRES_GPU"
         in qwen_manifest
     )
     assert "MODEL_OWNED\n        ${_trtmc_test_options}" in cmake
@@ -1276,11 +1746,17 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
 
 
 def test_builder_unit_scope_runs_python_without_native_build(tmp_path: Path) -> None:
+    selected_test = "tests/e2e/models/qwen/test_qwen_native_kv_routing.py"
+    selected_path = tmp_path / selected_test
+    selected_path.parent.mkdir(parents=True)
+    selected_path.write_text("def test_selected(): pass\n", encoding="utf-8")
+
     class RecordingContext:
         repository = tmp_path
         env = {
             "GITHUB_WORKSPACE": str(tmp_path),
             "TRTMC_PREMERGE_UNIT_SCOPE": "builder",
+            "TRTMC_PREMERGE_PYTHON_TEST_TARGETS": json.dumps([selected_test]),
             "TRTMC_UNIT_BUILD_JOBS": "8",
             "TRTMC_UNIT_TEST_JOBS": "8",
         }
@@ -1299,17 +1775,135 @@ def test_builder_unit_scope_runs_python_without_native_build(tmp_path: Path) -> 
     UnitTestRunner(context).premerge()
 
     pytest_commands = [
-        command
-        for command in context.commands
-        if command[:3] == ["python", "-m", "pytest"]
+        command for command in context.commands if command[:3] == ["python", "-m", "pytest"]
     ]
     assert len(pytest_commands) == 1
     assert "tests/builder/" in pytest_commands[0]
-    assert not [
-        command for command in context.commands if command[0] in {"cmake", "ctest"}
+    assert selected_test in pytest_commands[0]
+    assert not [command for command in context.commands if command[0] in {"cmake", "ctest"}]
+
+
+def test_all_unit_scope_isolates_shared_and_family_python_suites(tmp_path: Path) -> None:
+    mixed_file = (
+        tmp_path / "tests/e2e/models/example/optimized_adapter/test_example_e2e.py"
+    )
+    mixed_file.parent.mkdir(parents=True)
+    mixed_file.write_text(
+        "def test_model_e2e(): pass\n"
+        "def test_manifest_contract(): pass\n",
+        encoding="utf-8",
+    )
+
+    class RecordingContext:
+        repository = tmp_path
+        env = {
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "TRTMC_PREMERGE_UNIT_SCOPE": "community-all",
+            "TRTMC_UNIT_BUILD_JOBS": "8",
+            "TRTMC_UNIT_TEST_JOBS": "8",
+        }
+
+        def __init__(self) -> None:
+            self.commands: list[list[object]] = []
+
+        def positive_integer(self, value: str, _name: str) -> int:
+            return int(value)
+
+        def run(self, command: list[object], **_kwargs: object) -> subprocess.CompletedProcess:
+            self.commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    context = RecordingContext()
+    UnitTestRunner(context).premerge()
+
+    pytest_commands = [
+        command for command in context.commands if command[:3] == ["python", "-m", "pytest"]
     ]
+    source_commands = [
+        command
+        for command in pytest_commands
+        if "model_proof_allocator" not in command
+        and "tests/e2e/test_error_handling.py" not in command
+    ]
+    assert len(source_commands) == 4
+    shared, models, family, mixed = source_commands
+    assert all(
+        target in shared for target in ("tests/builder/", "tests/tools/", "tests/e2e_harness/")
+    )
+    assert "tests/e2e/models/" not in shared
+    assert "--ignore-glob=*_e2e.py" not in shared
+    assert all(
+        target in models
+        for target in (
+            "tests/e2e/models/",
+            "tests/test_e2e_selection.py",
+            "tests/e2e/test_diffusion_image_parity_inputs.py",
+        )
+    )
+    assert "python/tensorrt_model_connect/families/" not in models
+    assert "--ignore-glob=*_e2e.py" in models
+    assert "python/tensorrt_model_connect/families/" in family
+    assert "tests/e2e/models/" not in family
+    assert "--ignore-glob=*_e2e.py" not in family
+    relative_mixed = "tests/e2e/models/example/optimized_adapter/test_example_e2e.py"
+    assert relative_mixed in mixed
+    assert f"--deselect={relative_mixed}::test_model_e2e" in mixed
+    assert "--ignore-glob=*_e2e.py" not in mixed
+    for command in source_commands:
+        assert "--import-mode=importlib" in command
+        assert "not gpu and not trt and not e2e and not model_proof_allocator" in command
+
+    build_command = next(
+        command for command in context.commands if command[:2] == ["cmake", "--build"]
+    )
+    assert "trtmc_cpu_cpp_tests" in build_command
+    ctest_command = next(command for command in context.commands if command[0] == "ctest")
+    label_index = ctest_command.index("-L")
+    assert ctest_command[label_index : label_index + 2] == ["-L", "cpu"]
 
 
+def test_mixed_e2e_cpu_contract_inventory_is_not_hidden() -> None:
+    class InventoryContext:
+        repository = REPO_ROOT
+
+    selected = set(UnitTestRunner(InventoryContext())._mixed_e2e_cpu_contract_files())
+
+    assert {
+        "tests/e2e/models/fast_foundation_stereo/test_fast_foundation_stereo_e2e.py",
+        "tests/e2e/models/minimax_h3/test_minimax_h3_e2e.py",
+    } <= selected
+
+
+@pytest.mark.parametrize(
+    "selected_test",
+    [
+        "../outside/test_bad.py",
+        "tests/e2e/models/qwen/test_qwen_e2e.py",
+        "-k",
+    ],
+)
+def test_premerge_rejects_an_unsafe_selected_python_test(
+    tmp_path: Path,
+    selected_test: str,
+) -> None:
+    class RecordingContext:
+        repository = tmp_path
+        env = {
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "TRTMC_PREMERGE_UNIT_SCOPE": "builder",
+            "TRTMC_PREMERGE_PYTHON_TEST_TARGETS": json.dumps([selected_test]),
+            "TRTMC_UNIT_BUILD_JOBS": "8",
+            "TRTMC_UNIT_TEST_JOBS": "8",
+        }
+
+        def positive_integer(self, value: str, _name: str) -> int:
+            return int(value)
+
+        def run(self, command: list[object], **_kwargs: object) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    with pytest.raises(CiError, match="selected Python test target"):
+        UnitTestRunner(RecordingContext()).premerge()
 
 
 def test_unowned_gpu_only_builder_suites_are_excluded_from_cpu_units() -> None:
@@ -1326,8 +1920,6 @@ def test_unowned_gpu_only_builder_suites_are_excluded_from_cpu_units() -> None:
     ].split("class TestEngineBuilderKernelArtifacts:", maxsplit=1)[0]
     assert flashinfer_section.count("@pytest.mark.gpu") == 3
     assert flashinfer_section.count("@pytest.mark.trt") == 3
-
-
 
 
 def test_package_stage_builds_py310_and_py312_wheels() -> None:
@@ -1348,9 +1940,7 @@ def test_package_reuses_conan_cmake_build_directory(tmp_path: Path) -> None:
     release.mkdir(parents=True)
     (release / "CMakeCache.txt").touch()
 
-    assert WheelPackageManager(object())._conan_cmake_build_dir(
-        tmp_path / "conan_out"
-    ) == release
+    assert WheelPackageManager(object())._conan_cmake_build_dir(tmp_path / "conan_out") == release
 
 
 def test_package_smoke_default_is_model_owned() -> None:
@@ -1707,9 +2297,11 @@ def test_wheel_model_smoke_checks_py312_wheel_only() -> None:
     assert '"PATH"' not in smoke_block
     assert 'trtmc,\n                "build"' in smoke_block
     assert "InstalledWheelValidator.require_elf(trtmc)" in smoke_block
-    assert smoke_block.index("self._create_venv(venv, wheel)") < smoke_block.index(
-        "self._install_model_smoke_dependencies(python)"
-    ) < smoke_block.index('self.context.run([python, "-m", "pip", "check"])')
+    assert (
+        smoke_block.index("self._create_venv(venv, wheel)")
+        < smoke_block.index("self._install_model_smoke_dependencies(python)")
+        < smoke_block.index('self.context.run([python, "-m", "pip", "check"])')
+    )
 
 
 def test_wheel_model_smoke_installs_pinned_cpu_torch() -> None:
@@ -1770,9 +2362,7 @@ def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> Non
 
 def test_etth1_model_proofs_use_the_single_validation_engine_entry_point() -> None:
     stage = _ci_source("validation.py", "model_proof.py", "model_proof_inner.py")
-    validation_engine = (
-        REPO_ROOT / "tools" / "validation" / "engine.py"
-    ).read_text()
+    validation_engine = (REPO_ROOT / "tools" / "validation" / "engine.py").read_text()
 
     assert '"/src/tools/validation/engine.py"' in stage
     assert '"prepare-ci-dataset"' in stage

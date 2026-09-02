@@ -40,6 +40,7 @@ def build_olmo2_prefill_engine(
     *,
     precision: str = "fp32",
     verbose: bool = False,
+    workspace_bytes: int,
 ) -> bytes:
     """Build one dynamic-Sq profile that consumes a prompt in one enqueue."""
     trt = trt_compat.get_trt()
@@ -61,13 +62,15 @@ def build_olmo2_prefill_engine(
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     max_prefill_length = max(1, int(max_cache_length))
-    opt_prefill_length = min(128, max_prefill_length)
+    opt_prefill_length = min(352, max_prefill_length)
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.set_memory_pool_limit(
+        trt.MemoryPoolType.WORKSPACE, workspace_bytes)
     trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     token_id = network.add_input("token_id", trt.int32, (-1,))

@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from importlib import import_module
 from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -32,6 +34,28 @@ _repeat_head_norm = _mapper._repeat_head_norm
 _has_tensor = _mapper._has_tensor
 _load_tensor = _mapper._load_tensor
 load_standard_weights = _mapper.load_standard_weights
+
+
+@pytest.fixture
+def wrong_embedding_model_dir(tmp_path):
+    from safetensors.numpy import save_file
+
+    config = {
+        "model_type": "standard_decoder",
+        "vocab_size": 32,
+        "hidden_size": 16,
+        "num_hidden_layers": 0,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    tensors = {
+        "model.embed_tokens.weight": np.zeros((64, 16), dtype=np.float32),
+        "model.norm.weight": np.ones(16, dtype=np.float32),
+        "lm_head.weight": np.zeros((32, 16), dtype=np.float32),
+    }
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+    return tmp_path
 
 
 class TestTranspose2d:
@@ -644,32 +668,49 @@ class TestLoadStandardWeightsExtended:
         with pytest.raises(KeyError, match="model.embed_tokens.weight"):
             load_standard_weights(tmp_path, cfg)
 
-    def test_wrong_embedding_shape_raises(self, tmp_path):
-        """Embedding with wrong shape raises AssertionError."""
-        from safetensors.numpy import save_file
+    def test_wrong_embedding_shape_raises(self, wrong_embedding_model_dir):
+        cfg = ModelConfig.from_dir(wrong_embedding_model_dir)
+        with pytest.raises(ValueError, match="Embedding shape"):
+            load_standard_weights(wrong_embedding_model_dir, cfg)
 
-        config = {
-            "model_type": "standard_decoder",
-            "vocab_size": 32,
-            "hidden_size": 16,
-            "num_hidden_layers": 0,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 4,
-        }
-        (tmp_path / "config.json").write_text(json.dumps(config))
+    def test_wrong_embedding_shape_raises_with_optimized_python(
+        self,
+        wrong_embedding_model_dir,
+    ):
+        script = """
+import sys
+from importlib import import_module
+from pathlib import Path
 
-        # Embedding with wrong vocab dimension
-        tensors = {
-            "model.embed_tokens.weight":
-                np.random.randn(64, 16).astype(np.float32),  # vocab=64 != 32
-            "model.norm.weight": np.ones(16, dtype=np.float32),
-            "lm_head.weight": np.random.randn(32, 16).astype(np.float32),
-        }
-        save_file(tensors, str(tmp_path / "model.safetensors"))
+sys.path.insert(0, sys.argv[3])
 
-        cfg = ModelConfig.from_dir(tmp_path)
-        with pytest.raises(AssertionError, match="Embedding shape"):
-            load_standard_weights(tmp_path, cfg)
+from tensorrt_model_connect.families.qwen.config import ModelConfig
+
+model_dir = Path(sys.argv[1])
+load_standard_weights = import_module(sys.argv[2]).load_standard_weights
+try:
+    load_standard_weights(model_dir, ModelConfig.from_dir(model_dir))
+except ValueError as exc:
+    if "Embedding shape" not in str(exc):
+        raise
+else:
+    raise RuntimeError("wrong embedding shape was accepted")
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-O",
+                "-c",
+                script,
+                str(wrong_embedding_model_dir),
+                _mapper.__name__,
+                str(_QWEN_ROOT.parents[2]),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
 
     def test_no_safetensors_raises(self, tmp_path):
         """Model dir without any safetensors/bin files raises FileNotFoundError."""

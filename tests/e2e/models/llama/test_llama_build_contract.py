@@ -97,8 +97,9 @@ def test_native_minitron_regression_exceeds_one_prefill_profile() -> None:
     }
     assert case.inputs["expected_prompt_tokens"] == 32769
     assert case.metadata["expected_kv_cache_rows"] == 131072
-    assert case.metadata["expected_prefill_chunks"] == 2
-    assert case.metadata["expected_prefill_chunk_limit"] == 32768
+    assert case.metadata["expected_runtime_prefill_tokens"] == 32770
+    assert case.metadata["expected_prefill_chunks"] == 513
+    assert case.metadata["expected_prefill_chunk_limit"] == 64
     assert case.inputs["max_new_tokens"] == 2
 
 

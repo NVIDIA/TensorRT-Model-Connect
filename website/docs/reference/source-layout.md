@@ -15,11 +15,9 @@ Each directory name must agree with the `id` in its own descriptor. The three
 physical names usually match, but their link is the exact
 `runtime_strategy`, not filename equality: current builder/E2E owners
 `magpie_tts` and `wan_t2v` map to runtime owners `magpie` and `wan`,
-respectively. At this revision, all three trees contain 84 descriptors. The E2E
-descriptors declare 221 JSON manifests; runtime descriptors declare 85 unique
-strategy keys because one runtime owner exposes two strategies. Treat these
-numbers as a checked snapshot, not a constant: the descriptor files are the
-source of truth.
+respectively. The descriptor files are the source of truth; use
+`python3 tools/model_ci.py validate` for the live inventory rather than copying
+snapshot counts into integrations.
 
 ## Top-level directories
 

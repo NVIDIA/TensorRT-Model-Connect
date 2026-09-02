@@ -273,6 +273,20 @@ class TorchReference:
             "hf_id": "example/speech-streaming-case",
         },
         {
+            "name": "voicechat-case",
+            "family": "nemotron_voicechat",
+            "runtime_strategy": "nemotron_voicechat_full_duplex",
+            "task_strategy": "speech_to_speech",
+            "hf_id": "example/voicechat-case",
+        },
+        {
+            "name": "cosmos3-case",
+            "family": "cosmos3",
+            "runtime_strategy": "diffusion_cosmos3",
+            "task_strategy": "diffusion_media_generation",
+            "hf_id": "example/cosmos3-case",
+        },
+        {
             "name": "media-core",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
@@ -1314,6 +1328,7 @@ class TestCppScope:
 
     def test_third_party_stb_scopes_to_image_models(self, imap):
         """STB image headers affect image/video runtimes, not text-only models."""
+        assert "monocular_geometry" in test_impact.STB_IMAGE_TASK_STRATEGIES
         match = test_impact.classify_file("third_party/stb/stb_image.h", imap)
         assert match.rule == "third_party_stb_image"
         assert "vision-core" in match.models
@@ -1540,6 +1555,25 @@ class TestNoImpact:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "configs/environment-cohorts/schema.json",
+            "configs/environment-cohorts/trt111-cu133.json",
+            "scripts/devToolkit/README.md",
+            "scripts/devToolkit/examples/prepare_environment.py",
+            "scripts/devToolkit/trtmc_devtoolkit/api.py",
+        ],
+    )
+    def test_devtoolkit_contract_triggers_tools_tier(self, imap, path):
+        """devToolkit contracts run their tools tests without model proofs."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "devtoolkit_contract"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_test_impact_tool_triggers_tools_tier(self, imap):
         """Changing impact analysis should run tools-tier tests."""
         match = test_impact.classify_file("tools/test_impact.py", imap)
@@ -1554,6 +1588,7 @@ class TestNoImpact:
             "Dockerfile.community-cpu",
             "requirements/community-ci.txt",
             "tools/community_ci.py",
+            "tools/pr_metadata.py",
         ],
     )
     def test_community_cpu_contract_triggers_tools_tier(self, imap, path):
@@ -1567,6 +1602,7 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
+            ".coderabbit.yaml",
             "CODEOWNERS",
             "ruff.toml",
             "tests/__init__.py",
@@ -1823,6 +1859,7 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "tools/case_evidence.py",
             "tools/execution_ledger.py",
             "tools/performance/__init__.py",
             "tools/performance/catalog.py",
@@ -1839,6 +1876,17 @@ class TestUnitTiers:
         match = test_impact.classify_file(path, imap)
 
         assert match.rule == "report_generation_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    def test_public_failure_report_tool_triggers_tools_tier(self, imap):
+        """Protected-failure report edits run tools tests without model E2E."""
+        match = test_impact.classify_file(
+            "tools/public_failure/assets/public-failure-v1.schema.json", imap
+        )
+
+        assert match.rule == "public_failure_report_tool"
         assert match.models == []
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
@@ -1931,6 +1979,45 @@ class TestUnitTiers:
         assert match.rule == "cpp_example_tool"
         assert match.models == []
         assert match.unit_tiers == ["cpp"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "examples/models/nemotron_voicechat/full_duplex/main.cpp",
+            "examples/models/nemotron_voicechat/full_duplex/playback_queue.h",
+            "examples/models/nemotron_voicechat/full_duplex/test_playback_queue.cpp",
+            "examples/models/nemotron_voicechat/full_duplex/Dockerfile",
+            "examples/models/nemotron_voicechat/full_duplex/Dockerfile.dockerignore",
+            "examples/models/nemotron_voicechat/full_duplex/CMakeLists.txt",
+            "examples/models/nemotron_voicechat/full_duplex/README.md",
+        ],
+    )
+    def test_voicechat_full_duplex_example_is_model_owned(self, imap, path):
+        """The live example runs VoiceChat plus its host-side C++ and tools checks."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "nemotron_voicechat_full_duplex_example"
+        assert match.models == ["voicechat-case"]
+        assert match.unit_tiers == ["cpp", "tools"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "examples/models/cosmos3/dual_spark/run_dual_spark.py",
+            "examples/models/cosmos3/dual_spark/Dockerfile",
+            "examples/models/cosmos3/dual_spark/Dockerfile.dockerignore",
+            "examples/models/cosmos3/dual_spark/README.md",
+        ],
+    )
+    def test_cosmos3_dual_spark_example_is_model_owned(self, imap, path):
+        """The dual-Spark example runs Cosmos3 plus its C++ and tools checks."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "cosmos3_dual_spark_example"
+        assert match.models == ["cosmos3-case"]
+        assert match.unit_tiers == ["cpp", "tools"]
         assert match.rebuild_cpp is True
 
     @pytest.mark.parametrize(
@@ -2944,6 +3031,7 @@ diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_l
             "tests/e2e_harness/manifest_loader.py", broad, diff_text, imap
         )
         assert refined.rule == "harness_manifest_diffusion_thresholds"
+        assert "cosmos3-case" in refined.models
         assert "media-core" in refined.models
         assert "decoder-small" not in refined.models
 
@@ -3088,6 +3176,7 @@ diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_m
             imap,
         )
         assert refined.rule == "shared_builder_diffusion_tokenizer"
+        assert "cosmos3-case" in refined.models
         assert "media-core" in refined.models
         assert "decoder-small" not in refined.models
 

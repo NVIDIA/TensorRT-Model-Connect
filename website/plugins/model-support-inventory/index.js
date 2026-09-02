@@ -67,7 +67,7 @@ const HF_TASKS = [
     slug: 'depth-estimation',
     label: 'Depth Estimation',
     category: 'Computer Vision',
-    description: 'Stereo models that estimate dense disparity or depth from image pairs.',
+    description: 'Monocular and stereo models that recover dense depth or camera-space geometry.',
     hfUrl: 'https://huggingface.co/tasks/depth-estimation',
   },
   {
@@ -148,6 +148,7 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   encoder_only_nlp: ['encode'],
   image_classification: ['classify'],
   image_feature_extraction: ['extract-features'],
+  monocular_geometry: ['geometry'],
   neural_operator: ['solve'],
   omni_multimodal: ['generate-audio'],
   prompted_segmentation: ['segment-prompted'],
@@ -322,6 +323,8 @@ function hfTasksForManifest(manifest) {
       return ['image-classification'];
     case 'image_feature_extraction':
       return ['image-feature-extraction'];
+    case 'monocular_geometry':
+      return ['depth-estimation'];
     case 'stereo_disparity':
       return ['depth-estimation'];
     case 'segmentation':
@@ -1085,6 +1088,17 @@ function commandContractForProfile(profile, capability) {
         options: [
           option('--image <PATH>', 'Required', 'Image input consumed by extract_image_features().'),
           option('--output-json <PATH>', 'Optional', 'Write feature tensors and shapes as JSON.'),
+        ],
+        evidence,
+      };
+    case 'monocular_geometry':
+      return {
+        command: 'geometry',
+        purpose: 'Recover metric monocular geometry and normalized camera intrinsics.',
+        syntax: 'trtmc geometry <bundle.bundle> --image <input.png> --output <output-directory>',
+        options: [
+          option('--image <PATH>', 'Required', 'Single RGB input image.'),
+          option('--output <DIR>', 'Required', 'Directory for points, depth, mask, and intrinsics artifacts.'),
         ],
         evidence,
       };

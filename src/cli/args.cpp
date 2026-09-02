@@ -226,6 +226,7 @@ void print_usage() {
            "  trtmc segment         <bundle.bundle> --image PATH --output PATH [--hf-python PATH]\n"
            "  trtmc disparity       <bundle.bundle> --image LEFT --right-image RIGHT "
            "--output PATH\n"
+           "  trtmc geometry        <bundle.bundle> --image PATH --output DIR\n"
            "  trtmc segment-prompted <bundle.bundle> --image PATH --output DIR "
            "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\n"
            "  trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]\n"
@@ -317,11 +318,25 @@ CliArgs parse_args(int argc, char** argv) {
         return args;
     }
 
-    static const char* known_cmds[] = {
-        "run",         "inspect",    "generate-video", "segment",          "segment-prompted",
-        "disparity",   "classify",   "detect",         "extract-features", "generate-audio",
-        "serve-audio", "encode",     "embed",          "rerank",           "solve",
-        "speak",       "transcribe", nullptr};
+    static const char* known_cmds[] = {"run",
+                                       "inspect",
+                                       "generate-video",
+                                       "segment",
+                                       "segment-prompted",
+                                       "disparity",
+                                       "geometry",
+                                       "classify",
+                                       "detect",
+                                       "extract-features",
+                                       "generate-audio",
+                                       "serve-audio",
+                                       "encode",
+                                       "embed",
+                                       "rerank",
+                                       "solve",
+                                       "speak",
+                                       "transcribe",
+                                       nullptr};
     bool valid = false;
     for (const char** p = known_cmds; *p; ++p)
         if (args.command == *p) {

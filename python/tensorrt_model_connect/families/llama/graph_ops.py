@@ -9,12 +9,15 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import nullcontext
 import math
 from typing import Any
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
+from ...native_kv_attention_builder import (
+    NativeKvMasks,
+    add_explicit_masked_grouped_query_attention,
+)
 
 
 trt = trt_compat.get_trt()
@@ -971,7 +974,7 @@ def add_native_kv_cache_attention_from_rows(
     cache_k: trt.ITensor,
     cache_v: trt.ITensor,
     cache_write_indices: trt.ITensor,
-    key_value_lengths: trt.ITensor,
+    attention_masks: NativeKvMasks,
     *,
     num_heads: int,
     num_kv_heads: int,
@@ -979,26 +982,22 @@ def add_native_kv_cache_attention_from_rows(
     q_seq: int | None,
     scale: float | None = None,
     tag: str | None = None,
-    recipe_instance: str | None = None,
 ) -> dict[str, trt.ITensor]:
     """Update a user-owned KV cache and attend over its active prefix.
 
     ``IKVCacheUpdateLayer`` writes this step's K/V rows into the static,
-    full-capacity cache in place. ``IAttention`` consumes the aliased cache
-    outputs, while ``key_value_lengths`` limits work to the valid prefix.
-    ``LOWER_RIGHT`` causal alignment gives correct autoregressive semantics
-    when the query sequence is shorter than the active KV sequence.
+    full-capacity cache in place. Attention uses a shared explicit
+    active-prefix causal mask and a primitive grouped-query graph, avoiding
+    correctness and kernel-coverage dependence on
+    ``IAttention.key_value_lengths``.
 
     Cache inputs and outputs have shape ``[1, Hkv, capacity, D]``. The runtime
     must bind each output to the same device address as its corresponding
     input, as required by TensorRT's KV-cache aliasing contract.
     """
-    if not hasattr(network, "add_kv_cache_update") or not hasattr(
-        network, "add_attention_v2"
-    ):
+    if not hasattr(network, "add_kv_cache_update"):
         raise RuntimeError(
-            "Llama native KV cache requires TensorRT add_kv_cache_update "
-            "and add_attention_v2 support"
+            "Llama native KV cache requires TensorRT add_kv_cache_update support"
         )
 
     k_update_4d = reshape_rows_to_heads_4d(
@@ -1046,53 +1045,23 @@ def add_native_kv_cache_attention_from_rows(
         sequence_length=q_seq,
         tag=None if tag is None else tag + ".q",
     )
-    if scale is None:
-        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
     if q_4d.dtype != trt.bfloat16:
         raise ValueError("Llama native KV attention requires BF16 queries")
-    # Keep the exact score scale until the Q product, matching HF SDPA.  If
-    # the constant is rounded to BF16 first, near-tied logits can diverge at
-    # long context even though IAttention itself remains on the fused path.
-    q_scale_input = network.add_cast(q_4d, trt.float32).get_output(0)
-    scale_t = add_constant(
+    context_4d = add_explicit_masked_grouped_query_attention(
         network,
-        (1, 1, 1, 1),
-        np.array([[[[scale]]]]),
-        dtype=np.float32,
+        q_4d,
+        updated_k,
+        updated_v,
+        attention_masks,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        scale=scale,
+        tag=tag,
     )
-    q_scaled = network.add_elementwise(
-        q_scale_input, scale_t, trt.ElementWiseOperation.PROD
-    ).get_output(0)
-    q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
-
-    recipe = nullcontext()
-    if recipe_instance is not None:
-        from ...tvm_ffi.graph_build import graph_recipe_region
-
-        recipe = graph_recipe_region(
-            network,
-            "llama.decode_attention_region@1",
-            recipe_instance,
-            output_shape_input=0,
-        )
-    with recipe:
-        attention = network.add_attention_v2(
-            q_scaled,
-            updated_k,
-            updated_v,
-            trt.AttentionNormalizationOp.SOFTMAX,
-            trt.CausalMaskKind.LOWER_RIGHT,
-        )
-        if attention is None:
-            raise RuntimeError("TensorRT failed to create Llama native attention")
-        attention.decomposable = False
-        attention.key_value_lengths = key_value_lengths
-        if tag:
-            attention.name = tag
-
     context = reshape_heads_4d_to_rows(
         network,
-        attention.get_output(0),
+        context_4d,
         num_heads * head_dim,
         sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx",

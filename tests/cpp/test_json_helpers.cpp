@@ -19,12 +19,10 @@
 // =============================================================================
 //
 // Purpose:
-//   Validates the lightweight, regex-free JSON extraction functions used
-//   throughout the codebase to parse HuggingFace config.json and
-//   generation_config.json files. These extractors operate on raw JSON strings
-//   (no DOM parser) and must correctly handle common JSON patterns including
-//   nested objects, arrays, negative integers, scientific-notation floats,
-//   and missing keys (fallback values).
+//   Validates the strict JSON extraction functions used throughout the
+//   codebase to parse HuggingFace config.json and generation_config.json.
+//   Ordinary field lookup is deliberately scoped to the top-level object;
+//   callers must explicitly extract an object before reading nested fields.
 //
 // Dependencies:
 //   - utils/json_helpers.h (extract_json_string, extract_json_int,
@@ -156,6 +154,20 @@ bool test_extract_json_int_missing() {
         return false;
     }
     return true;
+}
+
+// Intention: Lock strict top-level lookup so nested model fields cannot be
+//            consumed accidentally as if they were bundle runtime fields.
+bool test_extract_json_int_nested_only_uses_fallback() {
+    const std::string json = R"({"text_config": {"hidden_size": 1536}})";
+    return trtmc::extract_json_int(json, "hidden_size", -99) == -99;
+}
+
+// Intention: When a composite config contains both nested source metadata and
+//            a materialized runtime field, the top-level field is authoritative.
+bool test_extract_json_int_top_level_wins_over_nested() {
+    const std::string json = R"({"text_config": {"hidden_size": 4096}, "hidden_size": 1536})";
+    return trtmc::extract_json_int(json, "hidden_size", -99) == 1536;
 }
 
 // Intention: Verify the behavior of extract_json_int when the value is a
@@ -333,14 +345,14 @@ bool test_extract_json_string_array_missing() {
     return true;
 }
 
-// Intention: Verify empty-string JSON values are treated as malformed by
-//            the lightweight extractor and return fallback.
+// Intention: Verify empty-string JSON values are correctly parsed as empty strings
+//            by the nlohmann::json extractor rather than falling back.
 // Setup:     JSON with "name": "".
-// Mechanism: Calls extract_json_string and checks fallback is returned.
+// Mechanism: Calls extract_json_string and checks empty string is returned.
 bool test_extract_json_string_empty_value_returns_fallback() {
     const std::string json = R"({"name": ""})";
     const std::string result = trtmc::extract_json_string(json, "name", "fallback");
-    if (result != "fallback") {
+    if (result != "") {
         std::cerr << "extract_json_string_empty_value: got '" << result << "'" << std::endl;
         return false;
     }
@@ -353,7 +365,7 @@ bool test_extract_json_string_empty_value_returns_fallback() {
 bool test_extract_json_float_invalid_token_returns_fallback() {
     const std::string json = R"({"eps": 1e})";
     const float result = trtmc::extract_json_float(json, "eps", 9.5F);
-    if (std::abs(result - 1.0F) > 1e-6F) {
+    if (std::abs(result - 9.5F) > 1e-6F) {
         std::cerr << "extract_json_float_invalid_token: got " << result << std::endl;
         return false;
     }
@@ -398,7 +410,7 @@ bool test_extract_json_float_array_max_count() {
 bool test_extract_json_float_array_stops_on_invalid_token() {
     const std::string json = R"({"vals": [1.0, bad, 3.0]})";
     const auto values = trtmc::extract_json_float_array(json, "vals", 8);
-    if (values.size() != 1 || std::abs(values[0] - 1.0F) > 1e-6F) {
+    if (!values.empty()) {
         std::cerr << "extract_json_float_array_stops_on_invalid_token: unexpected parse"
                   << std::endl;
         return false;
@@ -438,7 +450,7 @@ bool test_extract_json_int_array_rejects_scalar() {
 bool test_extract_json_int_array_stops_on_invalid_token() {
     const std::string json = R"({"ids": [10, --5, 7]})";
     const auto values = trtmc::extract_json_int_array(json, "ids", 8);
-    if (values.size() != 1 || values[0] != 10) {
+    if (!values.empty()) {
         std::cerr << "extract_json_int_array_stops_on_invalid_token: unexpected values"
                   << std::endl;
         return false;
@@ -462,6 +474,42 @@ bool test_extract_json_string_array_stops_on_non_string() {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Additional Tests for Issue #975
+// ---------------------------------------------------------------------------
+
+// Intention: Verify duplicate keys behavior (last occurrence wins with nlohmann::json).
+bool test_duplicate_keys() {
+    const std::string json = R"({"key": 1, "key": 2})";
+    return trtmc::extract_json_int(json, "key", -1) == 2;
+}
+
+// Intention: Verify trailing comments are ignored.
+bool test_comments() {
+    const std::string json = R"({"key": 42} // trailing comment)";
+    return trtmc::extract_json_int(json, "key", -1) == 42;
+}
+
+// Intention: Verify partial array values result in fallback due to strict parsing.
+bool test_partial_values() {
+    const std::string json = R"({"arr": [1, 2, GARBAGE])";
+    auto result = trtmc::extract_json_int_array(json, "arr", 10);
+    return result.empty();
+}
+
+// Intention: Verify maximum array counts.
+bool test_maximum_array_counts() {
+    const std::string json = R"({"arr": [1, 2, 3, 4, 5]})";
+    auto result = trtmc::extract_json_int_array(json, "arr", 2);
+    return result.size() == 2 && result[0] == 1 && result[1] == 2;
+}
+
+// Intention: Verify malformed input returns fallback.
+bool test_malformed_input() {
+    const std::string json = R"({"key": [1, 2, 3])";
+    return trtmc::extract_json_int(json, "key", -99) == -99;
+}
+
 int main() {
     bool all_passed = true;
     std::cout << "test_json_helpers:" << std::endl;
@@ -480,6 +528,8 @@ int main() {
     run("extract_json_int_positive", test_extract_json_int_positive);
     run("extract_json_int_negative", test_extract_json_int_negative);
     run("extract_json_int_missing", test_extract_json_int_missing);
+    run("extract_json_int_nested_only", test_extract_json_int_nested_only_uses_fallback);
+    run("extract_json_int_top_level_wins", test_extract_json_int_top_level_wins_over_nested);
     run("extract_json_int_float_value", test_extract_json_int_float_value);
     run("int_or_first_array_scalar", test_extract_json_int_or_first_array_scalar);
     run("int_or_first_array_array", test_extract_json_int_or_first_array_array);
@@ -499,6 +549,12 @@ int main() {
     run("string_array_empty", test_extract_json_string_array_empty);
     run("string_array_missing", test_extract_json_string_array_missing);
     run("string_array_non_string", test_extract_json_string_array_stops_on_non_string);
+
+    run("duplicate_keys", test_duplicate_keys);
+    run("comments", test_comments);
+    run("partial_values", test_partial_values);
+    run("maximum_array_counts", test_maximum_array_counts);
+    run("malformed_input", test_malformed_input);
 
     if (all_passed) {
         std::cout << "test_json_helpers passed" << std::endl;

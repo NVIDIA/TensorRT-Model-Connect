@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -105,6 +106,42 @@ void test_preprocess_matches_rgb_chw_replication_contract() {
                 "stereo green bottom-right replicate");
 }
 
+void test_preprocess_is_bitwise_equivalent_to_reference() {
+    constexpr int32_t height = 700;
+    constexpr int32_t width = 700;
+    constexpr int32_t engine_height = 704;
+    constexpr int32_t engine_width = 704;
+    constexpr int32_t pad_top = 2;
+    constexpr int32_t pad_left = 2;
+    std::vector<float> pixels(static_cast<std::size_t>(height) * width * 3);
+    for (std::size_t index = 0; index < pixels.size(); ++index) {
+        pixels[index] = static_cast<float>((index * 17 + 5) % 1021) / 1021.0F;
+    }
+
+    std::vector<float> expected(static_cast<std::size_t>(3) * engine_height * engine_width);
+    for (int32_t channel = 0; channel < 3; ++channel) {
+        for (int32_t y = 0; y < engine_height; ++y) {
+            const int32_t source_y = std::clamp(y - pad_top, 0, height - 1);
+            for (int32_t x = 0; x < engine_width; ++x) {
+                const int32_t source_x = std::clamp(x - pad_left, 0, width - 1);
+                const auto source_index =
+                    (static_cast<std::size_t>(source_y) * width + source_x) * 3 + channel;
+                const auto output_index =
+                    (static_cast<std::size_t>(channel) * engine_height + y) * engine_width + x;
+                expected[output_index] = pixels[source_index] * 255.0F;
+            }
+        }
+    }
+
+    std::vector<float> actual;
+    trtmc::prepare_fast_foundation_stereo_image(pixels.data(), height, width, actual);
+    check(actual.size() == expected.size(), "stereo preprocess bitwise reference size");
+    if (actual.size() == expected.size()) {
+        check(std::memcmp(actual.data(), expected.data(), expected.size() * sizeof(float)) == 0,
+              "stereo preprocess bitwise reference values");
+    }
+}
+
 void test_preprocess_rejects_invalid_input() {
     std::vector<float> output;
     bool null_threw = false;
@@ -155,6 +192,7 @@ void test_pipeline_validates_disparity_engine_contract() {
 
 int main() {
     test_preprocess_matches_rgb_chw_replication_contract();
+    test_preprocess_is_bitwise_equivalent_to_reference();
     test_preprocess_rejects_invalid_input();
     test_pipeline_validates_disparity_engine_contract();
     if (failures == 0)

@@ -14,6 +14,19 @@ from typing import Any, Mapping
 
 COMMAND_DIAGNOSTIC_SCHEMA = "trtmc.command-diagnostic/v1"
 COMMAND_DIAGNOSTIC_PREFIX = "TRTMC_DIAGNOSTIC_JSON="
+_WORKER_RUNTIME_FIELDS = frozenset(
+    {
+        "backend_search_paths",
+        "config",
+        "config_path",
+        "cuda_graphs",
+        "hf_python",
+        "kv_cache_size_bytes",
+        "model_plugin_search_paths",
+        "runtime_cache_path",
+        "set_tokens",
+    }
+)
 
 
 class BenchmarkError(RuntimeError):
@@ -186,6 +199,12 @@ class ResolvedCase:
         model_root = self.model.manifest_path.parent.parent
         request = _absolute_artifact_paths(self.request, model_root)
         runtime = _absolute_artifact_paths(self.runtime, model_root)
+        native_config = dict(runtime.pop("config", {}))
+        for field in tuple(runtime):
+            if field not in _WORKER_RUNTIME_FIELDS:
+                native_config[f"runtime.{field}"] = runtime.pop(field)
+        if native_config:
+            runtime["config"] = native_config
         return {
             "schema_version": 1,
             "case_name": self.name,

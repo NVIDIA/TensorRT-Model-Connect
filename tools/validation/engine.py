@@ -2349,6 +2349,10 @@ def prepare_sts_pair_dataset(
     validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     """Prepare STS sentence pairs as byte-shared HF/TRTMC text inputs."""
+    config = validation_config if isinstance(validation_config, dict) else {}
+    prompt_prefix = config.get("sts_prompt_prefix", "")
+    if not isinstance(prompt_prefix, str):
+        raise ValueError("task_eval.sts_prompt_prefix must be a string")
     indexed: list[tuple[int, dict[str, Any]]] = []
     for dataset_index, row in enumerate(load_jsonl(dataset_path)):
         genre = str(row.get("genre", ""))
@@ -2389,7 +2393,7 @@ def prepare_sts_pair_dataset(
                     "score": row["score"],
                     "subject": str(row.get("genre", "")),
                     "dataset": str(row.get("dataset", "")),
-                    "prompt": str(row[pair_side]),
+                    "prompt": f"{prompt_prefix}{row[pair_side]}",
                 }
                 requests.append(request)
                 prompts_file.write(
@@ -9038,6 +9042,28 @@ def _model_asset_path(model: dict[str, Any], value: str) -> Path:
     return REPO_ROOT / "tests" / "e2e" / "data" / asset
 
 
+def _append_manifest_build_cli_args(cmd: list[str], model: dict[str, Any]) -> None:
+    specs = model.get("build_cli_args", [])
+    if not isinstance(specs, list):
+        return
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        flag = spec.get("flag")
+        if not isinstance(flag, str) or not flag or "value" not in spec:
+            continue
+        value = spec["value"]
+        if value is None or value is False:
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                cmd.extend([flag, str(item)])
+            continue
+        cmd.append(flag)
+        if value is not True:
+            cmd.append(str(value))
+
+
 def build_bundle_command(
     model: dict[str, Any],
     *,
@@ -9107,6 +9133,7 @@ def build_bundle_command(
         scales_path = _model_asset_path(model, str(fp8_scales))
         if scales_path.is_file():
             cmd.extend(["--fp8-scales", str(scales_path)])
+    _append_manifest_build_cli_args(cmd, model)
     if extra_build_args:
         cmd.extend(extra_build_args)
     return cmd
@@ -10996,6 +11023,7 @@ def compare_model_plugin_prediction_sets(
     passed_count = 0
     skipped_count = 0
     execution_errors: list[dict[str, Any]] = []
+    aggregate_comparator: Any = None
 
     for index, (request, hf_row, trt_row) in enumerate(
         zip(requests, hf_rows, trt_rows, strict=True)
@@ -11042,6 +11070,7 @@ def compare_model_plugin_prediction_sets(
             raise RuntimeError(
                 f"No comparator plugin {case.task_strategy!r} for {case.family}"
             )
+        aggregate_comparator = comparator
         hf_payload = hf_row.get("stage_output")
         trt_payload = trt_row.get("stage_output")
         if not isinstance(hf_payload, Mapping) or not isinstance(
@@ -11145,10 +11174,19 @@ def compare_model_plugin_prediction_sets(
         )
 
     sample_pass_rate = passed_count / valid_count if valid_count else 0.0
+    plugin_aggregate: dict[str, Any] = {}
+    aggregate_hook = getattr(aggregate_comparator, "aggregate", None)
+    if callable(aggregate_hook):
+        raw_aggregate = aggregate_hook(cases, dict(gates))
+        if not isinstance(raw_aggregate, Mapping):
+            raise TypeError("model-plugin comparator aggregate() must return a mapping")
+        plugin_aggregate = dict(raw_aggregate)
+    aggregate_passed = bool(plugin_aggregate.get("passed", True))
     status = (
         "passed"
         if valid_count == len(cases)
         and sample_pass_rate >= min_sample_pass_rate
+        and aggregate_passed
         else "failed"
     )
     metrics_summary = {
@@ -11161,7 +11199,7 @@ def compare_model_plugin_prediction_sets(
         for name, values in sorted(metric_values.items())
         if values
     }
-    return {
+    summary = {
         "status": status,
         "sample_count": len(cases),
         "valid_count": valid_count,
@@ -11169,10 +11207,19 @@ def compare_model_plugin_prediction_sets(
         "skipped_count": skipped_count,
         "sample_pass_rate": sample_pass_rate,
         "metrics": metrics_summary,
-        "gates": {"min_sample_pass_rate": min_sample_pass_rate},
+        "gates": {
+            "min_sample_pass_rate": min_sample_pass_rate,
+            **dict(plugin_aggregate.get("gates", {})),
+        },
         "cases": cases,
         "execution_errors": execution_errors,
+        "gate_failures": list(plugin_aggregate.get("gate_failures", [])),
     }
+    if plugin_aggregate:
+        summary["plugin_aggregate"] = plugin_aggregate
+    if isinstance(plugin_aggregate.get("task_accuracy"), Mapping):
+        summary["task_accuracy"] = dict(plugin_aggregate["task_accuracy"])
+    return summary
 
 
 def run_full_duplex_bench_comparison(
@@ -11437,7 +11484,9 @@ def eval_one_model(
         log_path=work_dir / "build.log",
         cuda_visible_devices=args.cuda_visible_devices,
         expected_source_revision=str(
-            validation_config.get("reference_source_revision", "") or ""
+            os.environ.get("TRTMC_ENGINE_BUILD_REVISION", "").strip()
+            or validation_config.get("reference_source_revision", "")
+            or ""
         ),
     )
 
@@ -11593,7 +11642,11 @@ def eval_one_model(
             "sample_pass_rate": summary["sample_pass_rate"],
             "skipped_count": summary["skipped_count"],
             "metrics": summary["metrics"],
+            "gates": summary.get("gates", {}),
+            "gate_failures": summary.get("gate_failures", []),
         }
+        if "task_accuracy" in summary:
+            result["task_accuracy"] = summary["task_accuracy"]
         if summary["execution_errors"]:
             result["error_type"] = "ModelPluginExecutionError"
             result["error"] = (

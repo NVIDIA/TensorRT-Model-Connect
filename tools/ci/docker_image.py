@@ -10,13 +10,10 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import importlib.util
 import json
 import os
 import re
-import sys
 import time
-import types
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +21,7 @@ from .process import CiError, CommandRunner, GitHubFiles
 
 
 FINGERPRINT_LABEL = "org.nvidia.trtmc.ci-input-fingerprint"
-ENVIRONMENT_CONTRACT_VERSION = 2
+ENVIRONMENT_CONTRACT_VERSION = 3
 IMMUTABLE_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 EXACT_TENSORRT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
 EXACT_APT_VERSION = re.compile(r"[0-9][0-9A-Za-z.+:~_-]*")
@@ -87,7 +84,6 @@ class ImageRequirements:
     tensorrt: str
     tensorrt_apt: str
     modelopt: str
-    python_profiles: str
 
     @property
     def python_distributions(self) -> dict[str, str]:
@@ -109,7 +105,9 @@ class ImageRequirements:
             "common_input_fingerprint": self.common_fingerprint,
             "input_fingerprint": self.fingerprint,
             "modelopt_version": self.modelopt,
-            "python_profiles": self.python_profiles.split(","),
+            # Kept as an empty compatibility field for runtime-catalog readers.
+            # Family-owned profiles are prepared per proof, not baked here.
+            "python_profiles": [],
             "tensorrt": {
                 "version": self.tensorrt,
                 "apt_version": self.tensorrt_apt,
@@ -207,9 +205,8 @@ class DockerImageManager:
             print(
                 f"CI Docker image '{image}' verified: TensorRT {versions['TENSORRT_VERSION']}, "
                 f"exact Python, APT header, C++ header, and native runtime contracts, modelopt "
-                f"{versions['MODELOPT_VERSION']}, nlohmann/json headers, NeMo prompt RNN-T and "
-                f"prebuilt Python profiles ({versions['PYTHON_PROFILES']}) present, "
-                f"image {image_id}"
+                f"{versions['MODELOPT_VERSION']}, nlohmann/json headers, and NeMo prompt RNN-T "
+                f"present, image {image_id}"
             )
             return image_id
 
@@ -263,29 +260,10 @@ class DockerImageManager:
         tensorrt_version: str | None = None,
         tensorrt_apt_version: str | None = None,
     ) -> ImageRequirements:
-        registry, profile_names = self._load_profile_registry()
-        profiles = registry["profiles"]
-        expected_profiles = ",".join(profile_names)
-        if not expected_profiles:
-            raise CiError("No prebuilt Python execution profiles were declared")
-
-        package_root = Path("python/tensorrt_model_connect")
-        assets: set[Path] = set()
-        prebuilt_profiles = {name: profiles[name] for name in profile_names}
-        for spec in prebuilt_profiles.values():
-            if not isinstance(spec, dict):
-                continue
-            for field in ("requirements", "verification_script_file"):
-                value = str(spec.get(field, "") or "").strip()
-                if value:
-                    assets.add(self._profile_asset_input(package_root, value, field))
-
         inputs = {
             self.config.dockerfile,
             Path(".dockerignore"),
-            Path(".github/scripts/build-python-profiles.py"),
-            package_root / "python_profiles.py",
-            *assets,
+            Path("tools/ci/profile_downloader.py"),
         }
         dockerfile_text = (self.config.repository / self.config.dockerfile).read_text(
             encoding="utf-8"
@@ -306,8 +284,6 @@ class DockerImageManager:
             )
         common_semantic_contract = {
             "environment_contract_version": ENVIRONMENT_CONTRACT_VERSION,
-            "version": registry.get("version"),
-            "profiles": prebuilt_profiles,
         }
         common_semantic_payload = json.dumps(
             common_semantic_contract,
@@ -340,68 +316,11 @@ class DockerImageManager:
             tensorrt,
             tensorrt_apt,
             modelopt,
-            expected_profiles,
         )
-
-    def _profile_asset_input(
-        self,
-        package_root: Path,
-        path_spec: str,
-        field: str,
-    ) -> Path:
-        relative = Path(path_spec)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise CiError(f"Python profile has an unsafe {field} path: {path_spec!r}")
-        absolute_root = (self.config.repository / package_root).resolve()
-        resolved = (absolute_root / relative).resolve()
-        try:
-            resolved.relative_to(absolute_root)
-        except ValueError as error:
-            raise CiError(
-                f"Python profile has an unsafe {field} path: {path_spec!r}"
-            ) from error
-        if not resolved.is_file():
-            raise CiError(
-                f"Python profile references a missing {field} asset: {path_spec!r}"
-            )
-        return package_root / relative
-
-    def _load_profile_registry(self) -> tuple[dict[str, object], tuple[str, ...]]:
-        package_name = "tensorrt_model_connect"
-        package_root = self.config.repository / "python" / package_name
-        module_name = f"{package_name}.python_profiles"
-        previous_modules = {
-            name: module
-            for name, module in sys.modules.items()
-            if name == package_name or name.startswith(f"{package_name}.")
-        }
-        for name in previous_modules:
-            sys.modules.pop(name, None)
-        package = types.ModuleType(package_name)
-        package.__package__ = package_name
-        package.__path__ = [str(package_root)]
-        sys.modules[package_name] = package
-        try:
-            spec = importlib.util.spec_from_file_location(
-                module_name,
-                package_root / "python_profiles.py",
-            )
-            if spec is None or spec.loader is None:
-                raise CiError("Could not load the Source Python profile registry")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            spec.loader.exec_module(module)
-            registry = module.load_python_profile_registry()
-            return registry, module.prebuilt_python_profile_names(registry)
-        finally:
-            for name in tuple(sys.modules):
-                if name == package_name or name.startswith(f"{package_name}."):
-                    sys.modules.pop(name, None)
-            sys.modules.update(previous_modules)
 
     def _fingerprint_inputs(self, inputs: tuple[Path, ...], semantic: str) -> str:
         digest = hashlib.sha256()
-        digest.update(b"python-profile-registry\0")
+        digest.update(b"ci-base-runtime\0")
         digest.update(semantic.encode("ascii") + b"\n")
         for relative in inputs:
             digest.update(str(relative).encode("utf-8") + b"\0")
@@ -595,21 +514,6 @@ print("TENSORRT_NATIVE_VERSION=" + ".".join(native_parts))
 print("MODELOPT_VERSION=" + metadata.version("nvidia-modelopt"))
 print("NLOHMANN_JSON_HEADER=" + ("present" if Path("/usr/include/nlohmann/json.hpp").is_file() else "missing"))
 print("NEMO_PROMPT_RNNT=available")
-manifest_path = Path("/opt/trtmc-python-profiles/.image-ready.json")
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-if Path("/opt/trtmc-profile-source").exists():
-    raise SystemExit("profile builder source leaked into the runtime image")
-profiles = manifest.get("profiles")
-if not isinstance(profiles, dict) or not profiles:
-    raise SystemExit("prebuilt Python profile manifest is empty or invalid")
-for name, record in profiles.items():
-    if not isinstance(record, dict):
-        raise SystemExit(f"invalid prebuilt Python profile record: {name}")
-    python = Path(str(record.get("python", "")))
-    ready = Path(str(record.get("ready", "")))
-    if not python.is_file() or not ready.is_file():
-        raise SystemExit(f"prebuilt Python profile is incomplete: {name}")
-print("PYTHON_PROFILES=" + ",".join(sorted(profiles)))
 """
         result = self.commands.run(
             [
@@ -678,12 +582,6 @@ print("PYTHON_PROFILES=" + ",".join(sorted(profiles)))
             reasons.append("nlohmann/json development headers are missing")
         if actual.get("NEMO_PROMPT_RNNT") != "available":
             reasons.append("required NeMo prompt RNN-T capability is missing")
-        if actual.get("PYTHON_PROFILES") != expected.python_profiles:
-            reasons.append(
-                "prebuilt Python profiles differ: image has "
-                f"'{actual.get('PYTHON_PROFILES', 'missing')}', source expects "
-                f"'{expected.python_profiles}'"
-            )
         return reasons
 
     def _build(self, image: str, expected: ImageRequirements, reasons: list[str]) -> None:

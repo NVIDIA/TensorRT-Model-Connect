@@ -26,6 +26,21 @@ class BuilderContext:
     config: trt.IBuilderConfig
 
 
+def builder_workspace_bytes(config: object) -> int | None:
+    """Return the model-declared TensorRT tactic workspace limit."""
+    raw = getattr(config, "raw", {})
+    family_options = raw.get("_family_build_options", {}) if isinstance(raw, dict) else {}
+    if not isinstance(family_options, dict):
+        raise ValueError("family build options must be an object")
+    options = family_options.get("nemotron_decoder", {})
+    if not isinstance(options, dict):
+        raise ValueError("nemotron_decoder build options must be an object")
+    workspace_gib = options.get("builder_workspace_gib", 0)
+    if type(workspace_gib) is not int or workspace_gib < 0:
+        raise ValueError("nemotron_decoder.builder_workspace_gib must be a nonnegative integer")
+    return workspace_gib << 30 if workspace_gib else None
+
+
 def create_builder_context(
     *,
     verbose: bool,

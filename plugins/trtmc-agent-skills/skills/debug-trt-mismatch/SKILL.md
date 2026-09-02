@@ -197,7 +197,7 @@ Include:
 
 When the mismatch came from Internal CI, keep private logs, artifacts, runner
 details, and package coordinates private. Source PRs may cite only the
-sanitized exact-head `trtmc/premerge/required` status and public reproduction
+sanitized exact-head `TRTMC Internal CI / Automated premerge gate` status and public reproduction
 evidence.
 
 <!-- Collaborative review anchor: batch 2. -->

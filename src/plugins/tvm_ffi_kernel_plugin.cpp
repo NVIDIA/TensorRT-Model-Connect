@@ -10,12 +10,13 @@
 #include "plugins/tvm_ffi_kernel_plugin.h"
 
 #include "plugins/tvm_ffi_runtime_bindings.h"
-#include "utils/json_helpers.h"
 
+#include <charconv>
 #include <cstdint>
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
 #include <tvm/ffi/c_api.h>
@@ -29,72 +30,7 @@ namespace trtmc {
 // shape_spec parsing helpers (kept small for low CCN)
 // ---------------------------------------------------------------------------
 
-namespace {
-
-TvmFfiOutputSpec parse_single_output_spec(const std::string& obj) {
-    TvmFfiOutputSpec spec;
-    std::string dims_str = extract_json_string(obj, "dims", "");
-    if (dims_str.find("same_as_input_") == 0) {
-        spec.same_as_input_index = static_cast<int32_t>(std::stoi(dims_str.substr(14)));
-    } else {
-        auto arr = extract_json_int_array(obj, "dims", 16);
-        for (auto d : arr)
-            spec.dims.push_back(d);
-        spec.same_as_input_index = -1;
-    }
-    std::string dt = extract_json_string(obj, "dtype", "float32");
-    if (dt == "bfloat16" || dt == "bf16")
-        spec.dtype = 2;
-    else if (dt == "float16" || dt == "half")
-        spec.dtype = 1;
-    else if (dt == "int32")
-        spec.dtype = 3;
-    else
-        spec.dtype = 0;
-    return spec;
-}
-
-std::pair<std::size_t, std::size_t> find_outputs_array_bounds(const std::string& s) {
-    auto kp = s.find("\"outputs\"");
-    if (kp == std::string::npos)
-        return {std::string::npos, std::string::npos};
-    auto a = s.find('[', kp);
-    if (a == std::string::npos)
-        return {std::string::npos, std::string::npos};
-    return {a + 1, s.find(']', a)};
-}
-
-std::vector<TvmFfiOutputSpec> scan_output_objects(const std::string& s, std::size_t pos,
-                                                  std::size_t end, int32_t max) {
-    std::vector<TvmFfiOutputSpec> specs;
-    while (pos < end && static_cast<int32_t>(specs.size()) < max) {
-        auto os = s.find('{', pos);
-        if (os == std::string::npos || os >= end)
-            break;
-        auto oe = s.find('}', os);
-        if (oe == std::string::npos)
-            break;
-        specs.push_back(parse_single_output_spec(s.substr(os, oe - os + 1)));
-        pos = oe + 1;
-    }
-    return specs;
-}
-
-std::vector<TvmFfiOutputSpec> parse_outputs_array(const std::string& s, int32_t n) {
-    auto [pos, end] = find_outputs_array_bounds(s);
-    if (pos == std::string::npos || end == std::string::npos) {
-        std::vector<TvmFfiOutputSpec> defaults(static_cast<std::size_t>(n));
-        for (auto& d : defaults) {
-            d.same_as_input_index = 0;
-            d.dtype = 0;
-        }
-        return defaults;
-    }
-    return scan_output_objects(s, pos, end, n);
-}
-
-} // namespace
-
+namespace {} // namespace
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
@@ -142,67 +78,134 @@ TvmFfiKernelPlugin::~TvmFfiKernelPlugin() = default;
 
 namespace {
 
-TvmFfiExtraArg parse_single_extra_arg(const std::string& obj) {
+/// @brief Parse and validate a same-as-input dimension reference.
+static int32_t parse_input_index(const std::string& dims) {
+    const char* first = dims.data() + 14;
+    const char* last = dims.data() + dims.size();
+    int32_t input_index = -1;
+    const auto [end, error] = std::from_chars(first, last, input_index);
+    if (first == last || error != std::errc{} || end != last || input_index < 0) {
+        throw std::runtime_error("Invalid TvmFfiKernelPlugin output input index");
+    }
+    return input_index;
+}
+
+/// @brief Decode inherited or fixed output dimensions from JSON.
+static void parse_dims(TvmFfiOutputSpec& spec, const nlohmann::json& dims_obj) {
+    if (dims_obj.is_string()) {
+        std::string dims_str = dims_obj.get<std::string>();
+        if (dims_str.find("same_as_input_") == 0) {
+            spec.same_as_input_index = parse_input_index(dims_str);
+        } else {
+            spec.same_as_input_index = -1;
+        }
+    } else if (dims_obj.is_array()) {
+        spec.same_as_input_index = -1;
+        for (std::size_t k = 0; k < dims_obj.size() && k < 16; ++k) {
+            if (dims_obj[k].is_number_integer()) {
+                spec.dims.push_back(dims_obj[k].get<int32_t>());
+            }
+        }
+    } else {
+        spec.same_as_input_index = -1;
+    }
+}
+
+static int32_t parse_dtype(const std::string& dt) {
+    if (dt == "bfloat16" || dt == "bf16") {
+        return 2;
+    } else if (dt == "float16" || dt == "half") {
+        return 1;
+    } else if (dt == "int32") {
+        return 3;
+    }
+    return 0;
+}
+
+static TvmFfiOutputSpec parse_output_spec(const nlohmann::json& obj) {
+    TvmFfiOutputSpec spec;
+    if (obj.is_object()) {
+        if (obj.contains("dims")) {
+            parse_dims(spec, obj["dims"]);
+        } else {
+            spec.same_as_input_index = -1;
+        }
+        spec.dtype = parse_dtype(obj.value("dtype", "float32"));
+    } else {
+        spec.same_as_input_index = 0;
+        spec.dtype = 0;
+    }
+    return spec;
+}
+
+static TvmFfiExtraArg parse_extra_arg(const nlohmann::json& obj) {
     TvmFfiExtraArg arg;
-    std::string type_str = extract_json_string(obj, "type", "none");
-    if (type_str == "int") {
-        arg.type_index = kTVMFFIInt;
-        arg.v_int = static_cast<int64_t>(extract_json_int(obj, "value", 0));
-    } else if (type_str == "float") {
-        arg.type_index = kTVMFFIFloat;
-        arg.v_float = static_cast<double>(extract_json_float(obj, "value", 0.0f));
-    } else if (type_str == "ptr") {
-        arg.type_index = kTVMFFIOpaquePtr;
+    if (obj.is_object()) {
+        std::string type_str = obj.value("type", "none");
+        if (type_str == "int") {
+            arg.type_index = kTVMFFIInt;
+            if (obj.contains("value") && obj["value"].is_number()) {
+                arg.v_int = obj["value"].is_number_float()
+                                ? static_cast<int64_t>(obj["value"].get<double>())
+                                : obj["value"].get<int64_t>();
+            } else {
+                arg.v_int = 0;
+            }
+        } else if (type_str == "float") {
+            arg.type_index = kTVMFFIFloat;
+            if (obj.contains("value") && obj["value"].is_number()) {
+                arg.v_float = static_cast<double>(obj["value"].get<double>());
+            } else {
+                arg.v_float = 0.0;
+            }
+        } else if (type_str == "ptr") {
+            arg.type_index = kTVMFFIOpaquePtr;
+        } else {
+            arg.type_index = kTVMFFINone;
+        }
     } else {
         arg.type_index = kTVMFFINone;
     }
     return arg;
 }
 
-std::pair<std::size_t, std::size_t> find_extra_args_array_bounds(const std::string& spec) {
-    auto key_pos = spec.find("\"extra_args\"");
-    if (key_pos == std::string::npos)
-        return {std::string::npos, std::string::npos};
-    auto arr_start = spec.find('[', key_pos);
-    if (arr_start == std::string::npos)
-        return {std::string::npos, std::string::npos};
-    auto arr_end = spec.find(']', arr_start);
-    return {arr_start + 1, arr_end};
+static std::vector<TvmFfiOutputSpec> parse_output_specs_array(const nlohmann::json& j,
+                                                              int32_t num_outputs) {
+    std::vector<TvmFfiOutputSpec> specs;
+    if (j.contains("outputs") && j["outputs"].is_array()) {
+        const auto& outputs_arr = j["outputs"];
+        for (std::size_t i = 0; i < outputs_arr.size() && static_cast<int32_t>(i) < num_outputs;
+             ++i) {
+            specs.push_back(parse_output_spec(outputs_arr[i]));
+        }
+    }
+    while (static_cast<int32_t>(specs.size()) < num_outputs) {
+        TvmFfiOutputSpec spec;
+        spec.same_as_input_index = 0;
+        spec.dtype = 0;
+        specs.push_back(spec);
+    }
+    return specs;
 }
 
-std::vector<TvmFfiExtraArg> parse_extra_args(const std::string& spec) {
+static std::vector<TvmFfiExtraArg> parse_extra_args_array(const nlohmann::json& j) {
     std::vector<TvmFfiExtraArg> args;
-    auto [pos, arr_end] = find_extra_args_array_bounds(spec);
-    if (pos == std::string::npos || arr_end == std::string::npos)
-        return args;
-
-    while (pos < arr_end) {
-        auto os = spec.find('{', pos);
-        if (os == std::string::npos || os >= arr_end)
-            break;
-        auto oe = spec.find('}', os);
-        if (oe == std::string::npos)
-            break;
-        args.push_back(parse_single_extra_arg(spec.substr(os, oe - os + 1)));
-        pos = oe + 1;
+    if (j.contains("extra_args") && j["extra_args"].is_array()) {
+        for (const auto& obj : j["extra_args"]) {
+            args.push_back(parse_extra_arg(obj));
+        }
     }
     return args;
 }
 
-} // namespace
-
-void TvmFfiKernelPlugin::parse_shape_spec() {
-    num_inputs_ = extract_json_int(shape_spec_, "num_inputs", 1);
-    num_outputs_ = extract_json_int(shape_spec_, "num_outputs", 1);
-    workspace_bytes_ = static_cast<int64_t>(extract_json_int(shape_spec_, "workspace_bytes", 0));
-    output_specs_ = parse_outputs_array(shape_spec_, num_outputs_);
-    extra_args_ = parse_extra_args(shape_spec_);
-    if (num_inputs_ <= 0 || num_outputs_ <= 0 || workspace_bytes_ < 0 ||
-        output_specs_.size() != static_cast<std::size_t>(num_outputs_)) {
+static void validate_parsed_specs(int32_t num_inputs, int32_t num_outputs, int64_t workspace_bytes,
+                                  const std::vector<TvmFfiOutputSpec>& output_specs) {
+    if (num_inputs <= 0 || num_outputs <= 0 || workspace_bytes < 0 ||
+        output_specs.size() != static_cast<std::size_t>(num_outputs)) {
         throw std::runtime_error("Invalid TvmFfiKernelPlugin shape specification");
     }
-    for (const auto& output : output_specs_) {
-        if (output.same_as_input_index < -1 || output.same_as_input_index >= num_inputs_) {
+    for (const auto& output : output_specs) {
+        if (output.same_as_input_index < -1 || output.same_as_input_index >= num_inputs) {
             throw std::runtime_error("TvmFfiKernelPlugin output input index is out of range");
         }
         for (int32_t dimension : output.dims) {
@@ -210,6 +213,24 @@ void TvmFfiKernelPlugin::parse_shape_spec() {
                 throw std::runtime_error("TvmFfiKernelPlugin fixed dimensions must be positive");
         }
     }
+}
+
+} // namespace
+
+void TvmFfiKernelPlugin::parse_shape_spec() {
+    nlohmann::json j = nlohmann::json::parse(shape_spec_, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) {
+        j = nlohmann::json::object();
+    }
+
+    num_inputs_ = j.value("num_inputs", 1);
+    num_outputs_ = j.value("num_outputs", 1);
+    workspace_bytes_ = static_cast<int64_t>(j.value("workspace_bytes", 0));
+
+    output_specs_ = parse_output_specs_array(j, num_outputs_);
+    extra_args_ = parse_extra_args_array(j);
+
+    validate_parsed_specs(num_inputs_, num_outputs_, workspace_bytes_, output_specs_);
 }
 
 // ---------------------------------------------------------------------------

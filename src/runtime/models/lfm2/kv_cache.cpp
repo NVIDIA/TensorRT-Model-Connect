@@ -151,7 +151,8 @@ void Lfm2KvCache::advance(int32_t n_tokens) {
 }
 
 void Lfm2KvCache::reset() {
-    // IKVCacheUpdate and key_value_lengths make stale capacity invisible.
+    // IKVCacheUpdate plus the engine's explicit active-prefix mask make stale
+    // capacity invisible after the logical position is reset.
     position_ = 0;
     cache_write_index_ = 0;
     key_value_length_ = 0;
