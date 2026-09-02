@@ -153,6 +153,15 @@ def _metric_summary(values: Sequence[float]) -> dict[str, float]:
     }
 
 
+def _pooled_feature_tensor(output: Any) -> Any:
+    """Accept Tensor or Transformers 5 model-output feature APIs."""
+
+    features = getattr(output, "pooler_output", output)
+    if not callable(getattr(features, "float", None)):
+        raise TypeError("SigLIP feature output has no tensor pooler output")
+    return features
+
+
 def score_vbench_siglip_predictions(
     predictions: Mapping[str, Any],
     answers: Mapping[str, Any],
@@ -294,8 +303,8 @@ def _load_pinned_scorer(
         text_inputs = {name: value.to(device) for name, value in text_inputs.items()}
         image_inputs = {name: value.to(device) for name, value in image_inputs.items()}
         with torch.inference_mode():
-            text_features = model.get_text_features(**text_inputs)
-            image_features = model.get_image_features(**image_inputs)
+            text_features = _pooled_feature_tensor(model.get_text_features(**text_inputs))
+            image_features = _pooled_feature_tensor(model.get_image_features(**image_inputs))
             text_features = torch.nn.functional.normalize(text_features.float(), dim=-1)
             image_features = torch.nn.functional.normalize(image_features.float(), dim=-1)
             alignment = (image_features @ text_features.T).mean().item()

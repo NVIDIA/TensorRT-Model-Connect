@@ -5,10 +5,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
 
 from tools import vbench_siglip_score as score
+
+
+class _TensorLike:
+    def float(self):
+        return self
 
 
 def _case(tmp_path: Path, sample_id: str, *, valid: bool = True) -> tuple[dict, dict]:
@@ -155,6 +161,13 @@ def test_validate_model_snapshot_accepts_pinned_fixture(tmp_path: Path, monkeypa
     monkeypatch.setattr(score, "SIGLIP_FILE_SHA256", hashes)
 
     assert score.validate_model_snapshot(snapshot) == snapshot.resolve()
+
+
+def test_pooled_feature_tensor_accepts_transformers_5_model_output() -> None:
+    tensor = _TensorLike()
+
+    assert score._pooled_feature_tensor(tensor) is tensor
+    assert score._pooled_feature_tensor(SimpleNamespace(pooler_output=tensor)) is tensor
 
 
 def test_cli_summary_is_json_serializable(tmp_path: Path) -> None:
