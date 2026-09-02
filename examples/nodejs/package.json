@@ -1,0 +1,13 @@
+{
+  "name": "sample-nodejs-app",
+  "version": "1.0.0",
+  "description": "Sample application using TRT-Model-Connect Node.js bindings",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "tensorrt-model-connect-node": "file:../../bindings/nodejs"
+  }
+}

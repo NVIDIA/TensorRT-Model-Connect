@@ -63,9 +63,11 @@ conan-py-build.profile
 .ruff_cache/
 .ipynb_checkpoints/
 
-# Website local dependencies and generated state
+# Website and Bindings local dependencies
 website/node_modules/
 website/.docusaurus/
+bindings/nodejs/node_modules/
+bindings/nodejs/build/
 
 # Claude Code
 .claude/
