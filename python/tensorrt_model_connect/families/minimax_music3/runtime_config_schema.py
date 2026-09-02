@@ -50,7 +50,7 @@ SCHEMA = Schema(
         ConfigField(
             name="max_frames",
             type_tag="int32",
-            default=MAX_AUDIO_FRAMES,
+            default=9000,  # MAX_AUDIO_FRAMES, spelled out to match the C++ side
             allowed_layers=_SESSION,
             validator=lambda value: (
                 isinstance(value, int) and 1 <= value <= MAX_AUDIO_FRAMES
