@@ -225,6 +225,8 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         rope_freq_dim=1,
         video_rows=4,
         audio_rows=2,
+        min_text_rows=1,
+        opt_text_rows=2,
         text_rows=2,
         padded_sequence_length=8,
         max_timestep_count=2,
