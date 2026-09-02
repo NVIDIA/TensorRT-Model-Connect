@@ -273,27 +273,46 @@ PYTHONPATH=python:. python3 tools/test_impact.py --validate
 
 `.github/workflows/community-cpu.yml` runs four jobs on every pull request, and
 `Community CPU / Required` fails unless all four pass. Each has a local
-equivalent, so a failure does not have to cost a push and a CI round trip. Run
-them from the repository root, with `<base-ref>` as the commit you branched
-from (`upstream/main` or `github/main`):
+equivalent, so a failure does not have to cost a push and a CI round trip.
 
-| Pre-merge job | Run locally | Covers |
-| --- | --- | --- |
-| `Community CPU / Source quality` | `python3 -m tools.community_ci source-quality --base <base-ref>` | cyclomatic complexity, `ruff` and `clang-format` on changed files, model architecture contracts |
-| `Community CPU / Ownership and impact` | `python3 -m tools.community_ci impact --base <base-ref>` | ownership resolution and the CPU test scope your change selects |
-| `Community CPU / Unit / C++ and Python` | `python3 -m tools.community_ci unit --scope all` | compiles the C++ and runs the source-only C++ and Python unit tests in the CI container |
-| `Community CPU / Docs` | `cd website && npm ci && npm run test:model-support && npm run build` | the generated model support inventory and the production documentation build |
-
-The quality tools come from `requirements/community-ci.txt`; install them into a
-virtual environment rather than skipping a gate:
+The gates shell out to `lizard`, `ruff` and `clang-format` by name, and one
+check invokes bare `python`, so the environment has to be **activated** rather
+than addressed through its `bin` directory:
 
 ```bash
 python3 -m venv .venv-ci
 .venv-ci/bin/pip install --requirement requirements/community-ci.txt
+source .venv-ci/bin/activate
 ```
 
-`unit --scope all` builds the CI container, so it needs a working Docker daemon.
-The other three do not.
+Then, from the repository root, with `<base-ref>` as the commit you branched
+from (`upstream/main` or `github/main`):
+
+| Pre-merge job | Run locally | Covers |
+| --- | --- | --- |
+| `Community CPU / Source quality` | `python3 -m tools.community_ci source-quality --base <base-ref>` | the `src/` complexity ceiling across the whole tree; `ruff` and `clang-format` on changed files only; model architecture contracts |
+| `Community CPU / Ownership and impact` | `python3 -m tools.community_ci impact --base <base-ref>` | ownership resolution and the CPU test scope your change selects |
+| `Community CPU / Unit / C++ and Python` | `python3 -m tools.community_ci unit --scope all` | compiles the C++ and runs the source-only C++ and Python unit tests in the CI container |
+| `Community CPU / Docs` | `cd website && npm ci && npm run test:model-support && npm run build` | the generated model support inventory and the production documentation build |
+
+`unit --scope all` is the one that needs more than the virtual environment. It
+builds and runs the CI container, so it needs a working Docker daemon, and two
+things it does not tell you up front:
+
+- It refuses to start unless its scratch directory sits under `RUNNER_TEMP`,
+  which is set on a GitHub runner and usually not locally. Point it somewhere
+  writable first: `export RUNNER_TEMP="$(mktemp -d)"`.
+- The image is built without `--platform`, so it matches the Docker host.
+  Pre-merge runs on `ubuntu-24.04`, which is `linux/amd64`; on an arm64 host
+  the local container is a different architecture from the job it stands in
+  for. `DOCKER_DEFAULT_PLATFORM=linux/amd64` forces a match, under emulation.
+
+Expect a small number of failures a Linux runner does not reproduce. On macOS,
+a run of an unmodified tree reported four: two asserting on the executable bit,
+one on concurrent lock ownership, and one on git blob stability -- the
+bind-mounted host filesystem does not carry Linux permission and locking
+semantics. **Before chasing a failure, check whether it also fails on the base
+branch.** A failure that reproduces there is the environment, not your change.
 
 Two failure modes worth knowing, because both look like success:
 
