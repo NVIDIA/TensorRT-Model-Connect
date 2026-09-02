@@ -6,3 +6,6 @@ runtime_library = "libtrtmc_model_minimax_music3.so"
 runtime_plugins = ["plugin.cpp|register_minimax_music3_plugin"]
 runtime_config_schemas = ["config_schema.cpp|register_minimax_music3_schema"]
 runtime_strategies = ["minimax_music3_text_to_music"]
+runtime_tests = [
+  "test_minimax_music3_prompt_format|test_minimax_music3_prompt_format.cpp|trtmc_model_minimax_music3|_|_",
+]
