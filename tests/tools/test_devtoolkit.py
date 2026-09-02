@@ -185,6 +185,17 @@ def _write_trt_header(path: Path, version: str = "11.1.0.106") -> None:
     )
 
 
+def _clear_tensorrt_path_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "TRTMC_TRT_INCLUDE_DIR",
+        "TRTMC_TRT_LIBRARY",
+        "TRTMC_TRT_LIBRARY_DIR",
+        "TRT_INC_DIR",
+        "TRT_LIB_DIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _minimal_repository(tmp_path: Path) -> Path:
     repository = tmp_path / "repo"
     cohort_dir = repository / "configs" / "environment-cohorts"
@@ -310,7 +321,11 @@ def test_rejects_python_version_not_present_in_docker_image(tmp_path: Path) -> N
         )
 
 
-def test_local_doctor_checks_exact_python_and_native_tensorrt(tmp_path: Path) -> None:
+def test_local_doctor_checks_exact_python_and_native_tensorrt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_tensorrt_path_overrides(monkeypatch)
     repository = _minimal_repository(tmp_path)
     cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
     include_dir = tmp_path / "include"
@@ -349,8 +364,12 @@ def test_local_doctor_checks_exact_python_and_native_tensorrt(tmp_path: Path) ->
     ),
 )
 def test_local_doctor_rejects_version_mismatch(
-    tmp_path: Path, runner: LocalProbeRunner, failure: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: LocalProbeRunner,
+    failure: str,
 ) -> None:
+    _clear_tensorrt_path_overrides(monkeypatch)
     repository = _minimal_repository(tmp_path)
     cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
     include_dir = tmp_path / "include"
@@ -373,7 +392,11 @@ def test_local_doctor_rejects_version_mismatch(
         EnvironmentDoctor(repository, runner).inspect(request, cohort, "aarch64")
 
 
-def test_local_doctor_rejects_tensorrt_header_version_mismatch(tmp_path: Path) -> None:
+def test_local_doctor_rejects_tensorrt_header_version_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_tensorrt_path_overrides(monkeypatch)
     repository = _minimal_repository(tmp_path)
     cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
     include_dir = tmp_path / "include"
