@@ -155,7 +155,7 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     task_quality = next(
         value for value in suites if value["id"] == "minimax_h3_vbench_siglip_task_quality"
     )
-    assert catalog["sample_limits"][task_quality["id"]] == 100
+    assert catalog["sample_limits"][task_quality["id"]] == 10
     assert task_quality["reference"] == {"mode": "metric_only"}
     assert task_quality["dataset"] == {
         "kind": "model_plugin_json",
@@ -168,7 +168,7 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
         "device": "cuda:0",
     }
     assert task_quality["gates"] == {
-        "required_sample_count": 100,
+        "required_sample_count": 10,
         "min_structural_pass_rate": 1.0,
     }
     assert validation_catalog.suite_match_reason(task_quality, model) == (

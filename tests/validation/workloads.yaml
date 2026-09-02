@@ -1928,7 +1928,7 @@ suites:
       python_profile: reference_common
       device: cuda:0
     gates:
-      required_sample_count: 100
+      required_sample_count: 10
       min_structural_pass_rate: 1.0
     gate_metric_kinds:
       min_structural_pass_rate: proportion

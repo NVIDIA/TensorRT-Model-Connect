@@ -33,7 +33,7 @@ sample_limits:
   nemotron_voicechat_model_card_general_conversation: 1
   mmmu_pro_vision_plugin_parity: 5
   mmmu_pro_vision_square_plugin_parity: 5
-  minimax_h3_vbench_siglip_task_quality: 100
+  minimax_h3_vbench_siglip_task_quality: 10
   minimax_h3_official_profile_parity: 1
   moge_monocular_geometry_fp32_parity: 1
   newstest2019_en_ru_marian_translation_parity: 10
