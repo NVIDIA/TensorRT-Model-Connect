@@ -183,12 +183,13 @@ def test_max_frames_honours_the_upstream_limit() -> None:
 
 
 def _fake_checkpoint(tmp_path):
-    """A snapshot carrying the components' tensor *names*.
+    """A snapshot whose tensors are real only where the loader looks.
 
-    The three callers assert routing, a missing name, and a missing directory
-    -- none reads a shape or a value. Writing the real shapes serialises about
-    3.25 GB per call (``_rvq_depth_decoder`` alone is 2.58 GB), so each name
-    gets a scalar instead. ``test_checkpoint`` keeps the shape inventory.
+    ``checkpoint.validate_component`` checks names for every tensor but shapes
+    only for the few a builder depends on, so those carry their real shape and
+    the rest carry a scalar. Writing every real shape serialises 3.26 GB per
+    call (``_rvq_depth_decoder`` alone is 2.58 GB) and the three callers each
+    rebuild it; this way it is 0.35 GB with the same coverage.
     """
 
     import numpy as np
@@ -200,6 +201,9 @@ def _fake_checkpoint(tmp_path):
     ce_tests = importlib.import_module(
         "tensorrt_model_connect.families.minimax_music3.tests.test_checkpoint"
     )
+    checkpoint = importlib.import_module(
+        "tensorrt_model_connect.families.minimax_music3.checkpoint"
+    )
     builders = {
         "condition_encoder": ce_tests._condition_encoder,
         "rvq_depth_decoder": ce_tests._rvq_depth_decoder,
@@ -208,8 +212,12 @@ def _fake_checkpoint(tmp_path):
     for component, build in builders.items():
         directory = tmp_path / component
         directory.mkdir(parents=True, exist_ok=True)
+        checked = checkpoint.component(component).shapes
         save_file(
-            {k: np.zeros(1, dtype=np.float32) for k in build()},
+            {
+                k: np.zeros(checked[k] if k in checked else 1, dtype=np.float32)
+                for k, v in build().items()
+            },
             str(directory / "model.safetensors"),
         )
     for name, tensor in (
