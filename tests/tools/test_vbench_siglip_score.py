@@ -166,6 +166,7 @@ def test_validate_model_snapshot_accepts_pinned_fixture(tmp_path: Path, monkeypa
 def test_pooled_feature_tensor_accepts_transformers_5_model_output() -> None:
     tensor = _TensorLike()
 
+    assert score.SIGLIP_USE_FAST_PROCESSOR is False
     assert score._pooled_feature_tensor(tensor) is tensor
     assert score._pooled_feature_tensor(SimpleNamespace(pooler_output=tensor)) is tensor
 

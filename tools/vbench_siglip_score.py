@@ -21,6 +21,7 @@ from PIL import Image
 SIGLIP_MODEL = "google/siglip-base-patch16-224"
 SIGLIP_REVISION = "7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed"
 SIGLIP_LICENSE = "Apache-2.0"
+SIGLIP_USE_FAST_PROCESSOR = False
 SIGLIP_FILE_SHA256 = {
     "README.md": "86c231c4a7bf0ee2435295413ad5c7cf567c9426f00b79711ce8eda884b7a8d3",
     "config.json": "cd85b3d28829722820bcb89a2cfbb4160e55fd359249a3044da724166a8d9688",
@@ -284,6 +285,7 @@ def _load_pinned_scorer(
         snapshot,
         local_files_only=True,
         trust_remote_code=False,
+        use_fast=SIGLIP_USE_FAST_PROCESSOR,
     )
     model = AutoModel.from_pretrained(
         snapshot,
@@ -329,6 +331,7 @@ def _load_pinned_scorer(
         "evaluator_model": SIGLIP_MODEL,
         "evaluator_revision": SIGLIP_REVISION,
         "evaluator_license": SIGLIP_LICENSE,
+        "fast_image_processor": SIGLIP_USE_FAST_PROCESSOR,
         "frame_sampling": "8 evenly spaced frames: [0,18,35,53,70,88,105,123]",
         "metric_scope": (
             "TRTMC candidate-only semantic/temporal proxy; not an official VBench score"
