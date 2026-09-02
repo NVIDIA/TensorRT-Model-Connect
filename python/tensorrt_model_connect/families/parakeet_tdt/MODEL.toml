@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "parakeet_tdt"
+plugin = "parakeet_tdt"
+python_profile_specs = [
+  "parakeet_tdt_reference|families/parakeet_tdt/python_profile_requirements/parakeet_tdt_reference.lock.txt|families/parakeet_tdt/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|parakeet_tdt_reference",
+]
+module = "plugin"
+model_dir_adapter = "nemo_archive.py|resolve_model_dir"
+nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
+model_resolution_priority = 100
+nemo_model_type = "parakeet_tdt"
+nemo_target_patterns = ["EncDecRNNTBPEModel", "TDT", "tdt"]
+aliases = ["parakeet_tdt", "parakeet-tdt", "parakeet_tdt_0_6b_v3"]
+prefixes = ["parakeet_tdt", "parakeet-tdt"]

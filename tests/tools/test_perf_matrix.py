@@ -62,6 +62,7 @@ TASK_ADAPTERS = {
     "locateanything.generate": "hf-transformers-vlm",
     "magpie_tts.generate_audio": "nemo-tts",
     "nemotron_speech_streaming.transcribe": "nemo-asr",
+    "parakeet_tdt.transcribe": "hf-transformers-asr",
     "patchtsmixer.solve": "pytorch-timeseries",
     "patchtst.solve": "pytorch-timeseries",
     "personaplex.speak": "pytorch-personaplex",
@@ -270,8 +271,8 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
     performance_catalog.validate_release_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 111
-    assert len(raw_entries) == 81
+    assert len(cases) == 112
+    assert len(raw_entries) == 82
     assert len(raw_additional) == 30
     assert excluded_profiles == {
         "lfm2-1.2b": LFM2_EXCLUSION_REASON,
@@ -289,14 +290,14 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
     assert not any(performance_catalog.is_l0_profile(case["model"]) for case in cases)
-    assert len({(case["family"], case["operation"]) for case in cases}) == 81
-    assert len({case["family"] for case in cases}) == 79
+    assert len({(case["family"], case["operation"]) for case in cases}) == 82
+    assert len({case["family"] for case in cases}) == 80
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
-        "model_call_wall": 25,
+        "model_call_wall": 26,
         "public_pipeline_call_wall": 86,
     }
     assert {case["id"] for case in cases if case["baseline"]["asset_loading_included"]} == {
@@ -321,6 +322,21 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "intrinsics": "assets/demo_0_intrinsics.npy",
     }
     assert by_id["sana_wm.generate_image"]["baseline"]["python_profile"] == "sana_wm_reference"
+    parakeet_baseline = by_id["parakeet_tdt.transcribe"]["baseline"]
+    assert {
+        key: parakeet_baseline[key]
+        for key in ("runner", "adapter", "mode", "reference_backend")
+    } == {
+        "runner": "task-reference",
+        "adapter": "hf-transformers-asr",
+        "mode": "hf-eager",
+        "reference_backend": "hf_transformers",
+    }
+    assert parakeet_baseline["adapter_options"] == {
+        "auto_model_class": "AutoModelForTDT"
+    }
+    assert parakeet_baseline["timing_scope"] == "task-model-call-wall"
+    assert parakeet_baseline["input_preparation_included"] is False
     locateanything_baseline = by_id["locateanything.generate"]["baseline"]
     assert locateanything_baseline["output_contract"] == "localization"
     assert locateanything_baseline["min_localization_box_iou"] == 0.9
@@ -2191,7 +2207,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 111
+    assert len(rows) == 112
     assert results["environment_config"]["name"] == "test-gb300"
     assert results["environment_config"]["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert results["environment_config"]["source"] == str(environment.resolve())

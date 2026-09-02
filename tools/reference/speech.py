@@ -208,6 +208,13 @@ def _is_nemo_asr(arguments: argparse.Namespace) -> bool:
     )
 
 
+def _is_parakeet_tdt_asr(arguments: argparse.Namespace) -> bool:
+    return (
+        str(arguments.reference_family).lower() == "asr_parakeet_tdt"
+        or str(arguments.family).lower() == "parakeet_tdt"
+    )
+
+
 def _transcription_text(value: Any) -> str:
     if isinstance(value, list):
         value = value[0] if value else ""
@@ -252,7 +259,8 @@ def _load_whisper_runtime(
     arguments: argparse.Namespace,
 ) -> tuple[Any, Any, Any, Any]:
     import torch
-    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, logging
+    import transformers
+    from transformers import AutoProcessor, logging
 
     logging.set_verbosity_error()
     processor_kwargs = {
@@ -273,7 +281,12 @@ def _load_whisper_runtime(
         model_kwargs["attn_implementation"] = arguments.attn_impl
     if arguments.model_revision:
         model_kwargs["revision"] = arguments.model_revision
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    model_loader = (
+        transformers.AutoModelForTDT
+        if _is_parakeet_tdt_asr(arguments)
+        else transformers.AutoModelForSpeechSeq2Seq
+    )
+    model = model_loader.from_pretrained(
         arguments.model,
         **model_kwargs,
     ).eval()
@@ -332,7 +345,12 @@ def _run_whisper_asr(
         _seed_torch(torch, seed + eval_index if seed >= 0 else -1)
         started = time.perf_counter()
         with torch.inference_mode():
-            output_ids = model.generate(
+            generate_options: dict[str, Any] = {
+                "max_new_tokens": max_new_tokens,
+            }
+            if _is_parakeet_tdt_asr(arguments):
+                generate_options["return_dict_in_generate"] = True
+            generated = model.generate(
                 **_whisper_inputs(
                     processor,
                     audio,
@@ -340,12 +358,18 @@ def _run_whisper_asr(
                     device,
                     model_dtype,
                 ),
-                max_new_tokens=max_new_tokens,
+                **generate_options,
             )
+        output_ids = generated.sequences if hasattr(generated, "sequences") else generated
+        if _is_parakeet_tdt_asr(arguments):
+            decoded = processor.decode(output_ids[0], skip_special_tokens=True)
+        else:
+            decoded = processor.batch_decode(output_ids, skip_special_tokens=True)
+        output_text = decoded[0] if isinstance(decoded, (list, tuple)) else str(decoded)
         responses.append(
             _asr_row(
                 prompt,
-                processor.batch_decode(output_ids, skip_special_tokens=True)[0],
+                output_text,
                 (time.perf_counter() - started) * 1000.0,
                 output_ids[0].tolist(),
             )

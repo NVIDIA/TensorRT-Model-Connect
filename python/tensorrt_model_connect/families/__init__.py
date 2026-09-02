@@ -45,6 +45,7 @@ class _FamilyMetadata:
     diffusion_pipeline_classes: frozenset[str]
     nemo_target_patterns: frozenset[str]
     nemo_model_type: str
+    model_resolution_priority: int = 0
     nemo_archive_adapter: str = ""
     hf_allow_patterns: tuple[str, ...] = ()
     hf_required_files: tuple[str, ...] = ()
@@ -169,6 +170,10 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
             ),
             nemo_model_type=raw.get("nemo_model_type", "")
             if isinstance(raw.get("nemo_model_type"), str) else "",
+            model_resolution_priority=raw.get("model_resolution_priority", 0)
+            if isinstance(raw.get("model_resolution_priority", 0), int)
+            and not isinstance(raw.get("model_resolution_priority", 0), bool)
+            else 0,
             nemo_archive_adapter=raw.get("nemo_archive_adapter", "")
             if isinstance(raw.get("nemo_archive_adapter"), str) else "",
             hf_allow_patterns=tuple(_metadata_strings(raw.get("hf_allow_patterns"))),
@@ -199,6 +204,14 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
 
     _METADATA_CACHE = metadata
     return metadata
+
+
+def _model_resolution_metadata() -> list[_FamilyMetadata]:
+    """Return source adapters from most specific to broadest family claim."""
+    return sorted(
+        _load_family_metadata(),
+        key=lambda candidate: (-candidate.model_resolution_priority, candidate.id),
+    )
 
 
 def _add_index_value(
@@ -560,7 +573,7 @@ def resolve_config_from_model_dir(model_dir: str | Path) -> dict[str, Any] | Non
 def resolve_family_model_dir(model_dir: str | Path) -> str | None:
     """Ask family adapters to stage a non-flat model repository."""
     path = Path(model_dir)
-    for meta in _load_family_metadata():
+    for meta in _model_resolution_metadata():
         if not meta.model_dir_adapter:
             continue
         adapter = _load_metadata_callable_from_file(
@@ -600,7 +613,7 @@ def family_prefers_native_default_build(
 def resolve_nemo_archive_model_dir(nemo_path: str | Path) -> str | None:
     """Ask family-owned NeMo archive adapters to synthesize a model dir."""
     path = Path(nemo_path)
-    for meta in _load_family_metadata():
+    for meta in _model_resolution_metadata():
         if not meta.nemo_archive_adapter:
             continue
         adapter = _load_metadata_callable_from_file(meta, meta.nemo_archive_adapter)
@@ -719,7 +732,7 @@ def resolve_nemo_model_type(config: dict) -> str:
     """
     target = str(config.get("target", "") or config.get("_target_", ""))
     target_key = target.lower()
-    for meta in _load_family_metadata():
+    for meta in _model_resolution_metadata():
         if not meta.nemo_model_type or not meta.nemo_target_patterns:
             continue
         for pattern in meta.nemo_target_patterns:

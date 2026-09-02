@@ -16,6 +16,7 @@ MODEL_CALL_FAMILIES = {
     "elf_flow",
     "internvl",
     "locateanything",
+    "parakeet_tdt",
     "patchtsmixer",
     "patchtst",
     "phi4_multimodal",

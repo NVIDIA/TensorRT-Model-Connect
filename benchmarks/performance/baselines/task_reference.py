@@ -562,7 +562,7 @@ def _disable_nemo_asr_cuda_graphs(model: Any) -> bool:
 def _load_asr(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
-    _options: Mapping[str, Any],
+    options: Mapping[str, Any],
 ) -> Session:
     import torch
     from tools.validation.engine import _read_wav_float32, _resample_audio
@@ -615,11 +615,25 @@ def _load_asr(
             return {"text": _transcription_text(result), "output_tokens": None}
 
     else:
-        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+        import transformers
+        from transformers import AutoProcessor
+
+        auto_model_class = str(
+            options.get("auto_model_class", "AutoModelForSpeechSeq2Seq")
+        )
+        if auto_model_class not in {
+            "AutoModelForSpeechSeq2Seq",
+            "AutoModelForTDT",
+        }:
+            raise ValueError(
+                "hf-transformers-asr adapter_options.auto_model_class must be "
+                "AutoModelForSpeechSeq2Seq or AutoModelForTDT"
+            )
+        model_loader = getattr(transformers, auto_model_class)
 
         processor = AutoProcessor.from_pretrained(arguments.model, **_processor_kwargs(arguments))
         model = (
-            AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_loader.from_pretrained(
                 arguments.model, **_load_kwargs(arguments, torch)
             )
             .eval()
@@ -638,11 +652,19 @@ def _load_asr(
 
         def invoke() -> Mapping[str, Any]:
             with torch.inference_mode():
-                generated = model.generate(**inputs, max_new_tokens=max_new_tokens)
+                generate_options: dict[str, Any] = {"max_new_tokens": max_new_tokens}
+                if auto_model_class == "AutoModelForTDT":
+                    generate_options["return_dict_in_generate"] = True
+                generated = model.generate(**inputs, **generate_options)
             sequences = generated.sequences if hasattr(generated, "sequences") else generated
             token_ids = [int(token) for token in sequences[0].detach().cpu().tolist()]
+            if auto_model_class == "AutoModelForTDT":
+                decoded = processor.decode(sequences, skip_special_tokens=True)
+            else:
+                decoded = processor.batch_decode(sequences, skip_special_tokens=True)
+            text = decoded[0] if isinstance(decoded, (list, tuple)) else str(decoded)
             return {
-                "text": processor.batch_decode(sequences, skip_special_tokens=True)[0],
+                "text": text,
                 "token_ids": token_ids,
                 "output_tokens": len(token_ids),
             }

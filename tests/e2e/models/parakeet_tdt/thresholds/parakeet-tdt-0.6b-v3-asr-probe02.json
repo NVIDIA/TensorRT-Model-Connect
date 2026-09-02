@@ -1,0 +1,11 @@
+{
+  "threshold_overrides": {
+    "layer_atol": 0.1,
+    "logit_atol": 0.01,
+    "contract_ned_threshold": 0.1,
+    "contract_wer_threshold": 0.1,
+    "contract_cer_threshold": 0.1,
+    "wer": 0.1,
+    "cer": 0.1
+  }
+}

@@ -631,6 +631,21 @@ entries:
       runner: hf-transformers
       mode: torch-compile
       compile_scope: model.forward
+  - id: parakeet_tdt.transcribe
+    family: parakeet_tdt
+    operation: transcribe
+    model: parakeet-tdt-0.6b-v3
+    workload:
+      testcase: parakeet-tdt-0.6b-v3
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-asr
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+      adapter_options:
+        auto_model_class: AutoModelForTDT
   - id: opt.generate
     family: opt
     operation: generate

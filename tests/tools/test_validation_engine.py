@@ -596,8 +596,9 @@ def test_default_suites_include_librispeech_clean_asr() -> None:
     assert suite["selectors"]["runtime_strategies"] == [
         "whisper_speech_to_text",
         "canary_speech_to_text",
+        "parakeet_tdt_speech_to_text",
     ]
-    assert suite["selectors"]["families"] == ["whisper", "canary"]
+    assert suite["selectors"]["families"] == ["whisper", "canary", "parakeet_tdt"]
 
 
 def test_default_suites_do_not_split_librispeech_asr_by_family() -> None:
@@ -1876,11 +1877,15 @@ def test_plan_selects_librispeech_asr_models() -> None:
     assert selected["whisper-small-fp16"]["runtime_strategy"] == "whisper_speech_to_text"
     assert "canary-1b-v2" in selected
     assert selected["canary-1b-v2"]["runtime_strategy"] == "canary_speech_to_text"
+    assert selected["parakeet-tdt-0.6b-v3"]["runtime_strategy"] == (
+        "parakeet_tdt_speech_to_text"
+    )
     assert set(selected) == {
         "whisper-tiny-fp16",
         "whisper-small-fp16",
         "whisper-large-v3-turbo",
         "canary-1b-v2",
+        "parakeet-tdt-0.6b-v3",
     }
     assert "nemotron-nano-v2-speech-embedded" not in selected
 

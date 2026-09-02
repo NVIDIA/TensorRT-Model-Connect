@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "parakeet_tdt"
+plugin = "parakeet_tdt"
+test_manifests = ["manifests/parakeet-tdt-0.6b-v3.json"]
+
+[e2e_defaults.speech_to_text]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [{ name = "full_generation", required = true }]
+input_fields = [{ input = "audio", manifest = "test_input_audio" }]
+preflight_asset_fields = ["test_input_audio"]

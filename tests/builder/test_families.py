@@ -20,6 +20,7 @@ import io
 import json
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -186,6 +187,72 @@ def test_nemo_archive_resolution_uses_family_owned_adapters(tmp_path, monkeypatc
         "model_type": "example_nemo",
         "_nemo_archive_path": str(nemo_path),
     }
+
+
+def test_model_dir_resolution_prefers_higher_priority_family_adapter(
+    tmp_path, monkeypatch
+):
+    import tensorrt_model_connect.families as families
+
+    broad = SimpleNamespace(
+        id="broad",
+        model_dir_adapter="broad.py|resolve",
+        model_resolution_priority=0,
+    )
+    specific = SimpleNamespace(
+        id="specific",
+        model_dir_adapter="specific.py|resolve",
+        model_resolution_priority=100,
+    )
+    calls = []
+
+    def load_adapter(meta, _spec):
+        def resolve(_path):
+            calls.append(meta.id)
+            return tmp_path / meta.id
+
+        return resolve
+
+    monkeypatch.setattr(families, "_load_family_metadata", lambda: [broad, specific])
+    monkeypatch.setattr(families, "_load_metadata_callable_from_file", load_adapter)
+
+    resolved = families.resolve_family_model_dir(tmp_path / "model")
+
+    assert resolved == str(tmp_path / "specific")
+    assert calls == ["specific"]
+
+
+def test_nemo_resolution_prefers_higher_priority_family_adapter(
+    tmp_path, monkeypatch
+):
+    import tensorrt_model_connect.families as families
+
+    broad = SimpleNamespace(
+        id="broad",
+        nemo_archive_adapter="broad.py|resolve",
+        model_resolution_priority=0,
+    )
+    specific = SimpleNamespace(
+        id="specific",
+        nemo_archive_adapter="specific.py|resolve",
+        model_resolution_priority=100,
+    )
+    calls = []
+
+    def load_adapter(meta, _spec):
+        def resolve(_path):
+            calls.append(meta.id)
+            return tmp_path / meta.id
+
+        return resolve
+
+    monkeypatch.setattr(families, "_load_family_metadata", lambda: [broad, specific])
+    monkeypatch.setattr(families, "_load_metadata_callable_from_file", load_adapter)
+
+    resolved = families.resolve_nemo_archive_model_dir(tmp_path / "model.nemo")
+
+    assert resolved == str(tmp_path / "specific")
+    assert calls == ["specific"]
 
 
 def test_unknown_nemo_archive_has_no_family_adapter(tmp_path):

@@ -1129,6 +1129,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "nvidia/parakeet-tdt-0.6b-v3",
+      "revision": "541d1f99c6b0c3cd0b11a95167540bb8edefd82b",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "parakeet_tdt",
+      "architectures": [
+        "ParakeetForTDT"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "nvidia/personaplex-7b-v1",
       "revision": "fdaf4090a61cb315c138a1faee287ffd6c716309",
       "revision_source": "declared",

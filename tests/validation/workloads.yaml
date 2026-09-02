@@ -721,6 +721,7 @@ suites:
       - whisper-small-fp16
       - whisper-large-v3-turbo
       - canary-1b-v2
+      - parakeet-tdt-0.6b-v3
     dataset:
       kind: asr_chat_json
       default_path: /mnt/data/librispeech_clean_test/librispeech_clean_test.json
@@ -735,9 +736,11 @@ suites:
       runtime_strategies:
         - whisper_speech_to_text
         - canary_speech_to_text
+        - parakeet_tdt_speech_to_text
       families:
         - whisper
         - canary
+        - parakeet_tdt
       exclude_families:
         - nemotron_speech_streaming
     generation:

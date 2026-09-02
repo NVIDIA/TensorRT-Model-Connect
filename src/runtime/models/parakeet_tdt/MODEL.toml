@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "parakeet_tdt"
+runtime_library = "libtrtmc_model_parakeet_tdt.so"
+runtime_plugins = ["plugin.cpp|register_parakeet_tdt_plugin"]
+runtime_strategies = ["parakeet_tdt_speech_to_text"]
+runtime_tests = [
+  "test_parakeet_tdt_decode_policy|test_parakeet_tdt_decode_policy.cpp|_|_|_",
+  "test_parakeet_tdt_audio_helpers|test_parakeet_tdt_audio_helpers.cpp|_|audio_helpers.cpp|_",
+]
