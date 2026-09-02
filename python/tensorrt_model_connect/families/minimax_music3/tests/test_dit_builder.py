@@ -67,34 +67,37 @@ _TRT = SimpleNamespace(
 )
 
 
+    # np.zeros, not standard_normal: the _TRT.Weights stub records only
+    # np.shape and no assertion reads a value, so drawing production-width
+    # randoms (and the float64 intermediates standard_normal makes) is
+    # pure cost -- 1.12 GB per call here.
 def _weights(layers: int):
-    rng = np.random.default_rng(0)
     w = {
-        "preprocess_conv.weight": rng.standard_normal(
-            (dit.CONCAT_CHANNELS, dit.CONCAT_CHANNELS, 1)).astype(np.float32) * 0.01,
-        "postprocess_conv.weight": rng.standard_normal(
-            (dit.IN_CHANNELS, dit.IN_CHANNELS, 1)).astype(np.float32) * 0.01,
-        "proj_in.weight": rng.standard_normal(
-            (dit.INNER_DIM, dit.CONCAT_CHANNELS)).astype(np.float32) * 0.01,
-        "proj_out.weight": rng.standard_normal(
-            (dit.IN_CHANNELS, dit.INNER_DIM)).astype(np.float32) * 0.01,
+        "preprocess_conv.weight": np.zeros(
+            (dit.CONCAT_CHANNELS, dit.CONCAT_CHANNELS, 1), dtype=np.float32),
+        "postprocess_conv.weight": np.zeros(
+            (dit.IN_CHANNELS, dit.IN_CHANNELS, 1), dtype=np.float32),
+        "proj_in.weight": np.zeros(
+            (dit.INNER_DIM, dit.CONCAT_CHANNELS), dtype=np.float32),
+        "proj_out.weight": np.zeros(
+            (dit.IN_CHANNELS, dit.INNER_DIM), dtype=np.float32),
     }
     for layer in range(layers):
         p = f"transformer_blocks.{layer}"
         for name in ("to_q", "to_k", "to_v"):
-            w[f"{p}.attn.{name}.weight"] = rng.standard_normal(
-                (dit.INNER_DIM, dit.INNER_DIM)).astype(np.float32) * 0.01
-        w[f"{p}.attn.to_out.0.weight"] = rng.standard_normal(
-            (dit.INNER_DIM, dit.INNER_DIM)).astype(np.float32) * 0.01
+            w[f"{p}.attn.{name}.weight"] = np.zeros(
+                (dit.INNER_DIM, dit.INNER_DIM), dtype=np.float32)
+        w[f"{p}.attn.to_out.0.weight"] = np.zeros(
+            (dit.INNER_DIM, dit.INNER_DIM), dtype=np.float32)
         w[f"{p}.norm1.weight"] = np.ones(dit.INNER_DIM, dtype=np.float32)
         w[f"{p}.norm1.bias"] = np.zeros(dit.INNER_DIM, dtype=np.float32)
         w[f"{p}.norm2.weight"] = np.ones(dit.INNER_DIM, dtype=np.float32)
         w[f"{p}.norm2.bias"] = np.zeros(dit.INNER_DIM, dtype=np.float32)
-        w[f"{p}.ff_in.weight"] = rng.standard_normal(
-            (2 * dit.FF_INNER_DIM, dit.INNER_DIM)).astype(np.float32) * 0.01
+        w[f"{p}.ff_in.weight"] = np.zeros(
+            (2 * dit.FF_INNER_DIM, dit.INNER_DIM), dtype=np.float32)
         w[f"{p}.ff_in.bias"] = np.zeros(2 * dit.FF_INNER_DIM, dtype=np.float32)
-        w[f"{p}.ff_out.weight"] = rng.standard_normal(
-            (dit.INNER_DIM, dit.FF_INNER_DIM)).astype(np.float32) * 0.01
+        w[f"{p}.ff_out.weight"] = np.zeros(
+            (dit.INNER_DIM, dit.FF_INNER_DIM), dtype=np.float32)
         w[f"{p}.ff_out.bias"] = np.zeros(dit.INNER_DIM, dtype=np.float32)
     return w
 

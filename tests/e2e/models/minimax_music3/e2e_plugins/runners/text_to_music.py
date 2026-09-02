@@ -12,6 +12,7 @@ the music description travels as music_minimax_music3.caption.
 from __future__ import annotations
 
 import os
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -123,7 +124,10 @@ class TextToMusicRunner:
                     f"{case.name}_generated.wav",
                 )
                 os.makedirs(os.path.dirname(kept), exist_ok=True)
-                os.replace(wav_path, kept)
+                # shutil.move, not os.replace: TMPDIR and the artifacts directory are
+                # often separate mounts in CI, and a cross-device rename
+                # raises EXDEV after a full generation has already run.
+                shutil.move(wav_path, kept)
                 wav_path = kept
             data.update(_describe_wav(wav_path))
             return StageOutput(stage_name=stage.name, data=data)

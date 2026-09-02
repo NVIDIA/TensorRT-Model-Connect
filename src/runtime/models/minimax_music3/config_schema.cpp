@@ -44,6 +44,14 @@ bool is_frame_budget(const std::any& value) {
     return false;
 }
 
+bool is_positive_int(const std::any& value) {
+    return value.type() == typeid(std::int32_t) && std::any_cast<std::int32_t>(value) >= 1;
+}
+
+bool is_positive_float(const std::any& value) {
+    return value.type() == typeid(float) && std::any_cast<float>(value) > 0.0F;
+}
+
 } // namespace
 
 Schema make_music_minimax_music3_schema() {
@@ -59,6 +67,10 @@ Schema make_music_minimax_music3_schema() {
             // text, and every other family writes the literal here too.
             ConfigField{"max_frames", "int32", std::any{std::int32_t{9000}}, session,
                         is_frame_budget},
+            // The checkpoint's own draw; see runtime_config_schema.py for why
+            // these are not substituted for GenerateConfig's defaults.
+            ConfigField{"top_k", "int32", std::any{std::int32_t{50}}, session, is_positive_int},
+            ConfigField{"temperature", "float", std::any{1.0F}, session, is_positive_float},
             ConfigField{"seed", "int64", std::any{std::int64_t{-1}}, session, nullptr},
         },
     };
