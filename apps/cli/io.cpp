@@ -31,11 +31,16 @@ void write_wav(const AudioResult& audio, const std::string& path) {
 
     const auto num_samples = static_cast<std::int32_t>(audio.samples.size());
     const std::int32_t sample_rate = audio.sample_rate;
-    const std::int16_t num_channels = 1;
+    const auto num_channels =
+        static_cast<std::int16_t>(audio.channels > 0 ? audio.channels : 1);
+    if (audio.samples.size() % static_cast<std::size_t>(num_channels) != 0)
+        throw std::runtime_error("write_wav: sample count is not a multiple of the channel count");
     const std::int16_t bits_per_sample = 32;
     const std::int32_t byte_rate = sample_rate * num_channels * (bits_per_sample / 8);
     const auto block_align = static_cast<std::int16_t>(num_channels * (bits_per_sample / 8));
-    const std::int32_t data_size = num_samples * block_align;
+    // num_samples counts interleaved floats rather than frames. Multiplying by
+    // block_align would count channels twice and overstate the data chunk.
+    const std::int32_t data_size = num_samples * (bits_per_sample / 8);
     const std::int32_t chunk_size = 36 + data_size;
     const std::int32_t format_size = 16;
     const std::int16_t audio_format = 3;
@@ -104,6 +109,8 @@ AudioResult read_wav(const std::string& path) {
     const auto channels = std::max<std::int16_t>(num_channels, 1);
     AudioResult result;
     result.sample_rate = sample_rate;
+    // Multi-channel input is downmixed below, so the returned audio is mono.
+    result.channels = 1;
     if (audio_format == 3 && bits_per_sample == 32) {
         const std::size_t count = data.size() / (sizeof(float) * channels);
         result.samples.resize(count);

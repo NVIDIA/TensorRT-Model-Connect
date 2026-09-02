@@ -104,9 +104,13 @@ struct ImageResult {
 };
 
 struct AudioResult {
+    // Interleaved float32 [-1, 1]. `channels` samples share each time step, so
+    // samples.size() == num_samples * channels. Speech families retain the
+    // mono default; stereo families set this to 2.
     std::vector<float> samples;
     std::int32_t num_samples{0};
     std::int32_t sample_rate{24000};
+    std::int32_t channels{1};
 };
 
 struct TranscriptionStreamConfig {
