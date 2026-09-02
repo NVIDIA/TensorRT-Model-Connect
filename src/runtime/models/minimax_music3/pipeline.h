@@ -148,6 +148,34 @@ class MinimaxMusic3TextToMusicPipeline final : public IPipeline {
     void guide_velocity(ITrtModule& dit, TensorMap& inputs, const std::vector<float>& condition,
                         int32_t latent_length, std::vector<float>& guided) const;
 
+    // The frame states the conditioning stage reads: normally the
+    // autoregressive stage's, or, under TRTMC_MM3_FRAME_HIDDEN, ones recorded
+    // elsewhere so a fault in how codes are drawn can be told apart from a
+    // fault in what is done with them.
+    std::vector<float> collect_frame_states(const std::vector<int32_t>& prompt_ids, int32_t frames,
+                                            const GenerateConfig& cfg);
+
+    // The slice of a denoised window that the next one blends its head toward.
+    std::vector<float> carry_overlap(const std::vector<float>& latents,
+                                     int32_t latent_length) const;
+
+    // Append one window's samples, dropping the crops the seams duplicate.
+    void append_window(const std::vector<float>& chunk, std::size_t window,
+                       std::size_t window_count, std::vector<float>& samples) const;
+
+    // The parameters the autoregressive draw runs with, defaulted from the
+    // checkpoint where the request left them unset.
+    static GenerateConfig sampling_config(const GenerateConfig& cfg);
+
+    // Print the drawn semantic codes under TRTMC_MM3_DEBUG. A degenerate loop
+    // shows up here before it shows up in the audio.
+    static void report_semantic_codes(const std::vector<int32_t>& codes, int32_t emitted);
+
+    // Report the first and last denoising step's velocity and latents.
+    static void report_denoise_step(std::size_t index, std::size_t sigma_count,
+                                    const std::vector<float>& guided,
+                                    const std::vector<float>& latents);
+
     // Autoregressive stage. Returns num_codebooks streams of `frames` codes,
     // laid out codebook-major so a window is a contiguous slice per stream,
     // and fills `hidden` with the frame hidden states the condition encoder
