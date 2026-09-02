@@ -19,6 +19,7 @@ MODEL_CALL_FAMILIES = {
     "patchtsmixer",
     "patchtst",
     "phi4_multimodal",
+    "qwen3_embedding",
     "qwen3_omni",
     "qwen_vl",
     "sam",

@@ -738,6 +738,22 @@ entries:
         # Match the Accuracy/TRTMC component contract: FP32 T5 encoder,
         # FP16 DiT inputs, and FP32 DiT outputs/scheduler bindings.
         component_precision_contract: pixart_fp16_dit_fp32_t5
+  - id: qwen3_embedding.embed
+    family: qwen3_embedding
+    operation: embed
+    model: qwen3-embedding-0.6b
+    workload:
+      testcase: qwen3-embedding-retrieval-query
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-embedding
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+      adapter_options:
+        append_eos: true
+        pooling: last_token
   - id: qwen.generate
     family: qwen
     operation: generate

@@ -43,6 +43,7 @@ sample_limits:
   sana_wm_benchmark_diffusion_video: 2
   seedtts_en_tts_intelligibility: 3
   stsbenchmark_encoder_embedding_parity: 50
+  qwen3_embedding_retrieval_query_parity: 1
   vlm_mmmu_pro_vision_fixed_mcq: 5
   vlm_mmmu_pro_vision_mcq: 5
   vbench_t2v_diffusion_video: 2
@@ -247,6 +248,8 @@ models:
     reference_cache_identity: qwen3-0.6b-mmlu-five-shot-v1
   qwen3-4b-instruct-2507:
     workloads: [mmlu_five_shot_mcq]
+  qwen3-embedding-0.6b:
+    workloads: [qwen3_embedding_retrieval_query_parity]
   qwen3-moe-30b-a3b:
     workloads: [mmlu_five_shot_mcq]
   qwen3-omni-30b-a3b-instruct:

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "qwen3_embedding"
+plugin = "qwen3_embedding"
+module = "plugin"
+aliases = [
+  "qwen3_embedding",
+  "qwen3-embedding",
+]
+architecture_patterns = [
+  "Qwen3ForCausalLM",
+]
+hf_allow_patterns = [
+  "modules.json",
+  "1_Pooling/config.json",
+]

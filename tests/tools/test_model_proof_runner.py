@@ -744,6 +744,15 @@ def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -
     assert all(case["ci_tier"] != "l0_only" for case in selection["e2e_cases"])
 
 
+def test_qwen3_embedding_nightly_selects_only_its_owned_case(tmp_path: Path) -> None:
+    selection = _run_test_selection(tmp_path, "qwen3_embedding", "nightly")
+
+    assert selection["suite"] == "nightly"
+    assert [case["name"] for case in selection["e2e_cases"]] == [
+        "qwen3-embedding-retrieval-query"
+    ]
+
+
 @pytest.mark.parametrize(
     ("family", "expected_family_tests"),
     (

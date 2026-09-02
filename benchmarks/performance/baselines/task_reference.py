@@ -1181,10 +1181,71 @@ def _load_vlm(
     return Session(invoke, _resolved_revision(arguments, model), "transformers")
 
 
+def _ensure_final_eos(
+    torch: Any,
+    inputs: Mapping[str, Any],
+    *,
+    eos_token_id: int,
+) -> dict[str, Any]:
+    """Append EOS to the single performance request when it is not final."""
+    prepared = dict(inputs)
+    input_ids = prepared["input_ids"]
+    attention_mask = prepared.get(
+        "attention_mask", torch.ones_like(input_ids)
+    )
+    if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+        raise ValueError("embedding performance input must contain one token row")
+    positions = torch.arange(attention_mask.shape[1], device=attention_mask.device).unsqueeze(0)
+    last_index = int(positions.masked_fill(attention_mask == 0, -1).max().item())
+    if last_index < 0:
+        raise ValueError("embedding performance input has no valid token")
+    if int(input_ids[0, last_index]) == int(eos_token_id):
+        prepared["attention_mask"] = attention_mask
+        return prepared
+    input_ids = input_ids[:, : last_index + 1]
+    attention_mask = attention_mask[:, : last_index + 1]
+    eos = torch.full(
+        (1, 1),
+        int(eos_token_id),
+        dtype=input_ids.dtype,
+        device=input_ids.device,
+    )
+    prepared["input_ids"] = torch.cat([input_ids, eos], dim=1)
+    prepared["attention_mask"] = torch.cat(
+        [attention_mask, torch.ones_like(eos, dtype=attention_mask.dtype)], dim=1
+    )
+    return prepared
+
+
+def _pool_embedding(
+    torch: Any,
+    hidden: Any,
+    attention_mask: Any,
+    *,
+    pooling: str = "mean",
+) -> Any:
+    if bool((attention_mask.sum(dim=1) <= 0).any()):
+        raise ValueError("embedding performance input has an empty mask row")
+    if pooling == "last_token":
+        positions = torch.arange(
+            attention_mask.shape[1], device=attention_mask.device
+        ).unsqueeze(0)
+        last_indices = positions.masked_fill(attention_mask == 0, -1).max(dim=1).values
+        vector = hidden[
+            torch.arange(hidden.shape[0], device=hidden.device), last_indices
+        ]
+    elif pooling == "mean":
+        mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
+        vector = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+    else:
+        raise ValueError(f"unsupported embedding pooling mode: {pooling!r}")
+    return torch.nn.functional.normalize(vector, p=2, dim=-1)
+
+
 def _load_embedding(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
-    _options: Mapping[str, Any],
+    options: Mapping[str, Any],
 ) -> Session:
     import torch
     from transformers import AutoModel, AutoTokenizer
@@ -1196,10 +1257,16 @@ def _load_embedding(
         .eval()
         .to(device)
     )
-    inputs = _to_device(
-        tokenizer(str(request.get("prompt", "")), return_tensors="pt", truncation=True),
-        device,
+    inputs = tokenizer(
+        str(request.get("prompt", "")), return_tensors="pt", truncation=True
     )
+    if bool(options.get("append_eos", False)):
+        eos_token_id = getattr(model.config, "eos_token_id", None)
+        if eos_token_id is None:
+            raise ValueError("embedding adapter append_eos requires model.config.eos_token_id")
+        inputs = _ensure_final_eos(torch, inputs, eos_token_id=int(eos_token_id))
+    inputs = _to_device(inputs, device)
+    pooling = str(options.get("pooling", "mean"))
 
     def invoke() -> Mapping[str, Any]:
         with torch.inference_mode():
@@ -1207,10 +1274,15 @@ def _load_embedding(
         hidden = getattr(outputs, "last_hidden_state", None)
         if hidden is None:
             hidden = outputs.hidden_states[-1]
-        mask = inputs.get("attention_mask", torch.ones(hidden.shape[:2], device=device))
-        mask = mask.unsqueeze(-1).to(hidden.dtype)
-        vector = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        vector = torch.nn.functional.normalize(vector, p=2, dim=-1)
+        attention_mask = inputs.get(
+            "attention_mask", torch.ones(hidden.shape[:2], device=device)
+        )
+        vector = _pool_embedding(
+            torch,
+            hidden,
+            attention_mask,
+            pooling=pooling,
+        )
         summary = _tensor_summary(vector)
         summary.update(
             {

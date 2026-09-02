@@ -66,6 +66,17 @@ except ImportError:
         cudart = None  # type: ignore[assignment]
 
 
+def _runtime_config_base(source: bytes | None, config: ModelConfig) -> dict:
+    """Return public runtime configuration without build-private metadata."""
+    if source is not None:
+        return json.loads(source)
+    return {
+        key: value
+        for key, value in config.raw.items()
+        if not str(key).startswith("_")
+    }
+
+
 class _OmittedMaxCacheLength(int):
     """Preserve the public 256 default while detecting an omitted argument."""
 
@@ -1587,7 +1598,7 @@ def build_bundle(
         )
 
     def make_runtime_config_json(source: bytes | None) -> bytes:
-        cfg_dict = json.loads(source) if source is not None else dict(config.raw)
+        cfg_dict = _runtime_config_base(source, config)
         _apply_generation_config_eos(model_dir_path, cfg_dict)
         runtime_strategy = getattr(plugin, "runtime_strategy", None)
         if runtime_strategy:

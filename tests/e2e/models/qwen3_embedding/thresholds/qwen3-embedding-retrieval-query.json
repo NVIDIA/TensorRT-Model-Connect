@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "cosine_similarity": 0.99,
+    "l2_distance": 0.1,
+    "embedding_norm_tolerance": 0.001
+  }
+}

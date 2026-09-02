@@ -1559,6 +1559,35 @@ suites:
         gates:
           min_vector_cosine: 0.95
 
+  - id: qwen3_embedding_retrieval_query_parity
+    description: >
+      Qwen3 embedding parity for the official instruction-prefixed retrieval
+      query contract. The independent HF reference and native runtime reuse the
+      Qwen3-Embedding-owned last-token pooling, final-EOS, L2-normalization, and numerical
+      comparator contracts instead of the mean-pooled STS encoder workload.
+    user_contract: embedding_vector
+    task_type: Text to Embedding
+    default_model_names: [qwen3-embedding-0.6b]
+    dataset:
+      kind: model_plugin_json
+      default_path: tests/e2e/models/qwen3_embedding/validation/qwen3-embedding-0.6b.json
+    selectors:
+      model_names: [qwen3-embedding-0.6b]
+      task_strategies: [embedding]
+      runtime_strategies: [qwen_embedding]
+      user_contracts: [embedding_vector]
+      families: [qwen3_embedding]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Single-GPU native-reference consistency. Numerical gates remain owned
+        by the Qwen testcase threshold sidecar and are not weakened here.
+
   - id: beir_scifact_reranking
     description: >
       Per-query HF-versus-TRTMC ranking parity on the BEIR SciFact test split.

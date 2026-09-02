@@ -1,0 +1,27 @@
+{
+  "name": "qwen3-embedding-0.6b",
+  "hf_id": "Qwen/Qwen3-Embedding-0.6B",
+  "hf_revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+  "bundle": "qwen3-embedding-0.6b.bundle",
+  "family": "qwen3_embedding",
+  "runtime_strategy": "qwen_embedding",
+  "task_strategy": "embedding",
+  "precision": "bf16",
+  "max_cache_length": 512,
+  "testcases": [
+    {
+      "name": "qwen3-embedding-retrieval-query",
+      "trace_id": "IT-E2E-QWEN3-EMBED-01",
+      "reference_precision": "bf16",
+      "reference_family": "qwen3_embedding",
+      "user_contract": "embedding_vector",
+      "prompt": "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:What is the capital of China?",
+      "metadata": {
+        "modality": "text",
+        "pooling": "last_token",
+        "normalization": "l2",
+        "input_contract": "Instruct: {instruction}\\nQuery:{query}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": "trtmc.model-plugin-validation/v1",
+  "dataset": "Qwen3 embedding query parity",
+  "version": "1",
+  "requests": [
+    {
+      "sample_id": "qwen3-embedding-retrieval-query",
+      "testcase": "qwen3-embedding-retrieval-query",
+      "stage": "full_inference",
+      "category": "retrieval-query",
+      "inputs": {}
+    }
+  ]
+}

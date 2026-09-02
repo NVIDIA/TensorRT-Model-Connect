@@ -268,6 +268,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "Qwen/Qwen3-Embedding-0.6B",
+      "revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "qwen3",
+      "architectures": [
+        "Qwen3ForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
       "revision": "26291f793822fb6be9555850f06dfe95f2d7e695",
       "revision_source": "declared",

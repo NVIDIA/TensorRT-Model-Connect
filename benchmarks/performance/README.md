@@ -20,9 +20,9 @@ The suite contains one row for every release-relevant single-process model
 profile marked `ready` in the benchmark catalog. Profiles whose names contain an
 `l0` segment are shorter PR-smoke duplicates and are deliberately excluded.
 Other temporary omissions must be named under `excluded_profiles` with a reason.
-The suite currently has 107 model-profile comparisons across 77 families and 78
+The suite currently has 108 model-profile comparisons across 78 families and 79
 `(family, operation)` contracts because some families expose multiple profiles
-and `eagle_vlm` exposes both `embed` and `rerank`. Catalog profiles marked
+and some families expose multiple operations. Catalog profiles marked
 `distributed` require their own multi-process launch and are not silently
 included in this single-GPU matrix.
 
