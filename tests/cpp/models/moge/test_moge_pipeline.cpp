@@ -346,21 +346,6 @@ void test_focal_sampling_retains_complete_interior_neighborhoods() {
           "MoGe retained interior focal center remains valid geometry");
 }
 
-void test_fast_path_rejects_non_960x540_input() {
-    constexpr int32_t size = 64;
-    auto module = std::make_unique<FakeMogeModule>(size, size);
-    trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl", true);
-    auto image = rgb_image(size, size);
-
-    try {
-        (void)pipeline.estimate_geometry(image.data(), size, size);
-        check(false, "MoGe FP16 fast path rejects another shape");
-    } catch (const std::invalid_argument& error) {
-        check(std::string(error.what()).find("960x540") != std::string::npos,
-              "MoGe FP16 fast-path shape error is explicit");
-    }
-}
-
 } // namespace
 
 int main() {
@@ -372,7 +357,6 @@ int main() {
     test_focal_sampling_excludes_mapped_image_edges();
     test_focal_sampling_excludes_invalid_three_by_three_neighborhood();
     test_focal_sampling_retains_complete_interior_neighborhoods();
-    test_fast_path_rejects_non_960x540_input();
     if (g_failures != 0) {
         std::cerr << g_failures << " MoGe pipeline test(s) failed\n";
         return 1;

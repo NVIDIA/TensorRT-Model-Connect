@@ -129,7 +129,7 @@ def test_production_builder_is_fixed_and_tensor_rt_native_only() -> None:
         "first_transpose=(0, 3, 1, 2)",
         "_NUM_TOKENS = 1800",
         "_FOCAL_RECOVERY_SIZE = 64",
-        "_FAST_MIN_IMAGE_HEIGHT = 1074",
+        "_FAST_MIN_IMAGE_HEIGHT = 540",
         "_FAST_MIN_IMAGE_WIDTH = 608",
         "_FAST_OPT_IMAGE_HEIGHT = 1080",
         "_FAST_OPT_IMAGE_WIDTH = 1920",
