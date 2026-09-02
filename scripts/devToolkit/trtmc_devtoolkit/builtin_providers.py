@@ -206,6 +206,7 @@ def _docker_inspect(runner: Runner, repository: Path, container: str) -> dict[st
 _CONTAINER_PROBE_SCRIPT = r"""
 import ctypes
 import ctypes.util
+import itertools
 import json
 import os
 import platform
@@ -227,8 +228,7 @@ if cuda_match is None:
 cuda_root = Path(nvcc).resolve().parent.parent
 cuda_libraries = []
 for name in ("libcudart.so", "libcublas.so", "libcurand.so"):
-    matches = [path for path in cuda_root.rglob(name) if path.is_file()]
-    cuda_libraries.append(bool(matches))
+    cuda_libraries.append(any(path.is_file() for path in cuda_root.rglob(name)))
 cuda_complete = (cuda_root / "include" / "cuda.h").is_file() and all(cuda_libraries)
 
 configured_library = os.environ.get("TRTMC_TRT_LIBRARY")
@@ -251,12 +251,15 @@ library_path = str(Path(configured_library).resolve()) if configured_library els
 if not library_path and mapped:
     library_path = str(Path(mapped[0]).resolve())
 
-header_candidates = []
 configured_include = os.environ.get("TRTMC_TRT_INCLUDE_DIR") or os.environ.get("TRT_INC_DIR")
-if configured_include:
-    header_candidates.append(Path(configured_include) / "NvInferVersion.h")
-header_candidates.extend(Path("/usr/include").glob("**/NvInferVersion.h"))
-header_candidates.extend(Path("/usr/local").glob("**/NvInferVersion.h"))
+configured_headers = (
+    (Path(configured_include) / "NvInferVersion.h",) if configured_include else ()
+)
+header_candidates = itertools.chain(
+    configured_headers,
+    Path("/usr/include").rglob("NvInferVersion.h"),
+    Path("/usr/local").rglob("NvInferVersion.h"),
+)
 header = next((path for path in header_candidates if path.is_file()), None)
 if header is None:
     raise RuntimeError("NvInferVersion.h is not available")
@@ -430,16 +433,16 @@ class DockerExecutionContext:
                 return str(PurePosixPath(str(context.locator["target_state"])) / value.path)
             return str(value.path)
 
+        environment = {**dict(context.environment), **dict(command.environment)}
         arguments = ["docker", "exec", "--workdir", render(command.cwd)]
-        for name, value in sorted(
-            {**dict(context.environment), **dict(command.environment)}.items()
-        ):
-            arguments.extend(["--env", f"{name}={value}"])
+        for name in sorted(environment):
+            arguments.extend(["--env", name])
         arguments.append(str(context.locator["container"]))
         arguments.extend(render(argument) for argument in command.arguments)
         return runner.run(
             arguments,
             cwd=repository,
+            env=environment,
             check=check,
             capture_output=capture_output,
         )

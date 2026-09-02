@@ -422,6 +422,33 @@ def test_local_doctor_rejects_tensorrt_header_version_mismatch(
         EnvironmentDoctor(repository, LocalProbeRunner()).inspect(request, cohort, "aarch64")
 
 
+def test_local_doctor_reports_invalid_tensorrt_header_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_tensorrt_path_overrides(monkeypatch)
+    repository = _minimal_repository(tmp_path)
+    cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
+    include_dir = tmp_path / "include"
+    include_dir.mkdir()
+    (include_dir / "NvInferVersion.h").write_bytes(b"\xff")
+    architecture = replace(
+        cohort.architectures["aarch64"],
+        tensorrt_include_dir=str(include_dir),
+        tensorrt_library_dir=str(tmp_path / "lib"),
+    )
+    cohort = replace(cohort, architectures={"aarch64": architecture})
+    request = PrepareRequest(
+        tensorrt="11.1.0.106",
+        cuda="13.3",
+        architecture="aarch64",
+        target=LocalTarget(python="python3.12", dependency_mode="system"),
+    )
+
+    with pytest.raises(DevToolkitError, match="tensorrt-headers"):
+        EnvironmentDoctor(repository, LocalProbeRunner()).inspect(request, cohort, "aarch64")
+
+
 def test_system_local_build_uses_the_tensorrt_path_validated_by_doctor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -851,6 +878,34 @@ def test_legacy_environment_state_survives_source_revisions(tmp_path: Path) -> N
     assert first.environment_id == second.environment_id
     assert first.state_dir == second.state_dir
     assert first.run_id != second.run_id
+
+
+def test_legacy_environment_identity_uses_normalized_architecture(tmp_path: Path) -> None:
+    repository = _minimal_repository(tmp_path)
+    toolkit = DevToolkit.from_checkout(
+        repository,
+        state_root=tmp_path / "runs",
+        source_revision_override="a" * 40,
+    )
+    implicit = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.1.0.106",
+            cuda="13.3",
+            architecture=None,
+            target=LocalTarget(),
+        )
+    )
+    explicit = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.1.0.106",
+            cuda="13.3",
+            architecture=normalize_architecture(None),
+            target=LocalTarget(),
+        )
+    )
+
+    assert implicit.environment_id == explicit.environment_id
+    assert implicit.run_id != explicit.run_id
 
 
 def test_rejects_invalid_source_revision_override(tmp_path: Path) -> None:

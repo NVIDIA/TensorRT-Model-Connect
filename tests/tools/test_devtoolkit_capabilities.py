@@ -78,6 +78,7 @@ class BuiltinProbeRunner:
 class DockerAdoptionRunner:
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
+        self.environments: list[dict[str, str] | None] = []
 
     def run(
         self,
@@ -89,9 +90,10 @@ class DockerAdoptionRunner:
         capture_output=False,
         timeout=None,
     ):
-        del cwd, env, check, capture_output, timeout
+        del cwd, check, capture_output, timeout
         arguments = [str(item) for item in command]
         self.commands.append(arguments)
+        self.environments.append(dict(env) if env is not None else None)
         if arguments[:2] == ["docker", "inspect"]:
             output = json.dumps(
                 {
@@ -187,6 +189,26 @@ class CommandRecordingRunner:
         if arguments[0] == "sha256sum":
             output = f"{'c' * 64}  {arguments[1]}\n"
         return subprocess.CompletedProcess(arguments, 0, output, "")
+
+
+class NonzeroCommandRunner:
+    def __init__(self) -> None:
+        self.checks: list[bool] = []
+
+    def run(
+        self,
+        command,
+        *,
+        cwd,
+        env=None,
+        check=True,
+        capture_output=False,
+        timeout=None,
+    ):
+        del cwd, env, capture_output, timeout
+        arguments = [str(item) for item in command]
+        self.checks.append(check)
+        return subprocess.CompletedProcess(arguments, 7, "", "expected failure")
 
 
 class SecretEchoFailureRunner:
@@ -580,6 +602,37 @@ def test_provision_rejects_a_different_toolchain_provider_implementation(
         toolkit.provision(lock)
 
 
+def test_provision_records_failure_when_locked_provider_is_not_registered(
+    tmp_path: Path,
+) -> None:
+    original = ProviderRegistry()
+    original.register_context(StaticLocalContext())
+    original.register_toolchain(ExistingToolchainSource())
+    lock = DevToolkit.from_checkout(tmp_path, providers=original.freeze()).resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+    missing_toolchain = ProviderRegistry()
+    missing_toolchain.register_context(StaticLocalContext())
+    state_root = tmp_path / "state"
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=state_root,
+        providers=missing_toolchain.freeze(),
+    )
+
+    with pytest.raises(DevToolkitError, match="Unknown toolchain source provider"):
+        toolkit.provision(lock)
+
+    state_dir = state_root / "environments" / lock.lock_id
+    failure = json.loads((state_dir / "provision-failure.json").read_text(encoding="utf-8"))
+    assert failure["error_type"] == "DevToolkitError"
+    assert not (state_dir / "provision-receipt.json").exists()
+
+
 def test_builtin_docker_provider_adopts_a_probed_campaign_container(
     tmp_path: Path,
 ) -> None:
@@ -604,6 +657,35 @@ def test_builtin_docker_provider_adopts_a_probed_campaign_container(
     assert environment.context.locator["container"] == "jedha-campaign"
     assert environment.observation.tensorrt_native_version == "11.0.2.2"
     assert not any(command[:2] == ["docker", "run"] for command in runner.commands)
+
+
+def test_docker_command_forwards_environment_without_values_in_argv(tmp_path: Path) -> None:
+    runner = DockerAdoptionRunner()
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        runner=runner,
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.0.2.2",
+            target=ExecutionTarget.docker(container="jedha-campaign"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock, policy=ProvisionPolicy.ADOPT_ONLY)
+
+    toolkit.run(
+        environment,
+        CommandSpec(("trtmc", "version"), environment={"TOKEN": "super-secret"}),
+    )
+
+    assert "super-secret" not in " ".join(runner.commands[-1])
+    assert any(
+        pair == ("--env", "TOKEN")
+        for pair in zip(runner.commands[-1], runner.commands[-1][1:], strict=False)
+    )
+    assert runner.environments[-1] == {"TOKEN": "super-secret"}
 
 
 def test_generic_command_is_routed_by_the_execution_context(tmp_path: Path) -> None:
@@ -641,6 +723,32 @@ def test_generic_command_is_routed_by_the_execution_context(tmp_path: Path) -> N
     assert receipt["schema_version"] == 2
     assert receipt["environment_id"] == environment.environment_id
     assert receipt["occurrence_id"] != receipt["invocation_digest"]
+
+
+def test_run_trtmc_forwards_check_policy(tmp_path: Path) -> None:
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(ExistingToolchainSource())
+    runner = NonzeroCommandRunner()
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+        runner=runner,
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock)
+
+    result = toolkit.run_trtmc(environment, ("version",), check=False)
+
+    assert result.returncode == 7
+    assert runner.checks == [False]
 
 
 def test_command_failure_receipt_does_not_serialize_environment_values(
@@ -823,6 +931,53 @@ def test_invalid_optional_qualification_metadata_does_not_gate_resolution(
     assert toolkit.resolve(request).qualifications == ()
     with pytest.raises(DevToolkitError, match="Invalid qualification"):
         toolkit.resolve(replace(request, require_qualification=True))
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        ("python_versions", "3.12"),
+        ("architectures", "aarch64"),
+        ("targets", "local"),
+    ),
+)
+def test_qualification_rejects_string_in_place_of_collection(
+    tmp_path: Path,
+    field: str,
+    invalid: str,
+) -> None:
+    presets = tmp_path / "presets"
+    presets.mkdir()
+    payload = {
+        "schema_version": 1,
+        "id": "malformed",
+        "status": "supported",
+        "targets": ["local"],
+        "tensorrt": {"version": "11.2.0.113"},
+        "cuda": {"version": "12.8"},
+        "python_versions": ["3.12"],
+        "architectures": {"aarch64": {}},
+    }
+    payload[field] = invalid
+    (presets / "malformed.json").write_text(json.dumps(payload), encoding="utf-8")
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(ExistingToolchainSource())
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        providers=registry.freeze(),
+        qualification_roots=(presets,),
+    )
+
+    with pytest.raises(DevToolkitError, match="Invalid qualification"):
+        toolkit.resolve(
+            EnvironmentRequest(
+                tensorrt="11.2.0.113",
+                target=ExecutionTarget("test-local"),
+                architecture="aarch64",
+                require_qualification=True,
+            )
+        )
 
 
 def test_builtin_managed_source_accepts_arbitrary_trt_with_pinned_artifacts(

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -91,7 +92,7 @@ class ExecutionContext(Protocol):
         runner: Runner,
         check: bool,
         capture_output: bool,
-    ): ...
+    ) -> subprocess.CompletedProcess[str]: ...
 
 
 @dataclass(frozen=True)

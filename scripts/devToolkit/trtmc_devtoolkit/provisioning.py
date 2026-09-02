@@ -121,9 +121,9 @@ class EnvironmentProvisioner:
         state_dir = self.state_root / "environments" / lock.lock_id
         state_dir.mkdir(parents=True, exist_ok=True)
         write_json(state_dir / "environment-lock.json", lock.as_dict())
-        context_provider = self.providers.context(lock.context.provider.name)
-        toolchain_provider = self.providers.toolchain(lock.toolchain.provider.name)
         try:
+            context_provider = self.providers.context(lock.context.provider.name)
+            toolchain_provider = self.providers.toolchain(lock.toolchain.provider.name)
             if context_provider.descriptor != lock.context.provider:
                 raise AttestationFailed(
                     "Registered execution context provider does not match the environment lock"

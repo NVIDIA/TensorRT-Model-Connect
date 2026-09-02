@@ -135,12 +135,14 @@ class DevToolkit:
         arguments: Sequence[CommandArgument],
         *,
         executable: str = "trtmc",
+        check: bool = True,
         capture_output: bool = False,
     ) -> CommandResult:
         """Run arbitrary TRTMC CLI arguments without interpreting model semantics."""
         return self.run(
             environment,
             CommandSpec((executable, *arguments)),
+            check=check,
             capture_output=capture_output,
         )
 

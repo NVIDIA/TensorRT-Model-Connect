@@ -68,6 +68,7 @@ def environment_fingerprint(
     request_payload = asdict(request)
     request_payload.pop("model", None)
     request_payload.pop("mode", None)
+    request_payload.pop("architecture", None)
     payload = {
         "schema_version": 2,
         "cohort": cohort_id,

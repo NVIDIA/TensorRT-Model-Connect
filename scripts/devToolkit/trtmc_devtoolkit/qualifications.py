@@ -79,9 +79,18 @@ class QualificationRegistry:
             status = payload.get("status", "qualified")
             tensorrt = payload["tensorrt"]["version"]
             cuda = payload["cuda"]["version"]
-            python_versions = tuple(payload["python_versions"])
-            architectures = tuple(payload["architectures"])
-            targets = tuple(payload["targets"])
+            raw_python_versions = payload["python_versions"]
+            raw_architectures = payload["architectures"]
+            raw_targets = payload["targets"]
+            if not isinstance(raw_python_versions, list):
+                raise TypeError("python_versions must be an array")
+            if not isinstance(raw_architectures, (list, dict)):
+                raise TypeError("architectures must be an array or object")
+            if not isinstance(raw_targets, list):
+                raise TypeError("targets must be an array")
+            python_versions = tuple(raw_python_versions)
+            architectures = tuple(raw_architectures)
+            targets = tuple(raw_targets)
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
             raise DevToolkitError(f"Invalid qualification record {path}: {error}") from error
         values = (name, status, tensorrt, cuda, *python_versions, *architectures, *targets)

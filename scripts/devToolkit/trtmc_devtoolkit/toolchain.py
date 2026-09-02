@@ -266,7 +266,6 @@ class ManagedLocalProvisioner:
             cudart_library=cudart,
             cublas_library=cublas,
         )
-        self.verify(plan, python, toolchain)
         return toolchain
 
     def _prepare_headers(

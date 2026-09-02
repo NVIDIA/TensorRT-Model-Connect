@@ -187,7 +187,7 @@ class EnvironmentDoctor:
             else:
                 try:
                     header_version = tensorrt_header_version(header)
-                except (DevToolkitError, OSError) as error:
+                except (DevToolkitError, OSError, UnicodeDecodeError) as error:
                     header_result = ProbeResult("tensorrt-headers", "fail", str(error))
                 else:
                     status = "pass" if header_version == cohort.tensorrt_version else "fail"
