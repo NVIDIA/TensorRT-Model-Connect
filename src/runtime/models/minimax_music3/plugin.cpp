@@ -91,6 +91,45 @@ MinimaxMusic3Config read_config(const PipelineContext& context) {
     config.language_model_layers =
         extract_json_int(json, "language_model_layers", config.language_model_layers);
 
+    // The bundle writes these, so a bad value is a build defect -- but the
+    // runtime divides by several of them and steps a loop by another, so it
+    // has to say which key was wrong instead of dividing by zero, spinning
+    // forever, or wrapping an unsigned subtraction.
+    const auto require_positive = [](const char* key, std::int32_t value) {
+        if (value <= 0)
+            throw std::runtime_error(std::string("MiniMax-Music3 bundle config ") + key +
+                                     " must be positive, got " + std::to_string(value));
+    };
+    const auto require_non_negative = [](const char* key, std::int32_t value) {
+        if (value < 0)
+            throw std::runtime_error(std::string("MiniMax-Music3 bundle config ") + key +
+                                     " must not be negative, got " + std::to_string(value));
+    };
+    require_positive("sampling_rate", config.sampling_rate);
+    require_positive("output_channels", config.output_channels);
+    require_positive("latent_hop_length", config.latent_hop_length);
+    require_positive("chunk_latent_length", config.chunk_latent_length);
+    require_positive("chunk_frames", config.chunk_frames);
+    require_positive("chunk_hop", config.chunk_hop);
+    require_positive("latent_channels", config.latent_channels);
+    require_positive("condition_dim", config.condition_dim);
+    require_positive("condition_streams", config.condition_streams);
+    require_positive("frame_hidden_width", config.frame_hidden_width);
+    require_positive("num_codebooks", config.num_codebooks);
+    require_positive("num_residual_codebooks", config.num_residual_codebooks);
+    require_positive("audio_vocab_size", config.audio_vocab_size);
+    require_positive("max_audio_frames", config.max_audio_frames);
+    require_positive("default_inference_steps", config.default_inference_steps);
+    require_positive("guidance_branches", config.guidance_branches);
+    require_positive("language_model_hidden_size", config.language_model_hidden_size);
+    require_positive("language_model_kv_width", config.language_model_kv_width);
+    require_positive("language_model_vocab_size", config.language_model_vocab_size);
+    require_positive("language_model_layers", config.language_model_layers);
+    require_non_negative("crop_left_latent", config.crop_left_latent);
+    require_non_negative("crop_right_latent", config.crop_right_latent);
+    if (config.crop_left_latent + config.crop_right_latent >= config.chunk_latent_length)
+        throw std::runtime_error("MiniMax-Music3 bundle config crops remove the whole window");
+
     // The request's own namespace. The caption is the music description; the
     // lyrics travel in the prompt, because the task contract scores a
     // transcript against that field.
@@ -100,6 +139,9 @@ MinimaxMusic3Config read_config(const PipelineContext& context) {
         config.max_frames =
             context.runtime_config->get<std::int32_t>("music_minimax_music3", "max_frames");
         config.seed = context.runtime_config->get<std::int64_t>("music_minimax_music3", "seed");
+        config.top_k = context.runtime_config->get<std::int32_t>("music_minimax_music3", "top_k");
+        config.temperature =
+            context.runtime_config->get<float>("music_minimax_music3", "temperature");
     } else {
         config.max_frames = config.max_audio_frames;
     }

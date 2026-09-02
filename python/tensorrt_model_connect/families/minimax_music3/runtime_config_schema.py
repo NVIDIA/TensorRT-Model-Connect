@@ -52,8 +52,36 @@ SCHEMA = Schema(
             type_tag="int32",
             default=9000,  # MAX_AUDIO_FRAMES, spelled out to match the C++ side
             allowed_layers=_SESSION,
+            # bool is a subclass of int, so True would otherwise be accepted
+            # and silently mean "one frame".
             validator=lambda value: (
-                isinstance(value, int) and 1 <= value <= MAX_AUDIO_FRAMES
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and 1 <= value <= MAX_AUDIO_FRAMES
+            ),
+        ),
+        # The checkpoint's own draw. These live here rather than being
+        # substituted for GenerateConfig's defaults, because GenerateConfig has
+        # no "unset" value: its top_k defaults to 1, which is also how a caller
+        # spells greedy. Rewriting it would make greedy unrequestable.
+        ConfigField(
+            name="top_k",
+            type_tag="int32",
+            default=50,  # AR_SAMPLING_TOP_K
+            allowed_layers=_SESSION,
+            validator=lambda value: (
+                isinstance(value, int) and not isinstance(value, bool) and value >= 1
+            ),
+        ),
+        ConfigField(
+            name="temperature",
+            type_tag="float",
+            default=1.0,
+            allowed_layers=_SESSION,
+            validator=lambda value: (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value > 0.0
             ),
         ),
         ConfigField(

@@ -33,6 +33,7 @@ from .config import ModelConfig
 from .language_model import (
     HIDDEN_SIZE,
     INTERMEDIATE_SIZE,
+    MAX_POSITION_EMBEDDINGS,
     NUM_ATTENTION_HEADS,
     NUM_HIDDEN_LAYERS,
     NUM_KEY_VALUE_HEADS,
@@ -59,7 +60,13 @@ PRESENT_V_PATTERN = "present_v_{i}"
 #: cache has to span both. Neither bound is arbitrary: the prompt cap is
 #: prompt_format.MAX_PROMPT_TOKENS and the frame cap is
 #: pipeline_spec.MAX_AUDIO_FRAMES, both taken from the reference.
-DEFAULT_MAX_CACHE_LENGTH = MAX_PROMPT_TOKENS + MAX_AUDIO_FRAMES
+#:
+#: Their sum is 14,000, but the checkpoint only has 10,240 trained positions
+#: (``language_model/config.json``), so the two caps cannot both be reached.
+#: The cache stops at the position table: a longer one would let a long prompt
+#: plus a full-length generation run the model past the positions it knows.
+#: The runtime reports the overrun by name when a request would cross it.
+DEFAULT_MAX_CACHE_LENGTH = min(MAX_PROMPT_TOKENS + MAX_AUDIO_FRAMES, MAX_POSITION_EMBEDDINGS)
 
 
 def model_config() -> ModelConfig:
@@ -88,7 +95,11 @@ def build_engine(tensors: dict, *, max_cache_length: int = DEFAULT_MAX_CACHE_LEN
     config = model_config()
     if num_layers is not None:
         config.num_hidden_layers = num_layers
-    weights = build_weight_dict(tensors, num_layers=config.num_hidden_layers)
+    # precision has to reach the weight dict: without it every projection
+    # widens to float32, which is ~35 GB for this stack and defeats the
+    # mitigation language_model_weights documents.
+    weights = build_weight_dict(tensors, num_layers=config.num_hidden_layers,
+                                precision=precision)
     return build_standard_decoder_engine(
         config,
         weights,
@@ -118,21 +129,38 @@ def expected_io_shapes(max_cache_length: int = DEFAULT_MAX_CACHE_LENGTH,
 
     The engine is a single-token decode step: one id in, one row of logits out,
     with the prefix living in the cache rather than in the input.
+
+    These mirror what ``build_standard_decoder_engine`` actually emits, which
+    is not the same as the obvious guess:
+
+    * ``attention_mask`` is ``max_cache_length + 1`` wide, not
+      ``max_cache_length``. The step attends over ``concat(cache, current)``,
+      so the token being decoded is the last column.
+    * the caches are rank 2, ``(rows, kv_width)`` -- there is no batch axis.
+    * ``present_*`` is **one row**, the key and value for the token just
+      decoded, not an updated cache. The runtime owns the history and copies
+      that row into ``cache[position]``.
+    * ``embed_input=True`` adds ``input_embed`` and ``use_input_embed``: a
+      frame is eight codes and a token id carries one, so the depth stage
+      feeds an embedding back instead of an id.
     """
 
     head_dim = HIDDEN_SIZE // NUM_ATTENTION_HEADS
     kv_width = NUM_KEY_VALUE_HEADS * head_dim
     shapes: dict = {
         TOKEN_INPUT: (1,),
+        EMBED_INPUT: (1, HIDDEN_SIZE),
+        USE_EMBED_INPUT: (1,),
         POSITION_INPUT: (1,),
-        ATTENTION_MASK_INPUT: (1, max_cache_length),
+        ATTENTION_MASK_INPUT: (1, max_cache_length + 1),
         LOGITS_OUTPUT: (1, VOCAB_SIZE),
         HIDDEN_STATES_OUTPUT: (1, HIDDEN_SIZE),
     }
     for layer in range(num_layers):
-        cache = (1, max_cache_length, kv_width)
+        cache = (max_cache_length, kv_width)
+        present = (1, kv_width)
         shapes[CACHE_K_PATTERN.format(i=layer)] = cache
         shapes[CACHE_V_PATTERN.format(i=layer)] = cache
-        shapes[PRESENT_K_PATTERN.format(i=layer)] = cache
-        shapes[PRESENT_V_PATTERN.format(i=layer)] = cache
+        shapes[PRESENT_K_PATTERN.format(i=layer)] = present
+        shapes[PRESENT_V_PATTERN.format(i=layer)] = present
     return shapes

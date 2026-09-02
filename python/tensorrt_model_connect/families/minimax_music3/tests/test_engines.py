@@ -58,9 +58,17 @@ def test_language_model_io_is_a_cached_decode_step() -> None:
     assert io[lme.POSITION_INPUT] == (1,)
     assert io[lme.LOGITS_OUTPUT] == (1, 200000)
     assert io[lme.HIDDEN_STATES_OUTPUT] == (1, 4096)
-    # One cache pair per layer, each spanning the compiled cache length.
-    assert io["cache_k_0"] == (1, lme.DEFAULT_MAX_CACHE_LENGTH, 1024)
-    assert io["present_v_35"] == (1, lme.DEFAULT_MAX_CACHE_LENGTH, 1024)
+    # A frame is eight codes and a token id carries one, so the depth stage
+    # feeds an embedding back rather than an id.
+    assert io[lme.EMBED_INPUT] == (1, 4096)
+    assert io[lme.USE_EMBED_INPUT] == (1,)
+    # The mask spans concat(cache, current), so it is one wider than the cache.
+    assert io[lme.ATTENTION_MASK_INPUT] == (1, lme.DEFAULT_MAX_CACHE_LENGTH + 1)
+    # The cache is rank 2 -- no batch axis -- and spans the compiled length.
+    assert io["cache_k_0"] == (lme.DEFAULT_MAX_CACHE_LENGTH, 1024)
+    # present_* is the single row for the token just decoded, not a cache: the
+    # runtime owns the history and copies this row into cache[position].
+    assert io["present_v_35"] == (1, 1024)
 
 
 def test_every_engine_names_a_checkpoint_component() -> None:
