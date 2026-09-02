@@ -69,10 +69,10 @@ def test_dynamic_text_profile_preserves_the_537_token_maximum() -> None:
 def test_dynamic_media_profile_preserves_124_and_345_frame_endpoints() -> None:
     profile = SOL_ENGINE_1344X768_124_TO_345F
 
-    assert profile.video_row_profile == (21312, 37296, 108576)
+    assert profile.video_row_profile == (18870, 37296, 108576)
     assert profile.audio_row_profile == (414, 414, 1150)
     assert profile.text_row_profile == (1, 128, 2641)
-    assert profile.packed_row_profile == (21727, 37838, 112367)
+    assert profile.packed_row_profile == (19285, 37838, 112367)
     assert profile.padded_sequence_length == profile.sequence_length
     profile.validate()
 
@@ -155,9 +155,7 @@ def test_main_passes_cli_workspace_to_every_builder(
             ("build_keyframe_vae_encoder_engine", "fl2va_keyframe_vae_encoder.plan"),
         ),
         "vae_builder": (("build_vae_tile_decoder_engine", "vae_tile_decoder.plan"),),
-        "audio_vae_builder": (
-            ("build_audio_vae_decoder_engine", "audio_vae_decoder.plan"),
-        ),
+        "audio_vae_builder": (("build_audio_vae_decoder_engine", "audio_vae_decoder.plan"),),
     }
     package = "tensorrt_model_connect.families.minimax_h3"
     for module_name, builders in module_specs.items():

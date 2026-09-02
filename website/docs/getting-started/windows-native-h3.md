@@ -20,9 +20,13 @@ One bundle can expose these workflows:
 The target is 24 fps with 32 kHz stereo audio. Target frames follow the video
 VAE's `17 * n + 5` alignment. A nominal five-second request uses 120 requested
 frames and produces 124 frames (5.167 seconds); the longest local aligned
-request is 345 frames (14.375 seconds). Canvases are multiples of 32, cover
-aspect ratios from 1:4 through 4:1, use a 768-pixel short edge where the public
-pixel budget permits it, and are capped at the 768x1344 pixel budget.
+request is 345 frames (14.375 seconds). The finite native TensorRT profile
+accepts all 95 canvases emitted by the public resolver (multiples of 32, trained
+aspect ratios from 1:4 through 4:1, a 768-pixel short edge where the
+`768x1344` pixel budget permits it), plus the official explicit performance
+canvas `--height 544 --width 960` and its transpose. Other explicit
+multiple-of-32 canvases accepted by the eager Diffusers API are not silently
+generalized: the native runtime rejects them before plan execution.
 
 Ref2VA preserves argument order and enforces the released limits: at most 9
 images, 3 videos, 3 explicit audio files, and 12 files total. Each video or
@@ -30,6 +34,12 @@ explicit audio reference is 2--15 seconds; total video duration and total
 explicit-audio duration are each at most 15 seconds. An audio reference may be
 the only reference modality. A video's soundtrack remains attached to that
 video reference and does not consume the explicit-audio count or duration quota.
+The Windows media reader scales video directly onto that aspect ratio's bounded
+H3 resolver canvas and drops source rates above 24 fps before allocating float
+frames; source-rate metadata above 240 fps fails closed. Reference presentation
+timestamps remain strictly bounded to 15 seconds. Native MP3/AAC encoder
+priming and tail padding are trimmed at that boundary without admitting a real
+over-15-second presentation.
 
 This integration intentionally does not implement H3-Context-IR or
 H3-Regenerate-2K. They are separate services, not H3-Base checkpoint
@@ -161,14 +171,65 @@ $Package = 'D:\artifacts\MiniMax-H3-Windows'
 if ($LASTEXITCODE -ne 0) { throw 'Native package failed' }
 ```
 
+By default, packaging makes an independent copy of the bundle. The package is
+therefore unaffected if the build bundle is later modified, but the packaging
+step needs one additional bundle-sized allocation (about 238 GiB for the
+qualified bundle). On a space-constrained release machine, explicitly consume
+the build artifact with a same-volume atomic rename:
+
+```powershell
+& .\scripts\package_windows_h3.ps1 `
+    -BuildDirectory $BuildRoot `
+    -BundlePath $Bundle `
+    -OutputDirectory $Package `
+    -ConsumeBundle
+```
+
+`-ConsumeBundle` never falls back to copy-and-delete and fails if the input and
+package are on different volumes. Its use removes the original `$Bundle` path;
+after the move, the only copy is
+`$Package\payload\models\MiniMax-H3.bundle`. If a later package validation
+fails, recover or reuse the bundle from that exact package path. The default
+mode never consumes its input, and neither mode creates a hard link.
+
+After creating `payload.manifest`, the package step stamps those exact bytes as
+an RCDATA resource in the outer `MiniMaxH3Setup.exe`. Setup rejects an external
+manifest that differs by even one byte before parsing it, so changing a payload
+and recomputing the adjacent manifest is not sufficient. This anchor establishes
+authenticity only when users trust the exact outer Setup: release engineering
+must Authenticode-sign the stamped Setup and/or publish its official SHA-256.
+An unsigned Setup downloaded without an independently authenticated SHA does
+not protect against replacement of the entire Setup, manifest, and payload.
+
 Double-click `MiniMaxH3Setup.exe` in that directory. The installer verifies
-the SHA-256 manifest before a transactional per-user install, registers
-`trtmc.exe`, and adds its `bin` directory to the user PATH unless `--no-path`
-is selected. The default bundle path after installation is:
+the SHA-256 manifest before and after an independent transactional copy,
+registers `trtmc.exe`, and adds its `bin` directory to the user PATH unless
+`--no-path` is selected. Replacement uses same-directory staging, backup, and
+recovery renames. If a commit or final verification fails, the prior backup is
+restored first; a locked tree is preserved at the exact recovery path reported
+by Setup instead of being silently deleted. The installed bundle is never
+hard-linked to the mutable package layout, so installation requires free space
+at least equal to the packaged payload.
+
+Install and uninstall mutations for the same current user and canonical
+destination are serialized across Windows login and RDP sessions. A competing
+Setup waits for at most 30 minutes, then exits with an exact timeout diagnostic;
+an abandoned owner is acquired so the fixed recovery paths can be repaired
+under the same lock. `--help` and `--verify-only` remain lock-free because they
+do not mutate an installation.
+
+The default bundle path after installation is:
 
 ```text
 %LOCALAPPDATA%\Programs\ModelConnect\MiniMax-H3\models\MiniMax-H3.bundle
 ```
+
+Setup exit code `0` means both the verified files and Windows registration
+completed. Exit code `1` means the file transaction failed. Exit code `2` is an
+explicit partial success: the verified runtime files are committed and usable
+at the exact CLI path shown by Setup, but App Paths, uninstall metadata, or the
+user PATH could not be fully registered. Registry writes are not claimed to be
+atomic; rerun Setup to retry them.
 
 ## Generate video through ModelConnect
 
@@ -186,6 +247,15 @@ trtmc generate-video $Bundle `
     --prompt 'A cinematic sunrise over a mountain lake with synchronized birds and wind.' `
     --num-frames 120 --height 768 --width 1344 --seed 0 `
     --output .\t2va-5s.mp4
+```
+
+T2VA on the official smaller Diffusers performance canvas:
+
+```powershell
+trtmc generate-video $Bundle `
+    --prompt 'A close tracking shot with synchronized footsteps and city ambience.' `
+    --num-frames 120 --height 544 --width 960 --seed 0 `
+    --output .\t2va-960x544.mp4
 ```
 
 T2VA, longest aligned local output:
@@ -218,6 +288,8 @@ trtmc generate-video $Bundle `
 ```
 
 `--reference-video` accepts a native MP4 or a ModelConnect video directory.
+`--reference-audio` accepts MP3, WAV, and other audio files supported by Windows
+Media Foundation; decoding does not require FFmpeg or a Python runtime.
 MP4 output is written directly with H.264 video and, when generation succeeds,
 one AAC stereo 32 kHz audio stream. The CLI prints separate pipeline-load,
 input-decode, generation, media-write, and total timing fields to stderr.

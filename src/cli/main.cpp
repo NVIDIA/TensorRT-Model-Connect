@@ -32,8 +32,12 @@
 
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
+#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
+#include "cli/minimax_h3_video_contract.h"
+#endif
 #include "cli/speech_session_helpers.h"
 #include "cli/windows_media.h"
+#include "runtime/backend/runtime_cache_control.h"
 #if defined(_WIN32)
 #include "cli/windows_utf8_argv.h"
 #endif
@@ -183,6 +187,11 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
 
 std::unique_ptr<trtmc::IPipeline> load_pipeline(const CliArgs& args) {
     return trtmc::load(args.bundle_path, make_load_options(args), args.kernel_bindings_path);
+}
+
+void finalize_runtime_cache(trtmc::IPipeline& pipeline) {
+    if (auto* control = dynamic_cast<trtmc::IRuntimeCacheControl*>(&pipeline))
+        control->finalize_runtime_cache();
 }
 
 void preload_cli_config_schema_owner(const CliArgs& args) {
@@ -999,7 +1008,7 @@ trtmc::VideoGenerationRequest make_video_generation_request(const CliArgs& args,
         }
         case trtmc::cli::VideoReferenceArgKind::kAudio: {
             reference.kind = trtmc::VideoReferenceKind::kAudio;
-            reference.audio = trtmc::io::read_wav_interleaved(argument.path);
+            reference.audio = trtmc::cli::read_audio_file(argument.path);
             const double seconds =
                 audio_duration_seconds(reference.audio, "reference audio " + argument.path);
             validate_reference_duration(seconds, "reference audio " + argument.path);
@@ -1134,11 +1143,20 @@ int cmd_generate_video(const CliArgs& args) {
         std::cerr << "Error: generate-video requires bundle + --prompt\n";
         return EXIT_FAILURE;
     }
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+    // Defense in depth for callers that construct CliArgs without parse_args().
+    // Installed runtime-only builds have one output contract: a native MP4 file.
+    if (args.output_dir.empty() || !trtmc::cli::is_mp4_path(args.output_dir)) {
+        std::cerr << "Error: runtime-only generate-video requires --output OUTPUT.mp4\n";
+        return EXIT_FAILURE;
+    }
+#endif
     if (args.benchmark < 0 || args.warmup < 0) {
         std::cerr << "Error: generate-video --benchmark and --warmup must be non-negative\n";
         return EXIT_FAILURE;
     }
 
+#if !defined(TRTMC_RUNTIME_ONLY_CLI)
     std::optional<std::size_t> png_worker_override;
     if (const char* raw = std::getenv("TRTMC_PNG_WRITE_WORKERS"); raw != nullptr && *raw != '\0') {
         errno = 0;
@@ -1150,9 +1168,14 @@ int cmd_generate_video(const CliArgs& args) {
         }
         png_worker_override = static_cast<std::size_t>(parsed);
     }
+#endif
 
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+    const std::string out_dir = args.output_dir;
+#else
     const std::string out_dir =
         args.output_dir.empty() ? default_temp_output("trtmc_generate_video") : args.output_dir;
+#endif
 
     const auto total_begin = std::chrono::steady_clock::now();
     const auto load_begin = total_begin;
@@ -1188,16 +1211,15 @@ int cmd_generate_video(const CliArgs& args) {
     int32_t expected_h3_height = 0;
     int32_t expected_h3_width = 0;
     if (require_h3_contract) {
-        const int64_t requested_frames =
-            request.config.video_num_frames > 0 ? request.config.video_num_frames : 124;
-        const int64_t aligned_frames = requested_frames + ((5 - (requested_frames % 17) + 17) % 17);
-        if (aligned_frames > std::numeric_limits<int32_t>::max()) {
-            std::cerr << "Error: MiniMax-H3 aligned frame count overflows int32\n";
-            return EXIT_FAILURE;
-        }
-        expected_h3_frames = static_cast<int32_t>(aligned_frames);
-        expected_h3_height = request.config.height > 0 ? request.config.height : 768;
-        expected_h3_width = request.config.width > 0 ? request.config.width : 1344;
+#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
+        const auto contract = trtmc::cli::resolve_minimax_h3_video_contract(request);
+        expected_h3_frames = contract.num_frames;
+        expected_h3_height = contract.height;
+        expected_h3_width = contract.width;
+#else
+        std::cerr << "Error: this CLI was not built with the MiniMax-H3 video contract\n";
+        return EXIT_FAILURE;
+#endif
     }
     const auto validate_iteration = [&](const char* phase, int index) {
         VideoResultValidation checked;
@@ -1269,9 +1291,16 @@ int cmd_generate_video(const CliArgs& args) {
         if (!validate_iteration("generation", 0))
             return EXIT_FAILURE;
     }
+    // The cache is process-shared and can still be updated by resident RTX
+    // contexts. Finalization synchronizes and releases those contexts before
+    // serializing; any failure reaches run_cli's exception boundary and makes
+    // the command return non-zero instead of silently claiming success.
+    finalize_runtime_cache(*pipeline);
     const auto& frames = result.frames;
+#if !defined(TRTMC_RUNTIME_ONLY_CLI)
     const auto num_frames = final_validation.num_frames;
     const auto frame_pixels = final_validation.frame_pixels;
+#endif
     const bool has_audio = final_validation.has_audio;
 
     std::cout << "Generated video: " << frames.width << "x" << frames.height << " ("
@@ -1306,6 +1335,12 @@ int cmd_generate_video(const CliArgs& args) {
         return EXIT_SUCCESS;
     }
 
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+    // is_mp4_path() is checked before pipeline load as well. Keep this closed
+    // fallback in case the output dispatch is changed independently later.
+    std::cerr << "Error: runtime-only generate-video cannot emit a frame directory\n";
+    return EXIT_FAILURE;
+#else
     // Create output directory (including parents) if it doesn't exist.
     std::filesystem::create_directories(out_dir);
 
@@ -1453,6 +1488,7 @@ int cmd_generate_video(const CliArgs& args) {
               << " media_write_ms=" << output_ms << " total_ms=" << total_ms << '\n';
 
     return EXIT_SUCCESS;
+#endif
 }
 
 int cmd_segment(const CliArgs& args) {

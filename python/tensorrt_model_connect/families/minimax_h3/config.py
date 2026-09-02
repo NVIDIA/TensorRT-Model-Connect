@@ -5,7 +5,8 @@
 
 The fixed profile preserves the 124-frame, 1344x768 shape used by the public
 Sol-Engine H3 benchmark.  The production media profile covers every released
-5--15 second geometry and the public continuous 1:4--4:1 canvas resolver.
+5--15 second geometry, the public continuous 1:4--4:1 canvas resolver, and the
+documented explicit 960x544 performance canvas in both orientations.
 Structural row counts are explicit because prompt/media packing is part of
 the engine ABI and must match the Hugging Face reference.
 """
@@ -28,7 +29,7 @@ AUDIO_LATENT_FRAMES_MAX = 575
 VIDEO_NUM_FRAMES_MIN = 124
 VIDEO_NUM_FRAMES_OPT = 124
 VIDEO_NUM_FRAMES_MAX = 345
-VIDEO_ROWS_MIN = 21_312
+VIDEO_ROWS_MIN = 18_870
 VIDEO_ROWS_OPT = 37_296
 TARGET_VIDEO_ROWS_MAX = 106_488
 VIDEO_ROWS_MAX = 108_576
@@ -37,6 +38,10 @@ CANVAS_SHORT_EDGE = 768
 CANVAS_MAX_PIXELS = 768 * 1344
 CANVAS_MIN_ASPECT_RATIO = 0.25
 CANVAS_MAX_ASPECT_RATIO = 4.0
+# Extra explicit Diffusers performance canvas, stored as (height, width). The
+# TensorRT runtime remains a finite allowlist: these two orientations are in
+# addition to, not a replacement for, the 95 resolver-produced canvases.
+NATIVE_EXPLICIT_CANVAS_SIZES = ((544, 960), (960, 544))
 FASTH3_SCHEDULER_GRID_POINTS = 5
 FASTH3_TRANSFORMER_FORWARDS = 4
 FASTH3_GUIDANCE_SCALE = 1.0
@@ -82,7 +87,9 @@ FASTH3_SEGMENTED_DENOISER_PLAN_FILENAMES = (
 )
 
 
-def native_plan_filenames(*, first_block_cache: bool, segmented_vsa: bool = False) -> tuple[str, ...]:
+def native_plan_filenames(
+    *, first_block_cache: bool, segmented_vsa: bool = False
+) -> tuple[str, ...]:
     """Return the exact plan set selected by the native denoiser profile."""
 
     if not isinstance(first_block_cache, bool):
@@ -201,8 +208,7 @@ class MiniMaxH3Config:
         """Segment-pure ``text | audio`` tile counts for the dynamic ABI."""
 
         return tuple(
-            self._ceil_div(text, FASTH3_VSA_TILE_SIZE)
-            + self._ceil_div(audio, FASTH3_VSA_TILE_SIZE)
+            self._ceil_div(text, FASTH3_VSA_TILE_SIZE) + self._ceil_div(audio, FASTH3_VSA_TILE_SIZE)
             for text, audio in zip(self.text_row_profile, self.audio_row_profile, strict=True)
         )
 
@@ -277,11 +283,14 @@ class MiniMaxH3Config:
             raise ValueError("MiniMax-H3 video rows must satisfy 0 < min <= opt <= max")
         if not 0 < self.min_audio_rows <= self.opt_audio_rows <= self.audio_rows:
             raise ValueError("MiniMax-H3 audio rows must satisfy 0 < min <= opt <= max")
-        if any(value is not None for value in (
-            self.min_vsa_video_tiles,
-            self.opt_vsa_video_tiles,
-            self.max_vsa_video_tiles,
-        )):
+        if any(
+            value is not None
+            for value in (
+                self.min_vsa_video_tiles,
+                self.opt_vsa_video_tiles,
+                self.max_vsa_video_tiles,
+            )
+        ):
             vsa_tiles = self.vsa_video_tile_profile
             if not 0 < vsa_tiles[0] <= vsa_tiles[1] <= vsa_tiles[2]:
                 raise ValueError("MiniMax-H3 VSA video tiles must satisfy 0 < min <= opt <= max")

@@ -24,6 +24,13 @@
 
 static int failures = 0;
 
+class DummyPlugin final : public trtmc::IPipelinePlugin {
+  public:
+    std::unique_ptr<trtmc::IPipeline> create(const trtmc::PipelineContext&) override {
+        return nullptr;
+    }
+};
+
 static void check(bool condition, const char* name) {
     if (!condition) {
         std::cerr << "FAIL: " << name << std::endl;
@@ -230,6 +237,27 @@ static void test_strict_loading_requires_an_explicit_directory() {
 #endif
 }
 #else
+static DummyPlugin g_untrusted_h3_plugin;
+
+static void test_locked_registry_rejects_untrusted_first_writer() {
+    const auto* sample = first_index_entry();
+    check(sample != nullptr, "plugin index has entry before locked registry attack check");
+    if (sample == nullptr)
+        return;
+
+    auto& registry = trtmc::PipelineRegistry::instance();
+    bool rejected = false;
+    try {
+        registry.register_plugin(sample->runtime_strategy, &g_untrusted_h3_plugin);
+    } catch (const std::runtime_error& error) {
+        rejected =
+            std::string(error.what()).find("outside its trusted loader") != std::string::npos;
+    }
+    check(rejected, "locked registry rejects an untrusted H3 first writer");
+    check(registry.lookup(sample->runtime_strategy) == nullptr,
+          "untrusted H3 first writer cannot poison the registry");
+}
+
 static void test_locked_loading_uses_only_the_packaged_path() {
     const auto* sample = first_index_entry();
     check(sample != nullptr, "plugin index has entry before locked-load check");
@@ -260,6 +288,28 @@ static void test_locked_loading_uses_only_the_packaged_path() {
               "locked loader explains rejected plugin override");
     }
     check(override_rejected, "locked loader rejects explicit plugin path after loading");
+}
+
+static void test_locked_registry_rejects_post_load_replacement() {
+    const auto* sample = first_index_entry();
+    check(sample != nullptr, "plugin index has entry before replacement attack check");
+    if (sample == nullptr)
+        return;
+
+    auto& registry = trtmc::PipelineRegistry::instance();
+    auto* trusted = registry.lookup(sample->runtime_strategy);
+    check(trusted != nullptr && trusted != &g_untrusted_h3_plugin,
+          "trusted packaged H3 plugin owns the sealed strategy");
+    bool rejected = false;
+    try {
+        registry.register_plugin(sample->runtime_strategy, &g_untrusted_h3_plugin);
+    } catch (const std::runtime_error& error) {
+        rejected =
+            std::string(error.what()).find("outside its trusted loader") != std::string::npos;
+    }
+    check(rejected, "locked registry rejects post-load H3 replacement");
+    check(registry.lookup(sample->runtime_strategy) == trusted,
+          "post-load replacement cannot change the sealed H3 plugin");
 }
 #endif
 
@@ -310,7 +360,9 @@ int main(int argc, char** argv) {
     test_registry_does_not_eager_register_models();
     test_unknown_strategy_reports_clean_error();
 #if defined(TRTMC_LOCKED_H3_RUNTIME)
+    test_locked_registry_rejects_untrusted_first_writer();
     test_locked_loading_uses_only_the_packaged_path();
+    test_locked_registry_rejects_post_load_replacement();
 #else
     test_strict_loading_requires_an_explicit_directory();
 #endif

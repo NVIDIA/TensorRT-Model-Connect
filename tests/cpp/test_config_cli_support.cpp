@@ -396,6 +396,22 @@ void test_runtime_resolution_sidecar_policy(std::string tmp_dir) {
 #endif
 }
 
+void test_runtime_resolution_failure_policy() {
+    register_demo_schema();
+    const auto resolve_invalid_override = [] {
+        return trtmc::detail::resolve_runtime_config(
+            R"({"defaults":{"triattention":{"kv_budget":4096}}})", "bundle.bundle", "",
+            {"triattention.kv_budget=not_a_number"});
+    };
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    expect_throws([&] { (void)resolve_invalid_override(); }, "triattention.kv_budget",
+                  "locked runtime resolution: invalid override fails closed");
+#else
+    check(!resolve_invalid_override().has_value(),
+          "normal runtime resolution: invalid override retains best-effort fallback");
+#endif
+}
+
 // ---- bundle defaults: block ------------------------------------------------
 
 void test_extract_bundle_defaults_finds_block() {
@@ -549,6 +565,7 @@ int main() {
     test_bundle_to_effective_json_contains_source();
     test_try_write_effective_config_reports_unwritable_sidecar();
     test_runtime_resolution_survives_unwritable_effective_config_sidecar();
+    test_runtime_resolution_failure_policy();
 
     test_extract_bundle_defaults_finds_block();
     test_extract_bundle_defaults_absent_block();

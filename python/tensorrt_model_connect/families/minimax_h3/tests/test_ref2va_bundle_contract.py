@@ -78,7 +78,7 @@ def test_bundle_metadata_requires_strict_transformer_ref_identity() -> None:
     assert metadata["ref2va_shared_sections"]["text_encoder"] == "text_encoder_plan"
     assert metadata["ref2va_shared_qwen_profiles"]["vision_encoder_plan"][
         "patch_rows_per_call"
-    ] == [2_304, 4_032, 65_536]
+    ] == [2_040, 4_032, 65_536]
     assert metadata["ref2va_shared_qwen_profiles"]["text_encoder_plan"]["sequence_rows"] == [
         1,
         1_144,
@@ -93,7 +93,7 @@ def test_bundle_metadata_requires_strict_transformer_ref_identity() -> None:
     assert abis["ref2va_denoiser_plan"]["inputs"][0] == {
         "name": "video_hidden_states",
         "dtype": "float32",
-        "min_shape": [25_408, 96],
+        "min_shape": [18_870, 96],
         "opt_shape": [44_592, 96],
         "max_shape": [364_608, 96],
     }

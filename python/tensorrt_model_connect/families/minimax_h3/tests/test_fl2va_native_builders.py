@@ -83,6 +83,7 @@ def test_keyframe_vae_tile_geometry_matches_reference() -> None:
     assert latent_tile_axis(1344).starts == (0, 11, 22, 33, 44, 56, 68)
     assert latent_tile_axis(1344).overlaps == (5, 5, 5, 5, 4, 4)
     assert keyframe_tile_count(768, 1344) == 28
+    assert keyframe_tile_count(544, 960) == 15
     with pytest.raises(ValueError, match="at least 256"):
         keyframe_tile_count(128, 512)
     assert len(LATENTS_MEAN) == len(LATENTS_STD) == 24
@@ -91,8 +92,12 @@ def test_keyframe_vae_tile_geometry_matches_reference() -> None:
 def test_qwen_grid_and_fl2va_presentation_rows() -> None:
     assert qwen_vision_patch_rows(768, 1344) == 4032
     assert qwen_vision_token_rows(768, 1344) == 1008
+    assert qwen_vision_patch_rows(544, 960) == 2040
+    assert qwen_vision_token_rows(544, 960) == 510
     assert fl2va_text_rows(128, 1, height=768, width=1344) == 1144
     assert fl2va_text_rows(128, 2, height=768, width=1344) == 2160
+    assert fl2va_text_rows(128, 1, height=544, width=960) == 646
+    assert fl2va_text_rows(128, 2, height=544, width=960) == 1164
 
 
 def test_qwen_fl2va_mrope_runs_are_exact() -> None:
@@ -151,6 +156,32 @@ def test_dynamic_duration_and_packed_row_accounting() -> None:
         1150,
         102816,
     )
+    explicit_first = packed_rows(
+        prompt_tokens=128,
+        keyframes=1,
+        height=544,
+        width=960,
+        num_frames=124,
+    )
+    assert (
+        explicit_first.text,
+        explicit_first.condition_video,
+        explicit_first.target_audio,
+        explicit_first.target_video,
+    ) == (646, 510, 414, 18_870)
+    explicit_both = packed_rows(
+        prompt_tokens=128,
+        keyframes=2,
+        height=544,
+        width=960,
+        num_frames=345,
+    )
+    assert (
+        explicit_both.text,
+        explicit_both.condition_video,
+        explicit_both.target_audio,
+        explicit_both.target_video,
+    ) == (1_164, 1_020, 1_150, 52_020)
     assert last_keyframe_rotary_time(2160, 345) == pytest.approx(2733.3333333333335)
 
 
@@ -162,6 +193,10 @@ def test_plan_abis_are_dynamic_compact_and_shared() -> None:
     assert vae.inputs[0].opt_shape[0] == 28
     assert vae.inputs[0].max_shape[0] == 33
     assert vae.outputs[0].max_shape == (33, 48, 1, 16, 16)
+
+    default_vision = vision_encoder_abi()
+    assert default_vision.inputs[0].min_shape == (2_040, 1_536)
+    assert default_vision.outputs[0].min_shape == (510, 5_120)
 
     vision = vision_encoder_abi(VisionEncoderProfile(4, 8, 16))
     assert vision.filename == "vision_encoder.plan"

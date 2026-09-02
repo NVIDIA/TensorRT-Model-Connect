@@ -42,8 +42,19 @@ class IFileBackedBackend {
                             std::uint64_t plan_size, const char* expected_sha256,
                             const ModuleCreateOptions& options,
                             const std::vector<ModuleExternalBinding>& external_bindings,
-                            std::int64_t weight_streaming_budget_bytes,
-                            bool retain_engine) = 0;
+                            std::int64_t weight_streaming_budget_bytes, bool retain_engine) = 0;
+};
+
+// Optional capability for backends that own a process-shared JIT runtime
+// cache. Windows deliberately keeps backend DSOs alive until process exit, so
+// callers need an explicit, loader-lock-free persistence point.
+class IRuntimeCacheBackend {
+  public:
+    virtual ~IRuntimeCacheBackend();
+    virtual std::uint64_t acquire_runtime_cache_lease(const char* path) = 0;
+    // Releasing the final lease persists the cache. It may throw so an
+    // explicit pipeline finalization can report serialization or I/O failure.
+    virtual void release_runtime_cache_lease(std::uint64_t lease) = 0;
 };
 
 } // namespace trtmc

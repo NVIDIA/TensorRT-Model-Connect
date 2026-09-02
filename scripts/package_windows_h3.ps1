@@ -22,7 +22,11 @@ param(
     [string]$BundlePath,
 
     [Parameter(Mandatory = $true)]
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+
+    # Save one bundle-sized allocation by atomically moving the input bundle
+    # into the package. This is opt-in because it consumes BundlePath.
+    [switch]$ConsumeBundle
 )
 
 Set-StrictMode -Version Latest
@@ -44,14 +48,84 @@ function Copy-PayloadFile {
     Copy-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
 }
 
-function Link-OrCopyLargeFile {
+if (-not ('TrtmcPackage.NativeMethods' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace TrtmcPackage {
+    public static class NativeMethods {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr BeginUpdateResource(string fileName, bool deleteExisting);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool UpdateResource(IntPtr update, IntPtr type, IntPtr name,
+                                                 ushort language, byte[] data, uint size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EndUpdateResource(IntPtr update, bool discard);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool MoveFileEx(string existingName, string newName, uint flags);
+    }
+}
+'@
+}
+
+function Move-BundleIntoPackage {
     param([string]$Source, [string]$Destination)
     $parent = Split-Path -Parent $Destination
     [IO.Directory]::CreateDirectory($parent) | Out-Null
+    if ([IO.File]::Exists($Destination)) {
+        throw "Bundle package destination already exists: $Destination"
+    }
+    # Flags=0 is a rename-only Win32 move. It fails across volumes and never
+    # falls back to copy-then-delete, so the source is consumed atomically.
+    if (-not [TrtmcPackage.NativeMethods]::MoveFileEx($Source, $Destination, 0)) {
+        $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Unable to atomically consume bundle. BundlePath and OutputDirectory must be on the same volume. Windows error $code; source='$Source'; destination='$Destination'"
+    }
+}
+
+function Set-EmbeddedManifestResource {
+    param([string]$SetupPath, [string]$ManifestPath)
+    $bytes = [IO.File]::ReadAllBytes($ManifestPath)
+    if ($bytes.Length -eq 0) {
+        throw "Refusing to stamp an empty payload manifest: $ManifestPath"
+    }
+    $update = [TrtmcPackage.NativeMethods]::BeginUpdateResource($SetupPath, $false)
+    if ($update -eq [IntPtr]::Zero) {
+        $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Unable to open Setup for manifest resource stamping. Windows error $code; path='$SetupPath'"
+    }
+    $ended = $false
     try {
-        New-Item -ItemType HardLink -Path $Destination -Target $Source -ErrorAction Stop | Out-Null
+        $resourceType = [IntPtr]10 # RT_RCDATA
+        $resourceName = [IntPtr]241 # kPayloadManifestResourceId
+        if (-not [TrtmcPackage.NativeMethods]::UpdateResource(
+                $update, $resourceType, $resourceName, 0, $bytes,
+                [Convert]::ToUInt32($bytes.Length))) {
+            $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "Unable to stamp the payload manifest into Setup. Windows error $code; setup='$SetupPath'; manifest='$ManifestPath'"
+        }
+        if (-not [TrtmcPackage.NativeMethods]::EndUpdateResource($update, $false)) {
+            $ended = $true
+            $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "Unable to commit the Setup manifest resource. Windows error $code; setup='$SetupPath'"
+        }
+        $ended = $true
     } catch {
-        Copy-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+        $primary = $_.Exception.Message
+        if (-not $ended) {
+            if (-not [TrtmcPackage.NativeMethods]::EndUpdateResource($update, $true)) {
+                $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw "$primary; resource rollback also failed with Windows error $code; setup='$SetupPath'"
+            }
+        }
+        throw $primary
     }
 }
 
@@ -116,6 +190,19 @@ function Assert-NativeDependencyBoundary {
         'windowscodecs.dll' = $true
         'ws2_32.dll' = $true
     }
+    $forbiddenProcessImports = @(
+        '(?im)\bCreateProcess(?:A|W)?\b',
+        '(?im)\bCreateProcessAsUser(?:A|W)?\b',
+        '(?im)\bCreateProcessWithToken(?:A|W)?\b',
+        '(?im)\bCreateProcessWithLogon(?:A|W)?\b',
+        '(?im)\bNtCreateUserProcess\b',
+        '(?im)\bRtlCreateUserProcess\b',
+        '(?im)\bShellExecute(?:Ex)?(?:A|W)?\b',
+        '(?im)\bWinExec\b',
+        '(?im)\b_popen\b',
+        '(?im)\b_(?:w)?spawn[a-z0-9_]*\b',
+        '(?im)\bsystem\b'
+    )
     foreach ($file in $PeFiles) {
         $dumpbinOutput = @(& dumpbin.exe /dependents $file 2>&1)
         if ($LASTEXITCODE -ne 0) {
@@ -140,6 +227,25 @@ function Assert-NativeDependencyBoundary {
                 continue
             }
             throw "Unapproved runtime dependency '$import' found in $file"
+        }
+
+        # DLL-name checks alone would not catch a future direct process-launch
+        # import from an otherwise allowed Windows system DLL. TensorRT-RTX is
+        # the one vendor binary exception: it currently imports CreateProcessW,
+        # but the locked runtime establishes and tests a one-process Job before
+        # loading it. ModelConnect-owned executables and DLLs get no exception.
+        $fileName = [IO.Path]::GetFileName($file).ToLowerInvariant()
+        if ($fileName -notmatch '^tensorrt_rtx_[0-9_]+\.dll$') {
+            $importsOutput = @(& dumpbin.exe /imports $file 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw "dumpbin import-symbol scan failed: $file"
+            }
+            $importsText = $importsOutput -join [Environment]::NewLine
+            foreach ($pattern in $forbiddenProcessImports) {
+                if ($importsText -match $pattern) {
+                    throw "Forbidden process-launch import '$($Matches[0])' found in $file"
+                }
+            }
         }
     }
 }
@@ -264,7 +370,15 @@ Copy-PayloadFile $Backend (Join-Path $PayloadRoot "bin\trtmc_backend_trt_rtx.dll
 Copy-PayloadFile $RtxRuntime (Join-Path $PayloadRoot ("bin\" + [IO.Path]::GetFileName($RtxRuntime)))
 Copy-PayloadFile $ModelPlugin `
     (Join-Path $PayloadRoot "bin\trtmc\models\minimax_h3\trtmc_model_minimax_h3.dll")
-Link-OrCopyLargeFile $Bundle (Join-Path $PayloadRoot "models\MiniMax-H3.bundle")
+$PackagedBundle = Join-Path $PayloadRoot "models\MiniMax-H3.bundle"
+if ($ConsumeBundle) {
+    Move-BundleIntoPackage $Bundle $PackagedBundle
+    Write-Warning "BundlePath was atomically consumed. The only package-owned copy is now '$PackagedBundle'."
+} else {
+    # The release package owns independent bytes. Never hard-link the large
+    # bundle to a mutable build artifact.
+    Copy-PayloadFile $Bundle $PackagedBundle
+}
 
 foreach ($legalName in @("LICENSE", "NOTICE")) {
     $legalPath = Join-Path $RepositoryRoot $legalName
@@ -289,11 +403,16 @@ foreach ($file in $PayloadFiles) {
 $ManifestPath = Join-Path $OutputRoot "payload.manifest"
 [IO.File]::WriteAllText($ManifestPath, (($Rows -join "`n") + "`n"), $Utf8NoBom)
 
+# Anchor the exact external manifest bytes into the package's outer Setup.
+# Release Authenticode signing (and publication of the official Setup SHA-256)
+# happens after this resource update.
+$PackagedSetup = Join-Path $OutputRoot "MiniMaxH3Setup.exe"
+Set-EmbeddedManifestResource $PackagedSetup $ManifestPath
+
 # Validate through the exact SHA-256-manifested package layout. The locked
 # runtime discovers only the backend next to trtmc.exe and the fixed
 # bin/trtmc/models/minimax_h3 plugin path; no loader override is accepted.
 $PackagedCli = Join-Path $PayloadRoot "bin\trtmc.exe"
-$PackagedBundle = Join-Path $PayloadRoot "models\MiniMax-H3.bundle"
 Assert-RuntimeOnlyCli $PackagedCli
 Assert-CompleteMiniMaxH3Bundle $PackagedCli $PackagedBundle
 
@@ -306,7 +425,6 @@ Assert-NativeDependencyBoundary $PackagedPeFiles
 
 # Re-run the native installer verifier after every package validation step.
 # It rejects any payload file that is not represented by the SHA-256 manifest.
-$PackagedSetup = Join-Path $OutputRoot "MiniMaxH3Setup.exe"
 $VerifyOutput = @(& $PackagedSetup --payload-dir $PayloadRoot --verify-only --quiet 2>&1)
 if ($LASTEXITCODE -ne 0) {
     throw "Native installer rejected the exact package payload:`n$($VerifyOutput -join [Environment]::NewLine)"

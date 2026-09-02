@@ -54,9 +54,16 @@ void test_help_uses_platform_neutral_library_names() {
           "help does not hard-code Linux backend filenames");
     check(output.str().find("--num-frames N") != std::string::npos,
           "help documents native video frame count");
+#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
     check(output.str().find("--first-frame IMAGE") != std::string::npos &&
               output.str().find("--reference-video VIDEO") != std::string::npos,
           "help documents native FL2VA and Ref2VA inputs");
+#else
+    check(output.str().find("MiniMax-H3") == std::string::npos &&
+              output.str().find("FL2VA") == std::string::npos &&
+              output.str().find("Ref2VA") == std::string::npos,
+          "non-H3 help does not advertise H3 workflows or branding");
+#endif
 }
 
 trtmc::cli::CliArgs parse(std::initializer_list<std::string> args) {

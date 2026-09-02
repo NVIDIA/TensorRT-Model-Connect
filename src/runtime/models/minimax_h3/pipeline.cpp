@@ -50,13 +50,15 @@ constexpr int32_t kAttentionHeadDim = 128;
 constexpr int32_t kTimestepSlots = 4;
 constexpr int32_t kModalityCount = 3;
 constexpr int32_t kAdalnRows = kTimestepSlots * kModalityCount;
-constexpr int32_t kDefaultOutputFrames = 124;
+constexpr int32_t kDefaultOutputFrames = kMiniMaxH3DefaultOutputFrames;
 constexpr int32_t kMaxOutputFrames = 345;
 constexpr int32_t kMaxVideoLatentFrames = 102;
 constexpr int32_t kMaxAudioLatentFrames = 575;
-constexpr int32_t kCanvasMultiple = 32;
-constexpr int32_t kCanvasShortEdge = 768;
-constexpr int64_t kCanvasMaxPixels = static_cast<int64_t>(768) * 1344;
+constexpr int32_t kCanvasMultiple = kMiniMaxH3CanvasMultiple;
+// Diffusers documents 960x544 as its smaller explicit performance canvas. It
+// sits below the resolver envelope but is part of this finite TensorRT profile.
+constexpr int32_t kExplicitCanvasHeight = kMiniMaxH3ExplicitCanvasHeight;
+constexpr int32_t kExplicitCanvasWidth = kMiniMaxH3ExplicitCanvasWidth;
 // The official resolver caps area before nearest-32 rounding. Its largest
 // rounded canvas is 576x1856 (or the transpose), not 768x1344.
 constexpr int32_t kMaxOutputPixels = 576 * 1856;
@@ -67,8 +69,8 @@ constexpr int32_t kMaxVideoRows = kMaxTargetVideoRows + kMaxConditionVideoRows;
 constexpr int32_t kMaxAudioRows = kMaxAudioLatentFrames * 2;
 constexpr int32_t kMaxMediaRows = kMaxVideoRows + kMaxAudioRows;
 constexpr int32_t kMaxSequenceRows = kMaxTextRows + kMaxMediaRows;
-constexpr int32_t kDefaultOutputHeight = 768;
-constexpr int32_t kDefaultOutputWidth = 1344;
+constexpr int32_t kDefaultOutputHeight = kMiniMaxH3DefaultOutputHeight;
+constexpr int32_t kDefaultOutputWidth = kMiniMaxH3DefaultOutputWidth;
 constexpr int32_t kAudioSampleRate = 32000;
 constexpr int32_t kTileFrames = 28;
 constexpr int32_t kTileSize = 256;
@@ -76,7 +78,7 @@ constexpr int32_t kTileMinOverlap = 64;
 constexpr int32_t kTileAlignment = 16;
 constexpr int32_t kTileLatentSize = 16;
 constexpr int32_t kTileInputFrames = 7;
-constexpr int32_t kMinTileBatch = 16;
+constexpr int32_t kMinTileBatch = 15;
 constexpr int32_t kOptTileBatch = 28;
 constexpr int32_t kMaxTileBatch = 33;
 constexpr int32_t kMaxVsaVideoTiles = 2080;
@@ -87,13 +89,17 @@ constexpr int32_t kMaxVsaPaddedRows = kMaxVsaTotalTiles * kVsaTileTokens;
 constexpr int32_t kVsaVideoTileTime = 4;
 constexpr int32_t kVsaVideoTileHeight = 4;
 constexpr int32_t kVsaVideoTileWidth = 4;
-constexpr int32_t kMinPackedRows = 21727;
+constexpr int32_t kMinVideoRows =
+    37 * (kExplicitCanvasHeight / kCanvasMultiple) * (kExplicitCanvasWidth / kCanvasMultiple);
+constexpr int32_t kMinPackedRows = kMinVideoRows + 414 + kMinTextRows;
 constexpr int32_t kOptPackedRows = 37838;
 constexpr int32_t kMaxPackedRows = 112367;
 static_assert(((kMaxOutputFrames - 5) / 17) * 5 + 2 == kMaxVideoLatentFrames);
 static_assert(kMaxTargetVideoRows == 106488);
 static_assert(kMaxVideoRows == 108576);
 static_assert(kMaxSequenceRows == kMaxPackedRows);
+static_assert(kMinVideoRows == 18870);
+static_assert(kMinPackedRows == 19285);
 
 constexpr std::array<float, kLatentChannels> kLatentMean = {
     0.8580903411F,  -0.9606591463F, 1.0661640167F,  -0.5090325475F, -0.2727581859F, -1.3675414324F,
@@ -541,19 +547,6 @@ int32_t ceil_div(int32_t numerator, int32_t denominator) {
     return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
 }
 
-int32_t round_to_even_multiple(double value, int32_t multiple) {
-    const double scaled = value / multiple;
-    const double lower = std::floor(scaled);
-    const double fraction = scaled - lower;
-    double rounded = lower;
-    if (fraction > 0.5 || (fraction == 0.5 && static_cast<int64_t>(lower) % 2 != 0)) {
-        rounded += 1.0;
-    }
-    if (rounded > static_cast<double>(std::numeric_limits<int32_t>::max() / multiple))
-        throw std::overflow_error("MiniMax-H3 canvas rounding overflow");
-    return std::max(multiple, static_cast<int32_t>(rounded) * multiple);
-}
-
 struct TileAxisLayout {
     std::vector<int32_t> starts;
     std::vector<int32_t> overlaps;
@@ -591,38 +584,6 @@ TileAxisLayout make_tile_axis_layout(int32_t length) {
     return result;
 }
 
-bool landscape_canvas_is_official(int32_t height, int32_t width) {
-    if (height == kCanvasShortEdge && width >= kCanvasShortEdge && width <= 1344) {
-        return true;
-    }
-    if (height > kCanvasShortEdge || width <= 1344)
-        return false;
-
-    // Above 16:9, the pre-round axes lie on h*w=768*1344. Intersect
-    // the two nearest-32 rounding bins with the trained ratio interval.
-    const double lower =
-        std::max({static_cast<double>(height - kCanvasMultiple / 2),
-                  static_cast<double>(kCanvasMaxPixels) / (width + kCanvasMultiple / 2),
-                  std::sqrt(static_cast<double>(kCanvasMaxPixels) / 4.0)});
-    const double upper =
-        std::min({static_cast<double>(height + kCanvasMultiple / 2),
-                  static_cast<double>(kCanvasMaxPixels) / (width - kCanvasMultiple / 2),
-                  static_cast<double>(kCanvasShortEdge)});
-    return lower < upper;
-}
-
-bool canvas_is_official(int32_t height, int32_t width) {
-    if (height <= 0 || width <= 0 || height % kCanvasMultiple != 0 ||
-        width % kCanvasMultiple != 0) {
-        return false;
-    }
-    const double ratio = static_cast<double>(width) / height;
-    if (ratio < 0.25 || ratio > 4.0)
-        return false;
-    return width >= height ? landscape_canvas_is_official(height, width)
-                           : landscape_canvas_is_official(width, height);
-}
-
 std::vector<int64_t> vae_tile_shape(int32_t tile_count) {
     return {tile_count, kLatentChannels, kTileInputFrames, kTileLatentSize, kTileLatentSize};
 }
@@ -645,7 +606,7 @@ bool validate_vae_plan_geometry(ITrtModule& module, const MiniMaxH3Geometry& geo
         if (geometry.vae_tile_count != kOptTileBatch) {
             throw std::runtime_error(
                 "MiniMax-H3 legacy VAE plan supports only the 768x1344 28-tile canvas; "
-                "rebuild the bundle with the public [16,28,33] dynamic tile profile");
+                "rebuild the bundle with the native [15,28,33] dynamic tile profile");
         }
         return false;
     }
@@ -658,7 +619,7 @@ bool validate_vae_plan_geometry(ITrtModule& module, const MiniMaxH3Geometry& geo
             vae_tile_shape(kMaxTileBatch) ||
         module.tensor_shape("decoded_tiles") != vae_decoded_tile_shape(kMaxTileBatch)) {
         throw std::runtime_error(
-            "MiniMax-H3 dynamic VAE tile plan must use the public [16,28,33] batch profile");
+            "MiniMax-H3 dynamic VAE tile plan must use the native [15,28,33] batch profile");
     }
     if (geometry.vae_tile_count < kMinTileBatch || geometry.vae_tile_count > kMaxTileBatch)
         throw std::logic_error("MiniMax-H3 VAE runtime tile count exceeds its validated profile");
@@ -705,7 +666,7 @@ void validate_monolithic_denoiser_plan_impl(ITrtModule& module, bool native_vsa)
     const int32_t profile_packed_rows = legacy_profile ? 108175 : kMaxPackedRows;
     const int32_t profile_prefix_tiles = legacy_profile ? 27 : kMaxVsaPrefixTiles;
     require_dynamic_denoiser_input(module, "video_hidden_states", DType::kFloat32,
-                                   {21312, kPatchDim}, {37296, kPatchDim},
+                                   {kMinVideoRows, kPatchDim}, {37296, kPatchDim},
                                    {profile_video_rows, kPatchDim});
     require_dynamic_denoiser_input(module, "audio_hidden_states", DType::kFloat32,
                                    {414, kAudioChannels}, {414, kAudioChannels},
@@ -766,7 +727,7 @@ void validate_segmented_entry_plan(ITrtModule& module) {
         module.input_info().size() != 6U || module.output_info().size() != 5U)
         throw std::runtime_error("MiniMax-H3 segmented entry plan I/O count mismatch");
     require_dynamic_denoiser_input(module, "video_hidden_states", DType::kFloat32,
-                                   {21312, kPatchDim}, {37296, kPatchDim},
+                                   {kMinVideoRows, kPatchDim}, {37296, kPatchDim},
                                    {kMaxVideoRows, kPatchDim});
     require_dynamic_denoiser_input(module, "audio_hidden_states", DType::kFloat32,
                                    {414, kAudioChannels}, {414, kAudioChannels},
@@ -821,7 +782,7 @@ void validate_segmented_finish_plan(ITrtModule& module) {
     require_dynamic_denoiser_input(module, "timestep_indices", DType::kInt32, {kMinPackedRows},
                                    {kOptPackedRows}, {kMaxPackedRows});
     require_dynamic_denoiser_input(module, "video_hidden_states", DType::kFloat32,
-                                   {21312, kPatchDim}, {37296, kPatchDim},
+                                   {kMinVideoRows, kPatchDim}, {37296, kPatchDim},
                                    {kMaxVideoRows, kPatchDim});
     require_dynamic_denoiser_input(module, "audio_hidden_states", DType::kFloat32,
                                    {414, kAudioChannels}, {414, kAudioChannels},
@@ -1097,59 +1058,12 @@ void validate_minimax_h3_segment_plan(ITrtModule& module, MiniMaxH3SegmentPlanKi
     throw std::invalid_argument("MiniMax-H3 segmented plan kind is invalid");
 }
 
-int32_t align_minimax_h3_num_frames(int32_t requested_frames) {
-    if (requested_frames <= 0)
-        throw std::invalid_argument("MiniMax-H3 requested frame count must be positive");
-    int32_t aligned = requested_frames;
-    while (aligned % 17 != 5) {
-        if (aligned == std::numeric_limits<int32_t>::max())
-            throw std::overflow_error("MiniMax-H3 frame alignment overflow");
-        ++aligned;
-    }
-    if (aligned < 5 * 24 || aligned > 15 * 24)
-        throw std::invalid_argument(
-            "MiniMax-H3 released local profile supports aligned durations from 5 to 15 seconds");
-    return aligned;
-}
-
-MiniMaxH3Canvas resolve_minimax_h3_canvas(double aspect_width, double aspect_height) {
-    if (!std::isfinite(aspect_width) || !std::isfinite(aspect_height) || aspect_width <= 0.0 ||
-        aspect_height <= 0.0) {
-        throw std::invalid_argument("MiniMax-H3 aspect ratio must be finite and positive");
-    }
-    const double ratio = aspect_width / aspect_height;
-    if (!std::isfinite(ratio) || ratio < 0.25 || ratio > 4.0)
-        throw std::invalid_argument("MiniMax-H3 output aspect ratio must be between 1:4 and 4:1");
-
-    double width = 0.0;
-    double height = 0.0;
-    if (ratio >= 1.0) {
-        width = kCanvasShortEdge * ratio;
-        height = kCanvasShortEdge;
-    } else {
-        width = kCanvasShortEdge;
-        height = kCanvasShortEdge / ratio;
-    }
-    const double area = width * height;
-    if (area > static_cast<double>(kCanvasMaxPixels)) {
-        const double scale = std::sqrt(static_cast<double>(kCanvasMaxPixels) / area);
-        width *= scale;
-        height *= scale;
-    }
-
-    MiniMaxH3Canvas result;
-    result.height = round_to_even_multiple(height, kCanvasMultiple);
-    result.width = round_to_even_multiple(width, kCanvasMultiple);
-    if (!canvas_is_official(result.height, result.width))
-        throw std::logic_error("MiniMax-H3 canvas resolver produced an invalid canvas");
-    return result;
-}
-
 MiniMaxH3VaeTileLayout make_minimax_h3_vae_tile_layout(int32_t output_height,
                                                        int32_t output_width) {
-    if (!canvas_is_official(output_height, output_width))
+    if (!is_minimax_h3_native_canvas(output_height, output_width))
         throw std::invalid_argument(
-            "MiniMax-H3 VAE tiling requires a canvas produced by the public 768p resolver");
+            "MiniMax-H3 VAE tiling supports the public 768p resolver canvases plus the explicit "
+            "544x960/960x544 native profile");
     auto y = make_tile_axis_layout(output_height);
     auto x = make_tile_axis_layout(output_width);
     MiniMaxH3VaeTileLayout result;
@@ -1167,9 +1081,11 @@ MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output
     if (output_frames < 5 * 24 || output_frames > 15 * 24)
         throw std::invalid_argument(
             "MiniMax-H3 released local profile supports output durations from 5 to 15 seconds");
-    if (!canvas_is_official(output_height, output_width))
+    if (!is_minimax_h3_native_canvas(output_height, output_width))
         throw std::invalid_argument(
-            "MiniMax-H3 output canvas must come from the public 768p aspect-ratio resolver");
+            "MiniMax-H3 output canvas must come from the public 768p resolver or be the explicit "
+            "544x960/960x544 native profile; other multiple-of-32 canvases are not in the "
+            "finite TensorRT profile");
 
     MiniMaxH3Geometry result;
     result.output_frames = output_frames;
@@ -1184,7 +1100,7 @@ MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output
     const int64_t video_rows = static_cast<int64_t>(result.video_latent_frames) *
                                (result.latent_height / 2) * (result.latent_width / 2);
     if (video_rows > kMaxTargetVideoRows)
-        throw std::overflow_error("MiniMax-H3 packed video rows exceed the public 768p profile");
+        throw std::overflow_error("MiniMax-H3 packed video rows exceed the finite native profile");
     result.target_video_rows = static_cast<int32_t>(video_rows);
     result.video_rows = result.target_video_rows;
 
@@ -1193,7 +1109,7 @@ MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output
     result.vae_tile_columns = static_cast<int32_t>(tile_layout.x_starts.size());
     result.vae_tile_count = result.vae_tile_rows * result.vae_tile_columns;
     if (result.vae_tile_count < kMinTileBatch || result.vae_tile_count > kMaxTileBatch)
-        throw std::logic_error("MiniMax-H3 public canvas exceeded the VAE tile profile");
+        throw std::logic_error("MiniMax-H3 native canvas exceeded the VAE tile profile");
 
     const int32_t video_height = result.latent_height / kPatchHeight;
     const int32_t video_width = result.latent_width / kPatchWidth;
@@ -1201,7 +1117,7 @@ MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output
                              ceil_div(video_width, 4);
     result.vsa_top_video_tiles = std::max(1, ceil_div(result.vsa_video_tiles, 10));
     if (result.vsa_video_tiles > kMaxVsaVideoTiles)
-        throw std::logic_error("MiniMax-H3 public canvas exceeded the VSA tile profile");
+        throw std::logic_error("MiniMax-H3 native canvas exceeded the VSA tile profile");
     return result;
 }
 
@@ -2673,11 +2589,12 @@ MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
                                      std::unique_ptr<ITokenizer> tokenizer, std::string model_id,
                                      bool first_block_cache, float cache_threshold,
                                      MiniMaxH3DenoiserConfig denoiser_config,
-                                     MiniMaxH3Ref2VAConfig ref2va_config)
+                                     MiniMaxH3Ref2VAConfig ref2va_config,
+                                     std::function<void()> runtime_cache_finalize)
     : loader_(std::move(loader)), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id)),
       resident_(std::make_unique<ResidentState>()), first_block_cache_(first_block_cache),
       cache_threshold_(cache_threshold), denoiser_config_(denoiser_config),
-      ref2va_config_(ref2va_config) {
+      ref2va_config_(ref2va_config), runtime_cache_finalize_(std::move(runtime_cache_finalize)) {
     if (!loader_ || !tokenizer_)
         throw std::invalid_argument("MiniMax-H3 pipeline requires a loader and tokenizer");
     if (!std::isfinite(cache_threshold_) || cache_threshold_ <= 0.0F)
@@ -2723,11 +2640,56 @@ MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
 }
 
 MiniMaxH3Pipeline::~MiniMaxH3Pipeline() {
-    if (stream_ != nullptr)
-        (void)cudaStreamSynchronize(stream_);
+    std::lock_guard<std::mutex> lock(generation_mutex_);
+    runtime_cache_finalize_started_ = true;
+    if (stream_ != nullptr) {
+        const cudaError_t status = cudaStreamSynchronize(stream_);
+        if (status != cudaSuccess) {
+            std::cerr << "[trtmc] Failed to synchronize MiniMax-H3 before cache cleanup: "
+                      << cudaGetErrorString(status) << '\n';
+        }
+    }
     resident_.reset();
+    runtime_cache_contexts_released_ = true;
+    if (runtime_cache_finalize_) {
+        try {
+            runtime_cache_finalize_();
+            runtime_cache_finalize_ = {};
+        } catch (const std::exception& error) {
+            std::cerr << "[trtmc] Failed to persist RTX runtime cache: " << error.what() << '\n';
+        } catch (...) {
+            std::cerr << "[trtmc] Failed to persist RTX runtime cache: unknown error\n";
+        }
+    }
     if (stream_ != nullptr)
         cudaStreamDestroy(stream_);
+}
+
+void MiniMaxH3Pipeline::finalize_runtime_cache() {
+    std::lock_guard<std::mutex> lock(generation_mutex_);
+    if (!runtime_cache_finalize_)
+        return;
+
+    // Once finalization starts, no new module/context/JIT work may enter this
+    // pipeline even if persistence fails and the caller retries.
+    runtime_cache_finalize_started_ = true;
+    if (!runtime_cache_contexts_released_) {
+        if (stream_ != nullptr) {
+            const cudaError_t status = cudaStreamSynchronize(stream_);
+            if (status != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string("MiniMax-H3 failed to synchronize before runtime-cache ") +
+                    "persistence: " + cudaGetErrorString(status));
+            }
+        }
+        resident_.reset();
+        runtime_cache_contexts_released_ = true;
+    }
+
+    // Keep the callback on failure. Its lease remains active as well, so a
+    // subsequent explicit call or the non-throwing destructor can retry.
+    runtime_cache_finalize_();
+    runtime_cache_finalize_ = {};
 }
 
 VideoResult MiniMaxH3Pipeline::generate_video(const std::string& prompt,
@@ -3005,6 +2967,10 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
 VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGenerationRequest& request,
                                                            bool include_audio) {
     std::lock_guard<std::mutex> lock(generation_mutex_);
+    if (runtime_cache_finalize_started_) {
+        throw std::runtime_error(
+            "MiniMax-H3 pipeline cannot generate after runtime-cache finalization started");
+    }
     StreamScopeSynchronizer synchronize_on_exit(stream_);
     try {
         if (!request.config.negative_prompt.empty())

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "runtime/models/minimax_h3/hot_engine_policy.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"
@@ -41,6 +42,34 @@ int main() {
     using trtmc::config::ConfigBundle;
     using trtmc::config::Layer;
     using trtmc::config::SchemaRegistry;
+
+    bool all_fast_h3_transitions_retained = true;
+    int retained_transition_count = 0;
+    for (int index = 0; index < 100; ++index) {
+        std::string name = "denoiser_transition_";
+        name.push_back(static_cast<char>('0' + index / 10));
+        name.push_back(static_cast<char>('0' + index % 10));
+        name += "_plan";
+        const bool retained = trtmc::minimax_h3::should_retain_hot_engine(name, true);
+        retained_transition_count += retained ? 1 : 0;
+        if (index < 49)
+            all_fast_h3_transitions_retained &= retained;
+    }
+    check(all_fast_h3_transitions_retained, "all 49 FastH3 transition engines are retained");
+    check(retained_transition_count == 49,
+          "retained transition policy is limited to the authenticated 00..48 range");
+    for (std::string_view name : {"denoiser_entry_plan", "denoiser_finish_plan",
+                                  "vae_tile_decoder_plan", "audio_vae_decoder_plan"}) {
+        check(trtmc::minimax_h3::should_retain_hot_engine(name, true),
+              "FastH3 staged hot engine is retained");
+        check(!trtmc::minimax_h3::should_retain_hot_engine(name, false),
+              "FastH3 staged engine retention remains opt-in");
+    }
+    for (std::string_view name : {"denoiser_transition_49_plan", "denoiser_transition_0_plan",
+                                  "text_encoder_plan", "adaln_precompute_plan"}) {
+        check(!trtmc::minimax_h3::should_retain_hot_engine(name, true),
+              "non-FastH3 engine is excluded from the retained hot set");
+    }
 
     auto& schemas = SchemaRegistry::instance();
     check(schemas.lookup("minimax_h3") == nullptr, "minimax_h3 schema absent from core");

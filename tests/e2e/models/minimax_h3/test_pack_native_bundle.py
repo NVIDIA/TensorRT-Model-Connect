@@ -89,9 +89,7 @@ def test_staged_loading_partitions_every_bundle_section() -> None:
         "denoiser_finish_plan",
     ]
     assert set(split["lazy_sections"]) == set(pack_native_bundle.FIRST_BLOCK_CACHE_PLAN_SECTIONS)
-    fast_h3 = pack_native_bundle._bundle_loading_policy(
-        pack_native_bundle.FASTH3_PLAN_SECTIONS
-    )
+    fast_h3 = pack_native_bundle._bundle_loading_policy(pack_native_bundle.FASTH3_PLAN_SECTIONS)
     assert len(fast_h3["lazy_sections"]) == len(FASTH3_SEGMENTED_PLAN_FILENAMES)
     assert fast_h3["lazy_sections"][3] == "denoiser_entry_plan"
     assert fast_h3["lazy_sections"][53] == "denoiser_finish_plan"
@@ -109,7 +107,9 @@ def test_packer_preserves_validated_workspace_mapping(
     selected_plans = (
         FASTH3_SEGMENTED_PLAN_FILENAMES
         if fast_h3
-        else FIRST_BLOCK_CACHE_PLAN_FILENAMES if first_block_cache else PLAN_FILENAMES
+        else FIRST_BLOCK_CACHE_PLAN_FILENAMES
+        if first_block_cache
+        else PLAN_FILENAMES
     )
     for filename in selected_plans:
         (plans / filename).write_bytes(filename.encode())
@@ -223,7 +223,7 @@ def test_packer_preserves_validated_workspace_mapping(
         captured["video_rows_min"],
         captured["video_rows_opt"],
         captured["video_rows_max"],
-    ) == (21312, 37296, 108576)
+    ) == (18870, 37296, 108576)
     assert (
         captured["audio_rows_min"],
         captured["audio_rows_opt"],
@@ -233,13 +233,14 @@ def test_packer_preserves_validated_workspace_mapping(
         captured["packed_sequence_length_min"],
         captured["packed_sequence_length_opt"],
         captured["packed_sequence_length_max"],
-    ) == (21727, 37838, 112367)
+    ) == (19285, 37838, 112367)
     assert captured["audio_latent_frames"] == 207
     assert captured["audio_sample_rate"] == 32000
     assert captured["audio_hop_length"] == 800
     assert captured["audio_channels"] == 2
     assert captured["audio_vae_precision"] == "fp32"
-    assert captured["vae_tile_batch_min"] == 16
+    assert captured["vae_tile_batch_min"] == 15
+    assert captured["explicit_canvas_sizes"] == [[544, 960], [960, 544]]
     assert captured["vae_tile_batch_opt"] == 28
     assert captured["vae_tile_batch_max"] == 33
     assert captured["attention_mode"] == ("native_vsa" if fast_h3 else "dense")
@@ -255,6 +256,6 @@ def test_packer_preserves_validated_workspace_mapping(
         assert captured["vsa"]["runtime_metadata_abi"]["packed_row_to_tile_slot"] == {
             "dtype": "int32",
             "shape": ["S"],
-            "profile": [21727, 37838, 112367],
+            "profile": [19285, 37838, 112367],
         }
     capsys.readouterr()

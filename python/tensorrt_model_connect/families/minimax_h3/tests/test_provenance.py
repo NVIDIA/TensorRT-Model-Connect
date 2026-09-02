@@ -408,15 +408,15 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
         "canvas_multiple": 32,
         "canvas_short_edge": 768,
         "canvas_max_pixels": 1032192,
+        "explicit_canvas_sizes": [[544, 960], [960, 544]],
         "min_aspect_ratio": 0.25,
         "max_aspect_ratio": 4.0,
         "vae_tile_batch": 28,
-        "vae_tile_batch_min": 16,
+        "vae_tile_batch_min": 15,
         "vae_tile_batch_opt": 28,
         "vae_tile_batch_max": 33,
         "plan_sha256": {
-            filename: f"{index:064x}"
-            for index, filename in enumerate(PLAN_FILENAMES, start=1)
+            filename: f"{index:064x}" for index, filename in enumerate(PLAN_FILENAMES, start=1)
         },
     }
     bundle = tmp_path / "model.bundle"
@@ -654,6 +654,19 @@ def test_git_archive_source_record_rejects_escaping_symlink(tmp_path: Path, monk
     (archive_root / "escape.py").symlink_to(outside)
 
     with pytest.raises(ValueError, match="escaping symlink"):
+        validated_git_archive_source_record(
+            entrypoint,
+            evidence_path=evidence_path,
+            label="Diffusers reference",
+        )
+
+
+def test_git_archive_source_record_rejects_symlink_loop(tmp_path: Path, monkeypatch) -> None:
+    entrypoint, evidence_path, archive_root, _evidence = _git_archive_fixture(tmp_path, monkeypatch)
+    (archive_root / "loop-a").symlink_to("loop-b")
+    (archive_root / "loop-b").symlink_to("loop-a")
+
+    with pytest.raises(ValueError, match="broken symlink"):
         validated_git_archive_source_record(
             entrypoint,
             evidence_path=evidence_path,

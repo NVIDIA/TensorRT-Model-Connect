@@ -304,6 +304,17 @@ void enforce_locked_h3_process_policy() {
 #endif
 }
 
+void reject_locked_h3_hf_python(const std::string& hf_python) {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    if (!hf_python.empty()) {
+        throw std::invalid_argument(
+            "locked MiniMax-H3 runtime rejects hf_python; Python is not a runtime dependency");
+    }
+#else
+    (void)hf_python;
+#endif
+}
+
 const BundleSectionInfo* find_kernel_slots_section(const BundleInfo& info) {
     const auto section = std::find_if(
         info.sections.begin(), info.sections.end(),
@@ -380,9 +391,17 @@ detail::resolve_runtime_config(const std::string& config_text, const std::string
         apply_platform_config(resolution.bundle);
         return std::move(resolution.bundle);
     } catch (const std::exception& e) {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+        // A locked delivery must never turn a malformed --config/--set into a
+        // successful run with different settings.  In particular, silently
+        // dropping minimax_h3.retain_engines would disable the qualified hot
+        // path while leaving the process exit status at zero.
+        throw;
+#else
         std::cerr << "[trtmc.config] Failed to resolve runtime config: " << e.what()
                   << "\n          Proceeding with schema defaults.\n";
         return std::nullopt;
+#endif
     }
 }
 
@@ -391,6 +410,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                                                         const std::string& runtime_cache_path,
                                                         bool cuda_graphs) {
     enforce_locked_h3_process_policy();
+    reject_locked_h3_hf_python(hf_python);
     LoadOptions optimized_options;
     optimized_options.hf_python = hf_python;
     optimized_options.runtime_cache_path = runtime_cache_path;
@@ -475,6 +495,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                                                         const LoadOptions& options,
                                                         const std::string& kernel_bindings_path) {
     enforce_locked_h3_process_policy();
+    reject_locked_h3_hf_python(options.hf_python);
     const BundleInfo header = ReadBundleHeader(bundle_path);
     reject_optimized_runtime_kernel_bindings(header, kernel_bindings_path);
     if (auto optimized_runtime_pipeline =
@@ -545,6 +566,7 @@ PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t po
                                   const LoadOptions& options,
                                   const std::string& kernel_bindings_path) {
     enforce_locked_h3_process_policy();
+    reject_locked_h3_hf_python(options.hf_python);
     if (pool_size == 0)
         throw std::invalid_argument("Pipeline pool size must be positive");
 

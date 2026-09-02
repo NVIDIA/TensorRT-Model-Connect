@@ -6,6 +6,7 @@
 #include "runtime/backend/backend_loader.h"
 
 #include "runtime/backend/prebound_backend.h"
+#include "runtime/backend/runtime_cache_control.h"
 #include "runtime/platform/dynamic_library.h"
 #if defined(_WIN32) && defined(TRTMC_LOCKED_H3_RUNTIME)
 #include "runtime/platform/windows_process_lockdown.h"
@@ -26,6 +27,8 @@ namespace trtmc {
 
 IPreboundBackend::~IPreboundBackend() = default;
 IFileBackedBackend::~IFileBackedBackend() = default;
+IRuntimeCacheBackend::~IRuntimeCacheBackend() = default;
+IRuntimeCacheControl::~IRuntimeCacheControl() = default;
 
 namespace {
 

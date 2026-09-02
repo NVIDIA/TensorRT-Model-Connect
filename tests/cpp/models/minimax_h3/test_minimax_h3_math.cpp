@@ -113,6 +113,17 @@ void test_public_video_geometry() {
     check(trtmc::make_minimax_h3_geometry(124, 1344, 768).video_rows == 37296,
           "H3 accepts the public portrait 9:16 canvas");
 
+    for (const auto& canvas : std::array<std::array<int32_t, 2>, 2>{{{544, 960}, {960, 544}}}) {
+        const auto short_geometry = trtmc::make_minimax_h3_geometry(124, canvas[0], canvas[1]);
+        check(short_geometry.video_rows == 18870 && short_geometry.vae_tile_count == 15 &&
+                  short_geometry.vsa_video_tiles == 400,
+              "H3 124f profile accepts the documented 960x544 explicit canvas");
+        const auto long_geometry = trtmc::make_minimax_h3_geometry(345, canvas[0], canvas[1]);
+        check(long_geometry.video_rows == 52020 && long_geometry.vae_tile_count == 15 &&
+                  long_geometry.vsa_video_tiles == 1040,
+              "H3 345f profile accepts the documented 960x544 explicit canvas");
+    }
+
     const auto max_rows = trtmc::make_minimax_h3_geometry(345, 576, 1856);
     check(max_rows.video_rows == 106488,
           "H3 dynamic row profile covers the largest rounded public canvas");
@@ -289,7 +300,8 @@ void test_fl2va_full_public_geometry_and_rotary_contract() {
             }
         }
     }
-    check(public_canvases == 95, "H3 FL2VA exhaustively validates all 95 released public canvases");
+    check(public_canvases == 97,
+          "H3 FL2VA validates 95 resolver canvases plus both 960x544 orientations");
 }
 
 void check_vsa_metadata(const trtmc::MiniMaxH3VsaMetadata& metadata, int32_t sequence_rows,
@@ -321,6 +333,15 @@ void check_vsa_metadata(const trtmc::MiniMaxH3VsaMetadata& metadata, int32_t seq
 }
 
 void test_native_vsa_runtime_metadata() {
+    {
+        const auto geometry = trtmc::make_minimax_h3_geometry(124, 544, 960);
+        const auto metadata = trtmc::make_minimax_h3_denoiser_metadata(1, geometry, true);
+        check_vsa_metadata(metadata.vsa, 19285, 8, 400);
+        check(metadata.positions.size() == static_cast<std::size_t>(19285) * 3 &&
+                  metadata.adaln_indices.size() == 19285 &&
+                  metadata.timestep_indices.size() == 19285,
+              "H3 documented 960x544 canvas binds the new packed-row minimum");
+    }
     {
         const auto geometry = trtmc::make_minimax_h3_geometry(124, 768, 768);
         const auto metadata = trtmc::make_minimax_h3_denoiser_metadata(1, geometry, true);

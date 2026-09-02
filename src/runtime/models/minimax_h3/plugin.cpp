@@ -6,6 +6,7 @@
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
 #include "runtime/backend/prebound_backend.h"
+#include "runtime/models/minimax_h3/hot_engine_policy.h"
 #include "runtime/models/minimax_h3/pipeline.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/pipeline_registry.h"
@@ -18,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -61,17 +63,10 @@ std::string plan_filename(std::string_view section) {
         return "denoiser_finish.plan";
     if (section == "denoiser_entry_plan")
         return "denoiser_entry.plan";
-    constexpr std::string_view transition_prefix = "denoiser_transition_";
-    constexpr std::string_view plan_suffix = "_plan";
-    if (section.size() >= transition_prefix.size() + plan_suffix.size() &&
-        section.substr(0, transition_prefix.size()) == transition_prefix &&
-        section.substr(section.size() - plan_suffix.size()) == plan_suffix) {
-        const auto index = section.substr(transition_prefix.size(), 2);
-        if (section.size() == transition_prefix.size() + 2 + plan_suffix.size() &&
-            index[0] >= '0' && index[0] <= '9' && index[1] >= '0' && index[1] <= '9') {
-            return std::string(transition_prefix) + std::string(index) + ".plan";
-        }
-    }
+    if (minimax_h3::is_fast_h3_transition_plan(section))
+        return std::string(minimax_h3::kDenoiserTransitionPrefix) +
+               std::string(section.substr(minimax_h3::kDenoiserTransitionPrefix.size(), 2)) +
+               ".plan";
     if (section == "vae_tile_decoder_plan")
         return "vae_tile_decoder.plan";
     if (section == "audio_vae_decoder_plan")
@@ -302,6 +297,16 @@ bool json_int_array_equals(const nlohmann::json& value, std::initializer_list<in
     return true;
 }
 
+bool explicit_canvas_sizes_are_exact(const nlohmann::json& root) {
+    if (!root.contains("explicit_canvas_sizes") || !root.at("explicit_canvas_sizes").is_array() ||
+        root.at("explicit_canvas_sizes").size() != 2) {
+        return false;
+    }
+    const auto& sizes = root.at("explicit_canvas_sizes");
+    return json_int_array_equals(sizes.at(0), {544, 960}) &&
+           json_int_array_equals(sizes.at(1), {960, 544});
+}
+
 bool declares_public_workflow(const nlohmann::json& root, std::string_view name) {
     if (!root.contains("public_workflows") || !root.at("public_workflows").is_array())
         return false;
@@ -382,15 +387,15 @@ bool ref2va_plan_abis_are_exact(const nlohmann::json& root) {
                              std::initializer_list<int32_t> maximum) {
         return tensor_metadata_equals(inputs.at(index), name, dtype, minimum, optimum, maximum);
     };
-    if (!dynamic(0, "video_hidden_states", "float32", {25408, 96}, {44592, 96}, {364608, 96}) ||
+    if (!dynamic(0, "video_hidden_states", "float32", {18870, 96}, {44592, 96}, {364608, 96}) ||
         !dynamic(1, "audio_hidden_states", "float32", {414, 32}, {414, 32}, {3558, 32}) ||
         !dynamic(2, "encoder_hidden_states", "float32", {1, 5120}, {7433, 5120}, {262144, 5120}) ||
-        !dynamic(3, "position_ids", "float32", {25823, 3}, {52439, 3}, {630310, 3}) ||
-        !dynamic(4, "video_indices", "int32", {25408}, {44592}, {364608}) ||
+        !dynamic(3, "position_ids", "float32", {19285, 3}, {52439, 3}, {630310, 3}) ||
+        !dynamic(4, "video_indices", "int32", {18870}, {44592}, {364608}) ||
         !dynamic(5, "audio_indices", "int32", {414}, {414}, {3558}) ||
         !dynamic(6, "text_indices", "int32", {1}, {7433}, {262144}) ||
-        !dynamic(7, "adaln_indices", "int32", {25823}, {52439}, {630310}) ||
-        !dynamic(8, "timestep_indices", "int32", {25823}, {52439}, {630310})) {
+        !dynamic(7, "adaln_indices", "int32", {19285}, {52439}, {630310}) ||
+        !dynamic(8, "timestep_indices", "int32", {19285}, {52439}, {630310})) {
         return false;
     }
     for (int32_t layer = 0; layer < 50; ++layer) {
@@ -402,7 +407,7 @@ bool ref2va_plan_abis_are_exact(const nlohmann::json& root) {
     }
     if (!dynamic(59, "final_modulation", "bfloat16", {4, 2, 5376}, {4, 2, 5376}, {4, 2, 5376}) ||
         !tensor_metadata_equals(denoiser.at("outputs").at(0), "video_velocity", "float32",
-                                {25408, 96}, {44592, 96}, {364608, 96}) ||
+                                {18870, 96}, {44592, 96}, {364608, 96}) ||
         !tensor_metadata_equals(denoiser.at("outputs").at(1), "audio_velocity", "float32",
                                 {414, 32}, {414, 32}, {3558, 32})) {
         return false;
@@ -605,7 +610,7 @@ MiniMaxH3Ref2VAConfig load_ref2va_config(const PipelineContext& ctx) {
         }
         const auto& vision = qwen.at("vision_encoder_plan");
         const auto& text = qwen.at("text_encoder_plan");
-        if (!int_array_equals(vision, "patch_rows_per_call", {2304, 4032, 65536}) ||
+        if (!int_array_equals(vision, "patch_rows_per_call", {2040, 4032, 65536}) ||
             vision.value("invocation_unit", std::string{}) !=
                 "one_image_or_one_two_frame_video_temporal_block" ||
             vision.value("spatial_chunking_allowed", true) ||
@@ -632,10 +637,10 @@ MiniMaxH3Ref2VAConfig load_ref2va_config(const PipelineContext& ctx) {
             limits.value("max_total_explicit_audio_seconds", 0.0) == 15.0 &&
             limits.value("audio_can_be_sole_input", false) &&
             limits.value("video_soundtrack_stays_attached", false) &&
-            int_array_equals(capacity, "video_rows", {25408, 44592, 364608}) &&
+            int_array_equals(capacity, "video_rows", {18870, 44592, 364608}) &&
             int_array_equals(capacity, "audio_rows", {414, 414, 3558}) &&
             int_array_equals(capacity, "text_rows", {1, 7433, 262144}) &&
-            int_array_equals(capacity, "packed_rows", {25823, 52439, 630310});
+            int_array_equals(capacity, "packed_rows", {19285, 52439, 630310});
         if (!exact_limits)
             throw std::runtime_error("MiniMax-H3 Ref2VA limits/capacity metadata is invalid");
 
@@ -699,7 +704,7 @@ bool vsa_tensor_abi_is_exact(const nlohmann::json& vsa) {
            abi.value("value_output", std::string{}) == "vsa_value" &&
            abi.value("gate_output", std::string{}) == "vsa_gate" && residual_shape &&
            exact_shape("attention_shape", 56, "S", 128) &&
-           int_array_equals(abi, "packed_rows_profile", {21727, 37838, 112367});
+           int_array_equals(abi, "packed_rows_profile", {19285, 37838, 112367});
 }
 
 bool vsa_segments_are_exact(const nlohmann::json& vsa) {
@@ -748,10 +753,10 @@ void validate_fl2va_conditioning_contract(const PipelineContext& ctx, const Sect
         const bool exact_qwen_profile =
             declares_ref2va
                 ? int_array_equals(conditioning, "text_sequence_profile", {1, 1144, 262144}) &&
-                      int_array_equals(conditioning, "vision_patch_profile", {2304, 4032, 65536}) &&
+                      int_array_equals(conditioning, "vision_patch_profile", {2040, 4032, 65536}) &&
                       int_array_equals(conditioning, "vision_row_profile", {1, 1008, 262144})
                 : int_array_equals(conditioning, "text_sequence_profile", {1, 1144, 2641}) &&
-                      int_array_equals(conditioning, "vision_patch_profile", {2304, 4032, 4176}) &&
+                      int_array_equals(conditioning, "vision_patch_profile", {2040, 4032, 4176}) &&
                       int_array_equals(conditioning, "vision_row_profile", {1, 1008, 2088});
         const bool exact =
             conditioning.value("implementation", std::string{}) == "shared_native_qwen3_vl" &&
@@ -797,16 +802,17 @@ void validate_profile(const PipelineContext& ctx, const MiniMaxH3DenoiserConfig&
             packed == 112367 && root.value("canvas_multiple", 0) == 32 &&
             root.value("canvas_short_edge", 0) == 768 &&
             root.value("canvas_max_pixels", 0) == 768 * 1344 &&
-            root.value("num_frames_min", 0) == 124 && root.value("num_frames_opt", 0) == 124 &&
-            root.value("num_frames_max", 0) == 345 && root.value("text_rows_min", 0) == 1 &&
-            root.value("text_rows_opt", 0) == 128 && root.value("text_rows_max", 0) == 2641 &&
-            root.value("audio_rows_min", 0) == 414 && root.value("audio_rows_opt", 0) == 414 &&
-            root.value("audio_rows_max", 0) == 1150 && root.value("video_rows_min", 0) == 21312 &&
-            root.value("video_rows_opt", 0) == 37296 && root.value("video_rows_max", 0) == 108576 &&
-            root.value("packed_sequence_length_min", 0) == 21727 &&
+            explicit_canvas_sizes_are_exact(root) && root.value("num_frames_min", 0) == 124 &&
+            root.value("num_frames_opt", 0) == 124 && root.value("num_frames_max", 0) == 345 &&
+            root.value("text_rows_min", 0) == 1 && root.value("text_rows_opt", 0) == 128 &&
+            root.value("text_rows_max", 0) == 2641 && root.value("audio_rows_min", 0) == 414 &&
+            root.value("audio_rows_opt", 0) == 414 && root.value("audio_rows_max", 0) == 1150 &&
+            root.value("video_rows_min", 0) == 18870 && root.value("video_rows_opt", 0) == 37296 &&
+            root.value("video_rows_max", 0) == 108576 &&
+            root.value("packed_sequence_length_min", 0) == 19285 &&
             root.value("packed_sequence_length_opt", 0) == 37838 &&
             root.value("packed_sequence_length_max", 0) == 112367 &&
-            root.value("vae_tile_batch_min", 0) == 16 &&
+            root.value("vae_tile_batch_min", 0) == 15 &&
             root.value("vae_tile_batch_opt", 0) == 28 && root.value("vae_tile_batch_max", 0) == 33;
         if (!exact)
             throw std::runtime_error(
@@ -882,7 +888,7 @@ MiniMaxH3DenoiserConfig load_denoiser_config(const PipelineContext& ctx, const C
             vsa.value("video_keep_numerator", 0) == 1 &&
             vsa.value("video_keep_denominator", 0) == 10 &&
             vsa.value("max_video_tiles", 0) == 2080 && vsa.value("max_total_tiles", 0) == 2140 &&
-            int_array_equals(vsa, "packed_row_to_tile_slot_profile", {21727, 37838, 112367}) &&
+            int_array_equals(vsa, "packed_row_to_tile_slot_profile", {19285, 37838, 112367}) &&
             int_array_equals(vsa, "prefix_valid_sizes_profile", {8, 9, 60}) &&
             int_array_equals(vsa, "video_valid_sizes_profile", {360, 660, 2080}) &&
             vsa_tensor_abi_is_exact(vsa) && vsa_segments_are_exact(vsa);
@@ -916,11 +922,7 @@ const BundleSectionInfo& require_plan_section(const SectionMap& sections, const 
 }
 
 bool retain_hot_engine(std::string_view name, const HotEngineConfig& hot) {
-    if (!hot.retain_engines)
-        return false;
-    return name == "denoiser_head_plan" || name == "denoiser_tail_plan" ||
-           name == "denoiser_finish_plan" || name == "vae_tile_decoder_plan" ||
-           name == "audio_vae_decoder_plan";
+    return minimax_h3::should_retain_hot_engine(name, hot.retain_engines);
 }
 
 ModuleCreateOptions module_options(cudaStream_t stream, const std::string& runtime_cache,
@@ -1000,8 +1002,58 @@ std::unique_ptr<ITrtModule> load_module(const std::string& name, cudaStream_t st
                                  external_bindings);
 }
 
+class RuntimeCacheLeaseState final {
+  public:
+    RuntimeCacheLeaseState(IRuntimeCacheBackend& backend, const std::string& path)
+        : backend_(&backend), lease_(backend.acquire_runtime_cache_lease(path.c_str())) {}
+
+    ~RuntimeCacheLeaseState() {
+        if (lease_ == 0)
+            return;
+        try {
+            finalize();
+        } catch (const std::exception& error) {
+            std::cerr << "[trtmc] Failed to persist RTX runtime cache during lease cleanup: "
+                      << error.what() << '\n';
+        } catch (...) {
+            std::cerr << "[trtmc] Failed to persist RTX runtime cache during lease cleanup\n";
+        }
+    }
+
+    void require_active() const {
+        if (lease_ == 0)
+            throw std::runtime_error("MiniMax-H3 runtime cache lease is already finalized");
+    }
+
+    void finalize() {
+        if (lease_ == 0)
+            return;
+        // The backend intentionally leaves the lease active when persistence
+        // fails. Clear our token only after a successful release so explicit
+        // finalization and the destructor can retry the same lease.
+        backend_->release_runtime_cache_lease(lease_);
+        lease_ = 0;
+    }
+
+  private:
+    IRuntimeCacheBackend* backend_;
+    std::uint64_t lease_;
+};
+
+std::shared_ptr<RuntimeCacheLeaseState> make_runtime_cache_lease(const PipelineContext& ctx) {
+    if (ctx.runtime_cache_path.empty())
+        return {};
+    auto* cache_backend = dynamic_cast<IRuntimeCacheBackend*>(ctx.backend);
+    if (cache_backend == nullptr) {
+        throw std::runtime_error(
+            "MiniMax-H3 runtime cache requires a backend with explicit persistence support");
+    }
+    return std::make_shared<RuntimeCacheLeaseState>(*cache_backend, ctx.runtime_cache_path);
+}
+
 MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap sections,
-                                         RuntimeMemoryConfig memory, HotEngineConfig hot) {
+                                         RuntimeMemoryConfig memory, HotEngineConfig hot,
+                                         std::shared_ptr<RuntimeCacheLeaseState> cache_lease) {
     if (hot.retain_engines && !memory.staged) {
         throw std::runtime_error(
             "MiniMax-H3 retained engines require a staged TensorRT-RTX bundle");
@@ -1019,13 +1071,16 @@ MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap 
         plan_sha256 = load_plan_sha256(ctx.config_json, sections);
         validate_plan_section_attestations(ctx.bundle_path, sections, plan_sha256);
     }
-    return [sections = std::move(sections), bundle_path, runtime_cache, backend, cuda_graphs,
-            memory, hot, plan_sha256 = std::move(plan_sha256)](
-               const std::string& name, cudaStream_t stream,
-               const std::vector<ModuleExternalBinding>& external_bindings) {
-        return load_module(name, stream, external_bindings, sections, bundle_path, runtime_cache,
-                           backend, cuda_graphs, memory, plan_sha256, hot);
-    };
+    return
+        [sections = std::move(sections), bundle_path, runtime_cache, backend, cuda_graphs, memory,
+         hot, plan_sha256 = std::move(plan_sha256), cache_lease = std::move(cache_lease)](
+            const std::string& name, cudaStream_t stream,
+            const std::vector<ModuleExternalBinding>& external_bindings) {
+            if (cache_lease)
+                cache_lease->require_active();
+            return load_module(name, stream, external_bindings, sections, bundle_path,
+                               runtime_cache, backend, cuda_graphs, memory, plan_sha256, hot);
+        };
 }
 
 } // namespace
@@ -1040,11 +1095,18 @@ class MiniMaxH3Plugin final : public IPipelinePlugin {
         auto sections =
             index_sections(ctx.bundle.info, cache.enabled, denoiser.native_vsa, ref2va.enabled);
         validate_fl2va_conditioning_contract(ctx, sections);
+        auto runtime_cache_lease = make_runtime_cache_lease(ctx);
         auto loader = make_module_loader(ctx, std::move(sections), load_runtime_memory_config(ctx),
-                                         load_hot_engine_config(ctx));
-        return std::make_unique<MiniMaxH3Pipeline>(std::move(loader), load_tokenizer(ctx.bundle),
-                                                   ctx.bundle.info.model_id, cache.enabled,
-                                                   cache.threshold, denoiser, ref2va);
+                                         load_hot_engine_config(ctx), runtime_cache_lease);
+        std::function<void()> runtime_cache_finalizer;
+        if (runtime_cache_lease) {
+            runtime_cache_finalizer = [runtime_cache_lease = std::move(runtime_cache_lease)] {
+                runtime_cache_lease->finalize();
+            };
+        }
+        return std::make_unique<MiniMaxH3Pipeline>(
+            std::move(loader), load_tokenizer(ctx.bundle), ctx.bundle.info.model_id, cache.enabled,
+            cache.threshold, denoiser, ref2va, std::move(runtime_cache_finalizer));
     }
 };
 

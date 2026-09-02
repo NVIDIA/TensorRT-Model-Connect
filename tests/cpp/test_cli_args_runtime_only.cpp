@@ -30,7 +30,7 @@ trtmc::cli::CliArgs parse(std::initializer_list<std::string> arguments) {
     return trtmc::cli::parse_args(static_cast<int>(argv.size()), argv.data());
 }
 
-void test_help_exposes_only_native_h3_runtime_commands() {
+void test_help_matches_projected_runtime_models() {
     std::ostringstream output;
     std::streambuf* previous = std::cerr.rdbuf(output.rdbuf());
     trtmc::cli::print_usage();
@@ -38,15 +38,52 @@ void test_help_exposes_only_native_h3_runtime_commands() {
     const auto help = output.str();
     check(help.find("generate-video") != std::string::npos,
           "runtime help exposes native video generation");
+#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
     check(help.find("FL2VA") != std::string::npos && help.find("Ref2VA") != std::string::npos,
           "runtime help exposes all public H3 workflows");
+#else
+    check(help.find("MiniMax-H3") == std::string::npos && help.find("FL2VA") == std::string::npos &&
+              help.find("Ref2VA") == std::string::npos,
+          "non-H3 runtime help does not advertise H3 workflows or branding");
+#endif
     check(help.find("--warmup") != std::string::npos &&
               help.find("--benchmark") != std::string::npos,
           "runtime help exposes same-process video timing");
+    check(help.find("--output OUTPUT.mp4 is required exactly once") != std::string::npos,
+          "runtime help states the single MP4 output contract");
     check(help.find("trtmc build") == std::string::npos,
           "runtime help does not expose Python-backed build");
     check(help.find("hf-python") == std::string::npos,
           "runtime help has no Python interpreter option");
+}
+
+void test_runtime_requires_one_explicit_mp4_output() {
+    const auto uppercase = parse(
+        {"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output", "movie.MP4"});
+    check(!uppercase.parse_error && uppercase.output_dir == "movie.MP4",
+          "runtime accepts a case-insensitive MP4 extension");
+
+    const auto missing = parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello"});
+    check(missing.parse_error &&
+              missing.error_message ==
+                  "generate-video requires exactly one --output OUTPUT.mp4 argument",
+          "runtime rejects a missing output during parsing");
+
+    for (const char* output : {"frames", "frames/", "movie.mp4.tmp", "movie.png"}) {
+        const auto invalid = parse(
+            {"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output", output});
+        check(invalid.parse_error &&
+                  invalid.error_message ==
+                      "generate-video --output must be a file path ending in .mp4",
+              "runtime rejects a directory or non-MP4 output during parsing");
+    }
+
+    const auto duplicate = parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello",
+                                  "--output", "first.mp4", "-o", "second.mp4"});
+    check(duplicate.parse_error &&
+              duplicate.error_message ==
+                  "generate-video requires exactly one --output OUTPUT.mp4 argument",
+          "runtime rejects multiple output arguments during parsing");
 }
 
 void test_runtime_command_allowlist() {
@@ -63,8 +100,16 @@ void test_runtime_command_allowlist() {
           "runtime rejects Python-backed build");
     check(parse({"trtmc", "graph", "list"}).parse_error,
           "runtime rejects Python-backed graph tools");
-    check(parse({"trtmc", "run", "model.bundle", "--prompt", "hello"}).parse_error,
-          "H3 runtime rejects unrelated generic commands");
+    const auto unrelated = parse({"trtmc", "run", "model.bundle", "--prompt", "hello"});
+    check(unrelated.parse_error, "runtime rejects unrelated generic commands");
+#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
+    check(unrelated.error_message.find("MiniMax-H3 runtime CLI") != std::string::npos,
+          "H3 runtime command error retains H3 branding");
+#else
+    check(unrelated.error_message.find("runtime-only ModelConnect CLI") != std::string::npos &&
+              unrelated.error_message.find("MiniMax-H3") == std::string::npos,
+          "non-H3 runtime command error uses generic branding");
+#endif
     check(parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello",
                  "--validate-runtime"})
               .parse_error,
@@ -111,8 +156,9 @@ void test_runtime_rejects_malformed_timing_counts() {
 } // namespace
 
 int main() {
-    test_help_exposes_only_native_h3_runtime_commands();
+    test_help_matches_projected_runtime_models();
     test_runtime_command_allowlist();
+    test_runtime_requires_one_explicit_mp4_output();
     test_runtime_rejects_python_escape_hatch();
     test_nonlocked_runtime_keeps_development_loader_overrides();
     test_runtime_rejects_malformed_timing_counts();

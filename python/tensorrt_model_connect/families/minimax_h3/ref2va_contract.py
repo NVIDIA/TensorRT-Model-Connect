@@ -914,11 +914,12 @@ REF2VA_MAX_PACKED_ROWS = (
 
 @dataclass(frozen=True)
 class Ref2VADenoiserProfile:
-    # The public minimum can be a square reference image (4,096 rows) plus a
-    # square 5.167-second target (21,312 rows).  Keep the text profile at one
-    # rather than baking a tokenizer-dependent lower bound into the engine;
-    # request validation still requires the complete presentation.
-    min_video_rows: int = 25_408
+    # The live public workflow permits an audio-only reference, so the video
+    # minimum is the 5.167-second target on the explicit 960x544 canvas with no
+    # conditioning video rows. Keep the text profile at one rather than baking
+    # a tokenizer-dependent lower bound into the engine; request validation
+    # still requires the complete presentation.
+    min_video_rows: int = 18_870
     opt_video_rows: int = 44_592
     max_video_rows: int = REF2VA_MAX_ALL_VIDEO_ROWS
     min_audio_rows: int = 414

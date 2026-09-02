@@ -28,6 +28,7 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     CANVAS_MIN_ASPECT_RATIO,
     CANVAS_MULTIPLE,
     CANVAS_SHORT_EDGE,
+    NATIVE_EXPLICIT_CANVAS_SIZES,
     FASTH3_GUIDANCE_SCALE,
     FASTH3_SCHEDULER_GRID_POINTS,
     FASTH3_TRANSFORMER_FORWARDS,
@@ -99,9 +100,7 @@ FASTH3_PLAN_SECTIONS = {
     "vae_tile_decoder_plan": "vae_tile_decoder.plan",
     "audio_vae_decoder_plan": "audio_vae_decoder.plan",
 }
-REF2VA_PLAN_SECTIONS = {
-    section: filename for _component, filename, section in REF2VA_COMPONENTS
-}
+REF2VA_PLAN_SECTIONS = {section: filename for _component, filename, section in REF2VA_COMPONENTS}
 EAGER_BUNDLE_SECTIONS = ("tokenizer.json", "config.json")
 LAZY_BUNDLE_SECTIONS = tuple(PLAN_SECTIONS)
 
@@ -200,7 +199,10 @@ def _validated_fast_h3_metadata(value: object, profile) -> dict[str, object]:
     if (
         not isinstance(counts, dict)
         or set(counts) != expected_partitions
-        or any(not isinstance(count, int) or isinstance(count, bool) or count <= 0 for count in counts.values())
+        or any(
+            not isinstance(count, int) or isinstance(count, bool) or count <= 0
+            for count in counts.values()
+        )
         or sum(counts.values()) != expected["adapter_tensor_count"]
     ):
         raise ValueError("FastH3 build receipt has invalid adapter partition accounting")
@@ -268,14 +270,14 @@ def main() -> int:
         segmented_vsa=args.fast_h3,
     )
     fast_h3_metadata = (
-        _validated_fast_h3_metadata(receipt.get("fast_h3"), profile)
-        if args.fast_h3
-        else None
+        _validated_fast_h3_metadata(receipt.get("fast_h3"), profile) if args.fast_h3 else None
     )
     expected_mode = (
         "segmented_vsa"
         if args.fast_h3
-        else "first_block" if profile.first_block_cache else "monolithic"
+        else "first_block"
+        if profile.first_block_cache
+        else "monolithic"
     )
     if receipt.get("denoiser_mode") != expected_mode:
         raise ValueError("MiniMax-H3 build receipt denoiser mode does not match packaging mode")
@@ -290,8 +292,7 @@ def main() -> int:
         missing_ref_plans = sorted(set(REF2VA_PLAN_SECTIONS.values()) - set(recorded))
         if missing_ref_plans:
             raise ValueError(
-                "Ref2VA packaging receipt is missing strictly built plans: "
-                f"{missing_ref_plans}"
+                f"Ref2VA packaging receipt is missing strictly built plans: {missing_ref_plans}"
             )
     elif receipt.get("transformer_ref") is not None:
         raise ValueError("Non-Ref2VA packaging rejects transformer_ref receipt metadata")
@@ -313,7 +314,7 @@ def main() -> int:
     )
     if transformer_ref_identity is None:
         text_sequence_profile = [1, 1144, 2641]
-        vision_patch_profile = [2304, 4032, 4176]
+        vision_patch_profile = [2040, 4032, 4176]
         vision_row_profile = [1, 1008, 2088]
     else:
         shared_qwen = ref2va_shared_qwen_profile_metadata()
@@ -346,6 +347,7 @@ def main() -> int:
         "canvas_multiple": CANVAS_MULTIPLE,
         "canvas_short_edge": CANVAS_SHORT_EDGE,
         "canvas_max_pixels": CANVAS_MAX_PIXELS,
+        "explicit_canvas_sizes": [list(size) for size in NATIVE_EXPLICIT_CANVAS_SIZES],
         "min_aspect_ratio": CANVAS_MIN_ASPECT_RATIO,
         "max_aspect_ratio": CANVAS_MAX_ASPECT_RATIO,
         "public_workflows": [
@@ -400,7 +402,7 @@ def main() -> int:
         "max_timestep_count": 4,
         "context_parallel_size": 1,
         "vae_tile_batch": 28,
-        "vae_tile_batch_min": 16,
+        "vae_tile_batch_min": 15,
         "vae_tile_batch_opt": 28,
         "vae_tile_batch_max": 33,
         "vae_tile_size": 256,
@@ -415,9 +417,7 @@ def main() -> int:
             "video_keep_numerator": 1,
             "video_keep_denominator": 10,
             "max_video_tiles": FASTH3_VSA_MAX_VIDEO_TILES,
-            "max_total_tiles": (
-                profile.vsa_prefix_tile_profile[2] + FASTH3_VSA_MAX_VIDEO_TILES
-            ),
+            "max_total_tiles": (profile.vsa_prefix_tile_profile[2] + FASTH3_VSA_MAX_VIDEO_TILES),
             "packed_row_to_tile_slot_profile": list(profile.packed_row_profile),
             "prefix_valid_sizes_profile": list(profile.vsa_prefix_tile_profile),
             "video_valid_sizes_profile": list(profile.vsa_video_tile_abi_profile),

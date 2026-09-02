@@ -76,9 +76,8 @@ fs::path default_install_root() {
 
 SetupArguments parse_arguments(const fs::path& exe) {
     SetupArguments result;
-    result.install_root = _wcsicmp(exe.filename().c_str(), L"UninstallMiniMaxH3.exe") == 0
-                              ? exe.parent_path()
-                              : default_install_root();
+    const bool running_uninstaller =
+        _wcsicmp(exe.filename().c_str(), L"UninstallMiniMaxH3.exe") == 0;
     result.payload_root = exe.parent_path() / L"payload";
     int count = 0;
     LPWSTR* values = CommandLineToArgvW(GetCommandLineW(), &count);
@@ -117,7 +116,14 @@ SetupArguments parse_arguments(const fs::path& exe) {
         throw;
     }
     release();
-    result.install_root = fs::absolute(result.install_root).lexically_normal();
+    // Verification and help are package-local operations. Do not require a
+    // shell-known LocalAppData path merely to attest a release package.
+    if (result.install_root.empty() && !result.show_help &&
+        (result.uninstall || !result.verify_only)) {
+        result.install_root = running_uninstaller ? exe.parent_path() : default_install_root();
+    }
+    if (!result.install_root.empty())
+        result.install_root = fs::absolute(result.install_root).lexically_normal();
     result.payload_root = fs::absolute(result.payload_root).lexically_normal();
     return result;
 }
@@ -292,6 +298,16 @@ void show_message(bool quiet, const std::wstring& text, UINT flags) {
         MessageBoxW(nullptr, text.c_str(), L"ModelConnect MiniMax-H3 Setup", flags);
 }
 
+std::wstring utf8_error_text(const char* begin) {
+    const auto length = static_cast<int>(std::strlen(begin));
+    const int required = MultiByteToWideChar(CP_UTF8, 0, begin, length, nullptr, 0);
+    if (required <= 0)
+        return L"Unknown error";
+    std::wstring converted(static_cast<std::size_t>(required), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, begin, length, converted.data(), required);
+    return converted;
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
@@ -313,20 +329,25 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             return 0;
         }
         if (args.uninstall) {
-            if (!trtmc::installer::installation_marker_matches(args.install_root, kMarkerName,
-                                                               kMarkerContents)) {
-                throw std::runtime_error(
-                    "Refusing to uninstall a directory without the ModelConnect H3 marker");
+            {
+                const auto transaction_lock =
+                    trtmc::installer::acquire_install_transaction_lock(args.install_root);
+                (void)transaction_lock;
+                if (!trtmc::installer::installation_marker_matches(args.install_root, kMarkerName,
+                                                                   kMarkerContents)) {
+                    throw std::runtime_error(
+                        "Refusing to uninstall a directory without the ModelConnect H3 marker");
+                }
+                unregister_installation(args.install_root);
+                uninstall_files(args.install_root, exe);
             }
-            unregister_installation(args.install_root);
-            uninstall_files(args.install_root, exe);
             show_message(args.quiet, L"ModelConnect MiniMax-H3 was uninstalled.",
                          MB_OK | MB_ICONINFORMATION);
             return 0;
         }
 
         const auto manifest = args.payload_root.parent_path() / L"payload.manifest";
-        const auto entries = trtmc::installer::read_payload_manifest(manifest);
+        const auto entries = trtmc::installer::read_authenticated_payload_manifest(manifest);
         trtmc::installer::validate_minimax_h3_runtime_payload(entries);
         if (args.verify_only) {
             trtmc::installer::verify_payload(args.payload_root, entries);
@@ -334,9 +355,33 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                          MB_OK | MB_ICONINFORMATION);
             return 0;
         }
-        trtmc::installer::install_payload_transactional(args.payload_root, args.install_root,
-                                                        entries, kMarkerName, kMarkerContents);
-        register_installation(args.install_root, args.modify_path);
+        std::optional<std::string> registration_failure;
+        {
+            const auto transaction_lock =
+                trtmc::installer::acquire_install_transaction_lock(args.install_root);
+            (void)transaction_lock;
+            trtmc::installer::install_payload_transactional(args.payload_root, args.install_root,
+                                                            entries, kMarkerName, kMarkerContents);
+            try {
+                register_installation(args.install_root, args.modify_path);
+            } catch (const std::exception& registration_error) {
+                registration_failure = registration_error.what();
+            }
+        }
+        if (registration_failure.has_value()) {
+            const auto cli = args.install_root / L"bin" / L"trtmc.exe";
+            show_message(
+                args.quiet,
+                L"The runtime files were installed and verified, but Windows registration is "
+                L"incomplete. Rerun Setup to retry registration.\n\nCLI:\n" +
+                    cli.wstring() + L"\n\nCause:\n" +
+                    utf8_error_text(registration_failure->c_str()),
+                MB_OK | MB_ICONWARNING);
+            // Files are committed and usable by exact path. Distinguish this
+            // partial success from both a complete install (0) and a failed
+            // file transaction (1).
+            return 2;
+        }
         const auto bundle = args.install_root / L"models" / L"MiniMax-H3.bundle";
         show_message(args.quiet,
                      L"ModelConnect MiniMax-H3 was installed successfully.\n\nBundle:\n" +
@@ -344,17 +389,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                      MB_OK | MB_ICONINFORMATION);
         return 0;
     } catch (const std::exception& error) {
-        std::wstring message = L"Setup failed.\n\n";
-        const auto* begin = error.what();
-        const auto length = static_cast<int>(std::strlen(begin));
-        const int required = MultiByteToWideChar(CP_UTF8, 0, begin, length, nullptr, 0);
-        if (required > 0) {
-            std::wstring converted(static_cast<std::size_t>(required), L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, begin, length, converted.data(), required);
-            message += converted;
-        } else {
-            message += L"Unknown error";
-        }
+        std::wstring message = L"Setup failed.\n\n" + utf8_error_text(error.what());
         show_message(quiet, message, MB_OK | MB_ICONERROR);
         return 1;
     }

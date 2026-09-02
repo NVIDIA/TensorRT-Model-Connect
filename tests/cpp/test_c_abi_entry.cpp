@@ -206,6 +206,10 @@ static void test_create_ex_with_options() {
     check(p == nullptr, "bad bundle with options returns null");
     const char* err = trtmc_last_error();
     check(err != nullptr && std::strlen(err) > 0, "error set with options");
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    check(err != nullptr && std::strstr(err, "rejects hf_python") != nullptr,
+          "locked C ABI rejects hf_python before bundle access");
+#endif
 }
 
 // -----------------------------------------------------------------------------

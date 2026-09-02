@@ -105,9 +105,7 @@ def test_plan_writer_streams_memoryview_and_cleans_failed_temporary(
             return False
 
     with pytest.raises(RuntimeError, match="failed to serialize"):
-        trt_compat.build_serialized_network_to_file(
-            FailingBuilder(), object(), object(), output
-        )
+        trt_compat.build_serialized_network_to_file(FailingBuilder(), object(), object(), output)
     assert output.read_bytes() == b"previous"
     assert not list(tmp_path.glob(".engine.plan.tmp.*"))
 
@@ -170,7 +168,7 @@ def test_staged_build_uses_seven_fresh_children_resumes_and_sanitizes_bundle(
         config["video_rows_min"],
         config["video_rows_opt"],
         config["video_rows_max"],
-    ) == (21312, 37296, 108576)
+    ) == (18870, 37296, 108576)
     assert (
         config["audio_rows_min"],
         config["audio_rows_opt"],
@@ -180,13 +178,10 @@ def test_staged_build_uses_seven_fresh_children_resumes_and_sanitizes_bundle(
         config["packed_sequence_length_min"],
         config["packed_sequence_length_opt"],
         config["packed_sequence_length_max"],
-    ) == (21727, 37838, 112367)
-    assert set(config["plan_sha256"]) == {
-        item[1] for item in staged_build._COMPONENTS
-    }
+    ) == (19285, 37838, 112367)
+    assert set(config["plan_sha256"]) == {item[1] for item in staged_build._COMPONENTS}
     assert all(
-        len(value) == 64 and value == value.lower()
-        for value in config["plan_sha256"].values()
+        len(value) == 64 and value == value.lower() for value in config["plan_sha256"].values()
     )
     serialized = json.dumps(config).lower()
     assert str(tmp_path).lower() not in serialized
@@ -331,20 +326,21 @@ def test_plugin_routes_only_fixed_bf16_single_gpu_profile(
     model = tmp_path / "model"
     output = tmp_path / "model.bundle"
 
-    assert plugin.build_staged_bundle(
-        str(model),
-        str(output),
-        config,
-        {"_model_dir": str(model)},
-        precision="bf16",
-        parallel_config=SimpleNamespace(mode="single"),
-    ) == output
+    assert (
+        plugin.build_staged_bundle(
+            str(model),
+            str(output),
+            config,
+            {"_model_dir": str(model)},
+            precision="bf16",
+            parallel_config=SimpleNamespace(mode="single"),
+        )
+        == output
+    )
     assert calls == [((model, str(output)), {"verbose": False})]
 
     with pytest.raises(ValueError, match="require BF16"):
-        plugin.build_staged_bundle(
-            str(model), str(output), config, {}, precision="fp16"
-        )
+        plugin.build_staged_bundle(str(model), str(output), config, {}, precision="fp16")
     with pytest.raises(ValueError, match="require max_batch_size=1"):
         plugin.build_staged_bundle(
             str(model), str(output), config, {}, precision="bf16", max_batch_size=2
@@ -403,11 +399,14 @@ def test_fast_h3_staged_bundle_is_segmented_path_free_and_four_step(
     monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
     monkeypatch.setattr(staged_build.trt_compat, "tensorrt_abi", lambda _version: "1.6")
 
-    assert staged_build.build_staged_bundle(
-        model,
-        output,
-        fast_h3_adapter=adapter,
-    ) == output
+    assert (
+        staged_build.build_staged_bundle(
+            model,
+            output,
+            fast_h3_adapter=adapter,
+        )
+        == output
+    )
     assert [call[call.index("--component") + 1] for call in calls] == [
         item[0] for item in staged_build._FASTH3_COMPONENTS
     ]
@@ -422,27 +421,26 @@ def test_fast_h3_staged_bundle_is_segmented_path_free_and_four_step(
     assert config["denoiser_cache_mode"] == "segmented_vsa"
     assert config["attention_mode"] == "native_vsa"
     assert config["bundle_loading"]["lazy_sections"][3] == "denoiser_entry_plan"
-    assert config["bundle_loading"]["lazy_sections"][4] == (
-        "denoiser_transition_00_plan"
-    )
+    assert config["bundle_loading"]["lazy_sections"][4] == ("denoiser_transition_00_plan")
     assert config["vsa"]["implementation"] == "native_cuda_segmented"
     assert config["vsa"]["segment_count"] == 51
     assert config["vsa"]["attention_calls_per_forward"] == 50
     assert config["vsa"]["tensor_abi"]["attention_shape"] == [56, "S", 128]
-    assert config["vsa"]["packed_row_to_tile_slot_profile"] == [21727, 37838, 112367]
+    assert config["vsa"]["packed_row_to_tile_slot_profile"] == [19285, 37838, 112367]
+    assert config["explicit_canvas_sizes"] == [[544, 960], [960, 544]]
     assert config["vsa"]["prefix_valid_sizes_profile"] == [8, 9, 60]
     assert config["vsa"]["video_valid_sizes_profile"] == [360, 660, 2080]
     assert config["vsa"]["runtime_metadata_abi"]["packed_row_to_tile_slot"] == {
         "dtype": "int32",
         "shape": ["S"],
-        "profile": [21727, 37838, 112367],
+        "profile": [19285, 37838, 112367],
     }
     assert config["padded_sequence_length"] == 112367
     assert (
         config["vae_tile_batch_min"],
         config["vae_tile_batch_opt"],
         config["vae_tile_batch_max"],
-    ) == (16, 28, 33)
+    ) == (15, 28, 33)
     assert str(tmp_path).lower() not in json.dumps(config).lower()
 
 

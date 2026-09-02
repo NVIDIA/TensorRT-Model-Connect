@@ -21,6 +21,7 @@ from .config import (
     CANVAS_MIN_ASPECT_RATIO,
     CANVAS_MULTIPLE,
     CANVAS_SHORT_EDGE,
+    NATIVE_EXPLICIT_CANVAS_SIZES,
     SOL_ENGINE_1344X768_124_TO_345F,
     native_plan_filenames,
 )
@@ -45,9 +46,7 @@ DIFFUSERS_REFERENCE_ARCHIVE_SHA256 = (
 DIFFUSERS_REFERENCE_CONTAINER_ROOT = "/work/reference-private"
 PLAN_FILENAMES = native_plan_filenames(first_block_cache=False)
 FIRST_BLOCK_CACHE_PLAN_FILENAMES = native_plan_filenames(first_block_cache=True)
-FASTH3_SEGMENTED_PLAN_FILENAMES = native_plan_filenames(
-    first_block_cache=False, segmented_vsa=True
-)
+FASTH3_SEGMENTED_PLAN_FILENAMES = native_plan_filenames(first_block_cache=False, segmented_vsa=True)
 _REQUIRED_SNAPSHOT_FILES = (
     "audio_vae/config.json",
     "audio_vae/diffusion_pytorch_model.safetensors",
@@ -141,18 +140,12 @@ def validate_workspace_limit_bytes(
     selected = False if first_block_cache is None else first_block_cache
     if not isinstance(selected, bool):
         raise ValueError("MiniMax-H3 first_block_cache selector must be a boolean")
-    if (
-        not isinstance(additional_plan_filenames, tuple)
-        or any(
-            not isinstance(filename, str) or not filename
-            for filename in additional_plan_filenames
-        )
+    if not isinstance(additional_plan_filenames, tuple) or any(
+        not isinstance(filename, str) or not filename for filename in additional_plan_filenames
     ):
         raise ValueError("MiniMax-H3 additional plan filenames must be a tuple of names")
     expected = (
-        *native_plan_filenames(
-            first_block_cache=selected, segmented_vsa=segmented_vsa
-        ),
+        *native_plan_filenames(first_block_cache=selected, segmented_vsa=segmented_vsa),
         *additional_plan_filenames,
     )
     if len(set(expected)) != len(expected):
@@ -416,6 +409,20 @@ def _lstat_identity(path: Path) -> tuple[int, int, int, int, int, int]:
     )
 
 
+def _resolve_archive_symlink(path: Path) -> Path:
+    """Resolve a Git symlink payload without asking Windows to follow it directly.
+
+    Git symlink payloads always use POSIX separators. Windows can create such a
+    link, but ``Path.resolve`` on the link itself rejects some relative POSIX
+    payloads with ``ERROR_INVALID_NAME``. Resolve the payload relative to its
+    parent instead; the caller still validates the canonical target boundary.
+    """
+
+    payload = Path(os.readlink(path))
+    target = payload if payload.is_absolute() else path.parent / payload
+    return target.resolve(strict=True)
+
+
 def _archive_layout(root: Path, label: str) -> list[tuple[str, str]]:
     try:
         paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
@@ -441,8 +448,8 @@ def _archive_layout(root: Path, label: str) -> list[tuple[str, str]]:
         elif stat.S_ISLNK(mode):
             kind = "L"
             try:
-                target = path.resolve(strict=True)
-            except OSError as error:
+                target = _resolve_archive_symlink(path)
+            except (OSError, RuntimeError) as error:
                 raise ValueError(
                     f"MiniMax-H3 {label} archive has a broken symlink: {relative}"
                 ) from error
@@ -492,7 +499,10 @@ def _archive_inventory_record(root: Path, label: str) -> dict[str, int | str]:
             raise ValueError(
                 f"MiniMax-H3 {label} archive entry changed while hashing: {relative}"
             ) from error
-        if identity_after != identity_before or identity_before[3] != size:
+        # Windows reports reparse-point metadata size rather than the Git link
+        # payload length for a symlink. The lstat tuple still detects mutation;
+        # only regular files can additionally bind st_size to bytes hashed.
+        if identity_after != identity_before or (kind != "L" and identity_before[3] != size):
             raise ValueError(f"MiniMax-H3 {label} archive entry changed while hashing: {relative}")
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
@@ -802,20 +812,17 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         "builder_source_sha256": builder_source_sha256(),
         "context_parallel_size": 1,
         "padded_sequence_length": SOL_ENGINE_1344X768_124_TO_345F.padded_sequence_length,
-        "packed_sequence_length_min": (
-            SOL_ENGINE_1344X768_124_TO_345F.min_sequence_length
-        ),
-        "packed_sequence_length_opt": (
-            SOL_ENGINE_1344X768_124_TO_345F.opt_sequence_length
-        ),
+        "packed_sequence_length_min": (SOL_ENGINE_1344X768_124_TO_345F.min_sequence_length),
+        "packed_sequence_length_opt": (SOL_ENGINE_1344X768_124_TO_345F.opt_sequence_length),
         "packed_sequence_length_max": SOL_ENGINE_1344X768_124_TO_345F.sequence_length,
         "canvas_multiple": CANVAS_MULTIPLE,
         "canvas_short_edge": CANVAS_SHORT_EDGE,
         "canvas_max_pixels": CANVAS_MAX_PIXELS,
+        "explicit_canvas_sizes": [list(size) for size in NATIVE_EXPLICIT_CANVAS_SIZES],
         "min_aspect_ratio": CANVAS_MIN_ASPECT_RATIO,
         "max_aspect_ratio": CANVAS_MAX_ASPECT_RATIO,
         "vae_tile_batch": 28,
-        "vae_tile_batch_min": 16,
+        "vae_tile_batch_min": 15,
         "vae_tile_batch_opt": 28,
         "vae_tile_batch_max": 33,
     }

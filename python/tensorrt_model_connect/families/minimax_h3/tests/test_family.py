@@ -18,6 +18,7 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     FASTH3_SEGMENTED_DENOISER_PLAN_FILENAMES,
     FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES,
     MiniMaxH3Config,
+    NATIVE_EXPLICIT_CANVAS_SIZES,
     SOL_ENGINE_1344X768_124F,
     SOL_ENGINE_1344X768_124_TO_345F,
     default_workspace_limit_bytes,
@@ -70,10 +71,10 @@ def test_sol_engine_profile_matches_public_packed_shape() -> None:
 def test_dynamic_media_profile_covers_released_5_to_15_second_endpoints() -> None:
     profile = SOL_ENGINE_1344X768_124_TO_345F
     profile.validate()
-    assert profile.video_row_profile == (21312, 37296, 108576)
+    assert profile.video_row_profile == (18870, 37296, 108576)
     assert profile.audio_row_profile == (414, 414, 1150)
     assert profile.text_row_profile == (1, 128, 2641)
-    assert profile.packed_row_profile == (21727, 37838, 112367)
+    assert profile.packed_row_profile == (19285, 37838, 112367)
     assert profile.padded_sequence_length == 112367
 
 
@@ -85,6 +86,7 @@ def test_fast_h3_dynamic_tile_metadata_profiles_cover_public_aspects() -> None:
 
 
 def test_public_canvas_resolver_matches_model_card_aspects() -> None:
+    assert NATIVE_EXPLICIT_CANVAS_SIZES == ((544, 960), (960, 544))
     assert {
         ratio: _resolve_canvas_size(*ratio)
         for ratio in ((21, 9), (16, 9), (4, 3), (1, 1), (3, 4), (9, 16), (4, 1))
@@ -104,9 +106,7 @@ def test_continuous_canvas_resolver_has_exact_finite_95_canvas_image() -> None:
     assert len(reachable) == len(set(reachable)) == 95
     assert (576, 1856) in reachable
     assert max(height * width for height, width in reachable) == 1_069_056
-    assert {
-        (height // 16) * (width // 16) for height, width in reachable
-    } <= set(range(1, 4177))
+    assert {(height // 16) * (width // 16) for height, width in reachable} <= set(range(1, 4177))
     assert max((height // 16) * (width // 16) for height, width in reachable) == 4176
 
 
@@ -153,10 +153,10 @@ def test_continuous_fl2va_and_vsa_maxima_are_exhaustive() -> None:
         target_video_rows,
         text_rows + condition_video_rows + target_video_rows + 1150,
     ) == (4176, 1044, 2641, 2088, 106488, 112367)
-    assert max(
-        len(split_tile_axis(h).starts) * len(split_tile_axis(w).starts)
-        for h, w in reachable
-    ) == 33
+    assert (
+        max(len(split_tile_axis(h).starts) * len(split_tile_axis(w).starts) for h, w in reachable)
+        == 33
+    )
 
 
 def test_invalid_single_device_contract_fails_closed() -> None:
@@ -295,7 +295,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         result["vae_tile_batch_min"],
         result["vae_tile_batch_opt"],
         result["vae_tile_batch_max"],
-    ) == (16, 28, 33)
+    ) == (15, 28, 33)
     assert (result["num_frames_min"], result["num_frames_opt"], result["num_frames_max"]) == (
         124,
         124,
@@ -305,7 +305,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         result["video_rows_min"],
         result["video_rows_opt"],
         result["video_rows_max"],
-    ) == (21312, 37296, 108576)
+    ) == (18870, 37296, 108576)
     assert (
         result["audio_rows_min"],
         result["audio_rows_opt"],
@@ -315,7 +315,8 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         result["packed_sequence_length_min"],
         result["packed_sequence_length_opt"],
         result["packed_sequence_length_max"],
-    ) == (21727, 37838, 112367)
+    ) == (19285, 37838, 112367)
+    assert result["explicit_canvas_sizes"] == [[544, 960], [960, 544]]
     assert result["bundle_loading"] == {
         "mode": "staged",
         "eager_sections": ["tokenizer.json", "config.json"],
@@ -343,9 +344,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
 
 def test_fast_h3_bundle_contract_is_four_full_segmented_vsa_forwards() -> None:
     profile = SOL_ENGINE_1344X768_124_TO_345F
-    workspaces = default_workspace_limit_bytes(
-        first_block_cache=False, segmented_vsa=True
-    )
+    workspaces = default_workspace_limit_bytes(first_block_cache=False, segmented_vsa=True)
     provenance = {
         "source_revision": "a" * 40,
         "builder_source_sha256": "b" * 64,
@@ -378,9 +377,7 @@ def test_fast_h3_bundle_contract_is_four_full_segmented_vsa_forwards() -> None:
     assert result["denoiser_cache_mode"] == "segmented_vsa"
     assert result["attention_mode"] == "native_vsa"
     assert result["bundle_loading"]["lazy_sections"][3] == "denoiser_entry_plan"
-    assert result["bundle_loading"]["lazy_sections"][4] == (
-        "denoiser_transition_00_plan"
-    )
+    assert result["bundle_loading"]["lazy_sections"][4] == ("denoiser_transition_00_plan")
     assert result["vsa"]["implementation"] == "native_cuda_segmented"
     assert result["vsa"]["segment_count"] == 51
     assert result["vsa"]["attention_calls_per_forward"] == 50
@@ -388,7 +385,7 @@ def test_fast_h3_bundle_contract_is_four_full_segmented_vsa_forwards() -> None:
     assert [item["filename"] for item in result["vsa"]["segments"]] == list(
         FASTH3_SEGMENTED_DENOISER_PLAN_FILENAMES
     )
-    assert result["vsa"]["packed_row_to_tile_slot_profile"] == [21727, 37838, 112367]
+    assert result["vsa"]["packed_row_to_tile_slot_profile"] == [19285, 37838, 112367]
     assert result["vsa"]["prefix_valid_sizes_profile"] == [8, 9, 60]
     assert result["vsa"]["video_valid_sizes_profile"] == [360, 660, 2080]
     assert result["vsa"]["max_total_tiles"] == 2140
@@ -397,7 +394,7 @@ def test_fast_h3_bundle_contract_is_four_full_segmented_vsa_forwards() -> None:
         "packed_row_to_tile_slot": {
             "dtype": "int32",
             "shape": ["S"],
-            "profile": [21727, 37838, 112367],
+            "profile": [19285, 37838, 112367],
         },
         "prefix_valid_sizes": {
             "dtype": "int32",
@@ -415,9 +412,7 @@ def test_fast_h3_bundle_contract_is_four_full_segmented_vsa_forwards() -> None:
     invalid = dict(components)
     invalid["profile"] = replace(profile, first_block_cache=True)
     with pytest.raises(ValueError, match="segmented native CUDA"):
-        MiniMaxH3Plugin().diffusion_bundle_config(
-            SimpleNamespace(raw={}), components=invalid
-        )
+        MiniMaxH3Plugin().diffusion_bundle_config(SimpleNamespace(raw={}), components=invalid)
 
 
 def test_plugin_emits_first_block_cache_sections_and_profile() -> None:

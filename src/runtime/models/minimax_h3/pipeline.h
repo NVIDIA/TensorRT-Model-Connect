@@ -6,6 +6,8 @@
 #pragma once
 
 #include "runtime/backend/prebound_backend.h"
+#include "runtime/backend/runtime_cache_control.h"
+#include "runtime/models/minimax_h3/public_profile.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -26,11 +28,6 @@ using MiniMaxH3ModuleLoader = std::function<std::unique_ptr<ITrtModule>(
 struct MiniMaxH3Schedule {
     std::vector<float> sigmas;
     std::vector<float> timesteps;
-};
-
-struct MiniMaxH3Canvas {
-    int32_t height{0};
-    int32_t width{0};
 };
 
 struct MiniMaxH3VaeTileLayout {
@@ -106,8 +103,6 @@ enum class MiniMaxH3SegmentPlanKind {
 };
 
 MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift);
-int32_t align_minimax_h3_num_frames(int32_t requested_frames);
-MiniMaxH3Canvas resolve_minimax_h3_canvas(double aspect_width, double aspect_height);
 MiniMaxH3VaeTileLayout make_minimax_h3_vae_tile_layout(int32_t output_height, int32_t output_width);
 MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output_height,
                                            int32_t output_width);
@@ -132,16 +127,18 @@ std::vector<float> unpack_and_denormalize_minimax_h3_audio(const std::vector<flo
 void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t count,
                                float timestep, float sigma, float sigma_next);
 
-class MiniMaxH3Pipeline final : public IPipeline {
+class MiniMaxH3Pipeline final : public IPipeline, public IRuntimeCacheControl {
   public:
     MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader, std::unique_ptr<ITokenizer> tokenizer,
                       std::string model_id, bool first_block_cache = false,
                       float cache_threshold = 0.025F, MiniMaxH3DenoiserConfig denoiser_config = {},
-                      MiniMaxH3Ref2VAConfig ref2va_config = {});
+                      MiniMaxH3Ref2VAConfig ref2va_config = {},
+                      std::function<void()> runtime_cache_finalize = {});
     ~MiniMaxH3Pipeline() override;
 
     VideoResult generate_video(const std::string& prompt, const GenerateConfig& cfg = {}) override;
     VideoResult generate_video(const VideoGenerationRequest& request) override;
+    void finalize_runtime_cache() override;
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "MiniMaxH3Pipeline"; }
 
@@ -158,6 +155,9 @@ class MiniMaxH3Pipeline final : public IPipeline {
     float cache_threshold_{0.025F};
     MiniMaxH3DenoiserConfig denoiser_config_{};
     MiniMaxH3Ref2VAConfig ref2va_config_{};
+    std::function<void()> runtime_cache_finalize_;
+    bool runtime_cache_finalize_started_{false};
+    bool runtime_cache_contexts_released_{false};
 
     VideoResult generate_video_impl(const std::string& prompt, const GenerateConfig& cfg,
                                     bool include_audio);

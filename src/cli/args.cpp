@@ -63,6 +63,22 @@ bool parse_strict_float(const char* text, float& out) {
     return true;
 }
 
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+bool has_mp4_extension(const std::string& path) {
+    constexpr char extension[] = ".mp4";
+    if (path.size() < sizeof(extension) - 1)
+        return false;
+
+    const auto offset = path.size() - (sizeof(extension) - 1);
+    for (std::size_t index = 0; index < sizeof(extension) - 1; ++index) {
+        const auto character = static_cast<unsigned char>(path[offset + index]);
+        if (static_cast<char>(std::tolower(character)) != extension[index])
+            return false;
+    }
+    return true;
+}
+#endif
+
 } // namespace
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
@@ -188,12 +204,18 @@ void print_usage() {
     std::cerr << "Usage:\n"
                  "  trtmc generate-video <bundle.bundle> --prompt \"text\" --output OUTPUT.mp4 "
                  "[--num-frames N] [--height N] [--width N] [--seed N] "
-                 "[--warmup N --benchmark N]\n"
-                 "                       FL2VA: [--first-frame IMAGE] [--last-frame IMAGE]\n"
+                 "[--warmup N --benchmark N]\n";
+#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
+    std::cerr << "                       FL2VA: [--first-frame IMAGE] [--last-frame IMAGE]\n"
                  "                       Ref2VA: [--reference-image IMAGE] "
-                 "[--reference-video VIDEO] [--reference-audio AUDIO.wav] ...\n"
-                 "  trtmc inspect        <bundle.bundle> [--list-engines] [--validate-runtime]\n"
+                 "[--reference-video VIDEO] [--reference-audio AUDIO] ...\n";
+#endif
+    std::cerr << "  trtmc inspect        <bundle.bundle> [--list-engines] [--validate-runtime]\n"
                  "  trtmc version\n"
+                 "\n"
+                 "Output contract:\n"
+                 "  --output OUTPUT.mp4 is required exactly once for generate-video; the .mp4 "
+                 "extension is case-insensitive.\n"
                  "\n"
                  "Runtime options:\n"
                  "  --runtime-cache PATH   TensorRT-RTX JIT kernel cache file\n";
@@ -244,10 +266,16 @@ void print_usage() {
            "  trtmc generate-video  <bundle.bundle> --prompt \"text\" --output DIR [--num-steps N] "
            "[--num-frames N] [--guidance-scale S] [--initial-latents-raw PATH]\n"
            "                        [--negative-prompt \"text\"] [--height N] [--width N]\n"
+#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
+           "                        MiniMax-H3 native canvases: the 768p resolver set, plus\n"
+           "                        --height 544 --width 960 (or its transpose); others fail "
+           "closed.\n"
            "                        FL2VA: [--first-frame IMAGE] [--last-frame IMAGE]\n"
            "                        Ref2VA: [--reference-image IMAGE] "
-           "[--reference-video VIDEO] [--reference-audio AUDIO.wav] ...\n"
+           "[--reference-video VIDEO] [--reference-audio AUDIO] ...\n"
            "                        VIDEO is an MP4/media file or ModelConnect video directory.\n"
+           "                        AUDIO is an MP3/WAV/media file decoded natively on Windows.\n"
+#endif
            "  trtmc embed           <bundle.bundle> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.bundle> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
@@ -308,8 +336,13 @@ CliArgs parse_args(int argc, char** argv) {
     }
     if (args.command != "generate-video" && args.command != "inspect") {
         args.parse_error = true;
+#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
         args.error_message =
             "this MiniMax-H3 runtime CLI supports generate-video, inspect, and version only";
+#else
+        args.error_message =
+            "this runtime-only ModelConnect CLI supports generate-video, inspect, and version only";
+#endif
         return args;
     }
 #endif
@@ -351,6 +384,9 @@ CliArgs parse_args(int argc, char** argv) {
         return args;
     }
 
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+    bool saw_output = false;
+#endif
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
 
@@ -542,7 +578,11 @@ CliArgs parse_args(int argc, char** argv) {
         if (arg == "--hf-python" && need_value(arg)) {
 #if defined(TRTMC_RUNTIME_ONLY_CLI)
             args.parse_error = true;
+#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
             args.error_message = "--hf-python is not present in the native MiniMax-H3 runtime";
+#else
+            args.error_message = "--hf-python is not present in the native ModelConnect runtime";
+#endif
             return args;
 #else
             args.hf_python = argv[++i];
@@ -641,6 +681,15 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if ((arg == "--output" || arg == "-o") && need_value(arg)) {
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+            if (args.command == "generate-video" && saw_output) {
+                args.parse_error = true;
+                args.error_message =
+                    "generate-video requires exactly one --output OUTPUT.mp4 argument";
+                return args;
+            }
+            saw_output = true;
+#endif
             args.output_dir = argv[++i];
             continue;
         }
@@ -997,6 +1046,19 @@ CliArgs parse_args(int argc, char** argv) {
         args.parse_error = true;
         args.error_message = "--prompts-file cannot be combined with --image";
     }
+
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+    if (args.command == "generate-video" && (!saw_output || args.output_dir.empty())) {
+        args.parse_error = true;
+        args.error_message = "generate-video requires exactly one --output OUTPUT.mp4 argument";
+        return args;
+    }
+    if (args.command == "generate-video" && !has_mp4_extension(args.output_dir)) {
+        args.parse_error = true;
+        args.error_message = "generate-video --output must be a file path ending in .mp4";
+        return args;
+    }
+#endif
 
     const bool has_key_frames = !args.first_frame_path.empty() || !args.last_frame_path.empty();
     const bool has_references = !args.video_references.empty();

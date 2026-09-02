@@ -12,7 +12,9 @@
 
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -35,7 +37,20 @@ class PipelineRegistry {
 
   private:
     PipelineRegistry() = default;
+    void begin_locked_registration(const std::string& strategy);
+    void finish_locked_registration(const std::string& strategy);
+    void abort_locked_registration(const std::string& strategy) noexcept;
+
+    friend void load_model_plugin_for_strategy(const std::string& strategy,
+                                               const std::vector<std::string>& search_paths);
+
+    mutable std::mutex mutex_;
     std::unordered_map<std::string, IPipelinePlugin*> registry_;
+    bool locked_registration_open_{false};
+    bool locked_registration_sealed_{false};
+    std::thread::id locked_registration_thread_{};
+    std::string locked_registration_strategy_;
+    std::size_t locked_registration_count_{0};
 };
 
 // Legacy helper for ad hoc tests or local extensions that still rely on

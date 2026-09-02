@@ -144,7 +144,7 @@ def test_staged_ref2va_is_opt_in_strict_and_adds_all_sections(
     assert config["ref2va_scheduler"]["guidance_distilled"] is True
     assert config["ref2va_limits"]["audio_can_be_sole_input"] is True
     assert config["conditioning"]["text_sequence_profile"] == [1, 1_144, 262_144]
-    assert config["conditioning"]["vision_patch_profile"] == [2_304, 4_032, 65_536]
+    assert config["conditioning"]["vision_patch_profile"] == [2_040, 4_032, 65_536]
     assert set(config["ref2va_plan_sections"].values()).issubset(
         config["bundle_loading"]["lazy_sections"]
     )

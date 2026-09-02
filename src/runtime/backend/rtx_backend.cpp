@@ -10,6 +10,7 @@
 // CudaGraphStrategy, and DynamicShapesKernelSpecializationStrategy.
 
 #include "runtime/backend/prebound_backend.h"
+#include "runtime/backend/runtime_cache_persistence.h"
 #include "runtime/backend/trt_logger.h"
 #include "runtime/core/cuda_common.h"
 #include "trt_module_impl.h"
@@ -366,12 +367,16 @@ void configure_cuda_graphs(nvinfer1::IRuntimeConfig& config, bool enabled) {
 
 } // namespace
 
-class RtxBackend final : public IBackend, public IPreboundBackend, public IFileBackedBackend {
+class RtxBackend final : public IBackend,
+                         public IPreboundBackend,
+                         public IFileBackedBackend,
+                         public IRuntimeCacheBackend {
   public:
     RtxBackend()
         : runtime_(create_trt_runtime())
 #if defined(_WIN32)
-          , staged_runtime_(create_trt_runtime())
+          ,
+          staged_runtime_(create_trt_runtime())
 #endif
     {
         if (!runtime_)
@@ -386,7 +391,10 @@ class RtxBackend final : public IBackend, public IPreboundBackend, public IFileB
     }
 
     ~RtxBackend() override {
-        flush_runtime_cache();
+        if (!runtime_cache_leases_.empty()) {
+            std::cerr << "[trtmc] RTX runtime cache not persisted: " << runtime_cache_leases_.size()
+                      << " pipeline lease(s) are still active\n";
+        }
         delete runtime_cache_;
     }
 
@@ -410,21 +418,18 @@ class RtxBackend final : public IBackend, public IPreboundBackend, public IFileB
         return create_single_module(engine, options, external_bindings, -1);
     }
 
-    std::unique_ptr<ITrtModule>
-    create_module_from_file(const char* plan_path, std::uint64_t plan_offset,
-                            std::uint64_t plan_size, const char* expected_sha256,
-                            const ModuleCreateOptions& options,
-                            const std::vector<ModuleExternalBinding>& external_bindings,
-                            std::int64_t weight_streaming_budget_bytes,
-                            bool retain_engine) override {
+    std::unique_ptr<ITrtModule> create_module_from_file(
+        const char* plan_path, std::uint64_t plan_offset, std::uint64_t plan_size,
+        const char* expected_sha256, const ModuleCreateOptions& options,
+        const std::vector<ModuleExternalBinding>& external_bindings,
+        std::int64_t weight_streaming_budget_bytes, bool retain_engine) override {
         if (weight_streaming_budget_bytes >= 0 && options.cuda_graphs) {
             throw std::invalid_argument(
                 "[trtmc] RTX weight streaming is incompatible with CUDA graph capture");
         }
-        const std::string cache_key = retain_engine
-                                          ? retained_engine_key(expected_sha256,
-                                                                weight_streaming_budget_bytes)
-                                          : std::string{};
+        const std::string cache_key =
+            retain_engine ? retained_engine_key(expected_sha256, weight_streaming_budget_bytes)
+                          : std::string{};
         std::unique_lock<std::mutex> retained_lock;
         if (retain_engine) {
             // Serialize retained-engine creation. Two concurrent deserializations
@@ -450,8 +455,8 @@ class RtxBackend final : public IBackend, public IPreboundBackend, public IFileB
                 engine.release(), [](nvinfer1::ICudaEngine* value) { delete value; });
             apply_weight_streaming_budget(*retained, weight_streaming_budget_bytes,
                                           options.cuda_graphs);
-            auto module = create_single_module_from_engine(retained, options, external_bindings,
-                                                           true);
+            auto module =
+                create_single_module_from_engine(retained, options, external_bindings, true);
             retained_engines_.emplace(cache_key, retained);
             std::cerr << "[trtmc.rtx_engine_cache] hit=0 retained=1\n";
             return module;
@@ -535,6 +540,17 @@ class RtxBackend final : public IBackend, public IPreboundBackend, public IFileB
 
     const char* name() const override { return "trt_rtx"; }
 
+    std::uint64_t acquire_runtime_cache_lease(const char* path) override {
+        std::lock_guard<std::mutex> lock(runtime_cache_mutex_);
+        return runtime_cache_leases_.acquire(path);
+    }
+
+    void release_runtime_cache_lease(std::uint64_t lease) override {
+        std::lock_guard<std::mutex> lock(runtime_cache_mutex_);
+        runtime_cache_leases_.release(lease, runtime_cache_ != nullptr,
+                                      [this] { persist_runtime_cache_locked(); });
+    }
+
   private:
 #if defined(_WIN32)
     // Declared before runtime_ so it outlives the runtime and every engine
@@ -546,7 +562,8 @@ class RtxBackend final : public IBackend, public IPreboundBackend, public IFileB
     TrtUniquePtr<nvinfer1::IRuntime> staged_runtime_;
 #endif
     nvinfer1::IRuntimeCache* runtime_cache_{nullptr};
-    std::string cache_path_;
+    std::mutex runtime_cache_mutex_;
+    internal::RuntimeCacheLeaseState runtime_cache_leases_;
     std::mutex retained_engines_mutex_;
     std::unordered_map<std::string, std::shared_ptr<nvinfer1::ICudaEngine>> retained_engines_;
 
@@ -574,11 +591,11 @@ class RtxBackend final : public IBackend, public IPreboundBackend, public IFileB
                std::to_string(weight_streaming_budget_bytes);
     }
 
-    std::unique_ptr<ITrtModule> create_single_module_from_engine(
-        const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
-        const ModuleCreateOptions& options,
-        const std::vector<ModuleExternalBinding>& external_bindings,
-        bool use_synchronous_allocator = false) {
+    std::unique_ptr<ITrtModule>
+    create_single_module_from_engine(const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
+                                     const ModuleCreateOptions& options,
+                                     const std::vector<ModuleExternalBinding>& external_bindings,
+                                     bool use_synchronous_allocator = false) {
         validate_optimization_profile(*engine, options.optimization_profile);
         const StreamSetup stream_setup = resolve_stream(options.stream);
         auto config = create_runtime_config(*engine, options);
@@ -621,8 +638,7 @@ class RtxBackend final : public IBackend, public IPreboundBackend, public IFileB
         if (!context)
             throw std::runtime_error("[trtmc] Failed to create RTX execution context");
 #if defined(_WIN32)
-        if (use_synchronous_allocator &&
-            !context->setTemporaryStorageAllocator(&gpu_allocator_))
+        if (use_synchronous_allocator && !context->setTemporaryStorageAllocator(&gpu_allocator_))
             throw std::runtime_error(
                 "[trtmc] Failed to set synchronous RTX temporary-storage allocator");
 #else
@@ -670,39 +686,83 @@ class RtxBackend final : public IBackend, public IPreboundBackend, public IFileB
     }
 
     void ensure_runtime_cache(nvinfer1::IRuntimeConfig* cfg, const char* path) {
+        std::lock_guard<std::mutex> lock(runtime_cache_mutex_);
+        if (runtime_cache_leases_.empty()) {
+            throw std::runtime_error(
+                "[trtmc] RTX runtime cache use requires an active pipeline lease");
+        }
+        if (runtime_cache_leases_.path() != path) {
+            throw std::invalid_argument(
+                "[trtmc] RTX backend cannot share one runtime cache across different paths");
+        }
         if (!runtime_cache_) {
-            runtime_cache_ = cfg->createRuntimeCache();
-            cache_path_ = path;
+            std::unique_ptr<nvinfer1::IRuntimeCache> runtime_cache(cfg->createRuntimeCache());
+            if (runtime_cache == nullptr)
+                throw std::runtime_error("[trtmc] Failed to create RTX runtime cache");
+            std::error_code exists_error;
+            const bool cache_exists = fs::exists(path, exists_error);
+            if (exists_error) {
+                throw std::system_error(exists_error,
+                                        "failed to inspect RTX runtime cache " + std::string(path));
+            }
             std::ifstream ifs(path, std::ios::binary | std::ios::ate);
+            if (cache_exists && !ifs) {
+                throw std::runtime_error("[trtmc] Failed to open existing RTX runtime cache: " +
+                                         std::string(path));
+            }
             if (ifs) {
-                auto sz = ifs.tellg();
-                if (sz > 0) {
-                    std::vector<char> buf(static_cast<size_t>(sz));
-                    ifs.seekg(0);
-                    ifs.read(buf.data(), sz);
-                    runtime_cache_->deserialize(buf.data(), buf.size());
-                    std::cerr << "[trtmc] RTX runtime cache loaded: " << path << " (" << sz
+                const std::streamoff size = ifs.tellg();
+                if (size < 0)
+                    throw std::runtime_error("[trtmc] Failed to size RTX runtime cache: " +
+                                             std::string(path));
+                if (static_cast<std::uintmax_t>(size) >
+                        static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max()) ||
+                    size > std::numeric_limits<std::streamsize>::max()) {
+                    throw std::overflow_error("[trtmc] RTX runtime cache is too large to load: " +
+                                              std::string(path));
+                }
+                if (size > 0) {
+                    std::vector<char> buf(static_cast<std::size_t>(size));
+                    ifs.seekg(0, std::ios::beg);
+                    if (!ifs) {
+                        throw std::runtime_error("[trtmc] Failed to seek RTX runtime cache: " +
+                                                 std::string(path));
+                    }
+                    ifs.read(buf.data(), static_cast<std::streamsize>(size));
+                    if (!ifs || ifs.gcount() != static_cast<std::streamsize>(size)) {
+                        throw std::runtime_error("[trtmc] Failed to read RTX runtime cache: " +
+                                                 std::string(path));
+                    }
+                    if (!runtime_cache->deserialize(buf.data(), buf.size())) {
+                        throw std::runtime_error(
+                            "[trtmc] TensorRT-RTX rejected the serialized runtime cache: " +
+                            std::string(path));
+                    }
+                    std::cerr << "[trtmc] RTX runtime cache loaded: " << path << " (" << size
                               << " bytes)\n";
                 }
             }
+            runtime_cache_ = runtime_cache.release();
         }
-        cfg->setRuntimeCache(*runtime_cache_);
+        if (!cfg->setRuntimeCache(*runtime_cache_))
+            throw std::runtime_error("[trtmc] Failed to attach the TensorRT-RTX runtime cache");
     }
 
-    void flush_runtime_cache() {
-        if (!runtime_cache_ || cache_path_.empty())
-            return;
-        auto* mem = runtime_cache_->serialize();
-        if (mem && mem->size() > 0) {
-            std::ofstream ofs(cache_path_, std::ios::binary | std::ios::trunc);
-            if (ofs) {
-                ofs.write(static_cast<const char*>(mem->data()),
-                          static_cast<std::streamsize>(mem->size()));
-                std::cerr << "[trtmc] RTX runtime cache saved: " << cache_path_ << " ("
-                          << mem->size() << " bytes)\n";
-            }
-            delete mem;
+    void persist_runtime_cache_locked() {
+        auto* serialized = runtime_cache_->serialize();
+        if (serialized == nullptr)
+            throw std::runtime_error(
+                "[trtmc] TensorRT-RTX returned a null serialized runtime cache");
+        std::unique_ptr<nvinfer1::IHostMemory> memory(serialized);
+        if (memory->size() >
+            static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
+            throw std::overflow_error("[trtmc] RTX runtime cache is too large to persist");
         }
+
+        internal::persist_runtime_cache_file(runtime_cache_leases_.path(), memory->data(),
+                                             memory->size());
+        std::cerr << "[trtmc] RTX runtime cache saved: " << runtime_cache_leases_.path() << " ("
+                  << memory->size() << " bytes)\n";
     }
 };
 

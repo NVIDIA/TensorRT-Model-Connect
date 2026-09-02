@@ -24,11 +24,13 @@ def test_ref2va_shared_qwen_profiles_cover_public_endpoint_image_and_context() -
     assert REF2VA_MAX_VISION_PATCHES_PER_CALL == 65_536
     assert REF2VA_MAX_COMPACT_VISION_ROWS == 262_144
     assert REF2VA_SHARED_VISION_PROFILE.max_patches == 65_536
+    assert REF2VA_SHARED_VISION_PROFILE.min_patches == 2_040
     assert REF2VA_SHARED_TEXT_PROFILE.max_sequence_length == 262_144
     assert REF2VA_SHARED_TEXT_PROFILE.max_vision_rows == 262_144
     vision_abi, text_abi = ref2va_shared_qwen_abis()
     assert vision_abi.filename == "vision_encoder.plan"
     assert vision_abi.inputs[0].max_shape == (65_536, 1_536)
+    assert vision_abi.inputs[0].min_shape == (2_040, 1_536)
     assert vision_abi.outputs[0].max_shape == (16_384, 5_120)
     assert text_abi.filename == "text_encoder.plan"
     assert text_abi.inputs[0].max_shape == (262_144,)

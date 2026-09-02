@@ -177,7 +177,7 @@ void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind) {
         constexpr int64_t kSmallMaxPatches = 4176;
         constexpr int64_t kSupersetMaxPatches = 65536;
         const auto matches_envelope = [&](int64_t maximum) {
-            return dynamic_input_matches(module, "pixel_values", DType::kFloat32, {2304, 1536},
+            return dynamic_input_matches(module, "pixel_values", DType::kFloat32, {2040, 1536},
                                          {4032, 1536}, {maximum, 1536});
         };
         const int64_t maximum =
@@ -188,11 +188,11 @@ void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind) {
             throw std::runtime_error(
                 "MiniMax-H3 FL2VA vision plan is neither the exact public nor Ref2VA-superset "
                 "profile");
-        require_dynamic_input(module, "interp_indices", DType::kInt32, {2304, 4}, {4032, 4},
+        require_dynamic_input(module, "interp_indices", DType::kInt32, {2040, 4}, {4032, 4},
                               {maximum, 4});
-        require_dynamic_input(module, "interp_weights", DType::kFloat32, {2304, 4}, {4032, 4},
+        require_dynamic_input(module, "interp_weights", DType::kFloat32, {2040, 4}, {4032, 4},
                               {maximum, 4});
-        require_dynamic_input(module, "vision_position_ids", DType::kInt32, {2304, 2}, {4032, 2},
+        require_dynamic_input(module, "vision_position_ids", DType::kInt32, {2040, 2}, {4032, 2},
                               {maximum, 2});
         for (const char* name : {"vision_embeds", "deepstack_0", "deepstack_1", "deepstack_2"})
             require_profile_output(module, name, DType::kFloat32, {maximum / 4, kTextDim});
@@ -335,9 +335,6 @@ Fl2vaTextPresentation make_fl2va_text_presentation(const std::string& prompt,
         throw std::invalid_argument("MiniMax-H3 FL2VA text canvas must be divisible by 32");
 
     const auto prompt_ids = tokenizer.encode(prompt);
-    if (prompt_ids.size() > 537U)
-        throw std::invalid_argument(
-            "MiniMax-H3 FL2VA supports at most 537 prompt tokens without truncation");
     const int32_t vision_height = height / 32;
     const int32_t vision_width = width / 32;
     const int32_t vision_rows = vision_height * vision_width;

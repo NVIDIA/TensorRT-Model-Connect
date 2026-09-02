@@ -270,7 +270,8 @@ def test_ref2va_interleaved_packed_layout_and_rotary_clock() -> None:
 def test_full_public_capacity_is_explicit_not_silently_narrowed() -> None:
     profile = Ref2VADenoiserProfile()
     profile.validate()
-    assert profile.min_video_rows == 25_408
+    assert profile.min_video_rows == 18_870
+    assert profile.min_packed_rows == 19_285
     assert profile.min_text_rows == 1
     assert profile.max_video_rows == REF2VA_MAX_ALL_VIDEO_ROWS == 364_608
     assert profile.max_audio_rows == REF2VA_MAX_ALL_AUDIO_ROWS == 3_558

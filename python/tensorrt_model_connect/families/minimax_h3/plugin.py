@@ -30,6 +30,7 @@ from .config import (
     CANVAS_MIN_ASPECT_RATIO,
     CANVAS_MULTIPLE,
     CANVAS_SHORT_EDGE,
+    NATIVE_EXPLICIT_CANVAS_SIZES,
     FASTH3_GUIDANCE_SCALE,
     FASTH3_SCHEDULER_GRID_POINTS,
     FASTH3_TRANSFORMER_FORWARDS,
@@ -175,9 +176,7 @@ def _reachable_canvas_sizes() -> tuple[tuple[int, int], ...]:
     half = CANVAS_MULTIPLE // 2
     maximum_dimension = CANVAS_SHORT_EDGE * int(CANVAS_MAX_ASPECT_RATIO)
     for height in range(CANVAS_MULTIPLE, CANVAS_SHORT_EDGE + 1, CANVAS_MULTIPLE):
-        for width in range(
-            CANVAS_SHORT_EDGE, maximum_dimension + 1, CANVAS_MULTIPLE
-        ):
+        for width in range(CANVAS_SHORT_EDGE, maximum_dimension + 1, CANVAS_MULTIPLE):
             # In the area-limited landscape branch raw dimensions satisfy
             # h*w=max_pixels and r=w/h. Intersect the two nearest-multiple
             # rounding cells with the resolver's exact r interval.
@@ -235,9 +234,7 @@ def _first_block_cache_threshold(raw: dict) -> float:
 def _base_checkpoint_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
     """Exclude FastH3 adapter-created gate matrices from base reads."""
 
-    return tuple(
-        key for key in keys if not key.endswith(".attn.to_gate_compress.weight")
-    )
+    return tuple(key for key in keys if not key.endswith(".attn.to_gate_compress.weight"))
 
 
 def _fast_h3_build_inputs(raw: dict) -> Path | None:
@@ -291,9 +288,7 @@ def write_path_free_effective_build_config(bundle, artifact_path: str | Path) ->
                 )
             return
         if not isinstance(supplied, str) or summary is None:
-            raise ValueError(
-                f"MiniMax-H3 effective config cannot authenticate {field}"
-            )
+            raise ValueError(f"MiniMax-H3 effective config cannot authenticate {field}")
         entry["value"] = summary
 
     fast_h3 = config.get("fast_h3")
@@ -554,12 +549,8 @@ class MiniMaxH3Plugin:
             )
             adapter_partitions = {
                 "adaln_precompute": adaln_checkpoint_keys(profile),
-                "denoiser_head": head_checkpoint_keys(
-                    profile, include_vsa_gates=True
-                ),
-                "denoiser_tail": tail_checkpoint_keys(
-                    profile, include_vsa_gates=True
-                ),
+                "denoiser_head": head_checkpoint_keys(profile, include_vsa_gates=True),
+                "denoiser_tail": tail_checkpoint_keys(profile, include_vsa_gates=True),
                 "denoiser_finish": finish_checkpoint_keys(profile),
             }
         elif adapter_path is None:
@@ -658,9 +649,7 @@ class MiniMaxH3Plugin:
             counts = merge_fast_h3_adapter_state(
                 adaln_state, adapter_path, adapter_partitions["adaln_precompute"]
             )
-            if counts["tensors"] != adapter_identity.partition_tensor_counts[
-                "adaln_precompute"
-            ]:
+            if counts["tensors"] != adapter_identity.partition_tensor_counts["adaln_precompute"]:
                 raise ValueError("FastH3 AdaLN adapter accounting mismatch")
         adaln_weights = numpy_state(adaln_state)
         del adaln_state
@@ -693,12 +682,8 @@ class MiniMaxH3Plugin:
                 counts = merge_fast_h3_adapter_state(
                     dit_state, adapter_path, adapter_partitions[component_name]
                 )
-                if counts["tensors"] != adapter_identity.partition_tensor_counts[
-                    component_name
-                ]:
-                    raise ValueError(
-                        f"FastH3 adapter accounting mismatch for {component_name}"
-                    )
+                if counts["tensors"] != adapter_identity.partition_tensor_counts[component_name]:
+                    raise ValueError(f"FastH3 adapter accounting mismatch for {component_name}")
             dit_weights = numpy_state(dit_state)
             del dit_state
             denoiser_options = {
@@ -766,9 +751,7 @@ class MiniMaxH3Plugin:
             decoder_config_from_checkpoint,
         )
 
-        audio_vae_config = json.loads(
-            (Path(weights["_audio_vae_dir"]) / "config.json").read_text()
-        )
+        audio_vae_config = json.loads((Path(weights["_audio_vae_dir"]) / "config.json").read_text())
         audio_decoder_profile = decoder_config_from_checkpoint(
             audio_vae_config,
             latent_frames=AUDIO_LATENT_FRAMES_OPT,
@@ -792,15 +775,11 @@ class MiniMaxH3Plugin:
         tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
 
         plan_sha256["vae_tile_decoder.plan"] = hashlib.sha256(vae_decoder_plan).hexdigest()
-        plan_sha256["vision_encoder.plan"] = hashlib.sha256(
-            vision_encoder_plan
-        ).hexdigest()
+        plan_sha256["vision_encoder.plan"] = hashlib.sha256(vision_encoder_plan).hexdigest()
         plan_sha256["fl2va_keyframe_vae_encoder.plan"] = hashlib.sha256(
             keyframe_vae_encoder_plan
         ).hexdigest()
-        plan_sha256["audio_vae_decoder.plan"] = hashlib.sha256(
-            audio_vae_decoder_plan
-        ).hexdigest()
+        plan_sha256["audio_vae_decoder.plan"] = hashlib.sha256(audio_vae_decoder_plan).hexdigest()
 
         fast_h3_metadata = (
             adapter_identity.bundle_metadata() if adapter_identity is not None else None
@@ -897,9 +876,7 @@ class MiniMaxH3Plugin:
             raise ValueError("MiniMax-H3 components have incomplete FastH3 VSA provenance")
         fast_h3_enabled = fast_h3 is not None
         if fast_h3_enabled and profile.first_block_cache:
-            raise ValueError(
-                "FastH3 VSA components must use the segmented native CUDA contract"
-            )
+            raise ValueError("FastH3 VSA components must use the segmented native CUDA contract")
         if fast_h3_enabled and (
             not isinstance(fast_h3, dict)
             or fast_h3.get("adapter_gate_tensor_count") != 50
@@ -907,9 +884,7 @@ class MiniMaxH3Plugin:
         ):
             raise ValueError("MiniMax-H3 components have invalid FastH3 VSA provenance")
         fixed_request = {
-            "num_inference_steps": (
-                FASTH3_TRANSFORMER_FORWARDS if fast_h3_enabled else 50
-            ),
+            "num_inference_steps": (FASTH3_TRANSFORMER_FORWARDS if fast_h3_enabled else 50),
         }
         mismatches = {
             name: (raw[name], value)
@@ -966,6 +941,7 @@ class MiniMaxH3Plugin:
             "canvas_multiple": CANVAS_MULTIPLE,
             "canvas_short_edge": CANVAS_SHORT_EDGE,
             "canvas_max_pixels": CANVAS_MAX_PIXELS,
+            "explicit_canvas_sizes": [list(size) for size in NATIVE_EXPLICIT_CANVAS_SIZES],
             "min_aspect_ratio": CANVAS_MIN_ASPECT_RATIO,
             "max_aspect_ratio": CANVAS_MAX_ASPECT_RATIO,
             "public_workflows": ["t2va", "fl2va"],
@@ -975,7 +951,7 @@ class MiniMaxH3Plugin:
                 "vision_encoder_section": "vision_encoder_plan",
                 "keyframe_vae_encoder_section": "fl2va_keyframe_vae_encoder_plan",
                 "text_sequence_profile": [1, 1144, 2641],
-                "vision_patch_profile": [2304, 4032, 4176],
+                "vision_patch_profile": [2040, 4032, 4176],
                 "vision_row_profile": [1, 1008, 2088],
                 "t2va_dummy_vision_rows": 1,
                 "t2va_vision_count": 0,
@@ -991,13 +967,9 @@ class MiniMaxH3Plugin:
             "num_frames_opt": VIDEO_NUM_FRAMES_OPT,
             "num_frames_max": VIDEO_NUM_FRAMES_MAX,
             "fps": 24,
-            "num_inference_steps": (
-                FASTH3_TRANSFORMER_FORWARDS if fast_h3_enabled else 50
-            ),
+            "num_inference_steps": (FASTH3_TRANSFORMER_FORWARDS if fast_h3_enabled else 50),
             "guidance_scale": FASTH3_GUIDANCE_SCALE if fast_h3_enabled else 1.0,
-            "scheduler_grid_points": (
-                FASTH3_SCHEDULER_GRID_POINTS if fast_h3_enabled else 50
-            ),
+            "scheduler_grid_points": (FASTH3_SCHEDULER_GRID_POINTS if fast_h3_enabled else 50),
             "transformer_forwards": FASTH3_TRANSFORMER_FORWARDS if fast_h3_enabled else 49,
             "attention_mode": "native_vsa" if fast_h3_enabled else "dense",
             **(
@@ -1012,15 +984,9 @@ class MiniMaxH3Plugin:
                         "max_video_tiles": FASTH3_VSA_MAX_VIDEO_TILES,
                         "max_total_tiles": profile.vsa_prefix_tile_profile[2]
                         + FASTH3_VSA_MAX_VIDEO_TILES,
-                        "packed_row_to_tile_slot_profile": list(
-                            profile.packed_row_profile
-                        ),
-                        "prefix_valid_sizes_profile": list(
-                            profile.vsa_prefix_tile_profile
-                        ),
-                        "video_valid_sizes_profile": list(
-                            profile.vsa_video_tile_abi_profile
-                        ),
+                        "packed_row_to_tile_slot_profile": list(profile.packed_row_profile),
+                        "prefix_valid_sizes_profile": list(profile.vsa_prefix_tile_profile),
+                        "video_valid_sizes_profile": list(profile.vsa_video_tile_abi_profile),
                         "runtime_metadata_abi": {
                             "producer": "modelconnect_cpp",
                             "packed_row_to_tile_slot": {
@@ -1103,7 +1069,9 @@ class MiniMaxH3Plugin:
             "denoiser_cache_mode": (
                 "segmented_vsa"
                 if fast_h3_enabled
-                else "first_block" if profile.first_block_cache else "monolithic"
+                else "first_block"
+                if profile.first_block_cache
+                else "monolithic"
             ),
             "first_block_cache_threshold": _first_block_cache_threshold(raw),
             "text_rows": profile.text_rows,
@@ -1136,7 +1104,7 @@ class MiniMaxH3Plugin:
             "max_timestep_count": profile.max_timestep_count,
             "context_parallel_size": profile.context_parallel_size,
             "vae_tile_batch": 28,
-            "vae_tile_batch_min": 16,
+            "vae_tile_batch_min": 15,
             "vae_tile_batch_opt": 28,
             "vae_tile_batch_max": 33,
             "vae_tile_size": 256,

@@ -22,7 +22,7 @@ from tensorrt_model_connect.families.minimax_h3.vae_builder import (  # noqa: E4
 
 
 def test_video_vae_tile_profile_covers_public_aspect_envelope() -> None:
-    assert (MIN_BATCH, OPT_BATCH, MAX_BATCH) == (16, 28, 33)
+    assert (MIN_BATCH, OPT_BATCH, MAX_BATCH) == (15, 28, 33)
 
 
 @pytest.mark.gpu

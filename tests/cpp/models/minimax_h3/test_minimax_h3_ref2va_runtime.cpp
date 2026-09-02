@@ -224,18 +224,18 @@ FakeModule make_adaln_module() {
 
 FakeModule make_denoiser_module() {
     FakeModule module(ForwardKind::kDenoiser);
-    module.add_dynamic("video_hidden_states", trtmc::DType::kFloat32, {25408, 96}, {44592, 96},
+    module.add_dynamic("video_hidden_states", trtmc::DType::kFloat32, {18870, 96}, {44592, 96},
                        {364608, 96});
     module.add_dynamic("audio_hidden_states", trtmc::DType::kFloat32, {414, 32}, {414, 32},
                        {3558, 32});
     module.add_dynamic("encoder_hidden_states", trtmc::DType::kFloat32, {1, 5120}, {7433, 5120},
                        {262144, 5120});
-    module.add_dynamic("position_ids", trtmc::DType::kFloat32, {25823, 3}, {52439, 3}, {630310, 3});
-    module.add_dynamic("video_indices", trtmc::DType::kInt32, {25408}, {44592}, {364608});
+    module.add_dynamic("position_ids", trtmc::DType::kFloat32, {19285, 3}, {52439, 3}, {630310, 3});
+    module.add_dynamic("video_indices", trtmc::DType::kInt32, {18870}, {44592}, {364608});
     module.add_dynamic("audio_indices", trtmc::DType::kInt32, {414}, {414}, {3558});
     module.add_dynamic("text_indices", trtmc::DType::kInt32, {1}, {7433}, {262144});
     for (const char* name : {"adaln_indices", "timestep_indices"})
-        module.add_dynamic(name, trtmc::DType::kInt32, {25823}, {52439}, {630310});
+        module.add_dynamic(name, trtmc::DType::kInt32, {19285}, {52439}, {630310});
     for (int32_t layer = 0; layer < 50; ++layer)
         module.add_static("block_modulation_" + std::to_string(layer), trtmc::DType::kBFloat16,
                           {12, 6, 5376});
@@ -582,7 +582,7 @@ void test_strict_plan_abi_and_fake_end_to_end() {
     trtmc::minimax_h3::Ref2vaDenoiserInputs inputs;
     constexpr int32_t text_rows = 1;
     constexpr int32_t audio_rows = 414;
-    constexpr int32_t video_rows = 25408;
+    constexpr int32_t video_rows = 18870;
     constexpr int32_t packed_rows = text_rows + audio_rows + video_rows;
     inputs.layout.position_ids.resize(static_cast<std::size_t>(packed_rows) * 3U);
     inputs.layout.token_tags.resize(packed_rows, 0);

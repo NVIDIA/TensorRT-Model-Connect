@@ -40,13 +40,13 @@ constexpr int32_t kTextTag = 1;
 constexpr int32_t kAudioTag = 2;
 constexpr float kConditionVideoTimestep = 0.999F;
 constexpr float kConditionAudioTimestep = 1.0F;
-constexpr int32_t kMinVideoRows = 25408;
+constexpr int32_t kMinVideoRows = 18870;
 constexpr int32_t kOptVideoRows = 44592;
 constexpr int32_t kMinAudioRows = 414;
 constexpr int32_t kOptAudioRows = 414;
 constexpr int32_t kMinTextRows = 1;
 constexpr int32_t kOptTextRows = 7433;
-constexpr int32_t kMinPackedRows = 25823;
+constexpr int32_t kMinPackedRows = 19285;
 constexpr int32_t kOptPackedRows = 52439;
 constexpr int32_t kLatentChannels = 24;
 constexpr int32_t kPosteriorChannels = 48;
@@ -1449,13 +1449,13 @@ void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
     switch (kind) {
     case Ref2vaPlanKind::kVisionEncoder:
         require_counts(module, 4, 4, "vision encoder");
-        require_dynamic_input(module, "pixel_values", DType::kFloat32, {2304, 1536}, {4032, 1536},
+        require_dynamic_input(module, "pixel_values", DType::kFloat32, {2040, 1536}, {4032, 1536},
                               {65536, 1536});
-        require_dynamic_input(module, "interp_indices", DType::kInt32, {2304, 4}, {4032, 4},
+        require_dynamic_input(module, "interp_indices", DType::kInt32, {2040, 4}, {4032, 4},
                               {65536, 4});
-        require_dynamic_input(module, "interp_weights", DType::kFloat32, {2304, 4}, {4032, 4},
+        require_dynamic_input(module, "interp_weights", DType::kFloat32, {2040, 4}, {4032, 4},
                               {65536, 4});
-        require_dynamic_input(module, "vision_position_ids", DType::kInt32, {2304, 2}, {4032, 2},
+        require_dynamic_input(module, "vision_position_ids", DType::kInt32, {2040, 2}, {4032, 2},
                               {65536, 2});
         for (const char* name : {"vision_embeds", "deepstack_0", "deepstack_1", "deepstack_2"})
             require_output(module, name, DType::kFloat32, {16384, 5120});

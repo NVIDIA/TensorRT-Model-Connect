@@ -97,7 +97,7 @@ class FakeModule final : public trtmc::ITrtModule {
     }
 };
 
-constexpr int32_t kMinRows = 21727;
+constexpr int32_t kMinRows = 19285;
 constexpr int32_t kOptRows = 37838;
 constexpr int32_t kMaxRows = 112367;
 
@@ -121,7 +121,7 @@ void add_segment_outputs(FakeModule& module) {
 
 FakeModule make_entry() {
     FakeModule module;
-    module.add_dynamic("video_hidden_states", trtmc::DType::kFloat32, {21312, 96}, {37296, 96},
+    module.add_dynamic("video_hidden_states", trtmc::DType::kFloat32, {18870, 96}, {37296, 96},
                        {108576, 96});
     module.add_dynamic("audio_hidden_states", trtmc::DType::kFloat32, {414, 32}, {414, 32},
                        {1150, 32});
@@ -154,7 +154,7 @@ FakeModule make_finish() {
                        {56, kOptRows, 128}, {56, kMaxRows, 128});
     add_packed(module, "adaln_indices", trtmc::DType::kInt32);
     add_packed(module, "timestep_indices", trtmc::DType::kInt32);
-    module.add_dynamic("video_hidden_states", trtmc::DType::kFloat32, {21312, 96}, {37296, 96},
+    module.add_dynamic("video_hidden_states", trtmc::DType::kFloat32, {18870, 96}, {37296, 96},
                        {108576, 96});
     module.add_dynamic("audio_hidden_states", trtmc::DType::kFloat32, {414, 32}, {414, 32},
                        {1150, 32});
@@ -225,15 +225,15 @@ void test_static_legacy_plan_fails_closed() {
 
 void test_dynamic_dense_legacy_profile_remains_compatible() {
     FakeModule module;
-    module.add_dynamic("video_hidden_states", trtmc::DType::kFloat32, {21312, 96}, {37296, 96},
+    module.add_dynamic("video_hidden_states", trtmc::DType::kFloat32, {18870, 96}, {37296, 96},
                        {106488, 96});
     module.add_dynamic("audio_hidden_states", trtmc::DType::kFloat32, {414, 32}, {414, 32},
                        {1150, 32});
     module.add_dynamic("encoder_hidden_states", trtmc::DType::kFloat32, {1, 5120}, {128, 5120},
                        {537, 5120});
-    module.add_dynamic("position_ids", trtmc::DType::kFloat32, {21727, 3}, {37838, 3}, {108175, 3});
+    module.add_dynamic("position_ids", trtmc::DType::kFloat32, {19285, 3}, {37838, 3}, {108175, 3});
     for (const char* name : {"adaln_indices", "timestep_indices"})
-        module.add_dynamic(name, trtmc::DType::kInt32, {21727}, {37838}, {108175});
+        module.add_dynamic(name, trtmc::DType::kInt32, {19285}, {37838}, {108175});
     for (int32_t layer = 0; layer < 50; ++layer)
         module.add_static("block_modulation_" + std::to_string(layer), trtmc::DType::kBFloat16,
                           {12, 6, 5376});

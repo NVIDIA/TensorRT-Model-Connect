@@ -10,6 +10,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -41,6 +42,11 @@ std::vector<void*>& loaded_handles() {
 std::unordered_set<std::string>& loaded_model_ids() {
     static std::unordered_set<std::string> ids;
     return ids;
+}
+
+std::mutex& model_plugin_loader_mutex() {
+    static std::mutex mutex;
+    return mutex;
 }
 
 std::string exe_dir() {
@@ -163,6 +169,21 @@ void close_model_plugin_candidate(ModelPluginCandidate& candidate) {
     candidate.handle = nullptr;
 }
 
+void retain_model_plugin_candidate(ModelPluginCandidate& candidate) noexcept {
+    if (candidate.handle == nullptr)
+        return;
+    void* handle = candidate.handle;
+    candidate.handle = nullptr;
+    try {
+        loaded_handles().push_back(handle);
+    } catch (...) {
+        // Once a registrar has run, schema validators or pipeline objects may
+        // point into this DSO even when registration later fails.  Leaking the
+        // OS handle until process exit is the only safe fallback if recording
+        // the handle itself runs out of memory.
+    }
+}
+
 bool model_plugin_id_matches(const fs::path& candidate, void* handle, const std::string& model_id,
                              std::vector<std::string>& errors) {
     auto* id_sym = internal::dynamic_library_symbol(handle, "trtmc_model_plugin_id");
@@ -234,7 +255,6 @@ bool register_model_plugin_candidate(ModelPluginCandidate& candidate, const std:
     if (const auto unexpected = unexpected_registered_strategy(after, before, expected)) {
         errors.push_back(candidate.path.string() + ": plugin '" + model_id +
                          "' registered unexpected strategy '" + *unexpected + "'");
-        close_model_plugin_candidate(candidate);
         return false;
     }
 
@@ -243,7 +263,6 @@ bool register_model_plugin_candidate(ModelPluginCandidate& candidate, const std:
 
     errors.push_back(candidate.path.string() + ": plugin '" + model_id +
                      "' did not register requested strategy '" + strategy + "'");
-    close_model_plugin_candidate(candidate);
     return false;
 }
 
@@ -353,6 +372,7 @@ void load_model_plugin_for_strategy(const std::string& strategy,
             "locked MiniMax-H3 runtime rejects model plugin search path overrides");
     }
 #endif
+    std::lock_guard<std::mutex> loader_lock(model_plugin_loader_mutex());
     const auto model_id = model_plugin_id_for_strategy(strategy);
     if (!model_id)
         throw std::runtime_error("No plugin registered for runtime_strategy: " + strategy);
@@ -380,10 +400,34 @@ void load_model_plugin_for_strategy(const std::string& strategy,
         throw_load_error(*model_id, library_name, {candidate.string()}, errors);
 
     auto plugin = open_model_plugin_candidate(candidate, *model_id, errors);
-    if (!plugin || !register_model_plugin_candidate(*plugin, *model_id, strategy, errors))
+    if (!plugin)
         throw_load_error(*model_id, library_name, {candidate.string()}, errors);
 
-    loaded_handles().push_back(plugin->handle);
+    auto& registry = PipelineRegistry::instance();
+    bool registered = false;
+    bool registrar_invoked = false;
+    try {
+        registry.begin_locked_registration(strategy);
+        registrar_invoked = true;
+        registered = register_model_plugin_candidate(*plugin, *model_id, strategy, errors);
+        if (registered)
+            registry.finish_locked_registration(strategy);
+        else
+            registry.abort_locked_registration(strategy);
+    } catch (...) {
+        registry.abort_locked_registration(strategy);
+        if (registrar_invoked)
+            retain_model_plugin_candidate(*plugin);
+        else
+            close_model_plugin_candidate(*plugin);
+        throw;
+    }
+    if (!registered) {
+        retain_model_plugin_candidate(*plugin);
+        throw_load_error(*model_id, library_name, {candidate.string()}, errors);
+    }
+
+    retain_model_plugin_candidate(*plugin);
     loaded_model_ids().insert(*model_id);
 #else
     const auto paths = model_plugin_search_paths(search_paths);
@@ -402,10 +446,17 @@ void load_model_plugin_for_strategy(const std::string& strategy,
         if (!plugin)
             continue;
 
-        if (!register_model_plugin_candidate(*plugin, *model_id, strategy, errors))
-            continue;
+        try {
+            if (!register_model_plugin_candidate(*plugin, *model_id, strategy, errors)) {
+                retain_model_plugin_candidate(*plugin);
+                continue;
+            }
+        } catch (...) {
+            retain_model_plugin_candidate(*plugin);
+            throw;
+        }
 
-        loaded_handles().push_back(plugin->handle);
+        retain_model_plugin_candidate(*plugin);
         loaded_model_ids().insert(*model_id);
         return;
     }

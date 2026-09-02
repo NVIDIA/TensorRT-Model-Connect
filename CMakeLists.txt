@@ -284,6 +284,26 @@ if(TRTMC_LOCKED_H3_RUNTIME)
     message(FATAL_ERROR
       "TRTMC_LOCKED_H3_RUNTIME requires exactly TRTMC_RUNTIME_MODELS=minimax_h3")
   endif()
+  if(NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
+    message(FATAL_ERROR
+      "TRTMC_LOCKED_H3_RUNTIME requires CMAKE_CUDA_RUNTIME_LIBRARY=Static")
+  endif()
+  if(NOT CMAKE_MSVC_RUNTIME_LIBRARY STREQUAL "MultiThreaded")
+    message(FATAL_ERROR
+      "TRTMC_LOCKED_H3_RUNTIME requires CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded")
+  endif()
+  get_filename_component(_trtmc_locked_cudart_name "${TRTMC_CUDART_LIBRARY}" NAME)
+  string(TOLOWER "${_trtmc_locked_cudart_name}" _trtmc_locked_cudart_name)
+  if(NOT _trtmc_locked_cudart_name STREQUAL "cudart_static.lib")
+    message(FATAL_ERROR
+      "TRTMC_LOCKED_H3_RUNTIME requires the explicit CUDA cudart_static.lib")
+  endif()
+  string(LENGTH "${TRTMC_SOURCE_REVISION}" _trtmc_locked_source_revision_length)
+  if(NOT _trtmc_locked_source_revision_length EQUAL 40 OR
+     NOT TRTMC_SOURCE_REVISION MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR
+      "TRTMC_LOCKED_H3_RUNTIME requires an exact 40-character source revision")
+  endif()
 endif()
 if(WIN32)
   set(_trtmc_optimized_runtime_host_source
@@ -814,6 +834,7 @@ if(TRTMC_BUILD_BACKEND_RTX)
 
   if(TENSORRT_RTX_LIB AND TRT_RTX_INCLUDE_DIR)
     add_library(trtmc_backend_rtx SHARED
+      src/runtime/backend/runtime_cache_persistence.cpp
       src/runtime/backend/trt_logger.cpp
       src/runtime/backend/trt_module_impl.cpp
       src/runtime/backend/rtx_backend.cpp
@@ -888,6 +909,11 @@ add_executable(trtmc
   src/cli/main.cpp
   src/cli/windows_media.cpp
 )
+list(FIND TRTMC_RUNTIME_MODEL_IDS "minimax_h3" _trtmc_cli_minimax_h3_index)
+if(NOT _trtmc_cli_minimax_h3_index EQUAL -1)
+  target_sources(trtmc PRIVATE src/cli/minimax_h3_video_contract.cpp)
+  target_compile_definitions(trtmc PRIVATE TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT=1)
+endif()
 if(WIN32 AND TRTMC_LOCKED_H3_RUNTIME)
   target_compile_definitions(trtmc PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
 endif()
@@ -930,7 +956,7 @@ if(WIN32)
   set_target_properties(trtmc_windows_h3_installer_support PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
   )
-  target_link_libraries(trtmc_windows_h3_installer_support PRIVATE bcrypt)
+  target_link_libraries(trtmc_windows_h3_installer_support PRIVATE advapi32 bcrypt)
   target_compile_options(trtmc_windows_h3_installer_support PRIVATE /W4 /WX)
 
   add_executable(minimax_h3_setup WIN32
@@ -1198,7 +1224,12 @@ trtmc_add_test(test_pipeline_registry)
 trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
 add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
+trtmc_add_test(test_runtime_cache_persistence)
+target_sources(test_runtime_cache_persistence PRIVATE
+  src/runtime/backend/runtime_cache_persistence.cpp
+)
 if(TRTMC_LOCKED_H3_RUNTIME)
+  target_compile_definitions(test_pipeline_registry PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
   target_compile_definitions(test_model_plugin_loader PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
   target_compile_definitions(test_backend_loader PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
 endif()
@@ -1247,6 +1278,9 @@ endif()
 # C ABI
 trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
 trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
+if(TRTMC_LOCKED_H3_RUNTIME)
+  target_compile_definitions(test_c_abi_entry PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
+endif()
 
 # Config / parsing
 trtmc_add_test(test_text_parsers)
@@ -1254,10 +1288,20 @@ trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
+if(NOT _trtmc_cli_minimax_h3_index EQUAL -1)
+  target_compile_definitions(test_cli_args PRIVATE
+    TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT=1
+  )
+endif()
 if(TRTMC_RUNTIME_ONLY_CLI)
   trtmc_add_test(test_cli_args_runtime_only)
   target_sources(test_cli_args_runtime_only PRIVATE src/cli/args.cpp)
   target_compile_definitions(test_cli_args_runtime_only PRIVATE TRTMC_RUNTIME_ONLY_CLI=1)
+  if(NOT _trtmc_cli_minimax_h3_index EQUAL -1)
+    target_compile_definitions(test_cli_args_runtime_only PRIVATE
+      TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT=1
+    )
+  endif()
 endif()
 if(WIN32)
   trtmc_add_test(test_cli_args_locked_h3_runtime)
@@ -1265,6 +1309,7 @@ if(WIN32)
   target_compile_definitions(test_cli_args_locked_h3_runtime PRIVATE
     TRTMC_RUNTIME_ONLY_CLI=1
     TRTMC_LOCKED_H3_RUNTIME=1
+    TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT=1
   )
   if(TRTMC_LOCKED_H3_RUNTIME)
     trtmc_add_test(test_windows_process_lockdown)
@@ -1294,6 +1339,12 @@ trtmc_add_test(test_config_cli_support)
 if(TRTMC_LOCKED_H3_RUNTIME)
   target_compile_definitions(test_config_cli_support PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
 endif()
+if(NOT _trtmc_cli_minimax_h3_index EQUAL -1)
+  trtmc_add_test(test_minimax_h3_video_contract)
+  target_sources(test_minimax_h3_video_contract PRIVATE
+    src/cli/minimax_h3_video_contract.cpp
+  )
+endif()
 trtmc_add_test(test_config_schemas_triattention)
 
 # TRT runtime core
@@ -1321,6 +1372,9 @@ trtmc_add_test(test_device_tensor REQUIRES_GPU)
 
 # Pipelines (public API)
 trtmc_add_test(test_pipeline_api                NO_SRC_INCLUDE)
+if(TRTMC_LOCKED_H3_RUNTIME)
+  target_compile_definitions(test_pipeline_api PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
+endif()
 trtmc_add_model_manifest_tests()
 
 # Tokenizers

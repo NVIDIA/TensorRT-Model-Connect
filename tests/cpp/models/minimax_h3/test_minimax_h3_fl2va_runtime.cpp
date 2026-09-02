@@ -31,6 +31,10 @@ class FakeTokenizer final : public trtmc::ITokenizer {
     std::vector<int32_t> encode(const std::string& text) const override {
         if (text.rfind("<Picture ", 0) == 0)
             return {101, 102, 103, 104, 105, 106};
+        if (text == "official-long-prompt")
+            return std::vector<int32_t>(919, 201);
+        if (text == "presentation-overflow")
+            return std::vector<int32_t>(2641, 201);
         if (text.empty())
             return {};
         return {201, 202};
@@ -147,7 +151,7 @@ class FakeModule final : public trtmc::ITrtModule {
                                     ? 0
                                     : (selector == trtmc::ProfileShapeSelector::kOpt ? 1 : 2);
         if (kind_ == ModuleKind::kVision) {
-            const int64_t rows[3] = {2304, 4032,
+            const int64_t rows[3] = {2040, 4032,
                                      profile_max_override > 0 ? profile_max_override : 4176};
             if (name == "pixel_values")
                 return {rows[profile], 1536};
@@ -226,6 +230,20 @@ trtmc::VideoImageInput make_image(int32_t height, int32_t width) {
 
 void test_official_qwen_presentation_and_mock_plans() {
     FakeTokenizer tokenizer;
+    const auto long_presentation = trtmc::minimax_h3::make_fl2va_text_presentation(
+        "official-long-prompt", 1, 32, 32, tokenizer);
+    check(long_presentation.input_ids.size() == 928,
+          "FL2VA accepts the official 919-token reproduction prompt within plan capacity");
+    bool rejected_overflow = false;
+    try {
+        (void)trtmc::minimax_h3::make_fl2va_text_presentation("presentation-overflow", 1, 32, 32,
+                                                              tokenizer);
+    } catch (const std::invalid_argument&) {
+        rejected_overflow = true;
+    }
+    check(rejected_overflow,
+          "FL2VA still rejects a prompt whose complete presentation exceeds 2,641 rows");
+
     const auto presentation =
         trtmc::minimax_h3::make_fl2va_text_presentation("prompt", 2, 32, 32, tokenizer);
     check(presentation.input_ids.size() == 20 && presentation.vision_row_indices.size() == 2,
@@ -309,6 +327,12 @@ void test_keyframe_vae_mock_and_posterior_helpers() {
     for (float value : latent)
         finite = finite && std::isfinite(value);
     check(finite, "FL2VA seed-42 posterior sample and FP16 round stay finite");
+
+    const auto explicit_latent =
+        trtmc::minimax_h3::run_fl2va_keyframe_vae_encoder(vae, make_image(544, 960));
+    check(explicit_latent.size() == 24U * 34 * 60 &&
+              vae.last_inputs.at("pixel_tiles").shape == std::vector<int64_t>({15, 3, 1, 256, 256}),
+          "FL2VA keyframe VAE accepts the documented 960x544 explicit canvas");
 
     constexpr int32_t latent_height = 2;
     constexpr int32_t latent_width = 2;

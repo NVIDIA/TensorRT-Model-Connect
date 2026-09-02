@@ -20,7 +20,7 @@ from .config import VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES
 
 trt = trt_compat.get_trt()
 
-MIN_BATCH = 16
+MIN_BATCH = 15
 OPT_BATCH = 28
 MAX_BATCH = 33
 CHANNELS = 24
@@ -121,9 +121,9 @@ def _broadcast_rows(network, reference, value):
         batch_reference, zero, trt.ElementWiseOperation.PROD
     ).get_output(0)
     constant = op.cast(network, op.weight_constant(network, array), reference.dtype)
-    return network.add_elementwise(
-        batch_zeros, constant, trt.ElementWiseOperation.SUM
-    ).get_output(0)
+    return network.add_elementwise(batch_zeros, constant, trt.ElementWiseOperation.SUM).get_output(
+        0
+    )
 
 
 def _rope_cache(network, reference):
@@ -199,12 +199,8 @@ def _swiglu(network, hidden, weights, prefix: str):
         weights[f"{prefix}.net.0.proj.bias"],
         compute_dtype=trt.float16,
     )
-    value = op.dynamic_slice(
-        network, projected, (0, 0, 0), (None, SEQUENCE, FFN_DIM)
-    )
-    gate = op.dynamic_slice(
-        network, projected, (0, 0, FFN_DIM), (None, SEQUENCE, FFN_DIM)
-    )
+    value = op.dynamic_slice(network, projected, (0, 0, 0), (None, SEQUENCE, FFN_DIM))
+    gate = op.dynamic_slice(network, projected, (0, 0, FFN_DIM), (None, SEQUENCE, FFN_DIM))
     gate = op.silu(network, gate)
     hidden = network.add_elementwise(value, gate, trt.ElementWiseOperation.PROD).get_output(0)
     return op.linear(
@@ -236,9 +232,7 @@ def build_vae_tile_decoder_engine(
         workspace_bytes,
         default_bytes=VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
     )
-    latent = network.add_input(
-        "latent_tiles", trt.float32, (-1, CHANNELS, FRAMES, HEIGHT, WIDTH)
-    )
+    latent = network.add_input("latent_tiles", trt.float32, (-1, CHANNELS, FRAMES, HEIGHT, WIDTH))
     shape_profile = builder.create_optimization_profile()
     shape_profile.set_shape(
         "latent_tiles",

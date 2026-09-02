@@ -71,11 +71,30 @@ void test_locked_parser_keeps_package_commands() {
     check(inspect.runtime_cache == "cache.bin", "locked parser retains runtime cache");
 }
 
+void test_locked_generate_video_requires_one_mp4_output() {
+    const auto valid = parse(
+        {"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output", "result.Mp4"});
+    check(!valid.parse_error && valid.output_dir == "result.Mp4",
+          "locked parser accepts one case-insensitive MP4 output");
+
+    const auto missing = parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello"});
+    check(missing.parse_error, "locked parser rejects a missing output");
+
+    const auto directory = parse(
+        {"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output", "frames"});
+    check(directory.parse_error, "locked parser rejects a frame-directory output");
+
+    const auto duplicate = parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello",
+                                  "--output", "first.mp4", "--output", "second.mp4"});
+    check(duplicate.parse_error, "locked parser rejects multiple outputs");
+}
+
 } // namespace
 
 int main() {
     test_locked_help_has_no_loader_override();
     test_locked_parser_rejects_loader_overrides();
     test_locked_parser_keeps_package_commands();
+    test_locked_generate_video_requires_one_mp4_output();
     return failures == 0 ? 0 : 1;
 }

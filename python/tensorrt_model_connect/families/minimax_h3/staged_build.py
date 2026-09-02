@@ -30,6 +30,7 @@ from .config import (
     CANVAS_MIN_ASPECT_RATIO,
     CANVAS_MULTIPLE,
     CANVAS_SHORT_EDGE,
+    NATIVE_EXPLICIT_CANVAS_SIZES,
     DENOISER_DEFAULT_WORKSPACE_BYTES,
     FASTH3_GUIDANCE_SCALE,
     FASTH3_SCHEDULER_GRID_POINTS,
@@ -132,9 +133,7 @@ def _workspace_limits_for_components(
 def _base_checkpoint_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
     """Exclude adapter-created gate matrices from base-checkpoint reads."""
 
-    return tuple(
-        key for key in keys if not key.endswith(".attn.to_gate_compress.weight")
-    )
+    return tuple(key for key in keys if not key.endswith(".attn.to_gate_compress.weight"))
 
 
 def _profile(*, fast_h3: bool = False):
@@ -223,9 +222,7 @@ def _build_identity(
         "checkpoint_shards": shards,
     }
     checkpoint_inventory_sha256 = hashlib.sha256(
-        json.dumps(
-            checkpoint_inventory, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        json.dumps(checkpoint_inventory, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     result = {
         **checkpoint_inventory,
@@ -262,11 +259,7 @@ def _atomic_write_json(path: Path, value: object) -> None:
         with path.open("r+b") as committed:
             os.fsync(committed.fileno())
         if os.name != "nt":
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_CLOEXEC", 0)
-            )
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
             directory = os.open(path.parent, flags)
             try:
                 os.fsync(directory)
@@ -323,10 +316,7 @@ def _complete_plan_records(
     records: dict[str, dict[str, int | str]],
     components: Sequence[tuple[str, str, str]],
 ) -> dict[str, dict[str, int | str]] | None:
-    expected = {
-        filename: records.get(filename)
-        for _component, filename, _section in components
-    }
+    expected = {filename: records.get(filename) for _component, filename, _section in components}
     if not all(_valid_plan_record(record) for record in expected.values()):
         return None
     return {filename: record for filename, record in expected.items() if record is not None}
@@ -423,7 +413,7 @@ def _sanitized_config(
     lazy_sections = [section for _component, _filename, section in components]
     if transformer_ref_identity is None:
         text_sequence_profile = [1, 1144, 2641]
-        vision_patch_profile = [2304, 4032, 4176]
+        vision_patch_profile = [2040, 4032, 4176]
         vision_row_profile = [1, 1008, 2088]
     else:
         from .ref2va_qwen_contract import ref2va_shared_qwen_profile_metadata
@@ -469,6 +459,7 @@ def _sanitized_config(
         "canvas_multiple": CANVAS_MULTIPLE,
         "canvas_short_edge": CANVAS_SHORT_EDGE,
         "canvas_max_pixels": CANVAS_MAX_PIXELS,
+        "explicit_canvas_sizes": [list(size) for size in NATIVE_EXPLICIT_CANVAS_SIZES],
         "min_aspect_ratio": CANVAS_MIN_ASPECT_RATIO,
         "max_aspect_ratio": CANVAS_MAX_ASPECT_RATIO,
         "public_workflows": [
@@ -506,7 +497,9 @@ def _sanitized_config(
         "denoiser_cache_mode": (
             "segmented_vsa"
             if adapter_identity is not None
-            else "first_block" if profile.first_block_cache else "monolithic"
+            else "first_block"
+            if profile.first_block_cache
+            else "monolithic"
         ),
         "first_block_cache_threshold": 0.025,
         "text_rows": profile.text_rows,
@@ -539,7 +532,7 @@ def _sanitized_config(
         "max_timestep_count": profile.max_timestep_count,
         "context_parallel_size": profile.context_parallel_size,
         "vae_tile_batch": 28,
-        "vae_tile_batch_min": 16,
+        "vae_tile_batch_min": 15,
         "vae_tile_batch_opt": 28,
         "vae_tile_batch_max": 33,
         "vae_tile_size": 256,
@@ -647,9 +640,7 @@ def _finalize_staged_bundle(
 ) -> Path:
     audio_vae_config_path = model / "audio_vae" / "config.json"
     if not audio_vae_config_path.is_file():
-        raise FileNotFoundError(
-            f"MiniMax-H3 AudioVAE config is missing: {audio_vae_config_path}"
-        )
+        raise FileNotFoundError(f"MiniMax-H3 AudioVAE config is missing: {audio_vae_config_path}")
     audio_vae_config = json.loads(audio_vae_config_path.read_text())
     config = _sanitized_config(
         trt_version=version,
@@ -715,8 +706,10 @@ def build_staged_bundle(
 
     model = Path(model_dir).resolve(strict=True)
     output = Path(output_path).absolute()
-    plans = Path(plans_dir).absolute() if plans_dir is not None else output.with_name(
-        f"{output.name}.plans"
+    plans = (
+        Path(plans_dir).absolute()
+        if plans_dir is not None
+        else output.with_name(f"{output.name}.plans")
     )
     tokenizer = model / "tokenizer" / "tokenizer.json"
     if not tokenizer.is_file():
@@ -873,6 +866,7 @@ def _build_component(
                 f"component={component}, expected={expected}, actual={counts['tensors']}"
             )
         return state
+
     common = {
         "verbose": verbose,
         "consume_weights": True,
@@ -1032,9 +1026,7 @@ def _build_component(
             build_ref2va_adaln_precompute_engine,
         )
 
-        state = load_selected_component_state_dict(
-            transformer_ref_path, adaln_checkpoint_keys()
-        )
+        state = load_selected_component_state_dict(transformer_ref_path, adaln_checkpoint_keys())
         weights = numpy_state(state)
         del state
         result = build_ref2va_adaln_precompute_engine(weights, **common)
@@ -1099,14 +1091,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
         Path(args.output),
         verbose=args.verbose,
         adapter_path=(
-            Path(args.fast_h3_adapter).resolve(strict=True)
-            if args.fast_h3_adapter
-            else None
+            Path(args.fast_h3_adapter).resolve(strict=True) if args.fast_h3_adapter else None
         ),
         transformer_ref_path=(
-            Path(args.transformer_ref).resolve(strict=True)
-            if args.transformer_ref
-            else None
+            Path(args.transformer_ref).resolve(strict=True) if args.transformer_ref else None
         ),
     )
     return 0
