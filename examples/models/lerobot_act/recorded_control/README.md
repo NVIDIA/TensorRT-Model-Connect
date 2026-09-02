@@ -36,6 +36,10 @@ python tests/e2e/models/lerobot_act/prepare_recorded_observation.py \
   --output /tmp/lerobot-act-replay --episode-index 0 --frame-index 0
 ```
 
+The preparation command verifies and copies the repository's qualified replay fixture, whose
+source dataset revision and source-file SHA-256 digests are recorded alongside it. It therefore
+works without network access and fails closed if the packaged image or state digest changes.
+
 The main CLI runs parity-ready inference, ten timed chunks, and a real-time 50 Hz emission loop. Its JSON includes startup time, chunk p50/p95 latency and throughput, peak resident memory, effective control rate, p99 interval jitter, deadline misses, and the training-bound result:
 
 ```bash

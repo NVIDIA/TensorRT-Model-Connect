@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -21,6 +22,12 @@ _DATA_SHA256 = "8d02ba269356ed960741c3169e8106383b960583e9cd1e5960a0495580a9d6c2
 _VIDEO_SHA256 = "e16528b7da7dd433a60cb0e17c59689fc834be43fc0f0b24586377c833fcd0de"
 _IMAGE_SHA256 = "a53369bda31c6563548bd834e88f6640eb28e3233807c499a56d012de992799c"
 _STATE_SHA256 = "40cd79b41ce45e9ffc35f6dc70f74a980d8760857326a9482e109b1d763f54c0"
+_FIXTURE_DIR = Path(__file__).resolve().parent / "data" / "recorded_observation"
+_FIXTURE_FILES = (
+    "observation.images.top.png",
+    "observation.state.f32",
+    "recorded_observation.json",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -98,6 +105,42 @@ def _decode_frame(video_path: Path, global_index: int) -> np.ndarray:
     return np.frombuffer(completed.stdout, dtype=np.uint8).reshape(480, 640, 3).copy()
 
 
+def _is_qualified_observation(directory: Path, episode_index: int, frame_index: int) -> bool:
+    image_path = directory / "observation.images.top.png"
+    state_path = directory / "observation.state.f32"
+    metadata_path = directory / "recorded_observation.json"
+    if not image_path.is_file() or not state_path.is_file() or not metadata_path.is_file():
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(
+        metadata.get("dataset_id") == _DATASET_ID
+        and metadata.get("dataset_revision") == _DATASET_REVISION
+        and metadata.get("data_file") == _DATA_FILE
+        and metadata.get("data_sha256") == _DATA_SHA256
+        and metadata.get("video_file") == _VIDEO_FILE
+        and metadata.get("video_sha256") == _VIDEO_SHA256
+        and metadata.get("episode_index") == episode_index
+        and metadata.get("frame_index") == frame_index
+        and metadata.get("image_sha256") == _IMAGE_SHA256 == _sha256(image_path)
+        and metadata.get("state_sha256") == _STATE_SHA256 == _sha256(state_path)
+    )
+
+
+def _materialize_packaged_observation(
+    output: Path, episode_index: int, frame_index: int
+) -> bool:
+    if not _FIXTURE_DIR.exists():
+        return False
+    if not _is_qualified_observation(_FIXTURE_DIR, episode_index, frame_index):
+        raise ValueError("packaged LeRobot recorded observation failed its qualified contract")
+    for name in _FIXTURE_FILES:
+        shutil.copyfile(_FIXTURE_DIR / name, output / name)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
@@ -112,19 +155,16 @@ def main() -> int:
     image_path = arguments.output / "observation.images.top.png"
     state_path = arguments.output / "observation.state.f32"
     metadata_path = arguments.output / "recorded_observation.json"
-    if image_path.is_file() and state_path.is_file() and metadata_path.is_file():
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if (
-            metadata.get("dataset_revision") == _DATASET_REVISION
-            and metadata.get("data_sha256") == _DATA_SHA256
-            and metadata.get("video_sha256") == _VIDEO_SHA256
-            and metadata.get("episode_index") == arguments.episode_index
-            and metadata.get("frame_index") == arguments.frame_index
-            and metadata.get("image_sha256") == _IMAGE_SHA256 == _sha256(image_path)
-            and metadata.get("state_sha256") == _STATE_SHA256 == _sha256(state_path)
-        ):
-            print(metadata_path)
-            return 0
+    if _is_qualified_observation(
+        arguments.output, arguments.episode_index, arguments.frame_index
+    ):
+        print(metadata_path)
+        return 0
+    if _materialize_packaged_observation(
+        arguments.output, arguments.episode_index, arguments.frame_index
+    ):
+        print(metadata_path)
+        return 0
 
     data_path = _download(_DATA_FILE, local_files_only=arguments.local_files_only)
     video_path = _download(_VIDEO_FILE, local_files_only=arguments.local_files_only)
