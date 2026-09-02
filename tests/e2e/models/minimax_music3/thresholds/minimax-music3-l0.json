@@ -1,0 +1,9 @@
+{
+  "threshold_overrides": {
+    "contract_min_rms": 0.001,
+    "contract_min_duration_s": 15.0,
+    "contract_max_duration_s": 25.0,
+    "contract_asr_ned_threshold": 0.55,
+    "sampling_rate": 44100
+  }
+}
