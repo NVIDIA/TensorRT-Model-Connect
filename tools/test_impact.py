@@ -1884,6 +1884,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_lerobot_act_recorded_control_example_is_model_owned",),
         ),
         ClassificationRule(
+            priority=452,
+            name="foundationpose_preprocessed_refinement_example",
+            matcher=_regex_rule(r"examples/models/(foundationpose)/preprocessed_refinement/.+$"),
+            resolver=_match_result(
+                "foundationpose_preprocessed_refinement_example",
+                _family_models,
+                ["cpp", "tools"],
+                True,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_foundationpose_preprocessed_refinement_example_is_model_owned",
+            ),
+        ),
+        ClassificationRule(
             priority=456,
             name="cpp_example_tool",
             matcher=_regex_rule(r"examples/.+\.cpp$"),

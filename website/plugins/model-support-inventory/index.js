@@ -159,6 +159,7 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   neural_operator: ['solve'],
   omni_multimodal: ['generate-audio'],
   prompted_segmentation: ['segment-prompted'],
+  pose_hypothesis_refinement: [],
   reranking: ['rerank'],
   robot_action_chunk: ['act'],
   segmentation: ['segment'],
@@ -238,6 +239,37 @@ function hfMetadataFields(metadata) {
     hfMetadataRevision: metadata.revision,
     hfMetadataRevisionSource: metadata.revision_source,
     hfMetadataFile: metadata.metadata_file || 'not declared',
+  };
+}
+
+function externalModelSource(manifest, manifestPath) {
+  const source = manifest.model_source;
+  if (source === undefined) return null;
+  if (
+    !source ||
+    typeof source !== 'object' ||
+    Array.isArray(source) ||
+    source.kind !== 'ngc' ||
+    typeof source.id !== 'string' ||
+    !source.id ||
+    typeof source.revision !== 'string' ||
+    !source.revision ||
+    !path.isAbsolute(manifest.hf_id) ||
+    Object.hasOwn(manifest, 'hf_revision')
+  ) {
+    throw new Error(`Malformed external model_source in ${manifestPath}`);
+  }
+  return {
+    hfId: source.id,
+    revision: source.revision,
+    sourceKind: source.kind,
+    buildInput: manifest.hf_id,
+    hfModelType: 'not applicable',
+    hfArchitectures: [],
+    hfArchitectureSource: 'not applicable',
+    hfMetadataRevision: source.revision,
+    hfMetadataRevisionSource: source.kind,
+    hfMetadataFile: 'not applicable',
   };
 }
 
@@ -342,6 +374,8 @@ function hfTasksForManifest(manifest) {
     case 'neural_operator':
       return ['time-series-forecasting'];
     case 'robot_action_chunk':
+      return ['robotics'];
+    case 'pose_hypothesis_refinement':
       return ['robotics'];
     case 'diffusion_media_generation': {
       const tasks = new Set();
@@ -952,6 +986,7 @@ function typedConfigOptions(implementedFields, definitions, requirement = 'Optio
 }
 
 function commandContractForProfile(profile, capability) {
+  if (profile.cliCommands.length === 0) return null;
   const evidence = [
     'src/cli/main.cpp',
     'include/trtmc/pipeline.h',
@@ -1266,6 +1301,7 @@ function collectFamilyCommandContracts(repoRoot, profiles, runtimeOwnersByStrate
     });
     const merged = mergeRuntimeCapabilities(capabilities);
     const contract = commandContractForProfile(profile, merged);
+    if (contract === null) continue;
     const key = JSON.stringify({
       command: contract.command,
       purpose: contract.purpose,
@@ -1454,11 +1490,15 @@ function collectModelSupportInventory(repoRoot) {
       if (!manifest.name || !manifest.hf_id || !manifest.family || !manifest.task_strategy) {
         return null;
       }
+      const externalSource = externalModelSource(manifest, manifestPath);
       const hfMetadata = hfMetadataById.get(manifest.hf_id);
-      if (!hfMetadata) {
+      if (!hfMetadata && !externalSource) {
         throw new Error(
           `Missing Hugging Face model metadata for ${manifest.hf_id} (${manifestPath})`
         );
+      }
+      if (hfMetadata && externalSource) {
+        throw new Error(`Manifest cannot declare both Hugging Face and external metadata (${manifestPath})`);
       }
       if (manifest.hf_revision && manifest.hf_revision !== hfMetadata.revision) {
         throw new Error(
@@ -1469,8 +1509,8 @@ function collectModelSupportInventory(repoRoot) {
       const hfTasks = hfTasksForManifest(manifest);
       return {
         profile: manifest.name,
-        hfId: manifest.hf_id,
-        revision: manifest.hf_revision || 'not pinned',
+        hfId: externalSource?.hfId || manifest.hf_id,
+        revision: externalSource?.revision || manifest.hf_revision || 'not pinned',
         bundle: manifest.bundle || `${manifest.name}.bundle`,
         family: manifest.family,
         runtimeStrategy: manifest.runtime_strategy || 'not declared',
@@ -1482,7 +1522,7 @@ function collectModelSupportInventory(repoRoot) {
           : [],
         fp32Layers: Array.isArray(manifest.fp32_layers) ? manifest.fp32_layers : [],
         sourcePath: path.relative(repoRoot, manifestPath).replace(/\\/g, '/'),
-        ...hfMetadataFields(hfMetadata),
+        ...(externalSource || hfMetadataFields(hfMetadata)),
         ...manifestBuildConfiguration(manifest),
       };
     })
@@ -1547,7 +1587,9 @@ function collectModelSupportInventory(repoRoot) {
     };
   });
   const referencedHfIds = new Set([
-    ...modelProfiles.map((profile) => profile.hfId),
+    ...modelProfiles
+      .filter((profile) => !profile.sourceKind)
+      .map((profile) => profile.hfId),
     ...performanceSnapshot.map((row) => row.hfId),
   ]);
   const staleMetadata = [...hfMetadataById.keys()].filter(
@@ -1617,3 +1659,4 @@ function modelSupportInventoryPlugin(context) {
 module.exports = modelSupportInventoryPlugin;
 module.exports.collectModelSupportInventory = collectModelSupportInventory;
 module.exports.collectRuntimeCapabilities = collectRuntimeCapabilities;
+module.exports.externalModelSource = externalModelSource;

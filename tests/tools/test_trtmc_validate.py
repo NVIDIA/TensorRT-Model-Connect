@@ -52,6 +52,9 @@ def test_model_workload_catalog_covers_every_ready_model():
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]
         == catalog["models"]["flux-2-dev-fp8"]["reference_cache_identity"]
     )
+    assert catalog["models"]["foundationpose-ngc-1.0.1"]["workloads"] == [
+        "foundationpose_preprocessed_pose_refinement_fp32_parity"
+    ]
     assert catalog["models"]["flux-2-dev"]["reference_cache_identity"] == "flux-2-dev-dpg-v2"
     qwen_identities = {
         catalog["models"][name]["reference_cache_identity"]
@@ -225,6 +228,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
         "dinov3_image_feature_extraction_parity",
         "fast_foundation_stereo_synthetic_parity",
+        "foundationpose_preprocessed_pose_refinement_fp32_parity",
         "lfm2_model_card_sampling_parity",
         "lerobot_act_recorded_control_fp32_parity",
         "minimax_h3_official_profile_parity",

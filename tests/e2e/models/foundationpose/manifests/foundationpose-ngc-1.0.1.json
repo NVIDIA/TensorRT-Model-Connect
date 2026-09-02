@@ -1,0 +1,43 @@
+{
+  "name": "foundationpose-ngc-1.0.1",
+  "hf_id": "/work/model-artifacts/foundationpose/ngc-1.0.1",
+  "model_source": {
+    "kind": "ngc",
+    "id": "nvidia/isaac/foundationpose",
+    "revision": "1.0.1_onnx"
+  },
+  "bundle": "foundationpose-ngc-1.0.1.bundle",
+  "benchmark_exclusion_reason": "FoundationPose qualification benchmarks its stateful one-hypothesis pose-refinement contract rather than a generic catalog workload.",
+  "family": "foundationpose",
+  "runtime_strategy": "foundationpose_pose_refinement",
+  "task_strategy": "pose_hypothesis_refinement",
+  "precision": "fp32",
+  "trust_remote_code": false,
+  "execution_profiles": {
+    "build": "base",
+    "runtime": "base",
+    "reference": "foundationpose_reference"
+  },
+  "e2e_parallel_resource": "exclusive_gpu",
+  "e2e_min_free_gpu_memory_mib": 8192,
+  "build_timeout_s": 3600,
+  "testcases": [
+    {
+      "name": "foundationpose-ngc-1.0.1-synthetic-crops",
+      "trace_id": "IT-E2E-FOUNDATIONPOSE-01",
+      "test_type": "pose_hypothesis_refinement",
+      "reference_family": "pose_hypothesis_refinement",
+      "reference_precision": "fp32",
+      "user_contract": "ranked_rigid_object_to_camera_poses",
+      "ci_tier": "default",
+      "num_hypotheses": 3,
+      "refinement_iterations": 2,
+      "mesh_diameter": 0.18,
+      "source_revision": "a1b694b83e633c2cb6115b9063d940a687759392",
+      "ngc_version": "1.0.1_onnx",
+      "refiner_sha256": "dcc695a19c4bcfe5e1d909a22d8f652d8ec8bab1e19bd1544c6b45f2d3595cf7",
+      "scorer_sha256": "0bf1026c0db7320ebf9a548ecf0d3c810c8dbd377948630bd3e5af1d49440503",
+      "notes": "Runs two refinement iterations and joint scoring on deterministic preprocessed RGB+XYZ crop pairs, compares to the official NGC ONNX pair, validates rigid transforms and ranking, and measures single-hypothesis tracking capacity. Segmentation, CAD rendering, collision safety, and physical robot safety are outside this qualification."
+    }
+  ]
+}

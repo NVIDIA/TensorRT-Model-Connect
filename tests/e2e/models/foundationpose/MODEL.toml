@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "foundationpose"
+plugin = "foundationpose"
+test_manifests = ["manifests/foundationpose-ngc-1.0.1.json"]
+
+[model_reference_cache]
+repository = "https://github.com/NVlabs/FoundationPose.git"
+revision = "a1b694b83e633c2cb6115b9063d940a687759392"
+relative_path = "foundationpose/reference/FoundationPose-a1b694b83e63"
+entrypoint = "estimater.py"
+environment_variable = "TRTMC_FOUNDATIONPOSE_SOURCE_DIR"
+
+[model_artifact_cache]
+relative_path = "foundationpose/ngc-1.0.1"
+environment_variable = "TRTMC_FOUNDATIONPOSE_MODEL_DIR"
+files = [
+  { path = "refine_model.onnx", url = "https://api.ngc.nvidia.com/v2/models/nvidia/isaac/foundationpose/versions/1.0.1_onnx/files/refine_model.onnx", sha256 = "dcc695a19c4bcfe5e1d909a22d8f652d8ec8bab1e19bd1544c6b45f2d3595cf7", size = 68161611 },
+  { path = "score_model.onnx", url = "https://api.ngc.nvidia.com/v2/models/nvidia/isaac/foundationpose/versions/1.0.1_onnx/files/score_model.onnx", sha256 = "0bf1026c0db7320ebf9a548ecf0d3c810c8dbd377948630bd3e5af1d49440503", size = 63907741 },
+]
+
+[e2e_defaults.pose_hypothesis_refinement]
+reference_backend = "foundationpose_onnxruntime"
+oracle_level = "L1_external_reference"
+stages = [{ name = "synthetic_crop_pose_refinement", required = true }]
+input_fields = [
+  { input = "num_hypotheses", manifest = "num_hypotheses" },
+  { input = "refinement_iterations", manifest = "refinement_iterations" },
+  { input = "mesh_diameter", manifest = "mesh_diameter" },
+]
+preflight_requirements = [
+  { kind = "python_module_available", args = { module = "onnxruntime", phase = "reference" }, gating = true },
+]

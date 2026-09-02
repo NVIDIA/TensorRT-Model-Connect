@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .context import CiContext
 from .model_proof import ModelProofRequest
+from .model_artifact_cache import ModelArtifactFile, validate_artifact
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
 from .selected_wheel import SelectedWheelRuntime
@@ -59,6 +60,7 @@ class ProofStatus:
     STEPS = {
         "hf_cache_isolation": "hf-cache-repos.json",
         "model_reference_isolation": "selection.json",
+        "model_artifact_isolation": "model-artifact-cache.json",
         "projection_validation": "source-projection.json, selection.json",
         "configure": "configure.log",
         "scratch_build": "build.log",
@@ -163,7 +165,10 @@ class ModelProofInnerPipeline:
             )
             count = self._validate_hf_cache()
             self.status.step("hf_cache_isolation", "passed")
-            self.status.fact("hf_cache_isolation", "selected-repositories-only")
+            self.status.fact(
+                "hf_cache_isolation",
+                "selected-repositories-only" if count else "not-required",
+            )
             self.status.fact("hf_cache_repository_count", count)
             shutil.copy2(
                 self.source / ".trtmc-model-projection.json",
@@ -173,6 +178,7 @@ class ModelProofInnerPipeline:
                 self.request.model, self.request.suite, self.request.revision, self.source
             ).select(self.artifacts / "selection.json", lease)
             self._validate_reference_cache()
+            self._validate_artifact_cache()
             self.status.step("projection_validation", "passed")
             self._build_and_test()
             print(f"PASS: isolated model proof completed for {self.request.model}")
@@ -389,8 +395,8 @@ class ModelProofInnerPipeline:
         if payload.get("schema_version") != 1 or payload.get("hub_cache") != "/hf-cache/hub":
             raise CiError("selected HF cache evidence has an unsupported schema")
         repositories = payload.get("repositories")
-        if not isinstance(repositories, list) or not repositories:
-            raise CiError("selected HF cache evidence contains no repositories")
+        if not isinstance(repositories, list):
+            raise CiError("selected HF cache evidence repositories must be a list")
         expected_folders = set()
         for entry in repositories:
             repo_id = entry.get("repo_id") if isinstance(entry, dict) else None
@@ -419,6 +425,48 @@ class ModelProofInnerPipeline:
                 f"selected HF cache view mismatch: {sorted(actual)} != {sorted(expected_folders)}"
             )
         return len(repositories)
+
+    def _validate_artifact_cache(self) -> None:
+        assert self.status and self.selection
+        contract = self.selection.artifact_cache
+        evidence_path = self.artifacts / "model-artifact-cache.json"
+        if not contract:
+            if evidence_path.exists():
+                raise CiError("model artifact cache exposed for a model that declares none")
+            self.status.step(
+                "model_artifact_isolation", "passed",
+                "selection.json (no external binary artifact required)"
+            )
+            self.status.fact("model_artifact_isolation", "not-required")
+            return
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        for key, value in {
+            "schema_version": 1,
+            "model": self.request.model,
+            "relative_path": contract["relative_path"],
+            "container_storage_root": "/work/model-artifacts",
+        }.items():
+            if evidence.get(key) != value:
+                raise CiError(f"model artifact evidence mismatch for {key}")
+        if evidence.get("files") != contract["files"]:
+            raise CiError("model artifact evidence file contract mismatch")
+        root = Path("/work/model-artifacts") / str(contract["relative_path"])
+        if root.is_symlink() or not root.is_dir():
+            raise CiError("proof-private model artifact directory is unavailable")
+        expected: set[Path] = set()
+        for raw in contract["files"]:
+            item = ModelArtifactFile(**raw)
+            path = root.joinpath(*Path(item.path).parts)
+            validate_artifact(path, item)
+            expected.add(path.relative_to(root))
+        actual = {path.relative_to(root) for path in root.rglob("*") if path.is_file()}
+        if actual != expected or any(path.is_symlink() for path in root.rglob("*")):
+            raise CiError("proof-private model artifact view contains undeclared files")
+        environment = str(contract["environment_variable"])
+        if self.context.env.get(environment) != str(root):
+            raise CiError(f"{environment} must select the proof-private model artifacts")
+        self.status.step("model_artifact_isolation", "passed", "model-artifact-cache.json")
+        self.status.fact("model_artifact_isolation", "selected-digest-private")
 
     def _validate_reference_cache(self) -> None:
         assert self.status and self.selection
@@ -556,7 +604,11 @@ class ModelProofInnerPipeline:
             "model_dso_count": 1,
             "network": "disabled",
             "plugin_search": "strict",
-            "hf_cache_isolation": "selected-repositories-only",
+            "hf_cache_isolation": (
+                "selected-repositories-only"
+                if json.loads((self.artifacts / "hf-cache-repos.json").read_text())["repositories"]
+                else "not-required"
+            ),
             "hf_cache_repository_count": len(
                 json.loads((self.artifacts / "hf-cache-repos.json").read_text())["repositories"]
             ),
@@ -564,12 +616,17 @@ class ModelProofInnerPipeline:
             "model_reference_isolation": (
                 "selected-pinned-private" if self.selection.reference_cache else "not-required"
             ),
+            "model_artifact_isolation": (
+                "selected-digest-private" if self.selection.artifact_cache else "not-required"
+            ),
         }
         if self.selection.min_free_gpu_memory_mib:
             proof["gpu_memory_admission"] = payload["gpu_memory_admission"]
         if self.selection.reference_cache:
             proof["model_reference_revision"] = self.selection.reference_cache["revision"]
             proof["model_reference_evidence"] = "model-reference-cache.json"
+        if self.selection.artifact_cache:
+            proof["model_artifact_evidence"] = "model-artifact-cache.json"
         proof.update(self._selected_wheel_proof())
         (self.artifacts / "proof.json").write_text(
             json.dumps(proof, indent=2) + "\n", encoding="utf-8"

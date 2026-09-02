@@ -294,6 +294,13 @@ class TorchReference:
             "hf_id": "example/lerobot-act-case",
         },
         {
+            "name": "foundationpose-case",
+            "family": "foundationpose",
+            "runtime_strategy": "foundationpose_pose_refinement",
+            "task_strategy": "pose_hypothesis_refinement",
+            "hf_id": "example/foundationpose-case",
+        },
+        {
             "name": "media-core",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
@@ -2031,6 +2038,30 @@ class TestUnitTiers:
 
         assert match.rule == "lerobot_act_recorded_control_example"
         assert match.models == ["lerobot-act-case"]
+        assert match.unit_tiers == ["cpp", "tools"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "examples/models/foundationpose/preprocessed_refinement/CMakeLists.txt",
+            "examples/models/foundationpose/preprocessed_refinement/README.md",
+            "examples/models/foundationpose/preprocessed_refinement/main.cpp",
+            "examples/models/foundationpose/preprocessed_refinement/prepare_synthetic_inputs.py",
+            (
+                "examples/models/foundationpose/preprocessed_refinement/"
+                "qualification/gb300-trt11.1-fp32.json"
+            ),
+        ],
+    )
+    def test_foundationpose_preprocessed_refinement_example_is_model_owned(
+        self, imap, path
+    ):
+        """The preprocessed-pose example runs FoundationPose C++ and tools checks."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "foundationpose_preprocessed_refinement_example"
+        assert match.models == ["foundationpose-case"]
         assert match.unit_tiers == ["cpp", "tools"]
         assert match.rebuild_cpp is True
 

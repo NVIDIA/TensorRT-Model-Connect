@@ -12,7 +12,27 @@ const test = require('node:test');
 const {
   collectModelSupportInventory,
   collectRuntimeCapabilities,
+  externalModelSource,
 } = require('./index');
+
+test('rejects hf_revision for external model sources regardless of its value', () => {
+  const manifest = {
+    hf_id: '/work/model-artifacts/foundationpose/ngc-1.0.1',
+    model_source: {
+      kind: 'ngc',
+      id: 'nvidia/isaac/foundationpose',
+      revision: '1.0.1_onnx',
+    },
+  };
+
+  assert.equal(externalModelSource(manifest, 'manifest.json').sourceKind, 'ngc');
+  for (const hfRevision of ['', null]) {
+    assert.throws(
+      () => externalModelSource({...manifest, hf_revision: hfRevision}, 'manifest.json'),
+      /Malformed external model_source/
+    );
+  }
+});
 
 function writeFixture(repoRoot, relativePath, content = '') {
   const fixturePath = path.join(repoRoot, relativePath);
@@ -491,4 +511,27 @@ test('publishes LFM2 and MoGe profiles in model recipes and the website sidebar'
     href: '/models-recipes/model-recipes/families/lfm2',
     autoAddBaseUrl: true,
   });
+});
+
+test('publishes the external NGC FoundationPose recipe without HF metadata', () => {
+  const repoRoot = path.resolve(__dirname, '..', '..', '..');
+  const inventory = collectModelSupportInventory(repoRoot);
+  const profile = inventory.modelProfiles.find(
+    (candidate) => candidate.profile === 'foundationpose-ngc-1.0.1'
+  );
+
+  assert.ok(profile, 'missing FoundationPose NGC profile');
+  assert.equal(profile.hfId, 'nvidia/isaac/foundationpose');
+  assert.equal(profile.revision, '1.0.1_onnx');
+  assert.equal(profile.sourceKind, 'ngc');
+  assert.equal(profile.buildInput, '/work/model-artifacts/foundationpose/ngc-1.0.1');
+  assert.deepEqual(profile.hfTasks, ['robotics']);
+  assert.deepEqual(profile.cliCommands, []);
+  assert.equal(profile.hfModelType, 'not applicable');
+  assert.deepEqual(profile.hfArchitectures, []);
+  assert.deepEqual(
+    inventory.familyRecipes.find((candidate) => candidate.family === 'foundationpose')
+      ?.commandContracts,
+    []
+  );
 });

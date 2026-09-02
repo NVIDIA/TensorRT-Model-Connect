@@ -17,6 +17,7 @@ sample_limits:
   etth1_time_series_parity: 10
   fast_foundation_stereo_synthetic_parity: 1
   fast_foundation_stereo_middlebury_q_task_accuracy: 15
+  foundationpose_preprocessed_pose_refinement_fp32_parity: 1
   flores200_en_fr_riva_translation_parity: 10
   gedit_bench_image_edit: 5
   humaneval_code_continuation_parity: 10
@@ -123,6 +124,8 @@ models:
     workloads:
       - fast_foundation_stereo_synthetic_parity
       - fast_foundation_stereo_middlebury_q_task_accuracy
+  foundationpose-ngc-1.0.1:
+    workloads: [foundationpose_preprocessed_pose_refinement_fp32_parity]
   flux-2-dev:
     workloads: [dpg_bench_diffusion_image]
     reference_cache_identity: flux-2-dev-dpg-v2

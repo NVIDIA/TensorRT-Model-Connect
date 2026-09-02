@@ -1236,6 +1236,39 @@ suites:
         Numeric and systems thresholds remain owned by the LeRobot ACT
         comparator and are not overridden by this suite.
 
+  - id: foundationpose_preprocessed_pose_refinement_fp32_parity
+    description: >
+      Native FP32 FoundationPose qualification on three deterministic,
+      preprocessed RGB+XYZ crop pairs and rigid candidate poses. The pinned
+      official NGC refiner and scorer ONNX models and TRTMC runtime consume the
+      same tensors, perform two refinement iterations, and gate all refined
+      poses, scorer logits, and final ranking through the model-owned comparator.
+      Segmentation, CAD rendering, and physical robot safety are outside this
+      preprocessed inference contract.
+    user_contract: ranked_rigid_object_to_camera_poses
+    task_type: Preprocessed RGB+XYZ Crops + Candidate Poses → Ranked Rigid Poses
+    default_model_names: [foundationpose-ngc-1.0.1]
+    dataset:
+      kind: model_plugin_json
+      default_path: tests/e2e/models/foundationpose/data/validation.json
+    selectors:
+      model_names: [foundationpose-ngc-1.0.1]
+      task_strategies: [pose_hypothesis_refinement]
+      runtime_strategies: [foundationpose_pose_refinement]
+      user_contracts: [ranked_rigid_object_to_camera_poses]
+      families: [foundationpose]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only pinned-NGC FP32 parity and stateful tracking-capacity
+        qualification. Numeric, rigidity, ranking, latency, jitter, startup,
+        and memory thresholds remain model-owned and are not overridden here.
+
   - id: imagenette_image_classification
     description: >
       HF-to-TRTMC image-classification parity on Imagenette validation, a

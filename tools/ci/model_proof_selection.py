@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .model_reference_cache import parse_model_reference_contract
+from .model_artifact_cache import parse_model_artifact_contract
 from .process import CiError
 
 
@@ -45,6 +46,11 @@ class ModelProofSelection:
         value = self.payload.get("model_reference_cache")
         return dict(value) if isinstance(value, dict) else None
 
+    @property
+    def artifact_cache(self) -> dict[str, object] | None:
+        value = self.payload.get("model_artifact_cache")
+        return dict(value) if isinstance(value, dict) else None
+
 
 class ModelProofSelector:
     """Turn allowlisted projected metadata into one deterministic proof selection."""
@@ -70,6 +76,9 @@ class ModelProofSelector:
         owner_data = tomllib.loads((e2e_dir / "MODEL.toml").read_text(encoding="utf-8"))
         reference_cache = self._reference_cache(
             owner_data, str(owners["e2e"]), e2e_dir / "MODEL.toml"
+        )
+        artifact_contract = parse_model_artifact_contract(
+            owner_data, str(owners["e2e"]), e2e_dir / "MODEL.toml", self.suite
         )
         cases = self._cases(e2e_dir)
         selected_cases = self._select_cases(cases, str(owners["e2e"]))
@@ -119,6 +128,8 @@ class ModelProofSelector:
         }
         if reference_cache:
             payload["model_reference_cache"] = reference_cache
+        if artifact_contract:
+            payload["model_artifact_cache"] = artifact_contract.as_payload()
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return ModelProofSelection(payload)

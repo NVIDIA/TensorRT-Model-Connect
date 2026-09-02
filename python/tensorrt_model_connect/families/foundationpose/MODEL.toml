@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "foundationpose"
+plugin = "foundationpose"
+module = "plugin"
+python_profile_specs = [
+  "foundationpose_reference|families/foundationpose/python_profile_requirements/foundationpose_reference.lock.txt|families/foundationpose/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|foundationpose_reference",
+]
+config_adapter = "plugin.py|config_from_dir"
+aliases = ["foundationpose", "foundation-pose", "FoundationPose"]
+prefixes = ["foundationpose"]

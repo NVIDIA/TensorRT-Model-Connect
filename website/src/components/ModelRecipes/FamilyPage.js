@@ -12,7 +12,7 @@ import RecipePageLayout from './RecipePageLayout';
 const BUNDLE_CLI_REFERENCE = {
   build: {
     purpose: 'Build one exact checkpoint into a TensorRT-Model-Connect bundle.',
-    syntax: 'trtmc build <hf-id> --output <bundle.bundle>',
+    syntax: 'trtmc build <model-id-or-path> --output <bundle.bundle>',
   },
   inspect: {
     purpose: 'Inspect bundle metadata, runtime identity, and packaged sections.',
@@ -34,7 +34,10 @@ function parallelLabel(profile) {
 
 function ArchitectureNames({profile}) {
   if (profile.hfArchitectures.length === 0) {
-    return <><span>—</span><br /><small>Not declared by checkpoint metadata</small></>;
+    const emptyReason = profile.sourceKind
+      ? 'Not applicable to this external artifact source'
+      : 'Not declared by checkpoint metadata';
+    return <><span>—</span><br /><small>{emptyReason}</small></>;
   }
   return (
     <>
@@ -189,8 +192,9 @@ export default function ModelFamilyRecipePage({familySlug}) {
 
         <h2>Supported architectures and task heads</h2>
         <p>
-          The Hugging Face values below are copied from checkpoint metadata at
-          the recorded revision. The TRTMC task contract comes from the exact
+          Hugging Face values, where applicable, are copied from checkpoint metadata
+          at the recorded revision. External artifact recipes identify their source
+          and revision explicitly. The TRTMC task contract comes from the exact
           E2E recipe. Architecture identity selects or describes a source graph;
           it does not imply that TRTMC reproduces every Hugging Face head with
           the same <code>model_type</code>. For example, an encoder recipe may
@@ -234,7 +238,7 @@ export default function ModelFamilyRecipePage({familySlug}) {
           <thead>
             <tr>
               <th>Recipe</th>
-              <th>Exact Hugging Face checkpoint</th>
+              <th>Exact model source</th>
               <th>Task</th>
               <th>Build configuration</th>
               <th>Declared E2E cases</th>
@@ -248,6 +252,7 @@ export default function ModelFamilyRecipePage({familySlug}) {
                 <td>
                   <code>{profile.hfId}</code>
                   {profile.revision !== 'not pinned' && <><br /><small>Revision: <code>{profile.revision}</code></small></>}
+                  {profile.buildInput && <><br /><small>Build from: <code>{profile.buildInput}</code></small></>}
                 </td>
                 <td>
                   {profile.hfTasks.map((taskSlug) => (

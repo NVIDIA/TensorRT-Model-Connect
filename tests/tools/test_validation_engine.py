@@ -875,6 +875,23 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
     assert robotics["scoring"] == {"scorer": "model_plugin_parity"}
     assert robotics["gates"] == {"min_sample_pass_rate": 1.0}
 
+    pose = validation_engine.suite_by_id(
+        suites, "foundationpose_preprocessed_pose_refinement_fp32_parity"
+    )
+    assert pose["dataset"] == {
+        "kind": "model_plugin_json",
+        "default_path": "tests/e2e/models/foundationpose/data/validation.json",
+    }
+    assert pose["selectors"] == {
+        "model_names": ["foundationpose-ngc-1.0.1"],
+        "task_strategies": ["pose_hypothesis_refinement"],
+        "runtime_strategies": ["foundationpose_pose_refinement"],
+        "user_contracts": ["ranked_rigid_object_to_camera_poses"],
+        "families": ["foundationpose"],
+    }
+    assert pose["scoring"] == {"scorer": "model_plugin_parity"}
+    assert pose["gates"] == {"min_sample_pass_rate": 1.0}
+
     classification = validation_engine.suite_by_id(suites, "imagenette_image_classification")
     assert classification["dataset"]["kind"] == "image_classification_json"
     assert classification["scoring"]["task_metric"] == "top1_accuracy"
