@@ -27,8 +27,7 @@ from .runner import Runner, command_output
 CUDA_RELEASE = re.compile(r"release\s+([0-9]+\.[0-9]+)", re.IGNORECASE)
 
 
-def tensorrt_header_version(path: Path) -> str:
-    text = path.read_text(encoding="utf-8")
+def tensorrt_header_version_text(text: str, source: str | Path) -> str:
     definitions = dict(
         re.findall(r"^#define\s+([A-Za-z0-9_]+)\s+([A-Za-z0-9_]+)\b", text, re.MULTILINE)
     )
@@ -37,9 +36,13 @@ def tensorrt_header_version(path: Path) -> str:
         value = definitions.get(f"NV_TENSORRT_{name}", "")
         value = definitions.get(value, value)
         if not value.isdigit():
-            raise DevToolkitError(f"Could not resolve TensorRT {name.lower()} from {path}")
+            raise DevToolkitError(f"Could not resolve TensorRT {name.lower()} from {source}")
         parts.append(value)
     return ".".join(parts)
+
+
+def tensorrt_header_version(path: Path) -> str:
+    return tensorrt_header_version_text(path.read_text(encoding="utf-8"), path)
 
 
 def system_tensorrt_paths(contract: ArchitectureContract) -> tuple[Path, Path]:

@@ -14,7 +14,7 @@ from typing import Mapping
 
 from .models import DevToolkitError, ToolchainObservation
 from .providers import FrozenProviderRegistry
-from .receipt import write_json
+from .receipt import exclusive_lock, write_json
 from .resolution import EnvironmentLock, ProviderDescriptor
 from .runner import Runner
 
@@ -120,7 +120,19 @@ class EnvironmentProvisioner:
     ) -> ProvisionedEnvironment:
         state_dir = self.state_root / "environments" / lock.lock_id
         state_dir.mkdir(parents=True, exist_ok=True)
+        with exclusive_lock(state_dir / ".provision.lock"):
+            return self._provision_locked(lock, policy=policy, state_dir=state_dir)
+
+    def _provision_locked(
+        self,
+        lock: EnvironmentLock,
+        *,
+        policy: ProvisionPolicy,
+        state_dir: Path,
+    ) -> ProvisionedEnvironment:
         write_json(state_dir / "environment-lock.json", lock.as_dict())
+        (state_dir / "provision-receipt.json").unlink(missing_ok=True)
+        (state_dir / "provision-failure.json").unlink(missing_ok=True)
         try:
             context_provider = self.providers.context(lock.context.provider.name)
             toolchain_provider = self.providers.toolchain(lock.toolchain.provider.name)
@@ -219,3 +231,36 @@ class EnvironmentProvisioner:
                 },
             )
             raise
+
+
+def attest_environment(
+    environment: ProvisionedEnvironment,
+    *,
+    repository: Path,
+    providers: FrozenProviderRegistry,
+    runner: Runner,
+) -> ToolchainObservation:
+    """Re-observe a provisioned environment before mutable target execution."""
+    context_provider = providers.context(environment.context.provider.name)
+    toolchain_provider = providers.toolchain(environment.lock.toolchain.provider.name)
+    if context_provider.descriptor != environment.lock.context.provider:
+        raise AttestationFailed(
+            "Registered execution context provider does not match the environment lock"
+        )
+    if toolchain_provider.descriptor != environment.lock.toolchain.provider:
+        raise AttestationFailed(
+            "Registered toolchain provider does not match the environment lock"
+        )
+    if environment.context.provider != environment.lock.context.provider or dict(
+        environment.context.identity
+    ) != dict(environment.lock.context.identity):
+        raise AttestationFailed("Provisioned context does not match the environment lock")
+    observed = toolchain_provider.observe(
+        environment.lock,
+        environment.context,
+        execution=context_provider,
+        repository=repository,
+        runner=runner,
+    )
+    _attest(environment.lock, observed)
+    return observed

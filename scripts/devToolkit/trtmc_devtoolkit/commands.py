@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from .models import DevToolkitError
 from .providers import FrozenProviderRegistry
-from .provisioning import ProvisionedEnvironment
+from .provisioning import ProvisionedEnvironment, attest_environment
 from .receipt import write_json
 from .runner import Runner
 
@@ -138,8 +138,14 @@ class CommandExecutor:
         invocation = _invocation_digest(environment, command)
         occurrence = uuid4().hex
         receipt = environment.state_dir / "commands" / f"{occurrence}.json"
-        context_provider = self.providers.context(environment.context.provider.name)
         try:
+            context_provider = self.providers.context(environment.context.provider.name)
+            attest_environment(
+                environment,
+                repository=self.repository,
+                providers=self.providers,
+                runner=self.runner,
+            )
             completed = context_provider.execute(
                 environment.context,
                 command,

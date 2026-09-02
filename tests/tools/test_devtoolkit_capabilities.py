@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 import subprocess
+import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -42,6 +43,7 @@ from trtmc_devtoolkit import (  # noqa: E402
     repository_path,
 )
 from trtmc_devtoolkit.models import DevToolkitError  # noqa: E402
+from trtmc_devtoolkit import receipt as receipt_module  # noqa: E402
 
 
 def test_extension_protocols_are_public() -> None:
@@ -79,6 +81,10 @@ class DockerAdoptionRunner:
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
         self.environments: list[dict[str, str] | None] = []
+        self.environment_files: list[tuple[Path, str, int]] = []
+        self.daemon_id = "daemon-789"
+        self.container_id = "container-123"
+        self.tensorrt_version = "11.0.2.2"
 
     def run(
         self,
@@ -94,31 +100,49 @@ class DockerAdoptionRunner:
         arguments = [str(item) for item in command]
         self.commands.append(arguments)
         self.environments.append(dict(env) if env is not None else None)
-        if arguments[:2] == ["docker", "inspect"]:
+        if arguments == ["docker", "context", "show"]:
+            output = "test-context\n"
+        elif arguments[:4] == ["docker", "--context", "test-context", "info"]:
+            output = self.daemon_id + "\n"
+        elif arguments[:4] == ["docker", "--context", "test-context", "inspect"]:
             output = json.dumps(
                 {
-                    "Id": "container-123",
+                    "Id": self.container_id,
                     "Image": "sha256:image-456",
                     "State": {"Running": True},
                     "Config": {"Image": "campaign:latest"},
                 }
             )
-        elif arguments[:2] == ["docker", "exec"]:
-            output = json.dumps(
-                {
-                    "python": "3.12",
-                    "python_executable": "/usr/bin/python3",
-                    "cuda": "12.8",
-                    "cuda_root": "/usr/local/cuda-12.8",
-                    "tensorrt_python": "11.0.2.2",
-                    "tensorrt_native": "11.0.2.2",
-                    "tensorrt_headers": "11.0.2.2",
-                    "tensorrt_include_dir": "/usr/include/aarch64-linux-gnu",
-                    "tensorrt_library": "/usr/lib/aarch64-linux-gnu/libnvinfer.so.11",
-                    "cuda_complete": True,
-                    "architecture": "aarch64",
-                }
-            )
+        elif arguments[:4] == ["docker", "--context", "test-context", "exec"]:
+            if "--env-file" in arguments:
+                environment_file = Path(arguments[arguments.index("--env-file") + 1])
+                self.environment_files.append(
+                    (
+                        environment_file,
+                        environment_file.read_text(encoding="utf-8"),
+                        environment_file.stat().st_mode & 0o777,
+                    )
+                )
+            if "uname" in arguments:
+                output = "aarch64\n"
+            else:
+                output = json.dumps(
+                    {
+                        "python": "3.12",
+                        "python_executable": "/usr/bin/python3",
+                        "cuda": "12.8",
+                        "cuda_root": "/usr/local/cuda-12.8",
+                        "tensorrt_python": self.tensorrt_version,
+                        "tensorrt_native": self.tensorrt_version,
+                        "tensorrt_headers": self.tensorrt_version,
+                        "tensorrt_include_dir": "/usr/include/aarch64-linux-gnu",
+                        "tensorrt_library": (
+                            "/usr/lib/aarch64-linux-gnu/libnvinfer.so.11"
+                        ),
+                        "cuda_complete": True,
+                        "architecture": "aarch64",
+                    }
+                )
         else:
             raise AssertionError(arguments)
         return subprocess.CompletedProcess(arguments, 0, output, "")
@@ -266,6 +290,32 @@ class StaticLocalContext:
             env=command.environment,
             check=check,
             capture_output=capture_output,
+        )
+
+
+class BlockingLocalContext(StaticLocalContext):
+    def __init__(self) -> None:
+        self.first_entered = threading.Event()
+        self.release_first = threading.Event()
+        self.second_entered = threading.Event()
+        self._guard = threading.Lock()
+        self._calls = 0
+
+    def provision(self, lock, *, repository, state_dir, policy, runner):
+        with self._guard:
+            self._calls += 1
+            call = self._calls
+        if call == 1:
+            self.first_entered.set()
+            assert self.release_first.wait(timeout=5)
+        else:
+            self.second_entered.set()
+        return super().provision(
+            lock,
+            repository=repository,
+            state_dir=state_dir,
+            policy=policy,
+            runner=runner,
         )
 
 
@@ -633,6 +683,67 @@ def test_provision_records_failure_when_locked_provider_is_not_registered(
     assert not (state_dir / "provision-receipt.json").exists()
 
 
+def test_provision_serializes_mutation_for_the_same_environment(tmp_path: Path) -> None:
+    context = BlockingLocalContext()
+    registry = ProviderRegistry()
+    registry.register_context(context)
+    registry.register_toolchain(ExistingToolchainSource())
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+    failures: list[BaseException] = []
+
+    def provision() -> None:
+        try:
+            toolkit.provision(lock)
+        except BaseException as error:
+            failures.append(error)
+
+    first = threading.Thread(target=provision)
+    second = threading.Thread(target=provision)
+    first.start()
+    assert context.first_entered.wait(timeout=5)
+    second.start()
+    assert not context.second_entered.wait(timeout=0.2)
+    context.release_first.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert context.second_entered.is_set()
+    assert failures == []
+
+
+def test_json_receipt_replace_failure_preserves_previous_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = tmp_path / "receipt.json"
+    receipt_module.write_json(receipt, {"status": "previous"})
+
+    def fail_replace(source, destination) -> None:
+        del source, destination
+        raise OSError("simulated interrupted replace")
+
+    monkeypatch.setattr(receipt_module.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="interrupted replace"):
+        receipt_module.write_json(receipt, {"status": "new"})
+
+    assert json.loads(receipt.read_text(encoding="utf-8")) == {"status": "previous"}
+    assert list(tmp_path.glob(".receipt.json.*.tmp")) == []
+
+
 def test_builtin_docker_provider_adopts_a_probed_campaign_container(
     tmp_path: Path,
 ) -> None:
@@ -653,10 +764,32 @@ def test_builtin_docker_provider_adopts_a_probed_campaign_container(
     environment = toolkit.provision(lock, policy=ProvisionPolicy.ADOPT_ONLY)
 
     assert lock.toolchain.provider.name == "container-image"
+    assert lock.context.identity["daemon_id"] == "daemon-789"
+    assert lock.context.identity["container_id"] == "container-123"
     assert lock.context.identity["image_id"] == "sha256:image-456"
     assert environment.context.locator["container"] == "jedha-campaign"
     assert environment.observation.tensorrt_native_version == "11.0.2.2"
-    assert not any(command[:2] == ["docker", "run"] for command in runner.commands)
+    assert not any("run" in command[:5] for command in runner.commands)
+
+
+def test_docker_environment_identity_distinguishes_container_instances(
+    tmp_path: Path,
+) -> None:
+    runner = DockerAdoptionRunner()
+    toolkit = DevToolkit.from_checkout(tmp_path, runner=runner)
+    request = EnvironmentRequest(
+        tensorrt="11.0.2.2",
+        target=ExecutionTarget.docker(container="campaign"),
+        architecture="aarch64",
+    )
+
+    first = toolkit.resolve(request)
+    runner.container_id = "container-456"
+    second = toolkit.resolve(request)
+
+    assert first.context.identity["image_id"] == second.context.identity["image_id"]
+    assert first.context.identity["container_id"] != second.context.identity["container_id"]
+    assert first.lock_id != second.lock_id
 
 
 def test_docker_command_forwards_environment_without_values_in_argv(tmp_path: Path) -> None:
@@ -681,11 +814,93 @@ def test_docker_command_forwards_environment_without_values_in_argv(tmp_path: Pa
     )
 
     assert "super-secret" not in " ".join(runner.commands[-1])
-    assert any(
-        pair == ("--env", "TOKEN")
-        for pair in zip(runner.commands[-1], runner.commands[-1][1:], strict=False)
+    assert "--env-file" in runner.commands[-1]
+    assert "container-123" in runner.commands[-1]
+    assert "jedha-campaign" not in runner.commands[-1]
+    environment_path, content, mode = runner.environment_files[-1]
+    assert content == "TOKEN=super-secret\n"
+    assert mode == 0o600
+    assert not environment_path.exists()
+    assert runner.environments[-1] is None
+
+
+def test_docker_command_rejects_a_changed_daemon_after_attestation(tmp_path: Path) -> None:
+    runner = DockerAdoptionRunner()
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        runner=runner,
     )
-    assert runner.environments[-1] == {"TOKEN": "super-secret"}
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.0.2.2",
+            target=ExecutionTarget.docker(container="jedha-campaign"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock, policy=ProvisionPolicy.ADOPT_ONLY)
+    command_count = len(runner.commands)
+    runner.daemon_id = "different-daemon"
+
+    with pytest.raises(DevToolkitError, match="Docker daemon changed"):
+        toolkit.run(environment, CommandSpec(("trtmc", "version")))
+
+    new_commands = runner.commands[command_count:]
+    assert len(new_commands) == 1
+    assert new_commands[0][:4] == ["docker", "--context", "test-context", "info"]
+
+
+def test_docker_command_rejects_a_replaced_container_after_attestation(
+    tmp_path: Path,
+) -> None:
+    runner = DockerAdoptionRunner()
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        runner=runner,
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.0.2.2",
+            target=ExecutionTarget.docker(container="jedha-campaign"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock, policy=ProvisionPolicy.ADOPT_ONLY)
+    command_count = len(runner.commands)
+    runner.container_id = "replacement-container"
+
+    with pytest.raises(DevToolkitError, match="container identity changed"):
+        toolkit.run(environment, CommandSpec(("trtmc", "version")))
+
+    new_commands = runner.commands[command_count:]
+    assert len(new_commands) == 2
+    assert not any("trtmc" in command for command in new_commands)
+
+
+def test_docker_command_reattests_mutable_toolchain_before_execution(tmp_path: Path) -> None:
+    runner = DockerAdoptionRunner()
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        runner=runner,
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.0.2.2",
+            target=ExecutionTarget.docker(container="jedha-campaign"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock, policy=ProvisionPolicy.ADOPT_ONLY)
+    command_count = len(runner.commands)
+    runner.tensorrt_version = "11.0.0.114"
+
+    with pytest.raises(AttestationFailed, match="expected 11.0.2.2"):
+        toolkit.run(environment, CommandSpec(("trtmc", "version")))
+
+    new_commands = runner.commands[command_count:]
+    assert not any("trtmc" in command for command in new_commands)
 
 
 def test_generic_command_is_routed_by_the_execution_context(tmp_path: Path) -> None:

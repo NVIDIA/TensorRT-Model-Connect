@@ -9,12 +9,16 @@ import json
 import hashlib
 import os
 import platform
+import re
 import shutil
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from tempfile import NamedTemporaryFile
 
 from .commands import CommandSpec, EnvironmentPath, PathScope
 from .cohorts import normalize_architecture
@@ -184,10 +188,39 @@ def _native_version_script(library: Path) -> str:
     )
 
 
-def _docker_inspect(runner: Runner, repository: Path, container: str) -> dict[str, object]:
+def _docker_command(docker_context: str, *arguments: str) -> list[str]:
+    return ["docker", "--context", docker_context, *arguments]
+
+
+def _docker_daemon_id(runner: Runner, repository: Path, docker_context: str) -> str:
+    daemon_id = command_output(
+        runner,
+        _docker_command(docker_context, "info", "--format", "{{.ID}}"),
+        cwd=repository,
+        timeout=30,
+    )
+    if not daemon_id:
+        raise DevToolkitError(f"Docker context {docker_context!r} has no daemon identity")
+    return daemon_id
+
+
+def _docker_inspect(
+    runner: Runner,
+    repository: Path,
+    docker_context: str,
+    container: str,
+) -> dict[str, object]:
     output = command_output(
         runner,
-        ["docker", "inspect", "--type", "container", "--format", "{{json .}}", container],
+        _docker_command(
+            docker_context,
+            "inspect",
+            "--type",
+            "container",
+            "--format",
+            "{{json .}}",
+            container,
+        ),
         cwd=repository,
         timeout=30,
     )
@@ -201,6 +234,71 @@ def _docker_inspect(runner: Runner, repository: Path, container: str) -> dict[st
     if not isinstance(state, dict) or state.get("Running") is not True:
         raise DevToolkitError(f"Docker container {container} must already be running")
     return payload
+
+
+def _require_docker_binding(
+    runner: Runner,
+    repository: Path,
+    *,
+    docker_context: str,
+    daemon_id: str,
+    container_id: str,
+    image_id: str,
+) -> None:
+    observed_daemon = _docker_daemon_id(runner, repository, docker_context)
+    if observed_daemon != daemon_id:
+        raise DevToolkitError(
+            f"Docker daemon changed after resolution: expected {daemon_id}, "
+            f"observed {observed_daemon}"
+        )
+    inspected = _docker_inspect(runner, repository, docker_context, container_id)
+    if inspected.get("Id") != container_id:
+        raise DevToolkitError("Docker container identity changed after resolution")
+    if inspected.get("Image") != image_id:
+        raise DevToolkitError("Docker container image changed after resolution")
+
+
+_DOCKER_ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+@contextmanager
+def _docker_environment_file(
+    state_dir: Path,
+    environment: Mapping[str, str],
+) -> Iterator[Path | None]:
+    if not environment:
+        yield None
+        return
+    for name, value in environment.items():
+        if _DOCKER_ENVIRONMENT_NAME.fullmatch(name) is None:
+            raise DevToolkitError(f"Invalid Docker environment name: {name!r}")
+        if not isinstance(value, str) or any(character in value for character in "\r\n\0"):
+            raise DevToolkitError(
+                f"Docker environment value for {name!r} must be a single text line"
+            )
+    secret_dir = state_dir / ".secrets"
+    secret_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(secret_dir, 0o700)
+    temporary: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=secret_dir,
+            prefix="docker-environment-",
+            suffix=".list",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            os.chmod(temporary, 0o600)
+            for name, value in sorted(environment.items()):
+                stream.write(f"{name}={value}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        yield temporary
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 _CONTAINER_PROBE_SCRIPT = r"""
@@ -290,13 +388,30 @@ print(json.dumps({
 def _container_observation(
     runner: Runner,
     repository: Path,
-    container: str,
+    docker_context: str,
+    daemon_id: str,
+    container_id: str,
     image_id: str,
     python: str,
 ) -> tuple[ToolchainObservation, str, bool]:
+    _require_docker_binding(
+        runner,
+        repository,
+        docker_context=docker_context,
+        daemon_id=daemon_id,
+        container_id=container_id,
+        image_id=image_id,
+    )
     output = command_output(
         runner,
-        ["docker", "exec", container, python, "-c", _CONTAINER_PROBE_SCRIPT],
+        _docker_command(
+            docker_context,
+            "exec",
+            container_id,
+            python,
+            "-c",
+            _CONTAINER_PROBE_SCRIPT,
+        ),
         cwd=repository,
         timeout=30,
     )
@@ -339,7 +454,7 @@ def _container_observation(
 class DockerExecutionContext:
     """Adopt a running user container without imposing a Dockerfile or image version."""
 
-    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-adoption==2", 1)
+    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-adoption==3", 1)
 
     def resolve(
         self,
@@ -353,7 +468,21 @@ class DockerExecutionContext:
             raise DevToolkitError(
                 "Docker resolution currently requires a running container for adoption"
             )
-        inspected = _docker_inspect(runner, repository, container)
+        docker_context = request.target.options.get("docker_context")
+        if docker_context is None:
+            docker_context = command_output(
+                runner,
+                ["docker", "context", "show"],
+                cwd=repository,
+                timeout=30,
+            )
+        if not isinstance(docker_context, str) or not docker_context:
+            raise DevToolkitError("Docker resolution requires a non-empty context name")
+        daemon_id = _docker_daemon_id(runner, repository, docker_context)
+        inspected = _docker_inspect(runner, repository, docker_context, container)
+        container_id = inspected.get("Id")
+        if not isinstance(container_id, str) or not container_id:
+            raise DevToolkitError(f"Docker container {container} has no container identity")
         image_id = inspected.get("Image")
         if not isinstance(image_id, str) or not image_id:
             raise DevToolkitError(f"Docker container {container} has no image identity")
@@ -363,19 +492,33 @@ class DockerExecutionContext:
             else normalize_architecture(
                 command_output(
                     runner,
-                    ["docker", "exec", container, "uname", "-m"],
+                    _docker_command(docker_context, "exec", container_id, "uname", "-m"),
                     cwd=repository,
                     timeout=30,
                 )
             )
         )
+        _require_docker_binding(
+            runner,
+            repository,
+            docker_context=docker_context,
+            daemon_id=daemon_id,
+            container_id=container_id,
+            image_id=image_id,
+        )
         return ContextLock(
             provider=self.descriptor,
             operating_system="linux",
             architecture=architecture,
-            identity={"image_id": image_id, "runtime": "docker"},
+            identity={
+                "container_id": container_id,
+                "daemon_id": daemon_id,
+                "image_id": image_id,
+                "runtime": "docker",
+            },
             locator={
                 "container": container,
+                "docker_context": docker_context,
                 "workspace": request.target.options.get(
                     "workspace", "/workspace/tensorrt-model-connect"
                 ),
@@ -396,10 +539,14 @@ class DockerExecutionContext:
         del state_dir
         if policy is ProvisionPolicy.CREATE:
             raise DevToolkitError("The built-in Docker provider is adoption-only")
-        container = str(lock.context.locator["container"])
-        inspected = _docker_inspect(runner, repository, container)
-        if inspected.get("Image") != lock.context.identity.get("image_id"):
-            raise DevToolkitError(f"Docker container {container} changed after resolution")
+        _require_docker_binding(
+            runner,
+            repository,
+            docker_context=str(lock.context.locator["docker_context"]),
+            daemon_id=str(lock.context.identity["daemon_id"]),
+            container_id=str(lock.context.identity["container_id"]),
+            image_id=str(lock.context.identity["image_id"]),
+        )
         return ContextHandle(
             provider=self.descriptor,
             identity=lock.context.identity,
@@ -422,8 +569,6 @@ class DockerExecutionContext:
         check: bool,
         capture_output: bool,
     ):
-        del state_dir
-
         def render(value: str | EnvironmentPath) -> str:
             if not isinstance(value, EnvironmentPath):
                 return value
@@ -433,23 +578,40 @@ class DockerExecutionContext:
                 return str(PurePosixPath(str(context.locator["target_state"])) / value.path)
             return str(value.path)
 
-        environment = {**dict(context.environment), **dict(command.environment)}
-        arguments = ["docker", "exec", "--workdir", render(command.cwd)]
-        for name in sorted(environment):
-            arguments.extend(["--env", name])
-        arguments.append(str(context.locator["container"]))
-        arguments.extend(render(argument) for argument in command.arguments)
-        return runner.run(
-            arguments,
-            cwd=repository,
-            env=environment,
-            check=check,
-            capture_output=capture_output,
+        docker_context = str(context.locator["docker_context"])
+        daemon_id = str(context.identity["daemon_id"])
+        container_id = str(context.identity["container_id"])
+        image_id = str(context.identity["image_id"])
+        _require_docker_binding(
+            runner,
+            repository,
+            docker_context=docker_context,
+            daemon_id=daemon_id,
+            container_id=container_id,
+            image_id=image_id,
         )
+        environment = {**dict(context.environment), **dict(command.environment)}
+        with _docker_environment_file(state_dir, environment) as environment_file:
+            arguments = _docker_command(
+                docker_context,
+                "exec",
+                "--workdir",
+                render(command.cwd),
+            )
+            if environment_file is not None:
+                arguments.extend(["--env-file", str(environment_file)])
+            arguments.append(container_id)
+            arguments.extend(render(argument) for argument in command.arguments)
+            return runner.run(
+                arguments,
+                cwd=repository,
+                check=check,
+                capture_output=capture_output,
+            )
 
 
 class ContainerImageToolchainSource:
-    descriptor = ProviderDescriptor("container-image", "trtmc-devtoolkit-container-image==2", 1)
+    descriptor = ProviderDescriptor("container-image", "trtmc-devtoolkit-container-image==3", 1)
 
     def resolve(
         self,
@@ -461,12 +623,13 @@ class ContainerImageToolchainSource:
     ) -> tuple[ToolchainCandidate, ...]:
         if context.provider.name != "docker":
             return ()
-        container = str(context.locator["container"])
         try:
             observed, python_executable, complete_cuda = _container_observation(
                 runner,
                 repository,
-                container,
+                str(context.locator["docker_context"]),
+                str(context.identity["daemon_id"]),
+                str(context.identity["container_id"]),
                 str(context.identity["image_id"]),
                 str(context.locator["python"]),
             )
@@ -523,7 +686,9 @@ class ContainerImageToolchainSource:
         observed, _, complete_cuda = _container_observation(
             runner,
             repository,
-            str(context.locator["container"]),
+            str(context.locator["docker_context"]),
+            str(context.identity["daemon_id"]),
+            str(context.identity["container_id"]),
             str(context.identity["image_id"]),
             str(context.locator["python"]),
         )

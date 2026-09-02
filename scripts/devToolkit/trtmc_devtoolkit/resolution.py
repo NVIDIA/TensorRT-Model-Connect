@@ -123,6 +123,7 @@ class ExecutionTarget:
         *,
         gpu: str = "0",
         python: str = "python3",
+        docker_context: str | None = None,
         image: str | None = None,
         container: str | None = None,
         workspace: str = "/workspace/tensorrt-model-connect",
@@ -136,6 +137,8 @@ class ExecutionTarget:
         }
         if image is not None:
             options["image"] = image
+        if docker_context is not None:
+            options["docker_context"] = docker_context
         if container is not None:
             options["container"] = container
         return cls("docker", options)

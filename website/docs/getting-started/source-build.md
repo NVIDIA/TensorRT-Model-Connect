@@ -29,6 +29,7 @@ lock = toolkit.resolve(
         tensorrt="11.2.0.113",
         target=ExecutionTarget.docker(
             container="trtmc-dev-gb300",
+            docker_context="default",
             workspace="/workspace/TensorRT-Model-Connect",
         ),
     )
@@ -41,6 +42,11 @@ build = toolkit.build(
 print(environment.receipt)
 print(build.receipt)
 ```
+
+The Docker environment lock records the daemon, immutable container, and image
+identities and rechecks them before later execution. A reused container name or
+changed Docker context therefore fails closed instead of silently selecting a
+different environment.
 
 `resolve()` is read-only. With CUDA omitted, it prefers a complete target CUDA
 toolkit and otherwise selects the managed CUDA 13.3 policy. Managed provisioning

@@ -24,6 +24,7 @@ from .toolchain import (
     observe_local_toolchain,
     require_toolchain_observation,
     system_tensorrt_paths,
+    tensorrt_header_version_text,
 )
 
 
@@ -274,33 +275,50 @@ class DockerEnvironment:
         self, plan: PreparationPlan, container: str, sm: str
     ) -> ToolchainObservation:
         contract = plan.cohort.architectures[plan.architecture]
+        header = Path(contract.tensorrt_include_dir) / "NvInferVersion.h"
         script = (
-            "import ctypes, re, sys, tensorrt; from pathlib import Path; "
+            "import ctypes, json, sys, tensorrt; from pathlib import Path; "
             f"assert tensorrt.__version__ == {plan.cohort.tensorrt_version!r}; "
             f"lib=ctypes.CDLL({str(Path(contract.tensorrt_library_dir) / 'libnvinfer.so')!r}); "
             "names=('Major','Minor','Patch','Build'); "
             "funcs=[getattr(lib, f'getInferLib{name}Version') for name in names]; "
             "[setattr(func, 'restype', ctypes.c_int32) for func in funcs]; "
-            f"text=Path({str(Path(contract.tensorrt_include_dir) / 'NvInferVersion.h')!r}).read_text(); "
-            "defs=dict(re.findall(r'^#define\\s+([A-Za-z0-9_]+)\\s+([A-Za-z0-9_]+)\\b', text, re.M)); "
-            "header='.'.join(defs.get(defs.get(f'NV_TENSORRT_{name}', ''), "
-            "defs.get(f'NV_TENSORRT_{name}', '')) for name in ('MAJOR','MINOR','PATCH','BUILD')); "
+            f"text=Path({str(header)!r}).read_text(); "
             "python=f'{sys.version_info.major}.{sys.version_info.minor}'; "
-            "print(python, tensorrt.__version__, '.'.join(str(func()) for func in funcs), header)"
+            "print(json.dumps({'python': python, 'tensorrt_python': tensorrt.__version__, "
+            "'tensorrt_native': '.'.join(str(func()) for func in funcs), "
+            "'header_text': text}))"
         )
         output = command_output(
             self.runner,
             _docker_exec(container, ["python", "-c", script]),
             cwd=self.repository,
         )
+        try:
+            payload = json.loads(output)
+            python_version = payload["python"]
+            tensorrt_python = payload["tensorrt_python"]
+            tensorrt_native = payload["tensorrt_native"]
+            header_text = payload["header_text"]
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise DevToolkitError(f"Container TensorRT probe returned invalid data: {error}") from error
+        if not all(
+            isinstance(value, str)
+            for value in (python_version, tensorrt_python, tensorrt_native, header_text)
+        ):
+            raise DevToolkitError("Container TensorRT probe returned non-text data")
+        tensorrt_headers = tensorrt_header_version_text(header_text, header)
         expected = (
-            f"{plan.request.python_version} {plan.cohort.tensorrt_version} "
-            f"{plan.cohort.tensorrt_version} {plan.cohort.tensorrt_version}"
+            plan.request.python_version,
+            plan.cohort.tensorrt_version,
+            plan.cohort.tensorrt_version,
+            plan.cohort.tensorrt_version,
         )
-        if output != expected:
+        observed = (python_version, tensorrt_python, tensorrt_native, tensorrt_headers)
+        if observed != expected:
             raise DevToolkitError(
                 "Container TensorRT Python/native/header mismatch: "
-                f"expected {expected}, got {output}"
+                f"expected {expected}, got {observed}"
             )
         nvcc_output = command_output(
             self.runner,
@@ -331,7 +349,6 @@ class DockerEnvironment:
         )
         if observed_sm != sm:
             raise DevToolkitError(f"Container sees SM {observed_sm}; host selected SM {sm}")
-        python_version, tensorrt_python, tensorrt_native, tensorrt_headers = output.split()
         return ToolchainObservation(
             python_version=python_version,
             cuda_version=match.group(1),

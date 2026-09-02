@@ -91,8 +91,22 @@ class RecordingRunner:
         elif arguments[:2] == ["docker", "exec"]:
             if "import ctypes, sys, tensorrt" in " ".join(arguments):
                 output = "3.12 11.1.0.106 11.1.0.106\n"
-            elif "import ctypes, re, sys, tensorrt" in " ".join(arguments):
-                output = "3.12 11.1.0.106 11.1.0.106 11.1.0.106\n"
+            elif "import ctypes, json, sys, tensorrt" in " ".join(arguments):
+                output = json.dumps(
+                    {
+                        "python": "3.12",
+                        "tensorrt_python": "11.1.0.106",
+                        "tensorrt_native": "11.1.0.106",
+                        "header_text": "\n".join(
+                            (
+                                "#define NV_TENSORRT_MAJOR 11",
+                                "#define NV_TENSORRT_MINOR 1",
+                                "#define NV_TENSORRT_PATCH 0",
+                                "#define NV_TENSORRT_BUILD 106",
+                            )
+                        ),
+                    }
+                )
             elif arguments[-2:] == ["nvcc", "--version"]:
                 output = "Cuda compilation tools, release 13.3, V13.3.0\n"
             elif "--query-gpu=compute_cap" in arguments:
@@ -149,7 +163,48 @@ class DockerHeaderMismatchRunner(RecordingRunner):
             return subprocess.CompletedProcess(
                 arguments,
                 result.returncode,
-                "3.12 11.1.0.106 11.1.0.106 11.0.0.1\n",
+                json.dumps(
+                    {
+                        "python": "3.12",
+                        "tensorrt_python": "11.1.0.106",
+                        "tensorrt_native": "11.1.0.106",
+                        "header_text": "\n".join(
+                            (
+                                "#define NV_TENSORRT_MAJOR 11",
+                                "#define NV_TENSORRT_MINOR 0",
+                                "#define NV_TENSORRT_PATCH 0",
+                                "#define NV_TENSORRT_BUILD 1",
+                            )
+                        ),
+                    }
+                ),
+                result.stderr,
+            )
+        return result
+
+
+class DockerHeaderMissingMacroRunner(RecordingRunner):
+    def run(self, command, **kwargs) -> subprocess.CompletedProcess[str]:
+        result = super().run(command, **kwargs)
+        arguments = [str(item) for item in command]
+        if arguments[:2] == ["docker", "exec"] and "NvInferVersion.h" in " ".join(arguments):
+            return subprocess.CompletedProcess(
+                arguments,
+                result.returncode,
+                json.dumps(
+                    {
+                        "python": "3.12",
+                        "tensorrt_python": "11.1.0.106",
+                        "tensorrt_native": "11.1.0.106",
+                        "header_text": "\n".join(
+                            (
+                                "#define NV_TENSORRT_MAJOR 11",
+                                "#define NV_TENSORRT_MINOR 1",
+                                "#define NV_TENSORRT_BUILD 106",
+                            )
+                        ),
+                    }
+                ),
                 result.stderr,
             )
         return result
@@ -536,6 +591,27 @@ def test_docker_prepare_rejects_tensorrt_header_version_mismatch(tmp_path: Path)
     )
 
     with pytest.raises(DevToolkitError, match="Container TensorRT .*header mismatch"):
+        toolkit.apply(plan)
+
+
+def test_docker_prepare_reports_missing_tensorrt_header_macro(tmp_path: Path) -> None:
+    repository = _minimal_repository(tmp_path)
+    toolkit = DevToolkit.from_checkout(
+        repository,
+        state_root=tmp_path / "runs",
+        source_revision_override="a" * 40,
+        runner=DockerHeaderMissingMacroRunner(),
+    )
+    plan = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.1.0.106",
+            cuda="13.3",
+            architecture="aarch64",
+            target=DockerTarget(),
+        )
+    )
+
+    with pytest.raises(DevToolkitError, match="Could not resolve TensorRT patch"):
         toolkit.apply(plan)
 
 

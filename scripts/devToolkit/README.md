@@ -81,6 +81,9 @@ The built-in Docker provider is adoption-only. It does not assume an NGC image,
 `/opt/venv`, `--gpus device=...`, or a checked-in Dockerfile. It inspects a
 running container, records its image ID, and probes its actual Python, CUDA,
 TensorRT Python package, native library, and headers before producing the lock.
+The lock binds the Docker daemon ID, immutable container ID, and image ID. The
+binding is rechecked before provisioning, attestation, builds, and commands, so
+a recycled container name or changed Docker context fails closed.
 
 ```python
 lock = toolkit.resolve(
@@ -89,6 +92,7 @@ lock = toolkit.resolve(
         architecture="aarch64",
         target=ExecutionTarget.docker(
             container="jedha-campaign",
+            docker_context="default",  # Omit to capture `docker context show`.
             workspace="/workspace/TensorRT-Model-Connect",
         ),
     )
@@ -103,6 +107,8 @@ toolkit.run_trtmc(
 
 The CLI arguments are opaque to DevToolkit. Model-specific flags, validation,
 and performance policy stay with the model family or caller recipe.
+Command environment values are passed through a short-lived mode-0600 Docker
+env file and removed after execution; they are never placed in Docker argv.
 
 ## Managed fallback and arbitrary TensorRT
 
@@ -178,7 +184,9 @@ fails closed when the caller requests a preset or requires qualification.
 Provisioning writes `environment-lock.json`, `provision-receipt.json`, and an
 observed attestation under `.devtoolkit/environments/<lock-id>/`. Builds and
 commands write their own v2 receipts below that environment directory. Receipts
-do not serialize provider secrets or environment variable values.
+do not serialize provider secrets or environment variable values. JSON receipts
+are replaced atomically, and provisioning for one environment ID is serialized
+across processes to avoid partial or competing terminal state.
 
 ## Extension points
 

@@ -17,7 +17,7 @@ from typing import Mapping
 from .commands import CommandSpec, EnvironmentPath, repository_path, state_path
 from .models import DevToolkitError
 from .providers import FrozenProviderRegistry
-from .provisioning import ProvisionedEnvironment
+from .provisioning import ProvisionedEnvironment, attest_environment
 from .receipt import write_json
 from .runner import Runner
 
@@ -200,6 +200,12 @@ class NativeBuilder:
         environment: ProvisionedEnvironment,
         spec: BuildSpec,
     ) -> BuildResult:
+        attest_environment(
+            environment,
+            repository=self.repository,
+            providers=self.providers,
+            runner=self.runner,
+        )
         source = self._source_snapshot(environment, spec.source_identity)
         architectures = self._architectures(environment, spec.cuda_architectures)
         input_payload = {
