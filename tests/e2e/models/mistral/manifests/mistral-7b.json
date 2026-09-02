@@ -7,6 +7,9 @@
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
   "max_cache_length": 256,
+  "build_args": {
+    "decoder_engine_layout": "dual_profile"
+  },
   "trust_remote_code": false,
   "testcases": [
     {
