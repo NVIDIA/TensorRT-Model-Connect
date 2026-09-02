@@ -27,6 +27,38 @@ def _source_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRTMC_MINIMAX_H3_SOURCE_REVISION", SOURCE_REVISION)
 
 
+@pytest.fixture(autouse=True)
+def _synthetic_checkpoint_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    def record(model: Path) -> dict:
+        files = {}
+        for path in sorted(model.rglob("*")):
+            if not path.is_file() or "transformer_ref" in path.relative_to(model).parts:
+                continue
+            relative = path.relative_to(model).as_posix()
+            payload = path.read_bytes()
+            digest = hashlib.sha256(payload).hexdigest()
+            files[relative] = {
+                "blob_id": digest,
+                "bytes": len(payload),
+                "sha256": digest,
+            }
+        payload = {
+            "repository": "MiniMaxAI/MiniMax-H3",
+            "revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
+            "files": files,
+        }
+        return {
+            **payload,
+            "file_count": len(files),
+            "inventory_sha256": hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+
+    monkeypatch.setattr(staged_build, "checkpoint_snapshot_record", record)
+    monkeypatch.setattr(staged_build, "validate_checkpoint_snapshot_record", lambda value: value)
+
+
 class _StreamWriterBase:
     def __init__(self) -> None:
         pass
@@ -266,6 +298,159 @@ def test_staged_receipt_contains_only_settings_and_plan_digests(
     }
     assert str(tmp_path) not in json.dumps(receipt)
     assert all(set(record) == {"bytes", "sha256"} for record in receipt["plans"].values())
+
+
+def test_documented_staged_route_consumes_one_shared_base_snapshot_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "model"
+    tokenizer = model / "tokenizer" / "tokenizer.json"
+    tokenizer.parent.mkdir(parents=True)
+    tokenizer.write_text("{}", encoding="utf-8")
+    _write_audio_vae_config(model)
+    base_shard = model / "transformer" / "base.safetensors"
+    base_shard.parent.mkdir()
+    base_shard.write_bytes(b"base")
+    ref_shard = model / "transformer_ref" / "ref.safetensors"
+    ref_shard.parent.mkdir()
+    ref_shard.write_bytes(b"independent-ref")
+    output = tmp_path / "h3.bundle"
+    original_record = staged_build.checkpoint_snapshot_record
+    observed: list[dict] = []
+
+    def record(path: Path) -> dict:
+        assert path == model.resolve()
+        value = original_record(path)
+        observed.append(value)
+        return value
+
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+        assert verbose is False
+        plan.write_bytes(component.encode())
+
+    monkeypatch.setattr(staged_build, "checkpoint_snapshot_record", record)
+    monkeypatch.setattr(staged_build, "_run_component", build)
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_abi", lambda _version: "1.6")
+
+    staged_build.build_staged_bundle(model, output)
+
+    assert len(observed) == 2
+    assert observed[1] == observed[0]
+    assert all("transformer_ref" not in relative for relative in observed[0]["files"])
+    receipt_path = output.with_name(f"{output.name}.plans") / staged_build._RECEIPT_NAME
+    identity = json.loads(receipt_path.read_text(encoding="utf-8"))["build_identity"]
+    assert identity["checkpoint_inventory_sha256"] == observed[0]["inventory_sha256"]
+    assert identity["checkpoint_shards"] == [
+        {
+            "name": "transformer/base.safetensors",
+            "bytes": 4,
+            "sha256": hashlib.sha256(b"base").hexdigest(),
+        }
+    ]
+    assert "transformer_ref" not in json.dumps(identity)
+
+
+def test_staged_build_rejects_checkpoint_changed_while_plans_were_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "model"
+    tokenizer = model / "tokenizer" / "tokenizer.json"
+    tokenizer.parent.mkdir(parents=True)
+    tokenizer.write_text("{}", encoding="utf-8")
+    _write_audio_vae_config(model)
+    output = tmp_path / "h3.bundle"
+    mutated = False
+    calls: list[str] = []
+
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+        nonlocal mutated
+        assert verbose is False
+        calls.append(component)
+        plan.write_bytes(component.encode())
+        if not mutated:
+            tokenizer.write_text('{"changed":true}', encoding="utf-8")
+            mutated = True
+
+    monkeypatch.setattr(staged_build, "_run_component", build)
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_abi", lambda _version: "1.6")
+
+    with pytest.raises(ValueError, match="base checkpoint changed while staged plans were built"):
+        staged_build.build_staged_bundle(model, output)
+    assert not output.exists()
+    plans = output.with_name(f"{output.name}.plans")
+    invalid_marker = plans / staged_build._INVALID_RECEIPT_NAME
+    assert invalid_marker.is_file()
+    assert calls == [component for component, _filename, _section in staged_build._COMPONENTS]
+
+    # Restoring the source does not make plans produced during the failed consistency
+    # window reusable. A normal crash can still resume after full entry validation, but
+    # an observed final-revalidation failure forces every plan to be rebuilt.
+    tokenizer.write_text("{}", encoding="utf-8")
+    calls.clear()
+    staged_build.build_staged_bundle(model, output)
+
+    assert calls == [component for component, _filename, _section in staged_build._COMPONENTS]
+    assert output.is_file()
+    assert not invalid_marker.exists()
+
+
+def test_staged_build_rejects_builder_source_changed_while_plans_were_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "model"
+    tokenizer = model / "tokenizer" / "tokenizer.json"
+    tokenizer.parent.mkdir(parents=True)
+    tokenizer.write_text("{}", encoding="utf-8")
+    _write_audio_vae_config(model)
+    output = tmp_path / "h3.bundle"
+    source_digests = iter(("1" * 64, "2" * 64))
+
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+        assert verbose is False
+        plan.write_bytes(component.encode())
+
+    monkeypatch.setattr(staged_build, "_run_component", build)
+    monkeypatch.setattr(staged_build, "builder_source_sha256", lambda: next(source_digests))
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_abi", lambda _version: "1.6")
+
+    with pytest.raises(ValueError, match="builder source changed while staged plans were built"):
+        staged_build.build_staged_bundle(model, output)
+
+    invalid_marker = output.with_name(f"{output.name}.plans") / staged_build._INVALID_RECEIPT_NAME
+    assert invalid_marker.is_file()
+    assert not output.exists()
+
+
+def test_staged_finalizer_consumes_only_pinned_checkpoint_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "model"
+    tokenizer = model / "tokenizer" / "tokenizer.json"
+    tokenizer.parent.mkdir(parents=True)
+    tokenizer.write_text("{}", encoding="utf-8")
+    _write_audio_vae_config(model)
+    output = tmp_path / "h3.bundle"
+    validate_sources = staged_build._validate_staged_sources_unchanged
+
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+        assert verbose is False
+        plan.write_bytes(component.encode())
+
+    def validate_then_mutate(*args, **kwargs) -> None:
+        validate_sources(*args, **kwargs)
+        tokenizer.write_text('{"changed":true}', encoding="utf-8")
+
+    monkeypatch.setattr(staged_build, "_run_component", build)
+    monkeypatch.setattr(staged_build, "_validate_staged_sources_unchanged", validate_then_mutate)
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_abi", lambda _version: "1.6")
+
+    with pytest.raises(ValueError, match="pinned checkpoint file changed before finalization"):
+        staged_build.build_staged_bundle(model, output)
+    assert not output.exists()
 
 
 def test_staged_resume_uses_complete_receipt_before_missing_plan_rebuilds(

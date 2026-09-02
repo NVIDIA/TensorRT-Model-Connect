@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -15,6 +16,12 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .checkpoint_manifest import (
+    BASE_CHECKPOINT_BYTES,
+    BASE_CHECKPOINT_FILE_COUNT,
+    BASE_CHECKPOINT_FILES,
+    BASE_CHECKPOINT_INVENTORY_SHA256,
+)
 from .config import (
     CANVAS_MAX_ASPECT_RATIO,
     CANVAS_MAX_PIXELS,
@@ -61,6 +68,37 @@ _BUNDLE_MAGIC = b"BUNDLE\x01\x00"
 _MAX_BUNDLE_HEADER_BYTES = 100 << 20
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
+_HF_LOCAL_DOWNLOAD_METADATA = Path(".cache/huggingface/download")
+_CHECKPOINT_INDEX_FILES = (
+    "text_encoder/model.safetensors.index.json",
+    "transformer/diffusion_pytorch_model.safetensors.index.json",
+    "vae/diffusion_pytorch_model.safetensors.index.json",
+)
+
+_EXPECTED_CHECKPOINT_FILE_RECORDS = {
+    relative: {"blob_id": blob_id, "bytes": size, "sha256": sha256}
+    for relative, size, blob_id, sha256 in BASE_CHECKPOINT_FILES
+}
+if (
+    len(_EXPECTED_CHECKPOINT_FILE_RECORDS) != BASE_CHECKPOINT_FILE_COUNT
+    or sum(record["bytes"] for record in _EXPECTED_CHECKPOINT_FILE_RECORDS.values())
+    != BASE_CHECKPOINT_BYTES
+    or any(
+        not relative
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+        or Path(relative).parts[0] == "transformer_ref"
+        or not isinstance(record["bytes"], int)
+        or record["bytes"] <= 0
+        or (
+            _GIT_SHA.fullmatch(str(record["blob_id"])) is None
+            and _SHA256.fullmatch(str(record["blob_id"])) is None
+        )
+        or _SHA256.fullmatch(str(record["sha256"])) is None
+        for relative, record in _EXPECTED_CHECKPOINT_FILE_RECORDS.items()
+    )
+):
+    raise RuntimeError("MiniMax-H3 internal base-checkpoint manifest is inconsistent")
 
 
 def sha256_file(path: Path, *, chunk_bytes: int = 16 << 20) -> str:
@@ -75,13 +113,7 @@ def file_record(path: Path) -> dict[str, int | str]:
     return {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
 
 
-def file_identity(path: Path) -> dict[str, int]:
-    try:
-        metadata = path.stat()
-    except OSError as error:
-        raise ValueError(f"MiniMax-H3 artifact is unavailable: {path}: {error}") from error
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ValueError(f"MiniMax-H3 artifact is not a regular file: {path}")
+def _file_identity_from_stat(metadata: os.stat_result) -> dict[str, int]:
     return {
         "device": metadata.st_dev,
         "inode": metadata.st_ino,
@@ -89,6 +121,26 @@ def file_identity(path: Path) -> dict[str, int]:
         "mtime_ns": metadata.st_mtime_ns,
         "ctime_ns": metadata.st_ctime_ns,
     }
+
+
+def _same_open_file(path_identity: dict[str, int], handle_identity: dict[str, int]) -> bool:
+    # Windows path stat and handle fstat expose creation/change time with
+    # different precision/semantics. File ID, volume, size, and mtime are the
+    # stable fields needed to prove that the opened handle is the statted file.
+    return all(
+        path_identity[key] == handle_identity[key]
+        for key in ("device", "inode", "bytes", "mtime_ns")
+    )
+
+
+def file_identity(path: Path) -> dict[str, int]:
+    try:
+        metadata = path.stat()
+    except OSError as error:
+        raise ValueError(f"MiniMax-H3 artifact is unavailable: {path}: {error}") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"MiniMax-H3 artifact is not a regular file: {path}")
+    return _file_identity_from_stat(metadata)
 
 
 def stable_file_record(path: Path, label: str) -> tuple[dict[str, int | str], dict[str, int]]:
@@ -196,18 +248,106 @@ def _canonical_json_sha256(payload: object) -> str:
     return hashlib.sha256(serialized).hexdigest()
 
 
-def checkpoint_snapshot_record(snapshot: Path) -> dict:
-    """Describe the canonical HF snapshot without rereading LFS weight blobs.
+def _checkpoint_snapshot_payload(files: dict[str, dict[str, int | str]]) -> dict:
+    if files != _EXPECTED_CHECKPOINT_FILE_RECORDS:
+        expected_paths = set(_EXPECTED_CHECKPOINT_FILE_RECORDS)
+        actual_paths = set(files)
+        mismatched = sorted(
+            relative
+            for relative in expected_paths & actual_paths
+            if files[relative] != _EXPECTED_CHECKPOINT_FILE_RECORDS[relative]
+        )
+        raise ValueError(
+            "MiniMax-H3 checkpoint does not match the exact pinned base inventory: "
+            f"missing={sorted(expected_paths - actual_paths)}, "
+            f"unexpected={sorted(actual_paths - expected_paths)}, "
+            f"mismatched={mismatched}"
+        )
+    payload = {
+        "repository": CHECKPOINT_REPOSITORY,
+        "revision": CHECKPOINT_REVISION,
+        "files": files,
+    }
+    inventory_sha256 = _canonical_json_sha256(payload)
+    if inventory_sha256 != BASE_CHECKPOINT_INVENTORY_SHA256:
+        raise RuntimeError("MiniMax-H3 internal base-checkpoint inventory digest is inconsistent")
+    return {
+        **payload,
+        "file_count": len(files),
+        "inventory_sha256": inventory_sha256,
+    }
 
-    Hugging Face names LFS cache blobs by their SHA256. We bind large weight
-    shards to those content-addressed names and hash the smaller Git blobs
-    directly. Noncanonical copied snapshots fail closed instead of silently
-    triggering another 135 GB read.
-    """
 
-    snapshot = snapshot.absolute()
-    if snapshot.is_symlink() or not snapshot.is_dir():
-        raise ValueError("MiniMax-H3 model path must be a canonical HF snapshot directory")
+def _validate_checkpoint_indexes(snapshot: Path, files: dict[str, dict[str, int | str]]) -> None:
+    missing = sorted(set(_REQUIRED_SNAPSHOT_FILES) - set(files))
+    if missing:
+        raise ValueError(f"MiniMax-H3 snapshot is incomplete; missing: {missing}")
+    for index_name in _CHECKPOINT_INDEX_FILES:
+        try:
+            index_payload = (snapshot / index_name).read_bytes()
+        except OSError as error:
+            raise ValueError(f"MiniMax-H3 checkpoint index is unavailable: {index_name}") from error
+        if hashlib.sha256(index_payload).hexdigest() != files[index_name]["sha256"]:
+            raise ValueError(
+                f"MiniMax-H3 checkpoint index changed while being validated: {index_name}"
+            )
+        try:
+            index = json.loads(index_payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"MiniMax-H3 checkpoint index is invalid: {index_name}") from error
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(f"MiniMax-H3 checkpoint index has no weight_map: {index_name}")
+        filenames = tuple(weight_map.values())
+        if any(
+            not isinstance(filename, str)
+            or not filename
+            or Path(filename).is_absolute()
+            or ".." in Path(filename).parts
+            for filename in filenames
+        ):
+            raise ValueError(f"MiniMax-H3 checkpoint index has an invalid shard path: {index_name}")
+        referenced = {(Path(index_name).parent / filename).as_posix() for filename in filenames}
+        missing_shards = sorted(referenced - set(files))
+        if missing_shards:
+            raise ValueError(
+                f"MiniMax-H3 checkpoint index references missing shards: {missing_shards}"
+            )
+
+
+def _canonical_snapshot_entries(snapshot: Path) -> tuple[Path, ...]:
+    entries: list[Path] = []
+
+    def fail_walk(error: OSError) -> None:
+        raise ValueError("MiniMax-H3 canonical snapshot could not be inventoried") from error
+
+    for directory, directory_names, filenames in os.walk(
+        snapshot, topdown=True, onerror=fail_walk, followlinks=False
+    ):
+        root = Path(directory)
+        directory_names.sort()
+        filenames.sort()
+        if root == snapshot and "transformer_ref" in directory_names:
+            directory_names.remove("transformer_ref")
+        for name in directory_names:
+            path = root / name
+            metadata = path.lstat()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse_point(metadata)
+                or not stat.S_ISDIR(metadata.st_mode)
+            ):
+                relative = path.relative_to(snapshot).as_posix()
+                raise ValueError(
+                    f"MiniMax-H3 canonical snapshot contains a linked directory: {relative}"
+                )
+        entries.extend(root / name for name in filenames)
+    return tuple(entries)
+
+
+def _canonical_checkpoint_snapshot_record(snapshot: Path) -> dict:
+    """Hash and describe an exact pinned HF cache snapshot."""
+
     if snapshot.name != CHECKPOINT_REVISION or snapshot.parent.name != "snapshots":
         raise ValueError(
             f"MiniMax-H3 model path must resolve to pinned snapshot {CHECKPOINT_REVISION}"
@@ -218,19 +358,21 @@ def checkpoint_snapshot_record(snapshot: Path) -> dict:
     blob_root = (repository_root / "blobs").resolve(strict=True)
 
     files: dict[str, dict[str, int | str]] = {}
-    small_blob_digests: dict[Path, str] = {}
-    for path in sorted(snapshot.rglob("*")):
-        if path.is_dir():
-            continue
+    link_identities: dict[str, tuple[int, int, int, int, int, int]] = {}
+    target_identities: dict[Path, dict[str, int]] = {}
+    for path in _canonical_snapshot_entries(snapshot):
         relative = path.relative_to(snapshot).as_posix()
         if not path.is_symlink():
             raise ValueError(
                 f"MiniMax-H3 canonical snapshot entry is not a cache symlink: {relative}"
             )
+        link_identity = _lstat_identity(path)
         try:
             target = (path.parent / os.readlink(path)).resolve(strict=True)
         except OSError as error:
             raise ValueError(f"MiniMax-H3 snapshot has a broken entry: {relative}") from error
+        if _lstat_identity(path) != link_identity:
+            raise ValueError(f"MiniMax-H3 canonical snapshot link changed: {relative}")
         if target.parent != blob_root or not target.is_file():
             raise ValueError(
                 f"MiniMax-H3 snapshot entry leaves its canonical blob cache: {relative}"
@@ -243,52 +385,314 @@ def checkpoint_snapshot_record(snapshot: Path) -> dict:
             raise ValueError(
                 f"MiniMax-H3 weight shard is not backed by an LFS SHA256 blob: {relative}"
             )
-        digest = blob_id if is_lfs_sha256 else small_blob_digests.get(target)
-        if digest is None:
-            digest = sha256_file(target)
-            small_blob_digests[target] = digest
-        files[relative] = {
-            "blob_id": blob_id,
-            "bytes": target.stat().st_size,
-            "sha256": digest,
-        }
+        link_identities[relative] = link_identity
+        files[relative], target_identities[target] = _snapshot_file_record(
+            target, relative, blob_id
+        )
 
-    missing = sorted(set(_REQUIRED_SNAPSHOT_FILES) - set(files))
-    if missing:
-        raise ValueError(f"MiniMax-H3 snapshot is incomplete; missing: {missing}")
-    for index_name in (
-        "text_encoder/model.safetensors.index.json",
-        "transformer/diffusion_pytorch_model.safetensors.index.json",
-        "vae/diffusion_pytorch_model.safetensors.index.json",
+    _validate_checkpoint_indexes(snapshot, files)
+    for relative in files:
+        if _lstat_identity(snapshot / relative) != link_identities[relative]:
+            raise ValueError(f"MiniMax-H3 canonical snapshot link changed: {relative}")
+    for target, identity in target_identities.items():
+        if file_identity(target) != identity:
+            raise ValueError("MiniMax-H3 canonical snapshot blob changed while in use")
+    return _checkpoint_snapshot_payload(files)
+
+
+def _is_reparse_point(metadata: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+
+
+def _plain_snapshot_content_paths(snapshot: Path) -> tuple[Path, ...]:
+    paths: list[Path] = []
+
+    def fail_walk(error: OSError) -> None:
+        raise ValueError("MiniMax-H3 local-dir checkpoint could not be inventoried") from error
+
+    for directory, directory_names, filenames in os.walk(
+        snapshot, topdown=True, onerror=fail_walk, followlinks=False
     ):
-        index = json.loads((snapshot / index_name).read_text())
-        weight_map = index.get("weight_map") if isinstance(index, dict) else None
-        if not isinstance(weight_map, dict) or not weight_map:
-            raise ValueError(f"MiniMax-H3 checkpoint index has no weight_map: {index_name}")
-        referenced = {
-            (Path(index_name).parent / filename).as_posix() for filename in weight_map.values()
-        }
-        missing_shards = sorted(referenced - set(files))
-        if missing_shards:
-            raise ValueError(
-                f"MiniMax-H3 checkpoint index references missing shards: {missing_shards}"
-            )
+        root = Path(directory)
+        directory_names.sort()
+        filenames.sort()
+        if root == snapshot:
+            for excluded_directory in (".cache", "transformer_ref"):
+                if excluded_directory in directory_names:
+                    directory_names.remove(excluded_directory)
+        for name in directory_names:
+            path = root / name
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or _is_reparse_point(metadata):
+                relative = path.relative_to(snapshot).as_posix()
+                raise ValueError(
+                    f"MiniMax-H3 local-dir checkpoint contains a linked directory: {relative}"
+                )
+            if not stat.S_ISDIR(metadata.st_mode):
+                relative = path.relative_to(snapshot).as_posix()
+                raise ValueError(
+                    f"MiniMax-H3 local-dir checkpoint contains a special entry: {relative}"
+                )
+        for name in filenames:
+            path = root / name
+            metadata = path.lstat()
+            relative = path.relative_to(snapshot).as_posix()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse_point(metadata)
+                or not stat.S_ISREG(metadata.st_mode)
+            ):
+                raise ValueError(
+                    f"MiniMax-H3 local-dir checkpoint entry is not a regular file: {relative}"
+                )
+            paths.append(path)
+    return tuple(paths)
 
-    payload = {
-        "repository": CHECKPOINT_REPOSITORY,
-        "revision": CHECKPOINT_REVISION,
-        "files": files,
-    }
+
+def _plain_snapshot_metadata_paths(
+    snapshot: Path, content_relative_paths: set[str]
+) -> dict[str, Path]:
+    metadata_root = snapshot / _HF_LOCAL_DOWNLOAD_METADATA
+    try:
+        resolved_snapshot = snapshot.resolve(strict=True)
+        resolved_metadata_root = metadata_root.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(
+            "MiniMax-H3 local-dir checkpoint is missing Hugging Face download metadata"
+        ) from error
+    if not resolved_metadata_root.is_relative_to(resolved_snapshot):
+        raise ValueError("MiniMax-H3 local-dir download metadata leaves the checkpoint")
+    current = metadata_root
+    while current != snapshot:
+        metadata = current.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or _is_reparse_point(metadata)
+            or not stat.S_ISDIR(metadata.st_mode)
+        ):
+            raise ValueError("MiniMax-H3 local-dir download metadata is not a regular tree")
+        current = current.parent
+
+    result: dict[str, Path] = {}
+
+    def fail_walk(error: OSError) -> None:
+        raise ValueError(
+            "MiniMax-H3 local-dir download metadata could not be inventoried"
+        ) from error
+
+    for directory, directory_names, filenames in os.walk(
+        metadata_root, topdown=True, onerror=fail_walk, followlinks=False
+    ):
+        root = Path(directory)
+        directory_names.sort()
+        filenames.sort()
+        if root == metadata_root and "transformer_ref" in directory_names:
+            directory_names.remove("transformer_ref")
+        for name in directory_names:
+            path = root / name
+            metadata = path.lstat()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse_point(metadata)
+                or not stat.S_ISDIR(metadata.st_mode)
+            ):
+                raise ValueError(
+                    "MiniMax-H3 local-dir download metadata contains a linked directory"
+                )
+        for name in filenames:
+            if not name.endswith(".metadata"):
+                continue
+            path = root / name
+            metadata = path.lstat()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse_point(metadata)
+                or not stat.S_ISREG(metadata.st_mode)
+            ):
+                raise ValueError("MiniMax-H3 local-dir download metadata is not a regular file")
+            relative_metadata = path.relative_to(metadata_root).as_posix()
+            relative = relative_metadata[: -len(".metadata")]
+            if not relative or relative in result:
+                raise ValueError("MiniMax-H3 local-dir download metadata has an invalid path")
+            result[relative] = path
+
+    missing_metadata = sorted(content_relative_paths - set(result))
+    orphan_metadata = sorted(set(result) - content_relative_paths)
+    if missing_metadata or orphan_metadata:
+        raise ValueError(
+            "MiniMax-H3 local-dir content and download metadata differ: "
+            f"missing_metadata={missing_metadata}, orphan_metadata={orphan_metadata}"
+        )
+    return result
+
+
+def _read_plain_snapshot_metadata(path: Path, relative: str) -> tuple[str, dict[str, int]]:
+    before = file_identity(path)
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            handle_before = _file_identity_from_stat(os.fstat(stream.fileno()))
+            if not _same_open_file(before, handle_before):
+                raise ValueError(
+                    f"MiniMax-H3 local-dir download metadata changed before reading: {relative}"
+                )
+            fields = stream.read().splitlines()
+            if _file_identity_from_stat(os.fstat(stream.fileno())) != handle_before:
+                raise ValueError(
+                    f"MiniMax-H3 local-dir download metadata changed while reading: {relative}"
+                )
+    except (OSError, UnicodeDecodeError) as error:
+        raise ValueError(
+            f"MiniMax-H3 local-dir download metadata is unreadable: {relative}"
+        ) from error
+    after = file_identity(path)
+    if after != before:
+        raise ValueError(
+            f"MiniMax-H3 local-dir download metadata changed while reading: {relative}"
+        )
+    if len(fields) != 3 or fields[0] != CHECKPOINT_REVISION:
+        raise ValueError(
+            f"MiniMax-H3 local-dir metadata does not identify pinned revision: {relative}"
+        )
+    blob_id = fields[1]
+    if _GIT_SHA.fullmatch(blob_id) is None and _SHA256.fullmatch(blob_id) is None:
+        raise ValueError(f"MiniMax-H3 local-dir metadata has an invalid ETag: {relative}")
+    try:
+        timestamp = float(fields[2])
+    except ValueError as error:
+        raise ValueError(
+            f"MiniMax-H3 local-dir metadata has an invalid timestamp: {relative}"
+        ) from error
+    if not math.isfinite(timestamp) or timestamp < 0:
+        raise ValueError(f"MiniMax-H3 local-dir metadata has an invalid timestamp: {relative}")
+    return blob_id, before
+
+
+def _snapshot_file_record(
+    path: Path, relative: str, blob_id: str
+) -> tuple[dict[str, int | str], dict[str, int]]:
+    before = file_identity(path)
+    sha256 = hashlib.sha256()
+    git_blob = None
+    if len(blob_id) == 40:
+        try:
+            git_blob = hashlib.sha1(usedforsecurity=False)
+        except TypeError:  # pragma: no cover - for older Python implementations
+            git_blob = hashlib.sha1()
+        git_blob.update(f"blob {before['bytes']}\0".encode())
+    with path.open("rb") as stream:
+        handle_before = _file_identity_from_stat(os.fstat(stream.fileno()))
+        if not _same_open_file(before, handle_before):
+            raise ValueError(f"MiniMax-H3 checkpoint file changed before hashing: {relative}")
+        while chunk := stream.read(16 << 20):
+            sha256.update(chunk)
+            if git_blob is not None:
+                git_blob.update(chunk)
+        if _file_identity_from_stat(os.fstat(stream.fileno())) != handle_before:
+            raise ValueError(f"MiniMax-H3 checkpoint file changed while hashing: {relative}")
+    after = file_identity(path)
+    if after != before:
+        raise ValueError(f"MiniMax-H3 checkpoint file changed while hashing: {relative}")
+    digest = sha256.hexdigest()
+    if len(blob_id) == 64:
+        if digest != blob_id:
+            raise ValueError(f"MiniMax-H3 checkpoint LFS SHA256 mismatch: {relative}")
+    elif git_blob is None or git_blob.hexdigest() != blob_id:
+        raise ValueError(f"MiniMax-H3 checkpoint Git blob ID mismatch: {relative}")
     return {
-        **payload,
-        "file_count": len(files),
-        "inventory_sha256": _canonical_json_sha256(payload),
+        "blob_id": blob_id,
+        "bytes": before["bytes"],
+        "sha256": digest,
+    }, before
+
+
+def _plain_checkpoint_snapshot_record(snapshot: Path) -> dict:
+    """Verify and describe a pinned ``hf download --local-dir`` checkpoint."""
+
+    content_paths = _plain_snapshot_content_paths(snapshot)
+    content_by_relative = {path.relative_to(snapshot).as_posix(): path for path in content_paths}
+    expected_paths = set(_EXPECTED_CHECKPOINT_FILE_RECORDS)
+    actual_paths = set(content_by_relative)
+    if actual_paths != expected_paths:
+        raise ValueError(
+            "MiniMax-H3 local-dir does not contain the exact pinned base files: "
+            f"missing={sorted(expected_paths - actual_paths)}, "
+            f"unexpected={sorted(actual_paths - expected_paths)}"
+        )
+    metadata_paths = _plain_snapshot_metadata_paths(snapshot, set(content_by_relative))
+    files: dict[str, dict[str, int | str]] = {}
+    content_identities: dict[str, dict[str, int]] = {}
+    metadata_identities: dict[str, dict[str, int]] = {}
+    for relative, path in sorted(content_by_relative.items()):
+        blob_id, metadata_identity = _read_plain_snapshot_metadata(
+            metadata_paths[relative], relative
+        )
+        expected = _EXPECTED_CHECKPOINT_FILE_RECORDS[relative]
+        if blob_id != expected["blob_id"] or path.stat().st_size != expected["bytes"]:
+            raise ValueError(
+                f"MiniMax-H3 local-dir metadata or size does not match pinned file: {relative}"
+            )
+        if path.suffix == ".safetensors" and len(blob_id) != 64:
+            raise ValueError(f"MiniMax-H3 local-dir weight shard has a non-LFS ETag: {relative}")
+        files[relative], content_identities[relative] = _snapshot_file_record(
+            path, relative, blob_id
+        )
+        metadata_identities[relative] = metadata_identity
+
+    _validate_checkpoint_indexes(snapshot, files)
+    current_relative_paths = {
+        path.relative_to(snapshot).as_posix() for path in _plain_snapshot_content_paths(snapshot)
     }
+    if current_relative_paths != set(content_by_relative):
+        raise ValueError("MiniMax-H3 local-dir checkpoint changed while being inventoried")
+    _plain_snapshot_metadata_paths(snapshot, current_relative_paths)
+    for relative, path in content_by_relative.items():
+        if file_identity(path) != content_identities[relative]:
+            raise ValueError(f"MiniMax-H3 local-dir file changed while in use: {relative}")
+        if file_identity(metadata_paths[relative]) != metadata_identities[relative]:
+            raise ValueError(
+                f"MiniMax-H3 local-dir download metadata changed while in use: {relative}"
+            )
+    return _checkpoint_snapshot_payload(files)
+
+
+def checkpoint_snapshot_record(snapshot: Path) -> dict:
+    """Describe an exact pinned HF cache or ``--local-dir`` snapshot.
+
+    Both layouts receive a complete content-hash pass against the checked-in
+    file manifest. Canonical Hugging Face cache snapshots must additionally be
+    direct blob-cache symlinks; plain local-dir downloads must have one pinned
+    download-metadata record per content file. Both layouts produce the same
+    path-free receipt schema.
+    """
+
+    snapshot = snapshot.absolute()
+    try:
+        metadata = snapshot.lstat()
+    except OSError as error:
+        raise ValueError("MiniMax-H3 model path is unavailable") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or _is_reparse_point(metadata)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        raise ValueError("MiniMax-H3 model path must be a regular snapshot directory")
+    if snapshot.parent.name == "snapshots" and snapshot.parent.parent.name == HF_CACHE_REPOSITORY:
+        return _canonical_checkpoint_snapshot_record(snapshot)
+    return _plain_checkpoint_snapshot_record(snapshot)
 
 
 def validate_checkpoint_snapshot_record(record: object) -> dict:
     if not isinstance(record, dict):
         raise ValueError("MiniMax-H3 receipt is missing checkpoint_snapshot")
+    if set(record) != {
+        "repository",
+        "revision",
+        "files",
+        "file_count",
+        "inventory_sha256",
+    }:
+        raise ValueError("MiniMax-H3 checkpoint snapshot has unexpected fields")
     if record.get("repository") != CHECKPOINT_REPOSITORY:
         raise ValueError("MiniMax-H3 checkpoint snapshot has the wrong repository")
     if record.get("revision") != CHECKPOINT_REVISION:
@@ -305,6 +709,8 @@ def validate_checkpoint_snapshot_record(record: object) -> dict:
         relative_path = Path(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise ValueError("MiniMax-H3 checkpoint snapshot has an invalid relative path")
+        if not isinstance(entry, dict) or set(entry) != {"blob_id", "bytes", "sha256"}:
+            raise ValueError(f"MiniMax-H3 checkpoint file has unexpected fields: {relative}")
         _, digest = _validate_record_object(entry, f"checkpoint file {relative}")
         blob_id = entry.get("blob_id") if isinstance(entry, dict) else None
         if not isinstance(blob_id, str) or (
@@ -313,6 +719,8 @@ def validate_checkpoint_snapshot_record(record: object) -> dict:
             raise ValueError(f"MiniMax-H3 checkpoint file has an invalid blob ID: {relative}")
         if len(blob_id) == 64 and digest != blob_id:
             raise ValueError(f"MiniMax-H3 LFS digest does not match its blob ID: {relative}")
+    if files != _EXPECTED_CHECKPOINT_FILE_RECORDS:
+        raise ValueError("MiniMax-H3 checkpoint snapshot does not match pinned file manifest")
     payload = {
         "repository": record["repository"],
         "revision": record["revision"],

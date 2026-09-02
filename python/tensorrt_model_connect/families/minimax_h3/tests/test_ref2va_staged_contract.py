@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +38,38 @@ SOURCE_REVISION = "a" * 40
 @pytest.fixture(autouse=True)
 def _source_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRTMC_MINIMAX_H3_SOURCE_REVISION", SOURCE_REVISION)
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_checkpoint_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    def record(model: Path) -> dict:
+        files = {}
+        for path in sorted(model.rglob("*")):
+            if not path.is_file() or COMPONENT_NAME in path.relative_to(model).parts:
+                continue
+            relative = path.relative_to(model).as_posix()
+            payload = path.read_bytes()
+            digest = hashlib.sha256(payload).hexdigest()
+            files[relative] = {
+                "blob_id": digest,
+                "bytes": len(payload),
+                "sha256": digest,
+            }
+        payload = {
+            "repository": "MiniMaxAI/MiniMax-H3",
+            "revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
+            "files": files,
+        }
+        return {
+            **payload,
+            "file_count": len(files),
+            "inventory_sha256": hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+
+    monkeypatch.setattr(staged_build, "checkpoint_snapshot_record", record)
+    monkeypatch.setattr(staged_build, "validate_checkpoint_snapshot_record", lambda value: value)
 
 
 def _identity() -> TransformerRefIdentity:

@@ -52,11 +52,16 @@ from .consuming_bundle import (
     assembly_paths,
     write_consuming_bundle,
 )
-from .provenance import CHECKPOINT_REVISION, builder_source_sha256
+from .provenance import (
+    builder_source_sha256,
+    checkpoint_snapshot_record,
+    validate_checkpoint_snapshot_record,
+)
 from .ref2va_bundle_contract import REF2VA_PLAN_SECTIONS as _REF2VA_COMPONENTS
 
 
 _MODULE = "tensorrt_model_connect.families.minimax_h3.staged_build"
+_INVALID_RECEIPT_NAME = "build_receipt.invalid.json"
 _COMPONENTS = (
     ("text_encoder", "text_encoder.plan", "text_encoder_plan"),
     ("vision_encoder", "vision_encoder.plan", "vision_encoder_plan"),
@@ -177,16 +182,8 @@ def _file_record(path: Path) -> dict[str, int | str]:
     return {"bytes": size, "sha256": digest.hexdigest()}
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(_HASH_CHUNK_BYTES):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _build_identity(
-    model: Path,
+    checkpoint_snapshot: dict,
     *,
     trt_version: str,
     trt_abi: str,
@@ -195,39 +192,29 @@ def _build_identity(
     adapter_identity=None,
     transformer_ref_identity=None,
 ) -> dict[str, object]:
-    metadata_paths = {model / "tokenizer" / "tokenizer.json"}
-    for pattern in (
-        "config.json",
-        "model_index.json",
-        "modular_model_index.json",
-        "*.safetensors.index.json",
-    ):
-        metadata_paths.update(model.rglob(pattern))
+    snapshot = validate_checkpoint_snapshot_record(checkpoint_snapshot)
+    files = snapshot["files"]
     metadata = {
-        path.relative_to(model).as_posix(): _sha256_file(path)
-        for path in sorted(metadata_paths)
-        if path.is_file()
+        relative: record["sha256"]
+        for relative, record in files.items()
+        if relative == "tokenizer/tokenizer.json"
+        or Path(relative).name in {"config.json", "model_index.json", "modular_model_index.json"}
+        or Path(relative).name.endswith(".safetensors.index.json")
     }
     shards = [
         {
-            "name": path.relative_to(model).as_posix(),
-            "bytes": path.stat().st_size,
-            "sha256": _sha256_file(path),
+            "name": relative,
+            "bytes": record["bytes"],
+            "sha256": record["sha256"],
         }
-        for path in sorted(model.rglob("*.safetensors"), key=lambda item: (item.name, str(item)))
-        if path.is_file()
+        for relative, record in sorted(files.items())
+        if Path(relative).suffix == ".safetensors"
     ]
-    checkpoint_inventory = {
+    result = {
         "model_metadata_sha256": metadata,
         "checkpoint_shards": shards,
-    }
-    checkpoint_inventory_sha256 = hashlib.sha256(
-        json.dumps(checkpoint_inventory, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    result = {
-        **checkpoint_inventory,
-        "checkpoint_revision": CHECKPOINT_REVISION,
-        "checkpoint_inventory_sha256": checkpoint_inventory_sha256,
+        "checkpoint_revision": snapshot["revision"],
+        "checkpoint_inventory_sha256": snapshot["inventory_sha256"],
         "source_revision": source_revision,
         "builder_source_sha256": builder_source_sha256(),
         "backend": "trt_rtx",
@@ -243,6 +230,38 @@ def _build_identity(
     if transformer_ref_identity is not None:
         result["transformer_ref"] = transformer_ref_identity.bundle_metadata()
     return result
+
+
+def _validate_staged_sources_unchanged(
+    model: Path,
+    checkpoint_snapshot: dict,
+    *,
+    builder_source_sha256_expected: str,
+    adapter_path: Path | None,
+    adapter_identity,
+    transformer_ref_path: Path | None,
+    transformer_ref_identity,
+) -> None:
+    """Revalidate every build-time source after this invocation built plans."""
+
+    if checkpoint_snapshot_record(model) != checkpoint_snapshot:
+        raise ValueError("MiniMax-H3 base checkpoint changed while staged plans were built")
+    if adapter_path is not None:
+        from .checkpoint import validate_fast_h3_adapter
+
+        current_adapter = validate_fast_h3_adapter(
+            adapter_path, _adapter_target_partitions(_profile(fast_h3=True))
+        )
+        if current_adapter.bundle_metadata() != adapter_identity.bundle_metadata():
+            raise ValueError("MiniMax-H3 FastH3 adapter changed while staged plans were built")
+    if transformer_ref_path is not None:
+        from .ref2va_checkpoint import validate_transformer_ref_checkpoint
+
+        current_ref = validate_transformer_ref_checkpoint(transformer_ref_path)
+        if current_ref.bundle_metadata() != transformer_ref_identity.bundle_metadata():
+            raise ValueError("MiniMax-H3 transformer_ref changed while staged plans were built")
+    if builder_source_sha256() != builder_source_sha256_expected:
+        raise ValueError("MiniMax-H3 builder source changed while staged plans were built")
 
 
 def _atomic_write_json(path: Path, value: object) -> None:
@@ -273,6 +292,8 @@ def _atomic_write_json(path: Path, value: object) -> None:
 def _resume_records(
     receipt_path: Path, build_identity: dict[str, object]
 ) -> dict[str, dict[str, int | str]]:
+    if receipt_path.with_name(_INVALID_RECEIPT_NAME).is_file():
+        return {}
     if not receipt_path.is_file():
         return {}
     try:
@@ -341,6 +362,22 @@ def _write_receipt(
             "schema_version": 1,
             "build_identity": build_identity,
             "plans": plans,
+        },
+    )
+
+
+def _invalidate_plan_receipt(receipt_path: Path, build_identity: dict[str, object]) -> None:
+    """Atomically prevent reuse after an observed source-consistency failure."""
+
+    identity_sha256 = hashlib.sha256(
+        json.dumps(build_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    _atomic_write_json(
+        receipt_path.with_name(_INVALID_RECEIPT_NAME),
+        {
+            "schema_version": 1,
+            "reason": "source_revalidation_failed",
+            "build_identity_sha256": identity_sha256,
         },
     )
 
@@ -632,16 +669,34 @@ def _finalize_staged_bundle(
     tokenizer: Path,
     version: str,
     abi: str,
+    checkpoint_snapshot: dict,
     build_identity: dict[str, object],
     plan_records: dict[str, dict[str, int | str]],
     components: Sequence[tuple[str, str, str]],
     adapter_identity=None,
     transformer_ref_identity=None,
 ) -> Path:
+    checkpoint_snapshot = validate_checkpoint_snapshot_record(checkpoint_snapshot)
+
+    def pinned_bytes(path: Path, relative: str) -> bytes:
+        try:
+            payload = path.read_bytes()
+        except OSError as error:
+            raise ValueError(
+                f"MiniMax-H3 pinned checkpoint file is unavailable during finalization: {relative}"
+            ) from error
+        expected = checkpoint_snapshot["files"][relative]
+        if (
+            len(payload) != expected["bytes"]
+            or hashlib.sha256(payload).hexdigest() != expected["sha256"]
+        ):
+            raise ValueError(
+                f"MiniMax-H3 pinned checkpoint file changed before finalization: {relative}"
+            )
+        return payload
+
     audio_vae_config_path = model / "audio_vae" / "config.json"
-    if not audio_vae_config_path.is_file():
-        raise FileNotFoundError(f"MiniMax-H3 AudioVAE config is missing: {audio_vae_config_path}")
-    audio_vae_config = json.loads(audio_vae_config_path.read_text())
+    audio_vae_config = json.loads(pinned_bytes(audio_vae_config_path, "audio_vae/config.json"))
     config = _sanitized_config(
         trt_version=version,
         trt_abi=abi,
@@ -662,16 +717,10 @@ def _finalize_staged_bundle(
         )
         for _component, filename, section in components
     ]
-    tokenizer_record = _file_record(tokenizer)
+    tokenizer_payload = pinned_bytes(tokenizer, "tokenizer/tokenizer.json")
     sections.extend(
         (
-            ConsumingBundleSection.from_file(
-                "tokenizer.json",
-                tokenizer,
-                size=int(tokenizer_record["bytes"]),
-                sha256=str(tokenizer_record["sha256"]),
-                consume_source=False,
-            ),
+            ConsumingBundleSection.from_bytes("tokenizer.json", tokenizer_payload),
             ConsumingBundleSection.from_bytes(
                 "config.json", json.dumps(config, indent=2).encode("utf-8")
             ),
@@ -759,8 +808,9 @@ def build_staged_bundle(
     # public Windows instructions set this explicitly before invoking build.
     from .plugin import _build_source_revision
 
+    checkpoint_snapshot = checkpoint_snapshot_record(model)
     build_identity = _build_identity(
-        model,
+        checkpoint_snapshot,
         trt_version=version,
         trt_abi=abi,
         source_revision=_build_source_revision(),
@@ -783,6 +833,7 @@ def build_staged_bundle(
             tokenizer=tokenizer,
             version=version,
             abi=abi,
+            checkpoint_snapshot=checkpoint_snapshot,
             build_identity=build_identity,
             plan_records=complete_records,
             components=components,
@@ -790,6 +841,7 @@ def build_staged_bundle(
             transformer_ref_identity=transformer_ref_identity,
         )
 
+    built_any_plan = False
     for component, filename, _section in components:
         plan_path = plans / filename
         if _matches_record(plan_path, plan_records.get(filename)):
@@ -800,13 +852,34 @@ def build_staged_bundle(
         if transformer_ref_path is not None:
             child_options["transformer_ref_path"] = transformer_ref_path
         _run_component(component, model, plan_path, **child_options)
+        built_any_plan = True
         plan_records[filename] = _file_record(plan_path)
         _write_receipt(receipt_path, build_identity, plan_records)
 
     complete_records = _complete_plan_records(plan_records, components)
     if complete_records is None:
         raise RuntimeError("MiniMax-H3 staged build did not produce every expected plan record")
+    if built_any_plan:
+        # Keep ordinary crash recovery useful: every resumed invocation performs
+        # full exact source validation on entry, while an explicitly observed
+        # post-build validation failure permanently invalidates this plan set.
+        # Defending against a privileged actor that swaps and exactly restores
+        # sources around both validation passes is outside this consistency boundary.
+        try:
+            _validate_staged_sources_unchanged(
+                model,
+                checkpoint_snapshot,
+                builder_source_sha256_expected=str(build_identity["builder_source_sha256"]),
+                adapter_path=adapter_path,
+                adapter_identity=adapter_identity,
+                transformer_ref_path=transformer_ref_path,
+                transformer_ref_identity=transformer_ref_identity,
+            )
+        except Exception:
+            _invalidate_plan_receipt(receipt_path, build_identity)
+            raise
     _write_receipt(receipt_path, build_identity, complete_records)
+    receipt_path.with_name(_INVALID_RECEIPT_NAME).unlink(missing_ok=True)
     return _finalize_staged_bundle(
         model=model,
         output=output,
@@ -814,6 +887,7 @@ def build_staged_bundle(
         tokenizer=tokenizer,
         version=version,
         abi=abi,
+        checkpoint_snapshot=checkpoint_snapshot,
         build_identity=build_identity,
         plan_records=complete_records,
         components=components,

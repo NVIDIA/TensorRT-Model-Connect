@@ -102,10 +102,36 @@ authorized local checkpoint must contain the shared H3 components and
 `transformer_ref/` partition. The accelerated T2VA/FL2VA profile requires the
 strictly validated FastH3 adapter file.
 
+Use one of two strictly verified pinned checkpoint layouts. A Hugging Face
+cache view is the exact path printed by this pinned download:
+
+```powershell
+$H3Revision = '48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc'
+$Checkpoint = (& hf download MiniMaxAI/MiniMax-H3 --revision $H3Revision).Trim()
+```
+
+An existing `hf download --local-dir` tree is also accepted. Keep its
+`.cache\huggingface\download\*.metadata` files: the builder requires exactly
+one metadata record for every base-checkpoint content file and verifies that
+each record names `$H3Revision`. For both layouts, the builder performs one
+complete content pass and requires every relative path, byte count, Hugging
+Face blob ID, and SHA-256 to match the checked-in 55-file manifest for that
+revision. A copied local-dir tree without its metadata is rejected. Downloader
+`.incomplete` and `.lock` debris is not checkpoint content. `transformer_ref/`
+is excluded from the base inventory and validated independently against its
+fixed 14-shard SHA-256 manifest.
+
+```powershell
+$Checkpoint = 'D:\checkpoints\MiniMax-H3\48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc'
+hf download MiniMaxAI/MiniMax-H3 `
+    --revision $H3Revision `
+    --local-dir $Checkpoint
+if ($LASTEXITCODE -ne 0) { throw 'Pinned checkpoint download failed' }
+```
+
 ```powershell
 python -m pip install --no-deps -e . -C py-only=true
 
-$Checkpoint = '<authorized-MiniMax-H3-snapshot>'
 $FastH3Adapter = '<authorized-FastH3-adapter.safetensors>'
 $TransformerRef = Join-Path $Checkpoint 'transformer_ref'
 $Bundle = 'D:\artifacts\MiniMax-H3.bundle'
@@ -151,11 +177,19 @@ Rerun the exact same command after an interruption to resume. Do not remove the
 in progress. Recovery rehashes every committed range, truncates an uncommitted
 tail, and never rebuilds a plan already preserved in the committed bundle
 prefix. A checkpoint, adapter, source, TensorRT-RTX, or workspace-profile
-mismatch fails closed instead of reusing incompatible plans. The bundle and
-the build-only `.effective_config.json` file contain public model identities
-and content digests, never the local checkpoint, adapter, or `transformer_ref`
-paths. The package does not install that build record, and generation does not
-re-create it.
+mismatch fails closed instead of reusing incompatible plans. The checked-in
+exact base inventory is part of that resume identity; staged
+receipts created by a builder that predates this inventory cannot be resumed.
+Every resumed invocation fully validates its sources on entry, and an observed
+post-build source-validation failure invalidates that plan set before returning.
+Ordinary process interruption remains resumable; this practical consistency
+boundary does not attempt to defend against a privileged actor that swaps and
+exactly restores sources around both validation passes.
+
+The bundle and the build-only `.effective_config.json` file contain public
+model identities and content digests, never the local checkpoint, adapter, or
+`transformer_ref` paths. The package does not install that build record, and
+generation does not re-create it.
 
 ## Create and install the native package
 
