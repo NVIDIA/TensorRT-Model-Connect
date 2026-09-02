@@ -62,8 +62,18 @@ def native_profile(
 
 
 def _set_profile_shape(optimization, name: str, shapes: tuple[tuple[int, ...], ...]) -> None:
-    if not optimization.set_shape(name, min=shapes[0], opt=shapes[1], max=shapes[2]):
-        raise RuntimeError(f"TensorRT rejected MiniMax-H3 Ref2VA profile binding {name}")
+    # TensorRT-RTX returns None even when set_shape succeeds.  Verify the
+    # recorded profile instead of interpreting the binding return as a bool.
+    error = f"TensorRT rejected MiniMax-H3 Ref2VA profile binding {name}"
+    try:
+        result = optimization.set_shape(name, min=shapes[0], opt=shapes[1], max=shapes[2])
+        recorded = tuple(
+            tuple(int(dimension) for dimension in shape) for shape in optimization.get_shape(name)
+        )
+    except (RuntimeError, ValueError) as exception:
+        raise RuntimeError(error) from exception
+    if result is False or recorded != shapes or not optimization:
+        raise RuntimeError(error)
 
 
 def _add_optimization_profile(builder, config, capacity: Ref2VADenoiserProfile) -> None:

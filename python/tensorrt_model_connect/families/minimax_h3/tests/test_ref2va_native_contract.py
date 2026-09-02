@@ -382,6 +382,66 @@ def test_ref2va_builder_fails_closed_before_any_large_build_when_trt_is_availabl
         build_ref2va_adaln_precompute_engine({})
 
 
+def test_ref2va_dynamic_profile_serializes_and_round_trips() -> None:
+    from tensorrt_model_connect import trt_compat
+
+    if trt_compat.is_available("tensorrt"):
+        pass
+    elif trt_compat.is_available("tensorrt_rtx"):
+        trt_compat.configure_backend(rtx=True)
+    else:
+        pytest.skip("TensorRT or TensorRT-RTX bindings are unavailable")
+
+    from tensorrt_model_connect.families.minimax_h3.ref2va_dit_builder import (
+        _add_optimization_profile,
+        _set_profile_shape,
+    )
+
+    trt = trt_compat.get_trt()
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    config = builder.create_builder_config()
+    profile = Ref2VADenoiserProfile()
+    bindings = ref2va_denoiser_abi(profile).inputs[:9]
+    dtypes = {"float32": trt.float32, "int32": trt.int32}
+    for binding in bindings:
+        tensor = network.add_input(
+            binding.name,
+            dtypes[binding.dtype],
+            (-1, *binding.min_shape[1:]),
+        )
+        output = network.add_identity(tensor).get_output(0)
+        output.name = f"{binding.name}_identity"
+        network.mark_output(output)
+
+    _add_optimization_profile(builder, config, profile)
+    plan = builder.build_serialized_network(network, config)
+    assert plan is not None and len(bytes(plan)) > 0
+
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(bytes(plan))
+    assert engine is not None
+    for binding in bindings:
+        recorded = tuple(
+            tuple(int(dimension) for dimension in shape)
+            for shape in engine.get_tensor_profile_shape(binding.name, 0)
+        )
+        assert recorded == (binding.min_shape, binding.opt_shape, binding.max_shape)
+
+    invalid = Ref2VADenoiserProfile(min_video_rows=profile.opt_video_rows + 1)
+    with pytest.raises(RuntimeError, match="profile binding video_hidden_states"):
+        _add_optimization_profile(builder, builder.create_builder_config(), invalid)
+
+    class RejectingOptimization:
+        def set_shape(self, *_args, **_kwargs):
+            raise ValueError("invalid profile")
+
+    with pytest.raises(RuntimeError, match="profile binding test") as rejected:
+        _set_profile_shape(RejectingOptimization(), "test", ((1,), (2,), (3,)))
+    assert isinstance(rejected.value.__cause__, ValueError)
+
+
 def test_trt_scatter_gather_micrograph_serializes_when_trt_is_available() -> None:
     from tensorrt_model_connect import trt_compat
 
