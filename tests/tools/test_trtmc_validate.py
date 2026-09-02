@@ -45,7 +45,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(ready_models) == 119
+    assert len(catalog["models"]) == len(ready_models) == 120
     assert sum("not_compared_reason" in spec for spec in catalog["models"].values()) == 0
     assert all("e2e" not in spec.get("workloads", []) for spec in catalog["models"].values())
     assert "reference_cache_identity" not in catalog["models"]["personaplex-7b"]
@@ -64,7 +64,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 120
+    assert len(bindings) == 121
     assert {
         binding.model for binding in bindings if binding.workload == "mmlu_continuation_parity"
     } >= {
@@ -256,7 +256,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 119
+    assert len({model for model, _workload in bindings}) == 120
 
 
 def test_shadow_gate_metrics_include_plugin_task_accuracy() -> None:

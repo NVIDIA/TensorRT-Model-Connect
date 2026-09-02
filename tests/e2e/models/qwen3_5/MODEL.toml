@@ -5,6 +5,7 @@ id = "qwen3_5"
 plugin = "qwen3_5"
 test_manifests = [
   "manifests/qwen35-9b.json",
+  "manifests/ornith-1-5-9b.json",
 ]
 
 [e2e_defaults.text_generation_causal]

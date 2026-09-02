@@ -208,6 +208,8 @@ models:
     workloads: [mmlu_continuation_parity]
   opt-125m:
     workloads: [mmlu_continuation_parity]
+  ornith-1-5-9b:
+    workloads: [mmlu_five_shot_mcq]
   paraphrase-multilingual-minilm-l12-v2:
     workloads: [stsbenchmark_encoder_embedding_parity]
   patchtsmixer-granite-official:

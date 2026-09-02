@@ -1,0 +1,30 @@
+{
+  "name": "ornith-1-5-9b",
+  "hf_id": "ornith-ai/Ornith-1.5-9B",
+  "hf_revision": "489cb97981b8654bcfcf30ce1f94ed1b62e07b53",
+  "bundle": "ornith-1-5-9b.bundle",
+  "family": "qwen3_5",
+  "runtime_strategy": "qwen3_5_hybrid_mamba_attention",
+  "task_strategy": "text_generation_causal",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "max_cache_length": 256,
+  "trust_remote_code": true,
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "ornith-1-5-9b",
+      "trace_id": "IT-E2E-ORN-01",
+      "reference_family": "multimodal_chat_qwen35",
+      "user_contract": "chat_response",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "reference_precision": "fp32",
+      "runtime_config": {
+        "runtime": {
+          "disable_cuda_graph": true
+        }
+      },
+      "notes": "Runs on the existing qwen3_5 family with no code change."
+    }
+  ]
+}

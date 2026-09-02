@@ -1204,6 +1204,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "ornith-ai/Ornith-1.5-9B",
+      "revision": "489cb97981b8654bcfcf30ce1f94ed1b62e07b53",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "qwen3_5",
+      "architectures": [
+        "Qwen3_5ForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
       "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
       "revision_source": "resolved",
