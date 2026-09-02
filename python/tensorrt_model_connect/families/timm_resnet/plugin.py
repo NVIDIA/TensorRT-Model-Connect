@@ -179,7 +179,7 @@ class TimmResnetPlugin:
         if bottleneck:
             w1 = weights[f"{prefix}.conv1.weight"]
             out = graph_ops.add_conv2d(
-                network, x, int(w1.shape[0]), (1, 1), w1, dtype=dtype)
+                network, x, w1, None, int(w1.shape[0]), (1, 1), dtype=dtype)
             out = self._add_bn(network, out, weights, f"{prefix}.bn1", dtype)
             out = graph_ops.add_relu(network, out)
 
@@ -187,33 +187,35 @@ class TimmResnetPlugin:
             # Grouped (ResNeXt) convs store (out, in/groups, kh, kw).
             groups = max(1, int(w1.shape[0]) // int(w2.shape[1]))
             out = graph_ops.add_conv2d(
-                network, out, int(w2.shape[0]), (3, 3), w2,
-                stride=stride, padding=1, groups=groups, dtype=dtype)
+                network, out, w2, None, int(w2.shape[0]), (3, 3),
+                stride=(stride, stride), padding=(1, 1), groups=groups, dtype=dtype)
             out = self._add_bn(network, out, weights, f"{prefix}.bn2", dtype)
             out = graph_ops.add_relu(network, out)
 
             w3 = weights[f"{prefix}.conv3.weight"]
             out = graph_ops.add_conv2d(
-                network, out, int(w3.shape[0]), (1, 1), w3, dtype=dtype)
+                network, out, w3, None, int(w3.shape[0]), (1, 1), dtype=dtype)
             out = self._add_bn(network, out, weights, f"{prefix}.bn3", dtype)
         else:
             w1 = weights[f"{prefix}.conv1.weight"]
             out = graph_ops.add_conv2d(
-                network, x, int(w1.shape[0]), (3, 3), w1,
-                stride=stride, padding=1, dtype=dtype)
+                network, x, w1, None, int(w1.shape[0]), (3, 3),
+                stride=(stride, stride), padding=(1, 1), dtype=dtype)
             out = self._add_bn(network, out, weights, f"{prefix}.bn1", dtype)
             out = graph_ops.add_relu(network, out)
 
             w2 = weights[f"{prefix}.conv2.weight"]
             out = graph_ops.add_conv2d(
-                network, out, int(w2.shape[0]), (3, 3), w2, padding=1, dtype=dtype)
+                network, out, w2, None, int(w2.shape[0]), (3, 3),
+                padding=(1, 1), dtype=dtype)
             out = self._add_bn(network, out, weights, f"{prefix}.bn2", dtype)
 
         down_key = f"{prefix}.downsample.0.weight"
         if down_key in weights:
             wd = weights[down_key]
             identity = graph_ops.add_conv2d(
-                network, x, int(wd.shape[0]), (1, 1), wd, stride=stride, dtype=dtype)
+                network, x, wd, None, int(wd.shape[0]), (1, 1),
+                stride=(stride, stride), dtype=dtype)
             identity = self._add_bn(
                 network, identity, weights, f"{prefix}.downsample.1", dtype)
 
@@ -294,8 +296,8 @@ class TimmResnetPlugin:
 
         stem_w = weights["conv1.weight"]
         hidden = graph_ops.add_conv2d(
-            network, hidden, int(stem_w.shape[0]), (7, 7), stem_w,
-            stride=2, padding=3, dtype=work_np_dtype)
+            network, hidden, stem_w, None, int(stem_w.shape[0]), (7, 7),
+            stride=(2, 2), padding=(3, 3), dtype=work_np_dtype)
         hidden = self._add_bn(network, hidden, weights, "bn1", work_np_dtype)
         hidden = graph_ops.add_relu(network, hidden)
         hidden = graph_ops.add_max_pool2d(network, hidden, 3, 2, 1)

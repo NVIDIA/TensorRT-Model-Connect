@@ -18,30 +18,41 @@ trt = trt_compat.get_trt()
 
 def add_conv2d(
     network,
-    x,
-    out_channels: int,
-    kernel: tuple[int, int],
+    inp,
     weight: np.ndarray,
-    *,
-    stride: int = 1,
-    padding: int = 0,
+    bias: np.ndarray | None,
+    out_channels: int,
+    kernel_size: tuple[int, int],
+    stride: tuple[int, int] = (1, 1),
+    padding: tuple[int, int] = (0, 0),
     groups: int = 1,
-    dtype=np.float32,
+    dtype: np.dtype = np.float32,
 ):
-    """Bias-free convolution; timm ResNets always fold bias into the BN."""
+    """2D convolution wrapper.
+
+    Input: [N, C_in, H, W]
+    Weight: [C_out, C_in/groups, kH, kW]
+    Output: [N, C_out, H', W']
+
+    timm ResNets always fold the convolution bias into the following batch
+    norm, so `bias` is None throughout this family; the parameter is kept so
+    the signature matches the other families that own this helper.
+    """
+    conv_w = trt.Weights(np.ascontiguousarray(weight, dtype=dtype))
+    conv_b = trt.Weights()
+    if bias is not None:
+        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
+
     conv = network.add_convolution_nd(
-        x,
+        inp,
         num_output_maps=out_channels,
-        kernel_shape=kernel,
-        kernel=trt.Weights(np.ascontiguousarray(weight, dtype=dtype)),
-        # A default-constructed Weights is TensorRT's "no bias": a zero-count
-        # array with a non-null pointer fails its parameter check.
-        bias=trt.Weights(),
+        kernel_shape=kernel_size,
+        kernel=conv_w,
+        bias=conv_b,
     )
-    conv.stride_nd = (stride, stride)
-    conv.padding_nd = (padding, padding)
-    if groups != 1:
-        conv.num_groups = groups
+    conv.stride_nd = stride
+    conv.padding_nd = padding
+    conv.num_groups = groups
     return conv.get_output(0)
 
 
