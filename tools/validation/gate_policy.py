@@ -33,12 +33,20 @@ _PROPORTION_DROP_METRICS = {
     "top1_accuracy_drop_from_hf",
 }
 _DIRECT_GATE_SPECS = {
+    "candidate_reference_20nn_top1_agreement_min": (
+        "candidate_reference_20nn_top1_agreement",
+        ">=",
+    ),
     "exact_num_frames": ("num_frames", "=="),
     "exact_video_height": ("video_height", "=="),
     "exact_video_width": ("video_width", "=="),
     "kendall_tau": ("min_kendall_tau", ">="),
+    "expected_query_count": ("query_count", "=="),
     "pairwise_ordering_agreement": ("min_pairwise_ordering_agreement", ">="),
     "psnr": ("min_psnr", ">="),
+    "query_pooler_cosine_min": ("query_pooler_cosine_min", ">="),
+    "query_pooler_relative_l2_max": ("query_pooler_relative_l2_max", "<="),
+    "reference_20nn_top1_accuracy_min": ("reference_20nn_top1_accuracy", ">="),
     "require_matching_initial_latents": ("matching_initial_latents", ">="),
     "score_correlation": ("min_score_correlation", ">="),
     "spearman_rho": ("min_spearman_rho", ">="),
@@ -46,6 +54,10 @@ _DIRECT_GATE_SPECS = {
     "temporal_consistency": ("min_temporal_consistency", ">="),
 }
 _REFERENCE_PLUS_GATE_SPECS = {
+    "candidate_20nn_top1_accuracy_max_drop_from_reference": (
+        "candidate_20nn_top1_accuracy",
+        "reference_20nn_top1_accuracy",
+    ),
     "candidate_nonocc_epe_max_reference_plus_px": (
         "candidate_nonocc_epe_px",
         "reference_nonocc_epe_px",

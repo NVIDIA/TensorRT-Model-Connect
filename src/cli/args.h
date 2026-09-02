@@ -21,6 +21,7 @@ struct CliArgs {
     std::string hf_python;
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
+    std::string images_file;
     std::string right_image_path;
     std::string state_path;
     std::string lora_adapter_path;
@@ -95,6 +96,7 @@ struct CliArgs {
     std::vector<std::string> backend_search_paths;
     std::vector<std::string> model_plugin_search_paths;
     bool cuda_graphs{false};
+    bool pooler_only{false};
     bool list_engines{false};
     bool show_help{false};
     bool parse_error{false};

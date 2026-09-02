@@ -12,6 +12,7 @@ sample_limits:
   ade20k_semantic_segmentation: 50
   beir_scifact_reranking: 20
   coco2017_prompted_segmentation: 20
+  dinov3_beans_knn_task_accuracy: 8
   dinov3_image_feature_extraction_parity: 1
   dpg_bench_diffusion_image: 5
   etth1_time_series_parity: 10
@@ -98,9 +99,13 @@ models:
   deepseek-v2-tiny:
     workloads: [mmlu_continuation_parity]
   dinov3-convnext-tiny-pretrain-lvd1689m:
-    workloads: [dinov3_image_feature_extraction_parity]
+    workloads:
+      - dinov3_beans_knn_task_accuracy
+      - dinov3_image_feature_extraction_parity
   dinov3-vits16-pretrain-lvd1689m:
-    workloads: [dinov3_image_feature_extraction_parity]
+    workloads:
+      - dinov3_beans_knn_task_accuracy
+      - dinov3_image_feature_extraction_parity
   distilbert-base-uncased:
     workloads: [stsbenchmark_encoder_embedding_parity]
   distilgpt2:

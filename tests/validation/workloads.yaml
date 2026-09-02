@@ -1138,6 +1138,56 @@ suites:
         GB300-only sampled validation. Run with --limit 10; the full official
         961-frame benchmark and its pose evaluator are intentionally excluded.
 
+  - id: dinov3_beans_knn_task_accuracy
+    description: >
+      Frozen-backbone weighted k-NN image classification on the complete
+      MIT-licensed Beans test split. Each backend independently builds an
+      L2-normalized feature bank from all 1034 train images, then evaluates all
+      128 test images with the pinned DINOv3 20-NN, temperature-0.07 contract.
+      The eight dataset rows are fixed 16-query execution shards, not samples.
+    user_contract: image_classification
+    task_type: Image → Features → Class
+    default_model_names:
+      - dinov3-convnext-tiny-pretrain-lvd1689m
+      - dinov3-vits16-pretrain-lvd1689m
+    dataset:
+      kind: model_plugin_json
+      name: Beans complete train/test frozen-backbone k-NN
+      default_path: /mnt/data/dinov3-beans-knn-v1/dataset.json
+      input_asset_fields: [bank_manifest, query_manifest]
+    selectors:
+      model_names:
+        - dinov3-convnext-tiny-pretrain-lvd1689m
+        - dinov3-vits16-pretrain-lvd1689m
+      task_strategies: [image_feature_extraction]
+      runtime_strategies: [dinov3_image_feature_extraction]
+      user_contracts: [representation_parity]
+      families: [dinov3]
+    scoring:
+      scorer: model_plugin_parity
+      task_metric: weighted_20nn_top1_accuracy
+    gates:
+      min_sample_pass_rate: 1.0
+      expected_query_count: 128
+      reference_20nn_top1_accuracy_min: 0.5
+      candidate_20nn_top1_accuracy_max_drop_from_reference: 0.01
+      candidate_reference_20nn_top1_agreement_min: 0.98
+      query_pooler_cosine_min: 0.999
+      query_pooler_relative_l2_max: 0.01
+    gate_metric_kinds:
+      candidate_20nn_top1_accuracy_max_drop_from_reference: continuous
+      candidate_reference_20nn_top1_agreement_min: continuous
+      query_pooler_cosine_min: continuous
+      query_pooler_relative_l2_max: continuous
+      reference_20nn_top1_accuracy_min: continuous
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Managed NAS dataset prepared by
+        tests/e2e/models/dinov3/prepare_beans_knn.py. This workload is the
+        ground-truth Accuracy gate; representation parity remains separate.
+
   - id: dinov3_image_feature_extraction_parity
     description: >
       Full-tensor semantic parity for the official DINOv3 ViT-S/16 and

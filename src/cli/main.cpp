@@ -24,7 +24,8 @@
 //   trtmc generate-video  <bundle.bundle> --prompt "text" --output DIR [--num-steps N]
 //                        [--negative-prompt "text"] [--height N] [--width N]
 //   trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]
-//   trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]
+//   trtmc extract-features <bundle.bundle> (--image PATH | --images-file PATH)
+//                        [--pooler-only] [--output-json PATH]
 //   trtmc geometry        <bundle.bundle> --image PATH --output DIR
 //   trtmc act             <bundle.bundle> --image PATH --state STATE.f32
 //                        --output ACTIONS.f32 --control-hz F
@@ -1252,21 +1253,81 @@ void write_image_features_json(std::ostream& out, const trtmc::ImageFeaturesResu
 }
 
 int cmd_extract_features(const CliArgs& args) {
-    if (args.bundle_path.empty() || args.image_path.empty()) {
-        std::cerr << "Error: extract-features requires bundle + --image\n";
+    if (args.bundle_path.empty() || (args.image_path.empty() && args.images_file.empty())) {
+        std::cerr << "Error: extract-features requires bundle + --image or --images-file\n";
         return EXIT_FAILURE;
     }
 
     auto pipeline = load_pipeline(args);
-    auto image = trtmc::io::read_image(args.image_path);
-    if (image.empty()) {
-        std::cerr << "Error: failed to load image: " << args.image_path << '\n';
-        return EXIT_FAILURE;
-    }
-
     auto* extractor = dynamic_cast<trtmc::IImageFeatureExtractor*>(pipeline.get());
     if (extractor == nullptr) {
         std::cerr << "Error: loaded pipeline does not support image feature extraction\n";
+        return EXIT_FAILURE;
+    }
+
+    if (!args.images_file.empty()) {
+        std::ifstream inputs(args.images_file);
+        if (!inputs) {
+            std::cerr << "Error: failed to open images file: " << args.images_file << '\n';
+            return EXIT_FAILURE;
+        }
+        std::vector<std::string> paths;
+        std::string path;
+        while (std::getline(inputs, path)) {
+            if (!path.empty() && path.back() == '\r')
+                path.pop_back();
+            if (!path.empty())
+                paths.push_back(path);
+        }
+        if (paths.empty()) {
+            std::cerr << "Error: images file is empty: " << args.images_file << '\n';
+            return EXIT_FAILURE;
+        }
+
+        std::ofstream output_file;
+        std::ostream* output = &std::cout;
+        if (!args.output_json.empty()) {
+            const auto out_path = std::filesystem::path(args.output_json);
+            const auto parent = out_path.parent_path();
+            if (!parent.empty())
+                std::filesystem::create_directories(parent);
+            output_file.open(out_path, std::ios::out | std::ios::trunc);
+            if (!output_file) {
+                std::cerr << "Error: failed to open " << args.output_json << " for writing\n";
+                return EXIT_FAILURE;
+            }
+            output = &output_file;
+        }
+        for (const auto& image_path : paths) {
+            const auto image = trtmc::io::read_image(image_path);
+            if (image.empty()) {
+                std::cerr << "Error: failed to load image: " << image_path << '\n';
+                return EXIT_FAILURE;
+            }
+            const auto result =
+                extractor->extract_image_features(image.pixels.data(), image.height, image.width);
+            nlohmann::json record;
+            record["image_path"] = image_path;
+            record["pooler_output"] =
+                trtmc::cli::build_tensor_record(result.pooler_output_shape, result.pooler_output);
+            if (!args.pooler_only) {
+                record["last_hidden_state"] = trtmc::cli::build_tensor_record(
+                    result.last_hidden_state_shape, result.last_hidden_state);
+            }
+            *output << record.dump() << '\n';
+            if (!*output) {
+                std::cerr << "Error: failed while writing image features\n";
+                return EXIT_FAILURE;
+            }
+        }
+        if (!args.output_json.empty())
+            std::cout << "Image features saved: " << args.output_json << '\n';
+        return EXIT_SUCCESS;
+    }
+
+    auto image = trtmc::io::read_image(args.image_path);
+    if (image.empty()) {
+        std::cerr << "Error: failed to load image: " << args.image_path << '\n';
         return EXIT_FAILURE;
     }
     const auto result =

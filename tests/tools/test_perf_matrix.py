@@ -1619,6 +1619,33 @@ def test_image_feature_contract_compares_both_public_output_shapes() -> None:
     )
 
 
+def test_image_feature_parity_contract_compares_complete_outputs() -> None:
+    case = {
+        "operation": "extract_features",
+        "baseline": {
+            "output_contract": "image-features-parity",
+            "min_image_feature_full_cosine": 0.999,
+            "min_image_feature_pooler_cosine": 0.999,
+            "max_image_feature_relative_frobenius": 0.01,
+        },
+    }
+    candidate = {
+        "output_summary": {
+            "last_hidden_state_shape": [1, 2, 2],
+            "last_hidden_state": [1.0, 2.0, 3.0, 4.0],
+            "pooler_output_shape": [1, 2],
+            "pooler_output": [1.0, 2.0],
+        }
+    }
+    reference = {"output_summary": dict(candidate["output_summary"])}
+
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
+    reference["output_summary"]["last_hidden_state"] = [1.0, 2.0, 3.0, -4.0]
+    matched, reason = perf_matrix._output_contract(case, candidate, reference)
+    assert matched is False
+    assert reason == "image feature numeric parity is outside the configured contract"
+
+
 @pytest.mark.parametrize("configuration", ["", "Debug", "RelWithDebInfo"])
 def test_worker_preflight_rejects_non_release_builds(configuration: str) -> None:
     metadata = {

@@ -210,9 +210,13 @@ entries:
       adapter: hf-transformers-vision
       mode: hf-eager
       reference_backend: hf_transformers
+      precision: fp16
       timing_scope: task-model-call-wall
       input_preparation_included: false
-      output_contract: image-features-shape
+      output_contract: image-features-parity
+      min_image_feature_full_cosine: 0.999
+      min_image_feature_pooler_cosine: 0.999
+      max_image_feature_relative_frobenius: 0.01
   - id: distilbert.encode
     family: distilbert
     operation: encode

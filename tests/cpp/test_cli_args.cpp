@@ -191,6 +191,26 @@ void test_extract_features_parses_contract_flags() {
     check(args.output_json == "features.json", "extract-features output json");
 }
 
+void test_extract_features_parses_batch_pooler_flags() {
+    auto args = parse({"trtmc", "extract-features", "dinov3.bundle", "--images-file", "images.txt",
+                       "--pooler-only", "--output-json", "features.jsonl"});
+    check(!args.parse_error, "batch extract-features parses cleanly");
+    check(args.images_file == "images.txt", "extract-features images file");
+    check(args.pooler_only, "extract-features pooler-only mode");
+}
+
+void test_extract_features_rejects_ambiguous_or_incomplete_batch_flags() {
+    auto ambiguous = parse({"trtmc", "extract-features", "dinov3.bundle", "--image", "cat.png",
+                            "--images-file", "images.txt"});
+    check(ambiguous.parse_error, "extract-features rejects image plus images-file");
+    check(ambiguous.error_message == "--image and --images-file are mutually exclusive",
+          "extract-features ambiguous input message");
+    auto incomplete = parse({"trtmc", "extract-features", "dinov3.bundle", "--pooler-only"});
+    check(incomplete.parse_error, "extract-features rejects pooler-only without images-file");
+    check(incomplete.error_message == "--pooler-only requires --images-file",
+          "extract-features incomplete batch message");
+}
+
 void test_disparity_parses_stereo_images() {
     auto args = parse({"trtmc", "disparity", "bundle.bundle", "--image", "left.png",
                        "--right-image", "right.png", "--output", "disparity.f32"});
@@ -574,6 +594,8 @@ int main() {
     test_diffusion_flags();
     test_detect_parses_contract_flags();
     test_extract_features_parses_contract_flags();
+    test_extract_features_parses_batch_pooler_flags();
+    test_extract_features_rejects_ambiguous_or_incomplete_batch_flags();
     test_disparity_parses_stereo_images();
     test_geometry_parses_image_and_output_directory();
     test_act_parses_recorded_control_contract();
