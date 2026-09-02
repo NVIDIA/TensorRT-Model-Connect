@@ -404,7 +404,7 @@ def test_repository_registers_all_current_families() -> None:
 
     families = specialization.family_dirs(repo_root, ())
 
-    assert len(families) == 88
+    assert len(families) == 89
     assert any(family.name == "cosmos3" for family in families)
     assert any(family.name == "dinov3" for family in families)
     assert any(family.name == "fast_foundation_stereo" for family in families)
