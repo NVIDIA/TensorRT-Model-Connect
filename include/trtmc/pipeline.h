@@ -112,9 +112,13 @@ struct ImageResult {
 };
 
 struct AudioResult {
-    std::vector<float> samples; // mono float32 [-1,1]
+    // Interleaved float32 [-1,1]. `channels` frames share each time step, so
+    // samples.size() == num_samples * channels. It defaults to 1, which is what
+    // every speech model produces; music models set it to 2.
+    std::vector<float> samples;
     int32_t num_samples{0};
     int32_t sample_rate{24000};
+    int32_t channels{1};
 };
 
 struct TranscriptionStreamConfig {

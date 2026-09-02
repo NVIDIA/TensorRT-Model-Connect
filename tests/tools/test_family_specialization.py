@@ -410,5 +410,6 @@ def test_repository_registers_all_current_families() -> None:
     assert any(family.name == "fast_foundation_stereo" for family in families)
     assert any(family.name == "lfm2" for family in families)
     assert any(family.name == "minimax_h3" for family in families)
+    assert any(family.name == "minimax_music3" for family in families)
     assert any(family.name == "nemotron_voicechat" for family in families)
     assert any(family.name == "sam2" for family in families)

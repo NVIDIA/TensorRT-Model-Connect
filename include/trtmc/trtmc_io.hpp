@@ -26,7 +26,7 @@
 
 namespace trtmc::io {
 
-// Write a WAV file from AudioResult (IEEE float32 mono).
+// Write a WAV file from AudioResult (IEEE float32, audio.channels interleaved).
 inline void write_wav(const AudioResult& audio, const std::string& path)
 {
     if (audio.samples.empty())
@@ -38,11 +38,16 @@ inline void write_wav(const AudioResult& audio, const std::string& path)
 
     const int32_t num_samples = static_cast<int32_t>(audio.samples.size());
     const int32_t sample_rate = audio.sample_rate;
-    const int16_t num_channels = 1;
+    const int16_t num_channels = static_cast<int16_t>(audio.channels > 0 ? audio.channels : 1);
+    if (audio.samples.size() % static_cast<std::size_t>(num_channels) != 0)
+        throw std::runtime_error("write_wav: sample count is not a multiple of the channel count");
     const int16_t bits_per_sample = 32;
     const int32_t byte_rate = sample_rate * num_channels * (bits_per_sample / 8);
     const int16_t block_align = static_cast<int16_t>(num_channels * (bits_per_sample / 8));
-    const int32_t data_size = num_samples * block_align;
+    // num_samples counts interleaved floats, not frames, so the payload is one
+    // sample width per element -- multiplying by block_align would count the
+    // channels twice and declare a data chunk larger than the file.
+    const int32_t data_size = num_samples * (bits_per_sample / 8);
     const int32_t chunk_size = 36 + data_size;
 
     // RIFF header
@@ -129,6 +134,8 @@ inline AudioResult read_wav(const std::string& path)
     // Decode samples based on format
     AudioResult result;
     result.sample_rate = sample_rate;
+    // Multi-channel input is downmixed below, so the result is always mono.
+    result.channels = 1;
     const auto nc = std::max<int16_t>(num_channels, 1);
     if (audio_format == 3 && bits_per_sample == 32)
     {

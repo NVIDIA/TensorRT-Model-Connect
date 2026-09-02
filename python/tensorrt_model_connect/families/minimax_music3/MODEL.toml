@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "minimax_music3"
+plugin = "minimax_music3"
+module = "plugin"
+
+# MiniMax-Music3 publishes a root `config.json` carrying `model_type` and
+# `architectures` but no `_class_name`, and it ships no `model_index.json`.
+# `_resolve_diffusion_entrypoint` therefore declines it, so this family is
+# reached through the ordinary `model_type` aliases rather than through
+# `diffusion_pipeline_classes` the way `minimax_h3` is. The pipeline components
+# are read from `modular_model_index.json` by the plugin instead.
+aliases = [
+  "minimax_music3",
+  "minimax-music3",
+  "minimaxmusic3",
+]
+prefixes = [
+  "minimax_music3",
+]
+
+# Only the seven components that `modular_model_index.json` declares. The
+# repository also ships `qwen_7B/` (18.48 GB) and the root `flowmatching_vae.pth`
+# and `dav.pth` (10.32 GB together), none of which that index references and
+# each of whose diffusers-side counterparts is present as safetensors. Skipping
+# them takes the download from 57.4 GB to 28.5 GB. If a build ever reports a
+# missing module, this exclusion is the first assumption to re-test.
+hf_allow_patterns = [
+  "config.json",
+  "modular_model_index.json",
+  "LICENSE",
+  "condition_encoder/**",
+  "language_model/**",
+  "rvq_depth_decoder/**",
+  "scheduler/**",
+  "tokenizer/**",
+  "transformer/**",
+  "vocoder/**",
+]
+# Each entry is "<repository>|<path>": the checker resolves the file against
+# that repository, not against whichever snapshot happens to be at hand.
+hf_required_files = [
+  "MiniMaxAI/MiniMax-Music3|config.json",
+  "MiniMaxAI/MiniMax-Music3|modular_model_index.json",
+]
