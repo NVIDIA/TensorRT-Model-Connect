@@ -375,27 +375,33 @@ int32_t MinimaxMusic3TextToMusicPipeline::latent_length_for(int32_t frames) cons
     return std::max(1, static_cast<int32_t>(latent));
 }
 
+std::vector<int32_t>
+MinimaxMusic3TextToMusicPipeline::tokenize_prompt(const std::string& lyrics) const {
+    // The model is not given raw lyrics. The caption and the lyrics go inside
+    // the checkpoint's structure tokens, ending at <|audio_start|> so the first
+    // generated token is audio -- see prompt_format, which was checked against
+    // the reference over 410 captions and 409 lyric strings.
+    const auto assembled = minimax_music3::assemble_prompt(config_.caption, lyrics);
+    auto ids = tokenizer_->encode(assembled);
+    if (static_cast<int32_t>(ids.size()) > minimax_music3::kMaxPromptTokens)
+        throw std::runtime_error("MiniMax-Music3 prompt is longer than the checkpoint's budget");
+
+    report_stage_count("prompt_tokens", ids.size());
+    if (std::getenv("TRTMC_MM3_DEBUG") != nullptr) {
+        std::cerr << "[mm3] prompt_ids";
+        for (const auto id : ids)
+            std::cerr << ' ' << id;
+        std::cerr << '\n';
+    }
+    return ids;
+}
+
 AudioResult MinimaxMusic3TextToMusicPipeline::generate_audio(const std::string& prompt,
                                                              const GenerateConfig& cfg) {
     if (!tokenizer_)
         throw std::runtime_error("MiniMax-Music3 needs a tokenizer to read its prompt");
 
-    // The model is not given raw lyrics. The caption and the lyrics go inside
-    // the checkpoint's structure tokens, ending at <|audio_start|> so the first
-    // generated token is audio -- see prompt_format, which was checked against
-    // the reference over 410 captions and 409 lyric strings.
-    const auto assembled = minimax_music3::assemble_prompt(config_.caption, prompt);
-    const auto prompt_ids = tokenizer_->encode(assembled);
-    if (static_cast<int32_t>(prompt_ids.size()) > minimax_music3::kMaxPromptTokens) {
-        throw std::runtime_error("MiniMax-Music3 prompt is longer than the checkpoint's budget");
-    }
-    report_stage_count("prompt_tokens", prompt_ids.size());
-    if (std::getenv("TRTMC_MM3_DEBUG") != nullptr) {
-        std::cerr << "[mm3] prompt_ids";
-        for (const auto id : prompt_ids)
-            std::cerr << ' ' << id;
-        std::cerr << '\n';
-    }
+    const auto prompt_ids = tokenize_prompt(prompt);
     const int32_t frames = std::min(
         config_.max_frames, cfg.max_new_tokens > 0 ? cfg.max_new_tokens : config_.max_audio_frames);
 
@@ -572,10 +578,14 @@ const float* MinimaxMusic3TextToMusicPipeline::decode_step(int32_t branch, int32
     return scores.data();
 }
 
-void MinimaxMusic3TextToMusicPipeline::sample_residual_codes(
-    const float* conditional_hidden, const float* unconditional_hidden, int32_t semantic_code,
-    const GenerateConfig& cfg, uint64_t& rng_state, int32_t* codes_out, float* depth_hidden_out) {
-    const float* frame_hidden = conditional_hidden;
+void MinimaxMusic3TextToMusicPipeline::sample_residual_codes(const DepthStep& step,
+                                                             const GenerateConfig& cfg,
+                                                             uint64_t& rng_state) {
+    const float* const unconditional_hidden = step.unconditional_hidden;
+    const int32_t semantic_code = step.semantic_code;
+    int32_t* const codes_out = step.codes_out;
+    float* const depth_hidden_out = step.hidden_out;
+    const float* frame_hidden = step.conditional_hidden;
     auto& depth = *engines_.depth_decoder;
     const int32_t residual = config_.num_residual_codebooks;
 
@@ -658,6 +668,99 @@ void MinimaxMusic3TextToMusicPipeline::sample_residual_codes(
     rng_state = rng();
 }
 
+int32_t
+MinimaxMusic3TextToMusicPipeline::prime_caches(const std::vector<int32_t>& prompt_ids,
+                                               const std::vector<int32_t>& unconditional_ids,
+                                               BranchState& state) {
+    // Every prompt token is a decode step: the engine is compiled for one
+    // position at a time, so there is no separate prefill profile to run. The
+    // last step's logits and hidden state are the reference's `last_hidden` --
+    // the prompt is not re-fed afterwards.
+    int32_t position = 0;
+    for (std::size_t index = 0; index < prompt_ids.size(); ++index) {
+        state.conditional_logits =
+            decode_step(kConditional, prompt_ids[index], position, &state.conditional_hidden);
+        if (index == 0) {
+            // The very first token runs against an empty cache, which
+            // separates the per-layer arithmetic from the cache handling.
+            report_stage("first_token_hidden", state.conditional_hidden,
+                         static_cast<std::size_t>(config_.language_model_hidden_size));
+        }
+        state.unconditional_logits = decode_step(kUnconditional, unconditional_ids[index], position,
+                                                 &state.unconditional_hidden);
+        ++position;
+    }
+    return position;
+}
+
+void MinimaxMusic3TextToMusicPipeline::report_prompt_pass(const float* hidden,
+                                                          const float* logits) const {
+    // The prompt pass is deterministic on both sides, so this is where an
+    // engine or a binding is compared against a reference without sampling in
+    // the way. It is what located the attention mask fault and the aliased
+    // logits.
+    if (std::getenv("TRTMC_MM3_DEBUG") == nullptr)
+        return;
+
+    const auto width = static_cast<std::size_t>(config_.language_model_hidden_size);
+    if (const char* dump = std::getenv("TRTMC_MM3_PROMPT_DUMP")) {
+        std::ofstream out(dump, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(hidden),
+                  static_cast<std::streamsize>(width * sizeof(float)));
+    }
+    report_stage("prompt_hidden", hidden, width);
+
+    const auto vocab = static_cast<std::size_t>(config_.language_model_vocab_size);
+    std::vector<std::size_t> order(vocab);
+    for (std::size_t index = 0; index < vocab; ++index)
+        order[index] = index;
+    std::partial_sort(order.begin(), order.begin() + 5, order.end(),
+                      [logits](std::size_t a, std::size_t b) { return logits[a] > logits[b]; });
+
+    std::cerr << "[mm3] prompt_top5";
+    for (int rank = 0; rank < 5; ++rank)
+        std::cerr << ' ' << order[static_cast<std::size_t>(rank)] << '='
+                  << logits[order[static_cast<std::size_t>(rank)]];
+    std::cerr << '\n';
+}
+
+std::vector<int32_t>
+MinimaxMusic3TextToMusicPipeline::build_unconditional_ids(const std::vector<int32_t>& prompt_ids) {
+    // Every token but the first and the last two becomes the audio-CFG token,
+    // mirroring the reference's unconditional_ids[:, 1:-2] = AUDIO_CFG_TOKEN_ID.
+    std::vector<int32_t> ids = prompt_ids;
+    if (ids.size() >= 4) {
+        for (std::size_t index = 1; index + 2 < ids.size(); ++index)
+            ids[index] = minimax_music3::kAudioCfgTokenId;
+    }
+    return ids;
+}
+
+void MinimaxMusic3TextToMusicPipeline::record_frame(const EmittedFrame& frame,
+                                                    const std::vector<int32_t>& residual,
+                                                    std::vector<float>& hidden,
+                                                    std::vector<int32_t>& codes) const {
+    // Eight streams per frame: the language model's hidden state first, then
+    // the depth decoder's seven, which is the order the encoder's per-stream
+    // weights were trained in. Codes are stored codebook-major, so one window
+    // is a contiguous slice per stream.
+    const auto stream_width =
+        static_cast<std::size_t>(config_.frame_hidden_width / config_.condition_streams);
+    const auto base = static_cast<std::size_t>(frame.index) *
+                      static_cast<std::size_t>(config_.frame_hidden_width);
+
+    std::copy(frame.hidden, frame.hidden + stream_width,
+              hidden.begin() + static_cast<std::ptrdiff_t>(base));
+    std::copy(depth_hidden_.begin(), depth_hidden_.end(),
+              hidden.begin() + static_cast<std::ptrdiff_t>(base + stream_width));
+
+    codes[static_cast<std::size_t>(frame.index)] = frame.semantic;
+    for (int32_t stream = 0; stream < config_.num_residual_codebooks; ++stream) {
+        codes[static_cast<std::size_t>(stream + 1) * static_cast<std::size_t>(frame.total) +
+              static_cast<std::size_t>(frame.index)] = residual[static_cast<std::size_t>(stream)];
+    }
+}
+
 std::vector<int32_t>
 MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& prompt_ids,
                                                  int32_t frames, const GenerateConfig& cfg,
@@ -680,14 +783,7 @@ MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& pro
     uint64_t rng_state = cfg.seed >= 0 ? static_cast<uint64_t>(cfg.seed) : 0x9E3779B97F4A7C15ULL;
     std::mt19937_64 rng(rng_state);
 
-    // The classifier-free counterpart: every token but the first and the last
-    // two becomes the audio-CFG token, mirroring the reference's
-    // unconditional_ids[:, 1:-2] = AUDIO_CFG_TOKEN_ID.
-    std::vector<int32_t> unconditional_ids = prompt_ids;
-    if (unconditional_ids.size() >= 4) {
-        for (std::size_t index = 1; index + 2 < unconditional_ids.size(); ++index)
-            unconditional_ids[index] = minimax_music3::kAudioCfgTokenId;
-    }
+    const auto unconditional_ids = build_unconditional_ids(prompt_ids);
 
     // Prime both caches. Every prompt token is a decode step: the engine is
     // compiled for one position at a time, so there is no separate prefill
@@ -698,48 +794,16 @@ MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& pro
     const float* conditional = nullptr;
     const float* unconditional = nullptr;
     int32_t position = 0;
-    for (std::size_t index = 0; index < prompt_ids.size(); ++index) {
-        conditional = decode_step(kConditional, prompt_ids[index], position, &frame_hidden);
-        if (index == 0 && std::getenv("TRTMC_MM3_DEBUG") != nullptr) {
-            // The very first token runs against an empty cache, so this
-            // separates the per-layer arithmetic from the cache handling.
-            report_stage("first_token_hidden", frame_hidden,
-                         static_cast<std::size_t>(config_.language_model_hidden_size));
-        }
-        unconditional =
-            decode_step(kUnconditional, unconditional_ids[index], position, &unconditional_hidden);
-        ++position;
-    }
+    BranchState state;
+    position = prime_caches(prompt_ids, unconditional_ids, state);
+    frame_hidden = state.conditional_hidden;
+    unconditional_hidden = state.unconditional_hidden;
+    conditional = state.conditional_logits;
+    unconditional = state.unconditional_logits;
     if (conditional == nullptr)
         throw std::runtime_error("MiniMax-Music3 was given an empty prompt");
 
-    if (std::getenv("TRTMC_MM3_DEBUG") != nullptr) {
-        // The prompt pass is deterministic on both sides, so this is where an
-        // engine or a binding can be compared against the reference without
-        // sampling in the way.
-        if (const char* dump = std::getenv("TRTMC_MM3_PROMPT_DUMP")) {
-            std::ofstream out(dump, std::ios::binary);
-            out.write(
-                reinterpret_cast<const char*>(frame_hidden),
-                static_cast<std::streamsize>(
-                    static_cast<std::size_t>(config_.language_model_hidden_size) * sizeof(float)));
-        }
-        report_stage("prompt_hidden", frame_hidden,
-                     static_cast<std::size_t>(config_.language_model_hidden_size));
-        const auto vocab = static_cast<std::size_t>(config_.language_model_vocab_size);
-        std::vector<std::size_t> order(vocab);
-        for (std::size_t index = 0; index < vocab; ++index)
-            order[index] = index;
-        std::partial_sort(order.begin(), order.begin() + 5, order.end(),
-                          [conditional](std::size_t a, std::size_t b) {
-                              return conditional[a] > conditional[b];
-                          });
-        std::cerr << "[mm3] prompt_top5";
-        for (int rank = 0; rank < 5; ++rank)
-            std::cerr << ' ' << order[static_cast<std::size_t>(rank)] << '='
-                      << conditional[order[static_cast<std::size_t>(rank)]];
-        std::cerr << '\n';
-    }
+    report_prompt_pass(frame_hidden, conditional);
 
     GenerateConfig draw = cfg;
     if (draw.top_k <= 1)
@@ -760,22 +824,13 @@ MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& pro
             break;
 
         const int32_t semantic = sampled - minimax_music3::kAudioCodeOffset;
-        sample_residual_codes(frame_hidden, unconditional_hidden, semantic, draw, rng_state,
-                              residual.data(), depth_hidden_.data());
+        sample_residual_codes(DepthStep{frame_hidden, unconditional_hidden, semantic,
+                                        residual.data(), depth_hidden_.data()},
+                              draw, rng_state);
 
         if (step > 0) {
-            const int32_t frame = step - 1;
-            const auto base = static_cast<std::size_t>(frame) *
-                              static_cast<std::size_t>(config_.frame_hidden_width);
-            std::copy(frame_hidden, frame_hidden + stream_width,
-                      hidden.begin() + static_cast<std::ptrdiff_t>(base));
-            std::copy(depth_hidden_.begin(), depth_hidden_.end(),
-                      hidden.begin() + static_cast<std::ptrdiff_t>(base + stream_width));
-            codes[static_cast<std::size_t>(frame)] = semantic;
-            for (int32_t stream = 0; stream < config_.num_residual_codebooks; ++stream) {
-                codes[static_cast<std::size_t>(stream + 1) * static_cast<std::size_t>(frames) +
-                      static_cast<std::size_t>(frame)] = residual[static_cast<std::size_t>(stream)];
-            }
+            record_frame(EmittedFrame{step - 1, frames, semantic, frame_hidden}, residual, hidden,
+                         codes);
             ++emitted;
             if (emitted >= frames)
                 break;
@@ -838,6 +893,53 @@ MinimaxMusic3TextToMusicPipeline::encode_condition(const std::vector<float>& fra
     return std::vector<float>(values, values + count);
 }
 
+void MinimaxMusic3TextToMusicPipeline::blend_overlap(std::vector<float>& latents,
+                                                     const std::vector<float>& noise,
+                                                     const std::vector<float>& neighbour,
+                                                     int32_t latent_length, std::size_t carry,
+                                                     float sigma) const {
+    // A window's head is not free. It moves from the noise it started as at
+    // sigma 0 to the previous window's own values at sigma 1, so the seam
+    // between neighbours carries no discontinuity.
+    if (carry == 0 || neighbour.empty())
+        return;
+
+    const auto channels = static_cast<std::size_t>(config_.latent_channels);
+    const auto stride = neighbour.size() / channels;
+    for (std::size_t channel = 0; channel < channels; ++channel) {
+        for (std::size_t frame = 0; frame < carry; ++frame) {
+            const auto here = channel * static_cast<std::size_t>(latent_length) + frame;
+            const float from = noise.empty() ? 0.0F : noise[here];
+            latents[here] = (1.0F - (1.0F - 1e-6F) * sigma) * from +
+                            sigma * neighbour[channel * stride + frame];
+        }
+    }
+}
+
+void MinimaxMusic3TextToMusicPipeline::guide_velocity(ITrtModule& dit, TensorMap& inputs,
+                                                      const std::vector<float>& condition,
+                                                      int32_t latent_length,
+                                                      std::vector<float>& guided) const {
+    // Classifier-free guidance. The unconditional branch conditions on zeros
+    // rather than on a re-encoded empty prompt, which is what the reference
+    // guider does.
+    if (config_.guidance_scale <= 1.0F)
+        return;
+
+    std::vector<float> silent(condition.size(), 0.0F);
+    inputs[kDitConditionInput] =
+        Tensor{silent.data(), {1, latent_length, config_.condition_dim}, DType::kFloat32};
+    auto outputs = dit.forward(inputs);
+    const auto unconditional = outputs.find(kVelocityOutput);
+    if (unconditional == outputs.end())
+        throw std::runtime_error("diffusion transformer produced no velocity");
+
+    const auto* base = static_cast<const float*>(unconditional->second.data);
+    for (std::size_t element = 0; element < guided.size(); ++element)
+        guided[element] =
+            base[element] + config_.guidance_scale * (guided[element] - base[element]);
+}
+
 std::vector<float> MinimaxMusic3TextToMusicPipeline::denoise_window(
     const std::vector<float>& condition, int32_t latent_length, int32_t steps, uint64_t seed,
     const std::vector<float>& previous) {
@@ -867,17 +969,7 @@ std::vector<float> MinimaxMusic3TextToMusicPipeline::denoise_window(
         const float sigma = sigmas[index];
         const float next = sigmas[index + 1];
 
-        if (carry > 0) {
-            const auto stride = previous.size() / channels;
-            for (std::size_t channel = 0; channel < channels; ++channel) {
-                for (std::size_t frame = 0; frame < carry; ++frame) {
-                    const auto here = channel * static_cast<std::size_t>(latent_length) + frame;
-                    const float noise = noise_prompt[here];
-                    const float neighbour = previous[channel * stride + frame];
-                    latents[here] = (1.0F - (1.0F - 1e-6F) * sigma) * noise + sigma * neighbour;
-                }
-            }
-        }
+        blend_overlap(latents, noise_prompt, previous, latent_length, carry, sigma);
 
         std::vector<float> timestep(1, sigma);
         TensorMap inputs;
@@ -895,35 +987,7 @@ std::vector<float> MinimaxMusic3TextToMusicPipeline::denoise_window(
         const auto* conditional = static_cast<const float*>(velocity->second.data);
         std::vector<float> guided(conditional, conditional + count);
 
-        // Classifier-free guidance. The unconditional branch conditions on
-        // zeros rather than on a re-encoded empty prompt, which is what the
-        // reference guider does.
-        if (config_.guidance_scale > 1.0F) {
-            std::vector<float> silent(condition.size(), 0.0F);
-            inputs[kDitConditionInput] =
-                Tensor{silent.data(), {1, latent_length, config_.condition_dim}, DType::kFloat32};
-            auto unconditional_outputs = dit.forward(inputs);
-            const auto unconditional = unconditional_outputs.find(kVelocityOutput);
-            if (unconditional == unconditional_outputs.end())
-                throw std::runtime_error("diffusion transformer produced no velocity");
-            const auto* base = static_cast<const float*>(unconditional->second.data);
-            if (index == 0 && std::getenv("TRTMC_MM3_DEBUG") != nullptr) {
-                // If conditioning reaches the transformer at all, the two
-                // branches must differ. A difference near zero means the
-                // condition input is not being read.
-                double delta = 0.0;
-                for (std::size_t element = 0; element < count; ++element) {
-                    const double gap = guided[element] - base[element];
-                    delta += gap * gap;
-                }
-                std::cerr << "[mm3] cond_vs_uncond rms="
-                          << std::sqrt(delta / static_cast<double>(count)) << '\n';
-            }
-            for (std::size_t element = 0; element < count; ++element) {
-                guided[element] =
-                    base[element] + config_.guidance_scale * (guided[element] - base[element]);
-            }
-        }
+        guide_velocity(dit, inputs, condition, latent_length, guided);
 
         if (index == 0 || index + 2 == sigmas.size()) {
             report_stage(index == 0 ? "velocity_first" : "velocity_last", guided.data(), count);
@@ -940,15 +1004,7 @@ std::vector<float> MinimaxMusic3TextToMusicPipeline::denoise_window(
     // The neighbour's values win outright over the overlap once the window is
     // denoised; the blend was there to steer the rest of it, not to rewrite
     // frames the previous window already settled.
-    if (carry > 0) {
-        const auto stride = previous.size() / channels;
-        for (std::size_t channel = 0; channel < channels; ++channel) {
-            for (std::size_t frame = 0; frame < carry; ++frame) {
-                latents[channel * static_cast<std::size_t>(latent_length) + frame] =
-                    previous[channel * stride + frame];
-            }
-        }
-    }
+    blend_overlap(latents, {}, previous, latent_length, carry, 1.0F);
     return latents;
 }
 
