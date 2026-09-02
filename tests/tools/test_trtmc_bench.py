@@ -920,6 +920,46 @@ def test_prepare_only_builds_bundle_without_starting_measurement(
     assert receipt["bundles"][0]["source_revision"] == revision
 
 
+def test_prepare_only_exposes_worker_native_plugins_to_bundle_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revision = "a" * 40
+    worker = _worker(tmp_path)
+    (tmp_path / "libtrtmc_backend_trt.so").touch()
+    assert worker_backend_abi(worker) is None
+
+    def fake_build(command, environment, _timeout_s):
+        assert environment["_TRTMC_INTERNAL_NATIVE_BIN_DIR"] == str(tmp_path.resolve())
+        output = Path(command[command.index("-o") + 1])
+        write_bundle(
+            output,
+            BundleInfo(),
+            [BundleSection("config.json", json.dumps({"source_revision": revision}).encode())],
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.delenv("_TRTMC_INTERNAL_NATIVE_BIN_DIR", raising=False)
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", revision)
+    monkeypatch.setenv("TRTMC_BENCH_BUILD_PLATFORM", "test-sm80")
+    monkeypatch.setattr(BundleBuilder, "_execute", staticmethod(fake_build))
+
+    assert (
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle-cache",
+                str(tmp_path / "cache"),
+                "--worker",
+                str(worker),
+                "--prepare-only",
+            ]
+        )
+        == 0
+    )
+
+
 def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
     metrics = reduce_metrics(
         "generate_image",

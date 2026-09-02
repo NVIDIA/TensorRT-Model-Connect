@@ -887,6 +887,74 @@ def _resolve_request(
     return plan, platform
 
 
+def _probe_perf_backend_loader(environment: Mapping[str, Any]) -> dict[str, Any]:
+    accuracy_options = environment["tasks"]["accuracy"].get("options", {})
+    native_dir_value = str(accuracy_options.get("backend-dir", "") or "").strip()
+    if not native_dir_value:
+        raise ModelCheckError(
+            "model-check environment accuracy.options.backend-dir is required "
+            "for the Perf backend loader preflight"
+        )
+    native_dir = Path(native_dir_value).expanduser().resolve()
+    backend = native_dir / "libtrtmc_backend_trt.so"
+    if not backend.is_file():
+        raise ModelCheckError(f"Perf backend DSO is missing: {backend}")
+
+    python_value = str(environment["tasks"]["perf"].get("runner_python", "") or "").strip()
+    if not python_value:
+        raise ModelCheckError(
+            "model-check environment perf.runner_python is required for "
+            "the backend loader preflight"
+        )
+    python = Path(python_value).expanduser().resolve()
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise ModelCheckError(f"Perf runner Python is unavailable: {python}")
+
+    child = os.environ.copy()
+    python_paths = [str(REPOSITORY / "python")]
+    inherited_python_path = child.get("PYTHONPATH", "")
+    if inherited_python_path:
+        python_paths.append(inherited_python_path)
+    child["PYTHONPATH"] = os.pathsep.join(python_paths)
+    child["_TRTMC_INTERNAL_NATIVE_BIN_DIR"] = str(native_dir)
+    probe = (
+        "import json; "
+        "from tensorrt_model_connect import trt_compat; "
+        "trt_compat.load_native_backend_plugins(); "
+        "print(json.dumps({'status': 'loaded'}))"
+    )
+    try:
+        completed = subprocess.run(
+            [str(python), "-c", probe],
+            cwd=REPOSITORY,
+            env=child,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ModelCheckError(f"cannot execute Perf backend loader preflight: {error}") from error
+    if completed.returncode:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise ModelCheckError(
+            "Perf backend loader preflight failed: "
+            + (detail or f"exit code {completed.returncode}")
+        )
+    try:
+        receipt = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise ModelCheckError("Perf backend loader preflight returned invalid JSON") from error
+    if not isinstance(receipt, Mapping) or receipt.get("status") != "loaded":
+        raise ModelCheckError("Perf backend loader preflight did not confirm loading")
+    return {
+        "status": "ready",
+        "python": str(python),
+        "native_dir": str(native_dir),
+        "backend": str(backend),
+    }
+
+
 def _target_preflight(
     plan: Mapping[str, Any],
     environment: Mapping[str, Any],
@@ -902,6 +970,25 @@ def _target_preflight(
     except (ModelCheckError, trtmc_validate.ValidationError) as error:
         native_build = {"status": "blocked", "detail": str(error)}
         blockers.append({"category": "native_build_unavailable", "detail": str(error)})
+
+    perf_backend_loader: dict[str, Any] = {"status": "not_required"}
+    if _task_bindings(plan, "perf"):
+        if native_build["status"] != "ready":
+            perf_backend_loader = {
+                "status": "blocked",
+                "detail": "native build must pass before probing the Perf backend loader",
+            }
+        else:
+            try:
+                perf_backend_loader = _probe_perf_backend_loader(environment)
+            except ModelCheckError as error:
+                perf_backend_loader = {"status": "blocked", "detail": str(error)}
+                blockers.append(
+                    {
+                        "category": "perf_backend_loader_unavailable",
+                        "detail": str(error),
+                    }
+                )
 
     suites = {
         suite["id"]: suite
@@ -941,6 +1028,7 @@ def _target_preflight(
         "environment_source": environment["source"],
         "revision": arguments.revision,
         "native_build": native_build,
+        "perf_backend_loader": perf_backend_loader,
         "datasets": datasets,
         "blockers": blockers,
     }

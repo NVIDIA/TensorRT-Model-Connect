@@ -91,9 +91,18 @@ class _BuildPlan:
 class BundleBuilder:
     """Materialize missing benchmark bundles through the public builder CLI."""
 
-    def __init__(self, cache_root: Path | None = None, *, backend_abi: str | None = None) -> None:
+    def __init__(
+        self,
+        cache_root: Path | None = None,
+        *,
+        backend_abi: str | None = None,
+        native_bin_dir: Path | None = None,
+    ) -> None:
         self.cache_root = (cache_root or default_bundle_cache()).expanduser().resolve()
         self.backend_abi = backend_abi
+        self.native_bin_dir = (
+            native_bin_dir.expanduser().resolve() if native_bin_dir is not None else None
+        )
 
     def provisional_path(self, model: ModelDescriptor) -> Path:
         """Return a non-materialized path used while cases are being resolved."""
@@ -198,7 +207,9 @@ class BundleBuilder:
     def _plan(self, model: ModelDescriptor, cases: Sequence[ResolvedCase]) -> _BuildPlan:
         options = _build_options(model, cases)
         runtime = _resolve_builder_runtime(self.backend_abi)
-        environment = _build_environment(model, runtime)
+        environment = _build_environment(
+            model, runtime, native_bin_dir=self.native_bin_dir
+        )
         identity_options = dict(options)
         if "fp8_scales" in identity_options:
             identity_options["fp8_scales"] = model.build_settings["fp8_scales"]
@@ -659,8 +670,15 @@ _REQUIRED_BUILD_ENVIRONMENT_INPUTS = frozenset(
 )
 
 
-def _build_environment(model: ModelDescriptor, runtime: _BuilderRuntime) -> dict[str, str]:
+def _build_environment(
+    model: ModelDescriptor,
+    runtime: _BuilderRuntime,
+    *,
+    native_bin_dir: Path | None = None,
+) -> dict[str, str]:
     environment = os.environ.copy()
+    if native_bin_dir is not None:
+        environment["_TRTMC_INTERNAL_NATIVE_BIN_DIR"] = str(native_bin_dir)
     if runtime.python_root is not None:
         environment["TRTMC_BENCH_TRT_PYTHON_ROOT"] = str(runtime.python_root)
     if runtime.block_libs_wheel:
