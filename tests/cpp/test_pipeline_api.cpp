@@ -60,6 +60,43 @@ class DummyPipeline final : public trtmc::IPipeline {
     const char* pipeline_type() const override { return "DummyPipeline"; }
 };
 
+class RecordingVideoPipeline final : public trtmc::IPipeline {
+  public:
+    const char* model_id() const override { return "recording-video"; }
+    const char* pipeline_type() const override { return "RecordingVideoPipeline"; }
+
+    trtmc::ImageResult generate_image(const std::string& prompt,
+                                      const trtmc::GenerateConfig& cfg) override {
+        observed_prompt = prompt;
+        observed_config = cfg;
+        trtmc::ImageResult result;
+        result.pixels = {0.0F, 0.1F, 0.2F, 0.3F, 0.4F, 0.5F};
+        result.height = 1;
+        result.width = 1;
+        result.channels = 3;
+        result.num_frames = 2;
+        return result;
+    }
+
+    std::string observed_prompt;
+    trtmc::GenerateConfig observed_config;
+};
+
+class RecordingStructuredVideoPipeline final : public trtmc::IPipeline {
+  public:
+    const char* model_id() const override { return "recording-structured-video"; }
+    const char* pipeline_type() const override { return "RecordingStructuredVideoPipeline"; }
+
+    trtmc::VideoResult generate_video(const trtmc::VideoGenerationRequest& request) override {
+        observed_request = request;
+        trtmc::VideoResult result;
+        result.fps = 24;
+        return result;
+    }
+
+    trtmc::VideoGenerationRequest observed_request;
+};
+
 class RecordingTranscriptionPipeline final : public trtmc::IPipeline {
   public:
     const char* model_id() const override { return "recording"; }
@@ -375,6 +412,116 @@ static void test_ipipeline_default_virtuals() {
     check(threw, "default detect throws");
 }
 
+static void test_video_result_and_legacy_generation_contract() {
+    trtmc::GenerateConfig defaults;
+    check(defaults.video_num_frames == 0 && defaults.height == 0 && defaults.width == 0,
+          "video geometry defaults to model selection");
+
+    RecordingVideoPipeline pipeline;
+    trtmc::GenerateConfig cfg;
+    cfg.seed = 17;
+    cfg.video_num_frames = 345;
+    const auto result = pipeline.generate_video("a native video", cfg);
+
+    check(pipeline.observed_prompt == "a native video" && pipeline.observed_config.seed == 17 &&
+              pipeline.observed_config.video_num_frames == 345,
+          "default generate_video delegates prompt and config to generate_image");
+    check(result.frames.width == 1 && result.frames.height == 1 && result.frames.num_frames == 2 &&
+              result.frames.pixels.size() == 6,
+          "default generate_video returns legacy video frames");
+    check(result.audio.samples.empty() && result.audio.channels == 1 && result.fps == 0,
+          "legacy video generation defaults to no audio and unknown fps");
+
+    trtmc::VideoGenerationRequest t2va;
+    t2va.prompt = "structured text only";
+    t2va.config.height = 768;
+    t2va.config.width = 1344;
+    t2va.config.video_num_frames = 124;
+    const auto structured_result = pipeline.generate_video(t2va);
+    check(pipeline.observed_prompt == "structured text only" &&
+              pipeline.observed_config.height == 768 && pipeline.observed_config.width == 1344 &&
+              pipeline.observed_config.video_num_frames == 124 &&
+              structured_result.frames.num_frames == 2,
+          "structured T2VA defaults to the legacy video overload");
+
+    t2va.mode = trtmc::VideoGenerationMode::kFirstLastFrameToVideoAudio;
+    t2va.first_frame = trtmc::VideoImageInput{{0.0F, 0.5F, 1.0F}, 1, 1, 3};
+    bool rejected_multimodal = false;
+    try {
+        (void)pipeline.generate_video(t2va);
+    } catch (const std::runtime_error&) {
+        rejected_multimodal = true;
+    }
+    check(rejected_multimodal, "legacy video overload rejects multimodal requests explicitly");
+
+    trtmc::VideoResult synchronized;
+    synchronized.audio.samples = {0.25F, -0.25F, 0.5F, -0.5F};
+    synchronized.audio.num_samples = 4;
+    synchronized.audio.sample_rate = 32000;
+    synchronized.audio.channels = 2;
+    synchronized.fps = 24;
+    check(synchronized.audio.samples.size() == 4 && synchronized.audio.num_samples == 4 &&
+              synchronized.audio.sample_rate == 32000 && synchronized.audio.channels == 2 &&
+              synchronized.fps == 24,
+          "VideoResult carries 32 kHz interleaved stereo audio and fps");
+}
+
+static void test_structured_video_generation_request_contract() {
+    trtmc::VideoGenerationRequest request;
+    request.prompt = "use these references in order";
+    request.mode = trtmc::VideoGenerationMode::kReferenceToVideoAudio;
+    request.config.height = 768;
+    request.config.width = 1344;
+    request.config.video_num_frames = 345;
+
+    trtmc::VideoReferenceInput image;
+    image.kind = trtmc::VideoReferenceKind::kImage;
+    image.image = {{0.1F, 0.2F, 0.3F}, 1, 1, 3};
+    request.references.push_back(image);
+
+    trtmc::VideoReferenceInput video;
+    video.kind = trtmc::VideoReferenceKind::kVideo;
+    video.video.pixels = {0.4F, 0.5F, 0.6F};
+    video.video.num_frames = 1;
+    video.video.height = 1;
+    video.video.width = 1;
+    video.video.channels = 3;
+    video.video.fps_numerator = 30000;
+    video.video.fps_denominator = 1001;
+    video.video.soundtrack.samples = {0.25F, -0.25F};
+    video.video.soundtrack.num_samples = 2;
+    video.video.soundtrack.sample_rate = 32000;
+    video.video.soundtrack.channels = 2;
+    request.references.push_back(video);
+
+    trtmc::VideoReferenceInput audio;
+    audio.kind = trtmc::VideoReferenceKind::kAudio;
+    audio.audio.samples = {0.75F, -0.75F};
+    audio.audio.num_samples = 2;
+    audio.audio.sample_rate = 44100;
+    audio.audio.channels = 1;
+    request.references.push_back(audio);
+
+    RecordingStructuredVideoPipeline pipeline;
+    trtmc::IPipeline* base = &pipeline;
+    const auto result = base->generate_video(request);
+    const auto& observed = pipeline.observed_request;
+    check(result.fps == 24 && observed.mode == trtmc::VideoGenerationMode::kReferenceToVideoAudio &&
+              observed.config.height == 768 && observed.config.width == 1344 &&
+              observed.config.video_num_frames == 345,
+          "structured video request dispatches through the appended virtual overload");
+    check(observed.references.size() == 3 &&
+              observed.references[0].kind == trtmc::VideoReferenceKind::kImage &&
+              observed.references[1].kind == trtmc::VideoReferenceKind::kVideo &&
+              observed.references[2].kind == trtmc::VideoReferenceKind::kAudio,
+          "Ref2VA preserves ordered heterogeneous references");
+    check(observed.references[1].video.fps_numerator == 30000 &&
+              observed.references[1].video.fps_denominator == 1001 &&
+              observed.references[1].video.soundtrack.channels == 2 &&
+              observed.references[2].audio.sample_rate == 44100,
+          "decoded video and audio reference metadata survives API dispatch");
+}
+
 static void test_speech_session_value_contract() {
     const trtmc::SpeechSessionConfig defaults;
     check(defaults.input_sample_rate == 16000, "speech session default input sample rate");
@@ -531,6 +678,8 @@ int main() {
     test_sizeof_ipipeline_is_vtable();
     test_delete_null_safe();
     test_ipipeline_default_virtuals();
+    test_video_result_and_legacy_generation_contract();
+    test_structured_video_generation_request_contract();
     test_speech_session_value_contract();
     test_speech_session_virtual_interface();
     test_transcription_batch_preserves_per_request_config();

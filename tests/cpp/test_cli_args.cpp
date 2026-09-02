@@ -52,6 +52,11 @@ void test_help_uses_platform_neutral_library_names() {
           "help names model-plugin shared libraries portably");
     check(output.str().find("libtrtmc_backend_*.so") == std::string::npos,
           "help does not hard-code Linux backend filenames");
+    check(output.str().find("--num-frames N") != std::string::npos,
+          "help documents native video frame count");
+    check(output.str().find("--first-frame IMAGE") != std::string::npos &&
+              output.str().find("--reference-video VIDEO") != std::string::npos,
+          "help documents native FL2VA and Ref2VA inputs");
 }
 
 trtmc::cli::CliArgs parse(std::initializer_list<std::string> args) {
@@ -186,6 +191,104 @@ void test_diffusion_flags() {
     check(args.initial_latents_raw == "latents.raw", "diffusion latents");
 }
 
+void test_generate_video_parses_native_output_contract() {
+    auto args = parse({"trtmc", "generate-video", "bundle.bundle", "--prompt", "sports scene",
+                       "--output", "video-out", "--num-inference-steps", "4", "--height", "768",
+                       "--width", "1344", "--seed", "0", "--num-frames", "124"});
+    check(!args.parse_error, "generate-video parses cleanly");
+    check(args.command == "generate-video", "generate-video command");
+    check(args.bundle_path == "bundle.bundle", "generate-video bundle");
+    check(args.prompt == "sports scene" && args.prompt_provided, "generate-video prompt");
+    check(args.output_dir == "video-out", "generate-video output directory");
+    check(args.num_steps == 4, "generate-video inference steps");
+    check(args.diffusion_height == 768 && args.diffusion_width == 1344,
+          "generate-video dimensions");
+    check(args.seed == 0, "generate-video seed");
+    check(args.video_num_frames == 124, "generate-video 124-frame request");
+
+    auto long_video = parse({"trtmc", "generate-video", "bundle.bundle", "--prompt", "scene",
+                             "--output", "video-out", "--num-frames", "345"});
+    check(!long_video.parse_error && long_video.video_num_frames == 345,
+          "generate-video 345-frame request");
+    check(parse({"trtmc", "generate-video", "bundle.bundle", "--prompt", "scene", "--num-frames",
+                 "0"})
+              .parse_error,
+          "generate-video rejects zero frames");
+    check(parse({"trtmc", "generate-video", "bundle.bundle", "--prompt", "scene", "--num-frames",
+                 "abc"})
+              .parse_error,
+          "generate-video rejects malformed frame count");
+}
+
+void test_generate_video_parses_public_multimodal_modes() {
+    auto fl2va = parse({"trtmc", "generate-video", "bundle.bundle", "--prompt", "animate",
+                        "--first-frame", "first.png", "--last-frame", "last.jpg"});
+    check(!fl2va.parse_error && fl2va.first_frame_path == "first.png" &&
+              fl2va.last_frame_path == "last.jpg" && fl2va.video_references.empty(),
+          "generate-video parses FL2VA first and last frames");
+
+    auto ref2va = parse({"trtmc", "generate-video", "bundle.bundle", "--prompt",
+                         "follow references", "--reference-audio", "voice.wav", "--reference-image",
+                         "person.png", "--reference-video", "motion-video"});
+    check(!ref2va.parse_error && ref2va.video_references.size() == 3,
+          "generate-video parses Ref2VA media");
+    check(ref2va.video_references.size() == 3 &&
+              ref2va.video_references[0].kind == trtmc::cli::VideoReferenceArgKind::kAudio &&
+              ref2va.video_references[1].kind == trtmc::cli::VideoReferenceArgKind::kImage &&
+              ref2va.video_references[2].kind ==
+                  trtmc::cli::VideoReferenceArgKind::kVideoDirectory &&
+              ref2va.video_references[0].path == "voice.wav" &&
+              ref2va.video_references[2].path == "motion-video",
+          "Ref2VA command-line media order is preserved exactly");
+}
+
+void test_generate_video_rejects_invalid_public_multimodal_counts() {
+    check(parse({"trtmc", "generate-video", "b.bundle", "--prompt", "x", "--first-frame",
+                 "first.png", "--reference-image", "reference.png"})
+              .parse_error,
+          "generate-video rejects mixed FL2VA and Ref2VA inputs");
+    check(parse({"trtmc", "generate-video", "b.bundle", "--prompt", "x", "--first-frame", "one.png",
+                 "--first-frame", "two.png"})
+              .parse_error,
+          "generate-video rejects duplicate first frame");
+    check(!parse({"trtmc", "generate-video", "b.bundle", "--prompt", "x", "--reference-audio",
+                  "voice.wav"})
+               .parse_error,
+          "Ref2VA accepts audio-only conditioning");
+    check(parse({"trtmc", "generate-video", "b.bundle", "--prompt", "x", "--reference-image",
+                 "i.png", "--reference-video", "v1", "--reference-video", "v2", "--reference-video",
+                 "v3", "--reference-video", "v4"})
+              .parse_error,
+          "Ref2VA rejects more than three videos");
+    check(parse({"trtmc", "generate-video",    "b.bundle", "--prompt",
+                 "x",     "--reference-image", "i1",       "--reference-image",
+                 "i2",    "--reference-image", "i3",       "--reference-image",
+                 "i4",    "--reference-image", "i5",       "--reference-image",
+                 "i6",    "--reference-image", "i7",       "--reference-image",
+                 "i8",    "--reference-image", "i9",       "--reference-image",
+                 "i10"})
+              .parse_error,
+          "Ref2VA rejects more than nine images");
+    check(parse({"trtmc", "generate-video", "b.bundle", "--prompt", "x", "--reference-image",
+                 "i.png", "--reference-audio", "a1.wav", "--reference-audio", "a2.wav",
+                 "--reference-audio", "a3.wav", "--reference-audio", "a4.wav"})
+              .parse_error,
+          "Ref2VA rejects more than three explicit audio files");
+    check(parse({"trtmc", "generate-video",    "b.bundle", "--prompt",
+                 "x",     "--reference-image", "i1",       "--reference-image",
+                 "i2",    "--reference-image", "i3",       "--reference-image",
+                 "i4",    "--reference-image", "i5",       "--reference-image",
+                 "i6",    "--reference-image", "i7",       "--reference-image",
+                 "i8",    "--reference-image", "i9",       "--reference-video",
+                 "v1",    "--reference-video", "v2",       "--reference-video",
+                 "v3",    "--reference-audio", "a1.wav"})
+              .parse_error,
+          "Ref2VA rejects more than twelve ordered files");
+    check(parse({"trtmc", "run", "b.bundle", "--prompt", "x", "--reference-image", "i.png"})
+              .parse_error,
+          "video conditioning flags are scoped to generate-video");
+}
+
 void test_detect_parses_contract_flags() {
     auto args = parse({"trtmc", "detect", "bundle.bundle", "--image", "img.jpg", "--output-json",
                        "detections.json", "--score-threshold", "0.42"});
@@ -217,11 +320,12 @@ void test_disparity_parses_stereo_images() {
 }
 
 void test_inspect_and_config_flags() {
-    auto args = parse({"trtmc", "inspect", "bundle.bundle", "--list-engines", "--config",
-                       "profile.json", "--set", "audio.seed=7"});
+    auto args = parse({"trtmc", "inspect", "bundle.bundle", "--list-engines", "--validate-runtime",
+                       "--config", "profile.json", "--set", "audio.seed=7"});
     check(args.command == "inspect", "inspect command");
     check(args.bundle_path == "bundle.bundle", "inspect bundle");
     check(args.list_engines, "inspect list engines");
+    check(args.validate_runtime, "inspect validates runtime plugin contract");
     check(args.config_path == "profile.json", "config path");
     check(args.set_tokens.size() == 1 && args.set_tokens[0] == "audio.seed=7", "set token");
 }
@@ -517,6 +621,9 @@ int main() {
     test_build_forwards_args_verbatim();
     test_run_parses_common_flags();
     test_diffusion_flags();
+    test_generate_video_parses_native_output_contract();
+    test_generate_video_parses_public_multimodal_modes();
+    test_generate_video_rejects_invalid_public_multimodal_counts();
     test_detect_parses_contract_flags();
     test_extract_features_parses_contract_flags();
     test_disparity_parses_stereo_images();

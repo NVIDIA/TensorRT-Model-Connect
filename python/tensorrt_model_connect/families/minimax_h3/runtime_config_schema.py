@@ -18,6 +18,7 @@ from tensorrt_model_connect.runtime_config import (
 # The build CLI currently contributes ``--config`` / ``--set`` values at
 # SESSION_REQUEST priority before forwarding them as opaque family options.
 _BUILD = frozenset({Layer.BUILD_TIME, Layer.BUNDLE_DEFAULT, Layer.SESSION_REQUEST})
+_BUILD_PATH = frozenset({Layer.BUILD_TIME, Layer.SESSION_REQUEST})
 _SESSION = frozenset({Layer.SESSION_REQUEST, Layer.PLATFORM_PROFILE})
 
 
@@ -46,6 +47,18 @@ SCHEMA = Schema(
             validator=lambda value: (
                 isinstance(value, float) and math.isfinite(value) and value > 0.0
             ),
+        ),
+        ConfigField(
+            name="fast_h3_adapter",
+            type_tag="string",
+            default="",
+            allowed_layers=_BUILD_PATH,
+        ),
+        ConfigField(
+            name="transformer_ref",
+            type_tag="string",
+            default="",
+            allowed_layers=_BUILD_PATH,
         ),
         ConfigField(
             name="retain_engines",

@@ -184,10 +184,28 @@ std::vector<std::string> read_prompts_file(const std::string& path, std::string&
 }
 
 void print_usage() {
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+    std::cerr << "Usage:\n"
+                 "  trtmc generate-video <bundle.bundle> --prompt \"text\" --output OUTPUT.mp4 "
+                 "[--num-frames N] [--height N] [--width N] [--seed N] "
+                 "[--warmup N --benchmark N]\n"
+                 "                       FL2VA: [--first-frame IMAGE] [--last-frame IMAGE]\n"
+                 "                       Ref2VA: [--reference-image IMAGE] "
+                 "[--reference-video VIDEO] [--reference-audio AUDIO.wav] ...\n"
+                 "  trtmc inspect        <bundle.bundle> [--list-engines] [--validate-runtime]\n"
+                 "  trtmc version\n"
+                 "\n"
+                 "Runtime options:\n"
+                 "  --runtime-cache PATH   TensorRT-RTX JIT kernel cache file\n"
+                 "  --backend-dir PATH     Extra backend shared-library directory\n"
+                 "  --model-plugin-dir PATH Extra model-plugin shared-library directory\n";
+#else
     std::cerr
         << "Usage:\n"
+#if !defined(TRTMC_RUNTIME_ONLY_CLI)
            "  trtmc build           <hf-model-or-dir> -o <bundle.bundle> [builder args...]\n"
            "  trtmc graph           <inspect|list|recipes|select> [args...]\n"
+#endif
            "  trtmc run             <bundle.bundle> "
            "(--prompt \"text\" [--image PATH] | --prompts-file PATH) "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
@@ -221,8 +239,12 @@ void print_usage() {
            "                       Loads bundle once, reads prompts from stdin, streams PCM to "
            "stdout.\n"
            "  trtmc generate-video  <bundle.bundle> --prompt \"text\" --output DIR [--num-steps N] "
-           "[--guidance-scale S] [--initial-latents-raw PATH]\n"
+           "[--num-frames N] [--guidance-scale S] [--initial-latents-raw PATH]\n"
            "                        [--negative-prompt \"text\"] [--height N] [--width N]\n"
+           "                        FL2VA: [--first-frame IMAGE] [--last-frame IMAGE]\n"
+           "                        Ref2VA: [--reference-image IMAGE] "
+           "[--reference-video VIDEO] [--reference-audio AUDIO.wav] ...\n"
+           "                        VIDEO is an MP4/media file or ModelConnect video directory.\n"
            "  trtmc embed           <bundle.bundle> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.bundle> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
@@ -237,7 +259,7 @@ void print_usage() {
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
            "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
            "  trtmc speak           <bundle.bundle> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
-           "  trtmc inspect         <bundle.bundle> [--list-engines]\n"
+           "  trtmc inspect         <bundle.bundle> [--list-engines] [--validate-runtime]\n"
            "  trtmc version\n"
            "\n"
            "Options:\n"
@@ -247,9 +269,13 @@ void print_usage() {
            "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
            "  --kernel-bindings PATH Bind slot-ready engines to TVM-FFI kernels at load time\n"
            "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n"
+#if !defined(TRTMC_RUNTIME_ONLY_CLI)
            "\n"
            "Build uses a sibling Python interpreter when installed in an environment bin "
-           "directory, otherwise Python from PATH.\n";
+           "directory, otherwise Python from PATH.\n"
+#endif
+        ;
+#endif
 }
 
 CliArgs parse_args(int argc, char** argv) {
@@ -266,11 +292,24 @@ CliArgs parse_args(int argc, char** argv) {
         args.command = "version";
         return args;
     }
-
     if (args.command == "help" || args.command == "--help" || args.command == "-h") {
         args.show_help = true;
         return args;
     }
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+    if (args.command == "build" || args.command == "graph") {
+        args.parse_error = true;
+        args.error_message =
+            "this runtime-only ModelConnect CLI does not contain Python-backed build commands";
+        return args;
+    }
+    if (args.command != "generate-video" && args.command != "inspect") {
+        args.parse_error = true;
+        args.error_message =
+            "this MiniMax-H3 runtime CLI supports generate-video, inspect, and version only";
+        return args;
+    }
+#endif
 
     if (args.command == "build" || args.command == "graph") {
         for (int i = 2; i < argc; ++i)
@@ -395,11 +434,23 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--benchmark" && need_value(arg)) {
-            args.benchmark = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer >= 0");
+            if (!value || *value < 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer >= 0";
+                return args;
+            }
+            args.benchmark = *value;
             continue;
         }
         if (arg == "--warmup" && need_value(arg)) {
-            args.warmup = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer >= 0");
+            if (!value || *value < 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer >= 0";
+                return args;
+            }
+            args.warmup = *value;
             continue;
         }
         if (arg == "--temperature" && need_value(arg)) {
@@ -472,8 +523,14 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--hf-python" && need_value(arg)) {
+#if defined(TRTMC_RUNTIME_ONLY_CLI)
+            args.parse_error = true;
+            args.error_message = "--hf-python is not present in the native MiniMax-H3 runtime";
+            return args;
+#else
             args.hf_python = argv[++i];
             continue;
+#endif
         }
         if (arg == "--kv-cache-size" || arg == "--kv_cache_size") {
             if (!need_value(arg))
@@ -504,6 +561,53 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--right-image" && need_value(arg)) {
             args.right_image_path = argv[++i];
+            continue;
+        }
+        if (arg == "--first-frame" && need_value(arg)) {
+            if (!args.first_frame_path.empty()) {
+                args.parse_error = true;
+                args.error_message = "--first-frame may be specified at most once";
+                return args;
+            }
+            args.first_frame_path = argv[++i];
+            if (args.first_frame_path.empty()) {
+                args.parse_error = true;
+                args.error_message = "--first-frame requires a non-empty path";
+                return args;
+            }
+            continue;
+        }
+        if (arg == "--last-frame" && need_value(arg)) {
+            if (!args.last_frame_path.empty()) {
+                args.parse_error = true;
+                args.error_message = "--last-frame may be specified at most once";
+                return args;
+            }
+            args.last_frame_path = argv[++i];
+            if (args.last_frame_path.empty()) {
+                args.parse_error = true;
+                args.error_message = "--last-frame requires a non-empty path";
+                return args;
+            }
+            continue;
+        }
+        if ((arg == "--reference-image" || arg == "--reference-video" ||
+             arg == "--reference-audio") &&
+            need_value(arg)) {
+            VideoReferenceArg reference;
+            if (arg == "--reference-image")
+                reference.kind = VideoReferenceArgKind::kImage;
+            else if (arg == "--reference-video")
+                reference.kind = VideoReferenceArgKind::kVideoDirectory;
+            else
+                reference.kind = VideoReferenceArgKind::kAudio;
+            reference.path = argv[++i];
+            if (reference.path.empty()) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a non-empty path";
+                return args;
+            }
+            args.video_references.push_back(std::move(reference));
             continue;
         }
         if (arg == "--lora-adapter" && need_value(arg)) {
@@ -549,6 +653,16 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if ((arg == "--num-steps" || arg == "--num-inference-steps") && need_value(arg)) {
             args.num_steps = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--num-frames" && need_value(arg)) {
+            auto value = parse_int_value(arg, "an integer > 0");
+            if (!value || *value <= 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer > 0";
+                return args;
+            }
+            args.video_num_frames = *value;
             continue;
         }
         if (arg == "--guidance-scale" && need_value(arg)) {
@@ -802,6 +916,10 @@ CliArgs parse_args(int argc, char** argv) {
             args.list_engines = true;
             continue;
         }
+        if (arg == "--validate-runtime") {
+            args.validate_runtime = true;
+            continue;
+        }
         if (arg == "--config" && need_value(arg)) {
             args.config_path = argv[++i];
             continue;
@@ -837,6 +955,53 @@ CliArgs parse_args(int argc, char** argv) {
     if (args.command == "run" && !args.prompts_file.empty() && !args.image_path.empty()) {
         args.parse_error = true;
         args.error_message = "--prompts-file cannot be combined with --image";
+    }
+
+    const bool has_key_frames = !args.first_frame_path.empty() || !args.last_frame_path.empty();
+    const bool has_references = !args.video_references.empty();
+    if (args.command != "generate-video" && (has_key_frames || has_references)) {
+        args.parse_error = true;
+        args.error_message =
+            "video conditioning flags are only valid with the generate-video command";
+    }
+    if (args.command != "inspect" && args.validate_runtime) {
+        args.parse_error = true;
+        args.error_message = "--validate-runtime is only valid with inspect";
+    }
+    if (args.command == "generate-video" && has_key_frames && has_references) {
+        args.parse_error = true;
+        args.error_message = "FL2VA key frames cannot be combined with Ref2VA references";
+    }
+    if (args.command == "generate-video" && has_references) {
+        std::size_t image_count = 0;
+        std::size_t video_count = 0;
+        std::size_t audio_count = 0;
+        for (const auto& reference : args.video_references) {
+            switch (reference.kind) {
+            case VideoReferenceArgKind::kImage:
+                ++image_count;
+                break;
+            case VideoReferenceArgKind::kVideoDirectory:
+                ++video_count;
+                break;
+            case VideoReferenceArgKind::kAudio:
+                ++audio_count;
+                break;
+            }
+        }
+        if (image_count > 9) {
+            args.parse_error = true;
+            args.error_message = "Ref2VA accepts at most 9 reference images";
+        } else if (video_count > 3) {
+            args.parse_error = true;
+            args.error_message = "Ref2VA accepts at most 3 reference videos";
+        } else if (audio_count > 3) {
+            args.parse_error = true;
+            args.error_message = "Ref2VA accepts at most 3 explicit reference audio files";
+        } else if (args.video_references.size() > 12) {
+            args.parse_error = true;
+            args.error_message = "Ref2VA accepts at most 12 ordered reference files";
+        }
     }
 
     return args;

@@ -71,6 +71,44 @@ trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
+trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_dynamic_identity_engine() {
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    if (!builder)
+        return nullptr;
+
+    auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
+
+    auto* input = network->addInput("x", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {-1}});
+    if (!input)
+        return nullptr;
+    auto* identity = network->addIdentity(*input);
+    if (!identity)
+        return nullptr;
+    auto* output = identity->getOutput(0);
+    output->setName("y");
+    network->markOutput(*output);
+
+    auto* profile = builder->createOptimizationProfile();
+    if (!profile ||
+        !profile->setDimensions("x", nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims{1, {1}}) ||
+        !profile->setDimensions("x", nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims{1, {4}}) ||
+        !profile->setDimensions("x", nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims{1, {8}}) ||
+        config->addOptimizationProfile(profile) < 0)
+        return nullptr;
+
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
+        builder->buildSerializedNetwork(*network, *config));
+    if (!plan)
+        return nullptr;
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    if (!runtime)
+        return nullptr;
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        runtime->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
 void test_bind_external_failure_preserves_owned_buffer() {
     auto engine = build_identity_engine();
     if (!engine)
@@ -192,6 +230,64 @@ void test_constructor_failure_preserves_external_buffers() {
     cudaStreamDestroy(stream);
 }
 
+void test_constructor_prebinding_accepts_dynamic_max_capacity() {
+    auto engine = build_dynamic_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    void* input = nullptr;
+    void* output = nullptr;
+    cudaMalloc(&input, 8 * sizeof(float));
+    cudaMalloc(&output, 8 * sizeof(float));
+    {
+        auto* ctx = engine->createExecutionContext();
+        const std::vector<trtmc::ModuleExternalBinding> bindings = {
+            {"x", input, 8 * sizeof(float)},
+            {"y", output, 8 * sizeof(float)},
+        };
+        trtmc::TrtModuleImpl module(engine.get(), ctx, stream, 0, nullptr, bindings);
+        check(module.ok(), "dynamic constructor prebinding: module is valid");
+        check(module.device_ptr("x") == input && module.device_ptr("y") == output,
+              "dynamic constructor prebinding: max-capacity addresses are used");
+        module.bind_external("x", input, {8});
+        check(module.tensor_shape("x") == std::vector<int64_t>{8},
+              "dynamic constructor prebinding: runtime shape is applied");
+    }
+    cudaFree(input);
+    cudaFree(output);
+    cudaStreamDestroy(stream);
+}
+
+void test_constructor_prebinding_rejects_small_dynamic_output() {
+    auto engine = build_dynamic_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    void* input = nullptr;
+    void* output = nullptr;
+    cudaMalloc(&input, 8 * sizeof(float));
+    cudaMalloc(&output, 4 * sizeof(float));
+    {
+        auto* ctx = engine->createExecutionContext();
+        const std::vector<trtmc::ModuleExternalBinding> bindings = {
+            {"x", input, 8 * sizeof(float)},
+            {"y", output, 4 * sizeof(float)},
+        };
+        trtmc::TrtModuleImpl module(engine.get(), ctx, stream, 0, nullptr, bindings);
+        check(!module.ok(), "dynamic constructor prebinding: small output is rejected");
+    }
+    check(cudaMemset(input, 0, 8 * sizeof(float)) == cudaSuccess &&
+              cudaMemset(output, 0, 4 * sizeof(float)) == cudaSuccess,
+          "dynamic constructor prebinding: caller buffers remain live after rejection");
+    cudaFree(input);
+    cudaFree(output);
+    cudaStreamDestroy(stream);
+}
+
 } // namespace
 
 int main() {
@@ -199,5 +295,7 @@ int main() {
     test_bind_external_same_owned_pointer_preserves_ownership();
     test_constructor_prebinding_avoids_owned_io_buffers();
     test_constructor_failure_preserves_external_buffers();
+    test_constructor_prebinding_accepts_dynamic_max_capacity();
+    test_constructor_prebinding_rejects_small_dynamic_output();
     return failures == 0 ? 0 : 1;
 }

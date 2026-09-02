@@ -15,8 +15,12 @@ trt = pytest.importorskip("tensorrt")
 from tensorrt_model_connect.families.minimax_h3.adaln_builder import (  # noqa: E402
     build_adaln_precompute_engine,
 )
+from tensorrt_model_connect.families.minimax_h3.audio_vae_builder import (  # noqa: E402
+    build_audio_vae_decoder_engine,
+)
 from tensorrt_model_connect.families.minimax_h3.config import (  # noqa: E402
     ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
+    AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES,
     DENOISER_DEFAULT_WORKSPACE_BYTES,
     MiniMaxH3Config,
     SOL_ENGINE_1344X768_124F,
@@ -29,6 +33,9 @@ from tensorrt_model_connect.families.minimax_h3.dit_builder import (  # noqa: E4
     build_dit_finish_engine,
     build_dit_head_engine,
     build_dit_tail_engine,
+    build_dit_vsa_entry_engine,
+    build_dit_vsa_finish_engine,
+    build_dit_vsa_transition_engine,
     checkpoint_keys as dit_checkpoint_keys,
     finish_checkpoint_keys,
     head_checkpoint_keys,
@@ -115,6 +122,11 @@ def _weights(profile: MiniMaxH3Config) -> dict[str, np.ndarray]:
             DENOISER_DEFAULT_WORKSPACE_BYTES,
         ),
         (build_vae_tile_decoder_engine, ({},), VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES),
+        (
+            build_audio_vae_decoder_engine,
+            ({},),
+            AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES,
+        ),
     ],
 )
 @pytest.mark.parametrize("workspace_bytes", [None, 8 << 30])
@@ -203,7 +215,10 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         num_layers=1,
         num_refiner_layers=1,
         num_heads=4,
-        head_dim=8,
+        # TensorRT-RTX keeps H3 IAttention non-decomposable for production
+        # performance. Exercise a head dimension supported by its dedicated
+        # BF16 attention kernel rather than a synthetic 8-wide head.
+        head_dim=128,
         ffn_dim=16,
         video_in_channels=2,
         audio_in_channels=2,
@@ -212,8 +227,14 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         timestep_hidden_size=8,
         timestep_embed_dim=4,
         rope_freq_dim=1,
+        min_video_rows=4,
+        opt_video_rows=4,
         video_rows=4,
+        min_audio_rows=2,
+        opt_audio_rows=2,
         audio_rows=2,
+        min_text_rows=1,
+        opt_text_rows=2,
         text_rows=2,
         padded_sequence_length=8,
         max_timestep_count=2,
@@ -246,6 +267,168 @@ def test_tiny_native_h3_graphs_serialize() -> None:
             if engine.get_tensor_mode(engine.get_tensor_name(index)) == trt.TensorIOMode.OUTPUT
         }
         assert outputs == expected_outputs
+
+
+@pytest.mark.gpu
+def test_dynamic_finish_plan_preserves_124_and_345_frame_shapes() -> None:
+    profile = MiniMaxH3Config(
+        hidden_size=8,
+        num_layers=1,
+        num_refiner_layers=0,
+        num_heads=4,
+        head_dim=8,
+        ffn_dim=16,
+        video_in_channels=2,
+        audio_in_channels=2,
+        text_dim=8,
+        timestep_input_dim=4,
+        timestep_hidden_size=8,
+        timestep_embed_dim=4,
+        rope_freq_dim=1,
+        video_rows=102816,
+        audio_rows=1150,
+        padded_sequence_length=104503,
+        max_timestep_count=2,
+        context_parallel_size=1,
+        first_block_cache=True,
+    )
+    plan = build_dit_finish_engine(_weights(profile), profile, workspace_bytes=1 << 30)
+    runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+    engine = runtime.deserialize_cuda_engine(plan)
+    assert engine is not None
+    assert tuple(
+        tuple(shape)
+        for shape in engine.get_tensor_profile_shape("video_hidden_states", 0)
+    ) == (
+        (37296, profile.video_patch_dim),
+        (37296, profile.video_patch_dim),
+        (102816, profile.video_patch_dim),
+    )
+    assert tuple(
+        tuple(shape)
+        for shape in engine.get_tensor_profile_shape("audio_hidden_states", 0)
+    ) == (
+        (414, profile.audio_in_channels),
+        (414, profile.audio_in_channels),
+        (1150, profile.audio_in_channels),
+    )
+
+    for video_rows, audio_rows, packed_rows in (
+        (37296, 414, 37711),
+        (102816, 1150, 104503),
+    ):
+        finish = engine.create_execution_context()
+        assert finish.set_input_shape("head_hidden", (packed_rows, profile.hidden_size))
+        assert finish.set_input_shape("tail_residual", (packed_rows, profile.hidden_size))
+        assert finish.set_input_shape("timestep_indices", (packed_rows,))
+        assert finish.set_input_shape(
+            "video_hidden_states", (video_rows, profile.video_patch_dim)
+        )
+        assert finish.set_input_shape(
+            "audio_hidden_states", (audio_rows, profile.audio_in_channels)
+        )
+        assert tuple(finish.get_tensor_shape("video_velocity")) == (
+            video_rows,
+            profile.video_patch_dim,
+        )
+        assert tuple(finish.get_tensor_shape("audio_velocity")) == (
+            audio_rows,
+            profile.audio_in_channels,
+        )
+
+
+@pytest.mark.gpu
+def test_dynamic_attention_plans_preserve_media_and_packed_shapes() -> None:
+    profile = MiniMaxH3Config(
+        hidden_size=128,
+        num_layers=2,
+        num_refiner_layers=0,
+        num_heads=2,
+        head_dim=128,
+        ffn_dim=256,
+        video_in_channels=2,
+        audio_in_channels=2,
+        text_dim=128,
+        timestep_input_dim=4,
+        timestep_hidden_size=128,
+        timestep_embed_dim=64,
+        rope_freq_dim=16,
+        min_video_rows=64,
+        opt_video_rows=64,
+        video_rows=128,
+        min_audio_rows=32,
+        opt_audio_rows=32,
+        audio_rows=64,
+        min_text_rows=32,
+        opt_text_rows=32,
+        text_rows=64,
+        padded_sequence_length=256,
+        max_timestep_count=2,
+        first_block_cache=True,
+    )
+    monolithic_profile = replace(profile, first_block_cache=False)
+    monolithic_plan = build_dit_engine(
+        _weights(monolithic_profile), monolithic_profile, workspace_bytes=1 << 30
+    )
+    head_plan = build_dit_head_engine(_weights(profile), profile, workspace_bytes=1 << 30)
+    tail_plan = build_dit_tail_engine(_weights(profile), profile, workspace_bytes=1 << 30)
+    runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+    monolithic_engine = runtime.deserialize_cuda_engine(monolithic_plan)
+    head_engine = runtime.deserialize_cuda_engine(head_plan)
+    tail_engine = runtime.deserialize_cuda_engine(tail_plan)
+    assert monolithic_engine is not None and head_engine is not None and tail_engine is not None
+    assert tuple(
+        tuple(shape)
+        for shape in head_engine.get_tensor_profile_shape("video_hidden_states", 0)
+    ) == ((64, profile.video_patch_dim), (64, profile.video_patch_dim), (128, profile.video_patch_dim))
+    assert tuple(
+        tuple(shape) for shape in tail_engine.get_tensor_profile_shape("head_hidden", 0)
+    ) == ((128, profile.hidden_size), (128, profile.hidden_size), (256, profile.hidden_size))
+
+    for video_rows, audio_rows, text_rows, packed_rows in (
+        (64, 32, 32, 128),
+        (128, 64, 64, 256),
+    ):
+        monolithic = monolithic_engine.create_execution_context()
+        assert monolithic.set_input_shape(
+            "video_hidden_states", (video_rows, profile.video_patch_dim)
+        )
+        assert monolithic.set_input_shape(
+            "audio_hidden_states", (audio_rows, profile.audio_in_channels)
+        )
+        assert monolithic.set_input_shape(
+            "encoder_hidden_states", (text_rows, profile.text_dim)
+        )
+        assert monolithic.set_input_shape("position_ids", (packed_rows, 3))
+        assert monolithic.set_input_shape("adaln_indices", (packed_rows,))
+        assert monolithic.set_input_shape("timestep_indices", (packed_rows,))
+        assert tuple(monolithic.get_tensor_shape("video_velocity")) == (
+            video_rows,
+            profile.video_patch_dim,
+        )
+        assert tuple(monolithic.get_tensor_shape("audio_velocity")) == (
+            audio_rows,
+            profile.audio_in_channels,
+        )
+
+        head = head_engine.create_execution_context()
+        assert head.set_input_shape("video_hidden_states", (video_rows, profile.video_patch_dim))
+        assert head.set_input_shape("audio_hidden_states", (audio_rows, profile.audio_in_channels))
+        assert head.set_input_shape("encoder_hidden_states", (text_rows, profile.text_dim))
+        assert head.set_input_shape("position_ids", (packed_rows, 3))
+        assert head.set_input_shape("adaln_indices", (packed_rows,))
+        assert head.set_input_shape("previous_head_residual", (packed_rows, profile.hidden_size))
+        assert tuple(head.get_tensor_shape("head_hidden")) == (packed_rows, profile.hidden_size)
+        assert tuple(head.get_tensor_shape("head_residual")) == (packed_rows, profile.hidden_size)
+
+        tail = tail_engine.create_execution_context()
+        assert tail.set_input_shape("head_hidden", (packed_rows, profile.hidden_size))
+        assert tail.set_input_shape("position_ids", (packed_rows, 3))
+        assert tail.set_input_shape("adaln_indices", (packed_rows,))
+        assert tuple(tail.get_tensor_shape("tail_residual")) == (
+            packed_rows,
+            profile.hidden_size,
+        )
 
 
 @pytest.mark.gpu
@@ -323,6 +506,96 @@ def test_native_network_contract_counts_iattention_and_fails_closed() -> None:
     }
     with pytest.raises(RuntimeError, match="native layer contract failed"):
         op.validate_native_network(network, expected_attentions=2, label="test network")
+
+
+@pytest.mark.gpu
+def test_segmented_vsa_entry_transition_finish_serialize_head_major_abi() -> None:
+    profile = MiniMaxH3Config(
+        hidden_size=128,
+        num_layers=2,
+        num_refiner_layers=0,
+        num_heads=2,
+        head_dim=128,
+        ffn_dim=256,
+        video_in_channels=2,
+        audio_in_channels=2,
+        text_dim=128,
+        timestep_input_dim=4,
+        timestep_hidden_size=128,
+        timestep_embed_dim=64,
+        rope_freq_dim=16,
+        min_video_rows=64,
+        opt_video_rows=64,
+        video_rows=128,
+        min_audio_rows=32,
+        opt_audio_rows=32,
+        audio_rows=64,
+        min_text_rows=32,
+        opt_text_rows=32,
+        text_rows=64,
+        padded_sequence_length=256,
+        max_timestep_count=2,
+    )
+    weights = _weights(profile)
+    for index in range(profile.num_layers):
+        weights[
+            f"transformer_blocks.{index}.attn.to_gate_compress.weight"
+        ] = np.zeros((profile.attention_size, profile.hidden_size), np.float32)
+
+    plans = {
+        "entry": build_dit_vsa_entry_engine(
+            dict(weights), profile, workspace_bytes=1 << 30
+        ),
+        "transition": build_dit_vsa_transition_engine(
+            dict(weights), profile, 0, workspace_bytes=1 << 30
+        ),
+        "finish": build_dit_vsa_finish_engine(
+            dict(weights), profile, workspace_bytes=1 << 30
+        ),
+    }
+    runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+    engines = {
+        name: runtime.deserialize_cuda_engine(plan) for name, plan in plans.items()
+    }
+    assert all(engine is not None for engine in engines.values())
+    entry = engines["entry"]
+    transition = engines["transition"]
+    finish = engines["finish"]
+    assert set(entry.get_tensor_name(index) for index in range(entry.num_io_tensors)) >= {
+        "next_residual_hidden",
+        "vsa_query",
+        "vsa_key",
+        "vsa_value",
+        "vsa_gate",
+    }
+    assert tuple(
+        tuple(shape)
+        for shape in transition.get_tensor_profile_shape("vsa_attention_output", 0)
+    ) == ((2, 128, 128), (2, 128, 128), (2, 256, 128))
+
+    for rows in (128, 256):
+        context = transition.create_execution_context()
+        assert context.set_input_shape("residual_hidden", (rows, profile.hidden_size))
+        assert context.set_input_shape(
+            "vsa_attention_output", (profile.num_heads, rows, profile.head_dim)
+        )
+        assert context.set_input_shape("position_ids", (rows, 3))
+        assert context.set_input_shape("adaln_indices", (rows,))
+        assert tuple(context.get_tensor_shape("next_residual_hidden")) == (
+            rows,
+            profile.hidden_size,
+        )
+        for name in ("vsa_query", "vsa_key", "vsa_value", "vsa_gate"):
+            assert tuple(context.get_tensor_shape(name)) == (
+                profile.num_heads,
+                rows,
+                profile.head_dim,
+            )
+    assert set(finish.get_tensor_name(index) for index in range(finish.num_io_tensors)) >= {
+        "vsa_attention_output",
+        "video_velocity",
+        "audio_velocity",
+    }
 
 
 def test_native_attention_preserves_checkpoint_bfloat16_range() -> None:

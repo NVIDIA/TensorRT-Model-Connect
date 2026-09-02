@@ -71,13 +71,9 @@ $RtxSdk = Resolve-SdkRoot $TensorRtRtxRoot "TensorRT-RTX SDK" "include\NvInfer.h
 $RtxLibraryDirectory = Resolve-SdkDirectory $RtxSdk @("lib", "lib\x64") `
     "TensorRT-RTX library directory"
 $RtxRuntimeDirectory = Resolve-SdkDirectory $RtxSdk @("bin", "lib") "TensorRT-RTX runtime directory"
-$CudartLibrary = Join-Path $CudaSdk "lib\x64\cudart.lib"
+$CudartLibrary = Join-Path $CudaSdk "lib\x64\cudart_static.lib"
 if (-not (Test-Path -LiteralPath $CudartLibrary -PathType Leaf)) {
-    throw "CUDA 12.9 Toolkit does not contain lib\x64\cudart.lib"
-}
-$CudartRuntime = Join-Path $CudaSdk "bin\cudart64_12.dll"
-if (-not (Test-Path -LiteralPath $CudartRuntime -PathType Leaf)) {
-    throw "CUDA 12.9 Toolkit does not contain bin\cudart64_12.dll"
+    throw "CUDA 12.9 Toolkit does not contain lib\x64\cudart_static.lib"
 }
 
 $NvccVersion = (& (Join-Path $CudaSdk "bin\nvcc.exe") --version 2>&1 | Out-String)
@@ -111,6 +107,8 @@ $ConfigureArguments = @(
     "-DCMAKE_CUDA_COMPILER=$(Join-Path $CudaSdk 'bin\nvcc.exe')",
     "-DCMAKE_CUDA_HOST_COMPILER=cl.exe",
     "-DCMAKE_CUDA_ARCHITECTURES=120-real",
+    "-DCMAKE_CUDA_RUNTIME_LIBRARY=Static",
+    "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
     "-DCUDAToolkit_ROOT=$CudaSdk",
     "-DTRTMC_CUDA_INCLUDE_DIR=$(Join-Path $CudaSdk 'include')",
     "-DTRTMC_CUDART_LIBRARY=$CudartLibrary",
@@ -127,7 +125,8 @@ $ConfigureArguments = @(
     "-DTRTMC_BUILD_TESTS=$BuildTestsValue",
     "-DTRTMC_BUILD_BENCHMARKS=$BuildBenchmarksValue",
     "-DTRTMC_SOURCE_REVISION=$SourceRevision",
-    "-DTRTMC_DISTRIBUTABLE_BUILD=ON"
+    "-DTRTMC_DISTRIBUTABLE_BUILD=ON",
+    "-DTRTMC_RUNTIME_ONLY_CLI=ON"
 )
 
 & cmake @ConfigureArguments
@@ -139,7 +138,8 @@ $BuildTargets = @(
     "trtmc",
     "trtmc_core",
     "trtmc_backend_rtx",
-    "trtmc_model_minimax_h3"
+    "trtmc_model_minimax_h3",
+    "minimax_h3_setup"
 )
 if ($BuildBenchmarks) {
     $BuildTargets += "trtmc_benchmark_worker"
@@ -149,23 +149,36 @@ if ($LASTEXITCODE -ne 0) {
     throw "Native Windows MiniMax H3 build failed with exit code $LASTEXITCODE"
 }
 
-# Keep the redistributable CUDA runtime beside trtmc_core.dll. This also makes
-# child processes reliable when their launcher uses a restricted DLL search
-# policy that omits PATH.
-Copy-Item -LiteralPath $CudartRuntime -Destination $BuildPath -Force
-
 if ($BuildTests) {
     $TestTargets = @(
         "test_dynamic_library",
         "test_backend_loader",
-        "test_cli_args"
+        "test_bundle_format",
+        "test_bundle_sha256",
+        "test_cli_args",
+        "test_cli_args_runtime_only",
+        "test_windows_utf8_argv",
+        "test_windows_h3_installer",
+        "test_windows_media",
+        "test_model_plugin_loader",
+        "test_pipeline_api",
+        "test_trtmc_io",
+        "test_minimax_h3_config_schema",
+        "test_minimax_h3_math",
+        "test_minimax_h3_denoiser_abi",
+        "test_minimax_h3_conditioning",
+        "test_minimax_h3_fl2va_runtime",
+        "test_minimax_h3_ref2va_runtime",
+        "test_minimax_h3_vsa_layout",
+        "test_minimax_h3_vsa_cuda",
+        "test_minimax_h3_cuda_rng"
     )
     & cmake --build $BuildPath --parallel --target @TestTargets
     if ($LASTEXITCODE -ne 0) {
         throw "Native Windows test build failed with exit code $LASTEXITCODE"
     }
     & ctest --test-dir $BuildPath --output-on-failure `
-        -R "^(test_dynamic_library|test_backend_loader|test_cli_args)$"
+        -R "^(test_dynamic_library|test_backend_loader|test_bundle_format|test_bundle_sha256|test_cli_args|test_cli_args_runtime_only|test_windows_utf8_argv|test_windows_h3_installer|test_windows_media|test_model_plugin_loader|test_pipeline_api|test_trtmc_io|test_minimax_h3_config_schema|test_minimax_h3_math|test_minimax_h3_denoiser_abi|test_minimax_h3_conditioning|test_minimax_h3_fl2va_runtime|test_minimax_h3_ref2va_runtime|test_minimax_h3_vsa_layout|test_minimax_h3_vsa_cuda|test_minimax_h3_cuda_rng)$"
     if ($LASTEXITCODE -ne 0) {
         throw "Native Windows tests failed with exit code $LASTEXITCODE"
     }

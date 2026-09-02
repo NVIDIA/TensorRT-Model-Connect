@@ -28,15 +28,58 @@
 //   - test_helpers.h    : TempDirGuard
 //   No TRT, GPU, or CUDA required.
 
-#include "test_helpers.h"
 #include "trtmc/trtmc_io.hpp"
 
+#include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
+
+namespace trtmc_test {
+
+// This test target also runs on Windows, while the shared integration-test
+// helper intentionally depends on POSIX nftw/mkdtemp. Keep the small IO test
+// self-contained and constrain recursive cleanup to the OS temp directory.
+class TempDirGuard {
+  public:
+    TempDirGuard() {
+        temp_root_ = std::filesystem::temp_directory_path().lexically_normal();
+        const auto nonce = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            path_ = temp_root_ /
+                    ("trtmc_io_test_" + std::to_string(nonce) + "_" + std::to_string(attempt));
+            std::error_code ec;
+            if (std::filesystem::create_directory(path_, ec))
+                return;
+        }
+        throw std::runtime_error("failed to create a temporary IO test directory");
+    }
+
+    ~TempDirGuard() {
+        if (!path_.empty() && path_.parent_path().lexically_normal() == temp_root_) {
+            std::error_code ec;
+            std::filesystem::remove_all(path_, ec);
+        }
+    }
+
+    std::string path() const { return path_.string(); }
+    TempDirGuard(const TempDirGuard&) = delete;
+    TempDirGuard& operator=(const TempDirGuard&) = delete;
+
+  private:
+    std::filesystem::path temp_root_;
+    std::filesystem::path path_;
+};
+
+} // namespace trtmc_test
 
 static int failures = 0;
 
@@ -79,7 +122,7 @@ static bool test_io_write_read_roundtrip() {
         return false;
     }
 
-    if (result.sample_rate != ar.sample_rate) {
+    if (result.sample_rate != ar.sample_rate || result.channels != 1) {
         std::cerr << "io_write_read_roundtrip: sample_rate mismatch " << result.sample_rate
                   << " vs " << ar.sample_rate << '\n';
         return false;
@@ -239,6 +282,120 @@ static bool test_io_num_samples_field() {
     return result.num_samples == 4 && result.samples.size() == 4;
 }
 
+// Intention: write_wav emits standard interleaved IEEE-float stereo metadata
+//            and keeps read_wav's historical mono/downmix behavior.
+// Preconditions:  32 kHz stereo AudioResult with two sample frames
+// Postconditions: WAV header/payload preserve channel order; read_wav downmixes
+static bool test_io_stereo_interleaved_header_and_downmix() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "stereo.wav").string();
+
+    trtmc::AudioResult ar;
+    ar.samples = {0.25F, -0.25F, 0.75F, 0.25F};
+    ar.num_samples = static_cast<int32_t>(ar.samples.size());
+    ar.sample_rate = 32000;
+    ar.channels = 2;
+
+    try {
+        trtmc::io::write_wav(ar, path);
+    } catch (const std::exception& e) {
+        std::cerr << "io_stereo_interleaved: write threw: " << e.what() << '\n';
+        return false;
+    }
+
+    std::array<unsigned char, 60> bytes{};
+    std::ifstream input(path, std::ios::binary);
+    if (!input.read(reinterpret_cast<char*>(bytes.data()),
+                    static_cast<std::streamsize>(bytes.size())))
+        return false;
+
+    const auto read_i16 = [&bytes](std::size_t offset) {
+        int16_t value = 0;
+        std::memcpy(&value, bytes.data() + offset, sizeof(value));
+        return value;
+    };
+    const auto read_u32 = [&bytes](std::size_t offset) {
+        uint32_t value = 0;
+        std::memcpy(&value, bytes.data() + offset, sizeof(value));
+        return value;
+    };
+    if (std::memcmp(bytes.data(), "RIFF", 4) != 0 ||
+        std::memcmp(bytes.data() + 8, "WAVE", 4) != 0 ||
+        std::memcmp(bytes.data() + 12, "fmt ", 4) != 0 ||
+        std::memcmp(bytes.data() + 36, "data", 4) != 0 || read_u32(4) != 52U || read_i16(20) != 3 ||
+        read_i16(22) != 2 || read_u32(24) != 32000U || read_u32(28) != 256000U ||
+        read_i16(32) != 8 || read_i16(34) != 32 || read_u32(40) != 16U)
+        return false;
+
+    std::array<float, 4> payload{};
+    std::memcpy(payload.data(), bytes.data() + 44, sizeof(payload));
+    for (std::size_t i = 0; i < payload.size(); ++i) {
+        if (std::abs(payload[i] - ar.samples[i]) > 1e-6F)
+            return false;
+    }
+
+    trtmc::AudioResult interleaved;
+    try {
+        interleaved = trtmc::io::read_wav_interleaved(path);
+    } catch (...) {
+        return false;
+    }
+    if (interleaved.channels != 2 || interleaved.sample_rate != 32000 ||
+        interleaved.num_samples != 4 || interleaved.samples != ar.samples)
+        return false;
+
+    trtmc::AudioResult downmixed;
+    try {
+        downmixed = trtmc::io::read_wav(path);
+    } catch (...) {
+        return false;
+    }
+    return downmixed.channels == 1 && downmixed.sample_rate == 32000 &&
+           downmixed.num_samples == 2 && downmixed.samples.size() == 2 &&
+           std::abs(downmixed.samples[0]) < 1e-6F && std::abs(downmixed.samples[1] - 0.5F) < 1e-6F;
+}
+
+// Intention: reject malformed multichannel metadata before producing a WAV.
+// Preconditions:  non-empty AudioResult with invalid channels/sample layout
+// Postconditions: std::runtime_error is thrown for each invalid contract
+static bool test_io_invalid_interleaved_metadata_throws() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "invalid.wav").string();
+
+    trtmc::AudioResult ar;
+    ar.samples = {0.0F, 0.1F, 0.2F};
+    ar.num_samples = 3;
+    ar.sample_rate = 32000;
+    ar.channels = 0;
+    try {
+        trtmc::io::write_wav(ar, path);
+        return false;
+    } catch (const std::runtime_error&) {
+    } catch (...) {
+        return false;
+    }
+
+    ar.channels = 2;
+    try {
+        trtmc::io::write_wav(ar, path);
+        return false;
+    } catch (const std::runtime_error&) {
+    } catch (...) {
+        return false;
+    }
+
+    ar.samples = {0.0F, 0.1F};
+    ar.sample_rate = 0;
+    try {
+        trtmc::io::write_wav(ar, path);
+        return false;
+    } catch (const std::runtime_error&) {
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 int main() {
     bool all_passed = true;
     std::cout << "test_trtmc_io:" << std::endl;
@@ -256,6 +413,8 @@ int main() {
     run("io_write_bad_path_throws", test_io_write_bad_path_throws);
     run("io_read_missing_throws", test_io_read_missing_throws);
     run("io_num_samples_field", test_io_num_samples_field);
+    run("io_stereo_interleaved_header_and_downmix", test_io_stereo_interleaved_header_and_downmix);
+    run("io_invalid_interleaved_metadata_throws", test_io_invalid_interleaved_metadata_throws);
 
     if (all_passed) {
         std::cout << "test_trtmc_io passed" << std::endl;

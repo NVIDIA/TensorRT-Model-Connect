@@ -15,7 +15,15 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .config import native_plan_filenames
+from .config import (
+    CANVAS_MAX_ASPECT_RATIO,
+    CANVAS_MAX_PIXELS,
+    CANVAS_MIN_ASPECT_RATIO,
+    CANVAS_MULTIPLE,
+    CANVAS_SHORT_EDGE,
+    SOL_ENGINE_1344X768_124_TO_345F,
+    native_plan_filenames,
+)
 
 CHECKPOINT_REVISION = "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
 CHECKPOINT_REPOSITORY = "MiniMaxAI/MiniMax-H3"
@@ -37,7 +45,12 @@ DIFFUSERS_REFERENCE_ARCHIVE_SHA256 = (
 DIFFUSERS_REFERENCE_CONTAINER_ROOT = "/work/reference-private"
 PLAN_FILENAMES = native_plan_filenames(first_block_cache=False)
 FIRST_BLOCK_CACHE_PLAN_FILENAMES = native_plan_filenames(first_block_cache=True)
+FASTH3_SEGMENTED_PLAN_FILENAMES = native_plan_filenames(
+    first_block_cache=False, segmented_vsa=True
+)
 _REQUIRED_SNAPSHOT_FILES = (
+    "audio_vae/config.json",
+    "audio_vae/diffusion_pytorch_model.safetensors",
     "modular_model_index.json",
     "scheduler/scheduler_config.json",
     "text_encoder/model.safetensors.index.json",
@@ -105,12 +118,19 @@ def _validate_record_object(record: object, label: str) -> tuple[int, str]:
     return expected_size, expected_sha
 
 
-def plan_filenames_for_profile(profile) -> tuple[str, ...]:
-    return native_plan_filenames(first_block_cache=profile.first_block_cache)
+def plan_filenames_for_profile(profile, *, segmented_vsa: bool = False) -> tuple[str, ...]:
+    return native_plan_filenames(
+        first_block_cache=profile.first_block_cache, segmented_vsa=segmented_vsa
+    )
 
 
 def validate_workspace_limit_bytes(
-    record: object, *, profile=None, first_block_cache: bool | None = None
+    record: object,
+    *,
+    profile=None,
+    first_block_cache: bool | None = None,
+    segmented_vsa: bool = False,
+    additional_plan_filenames: tuple[str, ...] = (),
 ) -> dict[str, int]:
     """Validate the exact per-plan TensorRT tactic-workspace provenance."""
 
@@ -121,7 +141,22 @@ def validate_workspace_limit_bytes(
     selected = False if first_block_cache is None else first_block_cache
     if not isinstance(selected, bool):
         raise ValueError("MiniMax-H3 first_block_cache selector must be a boolean")
-    expected = native_plan_filenames(first_block_cache=selected)
+    if (
+        not isinstance(additional_plan_filenames, tuple)
+        or any(
+            not isinstance(filename, str) or not filename
+            for filename in additional_plan_filenames
+        )
+    ):
+        raise ValueError("MiniMax-H3 additional plan filenames must be a tuple of names")
+    expected = (
+        *native_plan_filenames(
+            first_block_cache=selected, segmented_vsa=segmented_vsa
+        ),
+        *additional_plan_filenames,
+    )
+    if len(set(expected)) != len(expected):
+        raise ValueError("MiniMax-H3 workspace plan filenames must be unique")
     if not isinstance(record, dict) or set(record) != set(expected):
         raise ValueError(
             "MiniMax-H3 workspace_limit_bytes must cover exactly the selected native plans"
@@ -621,6 +656,7 @@ def _validate_build_receipt_metadata(
     build_helper: Path,
     source_revision: str,
     profile,
+    segmented_vsa: bool = False,
 ) -> tuple[str, dict, dict]:
     if not isinstance(receipt, dict):
         raise ValueError("MiniMax-H3 build receipt must be a JSON object")
@@ -636,8 +672,12 @@ def _validate_build_receipt_metadata(
     for key, value in expected.items():
         if receipt.get(key) != value:
             raise ValueError(f"MiniMax-H3 build receipt does not match current {key}")
-    selected_plans = plan_filenames_for_profile(profile)
-    validate_workspace_limit_bytes(receipt.get("workspace_limit_bytes"), profile=profile)
+    selected_plans = plan_filenames_for_profile(profile, segmented_vsa=segmented_vsa)
+    validate_workspace_limit_bytes(
+        receipt.get("workspace_limit_bytes"),
+        profile=profile,
+        segmented_vsa=segmented_vsa,
+    )
     snapshot_record = validate_checkpoint_snapshot_record(receipt.get("checkpoint_snapshot"))
     components = receipt.get("components")
     if not isinstance(components, dict) or set(components) != set(selected_plans):
@@ -660,17 +700,19 @@ def validate_build_receipt(
     source_revision: str,
     profile,
     hash_files: bool,
+    segmented_vsa: bool = False,
 ) -> tuple[str, dict, dict, dict]:
     source_sha, components, recorded_snapshot = _validate_build_receipt_metadata(
         receipt,
         build_helper=build_helper,
         source_revision=source_revision,
         profile=profile,
+        segmented_vsa=segmented_vsa,
     )
     current_snapshot = checkpoint_snapshot_record(snapshot)
     if recorded_snapshot != current_snapshot:
         raise ValueError("MiniMax-H3 build receipt does not match current checkpoint_snapshot")
-    for filename in plan_filenames_for_profile(profile):
+    for filename in plan_filenames_for_profile(profile, segmented_vsa=segmented_vsa):
         validate_record(
             plans_dir / filename,
             components.get(filename),
@@ -691,14 +733,16 @@ def validate_component_build_receipt(
     source_revision: str,
     profile,
     hash_file: bool,
+    segmented_vsa: bool = False,
 ) -> tuple[str, dict, dict]:
-    if component not in plan_filenames_for_profile(profile):
+    if component not in plan_filenames_for_profile(profile, segmented_vsa=segmented_vsa):
         raise ValueError(f"Unknown MiniMax-H3 native component: {component}")
     source_sha, components, snapshot_record = _validate_build_receipt_metadata(
         receipt,
         build_helper=build_helper,
         source_revision=source_revision,
         profile=profile,
+        segmented_vsa=segmented_vsa,
     )
     component_record = components[component]
     validate_record(artifact, component_record, component, hash_file=hash_file)
@@ -757,8 +801,23 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         "source_revision": source_revision,
         "builder_source_sha256": builder_source_sha256(),
         "context_parallel_size": 1,
-        "padded_sequence_length": 38247,
+        "padded_sequence_length": SOL_ENGINE_1344X768_124_TO_345F.padded_sequence_length,
+        "packed_sequence_length_min": (
+            SOL_ENGINE_1344X768_124_TO_345F.min_sequence_length
+        ),
+        "packed_sequence_length_opt": (
+            SOL_ENGINE_1344X768_124_TO_345F.opt_sequence_length
+        ),
+        "packed_sequence_length_max": SOL_ENGINE_1344X768_124_TO_345F.sequence_length,
+        "canvas_multiple": CANVAS_MULTIPLE,
+        "canvas_short_edge": CANVAS_SHORT_EDGE,
+        "canvas_max_pixels": CANVAS_MAX_PIXELS,
+        "min_aspect_ratio": CANVAS_MIN_ASPECT_RATIO,
+        "max_aspect_ratio": CANVAS_MAX_ASPECT_RATIO,
         "vae_tile_batch": 28,
+        "vae_tile_batch_min": 16,
+        "vae_tile_batch_opt": 28,
+        "vae_tile_batch_max": 33,
     }
     for key, value in expected.items():
         if config.get(key) != value:
@@ -767,10 +826,22 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
     if not isinstance(inventory_sha, str) or _SHA256.fullmatch(inventory_sha) is None:
         raise ValueError("MiniMax-H3 bundle config has an invalid checkpoint inventory SHA256")
     cache_mode = config.get("denoiser_cache_mode", "monolithic")
-    if cache_mode not in ("monolithic", "first_block"):
+    if cache_mode not in ("monolithic", "first_block", "segmented_vsa"):
         raise ValueError("MiniMax-H3 bundle config has an invalid denoiser cache mode")
     first_block_cache = cache_mode == "first_block"
-    selected_plans = native_plan_filenames(first_block_cache=first_block_cache)
+    segmented_vsa = cache_mode == "segmented_vsa"
+    selected_plans = native_plan_filenames(
+        first_block_cache=first_block_cache,
+        segmented_vsa=segmented_vsa,
+    )
+    additional_plan_filenames: tuple[str, ...] = ()
+    if config.get("ref2va_supported") is True:
+        from .ref2va_bundle_contract import REF2VA_PLAN_SECTIONS
+
+        additional_plan_filenames = tuple(
+            filename for _component, filename, _section in REF2VA_PLAN_SECTIONS
+        )
+        selected_plans = (*selected_plans, *additional_plan_filenames)
     plan_sha = config.get("plan_sha256")
     if not isinstance(plan_sha, dict) or set(plan_sha) != set(selected_plans):
         raise ValueError("MiniMax-H3 bundle config must identify exactly the selected native plans")
@@ -783,7 +854,23 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         raise ValueError("MiniMax-H3 bundle config has an invalid first_block_cache flag")
     if config.get("first_block_cache", False) != first_block_cache:
         raise ValueError("MiniMax-H3 bundle cache mode and profile flag disagree")
+    if segmented_vsa:
+        fast_h3 = config.get("fast_h3")
+        vsa = config.get("vsa")
+        if (
+            config.get("attention_mode") != "native_vsa"
+            or not isinstance(fast_h3, dict)
+            or fast_h3.get("adapter_gate_tensor_count") != 50
+            or not isinstance(vsa, dict)
+            or vsa.get("implementation") != "native_cuda_segmented"
+            or vsa.get("segment_count") != 51
+            or vsa.get("attention_calls_per_forward") != 50
+        ):
+            raise ValueError("MiniMax-H3 segmented VSA bundle contract is incomplete")
     validate_workspace_limit_bytes(
-        config.get("workspace_limit_bytes"), first_block_cache=first_block_cache
+        config.get("workspace_limit_bytes"),
+        first_block_cache=first_block_cache,
+        segmented_vsa=segmented_vsa,
+        additional_plan_filenames=additional_plan_filenames,
     )
     return config

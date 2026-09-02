@@ -145,21 +145,34 @@ void TrtModuleImpl::validate_initial_external_bindings(
                                         "' must be bound after module creation");
         }
 
-        const auto dims = engine->getTensorShape(binding.tensor_name.c_str());
-        if (dims_are_dynamic(dims)) {
-            throw std::invalid_argument("tensor '" + binding.tensor_name +
-                                        "' is dynamic; prebinding requires a static shape");
+        auto dims = engine->getTensorShape(binding.tensor_name.c_str());
+        const bool is_input =
+            engine->getTensorIOMode(binding.tensor_name.c_str()) == nvinfer1::TensorIOMode::kINPUT;
+        // Dynamic inputs have a concrete profile maximum. Dynamic outputs are
+        // capacity-checked later, after maximum input shapes have been applied
+        // and TensorRT can infer their maximum output shapes.
+        if (dims_are_dynamic(dims) && is_input) {
+            if (profile_idx_ < 0 || engine->getNbOptimizationProfiles() <= profile_idx_)
+                throw std::invalid_argument("dynamic tensor '" + binding.tensor_name +
+                                            "' has no selected optimization profile");
+            dims = engine->getProfileShape(binding.tensor_name.c_str(), profile_idx_,
+                                           nvinfer1::OptProfileSelector::kMAX);
         }
         std::vector<int64_t> shape;
-        const auto required_bytes = compute_alloc_bytes(
-            dims, from_trt_dtype(engine->getTensorDataType(binding.tensor_name.c_str())), shape);
-        if (binding.capacity_bytes < required_bytes) {
+        const auto required_bytes =
+            dims_are_dynamic(dims)
+                ? std::size_t{0}
+                : compute_alloc_bytes(
+                      dims, from_trt_dtype(engine->getTensorDataType(binding.tensor_name.c_str())),
+                      shape);
+        if (required_bytes > 0 && binding.capacity_bytes < required_bytes) {
             throw std::invalid_argument("buffer for '" + binding.tensor_name + "' has " +
                                         std::to_string(binding.capacity_bytes) +
                                         " bytes; expected at least " +
                                         std::to_string(required_bytes));
         }
         initial_external_bindings_.emplace(binding.tensor_name, binding.device_ptr);
+        initial_external_binding_capacities_.emplace(binding.tensor_name, binding.capacity_bytes);
     }
 }
 
@@ -347,6 +360,14 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
 
     const auto external = initial_external_bindings_.find(name);
     if (external != initial_external_bindings_.end()) {
+        const auto capacity = initial_external_binding_capacities_.find(name);
+        const auto available = capacity == initial_external_binding_capacities_.end()
+                                   ? std::size_t{0}
+                                   : capacity->second;
+        if (available < nbytes)
+            throw std::invalid_argument("buffer for '" + name + "' has " +
+                                        std::to_string(available) + " bytes; expected at least " +
+                                        std::to_string(nbytes));
         entry.d_ptr = external->second;
         entry.is_external = true;
     } else if (should_allocate_input(name, nbytes)) {
@@ -412,6 +433,14 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
 
         const auto external = initial_external_bindings_.find(name);
         if (external != initial_external_bindings_.end()) {
+            const auto capacity = initial_external_binding_capacities_.find(name);
+            const auto available = capacity == initial_external_binding_capacities_.end()
+                                       ? std::size_t{0}
+                                       : capacity->second;
+            if (available < nbytes)
+                throw std::invalid_argument("buffer for '" + name + "' has " +
+                                            std::to_string(available) +
+                                            " bytes; expected at least " + std::to_string(nbytes));
             entry.d_ptr = external->second;
             entry.is_external = true;
         } else if (nbytes > 0) {
@@ -452,6 +481,7 @@ void TrtModuleImpl::allocate_buffers(nvinfer1::ICudaEngine* engine) {
         set_dynamic_input_shapes(engine, num_io, nvinfer1::OptProfileSelector::kOPT);
 
     initial_external_bindings_.clear();
+    initial_external_binding_capacities_.clear();
     cudaStreamSynchronize(stream_);
 }
 

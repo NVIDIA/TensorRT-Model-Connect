@@ -8,7 +8,6 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^third_party/fastvideo/windows-h3-vsa\.patch$
         stages: [pre-commit]
       - id: end-of-file-fixer
         stages: [pre-commit]

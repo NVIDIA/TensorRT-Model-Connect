@@ -60,6 +60,8 @@ option(TRTMC_BUILD_BENCHMARKS "Build benchmark executables" ON)
 option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial sampler" ON)
 option(TRTMC_DISTRIBUTABLE_BUILD
        "Build distributable artifacts without embedding source/build paths" OFF)
+option(TRTMC_RUNTIME_ONLY_CLI
+       "Build the CLI without Python-backed build/graph commands or subprocess code" OFF)
 set(TRTMC_RUNTIME_MODELS "" CACHE STRING
   "Semicolon-separated runtime model plugins to build; empty builds every model.")
 set(TRTMC_MODEL_PROOF_MODEL "" CACHE STRING
@@ -844,8 +846,21 @@ endif()
 add_executable(trtmc
   src/cli/args.cpp
   src/cli/main.cpp
+  src/cli/windows_media.cpp
 )
+if(TRTMC_RUNTIME_ONLY_CLI)
+  target_compile_definitions(trtmc PRIVATE TRTMC_RUNTIME_ONLY_CLI=1)
+endif()
 target_link_libraries(trtmc PRIVATE trtmc_core Threads::Threads)
+if(WIN32)
+  set(_trtmc_windows_utf8_manifest
+      "${PROJECT_SOURCE_DIR}/src/cli/trtmc_windows_utf8.manifest")
+  target_sources(trtmc PRIVATE
+    src/cli/windows_utf8_argv.cpp
+    ${_trtmc_windows_utf8_manifest}
+  )
+  target_link_libraries(trtmc PRIVATE mfplat mfreadwrite mfuuid ole32)
+endif()
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_include_directories(trtmc SYSTEM PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/stb
@@ -860,6 +875,32 @@ if(NOT WIN32)
     BUILD_RPATH_USE_ORIGIN TRUE
     INSTALL_RPATH "\$ORIGIN"
   )
+endif()
+
+if(WIN32)
+  add_library(trtmc_windows_h3_installer_support STATIC
+    src/installer/windows_h3_installer.cpp
+  )
+  target_include_directories(trtmc_windows_h3_installer_support
+    PUBLIC ${PROJECT_SOURCE_DIR}/src
+  )
+  set_target_properties(trtmc_windows_h3_installer_support PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+  )
+  target_link_libraries(trtmc_windows_h3_installer_support PRIVATE bcrypt)
+  target_compile_options(trtmc_windows_h3_installer_support PRIVATE /W4 /WX)
+
+  add_executable(minimax_h3_setup WIN32
+    src/installer/windows_h3_setup_main.cpp
+  )
+  set_target_properties(minimax_h3_setup PROPERTIES OUTPUT_NAME MiniMaxH3Setup)
+  set_target_properties(minimax_h3_setup PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+  )
+  target_link_libraries(minimax_h3_setup PRIVATE
+    trtmc_windows_h3_installer_support advapi32 ole32 shell32 user32
+  )
+  target_compile_options(minimax_h3_setup PRIVATE /W4 /WX)
 endif()
 
 if(TRTMC_BUILD_BENCHMARKS)
@@ -1057,6 +1098,21 @@ function(trtmc_add_model_manifest_tests)
       if(_trtmc_link_targets)
         target_link_libraries(${_trtmc_test_name} PRIVATE ${_trtmc_link_targets})
       endif()
+      if(WIN32)
+        # Model DSOs intentionally live in per-model subdirectories. Make
+        # CTest apply their search paths to every child independently; relying
+        # on a parent shell's PATH makes multi-test Windows runs order-sensitive.
+        set(_trtmc_test_path_modifications
+          "PATH=path_list_prepend:${CMAKE_BINARY_DIR}")
+        foreach(_trtmc_link_target IN LISTS _trtmc_link_targets)
+          if(TARGET ${_trtmc_link_target})
+            list(APPEND _trtmc_test_path_modifications
+              "PATH=path_list_prepend:$<TARGET_FILE_DIR:${_trtmc_link_target}>")
+          endif()
+        endforeach()
+        set_tests_properties(${_trtmc_test_name} PROPERTIES
+          ENVIRONMENT_MODIFICATION "${_trtmc_test_path_modifications}")
+      endif()
 
       _trtmc_manifest_csv_to_list("${_trtmc_extra_sources_csv}" _trtmc_extra_sources)
       foreach(_trtmc_extra_source IN LISTS _trtmc_extra_sources)
@@ -1073,6 +1129,7 @@ endfunction()
 
 # Bundle / format
 trtmc_add_test(test_bundle_format)
+trtmc_add_test(test_bundle_sha256)
 trtmc_add_test(test_bundle_materialization)
 trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
@@ -1124,6 +1181,28 @@ trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
+if(TRTMC_RUNTIME_ONLY_CLI)
+  trtmc_add_test(test_cli_args_runtime_only)
+  target_sources(test_cli_args_runtime_only PRIVATE src/cli/args.cpp)
+  target_compile_definitions(test_cli_args_runtime_only PRIVATE TRTMC_RUNTIME_ONLY_CLI=1)
+endif()
+if(WIN32)
+  trtmc_add_test(test_windows_utf8_argv)
+  target_sources(test_windows_utf8_argv PRIVATE
+    src/cli/windows_utf8_argv.cpp
+    ${_trtmc_windows_utf8_manifest}
+  )
+  trtmc_add_test(test_windows_media)
+  target_sources(test_windows_media PRIVATE src/cli/windows_media.cpp)
+  target_link_libraries(test_windows_media PRIVATE mfplat mfreadwrite mfuuid ole32)
+  trtmc_add_test(test_windows_h3_installer)
+  set_target_properties(test_windows_h3_installer PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+  )
+  target_link_libraries(test_windows_h3_installer PRIVATE
+    trtmc_windows_h3_installer_support
+  )
+endif()
 trtmc_add_test(test_jsonl_dataset_and_output
   EXTRA_INCLUDES ${_trtmc_nlohmann_json_include}
 )
@@ -1283,6 +1362,12 @@ install(DIRECTORY include/trtmc/
 install(TARGETS trtmc
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+if(TARGET minimax_h3_setup)
+  install(TARGETS minimax_h3_setup
+    RUNTIME DESTINATION .
+  )
+endif()
 
 if(TARGET trtmc_benchmark_worker)
   install(TARGETS trtmc_benchmark_worker

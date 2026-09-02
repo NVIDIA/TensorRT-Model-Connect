@@ -13,14 +13,46 @@ from types import SimpleNamespace
 import pytest
 
 from tensorrt_model_connect import trt_compat
+from tensorrt_model_connect.families.minimax_h3 import checkpoint
 from tensorrt_model_connect.families.minimax_h3 import staged_build
 from tensorrt_model_connect.families.minimax_h3.plugin import plugin
 from tests.builder.conftest import read_bundle_file
 
 
+SOURCE_REVISION = "a" * 40
+
+
+@pytest.fixture(autouse=True)
+def _source_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRTMC_MINIMAX_H3_SOURCE_REVISION", SOURCE_REVISION)
+
+
 class _StreamWriterBase:
     def __init__(self) -> None:
         pass
+
+
+def _write_audio_vae_config(model: Path) -> None:
+    path = model / "audio_vae" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "encoder_rates": [2, 4, 4, 5, 5],
+                "latent_channels": 32,
+                "latent_dim": 2048,
+                "decoder_dim": 1024,
+                "decoder_rates": [5, 5, 2, 2, 2, 2, 2],
+                "decoder_kernel_sizes": [9, 9, 4, 4, 4, 4, 4],
+                "resblock_kernel_sizes": [3, 7, 11],
+                "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                "sampling_rate": 32000,
+                "latents_mean": [0.0] * 32,
+                "latents_std": [1.0] * 32,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_plan_writer_streams_memoryview_and_cleans_failed_temporary(
@@ -80,13 +112,14 @@ def test_plan_writer_streams_memoryview_and_cleans_failed_temporary(
     assert not list(tmp_path.glob(".engine.plan.tmp.*"))
 
 
-def test_staged_build_uses_six_fresh_children_resumes_and_sanitizes_bundle(
+def test_staged_build_uses_seven_fresh_children_resumes_and_sanitizes_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model = tmp_path / "model"
     tokenizer = model / "tokenizer" / "tokenizer.json"
     tokenizer.parent.mkdir(parents=True)
     tokenizer.write_text('{"model": {}}', encoding="utf-8")
+    _write_audio_vae_config(model)
     shard = model / "transformer" / "weights.safetensors"
     shard.parent.mkdir(parents=True)
     shard.write_bytes(b"aaaa")
@@ -121,6 +154,33 @@ def test_staged_build_uses_six_fresh_children_resumes_and_sanitizes_bundle(
         "mode": "staged",
         "weight_streaming_budget_bytes": 32 << 30,
     }
+    assert config["checkpoint_revision"] == "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
+    assert config["source_revision"] == SOURCE_REVISION
+    assert len(config["builder_source_sha256"]) == 64
+    assert len(config["checkpoint_inventory_sha256"]) == 64
+    assert config["workspace_limit_bytes"] == {
+        filename: 16 << 30 for _component, filename, _section in staged_build._COMPONENTS
+    }
+    assert (
+        config["num_frames_min"],
+        config["num_frames_opt"],
+        config["num_frames_max"],
+    ) == (124, 124, 345)
+    assert (
+        config["video_rows_min"],
+        config["video_rows_opt"],
+        config["video_rows_max"],
+    ) == (21312, 37296, 108576)
+    assert (
+        config["audio_rows_min"],
+        config["audio_rows_opt"],
+        config["audio_rows_max"],
+    ) == (414, 414, 1150)
+    assert (
+        config["packed_sequence_length_min"],
+        config["packed_sequence_length_opt"],
+        config["packed_sequence_length_max"],
+    ) == (21727, 37838, 112367)
     assert set(config["plan_sha256"]) == {
         item[1] for item in staged_build._COMPONENTS
     }
@@ -132,7 +192,6 @@ def test_staged_build_uses_six_fresh_children_resumes_and_sanitizes_bundle(
     assert str(tmp_path).lower() not in serialized
     for forbidden in (
         "hostname",
-        "source_revision",
         "gpu_preflight",
         "tensorrt_build_environment",
         "uuid",
@@ -166,6 +225,7 @@ def test_staged_receipt_contains_only_settings_and_plan_digests(
     tokenizer = model / "tokenizer" / "tokenizer.json"
     tokenizer.parent.mkdir(parents=True)
     tokenizer.write_text("{}", encoding="utf-8")
+    _write_audio_vae_config(model)
     output = tmp_path / "h3.bundle"
 
     def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
@@ -187,7 +247,10 @@ def test_staged_receipt_contains_only_settings_and_plan_digests(
     assert set(receipt["build_identity"]) == {
         "model_metadata_sha256",
         "checkpoint_shards",
-        "builder_sha256",
+        "checkpoint_revision",
+        "checkpoint_inventory_sha256",
+        "source_revision",
+        "builder_source_sha256",
         "backend",
         "trt_version",
         "trt_abi",
@@ -238,4 +301,131 @@ def test_plugin_routes_only_fixed_bf16_single_gpu_profile(
             {},
             precision="bf16",
             parallel_config=SimpleNamespace(mode="tensor_parallel"),
+        )
+
+
+def test_fast_h3_staged_bundle_is_segmented_path_free_and_four_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "model"
+    tokenizer = model / "tokenizer" / "tokenizer.json"
+    tokenizer.parent.mkdir(parents=True)
+    tokenizer.write_text("{}", encoding="utf-8")
+    _write_audio_vae_config(model)
+    adapter = tmp_path / "adapter_model.safetensors"
+    adapter.write_bytes(b"adapter")
+    output = tmp_path / "fast-h3.bundle"
+    calls: list[list[str]] = []
+    adapter_metadata = {
+        "schema_version": 1,
+        "adapter_sha256": "a" * 64,
+        "adapter_bytes": 5_339_117_712,
+        "adapter_tensor_count": 856,
+        "adapter_low_rank_tensor_count": 724,
+        "adapter_diff_tensor_count": 82,
+        "adapter_set_weight_tensor_count": 50,
+        "adapter_gate_tensor_count": 50,
+        "adapter_partition_tensor_counts": {"adaln_precompute": 156, "denoiser": 700},
+        "adapter_base_revision": "b" * 40,
+        "adapter_finetuned_revision": "c" * 40,
+    }
+    identity = SimpleNamespace(bundle_metadata=lambda: dict(adapter_metadata))
+
+    def run(command, *, check):
+        assert check is True
+        calls.append(list(command))
+        component = command[command.index("--component") + 1]
+        assert command[command.index("--fast-h3-adapter") + 1] == str(adapter.resolve())
+        assert "--vsa-plugin-library" not in command
+        Path(command[command.index("--output") + 1]).write_bytes(component.encode())
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(staged_build.subprocess, "run", run)
+    monkeypatch.setattr(staged_build, "_adapter_target_partitions", lambda _profile: {"all": ()})
+    monkeypatch.setattr(checkpoint, "validate_fast_h3_adapter", lambda *_args: identity)
+    monkeypatch.setattr(staged_build.trt_compat, "configure_backend", lambda **_kwargs: None)
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_abi", lambda _version: "1.6")
+
+    assert staged_build.build_staged_bundle(
+        model,
+        output,
+        fast_h3_adapter=adapter,
+    ) == output
+    assert [call[call.index("--component") + 1] for call in calls] == [
+        item[0] for item in staged_build._FASTH3_COMPONENTS
+    ]
+
+    _header, sections = read_bundle_file(str(output))
+    config = json.loads(sections["config.json"])
+    assert config["num_inference_steps"] == 4
+    assert config["scheduler_grid_points"] == 5
+    assert config["transformer_forwards"] == 4
+    assert config["guidance_scale"] == 1.0
+    assert config["first_block_cache"] is False
+    assert config["denoiser_cache_mode"] == "segmented_vsa"
+    assert config["attention_mode"] == "native_vsa"
+    assert config["bundle_loading"]["lazy_sections"][3] == "denoiser_entry_plan"
+    assert config["bundle_loading"]["lazy_sections"][4] == (
+        "denoiser_transition_00_plan"
+    )
+    assert config["vsa"]["implementation"] == "native_cuda_segmented"
+    assert config["vsa"]["segment_count"] == 51
+    assert config["vsa"]["attention_calls_per_forward"] == 50
+    assert config["vsa"]["tensor_abi"]["attention_shape"] == [56, "S", 128]
+    assert config["vsa"]["packed_row_to_tile_slot_profile"] == [21727, 37838, 112367]
+    assert config["vsa"]["prefix_valid_sizes_profile"] == [8, 9, 60]
+    assert config["vsa"]["video_valid_sizes_profile"] == [360, 660, 2080]
+    assert config["vsa"]["runtime_metadata_abi"]["packed_row_to_tile_slot"] == {
+        "dtype": "int32",
+        "shape": ["S"],
+        "profile": [21727, 37838, 112367],
+    }
+    assert config["padded_sequence_length"] == 112367
+    assert (
+        config["vae_tile_batch_min"],
+        config["vae_tile_batch_opt"],
+        config["vae_tile_batch_max"],
+    ) == (16, 28, 33)
+    assert str(tmp_path).lower() not in json.dumps(config).lower()
+
+
+def test_plugin_forces_fast_h3_staged_build_to_segmented_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        staged_build,
+        "build_staged_bundle",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or Path(args[1]),
+    )
+    model = tmp_path / "model"
+    adapter = tmp_path / "adapter.safetensors"
+    adapter.write_bytes(b"adapter")
+    raw = {
+        "fast_h3_adapter": adapter,
+        "num_inference_steps": 4,
+    }
+
+    plugin.build_staged_bundle(
+        str(model),
+        str(tmp_path / "model.bundle"),
+        SimpleNamespace(raw=raw),
+        {"_model_dir": str(model)},
+        precision="bf16",
+        parallel_config=SimpleNamespace(mode="single"),
+    )
+
+    assert calls[0][1] == {
+        "verbose": False,
+        "fast_h3_adapter": adapter.resolve(),
+    }
+    with pytest.raises(ValueError, match="disable FirstBlockCache"):
+        plugin.build_staged_bundle(
+            str(model),
+            str(tmp_path / "invalid.bundle"),
+            SimpleNamespace(raw={**raw, "first_block_cache": True}),
+            {"_model_dir": str(model)},
+            precision="bf16",
+            parallel_config=SimpleNamespace(mode="single"),
         )

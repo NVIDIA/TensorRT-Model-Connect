@@ -11,9 +11,16 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 static int failures = 0;
 
@@ -27,6 +34,99 @@ static void check(bool condition, const char* name) {
 static bool contains(const std::vector<std::string>& values, const std::string& needle) {
     return std::find(values.begin(), values.end(), needle) != values.end();
 }
+
+#ifndef _WIN32
+static void set_test_environment(const char* name, const char* value) {
+    if (setenv(name, value, 1) != 0)
+        throw std::runtime_error(std::string("Unable to set test environment variable: ") + name);
+}
+
+static void unset_test_environment(const char* name) {
+    if (unsetenv(name) != 0)
+        throw std::runtime_error(std::string("Unable to unset test environment variable: ") + name);
+}
+#endif
+
+#ifdef _WIN32
+struct WindowsEnvironmentValue {
+    bool present{false};
+    std::wstring value;
+};
+
+static WindowsEnvironmentValue windows_environment_value(const wchar_t* name) {
+    std::vector<wchar_t> buffer(32768);
+    SetLastError(ERROR_SUCCESS);
+    const DWORD length =
+        GetEnvironmentVariableW(name, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length == 0) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_ENVVAR_NOT_FOUND)
+            return {};
+        if (error != ERROR_SUCCESS)
+            throw std::runtime_error("Unable to read Windows test environment variable");
+        return {true, {}};
+    }
+    if (length >= buffer.size())
+        throw std::runtime_error("Windows test environment variable is too large");
+    return {true, std::wstring(buffer.data(), length)};
+}
+
+class ScopedWindowsEnvironment final {
+  public:
+    ScopedWindowsEnvironment(const wchar_t* name, const wchar_t* value)
+        : name_(name), previous_(windows_environment_value(name)) {
+        if (!SetEnvironmentVariableW(name, value))
+            throw std::runtime_error("Unable to set Windows test environment variable");
+    }
+
+    ~ScopedWindowsEnvironment() {
+        SetEnvironmentVariableW(name_.c_str(),
+                                previous_.present ? previous_.value.c_str() : nullptr);
+    }
+
+  private:
+    std::wstring name_;
+    WindowsEnvironmentValue previous_;
+};
+
+static std::wstring current_test_executable() {
+    std::vector<wchar_t> buffer(32768);
+    const DWORD length =
+        GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length == 0 || length >= buffer.size())
+        throw std::runtime_error("Unable to locate the Windows test executable");
+    return std::wstring(buffer.data(), length);
+}
+
+static DWORD run_strict_loading_probe_child() {
+    ScopedWindowsEnvironment strict(L"TRTMC_MODEL_PLUGIN_STRICT", L"1");
+    ScopedWindowsEnvironment no_directory(L"TRTMC_MODEL_PLUGIN_DIR", nullptr);
+
+    const std::wstring executable = current_test_executable();
+    std::wstring command_line = L"\"" + executable + L"\" --strict-loading-probe";
+    std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+    mutable_command.push_back(L'\0');
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(executable.c_str(), mutable_command.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+        throw std::runtime_error("Unable to launch the Windows strict-loading probe");
+    }
+
+    const DWORD wait = WaitForSingleObject(process.hProcess, 30000);
+    DWORD exit_code = std::numeric_limits<DWORD>::max();
+    if (wait == WAIT_TIMEOUT) {
+        TerminateProcess(process.hProcess, exit_code);
+    } else if (wait != WAIT_OBJECT_0 || !GetExitCodeProcess(process.hProcess, &exit_code)) {
+        exit_code = std::numeric_limits<DWORD>::max();
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return exit_code;
+}
+#endif
 
 static const trtmc::ModelPluginInfo* first_index_entry() {
     for (const auto& entry : trtmc::runtime_model_plugin_index()) {
@@ -91,6 +191,13 @@ static void test_strict_loading_requires_an_explicit_directory() {
     if (sample == nullptr)
         return;
 
+#ifdef _WIN32
+    // /MT gives the test executable and trtmc_core.dll independent CRT
+    // environment caches. Launch a child after changing the process
+    // environment so every CRT observes the real inherited startup state.
+    check(run_strict_loading_probe_child() == 0,
+          "strict loading without a directory throws in a fresh process");
+#else
     const char* previous_strict = std::getenv("TRTMC_MODEL_PLUGIN_STRICT");
     const char* previous_dir = std::getenv("TRTMC_MODEL_PLUGIN_DIR");
     const std::string saved_strict = previous_strict ? previous_strict : "";
@@ -98,8 +205,8 @@ static void test_strict_loading_requires_an_explicit_directory() {
     const bool had_strict = previous_strict != nullptr;
     const bool had_dir = previous_dir != nullptr;
 
-    setenv("TRTMC_MODEL_PLUGIN_STRICT", "1", 1);
-    unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+    set_test_environment("TRTMC_MODEL_PLUGIN_STRICT", "1");
+    unset_test_environment("TRTMC_MODEL_PLUGIN_DIR");
     bool threw = false;
     try {
         trtmc::load_model_plugin_for_strategy(sample->runtime_strategy);
@@ -112,13 +219,14 @@ static void test_strict_loading_requires_an_explicit_directory() {
     check(threw, "strict loading without a directory throws");
 
     if (had_strict)
-        setenv("TRTMC_MODEL_PLUGIN_STRICT", saved_strict.c_str(), 1);
+        set_test_environment("TRTMC_MODEL_PLUGIN_STRICT", saved_strict.c_str());
     else
-        unsetenv("TRTMC_MODEL_PLUGIN_STRICT");
+        unset_test_environment("TRTMC_MODEL_PLUGIN_STRICT");
     if (had_dir)
-        setenv("TRTMC_MODEL_PLUGIN_DIR", saved_dir.c_str(), 1);
+        set_test_environment("TRTMC_MODEL_PLUGIN_DIR", saved_dir.c_str());
     else
-        unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+        unset_test_environment("TRTMC_MODEL_PLUGIN_DIR");
+#endif
 }
 
 static void test_load_index_owner_registers_only_that_model() {
@@ -143,7 +251,27 @@ static void test_load_index_owner_registers_only_that_model() {
     check(!saw_unrelated_model, "unrelated model plugin not registered");
 }
 
-int main() {
+int main(int argc, char** argv) {
+#ifdef _WIN32
+    if (argc == 2 && std::string(argv[1]) == "--strict-loading-probe") {
+        const auto* sample = first_index_entry();
+        if (sample == nullptr)
+            return 2;
+        try {
+            trtmc::load_model_plugin_for_strategy(sample->runtime_strategy);
+        } catch (const std::runtime_error& error) {
+            return std::string(error.what())
+                               .find("requires an explicit model plugin search path") !=
+                           std::string::npos
+                       ? 0
+                       : 3;
+        }
+        return 4;
+    }
+#else
+    (void)argc;
+    (void)argv;
+#endif
     test_index_maps_strategy_to_model();
     test_registry_does_not_eager_register_models();
     test_unknown_strategy_reports_clean_error();

@@ -1,184 +1,102 @@
 ---
-title: MiniMax H3 Windows hot benchmark
-description: Reproduce and audit same-process hot MiniMax H3 video-generation calls on Windows.
+title: MiniMax H3 Windows native benchmark
+description: Measure same-process ModelConnect H3 video-and-audio generation without a Python or third-party runtime.
 ---
 
-This benchmark measures the public MiniMax H3 video-generation call after one
-same-process warmup. It is intended to make a locally authorized Windows
-TensorRT-RTX result reproducible and auditable; it is not a portable latency
-guarantee or a substitute for visual-quality qualification.
+This contract measures the public `generate_video()` call inside the installed
+ModelConnect C++ runtime. It does not use a Python adapter, FastVideo, Triton,
+FFmpeg, a sidecar, or a subprocess. `trtmc.exe` keeps one pipeline alive for
+the warmup and measured iterations and writes only the last measured result as
+an MP4 through Windows Media Foundation.
 
-## Fixed workload
+## Timing boundary
 
-The launcher fixes the workload to:
+`--warmup 1 --benchmark 2` performs one unmeasured request followed by two
+measured requests in the same process with the same prompt and request. Before
+each timer starts, the CLI destroys the prior host result. Each sample begins
+immediately before `IPipeline::generate_video(request)` and ends when it
+returns synchronized host video and audio.
 
-- `MiniMaxAI/MiniMax-H3` using a locally authorized staged bundle;
-- batch size 1, seed 0, and the checked-in public prompt;
-- 1344x768 RGB output with 124 frames;
-- 50 denoising grid points;
-- one untimed pipeline warmup and two measured calls in one worker process;
-- FirstBlockCache threshold `0.30`;
-- retained denoiser head, tail, finish, and VAE engines;
-- a 24 GiB retained tail weight budget, capped by the bundle budget;
-- rotating denoiser/VAE execution contexts; and
-- CUDA graphs disabled because the tail uses weight streaming.
+Each `generation_ms` sample includes native conditioning, denoising, video VAE
+decode, audio VAE decode, device-to-host copies, and host result assembly. It
+excludes bundle/pipeline loading, the warmup, destruction of the prior host
+result, MP4 encoding, and file output.
 
-The threshold and retained budget are a Windows 64 GiB cohort baseline. They
-are not universally optimal. Keep them unchanged when reproducing that profile;
-report different values as a separate experiment.
+The CLI also reports:
 
-## Timing contract
+- `load_ms`: bundle validation, backend/plugin discovery, and pipeline load;
+- `input_decode_ms`: native image/video/audio reference decode and request
+  assembly;
+- `media_write_ms`: native H.264/AAC MP4 encoding and file output;
+- `total_ms`: the complete process-side operation after argument parsing,
+  including warmups and all measured calls; and
+- a sample summary with median, mean, minimum, and maximum generation time.
 
-For each measured sample, the timer starts immediately before the direct
-`IPipeline::generate_image` call and stops as soon as it returns the host float
-tensor. The measured call includes cache lookup, denoising, scheduler work,
-VAE decoding, device-to-host transfer, and host output assembly. On the staged
-64 GiB profile it also includes execution-context recreation.
+Do not compare `total_ms` with a same-process hot target. For an even number of
+samples the reported median is the mean of the two middle observations.
 
-The reported sample excludes:
+## Five-second T2VA workload
 
-- bundle hashing, validation, and pipeline construction;
-- the first untimed pipeline warmup, plan deserialization, and JIT preparation;
-- destruction of the previous host result;
-- the post-return non-finite scan;
-- GPU telemetry and video encoding; and
-- writing benchmark evidence to disk.
-
-Consequently, the complete command takes substantially longer than one reported
-sample. With the default `1 + 2` request sequence, expect one untimed request
-plus two hot requests. The launcher does not claim a storage-cold or system-cold
-start because prior processes and bundle hashing can populate OS caches. Two
-samples are enough to reproduce a specific run, but they are not a statistically
-stable production p50.
-
-## Build
-
-Start in an x64 Visual Studio developer PowerShell and build from a clean Git
-checkout. CUDA and TensorRT-RTX must be the compatible Windows SDK cohort used
-to construct the supplied bundle.
-
-The accepted baseline requires PowerShell 5.1 or newer, Git, Visual Studio 2022
-C++ tools, `nvidia-smi`, a compatible driver, and the prepared project Python
-environment kept active for authoritative bundle validation. It also requires a
-compute-capability 12.x GPU with at least 60,000 MiB reported memory. Provision
-enough pagefile/system commit and disk for the checkpoint, six plans, bundle,
-build, and evidence.
+Use the exact bundle, source revision, checkpoint, adapter, TensorRT-RTX SDK,
+driver, prompt, geometry, and seed in every reproduction. Close other GPU and
+unified-memory workloads before starting.
 
 ```powershell
-$CudaRoot = '<local-CUDA-12.9-Toolkit-root>'
-$RtxRoot = '<local-TensorRT-RTX-SDK-root>'
-$BuildDirectory = 'build-windows-h3'
+$Bundle = Join-Path $env:LOCALAPPDATA `
+    'Programs\ModelConnect\MiniMax-H3\models\MiniMax-H3.bundle'
+$Prompt = (Get-Content -Raw `
+    .\tests\e2e\models\minimax_h3\prompts\t2va-example-1.json |
+    ConvertFrom-Json).prompt
 
-& .\scripts\build_windows_h3.ps1 `
-    -CudaRoot $CudaRoot `
-    -TensorRtRtxRoot $RtxRoot `
-    -BuildDirectory $BuildDirectory `
-    -BuildTests `
-    -BuildBenchmarks
+trtmc generate-video $Bundle `
+    --prompt $Prompt `
+    --num-frames 120 --height 768 --width 1344 --seed 0 `
+    --warmup 1 --benchmark 2 `
+    --output .\minimax-h3-t2va-124f.mp4
 ```
 
-The build records the clean source revision in the worker. The benchmark
-launcher rejects a worker built from another revision. The build helper also
-exports that revision to the Python builder so a newly built bundle carries the
-same source provenance. Build the core, RTX backend, MiniMax H3 plugin, and
-Release worker together; mixing DLLs from different revisions is unsupported.
-The worker revision is verified directly; the other binaries are hashed. The
-launcher also requires the CUDA and TensorRT-RTX DLLs beside the worker to match
-the selected SDK files byte for byte.
+The request aligns 120 nominal frames to 124 output frames, or 5.167 seconds
+at 24 fps. The current performance qualification target is approximately
+8--9 minutes for the same-process hot `generation_ms` median on the qualified
+Spark hardware/software cohort. It is a target, not a portable latency
+guarantee.
 
-## Run
+## Long aligned T2VA workload
 
-Choose an output directory outside the source checkout and close competing GPU
-or unified-memory workloads.
+The longest released local alignment that remains within 15 seconds is 345
+frames, or 14.375 seconds:
 
 ```powershell
-$Bundle = '<authorized-local-MiniMax-H3-bundle>'
-$EvidenceRoot = '<private-directory-outside-the-checkout>'
-
-& .\scripts\run_windows_h3_hot_benchmark.ps1 `
-    -Bundle $Bundle `
-    -CudaRoot $CudaRoot `
-    -TensorRtRtxRoot $RtxRoot `
-    -BuildDirectory $BuildDirectory `
-    -OutputDirectory $EvidenceRoot `
-    -Warmup 1 `
-    -Iterations 2 `
-    -FirstBlockCacheThreshold 0.30 `
-    -TailWeightBudgetGiB 24
+trtmc generate-video $Bundle `
+    --prompt $Prompt `
+    --num-frames 345 --height 768 --width 1344 --seed 0 `
+    --warmup 1 --benchmark 2 `
+    --output .\minimax-h3-t2va-345f.mp4
 ```
 
-The script computes the large bundle hash by default. Use `-SkipBundleHash`
-only for an exploratory run and disclose that the resulting receipt has weaker
-artifact identity. A run that skips it is never marked as the baseline profile.
+The current qualification target is approximately 20 minutes for the hot
+`generation_ms` result. A full `1 + 2` command runs three generations, so its
+wall time is expected to be much longer than one reported sample.
 
-By default the launcher invokes the checked-in authoritative Python validator
-and requires the bundle's source, public checkpoint revision, current builder
-source hash, declared checkpoint inventory, six-plan BF16 profile, CUDA 12.9,
-and TensorRT-RTX provenance to agree with the checkout and selected SDK.
-`-AllowUnverifiedBundleProvenance` is an explicit diagnostic escape hatch for
-older local bundles; such a run is never marked as the baseline profile.
+## Acceptance
 
-`-UseFastExit` is an opt-in diagnostic workaround for a worker that finishes
-inference and persists its result but fails during third-party DLL teardown.
-It bypasses global C++ destruction and is recorded in `summary.json`; a run that
-uses it proves inference completion, not normal process teardown.
-It produces `status=inference_completed` and `lifecycle_status=bypassed`, not
-the normally accepted `status=completed` result.
+Keep the complete stderr/stdout log and record the Git revision, bundle hash,
+bundle inspection output, TensorRT-RTX version, driver version, GPU, request,
+and MP4 hash. A timing result is accepted only when:
 
-## Evidence and acceptance
+- the native dependency audit passed during packaging;
+- the runtime-only CLI, core, RTX backend, H3 plugin, bundle, and
+  TensorRT-RTX DLL are from one package;
+- the bundle declares the authenticated FastH3 adapter, 51 native segmented
+  VSA plans, four transformer forwards, the public dynamic canvas/frame
+  profiles, and no external VSA plugin;
+- both measured samples are finite and positive and the command exits zero;
+- the output has the requested aligned geometry at 24 fps;
+- generation returns audio and the MP4 contains H.264 video plus one AAC
+  stereo 32 kHz audio stream; and
+- visual and audible playback are separately inspected for corruption.
 
-Preflight validates the clean checkout, Release worker, bundle, SDK cohort,
-hardware, and artifact hashes before it creates an evidence directory. A
-successful run writes a timestamped directory containing:
-
-- `worker-request.json`, including the resolved paths and runtime configuration;
-- `worker-metadata.json`, including the compiled source revision;
-- `environment.json`, including toolchain versions, non-UUID GPU identity,
-  bundle provenance, effective requested budgets, telemetry status, and
-  artifact hashes;
-- `worker.log`, `worker.stdout.log`, and optional `gpu-telemetry.csv`;
-- `worker-result.json`, containing both raw measured samples; and
-- `summary.json`, containing the median, exit mode, and output summary.
-
-A worker-phase failure normally writes final `environment.json` and
-`summary.json` records if the evidence directory remains writable.
-`worker-result.json` exists only when the worker persisted a result. A preflight
-failure writes no evidence directory.
-
-An accepted baseline run has worker exit code 0, `status=completed`,
-`lifecycle_status=normal_teardown`, `baseline_profile=true`, verified bundle
-provenance, two finite positive observations, 124 frames, 383,975,424 RGB
-elements, zero non-finite elements, the checked-in prompt, a complete bundle
-hash, CUDA Toolkit 12.9, and matching side-by-side runtime DLLs. The launcher
-also requires four retained engine-cache misses on the first request, cache hits
-on later requests, and a runtime weight-budget record matching the
-bundle-capped tail request. Text and AdaLN should hit their same-prompt caches
-after warmup.
-
-FirstBlockCache step positions can vary with the bundle, SDK, and numerical
-trajectory. A matching count does not establish pixel, perceptual, or visual
-equivalence. Keep playable-video inspection and quality metrics as a separate
-qualification result.
-
-## Capacity and portability
-
-Retained engines trade memory for avoiding repeated plan reads and
-deserialization. The retained cache is opt-in, scoped by CUDA device, and lives
-for the backend process lifetime. The staged tail still streams weights and the
-pipeline still rotates denoiser and VAE contexts.
-
-Each new plan digest or requested budget can add another process-lifetime cache
-entry, so this mode is intended for the isolated benchmark worker rather than
-an unbounded multi-model service. On Windows, loaded backend DLLs are likewise
-kept until process exit to avoid unsafe vendor-runtime destruction under the
-loader lock; explicit backend unload/reload is not supported in this mode.
-
-The repository does not redistribute checkpoints, SDK files, plans, bundles,
-generated frames, telemetry, or benchmark receipts. Rebuild the bundle with
-authorized inputs when the checkpoint, source, GPU, CUDA, or TensorRT-RTX cohort
-changes.
-
-Evidence is intentionally private by default: `worker-request.json` contains
-resolved local paths, while receipts contain full artifact hashes and hardware
-details. Keep the output directory outside the checkout. Redact or transform
-those fields before sharing evidence beyond the authorized environment.
+FL2VA and Ref2VA use the same CLI timing mechanism, but their results are
+separate workloads. Ref2VA uses the independent `transformer_ref` partition
+and its released 50-point/49-forward schedule; it must never be reported as a
+four-forward FastH3 result.

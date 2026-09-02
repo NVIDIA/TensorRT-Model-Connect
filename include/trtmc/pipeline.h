@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -112,9 +113,23 @@ struct ImageResult {
 };
 
 struct AudioResult {
-    std::vector<float> samples; // mono float32 [-1,1]
+    // Interleaved float32 scalar samples in [-1, 1]. For example, stereo is
+    // [left_0, right_0, left_1, right_1, ...]. num_samples remains the total
+    // scalar sample count (samples.size()), preserving the legacy mono meaning.
+    std::vector<float> samples;
     int32_t num_samples{0};
     int32_t sample_rate{24000};
+    // Appended to preserve the offsets of legacy fields. Legacy audio is mono.
+    int32_t channels{1};
+};
+
+// A synchronized video-generation result. Pipelines that only produce video
+// frames remain source-compatible through IPipeline::generate_video(), whose
+// default implementation delegates to generate_image().
+struct VideoResult {
+    ImageResult frames;
+    AudioResult audio;
+    int32_t fps{0}; // 0 when the pipeline does not expose a frame rate
 };
 
 struct TranscriptionStreamConfig {
@@ -231,6 +246,78 @@ struct GenerateConfig {
     // Appended to preserve the offsets of every pre-existing field across the
     // dynamically loaded model-plugin ABI. 1.0 disables the processor.
     float repetition_penalty{1.0f};
+    // Requested video frame count. 0 selects the model/bundle default.
+    // Appended to preserve the offsets of every pre-existing field.
+    int32_t video_num_frames{0};
+};
+
+// Fully decoded, host-resident image input for video conditioning. Pixels are
+// contiguous RGB/RGBA float32 in [0, 1], laid out [height, width, channels]
+// (HWC). This is deliberately distinct from ImageResult, whose historical
+// layout contract is result-oriented and differs between older pipelines.
+struct VideoImageInput {
+    std::vector<float> pixels;
+    int32_t height{0};
+    int32_t width{0};
+    int32_t channels{3};
+};
+
+// Fully decoded, host-resident video input. Frames are contiguous float32 in
+// [0, 1], laid out [num_frames, height, width, channels] (THWC). Frame rate is
+// rational so container decoders can preserve rates such as 30000/1001 without
+// requiring any media library inside a model runtime. soundtrack is optional;
+// an empty sample vector means the source video has no decoded soundtrack.
+struct VideoClipInput {
+    std::vector<float> pixels;
+    int32_t num_frames{0};
+    int32_t height{0};
+    int32_t width{0};
+    int32_t channels{3};
+    int32_t fps_numerator{0};
+    int32_t fps_denominator{1};
+    AudioResult soundtrack;
+};
+
+enum class VideoReferenceKind {
+    kImage,
+    kVideo,
+    kAudio,
+};
+
+// One entry in the ordered Ref2VA conditioning stream. Exactly the field
+// selected by kind is populated. A kVideo entry may also carry the soundtrack
+// decoded from that video in VideoClipInput::soundtrack. A kAudio entry carries
+// interleaved float32 samples plus sample-rate/channel metadata in audio.
+struct VideoReferenceInput {
+    VideoReferenceKind kind{VideoReferenceKind::kImage};
+    VideoImageInput image;
+    VideoClipInput video;
+    AudioResult audio;
+};
+
+enum class VideoGenerationMode {
+    kTextToVideoAudio,           // T2VA
+    kFirstLastFrameToVideoAudio, // FL2VA: first, last, or both
+    kReferenceToVideoAudio,      // Ref2VA
+};
+
+// Structured native video request shared by the public H3-Base modes. Media is
+// already decoded into standard C++ value types, so a model plugin never needs
+// Python, FFmpeg, a subprocess, or a framework tensor at runtime.
+//
+// Mode contract:
+//   * kTextToVideoAudio: first_frame/last_frame/references are empty.
+//   * kFirstLastFrameToVideoAudio: at least one key frame is present and
+//     references is empty.
+//   * kReferenceToVideoAudio: key frames are empty and references preserves the
+//     caller's semantic media order.
+struct VideoGenerationRequest {
+    std::string prompt;
+    GenerateConfig config;
+    VideoGenerationMode mode{VideoGenerationMode::kTextToVideoAudio};
+    std::optional<VideoImageInput> first_frame;
+    std::optional<VideoImageInput> last_frame;
+    std::vector<VideoReferenceInput> references;
 };
 
 class ITranscriptionStream {
@@ -670,6 +757,28 @@ class IPipeline {
     // -- Metadata --
     virtual const char* model_id() const = 0;
     virtual const char* pipeline_type() const = 0;
+
+    // -- Synchronized video + audio generation --
+    // Kept at the end of the virtual interface so existing virtual method
+    // slots do not move. Legacy video pipelines inherit a frames-only result.
+    virtual VideoResult generate_video(const std::string& prompt, const GenerateConfig& cfg = {}) {
+        VideoResult result;
+        result.frames = generate_image(prompt, cfg);
+        return result;
+    }
+
+    // Structured multimodal overload. It is appended after every pre-existing
+    // virtual (including the legacy video overload) to keep prior vtable slots
+    // stable. Legacy video pipelines receive T2VA requests unchanged; they fail
+    // explicitly for FL2VA/Ref2VA instead of silently discarding media.
+    virtual VideoResult generate_video(const VideoGenerationRequest& request) {
+        if (request.mode != VideoGenerationMode::kTextToVideoAudio || request.first_frame ||
+            request.last_frame || !request.references.empty()) {
+            throw std::runtime_error(std::string(pipeline_type()) +
+                                     " does not support multimodal video generation");
+        }
+        return generate_video(request.prompt, request.config);
+    }
 };
 
 // --- Factory ---

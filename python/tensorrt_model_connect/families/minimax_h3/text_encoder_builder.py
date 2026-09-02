@@ -60,10 +60,10 @@ def checkpoint_keys() -> tuple[str, ...]:
 
 def _per_head_norm(network, tensor, weight, rows: int, heads: int):
     reshape = network.add_shuffle(tensor)
-    reshape.reshape_dims = (rows, heads, HEAD_DIM)
+    reshape.reshape_dims = (-1, heads, HEAD_DIM)
     normalized = op.rms_norm(network, reshape.get_output(0), weight, HEAD_DIM, NORM_EPS)
     flatten = network.add_shuffle(normalized)
-    flatten.reshape_dims = (rows, heads * HEAD_DIM)
+    flatten.reshape_dims = (-1, heads * HEAD_DIM)
     return flatten.get_output(0)
 
 
@@ -71,20 +71,24 @@ def _repeat_kv(network, tensor):
     repeated = []
     repeat = NUM_HEADS // NUM_KV_HEADS
     for index in range(NUM_KV_HEADS):
-        head = network.add_slice(
-            tensor, (0, index, 0, 0), (1, 1, int(tensor.shape[2]), HEAD_DIM), (1, 1, 1, 1)
-        ).get_output(0)
+        head = op.dynamic_slice(network, tensor, (0, index, 0, 0), (1, 1, None, HEAD_DIM))
         repeated.extend([head] * repeat)
     concat = network.add_concatenation(repeated)
     concat.axis = 1
     return concat.get_output(0)
 
 
-def _rope_cache(network, rows: int):
+def _rope_cache(network, position_ids):
     inverse = 1.0 / (ROPE_THETA ** (np.arange(0, HEAD_DIM, 2, dtype=np.float32) / HEAD_DIM))
-    frequency = np.outer(np.arange(rows, dtype=np.float32), inverse)
-    cos = op.constant(network, np.cos(frequency).reshape(1, rows, HEAD_DIM // 2))
-    sin = op.constant(network, np.sin(frequency).reshape(1, rows, HEAD_DIM // 2))
+    positions = op.cast(network, position_ids, trt.float32)
+    position_shape = network.add_shuffle(positions)
+    position_shape.reshape_dims = (1, -1, 1)
+    inverse = op.constant(network, inverse.reshape(1, 1, HEAD_DIM // 2))
+    frequency = network.add_elementwise(
+        position_shape.get_output(0), inverse, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    cos = network.add_unary(frequency, trt.UnaryOperation.COS).get_output(0)
+    sin = network.add_unary(frequency, trt.UnaryOperation.SIN).get_output(0)
     return op.cast(network, cos, trt.bfloat16), op.cast(network, sin, trt.bfloat16)
 
 
@@ -113,11 +117,22 @@ def build_text_encoder_engine(
         workspace_bytes,
         default_bytes=TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
     )
-    input_ids = network.add_input("input_ids", trt.int32, (sequence_length,))
+    input_ids = network.add_input("input_ids", trt.int32, (-1,))
+    position_ids = network.add_input("position_ids", trt.int32, (-1,))
+    profile = builder.create_optimization_profile()
+    opt_sequence_length = min(sequence_length, 128)
+    for name in ("input_ids", "position_ids"):
+        profile.set_shape(
+            name,
+            min=(1,),
+            opt=(opt_sequence_length,),
+            max=(sequence_length,),
+        )
+    config.add_optimization_profile(profile)
     table = op.weight_constant(network, weights["model.language_model.embed_tokens.weight"])
     table = op.cast(network, table, trt.bfloat16)
     hidden = network.add_gather(table, input_ids, 0).get_output(0)
-    cos, sin = _rope_cache(network, sequence_length)
+    cos, sin = _rope_cache(network, position_ids)
 
     for index in range(NUM_LAYERS):
         prefix = f"model.language_model.layers.{index}"
@@ -197,7 +212,7 @@ def build_text_encoder_engine(
     op.validate_native_network(network, expected_attentions=NUM_LAYERS, label="text encoder")
     print(
         f"[minimax-h3] building native Qwen3-VL text stack: layers={NUM_LAYERS}, "
-        f"sequence={sequence_length}",
+        f"sequence=1..{sequence_length} (opt={opt_sequence_length})",
         file=sys.stderr,
     )
     plan = None

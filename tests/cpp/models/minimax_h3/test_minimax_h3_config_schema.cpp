@@ -56,8 +56,7 @@ int main() {
     check(std::abs(defaults.get<double>("minimax_h3", "first_block_cache_threshold") - 0.025) <
               1.0e-12,
           "cache threshold schema default");
-    check(!defaults.get<bool>("minimax_h3", "retain_engines"),
-          "retained engines are opt-in");
+    check(!defaults.get<bool>("minimax_h3", "retain_engines"), "retained engines are opt-in");
     check(defaults.get<std::int64_t>("minimax_h3", "retained_tail_weight_budget_gib") == 24,
           "retained tail budget schema default");
 

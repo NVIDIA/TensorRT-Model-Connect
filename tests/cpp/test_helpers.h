@@ -8,37 +8,70 @@
 // Shared test helpers for model family integration tests.
 // Provides temp-dir creation, file writing, and safetensors construction.
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#ifndef _WIN32
 #include <ftw.h>
+#endif
 #include <stdexcept>
 #include <string>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <utility>
 #include <vector>
 
 namespace trtmc_test {
 
-// POSIX-based recursive remove. Avoids std::filesystem::remove_all, which on
-// the aarch64 CI image has been observed to trampoline into libtorch's
-// symbol-interposed std::filesystem implementation and segfault during
-// test-teardown. Uses nftw() which only calls plain libc unlink/rmdir.
-inline int remove_all_safe(const std::string& path) {
+// Windows uses its native std::filesystem implementation. POSIX avoids
+// std::filesystem::remove_all because the aarch64 CI image has been observed
+// to trampoline into libtorch's symbol-interposed implementation and segfault
+// during teardown; nftw() only calls plain libc unlink/rmdir there.
+inline int remove_all_safe(const std::filesystem::path& path) {
     if (path.empty())
         return 0;
+#ifdef _WIN32
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
+    return error ? -1 : 0;
+#else
     auto cb = [](const char* fpath, const struct stat* /*sb*/, int typeflag,
                  struct FTW* /*ftwbuf*/) -> int {
         if (typeflag == FTW_DP)
             return rmdir(fpath) == 0 ? 0 : -1;
         return std::remove(fpath) == 0 ? 0 : -1;
     };
-    return nftw(path.c_str(), cb, 16, FTW_DEPTH | FTW_PHYS);
+    return nftw(path.string().c_str(), cb, 16, FTW_DEPTH | FTW_PHYS);
+#endif
 }
+
+#ifdef _WIN32
+inline std::filesystem::path create_unique_temp_dir(const std::filesystem::path& parent,
+                                                    const std::string& prefix) {
+    static std::atomic<std::uint64_t> sequence{0};
+    for (int attempt = 0; attempt < 256; ++attempt) {
+        const auto clock_value = std::chrono::steady_clock::now().time_since_epoch().count();
+        const auto candidate =
+            parent / (prefix + std::to_string(clock_value) + "_" +
+                      std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)));
+        std::error_code error;
+        if (std::filesystem::create_directory(candidate, error))
+            return candidate;
+        if (error && error != std::errc::file_exists) {
+            throw std::runtime_error("Failed to create temporary test directory: " +
+                                     error.message());
+        }
+    }
+    throw std::runtime_error("Unable to allocate a unique temporary test directory");
+}
+#endif
 
 // RAII guard that saves an environment variable on construction and restores it
 // on destruction. Prevents env var state leaks between tests if a test fails
@@ -51,18 +84,28 @@ class EnvVarGuard {
         had_value_ = (old != nullptr);
         if (had_value_)
             old_value_ = old;
+#ifdef _WIN32
+        const int status = _putenv_s(name.c_str(), value ? value : "");
+        if (status != 0)
+            throw std::runtime_error("Unable to update test environment variable");
+#else
         if (value) {
             setenv(name.c_str(), value, 1);
         } else {
             unsetenv(name.c_str());
         }
+#endif
     }
     ~EnvVarGuard() {
+#ifdef _WIN32
+        (void)_putenv_s(name_.c_str(), had_value_ ? old_value_.c_str() : "");
+#else
         if (had_value_) {
             setenv(name_.c_str(), old_value_.c_str(), 1);
         } else {
             unsetenv(name_.c_str());
         }
+#endif
     }
     EnvVarGuard(const EnvVarGuard&) = delete;
     EnvVarGuard& operator=(const EnvVarGuard&) = delete;
@@ -79,11 +122,16 @@ class EnvVarGuard {
 class TempDirGuard {
   public:
     TempDirGuard() {
+#ifdef _WIN32
+        path_ =
+            create_unique_temp_dir(std::filesystem::temp_directory_path(), "trtmc_test_").string();
+#else
         char tmpl[] = "/tmp/trtmc_test_XXXXXX";
         char* result = mkdtemp(tmpl);
         if (!result)
             throw std::runtime_error("mkdtemp failed");
         path_ = result;
+#endif
     }
     ~TempDirGuard() {
         if (!path_.empty()) {
@@ -105,6 +153,19 @@ struct TensorSpec {
 };
 
 inline std::filesystem::path make_temp_dir_or_throw(const char* pattern) {
+#ifdef _WIN32
+    std::filesystem::path requested(pattern);
+    auto parent = requested.parent_path();
+    std::error_code error;
+    if (parent.empty() || !std::filesystem::is_directory(parent, error))
+        parent = std::filesystem::temp_directory_path();
+    std::string prefix = requested.filename().string();
+    const auto suffix = prefix.find_last_not_of('X');
+    prefix.erase(suffix == std::string::npos ? 0 : suffix + 1);
+    if (prefix.empty())
+        prefix = "trtmc_test_";
+    return create_unique_temp_dir(parent, prefix);
+#else
     char buffer[256];
     std::strncpy(buffer, pattern, sizeof(buffer));
     buffer[sizeof(buffer) - 1] = '\0';
@@ -113,6 +174,7 @@ inline std::filesystem::path make_temp_dir_or_throw(const char* pattern) {
         throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
     }
     return std::filesystem::path(created);
+#endif
 }
 
 inline void write_file(const std::filesystem::path& path, const std::string& content) {

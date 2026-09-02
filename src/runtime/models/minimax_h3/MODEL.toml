@@ -9,6 +9,12 @@ runtime_strategies = ["diffusion_minimax_h3"]
 runtime_tests = [
   "test_minimax_h3_config_schema|test_minimax_h3_config_schema.cpp|trtmc_model_minimax_h3|_|_",
   "test_minimax_h3_math|test_minimax_h3_math.cpp|trtmc_model_minimax_h3|_|_",
+  "test_minimax_h3_denoiser_abi|test_minimax_h3_denoiser_abi.cpp|trtmc_model_minimax_h3|_|_",
+  "test_minimax_h3_conditioning|test_minimax_h3_conditioning.cpp|trtmc_model_minimax_h3|_|_",
+  "test_minimax_h3_fl2va_runtime|test_minimax_h3_fl2va_runtime.cpp|trtmc_model_minimax_h3|_|_",
+  "test_minimax_h3_ref2va_runtime|test_minimax_h3_ref2va_runtime.cpp|trtmc_model_minimax_h3|_|_",
+  "test_minimax_h3_vsa_layout|test_minimax_h3_vsa_layout.cpp|trtmc_model_minimax_h3|_|_",
+  "test_minimax_h3_vsa_cuda|test_minimax_h3_vsa_cuda.cpp|trtmc_model_minimax_h3|_|REQUIRES_GPU",
   "test_minimax_h3_cuda_rng|test_minimax_h3_cuda_rng.cpp|trtmc_model_minimax_h3|_|REQUIRES_GPU",
   "test_minimax_h3_trt_module_bind_external|test_minimax_h3_trt_module_bind_external.cpp|trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
 ]

@@ -96,6 +96,10 @@ void append_installed_model_plugin_dirs(std::vector<std::string>& dirs) {
     dirs.push_back(bin_dir);
 
     const fs::path exe_bin_dir(bin_dir);
+    // Build-tree model DSOs are placed under <binary-dir>/models/<model-id>.
+    // Keep this relative lookup available in distributable configurations,
+    // where TRTMC_BINARY_DIR is intentionally not compiled into the runtime.
+    dirs.push_back((exe_bin_dir / "models").string());
     if (exe_bin_dir.filename() == "bin") {
         const fs::path prefix = exe_bin_dir.parent_path();
         dirs.push_back((prefix / "bin" / "trtmc" / "models").string());

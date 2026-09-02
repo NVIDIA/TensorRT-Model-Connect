@@ -96,6 +96,7 @@ class TrtModuleImpl final : public ITrtModule {
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
     std::unordered_map<std::string, void*> initial_external_bindings_;
+    std::unordered_map<std::string, std::size_t> initial_external_binding_capacities_;
     std::unordered_map<std::string, BufferEntry> buffers_;
     std::unordered_map<std::string, std::string> alias_input_by_output_;
     std::unordered_map<std::string, std::vector<std::string>> alias_outputs_by_input_;

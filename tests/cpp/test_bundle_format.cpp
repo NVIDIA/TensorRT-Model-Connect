@@ -25,7 +25,7 @@
 // Dependencies:
 //   - bundle/bundle_format.h: BundleFile, ReadBundleFile, IsBundle,
 //     InspectBundle, kBundleMagic.
-//   - Filesystem access (temp directories via mkdtemp).
+//   - Filesystem access (temp directories via the shared platform helper).
 //   - No TRT, GPU, or CUDA required.
 
 #include "bundle/bundle_format.h"
@@ -62,12 +62,7 @@ static void check(bool condition, const char* test_name) {
 }
 
 static std::filesystem::path make_temp_dir() {
-    char pattern[] = "/tmp/bundle_test_XXXXXX";
-    char* dir = mkdtemp(pattern);
-    if (dir == nullptr) {
-        throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
-    }
-    return std::filesystem::path(dir);
+    return trtmc_test::make_temp_dir_or_throw("/tmp/bundle_test_XXXXXX");
 }
 
 // Helper: write a minimal valid .bundle file manually (bypasses WriteBundleFile).

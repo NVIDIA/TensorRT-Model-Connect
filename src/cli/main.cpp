@@ -22,7 +22,7 @@
 //                        [--task transcribe|translate] [--timestamps]
 //   trtmc speak           <bundle.bundle> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.bundle> --prompt "text" --output DIR [--num-steps N]
-//                        [--negative-prompt "text"] [--height N] [--width N]
+//                        [--num-frames N] [--negative-prompt "text"] [--height N] [--width N]
 //   trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]
 //   trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]
 //   trtmc detect          <bundle.bundle> --image PATH [--output-json PATH]
@@ -32,6 +32,10 @@
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
 #include "cli/speech_session_helpers.h"
+#include "cli/windows_media.h"
+#if defined(_WIN32)
+#include "cli/windows_utf8_argv.h"
+#endif
 #include "runtime/platform/dynamic_library.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
@@ -63,20 +67,21 @@
 #include <limits>
 #include <locale>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <numeric>
 #include <optional>
 #include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(TRTMC_RUNTIME_ONLY_CLI)
 #include <process.h>
-#else
+#elif !defined(_WIN32) && !defined(TRTMC_RUNTIME_ONLY_CLI)
 #include <sys/wait.h>
 #endif
 #include <system_error>
 #include <thread>
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(TRTMC_RUNTIME_ONLY_CLI)
 #include <unistd.h>
 #endif
 #include <utility>
@@ -190,14 +195,17 @@ void preload_cli_config_schema_owner(const CliArgs& args) {
     trtmc::load_model_plugin_for_strategy(strategy, args.model_plugin_search_paths);
 }
 
+#if !defined(TRTMC_RUNTIME_ONLY_CLI)
 std::filesystem::path current_executable_path() {
     return trtmc::internal::current_executable_path();
 }
+#endif
 
 std::string default_temp_output(const char* name) {
     return (std::filesystem::temp_directory_path() / name).string();
 }
 
+#if !defined(TRTMC_RUNTIME_ONLY_CLI)
 std::string build_python_executable() {
     if (const char* configured = std::getenv("TRTMC_PYTHON_EXECUTABLE");
         configured != nullptr && configured[0] != '\0') {
@@ -378,6 +386,7 @@ int cmd_python(const CliArgs& args) {
     command.insert(command.end(), args.build_args.begin(), args.build_args.end());
     return run_python_module(command);
 }
+#endif
 
 int cmd_version() {
     std::cout << "trtmc " << trtmc_version() << '\n';
@@ -781,9 +790,342 @@ int cmd_run(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+trtmc::VideoImageInput load_video_image_input(const std::string& path) {
+    auto decoded = trtmc::io::read_image(path);
+    if (decoded.empty() || decoded.height <= 0 || decoded.width <= 0)
+        throw std::runtime_error("failed to decode video-conditioning image: " + path);
+    const auto height = static_cast<std::size_t>(decoded.height);
+    const auto width = static_cast<std::size_t>(decoded.width);
+    if (height > std::numeric_limits<std::size_t>::max() / width ||
+        height * width > std::numeric_limits<std::size_t>::max() / 3U ||
+        decoded.pixels.size() != height * width * 3U) {
+        throw std::runtime_error("invalid RGB image dimensions for video conditioning: " + path);
+    }
+
+    trtmc::VideoImageInput result;
+    result.pixels = std::move(decoded.pixels);
+    result.height = decoded.height;
+    result.width = decoded.width;
+    result.channels = 3;
+    return result;
+}
+
+bool is_safe_relative_media_path(const std::filesystem::path& path) {
+    if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory())
+        return false;
+    for (const auto& component : path) {
+        if (component == "..")
+            return false;
+    }
+    return true;
+}
+
+trtmc::VideoClipInput load_native_video_directory(const std::string& directory) {
+    const std::filesystem::path root(directory);
+    if (!std::filesystem::is_directory(root))
+        throw std::runtime_error("reference video is not a directory: " + directory);
+
+    const auto manifest_path = root / "manifest.json";
+    std::ifstream manifest_file(manifest_path, std::ios::binary);
+    if (!manifest_file)
+        throw std::runtime_error("reference video is missing manifest.json: " + directory);
+
+    nlohmann::json manifest;
+    try {
+        manifest_file >> manifest;
+    } catch (const std::exception& e) {
+        throw std::runtime_error("invalid reference video manifest " + manifest_path.string() +
+                                 ": " + e.what());
+    }
+
+    try {
+        if (manifest.at("artifact_type").get<std::string>() != "trtmc.video_directory")
+            throw std::runtime_error("unsupported artifact_type");
+        const auto& video = manifest.at("video");
+        if (video.at("frame_pattern").get<std::string>() != "frame_%04d.png")
+            throw std::runtime_error("frame_pattern must be frame_%04d.png");
+
+        trtmc::VideoClipInput result;
+        result.width = video.at("width").get<int32_t>();
+        result.height = video.at("height").get<int32_t>();
+        result.channels = video.at("channels").get<int32_t>();
+        result.num_frames = video.at("num_frames").get<int32_t>();
+        if (video.contains("fps_numerator")) {
+            result.fps_numerator = video.at("fps_numerator").get<int32_t>();
+            result.fps_denominator = video.value("fps_denominator", 1);
+        } else {
+            result.fps_numerator = video.at("fps").get<int32_t>();
+            result.fps_denominator = 1;
+        }
+        if (result.width <= 0 || result.height <= 0 || result.channels != 3 ||
+            result.num_frames <= 0 || result.fps_numerator <= 0 || result.fps_denominator <= 0) {
+            throw std::runtime_error("invalid video dimensions, frame count, or frame rate");
+        }
+
+        const auto height = static_cast<std::size_t>(result.height);
+        const auto width = static_cast<std::size_t>(result.width);
+        const auto frames = static_cast<std::size_t>(result.num_frames);
+        if (height > std::numeric_limits<std::size_t>::max() / width ||
+            height * width > std::numeric_limits<std::size_t>::max() / 3U ||
+            frames > std::numeric_limits<std::size_t>::max() / (height * width * 3U)) {
+            throw std::runtime_error("video dimensions overflow the host address space");
+        }
+        const auto frame_scalars = height * width * 3U;
+        result.pixels.reserve(frames * frame_scalars);
+        for (int32_t frame = 0; frame < result.num_frames; ++frame) {
+            std::ostringstream name;
+            name << "frame_" << std::setw(4) << std::setfill('0') << frame << ".png";
+            auto decoded = load_video_image_input((root / name.str()).string());
+            if (decoded.width != result.width || decoded.height != result.height)
+                throw std::runtime_error(
+                    "reference video frame dimensions do not match manifest: " + name.str());
+            result.pixels.insert(result.pixels.end(),
+                                 std::make_move_iterator(decoded.pixels.begin()),
+                                 std::make_move_iterator(decoded.pixels.end()));
+        }
+
+        if (manifest.contains("audio") && manifest.at("audio").is_object() &&
+            manifest.at("audio").value("present", false)) {
+            const auto relative_audio =
+                std::filesystem::path(manifest.at("audio").at("path").get<std::string>());
+            if (!is_safe_relative_media_path(relative_audio))
+                throw std::runtime_error("audio path must stay within the video directory");
+            result.soundtrack = trtmc::io::read_wav_interleaved((root / relative_audio).string());
+
+            const auto& audio = manifest.at("audio");
+            if (audio.contains("sample_rate") &&
+                audio.at("sample_rate").get<int32_t>() != result.soundtrack.sample_rate)
+                throw std::runtime_error("soundtrack sample rate does not match manifest");
+            if (audio.contains("channels") &&
+                audio.at("channels").get<int32_t>() != result.soundtrack.channels)
+                throw std::runtime_error("soundtrack channel count does not match manifest");
+            if (audio.contains("interleaved_sample_count") &&
+                audio.at("interleaved_sample_count").get<std::size_t>() !=
+                    result.soundtrack.samples.size())
+                throw std::runtime_error("soundtrack sample count does not match manifest");
+        }
+        return result;
+    } catch (const std::exception& e) {
+        throw std::runtime_error("invalid reference video manifest " + manifest_path.string() +
+                                 ": " + e.what());
+    }
+}
+
+double audio_duration_seconds(const trtmc::AudioResult& audio, const std::string& label) {
+    if (audio.samples.empty() || audio.sample_rate <= 0 || audio.channels <= 0 ||
+        audio.samples.size() % static_cast<std::size_t>(audio.channels) != 0) {
+        throw std::runtime_error(label + " has invalid interleaved audio metadata");
+    }
+    return static_cast<double>(audio.samples.size()) /
+           (static_cast<double>(audio.sample_rate) * static_cast<double>(audio.channels));
+}
+
+void validate_reference_duration(double seconds, const std::string& label) {
+    constexpr double kMinReferenceSeconds = 2.0;
+    constexpr double kMaxReferenceSeconds = 15.0;
+    if (!std::isfinite(seconds) || seconds < kMinReferenceSeconds ||
+        seconds > kMaxReferenceSeconds) {
+        std::ostringstream message;
+        message << label << " duration must be in [2, 15] seconds; got " << std::fixed
+                << std::setprecision(3) << seconds;
+        throw std::runtime_error(message.str());
+    }
+}
+
+trtmc::VideoGenerationRequest make_video_generation_request(const CliArgs& args,
+                                                            trtmc::GenerateConfig config) {
+    trtmc::VideoGenerationRequest request;
+    request.prompt = args.prompt;
+    request.config = std::move(config);
+
+    const bool has_key_frames = !args.first_frame_path.empty() || !args.last_frame_path.empty();
+    if (has_key_frames) {
+        request.mode = trtmc::VideoGenerationMode::kFirstLastFrameToVideoAudio;
+        if (!args.first_frame_path.empty())
+            request.first_frame = load_video_image_input(args.first_frame_path);
+        if (!args.last_frame_path.empty())
+            request.last_frame = load_video_image_input(args.last_frame_path);
+        return request;
+    }
+
+    if (args.video_references.empty())
+        return request;
+
+    request.mode = trtmc::VideoGenerationMode::kReferenceToVideoAudio;
+    request.references.reserve(args.video_references.size());
+    std::size_t image_count = 0;
+    std::size_t video_count = 0;
+    std::size_t explicit_audio_count = 0;
+    double total_video_seconds = 0.0;
+    double total_explicit_audio_seconds = 0.0;
+    for (const auto& argument : args.video_references) {
+        trtmc::VideoReferenceInput reference;
+        switch (argument.kind) {
+        case trtmc::cli::VideoReferenceArgKind::kImage:
+            reference.kind = trtmc::VideoReferenceKind::kImage;
+            reference.image = load_video_image_input(argument.path);
+            ++image_count;
+            break;
+        case trtmc::cli::VideoReferenceArgKind::kVideoDirectory: {
+            reference.kind = trtmc::VideoReferenceKind::kVideo;
+            reference.video = std::filesystem::is_directory(argument.path)
+                                  ? load_native_video_directory(argument.path)
+                                  : trtmc::cli::read_video_file(argument.path);
+            ++video_count;
+            const double seconds = static_cast<double>(reference.video.num_frames) *
+                                   static_cast<double>(reference.video.fps_denominator) /
+                                   static_cast<double>(reference.video.fps_numerator);
+            validate_reference_duration(seconds, "reference video " + argument.path);
+            total_video_seconds += seconds;
+            if (!reference.video.soundtrack.samples.empty()) {
+                // A soundtrack is attached metadata of this video reference,
+                // not a separate public audio reference. Validate its decoded
+                // shape/rate, but do not apply the explicit-audio 2..15 second
+                // range or its aggregate/count limits.
+                (void)audio_duration_seconds(reference.video.soundtrack,
+                                             "reference video soundtrack " + argument.path);
+            }
+            break;
+        }
+        case trtmc::cli::VideoReferenceArgKind::kAudio: {
+            reference.kind = trtmc::VideoReferenceKind::kAudio;
+            reference.audio = trtmc::io::read_wav_interleaved(argument.path);
+            const double seconds =
+                audio_duration_seconds(reference.audio, "reference audio " + argument.path);
+            validate_reference_duration(seconds, "reference audio " + argument.path);
+            total_explicit_audio_seconds += seconds;
+            ++explicit_audio_count;
+            break;
+        }
+        }
+        request.references.push_back(std::move(reference));
+    }
+
+    if (image_count > 9 || video_count > 3 || request.references.size() > 12)
+        throw std::runtime_error("Ref2VA reference count exceeds the public H3-Base limits");
+    if (explicit_audio_count > 3)
+        throw std::runtime_error("Ref2VA accepts at most 3 explicit reference audio files");
+    if (total_video_seconds > 15.0)
+        throw std::runtime_error(
+            "Ref2VA total reference-video duration must not exceed 15 seconds");
+    if (total_explicit_audio_seconds > 15.0)
+        throw std::runtime_error(
+            "Ref2VA total explicit reference-audio duration must not exceed 15 seconds");
+    return request;
+}
+
+struct VideoResultValidation {
+    std::size_t num_frames{0};
+    std::size_t frame_pixels{0};
+    std::size_t required_pixels{0};
+    std::size_t nonfinite_rgb{0};
+    std::size_t nonfinite_audio{0};
+    double video_seconds{0.0};
+    double audio_seconds{0.0};
+    bool has_audio{false};
+};
+
+bool validate_generated_video_result(const trtmc::VideoResult& result, bool require_h3_contract,
+                                     int32_t expected_frames, int32_t expected_height,
+                                     int32_t expected_width, VideoResultValidation& validation,
+                                     std::string& error) {
+    const auto& frames = result.frames;
+    if (frames.height <= 0 || frames.width <= 0 || frames.num_frames <= 0 || frames.channels != 3) {
+        error = "invalid frame metadata";
+        return false;
+    }
+    if (result.fps < 0) {
+        error = "negative frame rate";
+        return false;
+    }
+    if (require_h3_contract && result.fps != 24) {
+        error = "MiniMax-H3 output is not 24 fps";
+        return false;
+    }
+    if (require_h3_contract &&
+        (frames.num_frames != expected_frames || frames.height != expected_height ||
+         frames.width != expected_width)) {
+        std::ostringstream message;
+        message << "MiniMax-H3 output geometry " << frames.width << 'x' << frames.height << 'x'
+                << frames.num_frames << " does not match requested aligned geometry "
+                << expected_width << 'x' << expected_height << 'x' << expected_frames;
+        error = message.str();
+        return false;
+    }
+
+    const auto height = static_cast<std::size_t>(frames.height);
+    const auto width = static_cast<std::size_t>(frames.width);
+    validation.num_frames = static_cast<std::size_t>(frames.num_frames);
+    constexpr std::size_t kRgbChannels = 3;
+    if (height > std::numeric_limits<std::size_t>::max() / width ||
+        height * width > std::numeric_limits<std::size_t>::max() / kRgbChannels) {
+        error = "frame dimensions overflow the host address space";
+        return false;
+    }
+    validation.frame_pixels = height * width * kRgbChannels;
+    if (validation.num_frames > std::numeric_limits<std::size_t>::max() / validation.frame_pixels) {
+        error = "frame count overflows the host address space";
+        return false;
+    }
+    validation.required_pixels = validation.num_frames * validation.frame_pixels;
+    if (frames.pixels.size() != validation.required_pixels) {
+        error = "pixel count does not exactly match frame metadata";
+        return false;
+    }
+
+    validation.has_audio = !result.audio.samples.empty();
+    if (require_h3_contract && !validation.has_audio) {
+        error = "MiniMax-H3 output is missing its synchronized audio track";
+        return false;
+    }
+    if (validation.has_audio &&
+        (result.audio.sample_rate <= 0 || result.audio.channels <= 0 ||
+         result.audio.samples.size() % static_cast<std::size_t>(result.audio.channels) != 0 ||
+         result.audio.samples.size() >
+             static_cast<std::size_t>(std::numeric_limits<int32_t>::max()) ||
+         result.audio.num_samples != static_cast<int32_t>(result.audio.samples.size()))) {
+        error = "invalid interleaved audio metadata";
+        return false;
+    }
+    if (require_h3_contract && (result.audio.sample_rate != 32000 || result.audio.channels != 2)) {
+        error = "MiniMax-H3 output is not stereo 32 kHz audio";
+        return false;
+    }
+    if (result.fps > 0)
+        validation.video_seconds =
+            static_cast<double>(frames.num_frames) / static_cast<double>(result.fps);
+    if (validation.has_audio) {
+        const auto audio_frames =
+            result.audio.samples.size() / static_cast<std::size_t>(result.audio.channels);
+        validation.audio_seconds =
+            static_cast<double>(audio_frames) / static_cast<double>(result.audio.sample_rate);
+    }
+    if (require_h3_contract &&
+        std::abs(validation.video_seconds - validation.audio_seconds) > (1.0 / 24.0)) {
+        error = "MiniMax-H3 video and audio durations differ by more than one video frame";
+        return false;
+    }
+
+    validation.nonfinite_rgb =
+        static_cast<std::size_t>(std::count_if(frames.pixels.begin(), frames.pixels.end(),
+                                               [](float value) { return !std::isfinite(value); }));
+    validation.nonfinite_audio = static_cast<std::size_t>(
+        std::count_if(result.audio.samples.begin(), result.audio.samples.end(),
+                      [](float value) { return !std::isfinite(value); }));
+    if (validation.nonfinite_rgb != 0 || validation.nonfinite_audio != 0) {
+        error = "non-finite RGB or audio values";
+        return false;
+    }
+    return true;
+}
+
 int cmd_generate_video(const CliArgs& args) {
     if (args.bundle_path.empty() || args.prompt.empty()) {
         std::cerr << "Error: generate-video requires bundle + --prompt\n";
+        return EXIT_FAILURE;
+    }
+    if (args.benchmark < 0 || args.warmup < 0) {
+        std::cerr << "Error: generate-video --benchmark and --warmup must be non-negative\n";
         return EXIT_FAILURE;
     }
 
@@ -802,12 +1144,16 @@ int cmd_generate_video(const CliArgs& args) {
     const std::string out_dir =
         args.output_dir.empty() ? default_temp_output("trtmc_generate_video") : args.output_dir;
 
+    const auto total_begin = std::chrono::steady_clock::now();
+    const auto load_begin = total_begin;
     auto pipeline = load_pipeline(args);
+    const auto load_end = std::chrono::steady_clock::now();
 
     trtmc::GenerateConfig cfg;
     cfg.num_steps = args.num_steps;
     cfg.guidance_scale = args.guidance_scale;
     cfg.seed = args.seed;
+    cfg.video_num_frames = args.video_num_frames;
     cfg.negative_prompt = args.negative_prompt;
     cfg.height = args.diffusion_height;
     cfg.width = args.diffusion_width;
@@ -821,34 +1167,156 @@ int cmd_generate_video(const CliArgs& args) {
         cfg.initial_latents = std::move(*latents);
     }
 
-    auto result = pipeline->generate_image(args.prompt, cfg);
-    std::cout << "Generated image: " << result.width << "x" << result.height << " ("
-              << result.num_frames << " frames)\n";
+    const auto input_decode_begin = std::chrono::steady_clock::now();
+    auto request = make_video_generation_request(args, std::move(cfg));
+    const auto input_decode_end = std::chrono::steady_clock::now();
+    trtmc::VideoResult result;
+    VideoResultValidation final_validation;
+    const bool require_h3_contract =
+        std::strcmp(pipeline->pipeline_type(), "MiniMaxH3Pipeline") == 0;
+    int32_t expected_h3_frames = 0;
+    int32_t expected_h3_height = 0;
+    int32_t expected_h3_width = 0;
+    if (require_h3_contract) {
+        const int64_t requested_frames =
+            request.config.video_num_frames > 0 ? request.config.video_num_frames : 124;
+        const int64_t aligned_frames = requested_frames + ((5 - (requested_frames % 17) + 17) % 17);
+        if (aligned_frames > std::numeric_limits<int32_t>::max()) {
+            std::cerr << "Error: MiniMax-H3 aligned frame count overflows int32\n";
+            return EXIT_FAILURE;
+        }
+        expected_h3_frames = static_cast<int32_t>(aligned_frames);
+        expected_h3_height = request.config.height > 0 ? request.config.height : 768;
+        expected_h3_width = request.config.width > 0 ? request.config.width : 1344;
+    }
+    const auto validate_iteration = [&](const char* phase, int index) {
+        VideoResultValidation checked;
+        std::string error;
+        const bool valid =
+            validate_generated_video_result(result, require_h3_contract, expected_h3_frames,
+                                            expected_h3_height, expected_h3_width, checked, error);
+        std::cerr << "[trtmc.video_validation] phase=" << phase << " iteration=" << index
+                  << " rgb_values=" << checked.required_pixels
+                  << " audio_values=" << result.audio.samples.size()
+                  << " nonfinite_rgb=" << checked.nonfinite_rgb
+                  << " nonfinite_audio=" << checked.nonfinite_audio
+                  << " video_seconds=" << std::fixed << std::setprecision(6)
+                  << checked.video_seconds << " audio_seconds=" << checked.audio_seconds
+                  << " status=" << (valid ? "passed" : "failed") << '\n';
+        if (!valid) {
+            std::cerr << "Error: generate_video returned " << error << '\n';
+            return false;
+        }
+        final_validation = checked;
+        return true;
+    };
+    std::vector<double> benchmark_samples_ms;
+    auto generation_begin = std::chrono::steady_clock::now();
+    auto generation_end = generation_begin;
+    if (args.benchmark > 0) {
+        std::cerr << "[trtmc.video_benchmark] warmup=" << args.warmup
+                  << " iterations=" << args.benchmark << '\n';
+        for (int index = 0; index < args.warmup; ++index) {
+            result = {};
+            result = pipeline->generate_video(request);
+            if (!validate_iteration("warmup", index))
+                return EXIT_FAILURE;
+        }
+        benchmark_samples_ms.reserve(static_cast<std::size_t>(args.benchmark));
+        for (int index = 0; index < args.benchmark; ++index) {
+            // Keep destruction of the prior host result outside the public-call timer.
+            result = {};
+            generation_begin = std::chrono::steady_clock::now();
+            result = pipeline->generate_video(request);
+            generation_end = std::chrono::steady_clock::now();
+            if (!validate_iteration("measured", index))
+                return EXIT_FAILURE;
+            const double sample_ms =
+                std::chrono::duration<double, std::milli>(generation_end - generation_begin)
+                    .count();
+            benchmark_samples_ms.push_back(sample_ms);
+            std::cerr << std::fixed << std::setprecision(3)
+                      << "[trtmc.video_benchmark_sample] iteration=" << index
+                      << " generation_ms=" << sample_ms << '\n';
+        }
+        auto sorted_samples = benchmark_samples_ms;
+        std::sort(sorted_samples.begin(), sorted_samples.end());
+        const std::size_t middle = sorted_samples.size() / 2;
+        const double median_ms = sorted_samples.size() % 2 == 0
+                                     ? (sorted_samples[middle - 1] + sorted_samples[middle]) / 2.0
+                                     : sorted_samples[middle];
+        const double mean_ms = std::accumulate(sorted_samples.begin(), sorted_samples.end(), 0.0) /
+                               static_cast<double>(sorted_samples.size());
+        std::cerr << std::fixed << std::setprecision(3)
+                  << "[trtmc.video_benchmark_summary] iterations=" << sorted_samples.size()
+                  << " median_ms=" << median_ms << " mean_ms=" << mean_ms
+                  << " min_ms=" << sorted_samples.front() << " max_ms=" << sorted_samples.back()
+                  << '\n';
+    } else {
+        generation_begin = std::chrono::steady_clock::now();
+        result = pipeline->generate_video(request);
+        generation_end = std::chrono::steady_clock::now();
+        if (!validate_iteration("generation", 0))
+            return EXIT_FAILURE;
+    }
+    const auto& frames = result.frames;
+    const auto num_frames = final_validation.num_frames;
+    const auto frame_pixels = final_validation.frame_pixels;
+    const bool has_audio = final_validation.has_audio;
+
+    std::cout << "Generated video: " << frames.width << "x" << frames.height << " ("
+              << frames.num_frames << " frames";
+    if (result.fps > 0)
+        std::cout << " at " << result.fps << " fps";
+    std::cout << ")\n";
+
+    const auto elapsed_ms = [](const auto begin, const auto end) {
+        return std::chrono::duration<double, std::milli>(end - begin).count();
+    };
+    if (trtmc::cli::is_mp4_path(out_dir)) {
+        const auto output_begin = std::chrono::steady_clock::now();
+        try {
+            trtmc::cli::write_mp4(result, out_dir);
+        } catch (const std::exception& error) {
+            std::cerr << "Error: failed to write native MP4: " << error.what() << '\n';
+            return EXIT_FAILURE;
+        }
+        const auto output_end = std::chrono::steady_clock::now();
+        const auto load_ms = elapsed_ms(load_begin, load_end);
+        const auto input_decode_ms = elapsed_ms(input_decode_begin, input_decode_end);
+        const auto generation_ms = elapsed_ms(generation_begin, generation_end);
+        const auto output_ms = elapsed_ms(output_begin, output_end);
+        const auto total_ms = elapsed_ms(total_begin, output_end);
+        std::cout << "Saved " << out_dir << '\n';
+        std::cerr << "[trtmc.video_timing] frames=" << frames.num_frames << " fps=" << result.fps
+                  << " audio=" << (has_audio ? 1 : 0) << " workers=0 load_ms=" << std::fixed
+                  << std::setprecision(3) << load_ms << " input_decode_ms=" << input_decode_ms
+                  << " generation_ms=" << generation_ms << " media_write_ms=" << output_ms
+                  << " total_ms=" << total_ms << '\n';
+        return EXIT_SUCCESS;
+    }
 
     // Create output directory (including parents) if it doesn't exist.
     std::filesystem::create_directories(out_dir);
 
-    // Each frame in result.pixels is stored as [H, W, 3] float32 in [0,1],
+    // Each frame in frames.pixels is stored as [H, W, 3] float32 in [0,1],
     // with frames stacked contiguously: total layout is [T, H, W, 3].
-    const auto frame_pixels =
-        static_cast<std::size_t>(result.height) * static_cast<std::size_t>(result.width) * 3;
-
     const auto output_begin = std::chrono::steady_clock::now();
-    std::vector<std::string> frame_paths(static_cast<std::size_t>(result.num_frames));
-    for (int32_t f = 0; f < result.num_frames; ++f) {
+    std::vector<std::string> frame_paths(num_frames);
+    for (int32_t f = 0; f < frames.num_frames; ++f) {
         std::ostringstream fname;
         fname << out_dir << "/frame_" << std::setw(4) << std::setfill('0') << f << ".png";
         frame_paths[static_cast<std::size_t>(f)] = fname.str();
     }
 
     std::size_t workers_used = 0;
-    if (result.num_frames > 0) {
+    if (frames.num_frames > 0) {
         const auto hardware_threads = std::max(1U, std::thread::hardware_concurrency());
         const auto automatic_workers =
             std::min<std::size_t>(8, static_cast<std::size_t>(hardware_threads));
         const auto requested_workers = png_worker_override.value_or(automatic_workers);
         const auto worker_count =
-            std::min<std::size_t>(static_cast<std::size_t>(result.num_frames), requested_workers);
+            std::min<std::size_t>(static_cast<std::size_t>(frames.num_frames), requested_workers);
 
         // Allocate all fallible per-worker storage before any threads start.
         std::vector<std::vector<unsigned char>> rgb_buffers;
@@ -856,25 +1324,25 @@ int cmd_generate_video(const CliArgs& args) {
         for (std::size_t worker = 0; worker < worker_count; ++worker)
             rgb_buffers.emplace_back(frame_pixels);
 
-        std::vector<unsigned char> frame_status(static_cast<std::size_t>(result.num_frames), 0);
+        std::vector<unsigned char> frame_status(num_frames, 0);
         std::atomic<int32_t> next_frame{0};
         const auto encode_frames = [&](std::vector<unsigned char>& rgb) noexcept {
             while (true) {
                 const int32_t f = next_frame.fetch_add(1, std::memory_order_relaxed);
-                if (f >= result.num_frames)
+                if (f >= frames.num_frames)
                     return;
 
                 try {
                     const float* src =
-                        result.pixels.data() + static_cast<std::size_t>(f) * frame_pixels;
+                        frames.pixels.data() + static_cast<std::size_t>(f) * frame_pixels;
                     for (std::size_t i = 0; i < frame_pixels; ++i) {
                         const float v = std::max(0.0F, std::min(1.0F, src[i]));
                         rgb[i] = static_cast<unsigned char>(v * 255.0F + 0.5F);
                     }
 
                     const auto& path = frame_paths[static_cast<std::size_t>(f)];
-                    const int stride = result.width * 3;
-                    if (!stbi_write_png(path.c_str(), result.width, result.height, 3, rgb.data(),
+                    const int stride = frames.width * 3;
+                    if (!stbi_write_png(path.c_str(), frames.width, frames.height, 3, rgb.data(),
                                         stride))
                         frame_status[static_cast<std::size_t>(f)] = 1;
                 } catch (...) {
@@ -911,12 +1379,68 @@ int cmd_generate_video(const CliArgs& args) {
     for (const auto& path : frame_paths) {
         std::cout << "Saved " << path << '\n';
     }
+
+    const auto audio_path = (std::filesystem::path(out_dir) / "audio.wav").string();
+    if (has_audio) {
+        trtmc::io::write_wav(result.audio, audio_path);
+        std::cout << "Saved " << audio_path << '\n';
+    }
+
     const auto output_end = std::chrono::steady_clock::now();
-    const auto output_ms =
-        std::chrono::duration<double, std::milli>(output_end - output_begin).count();
-    std::cerr << "[trtmc.video_output_timing] frames=" << result.num_frames
-              << " workers=" << workers_used << " output_ms=" << std::fixed << std::setprecision(3)
-              << output_ms << '\n';
+    const auto load_ms = elapsed_ms(load_begin, load_end);
+    const auto input_decode_ms = elapsed_ms(input_decode_begin, input_decode_end);
+    const auto generation_ms = elapsed_ms(generation_begin, generation_end);
+    const auto output_ms = elapsed_ms(output_begin, output_end);
+    const auto total_ms = elapsed_ms(total_begin, output_end);
+
+    nlohmann::json manifest;
+    manifest["schema_version"] = 1;
+    manifest["artifact_type"] = "trtmc.video_directory";
+    const char* request_mode = "t2va";
+    if (request.mode == trtmc::VideoGenerationMode::kFirstLastFrameToVideoAudio)
+        request_mode = "fl2va";
+    else if (request.mode == trtmc::VideoGenerationMode::kReferenceToVideoAudio)
+        request_mode = "ref2va";
+    manifest["request"] = {{"mode", request_mode},
+                           {"reference_count", request.references.size()},
+                           {"has_first_frame", request.first_frame.has_value()},
+                           {"has_last_frame", request.last_frame.has_value()}};
+    manifest["video"] = {{"frame_pattern", "frame_%04d.png"}, {"width", frames.width},
+                         {"height", frames.height},           {"channels", frames.channels},
+                         {"num_frames", frames.num_frames},   {"fps", result.fps}};
+    manifest["audio"] = {
+        {"present", has_audio},
+        {"path", has_audio ? nlohmann::json("audio.wav") : nlohmann::json(nullptr)},
+        {"sample_rate", has_audio ? result.audio.sample_rate : 0},
+        {"channels", has_audio ? result.audio.channels : 0},
+        {"interleaved_sample_count", has_audio ? result.audio.samples.size() : std::size_t{0}},
+        {"sample_frames",
+         has_audio ? result.audio.samples.size() / static_cast<std::size_t>(result.audio.channels)
+                   : std::size_t{0}}};
+    manifest["timing_ms"] = {{"pipeline_load", load_ms},
+                             {"input_decode", input_decode_ms},
+                             {"generation", generation_ms},
+                             {"media_write", output_ms},
+                             {"total", total_ms}};
+
+    const auto manifest_path = (std::filesystem::path(out_dir) / "manifest.json").string();
+    std::ofstream manifest_file(manifest_path, std::ios::binary | std::ios::trunc);
+    if (!manifest_file) {
+        std::cerr << "Error: cannot open " << manifest_path << " for writing\n";
+        return EXIT_FAILURE;
+    }
+    manifest_file << manifest.dump(2) << '\n';
+    if (!manifest_file) {
+        std::cerr << "Error: failed while writing " << manifest_path << '\n';
+        return EXIT_FAILURE;
+    }
+    std::cout << "Saved " << manifest_path << '\n';
+
+    std::cerr << "[trtmc.video_timing] frames=" << frames.num_frames << " fps=" << result.fps
+              << " audio=" << (has_audio ? 1 : 0) << " workers=" << workers_used
+              << " load_ms=" << std::fixed << std::setprecision(3) << load_ms
+              << " input_decode_ms=" << input_decode_ms << " generation_ms=" << generation_ms
+              << " media_write_ms=" << output_ms << " total_ms=" << total_ms << '\n';
 
     return EXIT_SUCCESS;
 }
@@ -1714,6 +2238,12 @@ int cmd_inspect(const CliArgs& args) {
 
     try {
         const auto info = trtmc::InspectBundle(args.bundle_path);
+        if (args.validate_runtime) {
+            auto pipeline = load_pipeline(args);
+            if (pipeline == nullptr)
+                throw std::runtime_error("runtime validation returned a null pipeline");
+            std::cout << "Runtime validation:  passed (" << pipeline->pipeline_type() << ")\n";
+        }
         if (args.list_engines)
             return cmd_inspect_list_engines(info);
 
@@ -1797,7 +2327,7 @@ int apply_cli_config(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
-int main(int argc, char** argv) {
+static int run_cli(int argc, char** argv) {
     const CliArgs args = parse_args(argc, argv);
 
     if (args.show_help) {
@@ -1815,8 +2345,10 @@ int main(int argc, char** argv) {
     try {
         if (args.command == "version")
             return cmd_version();
+#if !defined(TRTMC_RUNTIME_ONLY_CLI)
         if (args.command == "build" || args.command == "graph")
             return cmd_python(args);
+#endif
         if (args.command == "run")
             return cmd_run(args);
         if (args.command == "encode")
@@ -1859,3 +2391,20 @@ int main(int argc, char** argv) {
     print_usage();
     return EXIT_FAILURE;
 }
+
+#if defined(_WIN32)
+int wmain(int argc, wchar_t** argv) {
+    try {
+        trtmc::cli::Utf8CommandLine command_line(argc, argv);
+        return run_cli(command_line.argc(), command_line.argv());
+    } catch (const std::exception& error) {
+        std::cerr << "Error: unable to decode the Windows command line as UTF-8: " << error.what()
+                  << '\n';
+        return EXIT_FAILURE;
+    }
+}
+#else
+int main(int argc, char** argv) {
+    return run_cli(argc, argv);
+}
+#endif

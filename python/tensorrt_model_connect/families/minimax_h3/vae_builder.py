@@ -20,7 +20,9 @@ from .config import VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES
 
 trt = trt_compat.get_trt()
 
-BATCH = 28  # Decode every spatial tile in one native single-device batch.
+MIN_BATCH = 16
+OPT_BATCH = 28
+MAX_BATCH = 33
 CHANNELS = 24
 FRAMES = 7
 HEIGHT = 16
@@ -78,7 +80,7 @@ def checkpoint_keys() -> tuple[str, ...]:
 
 def _heads(network, tensor):
     reshape = network.add_shuffle(tensor)
-    reshape.reshape_dims = (BATCH, SEQUENCE, HEADS, HEAD_DIM)
+    reshape.reshape_dims = (-1, SEQUENCE, HEADS, HEAD_DIM)
     reshape.second_transpose = trt.Permutation([0, 2, 1, 3])
     return reshape.get_output(0)
 
@@ -86,22 +88,45 @@ def _heads(network, tensor):
 def _rows(network, tensor):
     reshape = network.add_shuffle(tensor)
     reshape.first_transpose = trt.Permutation([0, 2, 1, 3])
-    reshape.reshape_dims = (BATCH, SEQUENCE, DIM)
+    reshape.reshape_dims = (-1, SEQUENCE, DIM)
     return reshape.get_output(0)
 
 
 def _per_head_norm(network, tensor):
     reshape = network.add_shuffle(tensor)
-    reshape.reshape_dims = (BATCH, SEQUENCE, HEADS, HEAD_DIM)
+    reshape.reshape_dims = (-1, SEQUENCE, HEADS, HEAD_DIM)
     normalized = op.rms_norm(
         network, reshape.get_output(0), np.ones(HEAD_DIM, np.float32), HEAD_DIM, NORM_EPS
     )
     flatten = network.add_shuffle(normalized)
-    flatten.reshape_dims = (BATCH, SEQUENCE, DIM)
+    flatten.reshape_dims = (-1, SEQUENCE, DIM)
     return flatten.get_output(0)
 
 
-def _rope_cache(network):
+def _broadcast_rows(network, reference, value):
+    """Broadcast a ``[1, rows, width]`` constant over runtime tile batch ``B``."""
+
+    array = np.asarray(value)
+    if array.ndim != 3 or array.shape[0] != 1:
+        raise ValueError("MiniMax-H3 VAE batch constants must have shape [1, rows, width]")
+    rows, width = array.shape[1:]
+    batch_reference = op.dynamic_slice(
+        network,
+        reference,
+        (0, 0, 0),
+        (None, rows, width),
+    )
+    zero = op.cast(network, op.constant(network, np.zeros((1, 1, 1), np.float32)), reference.dtype)
+    batch_zeros = network.add_elementwise(
+        batch_reference, zero, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    constant = op.cast(network, op.weight_constant(network, array), reference.dtype)
+    return network.add_elementwise(
+        batch_zeros, constant, trt.ElementWiseOperation.SUM
+    ).get_output(0)
+
+
+def _rope_cache(network, reference):
     axes = [
         2.0 * (np.arange(size, dtype=np.float32) + 0.5) / size - 1.0
         for size in (FRAMES, HEIGHT, WIDTH)
@@ -116,15 +141,15 @@ def _rope_cache(network):
     )
     cos = np.broadcast_to(
         np.cos(frequency).reshape(1, SEQUENCE, ROTARY_DIM // 2),
-        (BATCH, SEQUENCE, ROTARY_DIM // 2),
+        (1, SEQUENCE, ROTARY_DIM // 2),
     ).copy()
     sin = np.broadcast_to(
         np.sin(frequency).reshape(1, SEQUENCE, ROTARY_DIM // 2),
-        (BATCH, SEQUENCE, ROTARY_DIM // 2),
+        (1, SEQUENCE, ROTARY_DIM // 2),
     ).copy()
-    cos = op.constant(network, cos)
-    sin = op.constant(network, sin)
-    return op.cast(network, cos, trt.float16), op.cast(network, sin, trt.float16)
+    cos = _broadcast_rows(network, reference, cos)
+    sin = _broadcast_rows(network, reference, sin)
+    return cos, sin
 
 
 def _rope(network, tensor, cos, sin):
@@ -156,8 +181,11 @@ def _fused_qkv(
         for key in (*weight_keys, *bias_keys):
             weights.pop(key)
     return tuple(
-        network.add_slice(packed, (0, 0, part * DIM), (BATCH, SEQUENCE, DIM), (1, 1, 1)).get_output(
-            0
+        op.dynamic_slice(
+            network,
+            packed,
+            (0, 0, part * DIM),
+            (None, SEQUENCE, DIM),
         )
         for part in range(3)
     )
@@ -171,12 +199,12 @@ def _swiglu(network, hidden, weights, prefix: str):
         weights[f"{prefix}.net.0.proj.bias"],
         compute_dtype=trt.float16,
     )
-    value = network.add_slice(
-        projected, (0, 0, 0), (BATCH, SEQUENCE, FFN_DIM), (1, 1, 1)
-    ).get_output(0)
-    gate = network.add_slice(
-        projected, (0, 0, FFN_DIM), (BATCH, SEQUENCE, FFN_DIM), (1, 1, 1)
-    ).get_output(0)
+    value = op.dynamic_slice(
+        network, projected, (0, 0, 0), (None, SEQUENCE, FFN_DIM)
+    )
+    gate = op.dynamic_slice(
+        network, projected, (0, 0, FFN_DIM), (None, SEQUENCE, FFN_DIM)
+    )
     gate = op.silu(network, gate)
     hidden = network.add_elementwise(value, gate, trt.ElementWiseOperation.PROD).get_output(0)
     return op.linear(
@@ -209,11 +237,21 @@ def build_vae_tile_decoder_engine(
         default_bytes=VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
     )
     latent = network.add_input(
-        "latent_tiles", trt.float32, (BATCH, CHANNELS, FRAMES, HEIGHT, WIDTH)
+        "latent_tiles", trt.float32, (-1, CHANNELS, FRAMES, HEIGHT, WIDTH)
     )
+    shape_profile = builder.create_optimization_profile()
+    shape_profile.set_shape(
+        "latent_tiles",
+        (MIN_BATCH, CHANNELS, FRAMES, HEIGHT, WIDTH),
+        (OPT_BATCH, CHANNELS, FRAMES, HEIGHT, WIDTH),
+        (MAX_BATCH, CHANNELS, FRAMES, HEIGHT, WIDTH),
+    )
+    profile_index = config.add_optimization_profile(shape_profile)
+    if profile_index != 0:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 VideoVAE dynamic tile profile")
     rows = network.add_shuffle(latent)
     rows.first_transpose = trt.Permutation([0, 2, 3, 4, 1])
-    rows.reshape_dims = (BATCH, TOKENS, CHANNELS)
+    rows.reshape_dims = (-1, TOKENS, CHANNELS)
     post_weight = weights["post_quant_conv.weight"].reshape(CHANNELS, CHANNELS)
     hidden = op.linear(
         network,
@@ -230,15 +268,16 @@ def build_vae_tile_decoder_engine(
         compute_dtype=trt.float16,
     )
     hidden = op.cast(network, hidden, trt.float16)
-    registers = np.broadcast_to(
-        weights["decoder.register_tokens"], (BATCH, REGISTER_TOKENS, DIM)
-    ).copy()
-    registers = op.cast(network, op.weight_constant(network, registers), trt.float16)
-    cls = op.cast(network, op.constant(network, np.zeros((BATCH, 1, DIM), np.float32)), trt.float16)
+    registers = _broadcast_rows(
+        network,
+        hidden,
+        np.asarray(weights["decoder.register_tokens"]).reshape(1, REGISTER_TOKENS, DIM),
+    )
+    cls = _broadcast_rows(network, hidden, np.zeros((1, 1, DIM), np.float32))
     packed = network.add_concatenation([hidden, registers, cls])
     packed.axis = 1
     hidden = packed.get_output(0)
-    cos, sin = _rope_cache(network)
+    cos, sin = _rope_cache(network, hidden)
 
     for index in range(LAYERS):
         prefix = f"decoder.transformer_blocks.{index}"
@@ -309,14 +348,17 @@ def build_vae_tile_decoder_engine(
         weights["decoder.proj_out.bias"],
         compute_dtype=trt.float16,
     )
-    pixels = network.add_slice(
-        pixels, (0, 0, 0), (BATCH, TOKENS, OUT_CHANNELS * PATCH_T * PATCH * PATCH), (1, 1, 1)
-    ).get_output(0)
+    pixels = op.dynamic_slice(
+        network,
+        pixels,
+        (0, 0, 0),
+        (None, TOKENS, OUT_CHANNELS * PATCH_T * PATCH * PATCH),
+    )
     output = network.add_shuffle(pixels)
-    output.reshape_dims = (BATCH, FRAMES, HEIGHT, WIDTH, OUT_CHANNELS, PATCH_T, PATCH, PATCH)
+    output.reshape_dims = (-1, FRAMES, HEIGHT, WIDTH, OUT_CHANNELS, PATCH_T, PATCH, PATCH)
     output.second_transpose = trt.Permutation([0, 4, 1, 5, 2, 6, 3, 7])
     final = network.add_shuffle(output.get_output(0))
-    final.reshape_dims = (BATCH, OUT_CHANNELS, FRAMES * PATCH_T, HEIGHT * PATCH, WIDTH * PATCH)
+    final.reshape_dims = (-1, OUT_CHANNELS, FRAMES * PATCH_T, HEIGHT * PATCH, WIDTH * PATCH)
     # Keep the decoder math in FP16 and expose FP32 for the runtime's tile
     # assembly, ImageNet denormalization, and clamp. The resulting blend
     # delta against autocast assembly is covered by the decoded-video gate.
@@ -325,7 +367,8 @@ def build_vae_tile_decoder_engine(
     network.mark_output(result)
     op.validate_native_network(network, expected_attentions=LAYERS, label="VAE tile decoder")
     print(
-        f"[minimax-h3] building native VAE tile decoder: batch={BATCH}, "
+        "[minimax-h3] building native VAE tile decoder: "
+        f"batch_profile={MIN_BATCH}/{OPT_BATCH}/{MAX_BATCH}, "
         f"sequence={SEQUENCE}, layers={LAYERS}",
         file=sys.stderr,
     )

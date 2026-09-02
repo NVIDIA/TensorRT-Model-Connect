@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <iosfwd>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace trtmc {
@@ -61,6 +62,12 @@ BundleSectionFileRange ResolveBundleSectionFileRange(const std::string& path,
 // preferred path for model-sized payloads that must not be buffered in memory.
 void CopyBundleSection(const std::string& path, const BundleSectionInfo& section,
                        std::ostream& output);
+
+// Stream one section through the repository SHA-256 implementation and fail
+// closed unless the digest exactly matches the lowercase attestation. The
+// section payload is never materialized as one allocation.
+void ValidateBundleSectionSha256(const std::string& path, const BundleSectionInfo& section,
+                                 std::string_view expected_sha256);
 
 // Check magic bytes without reading full file.
 bool HasBundleMagic(const std::string& path);

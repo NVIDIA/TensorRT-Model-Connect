@@ -8,7 +8,6 @@
 # allowlist entry with a rationale.
 
 catch_all .dockerignore # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all .gitattributes # checkout and diff normalization can affect every path; catch-all stays conservative
 catch_all Dockerfile # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all _pyproject_backend.py # root PEP 517/660 backend routes wheel builds and editable installs; catch-all stays conservative
 catch_all benchmarks/performance/baselines/hf_transformers.py # shared release reference runner can affect every text-family comparison; catch-all stays conservative

@@ -253,8 +253,12 @@ def test_diffusion_family_build_options_reach_plugin(monkeypatch, tmp_path):
     model_dir = _make_fake_diffusion_model_dir(tmp_path)
     output = tmp_path / "out.bundle"
     args = _build_args(model_dir, output, max_batch_size=1)
+    adapter = tmp_path / "fast-h3.safetensors"
+    transformer_ref = tmp_path / "transformer_ref"
     args.set_flags = [
         "minimax_h3.first_block_cache=true",
+        f"minimax_h3.fast_h3_adapter={adapter}",
+        f"minimax_h3.transformer_ref={transformer_ref}",
         "minimax_h3.retain_engines=true",
         "minimax_h3.retained_tail_weight_budget_gib=30",
     ]
@@ -264,6 +268,18 @@ def test_diffusion_family_build_options_reach_plugin(monkeypatch, tmp_path):
     assert plugin.calls[0]["family_build_options"]["minimax_h3"] == {
         "first_block_cache": True,
         "first_block_cache_threshold": 0.025,
+        "fast_h3_adapter": str(adapter),
+        "transformer_ref": str(transformer_ref),
         "retain_engines": True,
         "retained_tail_weight_budget_gib": 30,
     }
+    # The path-free rewrite is model-family-owned.  A non-H3 build keeps the
+    # generic effective-config representation byte-for-byte compatible even
+    # when an unrelated namespace is present.
+    effective = json.loads(
+        output.with_suffix(".effective_config.json").read_text(encoding="utf-8")
+    )
+    assert effective["minimax_h3"]["fast_h3_adapter"]["value"] == str(adapter)
+    assert effective["minimax_h3"]["transformer_ref"]["value"] == str(
+        transformer_ref
+    )

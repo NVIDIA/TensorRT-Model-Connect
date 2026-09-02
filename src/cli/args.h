@@ -12,6 +12,17 @@
 
 namespace trtmc::cli {
 
+enum class VideoReferenceArgKind {
+    kImage,
+    kVideoDirectory,
+    kAudio,
+};
+
+struct VideoReferenceArg {
+    VideoReferenceArgKind kind{VideoReferenceArgKind::kImage};
+    std::string path;
+};
+
 struct CliArgs {
     std::string command;
     std::vector<std::string> build_args;
@@ -22,6 +33,11 @@ struct CliArgs {
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
     std::string right_image_path;
+    std::string first_frame_path;
+    std::string last_frame_path;
+    // Ref2VA inputs in exact command-line order. Video inputs are native
+    // Native media files or ModelConnect directories (manifest + PNG/WAV).
+    std::vector<VideoReferenceArg> video_references;
     std::string lora_adapter_path;
     std::string lora_adapter_id{"default"};
     std::string output_dir;
@@ -56,6 +72,7 @@ struct CliArgs {
     int top_k{1};
     int seed{-1};
     int num_steps{-1};
+    int video_num_frames{0}; // 0 = use bundle/model default
     float guidance_scale{-1.0F};
     float sde_gamma{-1.0F};
     float conf_threshold{-1.0F};
@@ -94,6 +111,7 @@ struct CliArgs {
     std::vector<std::string> model_plugin_search_paths;
     bool cuda_graphs{false};
     bool list_engines{false};
+    bool validate_runtime{false};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;

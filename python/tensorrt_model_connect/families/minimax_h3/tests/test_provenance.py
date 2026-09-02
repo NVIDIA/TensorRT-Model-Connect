@@ -17,6 +17,7 @@ from tensorrt_model_connect.families.minimax_h3 import provenance
 from tensorrt_model_connect.families.minimax_h3.config import (
     DEFAULT_WORKSPACE_LIMIT_BYTES,
     SOL_ENGINE_1344X768_124F,
+    SOL_ENGINE_1344X768_124_TO_345F,
     default_workspace_limit_bytes,
     native_plan_filenames,
 )
@@ -158,7 +159,15 @@ def _snapshot(tmp_path: Path) -> Path:
         index_payload = json.dumps({"weight_map": {"weight": Path(shard).name}}).encode()
         _link_blob(snapshot, index, f"{blob_index:040x}", index_payload)
         blob_index += 1
+    _link_blob(
+        snapshot,
+        "audio_vae/diffusion_pytorch_model.safetensors",
+        f"{blob_index:064x}",
+        b"audio-vae-weight",
+    )
+    blob_index += 1
     for relative, payload in (
+        ("audio_vae/config.json", b"{}"),
         ("modular_model_index.json", b"{}"),
         ("scheduler/scheduler_config.json", b"{}"),
         ("tokenizer/tokenizer.json", b'{"model":"test"}'),
@@ -383,20 +392,31 @@ def test_atomic_receipt_write_preserves_previous_file_on_replace_failure(
 
 
 def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) -> None:
-    receipt, _plans, _snapshot_path, _tokenizer = _receipt(tmp_path)
     config = {
         "model_type": "minimax_h3",
         "runtime_strategy": "diffusion_minimax_h3",
         "checkpoint_revision": CHECKPOINT_REVISION,
         "source_revision": SOURCE_REVISION,
         "builder_source_sha256": builder_source_sha256(),
-        "checkpoint_inventory_sha256": receipt["checkpoint_snapshot"]["inventory_sha256"],
+        "checkpoint_inventory_sha256": "a" * 64,
         "workspace_limit_bytes": dict(DEFAULT_WORKSPACE_LIMIT_BYTES),
         "context_parallel_size": 1,
-        "padded_sequence_length": 38247,
+        "padded_sequence_length": SOL_ENGINE_1344X768_124_TO_345F.padded_sequence_length,
+        "packed_sequence_length_min": SOL_ENGINE_1344X768_124_TO_345F.min_sequence_length,
+        "packed_sequence_length_opt": SOL_ENGINE_1344X768_124_TO_345F.opt_sequence_length,
+        "packed_sequence_length_max": SOL_ENGINE_1344X768_124_TO_345F.sequence_length,
+        "canvas_multiple": 32,
+        "canvas_short_edge": 768,
+        "canvas_max_pixels": 1032192,
+        "min_aspect_ratio": 0.25,
+        "max_aspect_ratio": 4.0,
         "vae_tile_batch": 28,
+        "vae_tile_batch_min": 16,
+        "vae_tile_batch_opt": 28,
+        "vae_tile_batch_max": 33,
         "plan_sha256": {
-            filename: receipt["components"][filename]["sha256"] for filename in PLAN_FILENAMES
+            filename: f"{index:064x}"
+            for index, filename in enumerate(PLAN_FILENAMES, start=1)
         },
     }
     bundle = tmp_path / "model.bundle"
@@ -440,7 +460,9 @@ def test_file_identity_detects_same_size_replacement(tmp_path: Path) -> None:
     artifact = tmp_path / "artifact.bin"
     artifact.write_bytes(b"old")
     identity = file_identity(artifact)
-    artifact.write_bytes(b"new")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"new")
+    os.replace(replacement, artifact)
     with pytest.raises(ValueError, match="changed while it was in use"):
         validate_file_identity(artifact, identity, "artifact")
 
