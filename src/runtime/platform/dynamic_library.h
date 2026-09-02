@@ -29,6 +29,10 @@ void* dynamic_library_symbol_in_process(const char* name, std::string* error = n
 bool close_dynamic_library(DynamicLibraryHandle handle, std::string* error = nullptr) noexcept;
 
 std::filesystem::path current_executable_path() noexcept;
+// Path of the shared library or executable that contains this implementation.
+// Unlike current_executable_path(), this remains anchored to trtmc_core.dll
+// when ModelConnect is hosted by an application in another directory.
+std::filesystem::path current_module_path() noexcept;
 std::vector<std::filesystem::path> loaded_dynamic_library_paths();
 std::string dynamic_library_filename(std::string_view stem);
 const char* dynamic_library_search_path_environment() noexcept;

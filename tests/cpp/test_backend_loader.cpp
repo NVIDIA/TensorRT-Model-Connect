@@ -21,6 +21,28 @@ static void check(bool cond, const char* name) {
 }
 
 int main() {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    bool rejected = false;
+    try {
+        trtmc::BackendLoader::load("trt_rtx", {"C:\\untrusted"});
+    } catch (const std::runtime_error& error) {
+        rejected = true;
+        check(std::string(error.what()).find("rejects backend search path overrides") !=
+                  std::string::npos,
+              "locked backend loader explains rejected search path");
+    }
+    check(rejected, "locked backend loader rejects explicit search paths");
+
+    bool wrong_backend_rejected = false;
+    try {
+        trtmc::BackendLoader::load("trt");
+    } catch (const std::runtime_error& error) {
+        wrong_backend_rejected = true;
+        check(std::string(error.what()).find("only the TensorRT-RTX backend") != std::string::npos,
+              "locked backend loader explains backend allowlist");
+    }
+    check(wrong_backend_rejected, "locked backend loader rejects non-RTX backends");
+#else
     const std::string backend_name = "nonexistent_backend_xyz";
     const auto missing_dir = std::filesystem::temp_directory_path() / "trtmc-missing-backends";
     const std::string library_name =
@@ -43,6 +65,7 @@ int main() {
               "error mentions explicit search paths");
     }
     check(threw, "missing backend throws runtime_error");
+#endif
 
     std::cerr << (failures == 0 ? "ALL PASSED" : "SOME FAILED") << std::endl;
     return failures;

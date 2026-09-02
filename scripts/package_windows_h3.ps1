@@ -147,9 +147,7 @@ function Assert-NativeDependencyBoundary {
 function Assert-CompleteMiniMaxH3Bundle {
     param(
         [string]$CliPath,
-        [string]$BundleFile,
-        [string]$BackendDirectory,
-        [string]$ModelPluginDirectory
+        [string]$BundleFile
     )
     $expectedSections = [Collections.Generic.List[string]]::new()
     foreach ($name in @(
@@ -179,10 +177,7 @@ function Assert-CompleteMiniMaxH3Bundle {
         throw "Internal packaging error: expected MiniMax-H3 plan count is not 61"
     }
 
-    $inspectOutput = @(
-        & $CliPath inspect $BundleFile --validate-runtime --list-engines `
-            --backend-dir $BackendDirectory --model-plugin-dir $ModelPluginDirectory 2>&1
-    )
+    $inspectOutput = @(& $CliPath inspect $BundleFile --validate-runtime --list-engines 2>&1)
     if ($LASTEXITCODE -ne 0) {
         throw "ModelConnect rejected the complete MiniMax-H3 bundle:`n$($inspectOutput -join [Environment]::NewLine)"
     }
@@ -222,6 +217,9 @@ function Assert-RuntimeOnlyCli {
         'trtmc run',
         'trtmc generate-audio',
         '--hf-python',
+        '--backend-dir',
+        '--model-plugin-dir',
+        '--kernel-bindings',
         'Build uses a sibling Python interpreter'
     )) {
         if ($helpText.Contains($forbidden)) {
@@ -243,7 +241,7 @@ $Core = Resolve-RequiredFile (Join-Path $BuildRoot "trtmc_core.dll") "ModelConne
 $Backend = Resolve-RequiredFile (Join-Path $BuildRoot "trtmc_backend_trt_rtx.dll") `
     "TensorRT-RTX backend"
 $ModelPlugin = Resolve-RequiredFile `
-    (Join-Path $BuildRoot "models\minimax_h3\trtmc_model_minimax_h3.dll") `
+    (Join-Path $BuildRoot "trtmc\models\minimax_h3\trtmc_model_minimax_h3.dll") `
     "MiniMax-H3 model plugin"
 $Setup = Resolve-RequiredFile (Join-Path $BuildRoot "MiniMaxH3Setup.exe") `
     "native MiniMax-H3 setup executable"
@@ -255,7 +253,6 @@ $RtxRuntime = $RtxRuntimeCandidates[0].FullName
 
 Assert-RuntimeOnlyCli $Cli
 Assert-NativeDependencyBoundary @($Cli, $Core, $Backend, $ModelPlugin, $Setup, $RtxRuntime)
-Assert-CompleteMiniMaxH3Bundle $Cli $Bundle $BuildRoot (Join-Path $BuildRoot 'models')
 
 $PayloadRoot = Join-Path $OutputRoot "payload"
 [IO.Directory]::CreateDirectory($PayloadRoot) | Out-Null
@@ -292,12 +289,28 @@ foreach ($file in $PayloadFiles) {
 $ManifestPath = Join-Path $OutputRoot "payload.manifest"
 [IO.File]::WriteAllText($ManifestPath, (($Rows -join "`n") + "`n"), $Utf8NoBom)
 
+# Validate through the exact SHA-256-manifested package layout. The locked
+# runtime discovers only the backend next to trtmc.exe and the fixed
+# bin/trtmc/models/minimax_h3 plugin path; no loader override is accepted.
+$PackagedCli = Join-Path $PayloadRoot "bin\trtmc.exe"
+$PackagedBundle = Join-Path $PayloadRoot "models\MiniMax-H3.bundle"
+Assert-RuntimeOnlyCli $PackagedCli
+Assert-CompleteMiniMaxH3Bundle $PackagedCli $PackagedBundle
+
 $PackagedPeFiles = @(
     Get-ChildItem -LiteralPath $OutputRoot -Recurse -File |
         Where-Object { $_.Extension -in @('.exe', '.dll') } |
         ForEach-Object { $_.FullName }
 )
 Assert-NativeDependencyBoundary $PackagedPeFiles
+
+# Re-run the native installer verifier after every package validation step.
+# It rejects any payload file that is not represented by the SHA-256 manifest.
+$PackagedSetup = Join-Path $OutputRoot "MiniMaxH3Setup.exe"
+$VerifyOutput = @(& $PackagedSetup --payload-dir $PayloadRoot --verify-only --quiet 2>&1)
+if ($LASTEXITCODE -ne 0) {
+    throw "Native installer rejected the exact package payload:`n$($VerifyOutput -join [Environment]::NewLine)"
+}
 
 Write-Host "Native MiniMax-H3 installation layout created: $OutputRoot"
 Write-Host "End users install by double-clicking MiniMaxH3Setup.exe."

@@ -6,6 +6,7 @@
 #include "runtime/backend/trt_version.h"
 
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -80,11 +81,39 @@ static void test_candidates() {
     check_eq(candidates[0], "trt_rtx", "TRT-RTX candidate preserved");
 }
 
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+static void test_locked_runtime_disables_standard_trt_loading() {
+    bool discovery_rejected = false;
+    try {
+        (void)trtmc::detect_installed_trt_version({"C:\\untrusted"});
+    } catch (const std::runtime_error& error) {
+        discovery_rejected =
+            std::string(error.what()).find("disables standard TensorRT discovery") !=
+            std::string::npos;
+    }
+    check(discovery_rejected, "locked runtime rejects standard TRT discovery");
+
+    bool library_rejected = false;
+    try {
+        const auto required = *trtmc::parse_trt_version("10.15.0");
+        (void)trtmc::find_trt_library_for_version(required, {"C:\\untrusted"});
+    } catch (const std::runtime_error& error) {
+        library_rejected =
+            std::string(error.what()).find("disables standard TensorRT library loading") !=
+            std::string::npos;
+    }
+    check(library_rejected, "locked runtime rejects standard TRT library loading");
+}
+#endif
+
 int main() {
     test_parse_version();
     test_parse_abi_tag();
     test_matching();
     test_candidates();
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    test_locked_runtime_disables_standard_trt_loading();
+#endif
 
     std::cerr << (failures == 0 ? "ALL PASSED" : "SOME FAILED") << std::endl;
     return failures;

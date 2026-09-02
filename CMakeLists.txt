@@ -62,6 +62,8 @@ option(TRTMC_DISTRIBUTABLE_BUILD
        "Build distributable artifacts without embedding source/build paths" OFF)
 option(TRTMC_RUNTIME_ONLY_CLI
        "Build the CLI without Python-backed build/graph commands or subprocess code" OFF)
+option(TRTMC_LOCKED_H3_RUNTIME
+       "Lock the native Windows MiniMax-H3 runtime to its attested package layout" OFF)
 set(TRTMC_RUNTIME_MODELS "" CACHE STRING
   "Semicolon-separated runtime model plugins to build; empty builds every model.")
 set(TRTMC_MODEL_PROOF_MODEL "" CACHE STRING
@@ -267,6 +269,22 @@ endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(cmake/trtmc_config_schemas.cmake)
 include(cmake/trtmc_pipeline_plugins.cmake)
+if(TRTMC_LOCKED_H3_RUNTIME)
+  if(NOT WIN32)
+    message(FATAL_ERROR "TRTMC_LOCKED_H3_RUNTIME is supported only on Windows")
+  endif()
+  if(NOT TRTMC_RUNTIME_ONLY_CLI OR NOT TRTMC_DISTRIBUTABLE_BUILD)
+    message(FATAL_ERROR
+      "TRTMC_LOCKED_H3_RUNTIME requires TRTMC_RUNTIME_ONLY_CLI=ON and "
+      "TRTMC_DISTRIBUTABLE_BUILD=ON")
+  endif()
+  list(LENGTH TRTMC_RUNTIME_MODEL_IDS _trtmc_locked_runtime_model_count)
+  if(NOT _trtmc_locked_runtime_model_count EQUAL 1 OR
+     NOT TRTMC_RUNTIME_MODEL_IDS STREQUAL "minimax_h3")
+    message(FATAL_ERROR
+      "TRTMC_LOCKED_H3_RUNTIME requires exactly TRTMC_RUNTIME_MODELS=minimax_h3")
+  endif()
+endif()
 if(WIN32)
   set(_trtmc_optimized_runtime_host_source
     src/runtime/providers/optimized_runtime_host_windows.cpp)
@@ -348,6 +366,10 @@ target_include_directories(trtmc_core SYSTEM PRIVATE
 )
 
 target_compile_definitions(trtmc_core PUBLIC TRTMC_VERSION_STRING=\"${PROJECT_VERSION}\")
+if(TRTMC_LOCKED_H3_RUNTIME)
+  target_sources(trtmc_core PRIVATE src/runtime/platform/windows_process_lockdown.cpp)
+  target_compile_definitions(trtmc_core PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
+endif()
 if(NOT TRTMC_DISTRIBUTABLE_BUILD)
   target_compile_definitions(trtmc_core
     PUBLIC TRTMC_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\"
@@ -577,10 +599,17 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
       "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic>"
       "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<PLATFORM_ID:Windows>>>:-Wall;-Wextra>"
   )
+  if(TRTMC_LOCKED_H3_RUNTIME)
+    set(_trtmc_model_output_directory
+      "${CMAKE_BINARY_DIR}/trtmc/models/${_trtmc_model}/$<0:>")
+  else()
+    set(_trtmc_model_output_directory
+      "${CMAKE_BINARY_DIR}/models/${_trtmc_model}/$<0:>")
+  endif()
   set_target_properties(trtmc_model_${_trtmc_model} PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}/$<0:>"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}/$<0:>"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}/$<0:>"
+    LIBRARY_OUTPUT_DIRECTORY "${_trtmc_model_output_directory}"
+    RUNTIME_OUTPUT_DIRECTORY "${_trtmc_model_output_directory}"
+    ARCHIVE_OUTPUT_DIRECTORY "${_trtmc_model_output_directory}"
   )
   if(NOT WIN32)
     set_target_properties(trtmc_model_${_trtmc_model} PROPERTIES
@@ -843,11 +872,25 @@ if(TRTMC_BUILD_BACKEND_RTX)
   endif()
 endif()
 
+if(TRTMC_LOCKED_H3_RUNTIME)
+  if(NOT TRTMC_BUILD_BACKEND_RTX)
+    message(FATAL_ERROR "TRTMC_LOCKED_H3_RUNTIME requires TRTMC_BUILD_BACKEND_RTX=ON")
+  endif()
+  if(TRTMC_BUILD_BACKEND_TRT OR TRTMC_ENABLE_TRT OR
+     TRTMC_ENABLE_LIBTORCH_MULTINOMIAL OR _trtmc_has_tvm_ffi)
+    message(FATAL_ERROR
+      "TRTMC_LOCKED_H3_RUNTIME permits only the TensorRT-RTX native runtime")
+  endif()
+endif()
+
 add_executable(trtmc
   src/cli/args.cpp
   src/cli/main.cpp
   src/cli/windows_media.cpp
 )
+if(WIN32 AND TRTMC_LOCKED_H3_RUNTIME)
+  target_compile_definitions(trtmc PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
+endif()
 if(TRTMC_RUNTIME_ONLY_CLI)
   target_compile_definitions(trtmc PRIVATE TRTMC_RUNTIME_ONLY_CLI=1)
 endif()
@@ -1155,11 +1198,18 @@ trtmc_add_test(test_pipeline_registry)
 trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
 add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
+if(TRTMC_LOCKED_H3_RUNTIME)
+  target_compile_definitions(test_model_plugin_loader PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
+  target_compile_definitions(test_backend_loader PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
+endif()
 trtmc_add_test(test_dynamic_library)
 target_compile_definitions(test_dynamic_library PRIVATE
   TRTMC_TEST_CORE_LIBRARY="$<TARGET_FILE:trtmc_core>"
 )
 trtmc_add_test(test_trt_version)
+if(TRTMC_LOCKED_H3_RUNTIME)
+  target_compile_definitions(test_trt_version PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
+endif()
 trtmc_add_test(test_runtime_measurement)
 trtmc_add_test(test_distributed_runtime)
 
@@ -1210,6 +1260,15 @@ if(TRTMC_RUNTIME_ONLY_CLI)
   target_compile_definitions(test_cli_args_runtime_only PRIVATE TRTMC_RUNTIME_ONLY_CLI=1)
 endif()
 if(WIN32)
+  trtmc_add_test(test_cli_args_locked_h3_runtime)
+  target_sources(test_cli_args_locked_h3_runtime PRIVATE src/cli/args.cpp)
+  target_compile_definitions(test_cli_args_locked_h3_runtime PRIVATE
+    TRTMC_RUNTIME_ONLY_CLI=1
+    TRTMC_LOCKED_H3_RUNTIME=1
+  )
+  if(TRTMC_LOCKED_H3_RUNTIME)
+    trtmc_add_test(test_windows_process_lockdown)
+  endif()
   trtmc_add_test(test_windows_utf8_argv)
   target_sources(test_windows_utf8_argv PRIVATE
     src/cli/windows_utf8_argv.cpp
@@ -1232,6 +1291,9 @@ trtmc_add_test(test_jsonl_dataset_and_output
 trtmc_add_test(test_speech_session_cli_helpers)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
+if(TRTMC_LOCKED_H3_RUNTIME)
+  target_compile_definitions(test_config_cli_support PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
+endif()
 trtmc_add_test(test_config_schemas_triattention)
 
 # TRT runtime core

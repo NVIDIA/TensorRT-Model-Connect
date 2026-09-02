@@ -31,6 +31,10 @@ std::string sha256_hex(const std::array<std::uint8_t, 32>& digest);
 void verify_payload(const std::filesystem::path& payload_root,
                     const std::vector<PayloadEntry>& entries);
 
+// Reject manifests that contain anything outside the fixed native H3 runtime,
+// one versioned TensorRT-RTX DLL, and the optional repository legal notices.
+void validate_minimax_h3_runtime_payload(const std::vector<PayloadEntry>& entries);
+
 // Verify first, materialize into a sibling staging directory, then atomically
 // replace an existing installation. Existing destinations must carry the
 // exact install marker, which prevents an installer invocation from replacing

@@ -207,6 +207,17 @@ def test_staged_build_uses_seven_fresh_children_resumes_and_sanitizes_bundle(
     plans = output.with_name(f"{output.name}.plans")
     (plans / "denoiser_tail.plan").write_bytes(b"corrupt")
     staged_build.build_staged_bundle(model, output)
+    assert calls == []
+    assert (plans / "denoiser_tail.plan").read_bytes() == b"corrupt"
+
+    # With no final or partial assembly, exact surviving sources are reused and
+    # only the changed plan is rebuilt.
+    output.unlink()
+    for component, filename, _section in staged_build._COMPONENTS:
+        if filename != "denoiser_tail.plan":
+            (plans / filename).write_bytes(f"plan:{component}".encode())
+    calls.clear()
+    staged_build.build_staged_bundle(model, output)
     assert [call[call.index("--component") + 1] for call in calls] == ["denoiser_tail"]
 
     shard.write_bytes(b"bbbb")
@@ -260,6 +271,51 @@ def test_staged_receipt_contains_only_settings_and_plan_digests(
     }
     assert str(tmp_path) not in json.dumps(receipt)
     assert all(set(record) == {"bytes", "sha256"} for record in receipt["plans"].values())
+
+
+def test_staged_resume_uses_complete_receipt_before_missing_plan_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "model"
+    tokenizer = model / "tokenizer" / "tokenizer.json"
+    tokenizer.parent.mkdir(parents=True)
+    tokenizer.write_text("{}", encoding="utf-8")
+    _write_audio_vae_config(model)
+    output = tmp_path / "h3.bundle"
+    calls: list[str] = []
+
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+        assert verbose is False
+        calls.append(component)
+        plan.write_bytes(f"plan:{component}".encode())
+
+    actual_writer = staged_build.write_consuming_bundle
+    interrupt = True
+
+    def interrupted_writer(destination, info, sections):
+        def fail(event: str) -> None:
+            if interrupt and event == "after_source_unlink:text_encoder_plan":
+                raise RuntimeError("injected assembly interruption")
+
+        return actual_writer(destination, info, sections, failure_injector=fail)
+
+    monkeypatch.setattr(staged_build, "_run_component", build)
+    monkeypatch.setattr(staged_build, "write_consuming_bundle", interrupted_writer)
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_abi", lambda _version: "1.6")
+
+    with pytest.raises(RuntimeError, match="injected assembly interruption"):
+        staged_build.build_staged_bundle(model, output)
+    plans = output.with_name(f"{output.name}.plans")
+    assert not (plans / "text_encoder.plan").exists()
+    assert len(calls) == len(staged_build._COMPONENTS)
+
+    calls.clear()
+    interrupt = False
+    staged_build.build_staged_bundle(model, output)
+    assert calls == []
+    _header, payloads = read_bundle_file(output)
+    assert payloads["text_encoder_plan"] == b"plan:text_encoder"
 
 
 def test_plugin_routes_only_fixed_bf16_single_gpu_profile(

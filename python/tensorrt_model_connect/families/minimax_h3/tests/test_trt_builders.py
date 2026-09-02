@@ -152,7 +152,11 @@ def test_builders_apply_default_or_overridden_workspace(
             return object()
 
     monkeypatch.setattr(trt, "Builder", lambda _logger: FakeBuilder())
-    monkeypatch.setattr(op, "configure_builder", lambda _config: None)
+    monkeypatch.setattr(
+        op,
+        "configure_builder",
+        lambda _config, *, weight_streaming=False: None,
+    )
     monkeypatch.setattr(op, "configure_workspace", capture)
     kwargs = {"workspace_bytes": workspace_bytes}
     if builder is build_text_encoder_engine:

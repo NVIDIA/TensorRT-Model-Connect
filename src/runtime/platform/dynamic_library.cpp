@@ -36,6 +36,8 @@ namespace {
 
 namespace fs = std::filesystem;
 
+const int kCurrentModuleAnchor = 0;
+
 void assign_error(std::string* output, std::string message) noexcept {
     if (output == nullptr)
         return;
@@ -268,6 +270,27 @@ fs::path current_executable_path() noexcept {
     } catch (...) {
     }
     return {};
+}
+
+fs::path current_module_path() noexcept {
+    try {
+#if defined(_WIN32)
+        HMODULE module = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(&kCurrentModuleAnchor), &module)) {
+            return {};
+        }
+        return module_path(module);
+#else
+        Dl_info info{};
+        if (dladdr(&kCurrentModuleAnchor, &info) == 0 || info.dli_fname == nullptr)
+            return {};
+        return fs::path(info.dli_fname);
+#endif
+    } catch (...) {
+        return {};
+    }
 }
 
 std::vector<fs::path> loaded_dynamic_library_paths() {

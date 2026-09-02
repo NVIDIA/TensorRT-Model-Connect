@@ -196,9 +196,11 @@ void print_usage() {
                  "  trtmc version\n"
                  "\n"
                  "Runtime options:\n"
-                 "  --runtime-cache PATH   TensorRT-RTX JIT kernel cache file\n"
-                 "  --backend-dir PATH     Extra backend shared-library directory\n"
+                 "  --runtime-cache PATH   TensorRT-RTX JIT kernel cache file\n";
+#if !defined(TRTMC_LOCKED_H3_RUNTIME)
+    std::cerr << "  --backend-dir PATH     Extra backend shared-library directory\n"
                  "  --model-plugin-dir PATH Extra model-plugin shared-library directory\n";
+#endif
 #else
     std::cerr
         << "Usage:\n"
@@ -911,17 +913,41 @@ CliArgs parse_args(int argc, char** argv) {
             args.runtime_cache = argv[++i];
             continue;
         }
-        if (arg == "--kernel-bindings" && need_value(arg)) {
+        if (arg == "--kernel-bindings") {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+            args.parse_error = true;
+            args.error_message = "--kernel-bindings is disabled in the locked MiniMax-H3 runtime";
+            return args;
+#else
+            if (!need_value(arg))
+                return args;
             args.kernel_bindings_path = argv[++i];
             continue;
+#endif
         }
-        if (arg == "--backend-dir" && need_value(arg)) {
+        if (arg == "--backend-dir") {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+            args.parse_error = true;
+            args.error_message = "--backend-dir is disabled in the locked MiniMax-H3 runtime";
+            return args;
+#else
+            if (!need_value(arg))
+                return args;
             args.backend_search_paths.emplace_back(argv[++i]);
             continue;
+#endif
         }
-        if (arg == "--model-plugin-dir" && need_value(arg)) {
+        if (arg == "--model-plugin-dir") {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+            args.parse_error = true;
+            args.error_message = "--model-plugin-dir is disabled in the locked MiniMax-H3 runtime";
+            return args;
+#else
+            if (!need_value(arg))
+                return args;
             args.model_plugin_search_paths.emplace_back(argv[++i]);
             continue;
+#endif
         }
         if (arg == "--cuda-graphs") {
             args.cuda_graphs = true;

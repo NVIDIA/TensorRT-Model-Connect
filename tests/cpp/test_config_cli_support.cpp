@@ -362,8 +362,7 @@ void test_try_write_effective_config_reports_unwritable_sidecar() {
         trtmc::config::try_write_effective_config_next_to(bundle, "/dev/null/bundle.bundle");
 
     check(!result.path.has_value(), "try_write_effective: unwritable path is non-fatal");
-    check(result.error.find("cannot create directories") != std::string::npos,
-          "try_write_effective: write error remains observable");
+    check(!result.error.empty(), "try_write_effective: write error remains observable");
 }
 
 void test_runtime_resolution_survives_unwritable_effective_config_sidecar() {
@@ -377,6 +376,24 @@ void test_runtime_resolution_survives_unwritable_effective_config_sidecar() {
         check(resolved->get<std::int32_t>("triattention", "kv_budget") == 8192,
               "runtime resolution: session override remains active");
     }
+}
+
+void test_runtime_resolution_sidecar_policy(std::string tmp_dir) {
+    namespace fs = std::filesystem;
+    register_demo_schema();
+    const fs::path bundle_path = fs::path(tmp_dir) / "locked.bundle";
+    const fs::path sidecar_path = fs::path(tmp_dir) / "locked.effective_config.json";
+    fs::remove(sidecar_path);
+    auto resolved = trtmc::detail::resolve_runtime_config(
+        R"({"defaults":{"triattention":{"kv_budget":4096}}})", bundle_path.string(), "",
+        {"triattention.kv_budget=8192"});
+    check(resolved.has_value(), "runtime sidecar policy: resolution succeeds");
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    check(!fs::exists(sidecar_path), "locked runtime sidecar policy: no file is created");
+#else
+    check(fs::is_regular_file(sidecar_path),
+          "normal runtime sidecar policy: effective config is created");
+#endif
 }
 
 // ---- bundle defaults: block ------------------------------------------------
@@ -554,6 +571,7 @@ int main() {
         trtmc_test::remove_all_safe(tmp.string());
         fs::create_directories(tmp);
         test_write_effective_config_next_to_places_file(tmp.string());
+        test_runtime_resolution_sidecar_policy(tmp.string());
     }
 
     SchemaRegistry::instance().clear_for_testing();

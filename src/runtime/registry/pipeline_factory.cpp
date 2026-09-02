@@ -11,6 +11,9 @@
 #include "runtime/backend/trt_version.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/providers/optimized_runtime_host.h"
+#if defined(_WIN32) && defined(TRTMC_LOCKED_H3_RUNTIME)
+#include "runtime/platform/windows_process_lockdown.h"
+#endif
 #include "runtime/registry/bundle_materialization.h"
 #include "runtime/registry/runtime_config_resolution.h"
 #include "trtmc/config/cli_support.h"
@@ -274,6 +277,17 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
                                   const std::string& bundle_path, const std::string& backend_name,
                                   const std::vector<std::string>& backend_search_paths) {
     const std::string logical_backend = backend_name.empty() ? "trt" : backend_name;
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    if (!backend_search_paths.empty()) {
+        throw std::runtime_error("locked MiniMax-H3 runtime rejects backend search path overrides");
+    }
+    if (logical_backend != "trt_rtx") {
+        throw std::runtime_error(
+            "locked MiniMax-H3 runtime requires engine_backend=trt_rtx before backend discovery");
+    }
+    return load_rtx_backend_for_bundle(bundle, config_text, bundle_path, logical_backend,
+                                       backend_search_paths);
+#else
     if (logical_backend == "trt_rtx")
         return load_rtx_backend_for_bundle(bundle, config_text, bundle_path, logical_backend,
                                            backend_search_paths);
@@ -281,6 +295,13 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
         return BackendLoader::load(logical_backend, backend_search_paths);
     return load_standard_trt_backend_for_bundle(bundle, config_text, bundle_path, logical_backend,
                                                 backend_search_paths);
+#endif
+}
+
+void enforce_locked_h3_process_policy() {
+#if defined(_WIN32) && defined(TRTMC_LOCKED_H3_RUNTIME)
+    internal::enforce_locked_h3_process_policy();
+#endif
 }
 
 const BundleSectionInfo* find_kernel_slots_section(const BundleInfo& info) {
@@ -344,12 +365,18 @@ detail::resolve_runtime_config(const std::string& config_text, const std::string
                                const std::vector<std::string>& set_tokens) {
     try {
         auto resolution = config::resolve_pipeline_config(config_text, config_path, set_tokens);
+#if !defined(TRTMC_LOCKED_H3_RUNTIME)
         const auto sidecar =
             config::try_write_effective_config_next_to(resolution.bundle, bundle_path);
         if (!sidecar.path) {
             std::cerr << "[trtmc.config] Failed to write effective config sidecar: "
                       << sidecar.error << "\n          Resolved runtime config remains active.\n";
         }
+#else
+        // The locked MiniMax-H3 runtime is an immutable package: resolving
+        // configuration must never create a sibling file next to the bundle.
+        (void)bundle_path;
+#endif
         apply_platform_config(resolution.bundle);
         return std::move(resolution.bundle);
     } catch (const std::exception& e) {
@@ -363,6 +390,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                                                         const std::string& hf_python,
                                                         const std::string& runtime_cache_path,
                                                         bool cuda_graphs) {
+    enforce_locked_h3_process_policy();
     LoadOptions optimized_options;
     optimized_options.hf_python = hf_python;
     optimized_options.runtime_cache_path = runtime_cache_path;
@@ -446,6 +474,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
 std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
                                                         const LoadOptions& options,
                                                         const std::string& kernel_bindings_path) {
+    enforce_locked_h3_process_policy();
     const BundleInfo header = ReadBundleHeader(bundle_path);
     reject_optimized_runtime_kernel_bindings(header, kernel_bindings_path);
     if (auto optimized_runtime_pipeline =
@@ -515,6 +544,7 @@ std::unique_ptr<PipelinePool>
 PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t pool_size,
                                   const LoadOptions& options,
                                   const std::string& kernel_bindings_path) {
+    enforce_locked_h3_process_policy();
     if (pool_size == 0)
         throw std::invalid_argument("Pipeline pool size must be positive");
 

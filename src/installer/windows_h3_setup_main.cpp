@@ -263,32 +263,6 @@ void unregister_installation(const fs::path& install_root) {
         throw windows_error("RegDeleteTreeW(Uninstall)", uninstall_status);
 }
 
-std::string lowercase(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
-        return static_cast<char>(std::tolower(character));
-    });
-    return value;
-}
-
-void validate_runtime_payload(const std::vector<trtmc::installer::PayloadEntry>& entries) {
-    std::set<std::string> paths;
-    for (const auto& entry : entries)
-        paths.insert(lowercase(entry.relative_path.generic_u8string()));
-    for (const char* required :
-         {"bin/trtmc.exe", "bin/trtmc_core.dll", "bin/trtmc_backend_trt_rtx.dll",
-          "bin/trtmc/models/minimax_h3/trtmc_model_minimax_h3.dll", "models/MiniMax-H3.bundle",
-          "UninstallMiniMaxH3.exe", kMarkerName}) {
-        if (paths.count(lowercase(required)) == 0)
-            throw std::runtime_error(std::string("Payload is missing required file: ") + required);
-    }
-    const bool has_rtx = std::any_of(paths.begin(), paths.end(), [](const std::string& path) {
-        return path.rfind("bin/tensorrt_rtx_", 0) == 0 && path.size() > 4 &&
-               path.compare(path.size() - 4, 4, ".dll") == 0;
-    });
-    if (!has_rtx)
-        throw std::runtime_error("Payload is missing the TensorRT-RTX runtime DLL");
-}
-
 void uninstall_files(const fs::path& install_root, const fs::path& running_executable) {
     const auto canonical_root = fs::weakly_canonical(install_root);
     const auto canonical_exe = fs::weakly_canonical(running_executable);
@@ -353,7 +327,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
         const auto manifest = args.payload_root.parent_path() / L"payload.manifest";
         const auto entries = trtmc::installer::read_payload_manifest(manifest);
-        validate_runtime_payload(entries);
+        trtmc::installer::validate_minimax_h3_runtime_payload(entries);
         if (args.verify_only) {
             trtmc::installer::verify_payload(args.payload_root, entries);
             show_message(args.quiet, L"The MiniMax-H3 payload passed SHA-256 verification.",

@@ -347,14 +347,45 @@ std::optional<std::string> legacy_runtime_strategy_alias_target(const std::strin
 
 void load_model_plugin_for_strategy(const std::string& strategy,
                                     const std::vector<std::string>& search_paths) {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    if (!search_paths.empty()) {
+        throw std::runtime_error(
+            "locked MiniMax-H3 runtime rejects model plugin search path overrides");
+    }
+#endif
     const auto model_id = model_plugin_id_for_strategy(strategy);
     if (!model_id)
         throw std::runtime_error("No plugin registered for runtime_strategy: " + strategy);
+
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    if (*model_id != "minimax_h3") {
+        throw std::runtime_error("locked MiniMax-H3 runtime refuses a non-MiniMax-H3 model plugin");
+    }
+#endif
 
     if (loaded_model_ids().find(*model_id) != loaded_model_ids().end())
         return;
 
     const auto library_name = model_plugin_library_name(*model_id);
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    const auto core_module = internal::current_module_path();
+    if (core_module.empty()) {
+        throw std::runtime_error(
+            "locked MiniMax-H3 runtime cannot locate the trtmc_core module directory");
+    }
+    const fs::path candidate =
+        core_module.parent_path() / "trtmc" / "models" / "minimax_h3" / library_name;
+    std::vector<std::string> errors;
+    if (!fs::is_regular_file(candidate))
+        throw_load_error(*model_id, library_name, {candidate.string()}, errors);
+
+    auto plugin = open_model_plugin_candidate(candidate, *model_id, errors);
+    if (!plugin || !register_model_plugin_candidate(*plugin, *model_id, strategy, errors))
+        throw_load_error(*model_id, library_name, {candidate.string()}, errors);
+
+    loaded_handles().push_back(plugin->handle);
+    loaded_model_ids().insert(*model_id);
+#else
     const auto paths = model_plugin_search_paths(search_paths);
     if (strict_model_plugin_loading() && paths.empty()) {
         throw std::runtime_error(
@@ -380,6 +411,7 @@ void load_model_plugin_for_strategy(const std::string& strategy,
     }
 
     throw_load_error(*model_id, library_name, paths, errors);
+#endif
 }
 
 } // namespace trtmc

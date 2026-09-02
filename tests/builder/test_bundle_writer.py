@@ -219,6 +219,23 @@ class TestWriteBundle:
         _, sections = self._read_bundle(str(destination))
         assert sections["engine_plan"] == b"new-plan"
 
+    def test_traditional_file_backed_writer_remains_non_consuming(self, tmp_path):
+        source = tmp_path / "engine.plan"
+        source.write_bytes(b"traditional-plan")
+        destination = tmp_path / "model.bundle"
+
+        write_bundle(
+            destination,
+            BundleInfo(model_id="traditional"),
+            [_bundle_section_from_file("engine_plan", source)],
+        )
+
+        _, sections = self._read_bundle(str(destination))
+        assert sections["engine_plan"] == b"traditional-plan"
+        assert source.read_bytes() == b"traditional-plan"
+        assert not (tmp_path / f".{destination.name}.partial").exists()
+        assert not (tmp_path / f".{destination.name}.partial.json").exists()
+
     def test_all_info_fields(self, tmp_path):
         info = BundleInfo(
             model_id="full-test",

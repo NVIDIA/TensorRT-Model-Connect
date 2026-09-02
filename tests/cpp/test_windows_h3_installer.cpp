@@ -11,6 +11,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <windows.h>
 
 namespace {
@@ -48,6 +49,30 @@ std::string manifest_row(const fs::path& path, const std::string& relative) {
            std::to_string(fs::file_size(path)) + "\t" + relative + "\n";
 }
 
+trtmc::installer::PayloadEntry manifest_entry(const std::string& relative) {
+    trtmc::installer::PayloadEntry entry;
+    entry.relative_path = fs::u8path(relative);
+    return entry;
+}
+
+std::vector<trtmc::installer::PayloadEntry> valid_runtime_entries() {
+    std::vector<trtmc::installer::PayloadEntry> entries;
+    for (const char* path : {
+             ".minimax-h3-install-id",
+             "UninstallMiniMaxH3.exe",
+             "bin/trtmc.exe",
+             "bin/trtmc_core.dll",
+             "bin/trtmc_backend_trt_rtx.dll",
+             "bin/trtmc/models/minimax_h3/trtmc_model_minimax_h3.dll",
+             "bin/tensorrt_rtx_1_6.dll",
+             "models/MiniMax-H3.bundle",
+             "licenses/LICENSE",
+         }) {
+        entries.push_back(manifest_entry(path));
+    }
+    return entries;
+}
+
 } // namespace
 
 int main() {
@@ -58,6 +83,21 @@ int main() {
                                     "C:/absolute", "bin/con", "bin/file. ", "bin/file."}) {
         check(!trtmc::installer::is_safe_payload_path(path), "unsafe path rejected");
     }
+
+    auto runtime_entries = valid_runtime_entries();
+    trtmc::installer::validate_minimax_h3_runtime_payload(runtime_entries);
+    runtime_entries.push_back(manifest_entry("bin/unapproved.dll"));
+    check_throws([&] { trtmc::installer::validate_minimax_h3_runtime_payload(runtime_entries); },
+                 "manifest entry outside exact runtime allowlist rejected");
+    runtime_entries = valid_runtime_entries();
+    runtime_entries.push_back(manifest_entry("bin/tensorrt_rtx_2_0.dll"));
+    check_throws([&] { trtmc::installer::validate_minimax_h3_runtime_payload(runtime_entries); },
+                 "second TensorRT-RTX runtime rejected");
+    runtime_entries = valid_runtime_entries();
+    runtime_entries[runtime_entries.size() - 2].relative_path =
+        fs::u8path("models/not-the-h3-bundle.bundle");
+    check_throws([&] { trtmc::installer::validate_minimax_h3_runtime_payload(runtime_entries); },
+                 "wrong model bundle path rejected");
 
     const auto root = fs::temp_directory_path() /
                       (L"trtmc-h3-installer-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
@@ -76,6 +116,11 @@ int main() {
         const auto entries = trtmc::installer::read_payload_manifest(manifest);
         check(entries.size() == 2, "manifest entry count");
         trtmc::installer::verify_payload(payload, entries);
+        const auto unexpected_sidecar = payload / L"models" / L"MiniMax-H3.effective_config.json";
+        write_bytes(unexpected_sidecar, "{}");
+        check_throws([&] { trtmc::installer::verify_payload(payload, entries); },
+                     "payload file absent from manifest rejected");
+        fs::remove(unexpected_sidecar);
         trtmc::installer::install_payload_transactional(payload, install, entries, marker_name,
                                                         marker_contents);
         check(fs::is_regular_file(install / L"bin" / L"trtmc.exe"), "transaction installs payload");

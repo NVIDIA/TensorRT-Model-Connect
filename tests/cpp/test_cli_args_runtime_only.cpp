@@ -78,6 +78,16 @@ void test_runtime_rejects_python_escape_hatch() {
           "runtime rejects --hf-python");
 }
 
+void test_nonlocked_runtime_keeps_development_loader_overrides() {
+    const auto args =
+        parse({"trtmc", "inspect", "model.bundle", "--backend-dir", "C:\\backends",
+               "--model-plugin-dir", "C:\\models", "--kernel-bindings", "bindings.json"});
+    check(!args.parse_error, "nonlocked runtime accepts development loader overrides");
+    check(args.backend_search_paths.size() == 1 && args.model_plugin_search_paths.size() == 1 &&
+              args.kernel_bindings_path == "bindings.json",
+          "nonlocked runtime records development loader overrides");
+}
+
 void test_runtime_rejects_malformed_timing_counts() {
     const auto malformed_benchmark = parse({"trtmc", "generate-video", "model.bundle", "--prompt",
                                             "hello", "--output", "out.mp4", "--benchmark", "abc"});
@@ -104,6 +114,7 @@ int main() {
     test_help_exposes_only_native_h3_runtime_commands();
     test_runtime_command_allowlist();
     test_runtime_rejects_python_escape_hatch();
+    test_nonlocked_runtime_keeps_development_loader_overrides();
     test_runtime_rejects_malformed_timing_counts();
     return failures == 0 ? 0 : 1;
 }

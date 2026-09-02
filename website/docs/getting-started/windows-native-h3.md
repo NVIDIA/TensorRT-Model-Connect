@@ -56,6 +56,11 @@ Python is used only on the build machine to translate authorized checkpoints
 and adapters into TensorRT-RTX plans. It is not copied into the installer and
 is not needed to install or generate media.
 
+The locked runtime never emits an effective-config file or another implicit
+sidecar. `--runtime-cache PATH` is the one explicit exception: when the user
+selects it, TensorRT-RTX may persist its JIT cache at exactly that path. No
+cache file is created by default.
+
 ## Build the runtime
 
 Start in an x64 Visual Studio 2022 developer PowerShell. Supply compatible
@@ -117,15 +122,30 @@ independent dense `transformer_ref` plans and released 50-point/49-forward
 schedule with video/audio shifts 12 and 3.
 
 The plans and bundle are very large. Put the checkpoint, plan-resume directory,
-and output on a local NTFS volume with enough space for the checkpoint, plans,
-and final bundle. Do not build and infer concurrently on a unified-memory
-machine. The command creates a sibling `$Bundle.plans` directory and writes an
-atomic receipt after every completed plan. Rerun the exact same command after
-an interruption to resume; a checkpoint, adapter, source, TensorRT-RTX, or
-workspace-profile mismatch fails closed instead of reusing incompatible
-plans. The bundle and its `.effective_config.json` sidecar contain public
-model identities and content digests, never the local checkpoint, adapter, or
-`transformer_ref` paths.
+and output on local storage with enough capacity, and do not build and infer
+concurrently on a unified-memory machine. The command creates a sibling
+`$Bundle.plans` directory and writes an atomic receipt after every completed
+plan. Final assembly uses a stable same-directory bundle partial and journal.
+After each plan range is copied, flushed, and SHA-256 verified, the journal is
+atomically committed before that exact source plan is removed. Consequently,
+the builder does not retain both a complete plans directory and a complete
+second bundle copy: its assembly peak is approximately the checkpoint plus the
+complete plan set plus the largest single plan. For the released 61-plan
+FastH3+Ref2VA profile, budget roughly 500 GiB of working-set residency when
+checkpoint, plans, and output share one volume. Before downloading a missing
+`transformer_ref`, require at least 350 GiB free; after every source is already
+present, require at least 320 GiB free before starting the build.
+
+Rerun the exact same command after an interruption to resume. Do not remove the
+`.partial`, `.partial.json`, receipt, or surviving plan files while recovery is
+in progress. Recovery rehashes every committed range, truncates an uncommitted
+tail, and never rebuilds a plan already preserved in the committed bundle
+prefix. A checkpoint, adapter, source, TensorRT-RTX, or workspace-profile
+mismatch fails closed instead of reusing incompatible plans. The bundle and
+the build-only `.effective_config.json` file contain public model identities
+and content digests, never the local checkpoint, adapter, or `transformer_ref`
+paths. The package does not install that build record, and generation does not
+re-create it.
 
 ## Create and install the native package
 

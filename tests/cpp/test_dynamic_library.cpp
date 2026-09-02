@@ -43,6 +43,14 @@ int main() {
     check(executable.empty() || std::filesystem::exists(executable),
           "current executable path exists");
 
+    const auto module = trtmc::internal::current_module_path();
+    check(!module.empty(), "current module path is available");
+    check(module.empty() || std::filesystem::exists(module), "current module path exists");
+#if defined(_WIN32)
+    check(module.empty() || module.filename() == "trtmc_core.dll",
+          "Windows module path is anchored to trtmc_core.dll");
+#endif
+
     std::string error;
     auto missing = trtmc::internal::open_dynamic_library(
         std::filesystem::temp_directory_path() / "trtmc-missing-dynamic-library",

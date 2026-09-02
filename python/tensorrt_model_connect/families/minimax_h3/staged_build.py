@@ -18,12 +18,7 @@ from pathlib import Path
 from typing import Sequence
 
 from tensorrt_model_connect import trt_compat
-from tensorrt_model_connect.bundle_writer import (
-    BundleInfo,
-    BundleSection,
-    _bundle_section_from_file,
-    write_bundle,
-)
+from tensorrt_model_connect.bundle_writer import BundleInfo
 
 from .config import (
     ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
@@ -50,6 +45,11 @@ from .config import (
     VIDEO_NUM_FRAMES_MIN,
     VIDEO_NUM_FRAMES_OPT,
     VISION_ENCODER_DEFAULT_WORKSPACE_BYTES,
+)
+from .consuming_bundle import (
+    ConsumingBundleSection,
+    assembly_paths,
+    write_consuming_bundle,
 )
 from .provenance import CHECKPOINT_REVISION, builder_source_sha256
 from .ref2va_bundle_contract import REF2VA_PLAN_SECTIONS as _REF2VA_COMPONENTS
@@ -259,6 +259,19 @@ def _atomic_write_json(path: Path, value: object) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        with path.open("r+b") as committed:
+            os.fsync(committed.fileno())
+        if os.name != "nt":
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            directory = os.open(path.parent, flags)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -285,14 +298,46 @@ def _resume_records(
 
 
 def _matches_record(path: Path, expected: object) -> bool:
-    if not path.is_file() or not isinstance(expected, dict):
-        return False
-    if set(expected) != {"bytes", "sha256"}:
+    if not path.is_file() or not _valid_plan_record(expected):
         return False
     try:
         return _file_record(path) == expected
     except OSError:
         return False
+
+
+def _valid_plan_record(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"bytes", "sha256"}
+        and isinstance(value.get("bytes"), int)
+        and not isinstance(value.get("bytes"), bool)
+        and value["bytes"] > 0
+        and isinstance(value.get("sha256"), str)
+        and len(value["sha256"]) == 64
+        and all(character in "0123456789abcdef" for character in value["sha256"])
+    )
+
+
+def _complete_plan_records(
+    records: dict[str, dict[str, int | str]],
+    components: Sequence[tuple[str, str, str]],
+) -> dict[str, dict[str, int | str]] | None:
+    expected = {
+        filename: records.get(filename)
+        for _component, filename, _section in components
+    }
+    if not all(_valid_plan_record(record) for record in expected.values()):
+        return None
+    return {filename: record for filename, record in expected.items() if record is not None}
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _write_receipt(
@@ -586,6 +631,77 @@ def _sanitized_config(
     return config
 
 
+def _finalize_staged_bundle(
+    *,
+    model: Path,
+    output: Path,
+    plans: Path,
+    tokenizer: Path,
+    version: str,
+    abi: str,
+    build_identity: dict[str, object],
+    plan_records: dict[str, dict[str, int | str]],
+    components: Sequence[tuple[str, str, str]],
+    adapter_identity=None,
+    transformer_ref_identity=None,
+) -> Path:
+    audio_vae_config_path = model / "audio_vae" / "config.json"
+    if not audio_vae_config_path.is_file():
+        raise FileNotFoundError(
+            f"MiniMax-H3 AudioVAE config is missing: {audio_vae_config_path}"
+        )
+    audio_vae_config = json.loads(audio_vae_config_path.read_text())
+    config = _sanitized_config(
+        trt_version=version,
+        trt_abi=abi,
+        build_identity=build_identity,
+        plan_records=plan_records,
+        audio_vae_config=audio_vae_config,
+        adapter_identity=adapter_identity,
+        transformer_ref_identity=transformer_ref_identity,
+        components=components,
+    )
+    sections = [
+        ConsumingBundleSection.from_file(
+            section,
+            plans / filename,
+            size=int(plan_records[filename]["bytes"]),
+            sha256=str(plan_records[filename]["sha256"]),
+            consume_source=True,
+        )
+        for _component, filename, section in components
+    ]
+    tokenizer_record = _file_record(tokenizer)
+    sections.extend(
+        (
+            ConsumingBundleSection.from_file(
+                "tokenizer.json",
+                tokenizer,
+                size=int(tokenizer_record["bytes"]),
+                sha256=str(tokenizer_record["sha256"]),
+                consume_source=False,
+            ),
+            ConsumingBundleSection.from_bytes(
+                "config.json", json.dumps(config, indent=2).encode("utf-8")
+            ),
+        )
+    )
+    return write_consuming_bundle(
+        output,
+        BundleInfo(
+            model_id="MiniMaxAI/MiniMax-H3",
+            model_type="minimax_h3",
+            family="minimax_h3",
+            trt_version=version,
+            trt_abi=abi,
+            runtime_strategy="diffusion_minimax_h3",
+            precision="bf16",
+            tokenizer_add_special_tokens=False,
+        ),
+        sections,
+    )
+
+
 def build_staged_bundle(
     model_dir: str | Path,
     output_path: str | Path,
@@ -662,6 +778,25 @@ def build_staged_bundle(
     plans.mkdir(parents=True, exist_ok=True)
     receipt_path = plans / _RECEIPT_NAME
     plan_records = _resume_records(receipt_path, build_identity)
+    complete_records = _complete_plan_records(plan_records, components)
+    partial_path, journal_path = assembly_paths(output)
+    if complete_records is not None and any(
+        _path_entry_exists(path) for path in (partial_path, journal_path, output)
+    ):
+        return _finalize_staged_bundle(
+            model=model,
+            output=output,
+            plans=plans,
+            tokenizer=tokenizer,
+            version=version,
+            abi=abi,
+            build_identity=build_identity,
+            plan_records=complete_records,
+            components=components,
+            adapter_identity=adapter_identity,
+            transformer_ref_identity=transformer_ref_identity,
+        )
+
     for component, filename, _section in components:
         plan_path = plans / filename
         if _matches_record(plan_path, plan_records.get(filename)):
@@ -675,52 +810,23 @@ def build_staged_bundle(
         plan_records[filename] = _file_record(plan_path)
         _write_receipt(receipt_path, build_identity, plan_records)
 
-    expected_filenames = {filename for _component, filename, _section in components}
-    plan_records = {filename: plan_records[filename] for filename in expected_filenames}
-    _write_receipt(receipt_path, build_identity, plan_records)
-    audio_vae_config_path = model / "audio_vae" / "config.json"
-    if not audio_vae_config_path.is_file():
-        raise FileNotFoundError(f"MiniMax-H3 AudioVAE config is missing: {audio_vae_config_path}")
-    audio_vae_config = json.loads(audio_vae_config_path.read_text())
-    config = _sanitized_config(
-        trt_version=version,
-        trt_abi=abi,
+    complete_records = _complete_plan_records(plan_records, components)
+    if complete_records is None:
+        raise RuntimeError("MiniMax-H3 staged build did not produce every expected plan record")
+    _write_receipt(receipt_path, build_identity, complete_records)
+    return _finalize_staged_bundle(
+        model=model,
+        output=output,
+        plans=plans,
+        tokenizer=tokenizer,
+        version=version,
+        abi=abi,
         build_identity=build_identity,
-        plan_records=plan_records,
-        audio_vae_config=audio_vae_config,
+        plan_records=complete_records,
+        components=components,
         adapter_identity=adapter_identity,
         transformer_ref_identity=transformer_ref_identity,
-        components=components,
     )
-    sections: list[BundleSection] = [
-        _bundle_section_from_file(
-            section,
-            plans / filename,
-            expected_sha256=str(plan_records[filename]["sha256"]),
-        )
-        for _component, filename, section in components
-    ]
-    sections.extend(
-        [
-            BundleSection("tokenizer.json", tokenizer.read_bytes()),
-            BundleSection("config.json", json.dumps(config, indent=2).encode("utf-8")),
-        ]
-    )
-    write_bundle(
-        output,
-        BundleInfo(
-            model_id="MiniMaxAI/MiniMax-H3",
-            model_type="minimax_h3",
-            family="minimax_h3",
-            trt_version=version,
-            trt_abi=abi,
-            runtime_strategy="diffusion_minimax_h3",
-            precision="bf16",
-            tokenizer_add_special_tokens=False,
-        ),
-        sections,
-    )
-    return output
 
 
 def _build_component(

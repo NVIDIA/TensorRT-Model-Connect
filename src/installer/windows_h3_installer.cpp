@@ -109,6 +109,29 @@ bool reserved_windows_component(const std::string& component) {
     return false;
 }
 
+bool is_versioned_rtx_runtime_path(const std::string& path) {
+    constexpr char prefix[] = "bin/tensorrt_rtx_";
+    constexpr char suffix[] = ".dll";
+    if (path.rfind(prefix, 0) != 0 || path.size() <= sizeof(prefix) - 1 + sizeof(suffix) - 1 ||
+        path.compare(path.size() - (sizeof(suffix) - 1), sizeof(suffix) - 1, suffix) != 0) {
+        return false;
+    }
+    const std::size_t begin = sizeof(prefix) - 1;
+    const std::size_t end = path.size() - (sizeof(suffix) - 1);
+    bool previous_was_digit = false;
+    for (std::size_t index = begin; index < end; ++index) {
+        const char character = path[index];
+        if (character >= '0' && character <= '9') {
+            previous_was_digit = true;
+            continue;
+        }
+        if (character != '_' || !previous_was_digit || index + 1 == end)
+            return false;
+        previous_was_digit = false;
+    }
+    return previous_was_digit;
+}
+
 std::string read_small_text_file(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input)
@@ -271,16 +294,90 @@ void verify_payload(const std::filesystem::path& payload_root,
                     const std::vector<PayloadEntry>& entries) {
     if (!std::filesystem::is_directory(payload_root))
         throw std::runtime_error("Payload directory is missing");
+
+    std::set<std::string> expected_paths;
+    for (const auto& entry : entries) {
+        const auto relative = entry.relative_path.generic_u8string();
+        if (!expected_paths.insert(lowercase_ascii(relative)).second)
+            throw std::runtime_error("Payload entries contain a duplicate path: " + relative);
+    }
+
+    std::set<std::string> actual_paths;
+    for (const auto& item : std::filesystem::recursive_directory_iterator(payload_root)) {
+        const auto status = item.symlink_status();
+        if (std::filesystem::is_directory(status))
+            continue;
+        const auto relative_path = item.path().lexically_relative(payload_root);
+        const auto relative = relative_path.generic_u8string();
+        if (!std::filesystem::is_regular_file(status)) {
+            throw std::runtime_error("Payload contains a non-regular entry: " + relative);
+        }
+        if (!is_safe_payload_path(relative))
+            throw std::runtime_error("Payload contains an unsafe file path: " + relative);
+        if (!actual_paths.insert(lowercase_ascii(relative)).second)
+            throw std::runtime_error("Payload contains a duplicate file path: " + relative);
+    }
+    for (const auto& actual : actual_paths) {
+        if (expected_paths.find(actual) == expected_paths.end())
+            throw std::runtime_error("Payload contains a file absent from the manifest: " + actual);
+    }
+    for (const auto& expected : expected_paths) {
+        if (actual_paths.find(expected) == actual_paths.end())
+            throw std::runtime_error("Payload manifest names a missing file: " + expected);
+    }
+
     for (const auto& entry : entries) {
         const auto source = payload_root / entry.relative_path;
-        std::error_code error;
-        if (!std::filesystem::is_regular_file(source, error) || error)
+        const auto status = std::filesystem::symlink_status(source);
+        if (!std::filesystem::is_regular_file(status))
             throw std::runtime_error("Payload file is missing: " + entry.relative_path.string());
+        std::error_code error;
         const auto actual_size = std::filesystem::file_size(source, error);
         if (error || actual_size != entry.size)
             throw std::runtime_error("Payload size mismatch: " + entry.relative_path.string());
         if (sha256_file(source) != entry.sha256)
             throw std::runtime_error("Payload SHA-256 mismatch: " + entry.relative_path.string());
+    }
+}
+
+void validate_minimax_h3_runtime_payload(const std::vector<PayloadEntry>& entries) {
+    const std::set<std::string> required{
+        ".minimax-h3-install-id",
+        "uninstallminimaxh3.exe",
+        "bin/trtmc.exe",
+        "bin/trtmc_core.dll",
+        "bin/trtmc_backend_trt_rtx.dll",
+        "bin/trtmc/models/minimax_h3/trtmc_model_minimax_h3.dll",
+        "models/minimax-h3.bundle",
+    };
+    const std::set<std::string> optional{
+        "licenses/license",
+        "licenses/notice",
+    };
+
+    std::set<std::string> paths;
+    std::size_t rtx_runtime_count = 0;
+    for (const auto& entry : entries) {
+        const std::string path = lowercase_ascii(entry.relative_path.generic_u8string());
+        if (!paths.insert(path).second)
+            throw std::runtime_error("MiniMax-H3 payload manifest contains a duplicate path: " +
+                                     path);
+        if (required.count(path) != 0 || optional.count(path) != 0)
+            continue;
+        if (is_versioned_rtx_runtime_path(path)) {
+            ++rtx_runtime_count;
+            continue;
+        }
+        throw std::runtime_error("MiniMax-H3 payload manifest contains an unexpected file: " +
+                                 path);
+    }
+    for (const auto& path : required) {
+        if (paths.count(path) == 0)
+            throw std::runtime_error("MiniMax-H3 payload is missing required file: " + path);
+    }
+    if (rtx_runtime_count != 1) {
+        throw std::runtime_error(
+            "MiniMax-H3 payload must contain exactly one versioned TensorRT-RTX runtime DLL");
     }
 }
 

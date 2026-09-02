@@ -37,6 +37,9 @@
 #if defined(_WIN32)
 #include "cli/windows_utf8_argv.h"
 #endif
+#if defined(_WIN32) && defined(TRTMC_LOCKED_H3_RUNTIME)
+#include "runtime/platform/windows_process_lockdown.h"
+#endif
 #include "runtime/platform/dynamic_library.h"
 #if __has_include("runtime/models/moge/geometry.h")
 #include "runtime/models/moge/geometry.h"
@@ -2403,6 +2406,12 @@ int apply_cli_config(const CliArgs& args) {
     }
     try {
         auto bundle = trtmc::config::resolve_cli_config(args.config_path, args.set_tokens);
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+        // The locked runtime validates CLI configuration here, while the
+        // pipeline applies it later. It must not emit effective-config
+        // sidecars into the attested package or beside a user bundle.
+        (void)bundle;
+#else
         if (!args.bundle_path.empty()) {
             const auto sidecar =
                 trtmc::config::try_write_effective_config_next_to(bundle, args.bundle_path);
@@ -2415,6 +2424,7 @@ int apply_cli_config(const CliArgs& args) {
                              "runtime config.\n";
             }
         }
+#endif
     } catch (const std::exception& e) {
         std::cerr << "Error resolving config: " << e.what() << '\n';
         return EXIT_FAILURE;
@@ -2491,6 +2501,15 @@ static int run_cli(int argc, char** argv) {
 
 #if defined(_WIN32)
 int wmain(int argc, wchar_t** argv) {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    try {
+        trtmc::internal::enforce_locked_h3_process_policy();
+    } catch (const std::exception& error) {
+        std::cerr << "Error: unable to enforce the locked MiniMax-H3 process policy: "
+                  << error.what() << '\n';
+        return EXIT_FAILURE;
+    }
+#endif
     try {
         trtmc::cli::Utf8CommandLine command_line(argc, argv);
         return run_cli(command_line.argc(), command_line.argv());
