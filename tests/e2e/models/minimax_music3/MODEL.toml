@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "minimax_music3"
+plugin = "minimax_music3"
+test_manifests = [
+  "manifests/minimax-music3-l0.json",
+]
+
+# The output is a waveform, so the task contract is text_to_audio and its
+# tts_audio checks apply: the generated audio is transcribed and scored
+# against the prompt. The prompt is the lyrics, which is what makes that
+# score the lyric-intelligibility check the onboarding request asks for; the
+# music description travels in the family's runtime-config namespace.
+[e2e_defaults.text_to_audio]
+reference_backend = "minimax_music3_modular"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]
