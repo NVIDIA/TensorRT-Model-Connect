@@ -18,7 +18,10 @@ The helper deliberately fixes one narrow cohort:
   `ptxas` required to assemble SM121 Triton kernels;
 - the public MiniMax H3 base checkpoint and FastH3 VSA/Data-Free adapter at
   exact revisions;
-- 1344x768 output at 24 fps, with either 124 or 345 frames;
+- 1344x768 output at 24 fps, with every native `17n + 5` frame count from
+  124 through 345;
+- one unpadded prompt presentation containing 1 through 1,024 tokenizer
+  tokens;
 - five scheduler grid points, which perform exactly four DiT forwards;
 - 90% VSA sparsity with tile size 64 and the Triton sparse kernel;
 - full MiniMax H3 video-VAE decoding; and
@@ -122,7 +125,51 @@ $Hf = Join-Path $InstallRoot '.venv\Scripts\hf.exe'
 & $Hf auth login
 ```
 
-## Generate one 124-frame video
+## Choose a prompt
+
+The checked-in public prompt is only the default. The FastVideo H3 path packs
+the actual prompt length rather than padding every request to the default
+537-token example. Pass prompt text directly:
+
+```powershell
+$Prompt = 'A red kite rises over a windy beach while waves break in the distance.'
+```
+
+Alternatively, put a non-empty `prompt` field in a JSON file and use
+`-PromptFile`. `-Prompt` and `-PromptFile` are mutually exclusive. Before model
+loading, the runner tokenizes the selected text with the pinned MiniMax H3
+tokenizer and accepts 1 through 1,024 tokens without truncation. It records only
+the token count and SHA-256 in the sanitized run summary, not the prompt text or
+its local file path. To avoid the Windows process-command-line length limit, the
+runner passes the text through a per-run temporary UTF-8 file instead of process
+arguments and deletes that file after either success or failure.
+
+## Choose a duration
+
+MiniMax H3 runs at 24 fps and its released latent grid accepts frame counts of
+the form `17n + 5`. This pinned FastVideo implementation accepts the following
+native values in its nominal 5-to-15-second request envelope:
+
+| Frames | Output seconds | Frames | Output seconds |
+| ---: | ---: | ---: | ---: |
+| 124 | 5.167 | 243 | 10.125 |
+| 141 | 5.875 | 260 | 10.833 |
+| 158 | 6.583 | 277 | 11.542 |
+| 175 | 7.292 | 294 | 12.250 |
+| 192 | 8.000 | 311 | 12.958 |
+| 209 | 8.708 | 328 | 13.667 |
+| 226 | 9.417 | 345 | 14.375 |
+
+Use either an exact native frame count through `-NumFrames` or a nominal
+duration through `-DurationSeconds`. A duration is normally aligned upward to
+the next native frame count. Requests above 14.375 seconds resolve to 345
+frames, however, because the next native value is 362 frames (15.083 seconds)
+and this pinned FastVideo pipeline rejects it after applying the 15-second
+validation boundary. Thus `-DurationSeconds 15` currently produces 345 frames
+and 14.375 seconds, not an exact 15-second clip. The runner prints and records
+the resolved frame count and duration before generation.
+
+## Generate one video
 
 Choose an output directory outside the repository. The runner resolves the
 exact base-model snapshot and one adapter file through the authenticated client,
@@ -134,18 +181,18 @@ $OutputDirectory = '<output-directory-outside-checkout>'
 & .\scripts\run_windows_h3_fastvideo_vsa.ps1 `
     -InstallRoot $InstallRoot `
     -OutputDirectory $OutputDirectory `
-    -NumFrames 124
+    -Prompt $Prompt `
+    -DurationSeconds 10
 ```
 
-The checked-in public prompt is used by default. Pass another JSON file with a
-non-empty `prompt` field through `-PromptFile` when needed. A custom prompt does
-not change the fixed model, scheduler, VSA, or decoder profile.
+The example resolves to 243 frames (10.125 seconds). A custom prompt or duration
+does not change the pinned model, four-forward scheduler, VSA, or decoder
+profile.
 
 ## Generate the long 345-frame profile
 
-MiniMax H3's released latent grid accepts frame counts of the form `17n + 5`.
-The checked-in long profile therefore uses 345 frames, the largest supported
-aligned value below the 15-second boundary. It does not use 360 or 362 frames.
+The checked-in long benchmark uses 345 frames, the largest supported aligned
+value below the 15-second boundary. It does not use 360 or 362 frames.
 
 ```powershell
 & .\scripts\run_windows_h3_fastvideo_vsa.ps1 `
@@ -177,13 +224,14 @@ the preceding Hugging Face downloads.
 The output directory receives the generated MP4 and
 `fastvideo-vsa-summary.json`. The summary records public revisions and hashes,
 shape, frame count, the five-grid-point/four-forward contract, decoder choice,
-exit status, and timing. It does not contain tokens, host names, GPU UUIDs, or
-resolved local paths.
+exit status, timing, and prompt token count. It does not contain authentication
+tokens, prompt text, host names, GPU UUIDs, or resolved local paths.
 
 The checked-in sanitized validation record is
 `tests/e2e/models/minimax_h3/fastvideo_windows_vsa_benchmark.json`. It pins the
 hardware/software cohort, execution flags, timing boundary, stage timings, and
-media probe without recording a host name, local path, GPU UUID, or token.
+media probe without recording a host name, local path, GPU UUID,
+authentication token, or prompt text.
 
 A completed run is evidence for that exact machine, source revision, patch,
 asset revision, and dependency cohort. It is not a portable latency guarantee,

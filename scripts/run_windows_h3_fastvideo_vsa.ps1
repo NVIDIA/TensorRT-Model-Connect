@@ -19,10 +19,13 @@ param(
 
     [string]$InstallRoot = "",
 
+    [string]$Prompt = "",
+
     [string]$PromptFile = "",
 
-    [ValidateSet(124, 345)]
     [int]$NumFrames = 124,
+
+    [double]$DurationSeconds = 0.0,
 
     [int]$GpuIndex = 0,
 
@@ -35,6 +38,17 @@ $ErrorActionPreference = "Stop"
 function Get-FileSha256 {
     param([string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-TextSha256 {
+    param([string]$Value)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+        return [BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
 }
 
 function Get-NativeOsArchitecture {
@@ -71,11 +85,19 @@ function Invoke-HuggingFaceDownload {
         [string]$Repository,
         [string]$Revision,
         [string]$Filename = "",
+        [string]$Include = "",
         [string]$CacheDirectory = ""
     )
+    if (-not [string]::IsNullOrWhiteSpace($Filename) -and
+        -not [string]::IsNullOrWhiteSpace($Include)) {
+        throw "Hugging Face download cannot combine Filename and Include"
+    }
     $arguments = @("download", $Repository)
     if (-not [string]::IsNullOrWhiteSpace($Filename)) {
         $arguments += $Filename
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Include)) {
+        $arguments += @("--include", $Include)
     }
     $arguments += @("--revision", $Revision, "--quiet")
     if (-not [string]::IsNullOrWhiteSpace($CacheDirectory)) {
@@ -131,6 +153,71 @@ if ($Execution.profile -ne "all" -or
     -not $Execution.pin_cpu_memory) {
     throw "The checked-in execution contract is not supported by this runner"
 }
+$LengthContract = $Profile.workload.video_length
+$Fps = [int]$Profile.workload.fps
+$DurationWasRequested = $PSBoundParameters.ContainsKey("DurationSeconds")
+$FramesWereRequested = $PSBoundParameters.ContainsKey("NumFrames")
+if ($DurationWasRequested -and $FramesWereRequested) {
+    throw "Specify either DurationSeconds or NumFrames, not both"
+}
+if ($DurationWasRequested) {
+    if ($DurationSeconds -lt [double]$LengthContract.minimum_requested_seconds -or
+        $DurationSeconds -gt [double]$LengthContract.maximum_requested_seconds) {
+        throw "DurationSeconds must be within the checked-in 5-to-15-second profile"
+    }
+    $requestedFrames = [int][Math]::Ceiling($DurationSeconds * $Fps)
+    $alignment = [int]$LengthContract.frame_alignment
+    $offset = [int]$LengthContract.frame_offset
+    $alignedSteps = [int][Math]::Ceiling(($requestedFrames - $offset) / [double]$alignment)
+    $NumFrames = $offset + ($alignment * $alignedSteps)
+    if ($NumFrames -gt [int]$LengthContract.maximum_num_frames) {
+        $NumFrames = [int]$LengthContract.maximum_num_frames
+    }
+}
+$FrameMinimum = [int]$LengthContract.minimum_num_frames
+$FrameMaximum = [int]$LengthContract.maximum_num_frames
+$FrameAlignment = [int]$LengthContract.frame_alignment
+$FrameOffset = [int]$LengthContract.frame_offset
+if ($NumFrames -lt $FrameMinimum -or
+    $NumFrames -gt $FrameMaximum -or
+    (($NumFrames - $FrameOffset) % $FrameAlignment) -ne 0) {
+    throw "NumFrames must be a native 17n+5 value from 124 through 345"
+}
+$AlignedDurationSeconds = $NumFrames / [double]$Fps
+if ($DurationWasRequested) {
+    Write-Host ("Requested {0:N3} seconds resolves to {1} frames ({2:N3} seconds)." -f `
+        $DurationSeconds, $NumFrames, $AlignedDurationSeconds)
+    if ($AlignedDurationSeconds -lt $DurationSeconds) {
+        Write-Warning "The pinned FastVideo 15-second boundary caps this request at 345 frames (14.375 seconds)."
+    }
+}
+$PromptWasRequested = $PSBoundParameters.ContainsKey("Prompt")
+$PromptFileWasRequested = $PSBoundParameters.ContainsKey("PromptFile")
+if ($PromptWasRequested -and $PromptFileWasRequested) {
+    throw "Prompt and PromptFile are mutually exclusive"
+}
+if ($PromptWasRequested) {
+    $PromptText = $Prompt
+} else {
+    if (-not $PromptFileWasRequested) {
+        $PromptFile = Join-Path $RepositoryRoot `
+            "tests\e2e\models\minimax_h3\prompts\t2va-example-1.json"
+    }
+    if ([string]::IsNullOrWhiteSpace($PromptFile)) {
+        throw "PromptFile must not be empty when specified"
+    }
+    $PromptPath = (Resolve-Path -LiteralPath $PromptFile -ErrorAction Stop).Path
+    $PromptSpec = Get-Content -Raw -Encoding UTF8 -LiteralPath $PromptPath | ConvertFrom-Json
+    if ($PromptSpec.PSObject.Properties.Name -notcontains "prompt" -or
+        $PromptSpec.prompt -isnot [string]) {
+        throw "PromptFile must contain a string prompt field"
+    }
+    $PromptText = $PromptSpec.prompt
+}
+if ([string]::IsNullOrWhiteSpace($PromptText)) {
+    throw "The selected prompt must be non-empty"
+}
+$PromptSha256 = Get-TextSha256 $PromptText
 $PatchPath = [IO.Path]::GetFullPath(
     (Join-Path $RepositoryRoot ([string]$Profile.fastvideo.patch_path))
 )
@@ -218,26 +305,62 @@ if (@(Compare-Object $ExpectedChangedPaths $ChangedPaths).Count -ne 0) {
     throw "The installed FastVideo patch path set does not match the profile"
 }
 
-if ([string]::IsNullOrWhiteSpace($PromptFile)) {
-    $PromptFile = Join-Path $RepositoryRoot `
-        "tests\e2e\models\minimax_h3\prompts\t2va-example-1.json"
-}
-$PromptPath = (Resolve-Path -LiteralPath $PromptFile -ErrorAction Stop).Path
-$PromptSpec = Get-Content -Raw -LiteralPath $PromptPath | ConvertFrom-Json
-if ([string]::IsNullOrWhiteSpace([string]$PromptSpec.prompt)) {
-    throw "PromptFile must contain a non-empty prompt field"
-}
-
 $OutputPath = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-PathWithin $OutputPath $RepositoryRoot) {
     throw "OutputDirectory must be outside the source checkout"
 }
 New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
 
+$PromptPayloadPath = Join-Path (
+    [IO.Path]::GetTempPath()
+) ("trtmc-h3-prompt-{0}.txt" -f [Guid]::NewGuid().ToString("N"))
+try {
+    $PromptEncoding = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($PromptPayloadPath, $PromptText, $PromptEncoding)
+
 if (-not [string]::IsNullOrWhiteSpace($HuggingFaceCache)) {
     $HuggingFaceCache = [IO.Path]::GetFullPath($HuggingFaceCache)
     New-Item -ItemType Directory -Force -Path $HuggingFaceCache | Out-Null
 }
+Write-Host "Resolving the authorized pinned MiniMax H3 tokenizer."
+$TokenizerSnapshotPath = Invoke-HuggingFaceDownload -HfExecutable $Hf `
+    -Repository ([string]$Profile.base_model.repository) `
+    -Revision ([string]$Profile.base_model.revision) `
+    -Include "processor/*" `
+    -CacheDirectory $HuggingFaceCache
+$TokenizerPath = Join-Path $TokenizerSnapshotPath "processor"
+if (-not (Test-Path -LiteralPath $TokenizerPath -PathType Container)) {
+    throw "The pinned MiniMax H3 tokenizer download did not produce the processor directory"
+}
+
+$PromptInspection = @'
+import json
+import pathlib
+import sys
+from transformers import AutoTokenizer
+from transformers.utils import logging
+
+logging.set_verbosity_error()
+tokenizer = AutoTokenizer.from_pretrained(
+    sys.argv[1],
+    local_files_only=True,
+)
+prompt = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+input_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+print(json.dumps({"prompt_tokens": len(input_ids)}))
+'@
+$PromptInspectionOutput = (& $Python -c $PromptInspection $TokenizerPath $PromptPayloadPath 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to tokenize the selected prompt with the pinned MiniMax H3 tokenizer"
+}
+$PromptInfo = $PromptInspectionOutput | ConvertFrom-Json
+$PromptTokenCount = [int]$PromptInfo.prompt_tokens
+$PromptContract = $Profile.workload.prompt
+if ($PromptTokenCount -lt [int]$PromptContract.minimum_tokens -or
+    $PromptTokenCount -gt [int]$PromptContract.maximum_tokens) {
+    throw "The FastVideo H3 profile supports 1 to 1024 prompt tokens without truncation; got $PromptTokenCount"
+}
+
 Write-Host "Resolving the authorized pinned MiniMax H3 snapshot."
 $BaseModelPath = Invoke-HuggingFaceDownload -HfExecutable $Hf `
     -Repository ([string]$Profile.base_model.repository) `
@@ -314,12 +437,11 @@ payload = {
 print(json.dumps(payload))
 '@
 
+$GenerationScript = "examples\inference\basic\basic_fasth3_lora_preview.py"
 $Arguments = @(
-    "examples\inference\basic\basic_fasth3_lora_preview.py",
     "--model-path", $BaseModelPath,
     "--lora-path", $AdapterPath,
     "--lora-strength", "1.0",
-    "--prompt", [string]$PromptSpec.prompt,
     "--output", $OutputPath,
     "--profile", [string]$Execution.profile,
     "--height", [string]$Profile.workload.height,
@@ -347,6 +469,18 @@ $Arguments = @(
     "--no-warmup",
     "--repeats", "1"
 )
+$GenerationLauncher = @'
+import pathlib
+import runpy
+import sys
+
+script = pathlib.Path(sys.argv[1]).resolve()
+prompt = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+forwarded = sys.argv[3:]
+sys.path.insert(0, str(script.parent))
+sys.argv = [str(script), *forwarded, f"--prompt={prompt}"]
+runpy.run_path(str(script), run_name="__main__")
+'@
 
 $GenerationExitCode = $null
 $ElapsedSeconds = $null
@@ -370,12 +504,15 @@ try {
         throw "The installed Python, PyTorch, Triton-Windows, or ptxas version does not match the profile"
     }
 
+    Write-Host "Prompt tokens: $PromptTokenCount (supported range: 1-1024; no truncation)."
+    Write-Host ("Video length: {0} frames at {1} fps = {2:N3} seconds." -f `
+        $NumFrames, $Fps, $AlignedDurationSeconds)
     Write-Host "Running one FastVideo request: 5 scheduler grid points = 4 DiT forwards."
     Write-Host "The full MiniMax H3 video VAE is enabled."
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     Push-Location -LiteralPath $FastVideoRoot
     try {
-        & $Python @Arguments
+        & $Python -c $GenerationLauncher $GenerationScript $PromptPayloadPath @Arguments
         $GenerationExitCode = $LASTEXITCODE
     } finally {
         Pop-Location
@@ -402,7 +539,11 @@ $Summary = [ordered]@{
     height = [int]$Profile.workload.height
     width = [int]$Profile.workload.width
     num_frames = $NumFrames
-    fps = [int]$Profile.workload.fps
+    fps = $Fps
+    requested_duration_seconds = if ($DurationWasRequested) { $DurationSeconds } else { $null }
+    aligned_duration_seconds = $AlignedDurationSeconds
+    prompt_tokens = $PromptTokenCount
+    prompt_sha256 = $PromptSha256
     scheduler_grid_points = [int]$Profile.workload.scheduler_grid_points
     transformer_forwards = [int]$Profile.workload.transformer_forwards
     measured_requests = 1
@@ -432,3 +573,8 @@ if ($GenerationExitCode -ne 0) {
 }
 Write-Host "FastVideo VSA generation completed successfully."
 Write-Host "A sanitized timing summary was written beside the generated video."
+} finally {
+    if ([IO.File]::Exists($PromptPayloadPath)) {
+        [IO.File]::Delete($PromptPayloadPath)
+    }
+}

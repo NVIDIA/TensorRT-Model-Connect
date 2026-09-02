@@ -77,11 +77,25 @@
   "workload": {
     "height": 768,
     "width": 1344,
-    "allowed_num_frames": [
-      124,
-      345
-    ],
     "fps": 24,
+    "prompt": {
+      "minimum_tokens": 1,
+      "maximum_tokens": 1024,
+      "default_prompt_tokens": 537
+    },
+    "video_length": {
+      "minimum_requested_seconds": 5.0,
+      "maximum_requested_seconds": 15.0,
+      "default_num_frames": 124,
+      "minimum_num_frames": 124,
+      "maximum_num_frames": 345,
+      "frame_alignment": 17,
+      "frame_offset": 5,
+      "validated_num_frames": [
+        124,
+        345
+      ]
+    },
     "scheduler_grid_points": 5,
     "transformer_forwards": 4,
     "guidance_scale": 1.0,

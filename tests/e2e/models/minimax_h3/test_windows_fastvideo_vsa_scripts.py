@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -105,8 +107,27 @@ def test_fastvideo_patch_contract_is_fail_closed_until_finalized() -> None:
 def test_fastvideo_workload_is_one_native_four_forward_request() -> None:
     workload = _profile()["workload"]
 
-    assert workload["allowed_num_frames"] == [124, 345]
-    assert all((frames - 5) % 17 == 0 for frames in workload["allowed_num_frames"])
+    assert workload["prompt"] == {
+        "minimum_tokens": 1,
+        "maximum_tokens": 1024,
+        "default_prompt_tokens": 537,
+    }
+    length = workload["video_length"]
+    assert length == {
+        "minimum_requested_seconds": 5.0,
+        "maximum_requested_seconds": 15.0,
+        "default_num_frames": 124,
+        "minimum_num_frames": 124,
+        "maximum_num_frames": 345,
+        "frame_alignment": 17,
+        "frame_offset": 5,
+        "validated_num_frames": [124, 345],
+    }
+    supported_frames = list(
+        range(length["minimum_num_frames"], length["maximum_num_frames"] + 1, length["frame_alignment"])
+    )
+    assert supported_frames == [124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345]
+    assert all((frames - length["frame_offset"]) % length["frame_alignment"] == 0 for frames in supported_frames)
     assert workload["height"] == 768
     assert workload["width"] == 1344
     assert workload["fps"] == 24
@@ -135,6 +156,23 @@ def test_fastvideo_workload_is_one_native_four_forward_request() -> None:
         "lazy_module_load": True,
         "pin_cpu_memory": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("requested_seconds", "expected_frames"),
+    ((5.0, 124), (8.0, 192), (10.0, 243), (14.375, 345), (15.0, 345)),
+)
+def test_nominal_duration_resolves_to_a_supported_native_bucket(
+    requested_seconds: float,
+    expected_frames: int,
+) -> None:
+    workload = _profile()["workload"]
+    length = workload["video_length"]
+    requested_frames = math.ceil(requested_seconds * workload["fps"])
+    steps = math.ceil((requested_frames - length["frame_offset"]) / length["frame_alignment"])
+    aligned = length["frame_offset"] + length["frame_alignment"] * steps
+
+    assert min(aligned, length["maximum_num_frames"]) == expected_frames
 
 
 def test_validated_benchmark_is_sanitized_and_profile_bound() -> None:
@@ -254,7 +292,32 @@ def test_runner_uses_only_the_single_gpu_windows_vsa_profile() -> None:
     ):
         assert fixed_argument in runner
 
-    assert "[ValidateSet(124, 345)]" in runner
+    assert "[ValidateSet(124, 345)]" not in runner
+    assert 'throw "Prompt and PromptFile are mutually exclusive"' in runner
+    assert 'ContainsKey("Prompt")' in runner
+    assert 'ContainsKey("PromptFile")' in runner
+    assert "Get-Content -Raw -Encoding UTF8 -LiteralPath $PromptPath" in runner
+    assert "$PromptSpec.prompt -isnot [string]" in runner
+    assert "from transformers import AutoTokenizer" in runner
+    assert "supports 1 to 1024 prompt tokens without truncation" in runner
+    assert "$PromptPayloadPath" in runner
+    assert '[IO.File]::Delete($PromptPayloadPath)' in runner
+    assert 'read_text(encoding="utf-8")' in runner
+    assert "runpy.run_path" in runner
+    assert 'f"--prompt={prompt}"' in runner
+    assert "$PromptBase64" not in runner
+    assert '"--prompt", $PromptText' not in runner
+    assert '-Include "processor/*"' in runner
+    assert runner.index("supports 1 to 1024 prompt tokens without truncation") < runner.index(
+        "Resolving the authorized pinned MiniMax H3 snapshot."
+    )
+    assert 'ContainsKey("DurationSeconds")' in runner
+    assert "NumFrames must be a native 17n+5 value from 124 through 345" in runner
+    assert "caps this request at 345 frames (14.375 seconds)" in runner
+    assert "requested_duration_seconds" in runner
+    assert "aligned_duration_seconds" in runner
+    assert "prompt_tokens" in runner
+    assert "prompt_sha256" in runner
     assert 'Set-ProcessEnvironment "TRITON_PTXAS.EXE_PATH" $PtxasPath' in runner
     assert 'Set-ProcessEnvironment "TRITON_PTXAS_PATH"' not in runner
     assert 'Set-ProcessEnvironment "FASTVIDEO_VSA_TRITON" "1"' in runner
@@ -278,6 +341,53 @@ def test_runner_uses_only_the_single_gpu_windows_vsa_profile() -> None:
     assert "--token" not in runner
     assert '"--repeats", "2"' not in runner
     assert '"--video-decode-backend", "taeh3"' not in runner
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    ((" " * 130_000) + "cat", "-hello"),
+    ids=("long-valid-token-shape", "leading-option-marker"),
+)
+def test_generation_launcher_keeps_prompt_out_of_process_arguments(
+    tmp_path: Path,
+    prompt: str,
+) -> None:
+    runner = RUNNER.read_text(encoding="utf-8")
+    launcher_match = re.search(
+        r"\$GenerationLauncher = @'\r?\n(.*?)\r?\n'@",
+        runner,
+        re.DOTALL,
+    )
+    assert launcher_match is not None
+
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    target_script = tmp_path / "target.py"
+    target_script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--sentinel")\n'
+        'parser.add_argument("--prompt")\n'
+        "arguments = parser.parse_args()\n"
+        'assert arguments.sentinel == "ok"\n'
+        "print(len(arguments.prompt))\n",
+        encoding="utf-8",
+    )
+    command = [
+        sys.executable,
+        "-c",
+        launcher_match.group(1),
+        str(target_script),
+        str(prompt_path),
+        "--sentinel",
+        "ok",
+    ]
+    assert all(prompt not in argument for argument in command)
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(len(prompt))
 
 
 def test_double_click_installer_is_a_thin_non_admin_wrapper() -> None:
@@ -313,6 +423,7 @@ def test_documentation_keeps_fastvideo_separate_from_native_trt() -> None:
     assert "1358.751" in documentation
     assert "did not reach 10 minutes on this single RTX" in documentation
     assert "getting-started/windows-fastvideo-h3-vsa" in sidebar
+    assert "does not contain tokens" not in documentation
 
 
 def test_helper_sources_contain_no_local_identity_or_secret() -> None:
