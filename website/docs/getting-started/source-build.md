@@ -8,10 +8,11 @@ source. Start at the repository root.
 
 ## Automated environment preparation
 
-The repository-local `scripts/devToolkit` Python API can inspect the host,
-resolve an exact TensorRT/CUDA cohort, build or reuse the development image,
-start an owned persistent container, build TRTMC, verify the installation, and
-write a reproducibility receipt:
+The repository-local `scripts/devToolkit` Python API exposes independent
+resolution, provisioning, source-build, and command capabilities. TensorRT is
+an arbitrary exact four-part request; a cohort is optional qualification
+provenance, not an allowlist. This example adopts an existing development
+container and verifies its actual CUDA/TensorRT toolchain before building:
 
 ```python
 from pathlib import Path
@@ -20,31 +21,40 @@ import sys
 repo = Path.cwd()
 sys.path.insert(0, str(repo / "scripts" / "devToolkit"))
 
-from trtmc_devtoolkit import DevToolkit, DockerTarget, PrepareRequest
+from trtmc_devtoolkit import BuildSpec, DevToolkit, EnvironmentRequest, ExecutionTarget
 
 toolkit = DevToolkit.from_checkout(repo)
-plan = toolkit.plan(
-    PrepareRequest(
-        tensorrt="11.1.0.106",
-        cuda="13.3",
-        target=DockerTarget(gpu="0"),
-        mode="development",
+lock = toolkit.resolve(
+    EnvironmentRequest(
+        tensorrt="11.2.0.113",
+        target=ExecutionTarget.docker(
+            container="trtmc-dev-gb300",
+            docker_context="default",
+            workspace="/workspace/TensorRT-Model-Connect",
+        ),
     )
 )
-
-for step in plan.steps:
-    print(step.id, step.description)
-
-result = toolkit.apply(plan)
-print(result.environment.activate_command)
-print(result.receipt)
+environment = toolkit.provision(lock)
+build = toolkit.build(
+    environment,
+    BuildSpec(targets=("trtmc", "trtmc_backend_trt", "trtmc_model_qwen")),
+)
+print(environment.receipt)
+print(build.receipt)
 ```
 
-`plan()` is read-only. `apply()` leaves the labelled container running for
-later development and stores state under `.devtoolkit/`. It never installs a
-host driver or changes host CUDA/TensorRT libraries. See
-`scripts/devToolkit/README.md` for local, installed-wheel, model-smoke, and
-downstream handoff examples.
+The Docker environment lock records the daemon, immutable container, and image
+identities and rechecks them before later execution. A reused container name or
+changed Docker context therefore fails closed instead of silently selecting a
+different environment. Docker CLI 20.10 or newer is required.
+
+`resolve()` is read-only. With CUDA omitted, it prefers a complete target CUDA
+toolkit and otherwise selects the managed CUDA 13.3 policy. Managed provisioning
+requires digest-pinned artifacts; it never downloads an unverified version.
+`provision()` attests Python, CUDA, TensorRT Python/native/header versions and
+writes the evidence under `.devtoolkit/`. See `scripts/devToolkit/README.md` for
+local targets, explicit CUDA policies, generic TRTMC CLI calls, extension
+providers, and receipt identity semantics.
 
 The manual commands below remain the direct source-build path and show the
 operations performed by development mode.

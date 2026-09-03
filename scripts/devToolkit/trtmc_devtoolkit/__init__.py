@@ -1,32 +1,66 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Repository-local environment preparation API for TensorRT-Model-Connect."""
+"""Composable development-environment toolkit for TensorRT-Model-Connect."""
 
 from .api import DevToolkit
-from .handoff import performance_handoff, profiling_handoff, validation_handoff
-from .models import (
-    DockerTarget,
-    EnvironmentHandle,
-    HandoffPlan,
-    LocalTarget,
-    ModelRequest,
-    PrepareRequest,
-    PrepareResult,
-    PreparationPlan,
+from .building import BuildArtifact, BuildResult, SourceSnapshot
+from .catalogs import JsonToolchainCatalog, NvidiaPackageIndexCatalog
+from .commands import (
+    ArtifactInput,
+    CommandArgument,
+    CommandResult,
+    CommandSpec,
+    EnvironmentPath,
+    repository_path,
+    state_path,
+    target_path,
+)
+from .models import DevToolkitError, ToolchainObservation, ToolchainRuntime
+from .provisioning import AttestationFailed, ProvisionedEnvironment, ProvisionPolicy
+from .qualifications import JsonQualificationSource, QualificationRef
+from .recipes import TrtmcBuildRecipe
+from .resolution import (
+    ArtifactPin,
+    ArtifactUnavailable,
+    CudaPolicy,
+    EnvironmentLock,
+    EnvironmentRequest,
+    ExecutionTarget,
+    IncompatibleCombination,
+    ResolutionError,
 )
 
 __all__ = [
     "DevToolkit",
-    "DockerTarget",
-    "EnvironmentHandle",
-    "HandoffPlan",
-    "LocalTarget",
-    "ModelRequest",
-    "PrepareRequest",
-    "PrepareResult",
-    "PreparationPlan",
-    "performance_handoff",
-    "profiling_handoff",
-    "validation_handoff",
+    "ArtifactPin",
+    "ArtifactUnavailable",
+    "AttestationFailed",
+    "ArtifactInput",
+    "BuildArtifact",
+    "BuildResult",
+    "CommandArgument",
+    "CommandResult",
+    "CommandSpec",
+    "CudaPolicy",
+    "DevToolkitError",
+    "EnvironmentLock",
+    "EnvironmentPath",
+    "EnvironmentRequest",
+    "ExecutionTarget",
+    "IncompatibleCombination",
+    "JsonQualificationSource",
+    "JsonToolchainCatalog",
+    "NvidiaPackageIndexCatalog",
+    "ProvisionedEnvironment",
+    "ProvisionPolicy",
+    "QualificationRef",
+    "ResolutionError",
+    "SourceSnapshot",
+    "ToolchainObservation",
+    "ToolchainRuntime",
+    "TrtmcBuildRecipe",
+    "repository_path",
+    "state_path",
+    "target_path",
 ]
