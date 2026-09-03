@@ -83,6 +83,7 @@ TASK_ADAPTERS = {
     "timm_mobilenetv3.classify": "hf-transformers-vision",
     "timm_efficientnet.classify": "hf-transformers-vision",
     "timm_densenet.classify": "hf-transformers-vision",
+    "timm_mnasnet.classify": "hf-transformers-vision",
     "timm_resnet.classify": "hf-transformers-vision",
     "timm_vgg.classify": "hf-transformers-vision",
     "timm_vit.classify": "hf-transformers-vision",
