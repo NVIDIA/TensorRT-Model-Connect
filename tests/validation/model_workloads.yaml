@@ -142,6 +142,8 @@ models:
     workloads: [stsbenchmark_encoder_embedding_parity]
   gemma-2-2b:
     workloads: [mmlu_five_shot_mcq]
+  ghostnet-100-in1k:
+    workloads: [imagenette_image_classification]
   glm-4-9b:
     workloads: [mmlu_continuation_parity]
   gpt-neo-125m:

@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_ghostnet"
+plugin = "timm_ghostnet"
+module = "plugin"
+python_profile_specs = [
+  "timm_ghostnet_reference|families/timm_ghostnet/python_profile_requirements/timm_ghostnet_reference.lock.txt|families/timm_ghostnet/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_ghostnet_reference",
+]
+aliases = [
+  "timm_ghostnet",
+  "ghostnet",
+  "ghostnet_100",
+]
+prefixes = [
+  "timm_ghostnet",
+  "ghostnet",
+]
