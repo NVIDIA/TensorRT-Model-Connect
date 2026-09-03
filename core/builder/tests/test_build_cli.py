@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -127,3 +128,47 @@ def test_build_command_rejects_a_task_the_family_does_not_own(monkeypatch, tmp_p
                 "embedding",
             ]
         )
+
+
+def test_prepare_structure_dispatches_to_the_resolved_family(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"boltz2"}', encoding="utf-8")
+    request = tmp_path / "request.yaml"
+    request.write_text("version: 1\n", encoding="utf-8")
+    output = tmp_path / "request.b2rq"
+    cache = tmp_path / "cache"
+    calls = []
+
+    def prepare(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"family": "boltz2", "cache_hit": False}
+
+    monkeypatch.setattr(
+        build_cli,
+        "_load_family",
+        lambda family: SimpleNamespace(prepare_structure_request=prepare),
+    )
+
+    assert (
+        build_cli.main(
+            [
+                "prepare-structure",
+                str(model),
+                "--input",
+                str(request),
+                "--output",
+                str(output),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        == 0
+    )
+    assert calls == [((model, request, output), {"cache_dir": cache})]
+    assert json.loads(capsys.readouterr().out) == {
+        "cache_hit": False,
+        "family": "boltz2",
+    }

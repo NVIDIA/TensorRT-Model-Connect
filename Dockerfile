@@ -58,10 +58,13 @@ RUN python3.12 -m venv "$VIRTUAL_ENV" \
       "onnx>=1.16" \
       "Pillow" \
       "protobuf" \
+      "pybind11==2.13.6" \
+      "pybind11-stubgen==2.4.2" \
       "pytest<9" \
       "PyYAML>=6.0" \
       "ruff==0.16.4" \
       "safetensors>=0.4" \
+      "scikit-build-core==0.8.2" \
       "sentencepiece>=0.1.99" \
       "setuptools>=80,<82" \
       "tensorrt==11.1.0.106" \

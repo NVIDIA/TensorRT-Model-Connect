@@ -147,6 +147,43 @@ struct StereoDisparityResult {
     std::int32_t width{0};
 };
 
+enum class StructureFormat {
+    kMmcif,
+    kPdb,
+};
+
+struct StructurePredictionConfig {
+    std::int32_t recycling_steps{3};
+    std::int32_t sampling_steps{200};
+    std::int32_t diffusion_samples{1};
+    std::int32_t seed{42};
+    StructureFormat output_format{StructureFormat::kMmcif};
+};
+
+struct StructurePredictionRequest {
+    std::string document;
+    std::string source_path;
+    StructurePredictionConfig config;
+};
+
+struct StructureConfidence {
+    float confidence_score{0.0F};
+    float ptm{0.0F};
+    float iptm{0.0F};
+    float ligand_iptm{0.0F};
+    float protein_iptm{0.0F};
+    float complex_plddt{0.0F};
+    float complex_iplddt{0.0F};
+    std::vector<float> plddt;
+};
+
+struct StructurePredictionResult {
+    std::string structure;
+    StructureFormat format{StructureFormat::kMmcif};
+    StructureConfidence confidence;
+    std::string metadata_json;
+};
+
 struct GeometryResult {
     std::vector<float> points;
     std::vector<float> depth;
@@ -688,6 +725,14 @@ class IImageFeatureExtractor : public virtual ITask {
     const char* task() const noexcept override { return kTask; }
     virtual ImageFeaturesResult extract_image_features(const float* pixels, std::int32_t height,
                                                        std::int32_t width) = 0;
+};
+
+class IStructurePrediction : public virtual ITask {
+  public:
+    static constexpr const char* kTask = "structure_prediction";
+    const char* task() const noexcept override { return kTask; }
+    virtual StructurePredictionResult
+    predict_structure(const StructurePredictionRequest& request) = 0;
 };
 
 class IVideoSegmentation : public virtual ITask {

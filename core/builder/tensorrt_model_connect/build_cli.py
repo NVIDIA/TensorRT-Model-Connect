@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Sequence
 
-from .build import BuildRequest, build
+from .build import BuildRequest, _load_family, build
 from .model_support import load_model_metadata, resolve_family
 
 
@@ -34,15 +35,39 @@ def _parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--fp32-layer", type=int, action="append", default=[])
     build_parser.add_argument("--dynamic-kv-cache", action="store_true")
     build_parser.add_argument("--verbose", action="store_true")
+    prepare_parser = commands.add_parser(
+        "prepare-structure",
+        help="Prepare one structure request without rebuilding its model bundle",
+    )
+    prepare_parser.add_argument("model", help="Local model or build package")
+    prepare_parser.add_argument("--input", type=Path, required=True)
+    prepare_parser.add_argument("-o", "--output", type=Path, required=True)
+    prepare_parser.add_argument("--revision", help="Hugging Face model revision")
+    prepare_parser.add_argument("--cache-dir", type=Path)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command != "build":
-        raise AssertionError(f"unhandled command: {args.command}")
     model_dir = _resolve_model(args.model, args.revision)
     family, support = resolve_family(load_model_metadata(model_dir))
+    if args.command == "prepare-structure":
+        if "structure_prediction" not in support.tasks:
+            raise ValueError(f"family {family!r} does not support structure prediction")
+        family_module = _load_family(family)
+        prepare = getattr(family_module, "prepare_structure_request", None)
+        if not callable(prepare):
+            raise ValueError(f"family {family!r} does not support request preparation")
+        result = prepare(
+            model_dir,
+            args.input,
+            args.output,
+            cache_dir=args.cache_dir,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    if args.command != "build":
+        raise AssertionError(f"unhandled command: {args.command}")
     task = args.task or support.default_task
     if task not in support.tasks:
         raise ValueError(

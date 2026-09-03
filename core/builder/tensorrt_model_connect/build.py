@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import re
 import sys
@@ -78,6 +79,18 @@ def _validate_id(field: str, value: object) -> str:
             "letters, digits, and underscores"
         )
     return value
+
+
+def content_cache_key(domain: str, *payloads: bytes) -> str:
+    """Return a domain-separated key for model-agnostic content caches."""
+
+    if not domain or any(not isinstance(payload, bytes) for payload in payloads):
+        raise ValueError("cache-key domain and byte payloads must be valid")
+    value = hashlib.sha256(domain.encode("utf-8") + b"\0")
+    for payload in payloads:
+        value.update(len(payload).to_bytes(8, "little"))
+        value.update(payload)
+    return value.hexdigest()
 
 
 def _resolve_family(request: BuildRequest) -> str:

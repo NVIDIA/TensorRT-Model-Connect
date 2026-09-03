@@ -120,6 +120,7 @@ HASH_SPECIAL_NAMES = frozenset(
 # ``unclassified`` instead of being silently skipped.
 NON_SOURCE_SUFFIXES = frozenset(
     {
+        ".a3m",
         ".bin",
         ".csv",
         ".dat",
