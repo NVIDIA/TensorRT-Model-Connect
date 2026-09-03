@@ -9682,6 +9682,28 @@ def resolve_reference_precision_contract(
     }
 
 
+def resolve_metric_only_precision_contract(
+    model: Mapping[str, Any], bundle_path: Path
+) -> dict[str, str]:
+    """Record candidate precision without inventing a model reference dtype."""
+
+    bundle_config = _read_optional_bundle_json_object(bundle_path, "config.json") or {}
+    base_precision = _canonical_reference_precision(
+        bundle_config.get("precision") or model.get("precision", "fp32"),
+        field="TRTMC bundle precision",
+    )
+    quantization = str(bundle_config.get("quantization", "") or "").strip().lower()
+    if not quantization:
+        quantization = _model_quantization_format(model)
+    return {
+        "trtmc_base_precision": base_precision,
+        "trtmc_quantization": quantization or "none",
+        "reference_precision": "metric-only",
+        "reference_dtype": "metric-only",
+        "comparison": "candidate_only",
+    }
+
+
 def resolve_hf_reference_dtype(
     args: argparse.Namespace,
     model: Mapping[str, Any],
@@ -11668,6 +11690,10 @@ def eval_one_model(
     if precision_contract is not None:
         base_result["reference_dtype"] = precision_contract["reference_dtype"]
         base_result["precision_contract"] = precision_contract
+    elif reference_mode == "metric_only":
+        base_result["precision_contract"] = resolve_metric_only_precision_contract(
+            model, bundle_path
+        )
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 

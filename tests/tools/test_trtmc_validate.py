@@ -3600,6 +3600,31 @@ def test_model_owned_report_declares_its_primary_metric() -> None:
     }
 
 
+def test_metric_only_result_derives_candidate_precision_from_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_accuracy_bundle_config",
+        lambda *_args: {"precision": "bf16"},
+    )
+    result = {
+        "execution": {"status": "completed"},
+        "validation": {"status": "passed"},
+        "comparison": {"status": "agreement"},
+        "raw_result": {
+            "reference_backend": "metric_only",
+            "bundle": "/engines/model.bundle",
+        },
+    }
+
+    assert trtmc_validate._accuracy_precision(result) == {
+        "reference": "metric-only",
+        "candidate": "bf16",
+    }
+    assert trtmc_validate._traffic_light_status(result) == "green"
+
+
 def test_mcq_report_exposes_reference_tie_equivalence_metrics():
     comparison = trtmc_validate._comparison_details(
         {

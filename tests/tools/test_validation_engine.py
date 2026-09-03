@@ -5974,6 +5974,29 @@ def test_declared_native_reference_dtype_exception_is_recorded(
     }
 
 
+def test_metric_only_precision_contract_uses_bundle_candidate_precision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        validation_engine,
+        "_read_optional_bundle_json_object",
+        lambda *_args: {"precision": "bf16"},
+    )
+
+    contract = validation_engine.resolve_metric_only_precision_contract(
+        {"precision": "fp16", "quantization": {}},
+        Path("/engines/model.bundle"),
+    )
+
+    assert contract == {
+        "trtmc_base_precision": "bf16",
+        "trtmc_quantization": "none",
+        "reference_precision": "metric-only",
+        "reference_dtype": "metric-only",
+        "comparison": "candidate_only",
+    }
+
+
 def test_comparison_precision_overrides_both_candidate_and_reference(
     tmp_path: Path,
 ) -> None:

@@ -23,6 +23,7 @@ import re
 import signal
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -2963,6 +2964,41 @@ def _traffic_light_status(result: Mapping[str, Any]) -> str:
     return "white"
 
 
+def _accuracy_bundle_config(path: str | Path) -> dict[str, Any]:
+    bundle_path = Path(path)
+    with bundle_path.open("rb") as bundle:
+        if bundle.read(8) != b"BUNDLE\x01\x00":
+            raise ValueError(f"{bundle_path} is not a TRTMC bundle")
+        raw_header_size = bundle.read(8)
+        if len(raw_header_size) != 8:
+            raise ValueError(f"{bundle_path} has a truncated header size")
+        header_size = struct.unpack("<Q", raw_header_size)[0]
+        if header_size > 64 * 1024 * 1024:
+            raise ValueError(f"{bundle_path} has an oversized header")
+        raw_header = bundle.read(header_size)
+        if len(raw_header) != header_size:
+            raise ValueError(f"{bundle_path} has a truncated header")
+        header = json.loads(raw_header)
+        sections = header.get("sections", {}) if isinstance(header, Mapping) else {}
+        section = sections.get("config.json") if isinstance(sections, Mapping) else None
+        if not isinstance(section, Mapping):
+            raise ValueError(f"{bundle_path} has no config.json section")
+        offset = int(section.get("offset", -1))
+        size = int(section.get("size", -1))
+        data_start = 16 + header_size
+        end = data_start + offset + size
+        if offset < 0 or size < 0 or end > bundle_path.stat().st_size:
+            raise ValueError(f"{bundle_path} has an invalid config.json section range")
+        bundle.seek(data_start + offset)
+        raw_config = bundle.read(size)
+    if len(raw_config) != size:
+        raise ValueError(f"{bundle_path} has a truncated config.json section")
+    config = json.loads(raw_config.decode("utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError(f"{bundle_path} config.json must contain an object")
+    return config
+
+
 def _accuracy_precision(result: Mapping[str, Any]) -> dict[str, str]:
     contract = result.get("precision_contract", {})
     contract = contract if isinstance(contract, Mapping) else {}
@@ -2976,6 +3012,20 @@ def _accuracy_precision(result: Mapping[str, Any]) -> dict[str, str]:
     )
     base = contract.get("trtmc_base_precision") or raw_result.get("precision")
     quantization = contract.get("trtmc_quantization")
+    reference_backend = str(
+        result.get("reference_backend") or raw_result.get("reference_backend") or ""
+    )
+    if reference_backend == "metric_only":
+        reference = reference or "metric-only"
+        if not base:
+            bundle_path = result.get("bundle") or raw_result.get("bundle")
+            try:
+                bundle_config = _accuracy_bundle_config(str(bundle_path))
+            except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                bundle_config = {}
+            if isinstance(bundle_config, Mapping):
+                base = bundle_config.get("precision")
+                quantization = quantization or bundle_config.get("quantization")
     if quantization and str(quantization).lower() not in {"none", "false"}:
         candidate = (
             f"{str(quantization).lower()} ({str(base).lower()} base)"
