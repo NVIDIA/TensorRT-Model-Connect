@@ -30,6 +30,10 @@ excluded_profiles:
     reason: *lfm2_performance_exclusion
   - model: lfm2-700m
     reason: *lfm2_performance_exclusion
+  - model: k2-horizon-7b
+    reason: >-
+      Pinned BF16 build and Hugging Face parity qualification are present, but
+      no matching release-performance workload or receipt has been collected.
   - model: minimax-h3-768p
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated

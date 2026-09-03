@@ -152,6 +152,8 @@ models:
     workloads: [mmlu_five_shot_mcq]
   internvl3-8b:
     workloads: [vlm_mmmu_pro_vision_fixed_mcq]
+  k2-horizon-7b:
+    workloads: [mmlu_continuation_parity]
   lance-3b-x2t-image:
     workloads: [mmmu_pro_vision_square_plugin_parity]
   lfm2-1.2b:

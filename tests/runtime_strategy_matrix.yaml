@@ -1,5 +1,6 @@
 {
   "new_runtime_guard_strategies": [
+    "k2_horizon_decoder_kv_cache",
     "qwen_decoder_kv_cache",
     "deepseek_v2_decoder_kv_cache",
     "olmo2_decoder_kv_cache",
@@ -76,6 +77,20 @@
     "diffusion_wan2_2_ti2v"
   ],
   "runtime_strategies": {
+    "k2_horizon_decoder_kv_cache": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [
+        "LogitDiffTest",
+        "PerfBenchmarkTest",
+        "RunnerParityTest"
+      ],
+      "performance_mode": "decode"
+    },
     "qwen_decoder_kv_cache": {
       "task_strategy": "text_generation_causal",
       "cli_commands": [

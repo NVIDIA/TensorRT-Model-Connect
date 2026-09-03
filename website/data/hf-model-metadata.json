@@ -92,6 +92,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "IFM/K2-Horizon-7B",
+      "revision": "586b03f0fd1fbbf2f13eeafc33749e95ae34dd10",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "k2_horizon",
+      "architectures": [
+        "K2HorizonForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "Lightricks/LTX-Video",
       "revision": "8984fa25007f376c1a299016d0957a37a2f797bb",
       "revision_source": "resolved",

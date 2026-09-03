@@ -744,6 +744,15 @@ def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -
     assert all(case["ci_tier"] != "l0_only" for case in selection["e2e_cases"])
 
 
+def test_k2_horizon_nightly_is_owned_by_its_family(tmp_path: Path) -> None:
+    selection = _run_test_selection(tmp_path, "k2_horizon", "nightly")
+
+    assert selection["suite"] == "nightly"
+    assert [case["name"] for case in selection["e2e_cases"]] == [
+        "k2-horizon-7b"
+    ]
+
+
 @pytest.mark.parametrize(
     ("family", "expected_family_tests"),
     (
