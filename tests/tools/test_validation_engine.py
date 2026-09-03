@@ -9259,7 +9259,10 @@ def test_public_ci_artifacts_omit_private_runner_paths(tmp_path: Path) -> None:
     assert "/private" not in numeric_public.read_text(encoding="utf-8")
 
 
-def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> None:
+def test_prepare_vbench_selects_ten_unique_review_dimensions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = tmp_path / "VBench_full_info.json"
     source.write_text(
         json.dumps(
@@ -9273,6 +9276,11 @@ def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> 
         ),
         encoding="utf-8",
     )
+    monkeypatch.setattr(
+        prepare_media,
+        "VBENCH_INFO_SHA256",
+        prepare_media._sha256(source),
+    )
 
     output = prepare_media.prepare_vbench(source, tmp_path / "out")
     payload = json.loads(output.read_text(encoding="utf-8"))
@@ -9285,6 +9293,14 @@ def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> 
     assert payload["source_info_sha256"]
     assert payload["license"] == "Apache-2.0"
     assert payload["source_revision"] == prepare_media.VBENCH_REVISION
+
+
+def test_prepare_vbench_rejects_source_from_another_revision(tmp_path: Path) -> None:
+    source = tmp_path / "VBench_full_info.json"
+    source.write_text("[]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match the pinned revision"):
+        prepare_media.prepare_vbench(source, tmp_path / "out")
 
 
 def test_prepare_vbench_model_plugin_dataset_is_portable_and_pinned(

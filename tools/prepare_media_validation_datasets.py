@@ -130,6 +130,9 @@ def _select_vbench_requests(source_info: Path, limit: int) -> list[dict[str, Any
 
 def prepare_vbench(source_info: Path, output_root: Path, limit: int = 10) -> Path:
     """Write the shared diffusion-runner view of the VBench prompt slice."""
+    source_info = source_info.resolve(strict=True)
+    if _sha256(source_info) != VBENCH_INFO_SHA256:
+        raise ValueError("VBench_full_info.json does not match the pinned revision")
     selected = _select_vbench_requests(source_info, limit)
     return _write_json(
         output_root / "VBench" / "vbench_t2v_task_eval.json",
