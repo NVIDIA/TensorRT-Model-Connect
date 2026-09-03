@@ -17,13 +17,14 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 
 from .commands import CommandSpec, EnvironmentPath, PathScope
-from .models import DevToolkitError, ToolchainObservation
+from .models import DevToolkitError, ToolchainObservation, ToolchainRuntime
 from .platforms import normalize_architecture
-from .provisioning import ContextHandle, ProvisionPolicy
+from .provisioning import ContextHandle, ProvisionPolicy, ToolchainHandle
 from .resolution import (
     CudaSource,
     ContextLock,
@@ -54,7 +55,7 @@ def _os_release() -> dict[str, str]:
 
 
 class LocalExecutionContext:
-    descriptor = ProviderDescriptor("local", "trtmc-devtoolkit-local==2", 1)
+    descriptor = ProviderDescriptor("local", "trtmc-devtoolkit-local==3", 1)
 
     def resolve(
         self,
@@ -80,59 +81,52 @@ class LocalExecutionContext:
                 "os_id": release.get("ID", "unknown"),
                 "os_version": release.get("VERSION_ID", "unknown"),
             },
+            execution={
+                "python": request.target.options.get("python", "python3"),
+                "gpu": request.target.options.get("gpu", "0"),
+            },
             locator={
                 "python": request.target.options.get("python", "python3"),
                 "gpu": request.target.options.get("gpu", "0"),
             },
+            capabilities=frozenset({"host-filesystem", "posix-process"}),
+            qualification={"execution": "local"},
         )
 
     def provision(
         self,
-        lock,
+        context: ContextLock,
         *,
+        inherit_system_packages: bool,
         repository: Path,
         state_dir: Path,
         policy: ProvisionPolicy,
         runner: Runner,
     ) -> ContextHandle:
-        base_python = str(lock.context.locator.get("python", "python3"))
+        base_python = str(context.locator.get("python", "python3"))
         python = base_python
         if policy is not ProvisionPolicy.ADOPT_ONLY:
             venv = state_dir / "venv"
             python_path = venv / "bin" / "python"
             if not python_path.is_file():
                 command: list[str | Path] = [base_python, "-m", "venv"]
-                if lock.toolchain.origin != "managed":
+                if inherit_system_packages:
                     command.append("--system-site-packages")
                 command.append(venv)
                 runner.run(command, cwd=repository)
             python = str(python_path)
-        cuda_root = str(lock.toolchain.identity.get("cuda_root", ""))
-        tensorrt_library = str(lock.toolchain.identity.get("tensorrt_library", ""))
-        library_paths = [str(Path(tensorrt_library).parent)]
-        for directory in ("lib64", "lib"):
-            candidate = Path(cuda_root) / directory
-            if candidate.is_dir():
-                library_paths.append(str(candidate))
-        if cuda_root:
-            cudart = _first_library(Path(cuda_root), "libcudart.so", lock.context.architecture)
-            if cudart is not None and str(cudart.parent) not in library_paths:
-                library_paths.append(str(cudart.parent))
         environment = {
-            "PATH": f"{Path(python).parent}:{Path(cuda_root) / 'bin'}:{os.environ.get('PATH', '')}",
-            "CUDA_VISIBLE_DEVICES": str(lock.context.locator.get("gpu", "0")),
-            "CUDA_HOME": cuda_root,
-            "CUDA_PATH": cuda_root,
-            "CUDAToolkit_ROOT": cuda_root,
-            "TRTMC_TRT_INCLUDE_DIR": str(lock.toolchain.identity.get("tensorrt_include_dir", "")),
-            "TRTMC_TRT_LIBRARY": tensorrt_library,
-            "TRTMC_TRT_LIBRARY_DIR": str(Path(tensorrt_library).parent),
-            "LD_LIBRARY_PATH": ":".join(library_paths),
+            "PATH": f"{Path(python).parent}:{os.environ.get('PATH', '')}",
+            "CUDA_VISIBLE_DEVICES": str(context.locator.get("gpu", "0")),
         }
         return ContextHandle(
             provider=self.descriptor,
-            identity=lock.context.identity,
-            locator={"python": python, "gpu": lock.context.locator.get("gpu", "0")},
+            identity=context.identity,
+            execution_identity={
+                "python": python,
+                "gpu": context.locator.get("gpu", "0"),
+            },
+            locator={"python": python, "gpu": context.locator.get("gpu", "0")},
             environment=environment,
         )
 
@@ -175,6 +169,35 @@ def _first_library(root: Path, name: str, architecture: str) -> Path | None:
     return next(
         (directory / name for directory in directories if (directory / name).is_file()), None
     )
+
+
+def _toolchain_environment(
+    runtime: ToolchainRuntime,
+    architecture: str,
+) -> dict[str, str]:
+    cuda_root = Path(runtime.cuda_root)
+    tensorrt_library = Path(runtime.tensorrt_library)
+    library_paths = [str(tensorrt_library.parent)]
+    for directory in ("lib64", "lib"):
+        candidate = cuda_root / directory
+        if candidate.is_dir() and str(candidate) not in library_paths:
+            library_paths.append(str(candidate))
+    cudart = _first_library(cuda_root, "libcudart.so", architecture)
+    if cudart is not None and str(cudart.parent) not in library_paths:
+        library_paths.append(str(cudart.parent))
+    return {
+        "PATH": (
+            f"{Path(runtime.python_executable).parent}:{cuda_root / 'bin'}:"
+            f"{os.environ.get('PATH', '')}"
+        ),
+        "CUDA_HOME": runtime.cuda_root,
+        "CUDA_PATH": runtime.cuda_root,
+        "CUDAToolkit_ROOT": runtime.cuda_root,
+        "TRTMC_TRT_INCLUDE_DIR": runtime.tensorrt_include_dir,
+        "TRTMC_TRT_LIBRARY": runtime.tensorrt_library,
+        "TRTMC_TRT_LIBRARY_DIR": str(tensorrt_library.parent),
+        "LD_LIBRARY_PATH": ":".join(library_paths),
+    }
 
 
 def _native_version_script(library: Path) -> str:
@@ -328,6 +351,7 @@ def _docker_environment_file(
 _CONTAINER_PROBE_SCRIPT = r"""
 import ctypes
 import ctypes.util
+import hashlib
 import itertools
 import json
 import os
@@ -393,6 +417,18 @@ for name in ("MAJOR", "MINOR", "PATCH", "BUILD"):
     value = definitions.get(f"NV_TENSORRT_{name}", "")
     parts.append(definitions.get(value, value))
 headers = ".".join(parts)
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+evidence = {
+    "nvcc": sha256(nvcc),
+    "tensorrt-header": sha256(header),
+}
+if library_path:
+    evidence["tensorrt-library"] = sha256(library_path)
 print(json.dumps({
     "architecture": platform.machine(),
     "python": f"{sys.version_info.major}.{sys.version_info.minor}",
@@ -405,6 +441,7 @@ print(json.dumps({
     "tensorrt_headers": headers,
     "tensorrt_include_dir": str(header.parent.resolve()),
     "tensorrt_library": library_path or library_name,
+    "evidence": evidence,
 }))
 """.strip()
 
@@ -456,6 +493,7 @@ def _container_observation(
         "tensorrt_include_dir",
         "tensorrt_library",
         "architecture",
+        "evidence",
     )
     if not isinstance(payload, dict) or any(not payload.get(name) for name in required):
         raise DevToolkitError("Container toolchain probe omitted required observations")
@@ -471,6 +509,7 @@ def _container_observation(
         cuda_root=str(payload["cuda_root"]),
         image_id=image_id,
         architecture=architecture,
+        evidence={str(name): str(digest) for name, digest in dict(payload["evidence"]).items()},
     )
     return observation, str(payload["python_executable"]), payload.get("cuda_complete") is True
 
@@ -478,7 +517,7 @@ def _container_observation(
 class DockerExecutionContext:
     """Adopt a running user container without imposing a Dockerfile or image version."""
 
-    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-adoption==4", 1)
+    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-adoption==5", 1)
 
     def resolve(
         self,
@@ -541,6 +580,13 @@ class DockerExecutionContext:
                 "image_id": image_id,
                 "runtime": "docker",
             },
+            execution={
+                "workspace": request.target.options.get(
+                    "workspace", "/workspace/tensorrt-model-connect"
+                ),
+                "target_state": request.target.options.get("state", "/tmp/trtmc-devtoolkit"),
+                "python": request.target.options.get("python", "python3"),
+            },
             locator={
                 "container": container,
                 "docker_context": docker_context,
@@ -550,37 +596,40 @@ class DockerExecutionContext:
                 "target_state": request.target.options.get("state", "/tmp/trtmc-devtoolkit"),
                 "python": request.target.options.get("python", "python3"),
             },
+            capabilities=frozenset({"container-process", "posix-process"}),
+            qualification={"execution": "container"},
         )
 
     def provision(
         self,
-        lock,
+        context: ContextLock,
         *,
+        inherit_system_packages: bool,
         repository: Path,
         state_dir: Path,
         policy: ProvisionPolicy,
         runner: Runner,
     ) -> ContextHandle:
-        del state_dir
+        del state_dir, inherit_system_packages
         if policy is ProvisionPolicy.CREATE:
             raise DevToolkitError("The built-in Docker provider is adoption-only")
         _require_docker_binding(
             runner,
             repository,
-            docker_context=str(lock.context.locator["docker_context"]),
-            daemon_id=str(lock.context.identity["daemon_id"]),
-            container_id=str(lock.context.identity["container_id"]),
-            image_id=str(lock.context.identity["image_id"]),
+            docker_context=str(context.locator["docker_context"]),
+            daemon_id=str(context.identity["daemon_id"]),
+            container_id=str(context.identity["container_id"]),
+            image_id=str(context.identity["image_id"]),
         )
         return ContextHandle(
             provider=self.descriptor,
-            identity=lock.context.identity,
-            locator={
-                **dict(lock.context.locator),
-                "python": lock.toolchain.identity.get(
-                    "python_executable", lock.context.locator.get("python", "python3")
-                ),
+            identity=context.identity,
+            execution_identity={
+                "workspace": context.locator["workspace"],
+                "target_state": context.locator["target_state"],
+                "python": context.locator["python"],
             },
+            locator={**dict(context.locator), **dict(context.execution)},
         )
 
     def execute(
@@ -636,7 +685,7 @@ class DockerExecutionContext:
 
 
 class ContainerImageToolchainSource:
-    descriptor = ProviderDescriptor("container-image", "trtmc-devtoolkit-container-image==4", 1)
+    descriptor = ProviderDescriptor("container-image", "trtmc-devtoolkit-container-image==5", 1)
 
     def resolve(
         self,
@@ -646,7 +695,7 @@ class ContainerImageToolchainSource:
         repository: Path,
         runner: Runner,
     ) -> tuple[ToolchainCandidate, ...]:
-        if context.provider.name != "docker":
+        if "container-process" not in context.capabilities:
             return ()
         try:
             observed, python_executable, complete_cuda = _container_observation(
@@ -677,11 +726,14 @@ class ContainerImageToolchainSource:
                 python=observed.python_version,
                 identity={
                     "image_id": observed.image_id,
-                    "python_executable": python_executable,
-                    "cuda_root": observed.cuda_root,
-                    "tensorrt_include_dir": observed.tensorrt_include_dir,
-                    "tensorrt_library": observed.tensorrt_library,
                 },
+                runtime=ToolchainRuntime(
+                    python_executable=python_executable,
+                    cuda_root=observed.cuda_root or "",
+                    nvcc=str(PurePosixPath(observed.cuda_root or "") / "bin" / "nvcc"),
+                    tensorrt_include_dir=observed.tensorrt_include_dir,
+                    tensorrt_library=observed.tensorrt_library,
+                ),
             ),
         )
 
@@ -690,24 +742,29 @@ class ContainerImageToolchainSource:
         lock,
         context: ContextHandle,
         *,
-        execution: DockerExecutionContext,
         repository: Path,
         state_dir: Path,
         runner: Runner,
-    ) -> ContextHandle:
-        del lock, execution, repository, state_dir, runner
-        return context
+    ) -> ToolchainHandle:
+        del context, repository, state_dir, runner
+        if lock.toolchain.runtime is None:
+            raise DevToolkitError("Container toolchain lock has no runtime")
+        return ToolchainHandle(
+            provider=self.descriptor,
+            identity=lock.toolchain.identity,
+            runtime=lock.toolchain.runtime,
+        )
 
     def observe(
         self,
         lock,
         context: ContextHandle,
+        toolchain: ToolchainHandle,
         *,
-        execution: DockerExecutionContext,
         repository: Path,
         runner: Runner,
     ) -> ToolchainObservation:
-        del execution
+        del lock
         observed, _, complete_cuda = _container_observation(
             runner,
             repository,
@@ -715,7 +772,7 @@ class ContainerImageToolchainSource:
             str(context.identity["daemon_id"]),
             str(context.identity["container_id"]),
             str(context.identity["image_id"]),
-            str(context.locator["python"]),
+            toolchain.runtime.python_executable,
         )
         if not complete_cuda:
             raise DevToolkitError("Container CUDA toolkit became incomplete after resolution")
@@ -725,7 +782,7 @@ class ContainerImageToolchainSource:
 class SystemToolchainSource:
     """Discover one complete, already-installed local CUDA/TensorRT toolchain."""
 
-    descriptor = ProviderDescriptor("system", "trtmc-devtoolkit-system==2", 1)
+    descriptor = ProviderDescriptor("system", "trtmc-devtoolkit-system==3", 1)
 
     def resolve(
         self,
@@ -735,7 +792,7 @@ class SystemToolchainSource:
         repository: Path,
         runner: Runner,
     ) -> tuple[ToolchainCandidate, ...]:
-        if context.provider.name != "local" or request.target.options.get("prefix"):
+        if "host-filesystem" not in context.capabilities or request.toolchain_options.get("prefix"):
             return ()
         discovered_cuda = self.discover_cuda(context, repository, runner)
         if discovered_cuda is None:
@@ -798,6 +855,13 @@ class SystemToolchainSource:
                     "tensorrt_library_dir": str(library.parent),
                     "tensorrt_library": str(library),
                 },
+                runtime=ToolchainRuntime(
+                    python_executable=python,
+                    cuda_root=str(cuda_root),
+                    nvcc=str(nvcc),
+                    tensorrt_include_dir=str(include_dir),
+                    tensorrt_library=str(library),
+                ),
             ),
         )
 
@@ -806,34 +870,44 @@ class SystemToolchainSource:
         lock,
         context: ContextHandle,
         *,
-        execution: LocalExecutionContext,
         repository: Path,
         state_dir: Path,
         runner: Runner,
-    ) -> ContextHandle:
-        del lock, execution, repository, state_dir, runner
-        return context
+    ) -> ToolchainHandle:
+        del repository, state_dir, runner
+        if lock.toolchain.runtime is None:
+            raise DevToolkitError("Adopted system toolchain lock has no runtime")
+        runtime = replace(
+            lock.toolchain.runtime,
+            python_executable=str(context.locator["python"]),
+        )
+        return ToolchainHandle(
+            provider=self.descriptor,
+            identity=lock.toolchain.identity,
+            runtime=runtime,
+            environment=_toolchain_environment(runtime, lock.context.architecture),
+        )
 
     def observe(
         self,
         lock,
         context: ContextHandle,
+        toolchain: ToolchainHandle,
         *,
-        execution: LocalExecutionContext,
         repository: Path,
         runner: Runner,
     ) -> ToolchainObservation:
-        del execution
-        identity = lock.toolchain.identity
+        del lock
+        runtime = toolchain.runtime
         return observe_local_toolchain(
             runner,
             repository=repository,
-            python=str(context.locator["python"]),
-            nvcc=str(identity["nvcc"]),
-            tensorrt_include_dir=Path(str(identity["tensorrt_include_dir"])),
-            tensorrt_library=Path(str(identity["tensorrt_library"])),
+            python=runtime.python_executable,
+            nvcc=runtime.nvcc,
+            tensorrt_include_dir=Path(runtime.tensorrt_include_dir),
+            tensorrt_library=Path(runtime.tensorrt_library),
             environment=dict(context.environment),
-            cuda_root=Path(str(identity["cuda_root"])),
+            cuda_root=Path(runtime.cuda_root),
         )
 
     @staticmethod
@@ -895,7 +969,7 @@ class SystemToolchainSource:
 class PrefixToolchainSource(SystemToolchainSource):
     """Adopt a complete CUDA/TensorRT toolchain rooted at a user-owned prefix."""
 
-    descriptor = ProviderDescriptor("prefix", "trtmc-devtoolkit-prefix==2", 1)
+    descriptor = ProviderDescriptor("prefix", "trtmc-devtoolkit-prefix==3", 1)
 
     def resolve(
         self,
@@ -905,12 +979,10 @@ class PrefixToolchainSource(SystemToolchainSource):
         repository: Path,
         runner: Runner,
     ) -> tuple[ToolchainCandidate, ...]:
-        configured = request.target.options.get("prefix")
-        if context.provider.name != "local" or not isinstance(configured, str):
+        configured = request.toolchain_options.get("prefix")
+        if "host-filesystem" not in context.capabilities or not isinstance(configured, str):
             return ()
-        discovered_cuda = self.discover_cuda_at(
-            Path(configured), context, repository, runner
-        )
+        discovered_cuda = self.discover_cuda_at(Path(configured), context, repository, runner)
         if discovered_cuda is None:
             return ()
         root, nvcc, cuda_version = discovered_cuda
@@ -976,6 +1048,13 @@ class PrefixToolchainSource(SystemToolchainSource):
                     "tensorrt_library_dir": str(library.parent),
                     "tensorrt_library": str(library),
                 },
+                runtime=ToolchainRuntime(
+                    python_executable=python,
+                    cuda_root=str(root),
+                    nvcc=str(nvcc),
+                    tensorrt_include_dir=str(include_dir),
+                    tensorrt_library=str(library),
+                ),
             ),
         )
 
@@ -983,7 +1062,7 @@ class PrefixToolchainSource(SystemToolchainSource):
 class ManagedArtifactToolchainSource:
     """Resolve caller-supplied, digest-pinned managed toolchain artifacts."""
 
-    descriptor = ProviderDescriptor("managed-artifacts", "trtmc-devtoolkit-managed-artifacts==2", 1)
+    descriptor = ProviderDescriptor("managed-artifacts", "trtmc-devtoolkit-managed-artifacts==3", 1)
 
     def resolve(
         self,
@@ -993,7 +1072,7 @@ class ManagedArtifactToolchainSource:
         repository: Path,
         runner: Runner,
     ) -> tuple[ToolchainCandidate, ...]:
-        if context.provider.name != "local" or not request.artifacts:
+        if "host-filesystem" not in context.capabilities or not request.artifacts:
             return ()
         headers = next(
             (artifact for artifact in request.artifacts if artifact.name == "tensorrt-headers"),
@@ -1009,7 +1088,7 @@ class ManagedArtifactToolchainSource:
         ):
             return ()
         policy = request.cuda
-        configured_prefix = request.target.options.get("prefix")
+        configured_prefix = request.toolchain_options.get("cuda_prefix")
         if isinstance(configured_prefix, str):
             system_cuda = SystemToolchainSource.discover_cuda_at(
                 Path(configured_prefix), context, repository, runner
@@ -1071,12 +1150,10 @@ class ManagedArtifactToolchainSource:
         lock,
         context: ContextHandle,
         *,
-        execution: LocalExecutionContext,
         repository: Path,
         state_dir: Path,
         runner: Runner,
-    ) -> ContextHandle:
-        del execution
+    ) -> ToolchainHandle:
         python = Path(str(context.locator["python"]))
         downloads = state_dir / "managed-artifacts"
         paths = {
@@ -1145,39 +1222,30 @@ class ManagedArtifactToolchainSource:
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise DevToolkitError(f"Could not locate managed toolchain paths: {error}") from error
         nvcc = cuda_root / "bin" / "nvcc"
-        if not SystemToolchainSource._complete_cuda(
-            cuda_root, lock.context.architecture
-        ):
+        if not SystemToolchainSource._complete_cuda(cuda_root, lock.context.architecture):
             raise DevToolkitError("Managed artifacts produced an incomplete CUDA toolkit")
         if not tensorrt_library.is_file():
             raise DevToolkitError("Managed artifacts produced an incomplete TensorRT toolchain")
         cudart = _first_library(cuda_root, "libcudart.so", lock.context.architecture)
         cublas = _first_library(cuda_root, "libcublas.so", lock.context.architecture)
         assert cudart is not None and cublas is not None
+        runtime = ToolchainRuntime(
+            python_executable=str(python),
+            cuda_root=str(cuda_root),
+            nvcc=str(nvcc),
+            tensorrt_include_dir=str(matching_headers[0].parent),
+            tensorrt_library=str(tensorrt_library),
+        )
         environment = {
-            **dict(context.environment),
-            "PATH": f"{python.parent}:{cuda_root / 'bin'}:{os.environ.get('PATH', '')}",
-            "CUDA_HOME": str(cuda_root),
-            "CUDA_PATH": str(cuda_root),
-            "CUDAToolkit_ROOT": str(cuda_root),
+            **_toolchain_environment(runtime, lock.context.architecture),
             "TRTMC_CUDA_INCLUDE_DIR": str(cuda_root / "include"),
             "TRTMC_CUDART_LIBRARY": str(cudart),
             "TRTMC_CUBLAS_LIBRARY": str(cublas),
-            "TRTMC_TRT_INCLUDE_DIR": str(matching_headers[0].parent),
-            "TRTMC_TRT_LIBRARY": str(tensorrt_library),
-            "TRTMC_TRT_LIBRARY_DIR": str(tensorrt_library.parent),
-            "LD_LIBRARY_PATH": f"{tensorrt_library.parent}:{cudart.parent}",
         }
-        return ContextHandle(
-            provider=context.provider,
-            identity=context.identity,
-            locator={
-                **dict(context.locator),
-                "cuda_root": str(cuda_root),
-                "nvcc": str(nvcc),
-                "tensorrt_include_dir": str(matching_headers[0].parent),
-                "tensorrt_library": str(tensorrt_library),
-            },
+        return ToolchainHandle(
+            provider=self.descriptor,
+            identity=lock.toolchain.identity,
+            runtime=runtime,
             environment=environment,
         )
 
@@ -1185,21 +1253,22 @@ class ManagedArtifactToolchainSource:
         self,
         lock,
         context: ContextHandle,
+        toolchain: ToolchainHandle,
         *,
-        execution: LocalExecutionContext,
         repository: Path,
         runner: Runner,
     ) -> ToolchainObservation:
-        del execution
+        del lock
+        runtime = toolchain.runtime
         return observe_local_toolchain(
             runner,
             repository=repository,
-            python=str(context.locator["python"]),
-            nvcc=str(context.locator["nvcc"]),
-            tensorrt_include_dir=Path(str(context.locator["tensorrt_include_dir"])),
-            tensorrt_library=Path(str(context.locator["tensorrt_library"])),
+            python=runtime.python_executable,
+            nvcc=runtime.nvcc,
+            tensorrt_include_dir=Path(runtime.tensorrt_include_dir),
+            tensorrt_library=Path(runtime.tensorrt_library),
             environment=dict(context.environment),
-            cuda_root=Path(str(context.locator["cuda_root"])),
+            cuda_root=Path(runtime.cuda_root),
         )
 
     @staticmethod

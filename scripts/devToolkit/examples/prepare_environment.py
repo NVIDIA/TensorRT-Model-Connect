@@ -14,11 +14,10 @@ REPOSITORY = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPOSITORY / "scripts" / "devToolkit"))
 
 from trtmc_devtoolkit import (  # noqa: E402
-    BuildSpec,
-    CommandSpec,
     DevToolkit,
     EnvironmentRequest,
     ExecutionTarget,
+    TrtmcBuildRecipe,
 )
 
 
@@ -48,15 +47,16 @@ def main() -> None:
     environment = toolkit.provision(lock)
     build = toolkit.build(
         environment,
-        BuildSpec(
+        TrtmcBuildRecipe(
             targets=("trtmc", "trtmc_backend_trt"),
             outputs={"trtmc": "trtmc"},
         ),
     )
 
-    result = toolkit.run(
+    result = toolkit.run_trtmc(
         environment,
-        CommandSpec((build.artifacts[0].path, "version")),
+        ("version",),
+        build=build,
         capture_output=True,
     )
     print(result.stdout, end="")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -60,10 +61,23 @@ CommandArgument = str | EnvironmentPath
 
 
 @dataclass(frozen=True)
+class ArtifactInput:
+    name: str
+    path: EnvironmentPath
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if not self.name or re.fullmatch(r"[0-9a-f]{64}", self.sha256) is None:
+            raise DevToolkitError("Artifact inputs require a name and lowercase SHA-256")
+
+
+@dataclass(frozen=True)
 class CommandSpec:
     arguments: tuple[CommandArgument, ...]
     cwd: EnvironmentPath = field(default_factory=repository_path)
     environment: Mapping[str, str] = field(default_factory=dict)
+    provenance: Mapping[str, str] = field(default_factory=dict)
+    artifacts: tuple[ArtifactInput, ...] = ()
 
     def __init__(
         self,
@@ -71,6 +85,8 @@ class CommandSpec:
         *,
         cwd: EnvironmentPath | None = None,
         environment: Mapping[str, str] | None = None,
+        provenance: Mapping[str, str] | None = None,
+        artifacts: Sequence[ArtifactInput] = (),
     ) -> None:
         if not arguments:
             raise DevToolkitError("A command requires at least one argument")
@@ -81,6 +97,15 @@ class CommandSpec:
             "environment",
             MappingProxyType(dict(environment or {})),
         )
+        resolved_provenance = dict(provenance or {})
+        if any(not name or not value for name, value in resolved_provenance.items()):
+            raise DevToolkitError("Command provenance names and values must be non-empty")
+        object.__setattr__(
+            self,
+            "provenance",
+            MappingProxyType(resolved_provenance),
+        )
+        object.__setattr__(self, "artifacts", tuple(artifacts))
 
 
 @dataclass(frozen=True)
@@ -102,7 +127,7 @@ def _invocation_digest(environment: ProvisionedEnvironment, command: CommandSpec
         json.dumps(dict(command.environment), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "environment_id": environment.environment_id,
         "arguments": [
             _path_payload(argument) if isinstance(argument, EnvironmentPath) else argument
@@ -111,9 +136,18 @@ def _invocation_digest(environment: ProvisionedEnvironment, command: CommandSpec
         "cwd": _path_payload(command.cwd),
         "environment_names": sorted(command.environment),
         "environment_digest": environment_digest,
+        "provenance": dict(command.provenance),
+        "artifacts": [
+            {
+                "name": artifact.name,
+                "path": _path_payload(artifact.path),
+                "sha256": artifact.sha256,
+            }
+            for artifact in command.artifacts
+        ],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(b"trtmc-devtoolkit-command-v2\0" + encoded).hexdigest()
+    return hashlib.sha256(b"trtmc-devtoolkit-command-v3\0" + encoded).hexdigest()
 
 
 class CommandExecutor:
@@ -146,6 +180,23 @@ class CommandExecutor:
                 providers=self.providers,
                 runner=self.runner,
             )
+            for artifact in command.artifacts:
+                digest_result = context_provider.execute(
+                    environment.context,
+                    CommandSpec(("sha256sum", artifact.path)),
+                    repository=self.repository,
+                    state_dir=environment.state_dir,
+                    runner=self.runner,
+                    check=True,
+                    capture_output=True,
+                )
+                output = digest_result.stdout.strip()
+                observed = output.split(None, 1)[0] if output else ""
+                if observed != artifact.sha256:
+                    raise DevToolkitError(
+                        f"Artifact {artifact.name!r} changed after build: "
+                        f"expected {artifact.sha256}, observed {observed or 'no digest'}"
+                    )
             completed = context_provider.execute(
                 environment.context,
                 command,
@@ -159,11 +210,13 @@ class CommandExecutor:
             write_json(
                 receipt,
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "status": "failed",
                     "environment_id": environment.environment_id,
                     "occurrence_id": occurrence,
                     "invocation_digest": invocation,
+                    "provenance": dict(command.provenance),
+                    "artifacts": [artifact.name for artifact in command.artifacts],
                     "error_type": type(error).__name__,
                 },
             )
@@ -171,12 +224,14 @@ class CommandExecutor:
         write_json(
             receipt,
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "status": "completed" if completed.returncode == 0 else "failed",
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "environment_id": environment.environment_id,
                 "occurrence_id": occurrence,
                 "invocation_digest": invocation,
+                "provenance": dict(command.provenance),
+                "artifacts": [artifact.name for artifact in command.artifacts],
                 "returncode": completed.returncode,
             },
         )

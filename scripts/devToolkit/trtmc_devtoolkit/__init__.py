@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Composable development-environment API for TensorRT-Model-Connect."""
+"""Composable development-environment toolkit for TensorRT-Model-Connect."""
 
 from .api import DevToolkit
-from .building import BuildArtifact, BuildResult, BuildSpec, SourceSnapshot
+from .building import BuildArtifact, BuildResult, SourceSnapshot
 from .commands import (
+    ArtifactInput,
     CommandArgument,
     CommandResult,
     CommandSpec,
@@ -14,32 +15,19 @@ from .commands import (
     state_path,
     target_path,
 )
-from .models import DevToolkitError, ToolchainObservation
-from .providers import (
-    ExecutionContext,
-    FrozenProviderRegistry,
-    ProviderRegistry,
-    ToolchainSource,
-)
-from .provisioning import (
-    AttestationFailed,
-    ContextHandle,
-    ProvisionedEnvironment,
-    ProvisionPolicy,
-)
-from .qualifications import QualificationRef, QualificationRegistry
+from .models import DevToolkitError, ToolchainObservation, ToolchainRuntime
+from .provisioning import AttestationFailed, ProvisionedEnvironment, ProvisionPolicy
+from .qualifications import JsonQualificationSource, QualificationRef
+from .recipes import TrtmcBuildRecipe
 from .resolution import (
     ArtifactPin,
     ArtifactUnavailable,
-    ContextLock,
     CudaPolicy,
     EnvironmentLock,
     EnvironmentRequest,
     ExecutionTarget,
     IncompatibleCombination,
-    ProviderDescriptor,
     ResolutionError,
-    ToolchainCandidate,
 )
 
 __all__ = [
@@ -47,34 +35,28 @@ __all__ = [
     "ArtifactPin",
     "ArtifactUnavailable",
     "AttestationFailed",
+    "ArtifactInput",
     "BuildArtifact",
     "BuildResult",
-    "BuildSpec",
     "CommandArgument",
     "CommandResult",
     "CommandSpec",
-    "ContextHandle",
-    "ContextLock",
     "CudaPolicy",
     "DevToolkitError",
     "EnvironmentLock",
     "EnvironmentPath",
     "EnvironmentRequest",
     "ExecutionTarget",
-    "ExecutionContext",
-    "FrozenProviderRegistry",
     "IncompatibleCombination",
-    "ProviderDescriptor",
-    "ProviderRegistry",
+    "JsonQualificationSource",
     "ProvisionedEnvironment",
     "ProvisionPolicy",
     "QualificationRef",
-    "QualificationRegistry",
     "ResolutionError",
     "SourceSnapshot",
-    "ToolchainCandidate",
     "ToolchainObservation",
-    "ToolchainSource",
+    "ToolchainRuntime",
+    "TrtmcBuildRecipe",
     "repository_path",
     "state_path",
     "target_path",

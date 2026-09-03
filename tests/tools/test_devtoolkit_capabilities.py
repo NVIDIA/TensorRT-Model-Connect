@@ -24,30 +24,35 @@ from trtmc_devtoolkit import (  # noqa: E402
     ArtifactPin,
     ArtifactUnavailable,
     AttestationFailed,
-    BuildSpec,
     CommandSpec,
-    ContextLock,
-    ContextHandle,
     CudaPolicy,
     DevToolkitError,
     DevToolkit,
     EnvironmentRequest,
-    ExecutionContext,
     ExecutionTarget,
     IncompatibleCombination,
+    JsonQualificationSource,
+    ProvisionPolicy,
+    ToolchainRuntime,
+    TrtmcBuildRecipe,
+    ToolchainObservation,
+    repository_path,
+)
+from trtmc_devtoolkit.spi import (  # noqa: E402
+    ContextHandle,
+    ContextLock,
+    ExecutionContext,
     ProviderDescriptor,
     ProviderRegistry,
-    ProvisionPolicy,
     QualificationRegistry,
-    ToolchainObservation,
     ToolchainCandidate,
+    ToolchainHandle,
     ToolchainSource,
-    repository_path,
 )
 from trtmc_devtoolkit import receipt as receipt_module  # noqa: E402
 
 
-def test_extension_protocols_are_public() -> None:
+def test_extension_protocols_are_isolated_in_spi() -> None:
     assert ExecutionContext.__name__ == "ExecutionContext"
     assert ToolchainSource.__name__ == "ToolchainSource"
 
@@ -59,10 +64,20 @@ def test_public_api_exposes_capabilities_without_plan_or_apply(tmp_path: Path) -
     assert not hasattr(toolkit, "apply")
 
 
-def test_checked_in_cohorts_load_as_optional_qualification_records() -> None:
-    records = QualificationRegistry(
-        (REPO_ROOT / "configs" / "environment-cohorts",)
-    ).load_all()
+def test_generic_qualification_source_is_explicit(tmp_path: Path) -> None:
+    root = tmp_path / "qualifications"
+    root.mkdir()
+    (root / "qualified.json").write_text(
+        json.dumps(
+            {
+                "id": "qualified",
+                "status": "supported",
+                "requirements": {"tensorrt": "11.2.0.113", "execution": ["local"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = QualificationRegistry((JsonQualificationSource((root,)),)).load_all()
 
     assert records
     assert all(record.reference.digest for record in records)
@@ -156,11 +171,14 @@ class DockerAdoptionRunner:
                         "tensorrt_native": self.tensorrt_version,
                         "tensorrt_headers": self.tensorrt_version,
                         "tensorrt_include_dir": "/usr/include/aarch64-linux-gnu",
-                        "tensorrt_library": (
-                            "/usr/lib/aarch64-linux-gnu/libnvinfer.so.11"
-                        ),
+                        "tensorrt_library": ("/usr/lib/aarch64-linux-gnu/libnvinfer.so.11"),
                         "cuda_complete": True,
                         "architecture": "aarch64",
+                        "evidence": {
+                            "nvcc": "1" * 64,
+                            "tensorrt-header": "2" * 64,
+                            "tensorrt-library": "3" * 64,
+                        },
                     }
                 )
         else:
@@ -224,15 +242,45 @@ class ManagedProvisionRunner:
 class CommandRecordingRunner:
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
+        self.artifact_digest = "c" * 64
 
     def run(self, command, **kwargs):
         del kwargs
         arguments = [str(item) for item in command]
         self.commands.append(arguments)
         output = "trtmc 0.1\n"
-        if arguments[0] == "sha256sum":
-            output = f"{'c' * 64}  {arguments[1]}\n"
+        if arguments[:3] == ["git", "rev-parse", "HEAD"]:
+            output = "b" * 40 + "\n"
+        elif arguments[:3] == ["git", "diff", "--binary"]:
+            output = ""
+        elif arguments[:3] == ["git", "ls-files", "--others"]:
+            output = ""
+        elif arguments[0] == "sha256sum":
+            output = f"{self.artifact_digest}  {arguments[1]}\n"
         return subprocess.CompletedProcess(arguments, 0, output, "")
+
+
+class BlockingBuildRunner(CommandRecordingRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_configure_entered = threading.Event()
+        self.release_first_configure = threading.Event()
+        self.second_configure_entered = threading.Event()
+        self._configure_calls = 0
+        self._guard = threading.Lock()
+
+    def run(self, command, **kwargs):
+        arguments = [str(item) for item in command]
+        if arguments[:2] == ["cmake", "-S"]:
+            with self._guard:
+                self._configure_calls += 1
+                call = self._configure_calls
+            if call == 1:
+                self.first_configure_entered.set()
+                assert self.release_first_configure.wait(timeout=5)
+            else:
+                self.second_configure_entered.set()
+        return super().run(command, **kwargs)
 
 
 class NonzeroCommandRunner:
@@ -271,16 +319,30 @@ class StaticLocalContext:
             operating_system="linux",
             architecture=request.architecture or "aarch64",
             identity={"kind": "local"},
+            execution={"gpu": "0", "python": "python3"},
             locator={"gpu": "0"},
+            capabilities=frozenset({"host-filesystem", "posix-process"}),
+            qualification={"execution": "local"},
         )
 
-    def provision(self, lock, *, repository, state_dir, policy, runner):
+    def provision(
+        self,
+        context,
+        *,
+        inherit_system_packages,
+        repository,
+        state_dir,
+        policy,
+        runner,
+    ):
         del repository, runner
+        del inherit_system_packages
         assert policy is ProvisionPolicy.ADOPT_OR_CREATE
         state_dir.mkdir(parents=True, exist_ok=True)
         return ContextHandle(
             provider=self.descriptor,
-            identity=lock.context.identity,
+            identity=context.identity,
+            execution_identity={"root": str(state_dir), "gpu": "0"},
             locator={"root": str(state_dir)},
             environment={"CUDA_VISIBLE_DEVICES": "0"},
         )
@@ -296,10 +358,12 @@ class StaticLocalContext:
         check,
         capture_output,
     ):
-        del context, state_dir
+        del context
         arguments = [
             str(repository / argument.path)
             if hasattr(argument, "scope") and argument.scope.value == "repository"
+            else str(state_dir / argument.path)
+            if hasattr(argument, "scope") and argument.scope.value == "state"
             else str(argument)
             for argument in command.arguments
         ]
@@ -321,7 +385,16 @@ class BlockingLocalContext(StaticLocalContext):
         self._guard = threading.Lock()
         self._calls = 0
 
-    def provision(self, lock, *, repository, state_dir, policy, runner):
+    def provision(
+        self,
+        context,
+        *,
+        inherit_system_packages,
+        repository,
+        state_dir,
+        policy,
+        runner,
+    ):
         with self._guard:
             self._calls += 1
             call = self._calls
@@ -331,7 +404,8 @@ class BlockingLocalContext(StaticLocalContext):
         else:
             self.second_entered.set()
         return super().provision(
-            lock,
+            context,
+            inherit_system_packages=inherit_system_packages,
             repository=repository,
             state_dir=state_dir,
             policy=policy,
@@ -356,23 +430,40 @@ class ExistingToolchainSource:
                 cuda="12.8",
                 python=request.python,
                 identity={"prefix": "/opt/nvidia"},
+                runtime=ToolchainRuntime(
+                    python_executable="python3",
+                    cuda_root="/opt/nvidia/cuda",
+                    nvcc="/opt/nvidia/cuda/bin/nvcc",
+                    tensorrt_include_dir="/opt/nvidia/include",
+                    tensorrt_library="/opt/nvidia/lib/libnvinfer.so",
+                ),
             ),
         )
 
-    def provision(self, lock, context, *, execution, repository, state_dir, runner):
-        del lock, execution, repository, state_dir, runner
-        return context
+    def provision(self, lock, context, *, repository, state_dir, runner):
+        del repository, state_dir, runner
+        assert lock.toolchain.runtime is not None
+        return ToolchainHandle(
+            provider=self.descriptor,
+            identity=lock.toolchain.identity,
+            runtime=replace(
+                lock.toolchain.runtime,
+                python_executable=str(context.locator.get("python", "python3")),
+            ),
+        )
 
-    def observe(self, lock, context, *, execution, repository, runner):
-        del context, execution, repository, runner
+    def observe(self, lock, context, toolchain, *, repository, runner):
+        del context, repository, runner
         return ToolchainObservation(
             python_version=lock.toolchain.python,
             cuda_version=lock.toolchain.cuda,
             tensorrt_python_version=lock.toolchain.tensorrt,
             tensorrt_native_version=lock.toolchain.tensorrt,
             tensorrt_header_version=lock.toolchain.tensorrt,
-            tensorrt_include_dir="/opt/nvidia/include",
-            tensorrt_library="/opt/nvidia/lib/libnvinfer.so",
+            tensorrt_include_dir=toolchain.runtime.tensorrt_include_dir,
+            tensorrt_library=toolchain.runtime.tensorrt_library,
+            cuda_root=toolchain.runtime.cuda_root,
+            evidence={"toolchain": "a" * 64},
         )
 
 
@@ -385,17 +476,33 @@ class FailingReattestationSource(ExistingToolchainSource):
         super().__init__()
         self.observations = 0
 
-    def observe(self, lock, context, *, execution, repository, runner):
+    def observe(self, lock, context, toolchain, *, repository, runner):
         self.observations += 1
         if self.observations > 1:
             raise RuntimeError("preflight contained super-secret")
         return super().observe(
             lock,
             context,
-            execution=execution,
+            toolchain,
             repository=repository,
             runner=runner,
         )
+
+
+class MutableEvidenceSource(ExistingToolchainSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.digest = "a" * 64
+
+    def observe(self, lock, context, toolchain, *, repository, runner):
+        observed = super().observe(
+            lock,
+            context,
+            toolchain,
+            repository=repository,
+            runner=runner,
+        )
+        return replace(observed, evidence={"toolchain": self.digest})
 
 
 class EmptySystemToolchainSource:
@@ -427,27 +534,38 @@ class ManagedCudaToolchainSource:
                         name="cuda-toolkit",
                         uri="https://example.invalid/cuda-13.3.tar.xz",
                         sha256="a" * 64,
-                        verification="pinned-digest",
                     ),
                 ),
             ),
         )
 
-    def provision(self, lock, context, *, execution, repository, state_dir, runner):
-        del lock, execution, repository, state_dir, runner
+    def provision(self, lock, context, *, repository, state_dir, runner):
+        del context, repository, state_dir, runner
         self.provisioned = True
-        return context
+        return ToolchainHandle(
+            provider=self.descriptor,
+            identity=lock.toolchain.identity,
+            runtime=ToolchainRuntime(
+                python_executable="python3",
+                cuda_root="/managed/cuda",
+                nvcc="/managed/cuda/bin/nvcc",
+                tensorrt_include_dir="/managed/include",
+                tensorrt_library="/managed/lib/libnvinfer.so",
+            ),
+        )
 
-    def observe(self, lock, context, *, execution, repository, runner):
-        del context, execution, repository, runner
+    def observe(self, lock, context, toolchain, *, repository, runner):
+        del context, repository, runner
         return ToolchainObservation(
             python_version=lock.toolchain.python,
             cuda_version=lock.toolchain.cuda,
             tensorrt_python_version=lock.toolchain.tensorrt,
             tensorrt_native_version=lock.toolchain.tensorrt,
             tensorrt_header_version=lock.toolchain.tensorrt,
-            tensorrt_include_dir="/managed/include",
-            tensorrt_library="/managed/lib/libnvinfer.so",
+            tensorrt_include_dir=toolchain.runtime.tensorrt_include_dir,
+            tensorrt_library=toolchain.runtime.tensorrt_library,
+            cuda_root=toolchain.runtime.cuda_root,
+            evidence={"toolchain": "b" * 64},
         )
 
 
@@ -475,7 +593,7 @@ def test_arbitrary_tensorrt_reaches_provider_without_a_cohort(tmp_path: Path) ->
     assert source.requested_versions == ["11.2.0.113"]
     assert lock.tensorrt == "11.2.0.113"
     assert lock.cuda == "12.8"
-    assert lock.decision == "system"
+    assert lock.cuda_origin == "system"
     assert len(lock.lock_id) == 64
     assert not state_root.exists()
 
@@ -496,7 +614,7 @@ def test_system_first_falls_back_to_managed_cuda_13_3(tmp_path: Path) -> None:
 
     assert lock.cuda == "13.3"
     assert lock.cuda_origin == "managed-default"
-    assert lock.toolchain.artifacts[0].verification == "pinned-digest"
+    assert lock.toolchain.artifacts[0].sha256 == "a" * 64
 
 
 def test_adopt_only_never_materializes_a_managed_toolchain(tmp_path: Path) -> None:
@@ -635,7 +753,7 @@ def test_resolution_distinguishes_unavailable_from_incompatible(tmp_path: Path) 
         )
 
 
-def test_provision_attests_and_writes_a_v2_receipt(tmp_path: Path) -> None:
+def test_provision_attests_and_writes_a_v3_receipt(tmp_path: Path) -> None:
     registry = ProviderRegistry()
     registry.register_context(StaticLocalContext())
     registry.register_toolchain(ExistingToolchainSource())
@@ -655,10 +773,10 @@ def test_provision_attests_and_writes_a_v2_receipt(tmp_path: Path) -> None:
 
     environment = toolkit.provision(lock)
 
-    assert environment.environment_id == lock.lock_id
+    assert environment.environment_id != lock.lock_id
     assert environment.observation.tensorrt_header_version == "11.2.0.113"
     receipt = json.loads(environment.receipt.read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 2
+    assert receipt["schema_version"] == 3
     assert receipt["lock_id"] == lock.lock_id
     assert receipt["cuda_origin"] == "system"
     assert receipt["observed"]["tensorrt_native_version"] == "11.2.0.113"
@@ -847,6 +965,72 @@ def test_docker_environment_identity_distinguishes_container_instances(
     assert first.lock_id != second.lock_id
 
 
+def test_docker_environment_identity_includes_effective_path_mapping(
+    tmp_path: Path,
+) -> None:
+    runner = DockerAdoptionRunner()
+    first_toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "first-state",
+        runner=runner,
+    )
+    second_toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "second-state",
+        runner=runner,
+    )
+    first_lock = first_toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.0.2.2",
+            target=ExecutionTarget.docker(
+                container="jedha-campaign",
+                workspace="/workspace/first",
+            ),
+            architecture="aarch64",
+        )
+    )
+    second_lock = second_toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.0.2.2",
+            target=ExecutionTarget.docker(
+                container="jedha-campaign",
+                workspace="/workspace/second",
+            ),
+            architecture="aarch64",
+        )
+    )
+
+    first = first_toolkit.provision(first_lock, policy=ProvisionPolicy.ADOPT_ONLY)
+    second = second_toolkit.provision(second_lock, policy=ProvisionPolicy.ADOPT_ONLY)
+
+    assert first_lock.lock_id != second_lock.lock_id
+    assert first.environment_id != second.environment_id
+
+
+def test_changed_toolchain_evidence_blocks_execution(tmp_path: Path) -> None:
+    source = MutableEvidenceSource()
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(source)
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock)
+    source.digest = "b" * 64
+
+    with pytest.raises(AttestationFailed, match="evidence changed"):
+        toolkit.run(environment, CommandSpec(("trtmc", "version")))
+
+
 def test_docker_command_forwards_environment_without_values_in_argv(tmp_path: Path) -> None:
     runner = DockerAdoptionRunner()
     toolkit = DevToolkit.from_checkout(
@@ -990,7 +1174,7 @@ def test_generic_command_is_routed_by_the_execution_context(tmp_path: Path) -> N
     assert runner.commands[-1] == ["trtmc", "inspect", str(tmp_path / "example.bundle")]
     assert result.stdout == "trtmc 0.1\n"
     receipt = json.loads(result.receipt.read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 2
+    assert receipt["schema_version"] == 3
     assert receipt["environment_id"] == environment.environment_id
     assert receipt["occurrence_id"] != receipt["invocation_digest"]
 
@@ -1077,11 +1261,10 @@ def test_native_build_identity_includes_source_sm_options_and_outputs(
 
     build = toolkit.build(
         environment,
-        BuildSpec(
+        TrtmcBuildRecipe(
             targets=("trtmc",),
             cmake_defines={"TRTMC_BUILD_TESTS": False},
             cuda_architectures=("100",),
-            source_identity="b" * 40,
         ),
     )
 
@@ -1100,6 +1283,19 @@ def test_native_build_identity_includes_source_sm_options_and_outputs(
     assert receipt["environment_id"] == environment.environment_id
     assert receipt["source"]["revision"] == "b" * 40
     assert receipt["artifacts"][0]["sha256"] == "c" * 64
+
+    command = toolkit.run_trtmc(environment, ("version",), build=build)
+    command_receipt = json.loads(command.receipt.read_text(encoding="utf-8"))
+    assert command_receipt["provenance"] == {
+        "build_id": build.build_id,
+        "artifact:trtmc": "c" * 64,
+    }
+    assert runner.commands[-1][0].endswith(f"builds/{build.build_request_id}/build/trtmc")
+
+    runner.artifact_digest = "d" * 64
+    with pytest.raises(DevToolkitError, match="changed after build"):
+        toolkit.run_trtmc(environment, ("version",), build=build)
+    assert runner.commands[-1][0] == "sha256sum"
 
 
 def test_native_build_records_attestation_preflight_failure(tmp_path: Path) -> None:
@@ -1121,7 +1317,7 @@ def test_native_build_records_attestation_preflight_failure(tmp_path: Path) -> N
     environment = toolkit.provision(lock)
 
     with pytest.raises(RuntimeError, match="super-secret"):
-        toolkit.build(environment, BuildSpec(source_identity="b" * 40))
+        toolkit.build(environment, TrtmcBuildRecipe(cuda_architectures=("100",)))
 
     receipts = list((environment.state_dir / "builds" / "preflight").glob("*.json"))
     assert len(receipts) == 1
@@ -1133,7 +1329,46 @@ def test_native_build_records_attestation_preflight_failure(tmp_path: Path) -> N
     assert "super-secret" not in receipts[0].read_text(encoding="utf-8")
 
 
-def test_cohort_is_optional_qualification_provenance_not_an_allowlist(
+def test_identical_builds_are_serialized(tmp_path: Path) -> None:
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(ExistingToolchainSource())
+    runner = BlockingBuildRunner()
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+        runner=runner,
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock)
+    recipe = TrtmcBuildRecipe(cuda_architectures=("100",))
+    results = []
+
+    first = threading.Thread(target=lambda: results.append(toolkit.build(environment, recipe)))
+    second = threading.Thread(target=lambda: results.append(toolkit.build(environment, recipe)))
+    first.start()
+    assert runner.first_configure_entered.wait(timeout=5)
+    second.start()
+    assert not runner.second_configure_entered.wait(timeout=0.2)
+    runner.release_first_configure.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert runner.second_configure_entered.is_set()
+    assert len(results) == 2
+    assert results[0].build_request_id == results[1].build_request_id
+
+
+def test_qualification_is_optional_provenance_not_an_allowlist(
     tmp_path: Path,
 ) -> None:
     presets = tmp_path / "presets"
@@ -1141,14 +1376,15 @@ def test_cohort_is_optional_qualification_provenance_not_an_allowlist(
     (presets / "qualified.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "id": "qualified-trt",
                 "status": "supported",
-                "targets": ["local"],
-                "tensorrt": {"version": "11.2.0.113"},
-                "cuda": {"version": "12.8"},
-                "python_versions": ["3.12"],
-                "architectures": {"aarch64": {}},
+                "requirements": {
+                    "execution": ["local"],
+                    "tensorrt": "11.2.0.113",
+                    "cuda": "12.8",
+                    "python": ["3.12"],
+                    "architecture": ["aarch64"],
+                },
             }
         ),
         encoding="utf-8",
@@ -1159,7 +1395,7 @@ def test_cohort_is_optional_qualification_provenance_not_an_allowlist(
     toolkit = DevToolkit.from_checkout(
         tmp_path,
         providers=registry.freeze(),
-        qualification_roots=(presets,),
+        qualifications=(JsonQualificationSource((presets,)),),
     )
 
     qualified = toolkit.resolve(
@@ -1221,7 +1457,7 @@ def test_invalid_optional_qualification_metadata_does_not_gate_resolution(
     toolkit = DevToolkit.from_checkout(
         tmp_path,
         providers=registry.freeze(),
-        qualification_roots=(presets,),
+        qualifications=(JsonQualificationSource((presets,)),),
     )
     request = EnvironmentRequest(
         tensorrt="11.2.0.113",
@@ -1234,32 +1470,18 @@ def test_invalid_optional_qualification_metadata_does_not_gate_resolution(
         toolkit.resolve(replace(request, require_qualification=True))
 
 
-@pytest.mark.parametrize(
-    ("field", "invalid"),
-    (
-        ("python_versions", "3.12"),
-        ("architectures", "aarch64"),
-        ("targets", "local"),
-    ),
-)
-def test_qualification_rejects_string_in_place_of_collection(
+@pytest.mark.parametrize("invalid", ([], {"python": 3.12}, {"python": [3.12]}))
+def test_qualification_rejects_invalid_requirement_shapes(
     tmp_path: Path,
-    field: str,
-    invalid: str,
+    invalid: object,
 ) -> None:
     presets = tmp_path / "presets"
     presets.mkdir()
     payload = {
-        "schema_version": 1,
         "id": "malformed",
         "status": "supported",
-        "targets": ["local"],
-        "tensorrt": {"version": "11.2.0.113"},
-        "cuda": {"version": "12.8"},
-        "python_versions": ["3.12"],
-        "architectures": {"aarch64": {}},
+        "requirements": invalid,
     }
-    payload[field] = invalid
     (presets / "malformed.json").write_text(json.dumps(payload), encoding="utf-8")
     registry = ProviderRegistry()
     registry.register_context(StaticLocalContext())
@@ -1267,7 +1489,7 @@ def test_qualification_rejects_string_in_place_of_collection(
     toolkit = DevToolkit.from_checkout(
         tmp_path,
         providers=registry.freeze(),
-        qualification_roots=(presets,),
+        qualifications=(JsonQualificationSource((presets,)),),
     )
 
     with pytest.raises(DevToolkitError, match="Invalid qualification"):
@@ -1291,13 +1513,11 @@ def test_builtin_managed_source_accepts_arbitrary_trt_with_pinned_artifacts(
             name="tensorrt-headers",
             uri="https://example.invalid/libnvinfer-headers.deb",
             sha256="d" * 64,
-            verification="pinned-digest",
         ),
         ArtifactPin(
             name="tensorrt-wheel",
             uri="https://example.invalid/tensorrt-11.2.0.113.whl?token=super-secret",
             sha256="e" * 64,
-            verification="pinned-digest",
         ),
     )
     toolkit = DevToolkit.from_checkout(tmp_path, runner=BuiltinProbeRunner())
@@ -1332,7 +1552,6 @@ def test_builtin_managed_source_materializes_and_attests_pinned_artifacts(
             name,
             path.as_uri(),
             hashlib.sha256(path.read_bytes()).hexdigest(),
-            "pinned-digest",
         )
 
     toolkit = DevToolkit.from_checkout(
@@ -1371,7 +1590,6 @@ def test_builtin_managed_source_rejects_an_incomplete_cuda_toolkit(
             name,
             path.as_uri(),
             hashlib.sha256(path.read_bytes()).hexdigest(),
-            "pinned-digest",
         )
         for name, path in (("tensorrt-headers", headers), ("tensorrt-wheel", wheel))
     )
@@ -1416,13 +1634,11 @@ def test_managed_tensorrt_uses_complete_system_cuda_before_fallback(
             "tensorrt-headers",
             "https://example.invalid/headers.deb",
             "1" * 64,
-            "pinned-digest",
         ),
         ArtifactPin(
             "tensorrt-wheel",
             "https://example.invalid/tensorrt.whl",
             "2" * 64,
-            "pinned-digest",
         ),
     )
     toolkit = DevToolkit.from_checkout(tmp_path, runner=BuiltinProbeRunner())
@@ -1496,7 +1712,9 @@ def test_builtin_prefix_provider_uses_user_owned_toolchain_root(
     lock = toolkit.resolve(
         EnvironmentRequest(
             tensorrt="11.2.0.113",
-            target=ExecutionTarget.local(prefix=str(prefix)),
+            target=ExecutionTarget.local(),
+            toolchain="prefix",
+            toolchain_options={"prefix": str(prefix)},
         )
     )
 
@@ -1526,13 +1744,11 @@ def test_managed_tensorrt_follows_cuda_from_explicit_prefix(
             "tensorrt-headers",
             "https://example.invalid/headers.deb",
             "3" * 64,
-            "pinned-digest",
         ),
         ArtifactPin(
             "tensorrt-wheel",
             "https://example.invalid/tensorrt.whl",
             "4" * 64,
-            "pinned-digest",
         ),
     )
     toolkit = DevToolkit.from_checkout(tmp_path, runner=BuiltinProbeRunner())
@@ -1540,7 +1756,8 @@ def test_managed_tensorrt_follows_cuda_from_explicit_prefix(
     lock = toolkit.resolve(
         EnvironmentRequest(
             tensorrt="11.2.0.113",
-            target=ExecutionTarget.local(prefix=str(prefix)),
+            target=ExecutionTarget.local(),
+            toolchain_options={"cuda_prefix": str(prefix)},
             artifacts=artifacts,
         )
     )

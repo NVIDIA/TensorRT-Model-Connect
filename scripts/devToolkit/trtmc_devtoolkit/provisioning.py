@@ -5,14 +5,16 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Sequence
 
-from .models import DevToolkitError, ToolchainObservation
+from .models import DevToolkitError, ToolchainObservation, ToolchainRuntime
 from .providers import FrozenProviderRegistry
 from .receipt import exclusive_lock, write_json
 from .resolution import EnvironmentLock, ProviderDescriptor
@@ -25,18 +27,64 @@ class ProvisionPolicy(Enum):
     CREATE = "create"
 
 
+def _freeze_json(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(name): _freeze_json(item) for name, item in sorted(value.items())}
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return tuple(_freeze_json(item) for item in value)
+    raise DevToolkitError(f"Provisioned identity must be JSON-compatible: {type(value).__name__}")
+
+
+def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    frozen = _freeze_json(value)
+    assert isinstance(frozen, Mapping)
+    return frozen
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(name): _plain_json(item) for name, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_json(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class ContextHandle:
     """Provider-owned runtime locator; secrets are deliberately not serialized."""
 
     provider: ProviderDescriptor
     identity: Mapping[str, object]
+    execution_identity: Mapping[str, object]
     locator: Mapping[str, object] = field(default_factory=dict, compare=False)
     environment: Mapping[str, str] = field(default_factory=dict, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "identity", MappingProxyType(dict(self.identity)))
-        object.__setattr__(self, "locator", MappingProxyType(dict(self.locator)))
+        object.__setattr__(self, "identity", _freeze_mapping(self.identity))
+        object.__setattr__(
+            self,
+            "execution_identity",
+            _freeze_mapping(self.execution_identity),
+        )
+        object.__setattr__(self, "locator", _freeze_mapping(self.locator))
+        object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
+
+
+@dataclass(frozen=True)
+class ToolchainHandle:
+    """Provisioned toolchain state independent from an execution context."""
+
+    provider: ProviderDescriptor
+    identity: Mapping[str, object]
+    runtime: ToolchainRuntime
+    environment: Mapping[str, str] = field(default_factory=dict, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "identity", _freeze_mapping(self.identity))
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
 
 
@@ -45,6 +93,7 @@ class ProvisionedEnvironment:
     environment_id: str
     lock: EnvironmentLock
     context: ContextHandle
+    toolchain: ToolchainHandle
     observation: ToolchainObservation
     state_dir: Path = field(compare=False)
     receipt: Path = field(compare=False)
@@ -54,7 +103,54 @@ class AttestationFailed(DevToolkitError):
     """The provisioned environment does not satisfy its immutable lock."""
 
 
-def _attest(lock: EnvironmentLock, observed: ToolchainObservation) -> None:
+def _observation_payload(observed: ToolchainObservation) -> dict[str, object]:
+    return {
+        "python_version": observed.python_version,
+        "cuda_version": observed.cuda_version,
+        "tensorrt_python_version": observed.tensorrt_python_version,
+        "tensorrt_native_version": observed.tensorrt_native_version,
+        "tensorrt_header_version": observed.tensorrt_header_version,
+        "tensorrt_include_dir": observed.tensorrt_include_dir,
+        "tensorrt_library": observed.tensorrt_library,
+        "cuda_root": observed.cuda_root,
+        "image_id": observed.image_id,
+        "architecture": observed.architecture,
+        "evidence": dict(observed.evidence),
+    }
+
+
+def _runtime_payload(runtime: ToolchainRuntime) -> dict[str, str]:
+    return asdict(runtime)
+
+
+def _environment_id(
+    lock: EnvironmentLock,
+    context: ContextHandle,
+    toolchain: ToolchainHandle,
+    observed: ToolchainObservation,
+) -> str:
+    payload = {
+        "schema_version": 3,
+        "lock_id": lock.lock_id,
+        "execution_identity": _plain_json(context.execution_identity),
+        "toolchain_provider": {
+            "name": toolchain.provider.name,
+            "implementation": toolchain.provider.implementation,
+            "lock_schema": toolchain.provider.lock_schema,
+        },
+        "toolchain_identity": _plain_json(toolchain.identity),
+        "runtime": _runtime_payload(toolchain.runtime),
+        "observed": _observation_payload(observed),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(b"trtmc-devtoolkit-environment-v3\0" + encoded).hexdigest()
+
+
+def _attest(
+    lock: EnvironmentLock,
+    toolchain: ToolchainHandle,
+    observed: ToolchainObservation,
+) -> None:
     mismatches: list[str] = []
     expected_trt = lock.toolchain.tensorrt
     for name, actual in (
@@ -74,21 +170,19 @@ def _attest(lock: EnvironmentLock, observed: ToolchainObservation) -> None:
         mismatches.append(
             f"Architecture: expected {lock.context.architecture}, observed {observed.architecture}"
         )
-    expected_include = lock.toolchain.identity.get("tensorrt_include_dir")
-    if expected_include is not None and observed.tensorrt_include_dir != expected_include:
+    expected_include = toolchain.runtime.tensorrt_include_dir
+    if observed.tensorrt_include_dir != expected_include:
         mismatches.append(
             "TensorRT include directory: "
             f"expected {expected_include}, observed {observed.tensorrt_include_dir}"
         )
-    expected_library = lock.toolchain.identity.get("tensorrt_library")
-    if expected_library is not None and observed.tensorrt_library != expected_library:
+    expected_library = toolchain.runtime.tensorrt_library
+    if observed.tensorrt_library != expected_library:
         mismatches.append(
             f"TensorRT library: expected {expected_library}, observed {observed.tensorrt_library}"
         )
-    expected_cuda_root = lock.toolchain.identity.get("cuda_root") or lock.toolchain.identity.get(
-        "system_cuda_root"
-    )
-    if expected_cuda_root is not None and observed.cuda_root != expected_cuda_root:
+    expected_cuda_root = toolchain.runtime.cuda_root
+    if observed.cuda_root != expected_cuda_root:
         mismatches.append(
             f"CUDA root: expected {expected_cuda_root}, observed {observed.cuda_root}"
         )
@@ -149,7 +243,8 @@ class EnvironmentProvisioner:
                     "adopt-only provisioning cannot materialize a managed toolchain"
                 )
             context = context_provider.provision(
-                lock,
+                lock.context,
+                inherit_system_packages=lock.toolchain.origin != "managed",
                 repository=self.repository,
                 state_dir=state_dir,
                 policy=policy,
@@ -163,43 +258,46 @@ class EnvironmentProvisioner:
                 raise AttestationFailed(
                     "Provisioned context identity does not match the environment lock"
                 )
-            context = toolchain_provider.provision(
+            toolchain = toolchain_provider.provision(
                 lock,
                 context,
-                execution=context_provider,
                 repository=self.repository,
                 state_dir=state_dir,
                 runner=self.runner,
             )
-            if context.provider != lock.context.provider:
+            if toolchain.provider != lock.toolchain.provider:
                 raise AttestationFailed(
-                    "Toolchain provisioning changed the execution context provider"
+                    "Provisioned toolchain provider does not match the environment lock"
                 )
-            if dict(context.identity) != dict(lock.context.identity):
-                raise AttestationFailed(
-                    "Toolchain provisioning changed the resolved context identity"
-                )
+            context = replace(
+                context,
+                environment={**dict(context.environment), **dict(toolchain.environment)},
+            )
             observed = toolchain_provider.observe(
                 lock,
                 context,
-                execution=context_provider,
+                toolchain,
                 repository=self.repository,
                 runner=self.runner,
             )
-            _attest(lock, observed)
+            _attest(lock, toolchain, observed)
+            environment_id = _environment_id(lock, context, toolchain, observed)
             (state_dir / "provision-failure.json").unlink(missing_ok=True)
             receipt = write_json(
                 state_dir / "provision-receipt.json",
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "status": "ready",
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                     "lock_id": lock.lock_id,
-                    "environment_id": lock.lock_id,
+                    "environment_id": environment_id,
                     "cuda_origin": lock.cuda_origin,
                     "toolchain_source": lock.toolchain.provider.name,
                     "context_provider": lock.context.provider.name,
-                    "context_identity": dict(context.identity),
+                    "context_identity": _plain_json(context.identity),
+                    "execution_identity": _plain_json(context.execution_identity),
+                    "toolchain_identity": _plain_json(toolchain.identity),
+                    "toolchain_runtime": _runtime_payload(toolchain.runtime),
                     "qualifications": [
                         {
                             "name": item.name,
@@ -208,13 +306,14 @@ class EnvironmentProvisioner:
                         }
                         for item in lock.qualifications
                     ],
-                    "observed": asdict(observed),
+                    "observed": _observation_payload(observed),
                 },
             )
             return ProvisionedEnvironment(
-                environment_id=lock.lock_id,
+                environment_id=environment_id,
                 lock=lock,
                 context=context,
+                toolchain=toolchain,
                 observation=observed,
                 state_dir=state_dir,
                 receipt=receipt,
@@ -224,7 +323,7 @@ class EnvironmentProvisioner:
             write_json(
                 state_dir / "provision-failure.json",
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "status": "failed",
                     "lock_id": lock.lock_id,
                     "error_type": type(error).__name__,
@@ -248,9 +347,7 @@ def attest_environment(
             "Registered execution context provider does not match the environment lock"
         )
     if toolchain_provider.descriptor != environment.lock.toolchain.provider:
-        raise AttestationFailed(
-            "Registered toolchain provider does not match the environment lock"
-        )
+        raise AttestationFailed("Registered toolchain provider does not match the environment lock")
     if environment.context.provider != environment.lock.context.provider or dict(
         environment.context.identity
     ) != dict(environment.lock.context.identity):
@@ -258,9 +355,19 @@ def attest_environment(
     observed = toolchain_provider.observe(
         environment.lock,
         environment.context,
-        execution=context_provider,
+        environment.toolchain,
         repository=repository,
         runner=runner,
     )
-    _attest(environment.lock, observed)
+    _attest(environment.lock, environment.toolchain, observed)
+    if observed != environment.observation:
+        raise AttestationFailed("Environment evidence changed after provisioning")
+    expected_id = _environment_id(
+        environment.lock,
+        environment.context,
+        environment.toolchain,
+        observed,
+    )
+    if expected_id != environment.environment_id:
+        raise AttestationFailed("Provisioned environment identity is inconsistent")
     return observed

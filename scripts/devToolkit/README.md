@@ -9,7 +9,7 @@ The core has four stages:
 ```text
 EnvironmentRequest -> resolve() -> EnvironmentLock
 EnvironmentLock    -> provision() -> ProvisionedEnvironment
-ProvisionedEnvironment + BuildSpec -> build() -> BuildResult
+ProvisionedEnvironment + BuildRecipe -> build() -> BuildResult
 ProvisionedEnvironment + CommandSpec -> run() -> CommandResult
 ```
 
@@ -31,12 +31,10 @@ repo = Path.cwd()
 sys.path.insert(0, str(repo / "scripts" / "devToolkit"))
 
 from trtmc_devtoolkit import (
-    BuildSpec,
-    CommandSpec,
     DevToolkit,
     EnvironmentRequest,
     ExecutionTarget,
-    repository_path,
+    TrtmcBuildRecipe,
 )
 
 toolkit = DevToolkit.from_checkout(repo)
@@ -49,31 +47,37 @@ lock = toolkit.resolve(
 environment = toolkit.provision(lock)
 build = toolkit.build(
     environment,
-    BuildSpec(
+    TrtmcBuildRecipe(
         targets=("trtmc", "trtmc_backend_trt", "trtmc_model_qwen"),
         outputs={"trtmc": "trtmc"},
     ),
 )
 
-toolkit.run(
-    environment,
-    CommandSpec(
-        (build.artifacts[0].path, "version"),
-        cwd=repository_path("."),
-    ),
+toolkit.run_trtmc(environment, ("version",), build=build)
+```
+
+`build()` itself only snapshots source, serializes identical builds, runs the
+selected recipe, hashes outputs, and writes evidence. `TrtmcBuildRecipe` is an
+optional sample recipe that installs the checkout's Python package editable
+with `--no-deps`, configures CMake against the resolved TensorRT runtime, and
+builds only the requested targets. User recipes can replace it completely.
+
+For a user-owned unified CUDA/TensorRT installation, pass
+the prefix as toolchain-owned configuration. Resolution checks the prefix
+rather than ambient host locations:
+
+```python
+request = EnvironmentRequest(
+    tensorrt="11.2.0.113",
+    target=ExecutionTarget.local(),
+    toolchain="prefix",
+    toolchain_options={"prefix": "/path/to/toolchain"},
 )
 ```
 
-`build()` installs the checkout's Python package editable with `--no-deps`,
-configures CMake against the exact observed TensorRT headers and library, and
-builds only the requested targets. Dependency installation remains an explicit
-environment-composition decision.
-
-For a user-owned unified CUDA/TensorRT installation, pass
-`ExecutionTarget.local(prefix="/path/to/toolchain")`. Resolution checks the
-prefix rather than ambient host locations. If its CUDA is complete but its
-TensorRT does not match, a pinned managed TensorRT request still follows that
-prefix CUDA.
+To combine managed TensorRT artifacts with a caller-owned CUDA prefix, use
+`toolchain_options={"cuda_prefix": "/path/to/cuda"}`. Execution target options
+never carry toolchain configuration.
 
 ## Adopt an existing campaign container
 
@@ -132,14 +136,12 @@ lock = toolkit.resolve(
                 name="tensorrt-headers",
                 uri="https://artifact.example/libnvinfer-headers.deb",
                 sha256="<64 lowercase hex characters>",
-                verification="pinned-digest",
             ),
             # Include the complete, mutually compatible wheel closure.
             ArtifactPin(
                 name="tensorrt-wheel",
                 uri="https://artifact.example/tensorrt.whl",
                 sha256="<64 lowercase hex characters>",
-                verification="pinned-digest",
             ),
         ),
     )
@@ -151,14 +153,19 @@ resolution raises `ArtifactUnavailable`; it never silently weakens verification.
 Use `CudaPolicy.exact("12.8")`, `CudaPolicy.system_only()`, or
 `CudaPolicy.managed("13.3")` to override the default policy.
 
-## Cohorts are optional qualification records
+## Qualification is explicit and source-neutral
 
-Files in `configs/environment-cohorts/` may annotate a resolved environment as
-known-qualified. They do not control which TensorRT version can be attempted.
-Additional record directories can be supplied with `qualification_roots=`.
+DevToolkit does not scan `configs/environment-cohorts/` by default. A caller may
+attach optional qualification evidence through a source adapter; this never
+controls which TensorRT version can be attempted.
 
 ```python
-toolkit = DevToolkit.from_checkout(repo, qualification_roots=(Path("my-presets"),))
+from trtmc_devtoolkit import JsonQualificationSource
+
+toolkit = DevToolkit.from_checkout(
+    repo,
+    qualifications=(JsonQualificationSource((Path("my-qualifications"),)),),
+)
 
 # Optional provenance, fail closed only because the caller explicitly asks.
 request = EnvironmentRequest(
@@ -167,6 +174,22 @@ request = EnvironmentRequest(
     preset="trt112-cu133",
     require_qualification=True,
 )
+```
+
+A JSON qualification record declares generic facts rather than the historical
+cohort shape:
+
+```json
+{
+  "id": "trt112-cu133",
+  "status": "qualified",
+  "requirements": {
+    "tensorrt": "11.2.1.2",
+    "cuda": ["13.3"],
+    "architecture": ["x86_64"],
+    "execution": ["local", "container"]
+  }
+}
 ```
 
 The record's content digest is stored as provenance but does not alter the
@@ -178,17 +201,19 @@ fails closed when the caller requests a preset or requires qualification.
 
 | Identity | Includes | Excludes |
 |---|---|---|
-| Environment lock | resolved context, exact Python/CUDA/TRT, provider versions, artifact digests | source revision, GPU SM, preset spelling, container/GPU locator |
+| Environment lock | resolved context, effective path mapping, exact Python/CUDA/TRT, provider versions, artifact digests | source revision, GPU SM, preset spelling, private locator |
+| Provisioned environment | lock ID, effective execution identity, normalized toolchain runtime, observed file digests | command occurrence |
 | Build request | environment ID, source snapshot, SM set, CMake/build inputs | command occurrence |
-| Build result | build request ID and output digests | later runs |
-| Command invocation | environment ID, arguments, path scopes, environment-value digest | occurrence ID |
+| Build result | build request ID and output digests | unrelated later runs |
+| Command invocation | environment ID, arguments, path scopes, environment-value digest, build/artifact provenance | occurrence ID |
 
 Provisioning writes `environment-lock.json`, `provision-receipt.json`, and an
 observed attestation under `.devtoolkit/environments/<lock-id>/`. Builds and
-commands write their own v2 receipts below that environment directory. Receipts
+commands write their own v3 receipts below that environment directory. Receipts
 do not serialize provider secrets or environment variable values. JSON receipts
 are replaced atomically, and provisioning for one environment ID is serialized
-across processes to avoid partial or competing terminal state.
+across processes to avoid partial or competing terminal state. Identical build
+requests are also serialized across processes.
 Build failures before a build request ID can be computed are recorded below
 `builds/preflight/` with the environment ID and failed stage.
 
@@ -199,10 +224,15 @@ There are two provider protocols:
 - `ToolchainSource`: discover, materialize, and observe a CUDA/TensorRT toolchain.
 - `ExecutionContext`: resolve/provision a target and execute mapped commands.
 
-Register providers explicitly through `ProviderRegistry`; there is no implicit
-entry-point discovery or workflow DAG.
+Extension contracts live under `trtmc_devtoolkit.spi`. Execution contexts
+declare semantic capabilities such as `host-filesystem` or
+`container-process`; toolchain adapters select capabilities rather than
+provider names. Register adapters explicitly; there is no implicit entry-point
+discovery or workflow DAG.
 
 ```python
+from trtmc_devtoolkit.spi import ProviderRegistry
+
 registry = ProviderRegistry.with_builtins()
 registry.register_context(MyRemoteContext())
 registry.register_toolchain(MyTensorRTSource())

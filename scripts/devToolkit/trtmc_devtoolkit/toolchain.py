@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -13,6 +14,14 @@ from .runner import Runner, command_output
 
 
 CUDA_RELEASE = re.compile(r"release\s+([0-9]+\.[0-9]+)", re.IGNORECASE)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def tensorrt_header_version_text(text: str, source: str | Path) -> str:
@@ -91,4 +100,9 @@ def observe_local_toolchain(
         tensorrt_include_dir=str(tensorrt_include_dir),
         tensorrt_library=str(tensorrt_library),
         cuda_root=str(cuda_root) if cuda_root is not None else None,
+        evidence={
+            "nvcc": _sha256(Path(nvcc)),
+            "tensorrt-header": _sha256(tensorrt_include_dir / "NvInferVersion.h"),
+            "tensorrt-library": _sha256(tensorrt_library),
+        },
     )

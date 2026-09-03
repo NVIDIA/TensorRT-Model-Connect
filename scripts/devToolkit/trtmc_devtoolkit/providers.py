@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from .models import ToolchainObservation
     from .commands import CommandSpec
-    from .provisioning import ContextHandle, ProvisionPolicy
+    from .provisioning import ContextHandle, ProvisionPolicy, ToolchainHandle
     from .resolution import (
         ContextLock,
         EnvironmentLock,
@@ -44,18 +44,17 @@ class ToolchainSource(Protocol):
         lock: EnvironmentLock,
         context: ContextHandle,
         *,
-        execution: ExecutionContext,
         repository: Path,
         state_dir: Path,
         runner: Runner,
-    ) -> ContextHandle: ...
+    ) -> ToolchainHandle: ...
 
     def observe(
         self,
         lock: EnvironmentLock,
         context: ContextHandle,
+        toolchain: ToolchainHandle,
         *,
-        execution: ExecutionContext,
         repository: Path,
         runner: Runner,
     ) -> ToolchainObservation: ...
@@ -74,8 +73,9 @@ class ExecutionContext(Protocol):
 
     def provision(
         self,
-        lock: EnvironmentLock,
+        context: ContextLock,
         *,
+        inherit_system_packages: bool,
         repository: Path,
         state_dir: Path,
         policy: ProvisionPolicy,

@@ -15,7 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
 
-from .models import DevToolkitError
+from .models import DevToolkitError, ToolchainRuntime
 from .providers import FrozenProviderRegistry
 from .qualifications import QualificationRef, QualificationRegistry
 from .runner import Runner
@@ -110,33 +110,24 @@ class ExecutionTarget:
         *,
         python: str = "python3",
         gpu: str = "0",
-        prefix: str | None = None,
     ) -> ExecutionTarget:
-        options: dict[str, object] = {"python": python, "gpu": gpu}
-        if prefix is not None:
-            options["prefix"] = prefix
-        return cls("local", options)
+        return cls("local", {"python": python, "gpu": gpu})
 
     @classmethod
     def docker(
         cls,
         *,
-        gpu: str = "0",
         python: str = "python3",
         docker_context: str | None = None,
-        image: str | None = None,
         container: str | None = None,
         workspace: str = "/workspace/tensorrt-model-connect",
         state: str = "/tmp/trtmc-devtoolkit",
     ) -> ExecutionTarget:
         options: dict[str, object] = {
-            "gpu": gpu,
             "python": python,
             "workspace": workspace,
             "state": state,
         }
-        if image is not None:
-            options["image"] = image
         if docker_context is not None:
             options["docker_context"] = docker_context
         if container is not None:
@@ -152,6 +143,7 @@ class EnvironmentRequest:
     python: str = "3.12"
     architecture: str | None = None
     toolchain: str | None = None
+    toolchain_options: Mapping[str, object] = field(default_factory=dict)
     preset: str | None = None
     require_qualification: bool = False
     artifacts: tuple[ArtifactPin, ...] = ()
@@ -164,6 +156,7 @@ class EnvironmentRequest:
             )
         object.__setattr__(self, "tensorrt", value)
         object.__setattr__(self, "artifacts", tuple(self.artifacts))
+        object.__setattr__(self, "toolchain_options", _freeze_json(self.toolchain_options))
         names = [artifact.name for artifact in self.artifacts]
         if len(names) != len(set(names)):
             raise DevToolkitError("Artifact pin names must be unique")
@@ -174,7 +167,6 @@ class ArtifactPin:
     name: str
     uri: str
     sha256: str
-    verification: Literal["pinned-digest", "signed-metadata", "oci-digest"]
 
     def __post_init__(self) -> None:
         if not self.name or not self.uri:
@@ -182,29 +174,38 @@ class ArtifactPin:
         parsed = urllib.parse.urlsplit(self.uri)
         if parsed.username is not None or parsed.password is not None:
             raise DevToolkitError(f"Artifact {self.name} URI cannot contain credentials")
-        if self.verification not in {
-            "pinned-digest",
-            "signed-metadata",
-            "oci-digest",
-        }:
-            raise DevToolkitError(f"Artifact {self.name} has an unsupported verification mode")
         if re.fullmatch(r"[0-9a-f]{64}", self.sha256) is None:
             raise DevToolkitError(f"Artifact {self.name} requires a lowercase SHA-256 digest")
 
 
 @dataclass(frozen=True)
 class ContextLock:
-    """Resolved context identity plus a secret-free, non-identity locator."""
+    """Resolved context identity, semantic execution mapping, and private locator."""
 
     provider: ProviderDescriptor
     operating_system: str
     architecture: str
     identity: Mapping[str, object]
+    execution: Mapping[str, object] = field(default_factory=dict)
     locator: Mapping[str, object] = field(default_factory=dict, compare=False)
+    capabilities: frozenset[str] = frozenset()
+    qualification: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "identity", _freeze_json(self.identity))
+        object.__setattr__(self, "execution", _freeze_json(self.execution))
         object.__setattr__(self, "locator", _freeze_json(self.locator))
+        capabilities = frozenset(self.capabilities)
+        if any(not isinstance(value, str) or not value for value in capabilities):
+            raise DevToolkitError("Context capabilities must be non-empty strings")
+        object.__setattr__(self, "capabilities", capabilities)
+        qualification = dict(self.qualification)
+        if any(
+            not isinstance(name, str) or not name or not isinstance(value, str) or not value
+            for name, value in qualification.items()
+        ):
+            raise DevToolkitError("Context qualification facts must be non-empty strings")
+        object.__setattr__(self, "qualification", MappingProxyType(qualification))
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,7 @@ class ToolchainCandidate:
     cuda: str
     python: str
     identity: Mapping[str, object]
+    runtime: ToolchainRuntime | None = None
     artifacts: tuple[ArtifactPin, ...] = ()
     cuda_source: CudaSource | None = None
 
@@ -236,11 +238,15 @@ class ToolchainCandidate:
             raise DevToolkitError(
                 f"Managed toolchain candidate {self.provider.name} requires trusted artifacts"
             )
+        if self.origin != "managed" and self.runtime is None:
+            raise DevToolkitError(
+                f"Adopted toolchain candidate {self.provider.name} requires a runtime"
+            )
 
 
 @dataclass(frozen=True)
 class EnvironmentLock:
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     lock_id: str
     request: EnvironmentRequest
     context: ContextLock
@@ -249,7 +255,7 @@ class EnvironmentLock:
     qualifications: tuple[QualificationRef, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.schema_version != 2 or self.lock_id != _environment_lock_id(
+        if self.schema_version != 3 or self.lock_id != _environment_lock_id(
             self.context, self.toolchain
         ):
             raise DevToolkitError("Environment lock ID does not match its resolved identity")
@@ -261,11 +267,6 @@ class EnvironmentLock:
     @property
     def cuda(self) -> str:
         return self.toolchain.cuda
-
-    @property
-    def decision(self) -> CudaOrigin:
-        """Compatibility alias for early adopters of the capability API."""
-        return self.cuda_origin
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -286,6 +287,7 @@ class EnvironmentLock:
                     "option_names": sorted(self.request.target.options),
                 },
                 "toolchain": self.request.toolchain,
+                "toolchain_option_names": sorted(self.request.toolchain_options),
                 "preset": self.request.preset,
                 "require_qualification": self.request.require_qualification,
             },
@@ -356,7 +358,7 @@ class EnvironmentResolver:
         qualifications = self._qualifications(request, context, selected)
         lock_id = self._lock_id(request, context, selected)
         return EnvironmentLock(
-            2,
+            3,
             lock_id,
             request,
             context,
@@ -379,13 +381,13 @@ class EnvironmentResolver:
             return ()
         if request.preset is not None:
             named = [record for record in records if record.reference.name == request.preset]
-            if len(named) != 1 or not named[0].matches(request, context, candidate):
+            if len(named) != 1 or not named[0].matches(context, candidate):
                 raise IncompatibleCombination(
                     f"Requested qualification {request.preset!r} does not match the environment"
                 )
             return (named[0].reference,)
         matches = tuple(
-            record.reference for record in records if record.matches(request, context, candidate)
+            record.reference for record in records if record.matches(context, candidate)
         )
         if request.require_qualification and not matches:
             raise IncompatibleCombination(
@@ -497,12 +499,15 @@ def _identity_payload(
     candidate: ToolchainCandidate,
 ) -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "context": {
             "provider": _provider_payload(context.provider),
             "operating_system": context.operating_system,
             "architecture": context.architecture,
             "identity": _plain_json(context.identity),
+            "execution": _plain_json(context.execution),
+            "capabilities": sorted(context.capabilities),
+            "qualification": dict(context.qualification),
         },
         "toolchain": {
             "provider": _provider_payload(candidate.provider),
@@ -512,6 +517,17 @@ def _identity_payload(
             "cuda": candidate.cuda,
             "python": candidate.python,
             "identity": _plain_json(candidate.identity),
+            "runtime": (
+                {
+                    "python_executable": candidate.runtime.python_executable,
+                    "cuda_root": candidate.runtime.cuda_root,
+                    "nvcc": candidate.runtime.nvcc,
+                    "tensorrt_include_dir": candidate.runtime.tensorrt_include_dir,
+                    "tensorrt_library": candidate.runtime.tensorrt_library,
+                }
+                if candidate.runtime is not None
+                else None
+            ),
             "artifacts": [
                 {
                     "name": artifact.name,
@@ -529,7 +545,7 @@ def _environment_lock_id(
 ) -> str:
     payload = _identity_payload(context, candidate)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(b"trtmc-devtoolkit-environment-lock-v2\0" + encoded).hexdigest()
+    return hashlib.sha256(b"trtmc-devtoolkit-environment-lock-v3\0" + encoded).hexdigest()
 
 
 def _resolved_payload(
@@ -549,7 +565,6 @@ def _resolved_payload(
                 urllib.parse.urlsplit(artifact.uri)._replace(query="", fragment="")
             ),
             "sha256": artifact.sha256,
-            "verification": artifact.verification,
         }
         for artifact in candidate.artifacts
     ]

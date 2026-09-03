@@ -1,20 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Optional cohort-backed qualification provenance for resolved environments."""
+"""Optional, source-neutral qualification evidence for resolved environments."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Protocol
 
 from .models import DevToolkitError
 
 if TYPE_CHECKING:
-    from .resolution import ContextLock, EnvironmentRequest, ToolchainCandidate
+    from .resolution import ContextLock, ToolchainCandidate
 
 
 @dataclass(frozen=True)
@@ -27,36 +29,44 @@ class QualificationRef:
 @dataclass(frozen=True)
 class QualificationRecord:
     reference: QualificationRef
-    tensorrt: str
-    cuda: str
-    python_versions: tuple[str, ...]
-    architectures: tuple[str, ...]
-    targets: tuple[str, ...]
-    source: Path = field(compare=False)
+    requirements: Mapping[str, tuple[str, ...]]
+    source: str = field(compare=False)
+
+    def __post_init__(self) -> None:
+        normalized = {name: tuple(values) for name, values in sorted(self.requirements.items())}
+        if any(
+            not name or not values or any(not value for value in values)
+            for name, values in normalized.items()
+        ):
+            raise DevToolkitError("Qualification requirements must be non-empty")
+        object.__setattr__(self, "requirements", MappingProxyType(normalized))
 
     def matches(
         self,
-        request: EnvironmentRequest,
         context: ContextLock,
         candidate: ToolchainCandidate,
     ) -> bool:
-        logical_target = request.target.options.get("qualification_target")
-        if not isinstance(logical_target, str):
-            logical_target = "docker" if "docker" in request.target.provider else "local"
-        return (
-            candidate.tensorrt == self.tensorrt
-            and candidate.cuda == self.cuda
-            and candidate.python in self.python_versions
-            and context.architecture in self.architectures
-            and logical_target in self.targets
-        )
+        facts = {
+            "tensorrt": candidate.tensorrt,
+            "cuda": candidate.cuda,
+            "python": candidate.python,
+            "architecture": context.architecture,
+            **dict(context.qualification),
+        }
+        return all(facts.get(name) in accepted for name, accepted in self.requirements.items())
 
 
-class QualificationRegistry:
+class QualificationSource(Protocol):
+    def load(self) -> tuple[QualificationRecord, ...]: ...
+
+
+class JsonQualificationSource:
+    """Load generic qualification facts from caller-owned JSON directories."""
+
     def __init__(self, roots: tuple[Path, ...]) -> None:
-        self.roots = roots
+        self.roots = tuple(Path(root).resolve() for root in roots)
 
-    def load_all(self) -> tuple[QualificationRecord, ...]:
+    def load(self) -> tuple[QualificationRecord, ...]:
         paths = sorted(
             path
             for root in self.roots
@@ -64,11 +74,7 @@ class QualificationRegistry:
             for path in root.glob("*.json")
             if path.name != "schema.json"
         )
-        records = tuple(self._load(path) for path in paths)
-        names = [record.reference.name for record in records]
-        if len(set(names)) != len(names):
-            raise DevToolkitError("Duplicate qualification record names")
-        return records
+        return tuple(self._load(path) for path in paths)
 
     @staticmethod
     def _load(path: Path) -> QualificationRecord:
@@ -77,24 +83,23 @@ class QualificationRegistry:
             payload = json.loads(content)
             name = payload["id"]
             status = payload.get("status", "qualified")
-            tensorrt = payload["tensorrt"]["version"]
-            cuda = payload["cuda"]["version"]
-            raw_python_versions = payload["python_versions"]
-            raw_architectures = payload["architectures"]
-            raw_targets = payload["targets"]
-            if not isinstance(raw_python_versions, list):
-                raise TypeError("python_versions must be an array")
-            if not isinstance(raw_architectures, (list, dict)):
-                raise TypeError("architectures must be an array or object")
-            if not isinstance(raw_targets, list):
-                raise TypeError("targets must be an array")
-            python_versions = tuple(raw_python_versions)
-            architectures = tuple(raw_architectures)
-            targets = tuple(raw_targets)
+            raw_requirements = payload["requirements"]
+            if not isinstance(raw_requirements, dict):
+                raise TypeError("requirements must be an object")
+            requirements: dict[str, tuple[str, ...]] = {}
+            for fact, raw_values in raw_requirements.items():
+                if isinstance(raw_values, str):
+                    values = (raw_values,)
+                elif isinstance(raw_values, list):
+                    values = tuple(raw_values)
+                else:
+                    raise TypeError(f"requirement {fact} must be text or an array")
+                if not isinstance(fact, str) or any(not isinstance(value, str) for value in values):
+                    raise TypeError("requirement names and values must be text")
+                requirements[fact] = values
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
             raise DevToolkitError(f"Invalid qualification record {path}: {error}") from error
-        values = (name, status, tensorrt, cuda, *python_versions, *architectures, *targets)
-        if not all(isinstance(value, str) and value for value in values):
+        if not isinstance(name, str) or not name or not isinstance(status, str) or not status:
             raise DevToolkitError(f"Invalid qualification record values in {path}")
         return QualificationRecord(
             reference=QualificationRef(
@@ -102,10 +107,18 @@ class QualificationRegistry:
                 digest=hashlib.sha256(content).hexdigest(),
                 status=status,
             ),
-            tensorrt=tensorrt,
-            cuda=cuda,
-            python_versions=python_versions,
-            architectures=architectures,
-            targets=targets,
-            source=path,
+            requirements=requirements,
+            source=str(path),
         )
+
+
+class QualificationRegistry:
+    def __init__(self, sources: tuple[QualificationSource, ...]) -> None:
+        self.sources = sources
+
+    def load_all(self) -> tuple[QualificationRecord, ...]:
+        records = tuple(record for source in self.sources for record in source.load())
+        names = [record.reference.name for record in records]
+        if len(set(names)) != len(names):
+            raise DevToolkitError("Duplicate qualification record names")
+        return records
