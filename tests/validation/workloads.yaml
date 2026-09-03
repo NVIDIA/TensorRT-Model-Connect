@@ -1292,6 +1292,7 @@ suites:
       runtime_strategies:
         - timm_vit_image_classification
         - timm_resnet_image_classification
+        - timm_inception_image_classification
         - timm_mnasnet_image_classification
         - timm_densenet_image_classification
         - timm_efficientnet_image_classification
@@ -1300,6 +1301,7 @@ suites:
       families:
         - timm_vit
         - timm_resnet
+        - timm_inception
         - timm_mnasnet
         - timm_densenet
         - timm_efficientnet
