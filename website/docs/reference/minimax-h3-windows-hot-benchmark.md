@@ -135,20 +135,22 @@ $LongLog = Join-Path (Get-Location) 'minimax-h3-t2va-345f.log'
 if ($LASTEXITCODE -ne 0) { throw "MiniMax-H3 345-frame benchmark failed" }
 ```
 
-The acceptance ceiling is 1,200,000 ms (20:00) for the hot `generation_ms`
-median. A full `1 + 2` command runs three generations, so its wall time is
-expected to be much longer than one reported sample.
+The acceptance ceiling is 1,380,000 ms (23:00) for the hot `generation_ms`
+median on the qualified Spark hardware/software cohort. This leaves 20.326
+seconds of headroom over the qualified final-package median and is not a
+portable latency guarantee. A full `1 + 2` command runs three generations, so
+its wall time is expected to be much longer than one reported sample.
 
-## Qualified SM121 result
+## Qualified final-package SM121 cubin result
 
-The retained bundle used for this result was constructed at ModelConnect
-builder revision `45bff91397da2875f93c0af9b847eb7308fce60d`; its embedded metadata
-and build receipt record that revision. The qualified native SM121 runtime was
-implementation revision `f029eeeb595b41ef6decf120aa9512fd59e6c4c0`. The
-intervening commits change native runtime/build/package code, not the Python
-bundle builder or model-plan inputs. Keep these two provenance fields separate:
-a bundle rebuilt from a later clean revision records that later revision and is
-not expected to have the retained bundle's byte hash.
+The measured native runtime and package were built from
+`610aeaa6a0acd611f38e9dceb71230d820e690ec` (tree
+`7f118e15e3585f7a46c554b6471334d004b5b014`). The retained bundle was
+constructed at ModelConnect builder revision
+`45bff91397da2875f93c0af9b847eb7308fce60d`; its embedded metadata and build
+receipt record that revision. Keep these provenance fields separate: a bundle
+rebuilt from a later clean revision records that later revision and is not
+expected to have the retained bundle's byte hash.
 
 The run used an NVIDIA RTX Spark N1X (driver 616.67), CUDA 12.9.1, and
 TensorRT-RTX 1.6. Both commands used the same prompt fixture (file SHA-256
@@ -161,25 +163,39 @@ bundle, cache policy, and `1 + 2` same-process timing contract shown above. The
 
 | Request | Output | Measured samples | Hot median |
 | --- | --- | --- | --- |
-| 120 nominal frames | 124 frames / 5.167 s | 286,417.720 ms; 285,284.762 ms | 285,851.241 ms (4:45.851) |
-| 345 frames | 345 frames / 14.375 s | 964,505.670 ms; 959,489.510 ms | 961,997.590 ms (16:01.998) |
+| 120 nominal frames | 124 frames / 5.167 s | 457,594.618 ms; 457,439.332 ms | 457,516.975 ms (7:37.517) |
+| 345 frames | 345 frames / 14.375 s | 1,357,180.330 ms; 1,362,168.359 ms | 1,359,674.344 ms (22:39.674) |
 
-These historical `f029eeeb` runs predate build-time cubin assembly and recorded
-the legacy `sm121_embedded_ptx` label: 53 warmup engine-cache fills, 106
-measured cache hits, three selections, zero `portable_cuda` selections, and
-three successful finite-output validations. The 124-frame MP4 SHA-256 is
-`18D6C5395D9B56FD35CC87A4419D37B6548EA30358AEE1B92575012A9E9FE38D`; the
-345-frame MP4 SHA-256 is
-`E69AAAD4764C8E1DB0F193B383ED0F391055A8848AC48B5C3BC0E3D9C81FD37F`.
-Both files contain 1344x768 H.264 video at 24 fps and AAC-LC stereo audio at
-32 kHz. Normal AAC tail padding makes the encoded audio/container duration a
-few milliseconds longer than the raw generated audio.
+Each final-package command recorded 53 warmup engine-cache fills, 106 measured
+cache hits, three `sm121_embedded_cubin` selections, zero `portable_cuda`
+selections or recovery replays, and three successful finite RGB/audio
+validations. The two 345-frame samples differ by 4,988.029 ms, or 0.367% of
+their median. The 23-minute ceiling leaves 17,831.641 ms of headroom over the
+slower sample.
+
+The 124-frame MP4 is 5,839,212 bytes with SHA-256
+`7EA70B4A333A972ABB6DE2932E49FECFD46D6ECD1B3AEB2BCA97D39B31467C35`.
+The 345-frame MP4 is 15,671,335 bytes with SHA-256
+`080761926BB5A91458E2600E12FB5D6D5F576959A7A1015790A82E54AADE27E9`.
+Both files contain 1344x768 H.264 Main video at 24 fps and AAC-LC stereo audio
+at 32 kHz. The long file contains a 14.375-second video track and a
+14.400-second audio track; the raw generated audio is 14.375 seconds and the
+difference is normal AAC tail padding.
 
 Pipeline loading and the warmup are intentionally outside each
 `generation_ms` sample. On this qualification run, the complete process took
-45:23.639 for the 124-frame command and 1:18:40.582 for the 345-frame command;
+53:33.443 for the 124-frame command and 1:39:44.519 for the 345-frame command;
 those wall times cover load, warmup, both measured generations, validation,
 and MP4 output and must not be reported as single-generation latency.
+
+### Legacy PTX reference
+
+Earlier same-machine measurements at runtime revision
+`f029eeeb595b41ef6decf120aa9512fd59e6c4c0` predate build-time cubin assembly
+and recorded the `sm121_embedded_ptx` label. Their 124-frame samples were
+286,417.720 and 285,284.762 ms (median 285,851.241 ms); their 345-frame samples
+were 964,505.670 and 959,489.510 ms (median 961,997.590 ms). Those measurements
+remain historical references and do not qualify the final cubin package.
 
 ## Verify the hot engine cache
 
@@ -254,7 +270,7 @@ function Assert-MiniMaxH3HotCache(
 
 Assert-MiniMaxH3HotCache $FiveSecondLog 555000
 # After running the long workload instead, call:
-# Assert-MiniMaxH3HotCache $LongLog 1200000
+# Assert-MiniMaxH3HotCache $LongLog 1380000
 ```
 
 `denoiser_resident_hit=0` and `vae_resident_hit=0` in `[minimax-h3.perf]` are
