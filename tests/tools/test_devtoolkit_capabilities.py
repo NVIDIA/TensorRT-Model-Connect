@@ -1333,6 +1333,11 @@ def test_managed_target_bootstraps_python_without_ensurepip(tmp_path: Path) -> N
         command for command in context.commands if command[1:3] == ["-m", "pip"] and "wheel" in command
     )
     assert wheel_build[0].endswith("/venv/bin/python")
+    assert all(
+        "--no-cache-dir" in command
+        for command in context.commands
+        if command[1:3] == ["-m", "pip"] and command[3] in {"install", "wheel"}
+    )
 
 
 def test_managed_target_reuses_a_completed_toolchain_prefix(tmp_path: Path) -> None:
