@@ -64,7 +64,12 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 121
+    assert len(bindings) == len(ready_models) + 2
+    workload_counts = Counter(binding.model for binding in bindings)
+    assert {model: count for model, count in workload_counts.items() if count > 1} == {
+        "fast-foundation-stereo": 2,
+        "minimax-h3-768p": 2,
+    }
     assert {
         binding.model for binding in bindings if binding.workload == "mmlu_continuation_parity"
     } >= {
