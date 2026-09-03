@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_seresnet"
+plugin = "timm_seresnet"
+module = "plugin"
+python_profile_specs = [
+  "timm_seresnet_reference|families/timm_seresnet/python_profile_requirements/timm_seresnet_reference.lock.txt|families/timm_seresnet/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_seresnet_reference",
+]
+aliases = [
+  "timm_seresnet",
+  "seresnet",
+  "seresnet50",
+]
+prefixes = [
+  "timm_seresnet",
+  "seresnet",
+  "seresnext",
+]

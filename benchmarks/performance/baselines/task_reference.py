@@ -573,7 +573,7 @@ def _load_asr(
     max_new_tokens = int(request.get("max_new_tokens", 100))
     device = torch.device("cuda")
 
-    if arguments.family in {"canary", "nemotron_speech_streaming", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg"}:
+    if arguments.family in {"canary", "nemotron_speech_streaming", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg", "timm_seresnet"}:
         from tools.validation.engine import _transcription_text
 
         model = _load_nemo_asr_reference_model(arguments, device=device).eval().to(device)

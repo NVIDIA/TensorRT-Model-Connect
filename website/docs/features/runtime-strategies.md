@@ -23,7 +23,7 @@ selects that path before reading a native strategy.
 | Vision and multimodal | `qwen_vl_vision_language`, `internvl_vision_language`, `qwen3_omni_multimodal` |
 | Speech and audio | `whisper_speech_to_text`, `nemotron_speech_streaming_speech_to_text_rnnt`, `text_to_audio_bark`, `personaplex_speech_to_speech` |
 | Diffusion | `diffusion_flux`, `diffusion_wan`, `diffusion_wan2_2_ti2v`, `diffusion_qwen_image`, `diffusion_sana_wm` |
-| Perception | `dinov3_image_feature_extraction`, `moge_monocular_geometry`, `segformer_segmentation`, `sam_prompted_segmentation`, `sam3_prompted_segmentation`, `timm_vit_image_classification`, `timm_resnet_image_classification`, `timm_repvgg_image_classification`, `timm_inception_image_classification`, `timm_mnasnet_image_classification`, `timm_densenet_image_classification`, `timm_efficientnet_image_classification`, `timm_mobilenetv3_image_classification`, `timm_vgg_image_classification` |
+| Perception | `dinov3_image_feature_extraction`, `moge_monocular_geometry`, `segformer_segmentation`, `sam_prompted_segmentation`, `sam3_prompted_segmentation`, `timm_vit_image_classification`, `timm_resnet_image_classification`, `timm_seresnet_image_classification`, `timm_repvgg_image_classification`, `timm_inception_image_classification`, `timm_mnasnet_image_classification`, `timm_densenet_image_classification`, `timm_efficientnet_image_classification`, `timm_mobilenetv3_image_classification`, `timm_vgg_image_classification` |
 | Numeric operators | `chronos_bolt_trt`, `patchtsmixer_trt`, `patchtst_trt`, `timesfm_trt` |
 
 The complete live list is the union of the `runtime_strategies` arrays in the
