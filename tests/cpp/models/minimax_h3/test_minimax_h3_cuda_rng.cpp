@@ -150,6 +150,24 @@ trtmc::MiniMaxH3ModuleLoader make_unused_pipeline_loader() {
         };
 }
 
+void test_pipeline_rejects_initial_latents_before_plan_loading() {
+    trtmc::MiniMaxH3Pipeline pipeline(make_unused_pipeline_loader(),
+                                      std::make_unique<TestTokenizer>(), "test-minimax-h3");
+    trtmc::VideoGenerationRequest request;
+    request.mode = trtmc::VideoGenerationMode::kTextToVideoAudio;
+    request.prompt = "must-not-tokenize";
+    request.config.initial_latents = {0.0F};
+    bool rejected = false;
+    try {
+        (void)pipeline.generate_video(request);
+    } catch (const std::invalid_argument& error) {
+        rejected = std::string(error.what()).find("does not accept initial_latents") !=
+                   std::string::npos;
+    }
+    if (!rejected)
+        throw std::runtime_error("MiniMax-H3 did not reject caller-supplied initial latents");
+}
+
 void test_pipeline_explicit_cache_finalization_is_once_and_terminal() {
     int finalizations = 0;
     {
@@ -518,6 +536,7 @@ int main() {
     try {
         test_scheduler_matches_cpu();
         test_pipeline_destruction_flushes_runtime_cache();
+        test_pipeline_rejects_initial_latents_before_plan_loading();
         test_pipeline_explicit_cache_finalization_is_once_and_terminal();
         test_pipeline_cache_finalization_failure_propagates_and_retries();
         test_scheduler_rejects_invalid_inputs();

@@ -28,6 +28,13 @@ canvas `--height 544 --width 960` and its transpose. Other explicit
 multiple-of-32 canvases accepted by the eager Diffusers API are not silently
 generalized: the native runtime rejects them before plan execution.
 
+T2VA tokenizes each prompt supplied to the request; the prompt is not fixed or
+padded to the qualification prompt. The native dynamic profile accepts 1--2641
+tokens without truncation. Prompts beyond that finite engine profile fail
+before generation instead of being silently shortened.
+The packaged single-video command accepts exactly one non-negative integer
+`--seed`; CSV or negative values fail before loading the model.
+
 Ref2VA preserves argument order and enforces the released limits: at most 9
 images, 3 videos, 3 explicit audio files, and 12 files total. Each video or
 explicit audio reference is 2--15 seconds; total video duration and total

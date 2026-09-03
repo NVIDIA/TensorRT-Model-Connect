@@ -82,6 +82,7 @@ struct MiniMaxH3DenoiserConfig {
     int32_t scheduler_grid_points{50};
     int32_t transformer_forwards{49};
     float guidance_scale{1.0F};
+    int32_t max_text_rows{537};
 };
 
 struct MiniMaxH3Ref2VAConfig {
@@ -117,7 +118,9 @@ MiniMaxH3DenoiserMetadata
 make_minimax_h3_fl2va_denoiser_metadata(const std::vector<int32_t>& text_token_tags,
                                         const std::vector<int32_t>& keyframe_anchors,
                                         const MiniMaxH3Geometry& geometry, bool native_vsa);
-void validate_minimax_h3_monolithic_denoiser_plan(ITrtModule& module, bool native_vsa);
+void validate_minimax_h3_prompt_token_count(std::size_t token_count, int32_t max_text_rows);
+void validate_minimax_h3_monolithic_denoiser_plan(ITrtModule& module, bool native_vsa,
+                                                  int32_t expected_max_text_rows = 0);
 void validate_minimax_h3_segment_plan(ITrtModule& module, MiniMaxH3SegmentPlanKind kind);
 std::vector<float> make_minimax_h3_position_ids(int32_t text_rows);
 std::vector<float> make_minimax_h3_position_ids(int32_t text_rows,

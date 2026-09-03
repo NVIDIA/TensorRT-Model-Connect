@@ -153,6 +153,22 @@ void test_runtime_rejects_malformed_timing_counts() {
           "runtime rejects a negative benchmark count");
 }
 
+void test_nonlocked_runtime_keeps_bundle_specific_generation_inputs() {
+    const auto args =
+        parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output",
+               "out.mp4", "--seed", "2", "--initial-latents-raw", "latents.raw"});
+    check(!args.parse_error,
+          "nonlocked runtime does not apply the locked H3 contract to every video bundle");
+    check(args.seed == 2 && args.initial_latents_raw == "latents.raw",
+          "nonlocked runtime preserves bundle-specific seed and latent inputs");
+
+    const auto csv =
+        parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output",
+               "out.mp4", "--seed", "1,2"});
+    check(csv.parse_error && csv.error_message.find("one non-negative integer") != std::string::npos,
+          "single-video command rejects a seed CSV instead of silently using seed zero");
+}
+
 } // namespace
 
 int main() {
@@ -162,5 +178,6 @@ int main() {
     test_runtime_rejects_python_escape_hatch();
     test_nonlocked_runtime_keeps_development_loader_overrides();
     test_runtime_rejects_malformed_timing_counts();
+    test_nonlocked_runtime_keeps_bundle_specific_generation_inputs();
     return failures == 0 ? 0 : 1;
 }

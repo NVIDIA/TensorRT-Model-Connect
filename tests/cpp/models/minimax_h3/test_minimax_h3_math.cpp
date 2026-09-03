@@ -10,6 +10,7 @@
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -82,6 +83,28 @@ void test_variable_text_position_layout() {
             rejected = true;
         }
         check(rejected, "H3 position layout rejects text rows outside its profile");
+    }
+}
+
+void test_prompt_token_profile_boundaries() {
+    for (const auto [tokens, maximum] :
+         {std::pair<std::size_t, int32_t>{537, 537}, {2641, 2641}}) {
+        try {
+            trtmc::validate_minimax_h3_prompt_token_count(tokens, maximum);
+        } catch (...) {
+            check(false, "H3 prompt accepts the declared profile endpoint");
+        }
+    }
+
+    for (const auto [tokens, maximum] :
+         {std::pair<std::size_t, int32_t>{538, 537}, {2642, 2641}}) {
+        bool rejected = false;
+        try {
+            trtmc::validate_minimax_h3_prompt_token_count(tokens, maximum);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "H3 prompt rejects one token beyond the declared profile");
     }
 }
 
@@ -407,6 +430,7 @@ int main() {
     test_pinned_schedules();
     test_data_ward_euler_sign();
     test_variable_text_position_layout();
+    test_prompt_token_profile_boundaries();
     test_public_video_geometry();
     test_public_canvas_resolver_and_vae_tiles();
     test_variable_duration_position_layout();

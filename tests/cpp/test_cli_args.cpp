@@ -626,6 +626,14 @@ void test_seed_csv_populates_seed_list() {
           "seed list values");
 }
 
+void test_seed_rejects_malformed_scalar() {
+    const auto args =
+        parse({"trtmc", "run", "bundle.bundle", "--prompt", "x", "--seed", "not-a-seed"});
+    check(args.parse_error, "malformed scalar seed is rejected");
+    check(args.error_message == "--seed expects an integer or unsigned-integer CSV",
+          "malformed scalar seed reports the accepted forms");
+}
+
 void test_prompt_and_prompts_file_mutually_exclusive() {
     auto args =
         parse({"trtmc", "run", "bundle.bundle", "--prompt", "hi", "--prompts-file", "prompts.txt"});
@@ -695,6 +703,7 @@ int main() {
     test_unexpected_positional_fails();
     test_num_images_zero_fails();
     test_seed_csv_populates_seed_list();
+    test_seed_rejects_malformed_scalar();
     test_prompt_and_prompts_file_mutually_exclusive();
     test_prompts_file_is_run_input_source();
     test_prompts_file_rejects_single_image_input();

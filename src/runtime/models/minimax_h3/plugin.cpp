@@ -793,6 +793,9 @@ void validate_profile(const PipelineContext& ctx, const MiniMaxH3DenoiserConfig&
     if (!denoiser.native_vsa) {
         if (packed != 38247 && packed != 108175 && packed != 112367)
             throw std::runtime_error("MiniMax-H3 dense bundle has an invalid sequence profile");
+        const int32_t expected_max_text_rows = packed == 112367 ? 2641 : 537;
+        if (denoiser.max_text_rows != expected_max_text_rows)
+            throw std::runtime_error("MiniMax-H3 dense bundle has an invalid text profile");
         return;
     }
 
@@ -804,6 +807,7 @@ void validate_profile(const PipelineContext& ctx, const MiniMaxH3DenoiserConfig&
             root.value("canvas_max_pixels", 0) == 768 * 1344 &&
             explicit_canvas_sizes_are_exact(root) && root.value("num_frames_min", 0) == 124 &&
             root.value("num_frames_opt", 0) == 124 && root.value("num_frames_max", 0) == 345 &&
+            denoiser.max_text_rows == 2641 &&
             root.value("text_rows_min", 0) == 1 && root.value("text_rows_opt", 0) == 128 &&
             root.value("text_rows_max", 0) == 2641 && root.value("audio_rows_min", 0) == 414 &&
             root.value("audio_rows_opt", 0) == 414 && root.value("audio_rows_max", 0) == 1150 &&
@@ -859,6 +863,9 @@ MiniMaxH3DenoiserConfig load_denoiser_config(const PipelineContext& ctx, const C
         result.scheduler_grid_points = root.value("scheduler_grid_points", 50);
         result.transformer_forwards = root.value("transformer_forwards", 49);
         result.guidance_scale = root.value("guidance_scale", 1.0F);
+        const int32_t packed = root.value("padded_sequence_length", 38247);
+        result.max_text_rows =
+            root.value("text_rows_max", packed == 112367 ? 2641 : 537);
 
         if (!result.native_vsa) {
             if (result.scheduler_grid_points != 50 || result.transformer_forwards != 49 ||

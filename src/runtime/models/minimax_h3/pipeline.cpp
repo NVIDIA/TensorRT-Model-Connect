@@ -36,7 +36,6 @@ using Clock = std::chrono::steady_clock;
 
 constexpr int32_t kMinTextRows = 1;
 constexpr int32_t kMaxTextRows = 2641;
-constexpr int32_t kMaxT2vaPromptTokens = 537;
 constexpr int32_t kTextDim = 5120;
 constexpr int32_t kAudioChannels = 32;
 constexpr int32_t kLatentChannels = 24;
@@ -290,6 +289,17 @@ void fill_audio_position_ids(std::vector<float>& positions, const std::vector<do
 void validate_text_rows(int32_t text_rows) {
     if (text_rows < kMinTextRows || text_rows > kMaxTextRows)
         throw std::invalid_argument("MiniMax-H3 text rows must be between 1 and 2641");
+}
+
+void validate_prompt_token_count(std::size_t token_count, int32_t max_text_rows) {
+    if (max_text_rows < kMinTextRows || max_text_rows > kMaxTextRows)
+        throw std::invalid_argument("MiniMax-H3 prompt profile is invalid");
+    if (token_count < static_cast<std::size_t>(kMinTextRows) ||
+        token_count > static_cast<std::size_t>(max_text_rows)) {
+        throw std::invalid_argument(
+            "MiniMax-H3 native profile supports 1 to " + std::to_string(max_text_rows) +
+            " prompt tokens without truncation; got " + std::to_string(token_count));
+    }
 }
 
 double numpy_pairwise_sum(const std::vector<double>& values) {
@@ -647,7 +657,8 @@ void require_dynamic_denoiser_input(ITrtModule& module, const std::string& name,
     }
 }
 
-void validate_monolithic_denoiser_plan_impl(ITrtModule& module, bool native_vsa) {
+void validate_monolithic_denoiser_plan_impl(ITrtModule& module, bool native_vsa,
+                                            int32_t expected_max_text_rows) {
     if (!module.ok() || module.optimization_profile_count() != 1)
         throw std::runtime_error("MiniMax-H3 denoiser requires one valid optimization profile");
     const std::size_t expected_inputs = native_vsa ? 60U : 57U;
@@ -665,6 +676,10 @@ void validate_monolithic_denoiser_plan_impl(ITrtModule& module, bool native_vsa)
     const int32_t profile_text_rows = legacy_profile ? 537 : kMaxTextRows;
     const int32_t profile_packed_rows = legacy_profile ? 108175 : kMaxPackedRows;
     const int32_t profile_prefix_tiles = legacy_profile ? 27 : kMaxVsaPrefixTiles;
+    if (expected_max_text_rows != 0 && expected_max_text_rows != profile_text_rows) {
+        throw std::runtime_error(
+            "MiniMax-H3 denoiser plan text profile disagrees with bundle metadata");
+    }
     require_dynamic_denoiser_input(module, "video_hidden_states", DType::kFloat32,
                                    {kMinVideoRows, kPatchDim}, {37296, kPatchDim},
                                    {profile_video_rows, kPatchDim});
@@ -1039,8 +1054,9 @@ bool device_tensors_ready(std::initializer_list<const DeviceTensor*> tensors) {
 
 } // namespace
 
-void validate_minimax_h3_monolithic_denoiser_plan(ITrtModule& module, bool native_vsa) {
-    validate_monolithic_denoiser_plan_impl(module, native_vsa);
+void validate_minimax_h3_monolithic_denoiser_plan(ITrtModule& module, bool native_vsa,
+                                                  int32_t expected_max_text_rows) {
+    validate_monolithic_denoiser_plan_impl(module, native_vsa, expected_max_text_rows);
 }
 
 void validate_minimax_h3_segment_plan(ITrtModule& module, MiniMaxH3SegmentPlanKind kind) {
@@ -1265,6 +1281,10 @@ make_minimax_h3_fl2va_denoiser_metadata(const std::vector<int32_t>& text_token_t
     return result;
 }
 
+void validate_minimax_h3_prompt_token_count(std::size_t token_count, int32_t max_text_rows) {
+    validate_prompt_token_count(token_count, max_text_rows);
+}
+
 std::vector<float> make_minimax_h3_position_ids(int32_t text_rows) {
     return make_position_ids(
         text_rows,
@@ -1357,7 +1377,8 @@ struct MiniMaxH3Pipeline::ResidentState {
     std::unique_ptr<ITrtModule> vae;
 
     void load_text_embeddings(const std::string& requested_prompt, ITokenizer& tokenizer,
-                              const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
+                              const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
+                              int32_t max_text_rows);
     std::vector<std::vector<float>>
     load_fl2va_conditioning(const std::string& requested_prompt,
                             const MiniMaxH3PreparedKeyframes& keyframes, ITokenizer& tokenizer,
@@ -1366,7 +1387,7 @@ struct MiniMaxH3Pipeline::ResidentState {
                           const MiniMaxH3Schedule& audio_schedule,
                           const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
     bool prepare_denoiser(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
-                          bool first_block_cache, bool native_vsa,
+                          bool first_block_cache, bool native_vsa, int32_t max_text_rows,
                           const MiniMaxH3Geometry& geometry);
     DenoiserStats
     run_denoiser(bool first_block_cache, bool native_vsa, MiniMaxH3DenoiserMetadata& metadata,
@@ -1487,7 +1508,8 @@ void MiniMaxH3Pipeline::ResidentState::release_vae_stage() {
 void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& requested_prompt,
                                                             ITokenizer& tokenizer,
                                                             const MiniMaxH3ModuleLoader& loader,
-                                                            cudaStream_t stream) {
+                                                            cudaStream_t stream,
+                                                            int32_t max_text_rows) {
     // The text encoder is the largest plan. Drop resident execution modules
     // before loading it so prompt changes retain the previous peak-memory
     // behavior on smaller devices.
@@ -1498,11 +1520,7 @@ void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& r
     text_token_tags.clear();
     text_rows = 0;
     const auto ids = tokenizer.encode(requested_prompt);
-    if (ids.size() < static_cast<std::size_t>(kMinTextRows) ||
-        ids.size() > static_cast<std::size_t>(kMaxT2vaPromptTokens))
-        throw std::invalid_argument(
-            "MiniMax-H3 native profile supports 1 to 537 prompt tokens without truncation; got " +
-            std::to_string(ids.size()));
+    validate_prompt_token_count(ids.size(), max_text_rows);
     const int32_t requested_text_rows = static_cast<int32_t>(ids.size());
     std::vector<int32_t> position_ids(ids.size());
     for (int32_t index = 0; index < requested_text_rows; ++index)
@@ -1934,9 +1952,9 @@ void MiniMaxH3Pipeline::ResidentState::bind_segmented_vsa_shapes(
 }
 
 bool MiniMaxH3Pipeline::ResidentState::prepare_denoiser(const MiniMaxH3ModuleLoader& loader,
-                                                        cudaStream_t stream, bool first_block_cache,
-                                                        bool native_vsa,
-                                                        const MiniMaxH3Geometry& geometry) {
+                                                         cudaStream_t stream, bool first_block_cache,
+                                                         bool native_vsa, int32_t max_text_rows,
+                                                         const MiniMaxH3Geometry& geometry) {
     // The previous request synchronized its VAE before returning. Release it
     // before deserializing the denoiser so the two large stages never overlap.
     release_vae_stage();
@@ -1949,7 +1967,7 @@ bool MiniMaxH3Pipeline::ResidentState::prepare_denoiser(const MiniMaxH3ModuleLoa
         else if (first_block_cache)
             bind_first_block_cache_shapes(geometry);
         else {
-            validate_minimax_h3_monolithic_denoiser_plan(*denoiser, native_vsa);
+            validate_minimax_h3_monolithic_denoiser_plan(*denoiser, native_vsa, max_text_rows);
             denoiser_geometry = geometry;
         }
         return true;
@@ -1961,7 +1979,7 @@ bool MiniMaxH3Pipeline::ResidentState::prepare_denoiser(const MiniMaxH3ModuleLoa
     } else {
         denoiser = loader("denoiser_plan", stream, {});
         denoiser->set_timing_label("denoiser_plan");
-        validate_minimax_h3_monolithic_denoiser_plan(*denoiser, native_vsa);
+        validate_minimax_h3_monolithic_denoiser_plan(*denoiser, native_vsa, max_text_rows);
         denoiser_geometry = geometry;
     }
     return false;
@@ -2626,6 +2644,10 @@ MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
         throw std::invalid_argument("MiniMax-H3 pipeline requires a loader and tokenizer");
     if (!std::isfinite(cache_threshold_) || cache_threshold_ <= 0.0F)
         throw std::invalid_argument("MiniMax-H3 cache threshold must be finite and positive");
+    if (denoiser_config_.max_text_rows < kMinTextRows ||
+        denoiser_config_.max_text_rows > kMaxTextRows) {
+        throw std::invalid_argument("MiniMax-H3 denoiser text profile is invalid");
+    }
     if (denoiser_config_.scheduler_grid_points < 2 ||
         denoiser_config_.transformer_forwards != denoiser_config_.scheduler_grid_points - 1 ||
         !std::isfinite(denoiser_config_.guidance_scale) ||
@@ -3000,6 +3022,9 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
     }
     StreamScopeSynchronizer synchronize_on_exit(stream_);
     try {
+        if (!request.config.initial_latents.empty())
+            throw std::invalid_argument(
+                "MiniMax-H3 native runtime does not accept initial_latents");
         if (!request.config.negative_prompt.empty())
             throw std::invalid_argument(
                 "MiniMax-H3 is guidance-distilled and does not accept negative_prompt");
@@ -3062,7 +3087,8 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
             keyframe_latents = resident_->load_fl2va_conditioning(
                 request.prompt, prepared_keyframes, *tokenizer_, loader_, stream_);
         } else if (!text_cache_hit) {
-            resident_->load_text_embeddings(request.prompt, *tokenizer_, loader_, stream_);
+            resident_->load_text_embeddings(request.prompt, *tokenizer_, loader_, stream_,
+                                             denoiser_config_.max_text_rows);
         }
         const auto text_end = Clock::now();
 
@@ -3120,7 +3146,8 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
 
         const auto denoiser_begin = Clock::now();
         const bool denoiser_resident_hit = resident_->prepare_denoiser(
-            loader_, stream_, first_block_cache_, denoiser_config_.native_vsa, geometry);
+            loader_, stream_, first_block_cache_, denoiser_config_.native_vsa,
+            denoiser_config_.max_text_rows, geometry);
         const DenoiserStats denoiser_stats = resident_->run_denoiser(
             first_block_cache_, denoiser_config_.native_vsa, metadata, video_schedule,
             audio_schedule, video_rows, audio_rows, cache_threshold_, stream_);

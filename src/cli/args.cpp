@@ -559,6 +559,12 @@ CliArgs parse_args(int argc, char** argv) {
         if (arg == "--seed" && need_value(arg)) {
             const std::string value = argv[++i];
             if (value.find(',') != std::string::npos) {
+                if (args.command == "generate-video") {
+                    args.parse_error = true;
+                    args.error_message =
+                        "--seed expects one non-negative integer for generate-video";
+                    return args;
+                }
                 auto parsed = parse_seed_csv(value);
                 if (!parsed.has_value() || parsed->empty()) {
                     args.parse_error = true;
@@ -567,7 +573,19 @@ CliArgs parse_args(int argc, char** argv) {
                 }
                 args.seed_list = std::move(*parsed);
             } else {
-                args.seed = std::atoi(value.c_str());
+                int parsed = 0;
+                if (!parse_strict_int(value.c_str(), parsed)) {
+                    args.parse_error = true;
+                    args.error_message = "--seed expects an integer or unsigned-integer CSV";
+                    return args;
+                }
+                if (args.command == "generate-video" && parsed < 0) {
+                    args.parse_error = true;
+                    args.error_message =
+                        "--seed expects one non-negative integer for generate-video";
+                    return args;
+                }
+                args.seed = parsed;
             }
             continue;
         }
@@ -698,8 +716,15 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--initial-latents-raw" && need_value(arg)) {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+            args.parse_error = true;
+            args.error_message =
+                "--initial-latents-raw is not supported by the native MiniMax-H3 runtime";
+            return args;
+#else
             args.initial_latents_raw = argv[++i];
             continue;
+#endif
         }
         if (arg == "--condition-latents-raw" && need_value(arg)) {
             args.condition_latents_raw = argv[++i];

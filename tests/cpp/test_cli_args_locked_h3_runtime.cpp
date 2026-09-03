@@ -89,6 +89,34 @@ void test_locked_generate_video_requires_one_mp4_output() {
     check(duplicate.parse_error, "locked parser rejects multiple outputs");
 }
 
+void test_locked_generate_video_rejects_unsupported_latent_injection() {
+    const auto parsed =
+        parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output",
+               "result.mp4", "--initial-latents-raw", "latents.raw"});
+    check(parsed.parse_error, "locked H3 parser rejects unsupported initial latents");
+    check(parsed.error_message.find("not supported by the native MiniMax-H3 runtime") !=
+              std::string::npos,
+          "locked H3 parser explains unsupported initial latents");
+    check(parsed.initial_latents_raw.empty(), "locked H3 parser never records initial latents");
+}
+
+void test_locked_generate_video_requires_one_non_negative_seed() {
+    for (const char* value : {"-1", "1,2"}) {
+        const auto parsed =
+            parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output",
+                   "result.mp4", "--seed", value});
+        check(parsed.parse_error, "locked H3 parser rejects a non-scalar or negative seed");
+        check(parsed.error_message.find("one non-negative integer") != std::string::npos,
+              "locked H3 parser explains its seed contract");
+    }
+
+    const auto valid =
+        parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output",
+               "result.mp4", "--seed", "17"});
+    check(!valid.parse_error && valid.seed == 17,
+          "locked H3 parser accepts one non-negative scalar seed");
+}
+
 } // namespace
 
 int main() {
@@ -96,5 +124,7 @@ int main() {
     test_locked_parser_rejects_loader_overrides();
     test_locked_parser_keeps_package_commands();
     test_locked_generate_video_requires_one_mp4_output();
+    test_locked_generate_video_rejects_unsupported_latent_injection();
+    test_locked_generate_video_requires_one_non_negative_seed();
     return failures == 0 ? 0 : 1;
 }
