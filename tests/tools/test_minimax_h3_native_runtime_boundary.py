@@ -92,6 +92,7 @@ def test_windows_h3_distribution_disables_optional_runtime_frameworks() -> None:
     ):
         assert forbidden_import in package_script.lower()
     assert "unapproved runtime dependency" in package_script.lower()
+    assert '@("LICENSE", "NOTICE", "ASSET_LICENSES.md")' in package_script
     assert "--validate-runtime" in package_script
     inspect_invocation = re.search(
         r"\$inspectOutput\s*=\s*@\((.*?)\)\s*\n", package_script, re.DOTALL
@@ -227,6 +228,7 @@ def test_locked_windows_h3_runtime_is_fail_closed() -> None:
     )
     assert "Payload contains a file absent from the manifest" in installer
     assert "MiniMax-H3 payload manifest contains an unexpected file" in installer
+    assert '"licenses/asset_licenses.md"' in installer
     assert "exactly one versioned TensorRT-RTX runtime DLL" in installer
     assert "CreateHardLink" not in installer
     assert "verify_payload(staging, entries)" in installer

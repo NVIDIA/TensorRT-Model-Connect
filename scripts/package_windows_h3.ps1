@@ -380,7 +380,7 @@ if ($ConsumeBundle) {
     Copy-PayloadFile $Bundle $PackagedBundle
 }
 
-foreach ($legalName in @("LICENSE", "NOTICE")) {
+foreach ($legalName in @("LICENSE", "NOTICE", "ASSET_LICENSES.md")) {
     $legalPath = Join-Path $RepositoryRoot $legalName
     if (Test-Path -LiteralPath $legalPath -PathType Leaf) {
         Copy-PayloadFile $legalPath (Join-Path $PayloadRoot ("licenses\" + $legalName))

@@ -6,6 +6,44 @@ source, configuration, benchmark metadata, and generated golden data are
 distributed under the project license unless stated otherwise. Third-party or
 externally sourced assets not listed here require separate review.
 
+## MiniMax-H3 SM121 block-sparse attention PTX
+
+`src/runtime/models/minimax_h3/vsa_attention_sm121.ptx` is a generated and
+modified derivative of the FastVideo block-sparse Triton kernel. It is
+distributed under the Apache License 2.0 and attributed in `NOTICE`.
+
+- Artifact SHA-256: `bdd8e16a33ef6a140fdba632cd4a2344c29bf5581edaf4403b10700edbacba32`
+- Artifact size: 103,009 bytes
+- Upstream: https://github.com/hao-ai-lab/FastVideo
+- Upstream revision: `3d8ac9d14bd697a89ede8f170cbfbca012a9edcc`
+- Upstream source:
+  `fastvideo-kernel/python/fastvideo_kernel/triton_kernels/block_sparse_attn_triton.py`
+- Upstream source Git blob: `22d0b13e57f885b3bcadafbc6a03a33ec90df50f`
+- Upstream source SHA-256:
+  `870df2aa8453ab8be42124e6afbd277b82c19bf7ea4218deed2abcff62667cb2`
+- Upstream license: Apache License 2.0; that revision has no upstream
+  `NOTICE` file
+- Generator: `triton-windows` 3.7.1.post27 (compiler metadata 3.7.1),
+  distributed under the MIT License; https://github.com/woct0rdho/triton-windows
+- Generation cache key:
+  `c28ebcca34f98b93245137c44ed42c7f54fbe8bb134e06d491d42186208a4ac8`
+- Specialization: PTX ISA 8.8, `sm_121a`, 64 x 64 query/key tiles,
+  128 threads (four warps), six pipeline stages, and 90,136 bytes of dynamic
+  shared memory
+- Compiler input bundled with `triton-windows` 3.7.1.post27:
+  `triton/backends/nvidia/lib/libdevice.10.bc`, SHA-256
+  `5c2fae37c86e68c3a38605a95f512d7d12d5f3db986310be47f57304aa72a5ee`;
+  the exact upstream CUDA Toolkit release is not established, and the bitcode
+  file is not separately included in this repository
+
+The generated PTX was modified by removing every `.loc` and `.file` directive
+and every DWARF/debug section. This removes generator-machine paths while
+leaving the kernel instruction sequence unchanged. CMake embeds the sanitized
+PTX into the MiniMax-H3 plugin when building with CUDA 12.9 or newer. At
+runtime it is loaded only on compute capability 12.1; all other devices retain
+the portable CUDA implementation. Python, PyTorch, Triton, and FastVideo are
+not runtime dependencies.
+
 ## Shared vehicle test photograph
 
 The following paths contain byte-identical copies of an original photograph

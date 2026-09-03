@@ -738,6 +738,7 @@ void validate_minimax_h3_runtime_payload(const std::vector<PayloadEntry>& entrie
     const std::set<std::string> optional{
         "licenses/license",
         "licenses/notice",
+        "licenses/asset_licenses.md",
     };
 
     std::set<std::string> paths;

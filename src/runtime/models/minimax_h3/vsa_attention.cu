@@ -5,7 +5,22 @@
 
 #include "runtime/models/minimax_h3/vsa_attention.h"
 
+#ifndef TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
+#define TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION 0
+#endif
+
+#if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION && CUDART_VERSION < 12090
+#error "The MiniMax-H3 SM121 specialization requires CUDA Runtime headers 12.9 or newer"
+#endif
+
+#if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
+#include "vsa_attention_sm121_ptx.h"
+#endif
+
 #include <algorithm>
+#if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
+#include <array>
+#endif
 #include <cfloat>
 #include <climits>
 #include <cmath>
@@ -14,6 +29,9 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <limits>
+#if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
+#include <mutex>
+#endif
 #include <mma.h>
 #include <stdexcept>
 #include <string>
@@ -24,7 +42,9 @@ namespace {
 namespace wmma = nvcuda::wmma;
 
 constexpr int32_t kWarpSize = 32;
-constexpr int32_t kAttentionThreads = 256;
+constexpr int32_t kAttentionThreads = 128;
+constexpr int32_t kAttentionQueryRows = 16;
+constexpr int32_t kAttentionQuerySlices = kTileTokens / kAttentionQueryRows;
 constexpr int32_t kSelectorThreads = 256;
 // The public worst-aspect 15-second canvas has 2,080 video tiles. Nine
 // blocked items per thread keep the one-block radix selector fail-closed above
@@ -33,6 +53,70 @@ constexpr int32_t kSelectorItems = 9;
 constexpr int32_t kSelectorCapacity = kSelectorThreads * kSelectorItems;
 constexpr float kAttentionScale = 0.08838834764831844055F; // 1 / sqrt(128)
 constexpr float kLog2E = 1.4426950408889634074F;
+#if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
+constexpr int32_t kSm121Threads = 128;
+constexpr int32_t kSm121SharedBytes = 90136;
+
+struct Sm121KernelState {
+    std::mutex mutex;
+    cudaLibrary_t library{nullptr};
+    cudaKernel_t kernel{nullptr};
+    bool attempted{false};
+    // 0: unconfigured, 1: ready, 2: failed. CUDA supports at most 32 devices.
+    std::array<unsigned char, 32> device_status{};
+};
+
+Sm121KernelState& sm121_kernel_state() {
+    // The CUDA Runtime owns loaded library lifetime. Keeping this state until
+    // process exit avoids unloading code while another stream may still use it.
+    static auto* state = new Sm121KernelState();
+    return *state;
+}
+
+cudaKernel_t sm121_kernel() {
+    int32_t device = 0;
+    int32_t major = 0;
+    int32_t minor = 0;
+    if (cudaGetDevice(&device) != cudaSuccess) {
+        cudaGetLastError();
+        return nullptr;
+    }
+    if (device < 0 || device >= 32)
+        return nullptr;
+    if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device) != cudaSuccess ||
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device) != cudaSuccess) {
+        cudaGetLastError();
+        return nullptr;
+    }
+    if (major != 12 || minor != 1) {
+        return nullptr;
+    }
+
+    auto& state = sm121_kernel_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.attempted) {
+        state.attempted = true;
+        if (cudaLibraryLoadData(&state.library, kMiniMaxH3VsaSm121Ptx, nullptr, nullptr, 0, nullptr,
+                                nullptr, 0) != cudaSuccess ||
+            cudaLibraryGetKernel(&state.kernel, state.library, "_attn_fwd_sparse") != cudaSuccess) {
+            state.kernel = nullptr;
+            cudaGetLastError();
+        }
+    }
+    if (state.kernel == nullptr || state.device_status[static_cast<std::size_t>(device)] == 2)
+        return nullptr;
+    if (state.device_status[static_cast<std::size_t>(device)] == 0) {
+        const cudaError_t status = cudaKernelSetAttributeForDevice(
+            state.kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSm121SharedBytes, device);
+        state.device_status[static_cast<std::size_t>(device)] = status == cudaSuccess ? 1 : 2;
+        if (status != cudaSuccess) {
+            cudaGetLastError();
+            return nullptr;
+        }
+    }
+    return state.kernel;
+}
+#endif
 
 void check_cuda(cudaError_t status, const char* operation) {
     if (status != cudaSuccess) {
@@ -228,36 +312,142 @@ __device__ __forceinline__ int32_t attended_key_tile(int32_t key_rank, int32_t q
                     key_rank - prefix_tiles];
 }
 
+#if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
+// The embedded SM121 specialization uses FastVideo's generic q2k ABI. Expand
+// ModelConnect's compact selector output into that ABI without materializing a
+// dense Boolean mask. Only live entries are written; unused row tails are never
+// read by the attention kernel.
+__global__ void materialize_sm121_q2k_kernel(const int32_t* selected_video_tiles,
+                                             int32_t* q2k_index, int32_t* q2k_count, int32_t heads,
+                                             int32_t total_tiles, int32_t prefix_tiles,
+                                             int32_t top_video_tiles) {
+    const int32_t row = blockIdx.x;
+    const int32_t query_tile = row % total_tiles;
+    const int32_t head = row / total_tiles;
+    if (head >= heads)
+        return;
+    const bool dense = query_tile < prefix_tiles;
+    const int32_t count = dense ? total_tiles : prefix_tiles + top_video_tiles;
+    if (threadIdx.x == 0)
+        q2k_count[row] = count;
+    for (int32_t rank = threadIdx.x; rank < count; rank += blockDim.x) {
+        int32_t key_tile = rank;
+        if (!dense && rank >= prefix_tiles) {
+            key_tile =
+                selected_video_tiles[(static_cast<std::int64_t>(head) * total_tiles + query_tile) *
+                                         top_video_tiles +
+                                     rank - prefix_tiles];
+        }
+        q2k_index[static_cast<std::int64_t>(row) * total_tiles + rank] = key_tile;
+    }
+}
+
+__global__ void zero_sm121_padded_query_rows_kernel(__nv_bfloat16* output,
+                                                    const int32_t* valid_sizes,
+                                                    int32_t total_tiles) {
+    const int32_t row = blockIdx.x;
+    const int32_t query_tile = row % total_tiles;
+    const int32_t head = row / total_tiles;
+    const int32_t valid_rows = valid_sizes[query_tile];
+    for (int32_t index = valid_rows * kHeadDim + threadIdx.x; index < kTileTokens * kHeadDim;
+         index += blockDim.x) {
+        output[(static_cast<std::int64_t>(head) * total_tiles + query_tile) * kTileTokens *
+                   kHeadDim +
+               index] = __float2bfloat16_rn(0.0F);
+    }
+}
+
+void launch_sm121_attention(cudaKernel_t kernel, const __nv_bfloat16* query,
+                            const __nv_bfloat16* key, const __nv_bfloat16* value,
+                            const int32_t* valid_sizes, const int32_t* selected_video_tiles,
+                            __nv_bfloat16* output, int32_t* q2k_index, int32_t* q2k_count,
+                            float* lse, int32_t heads, int32_t total_tiles, int32_t prefix_tiles,
+                            int32_t top_video_tiles, cudaStream_t stream) {
+    if (kernel == nullptr || q2k_index == nullptr || q2k_count == nullptr || lse == nullptr)
+        throw std::invalid_argument("FastH3 SM121 attention received invalid workspace");
+
+    materialize_sm121_q2k_kernel<<<heads * total_tiles, 256, 0, stream>>>(
+        selected_video_tiles, q2k_index, q2k_count, heads, total_tiles, prefix_tiles,
+        top_video_tiles);
+    check_launch("FastH3 SM121 q2k materialization launch");
+
+    auto* query_arg = const_cast<__nv_bfloat16*>(query);
+    auto* key_arg = const_cast<__nv_bfloat16*>(key);
+    auto* value_arg = const_cast<__nv_bfloat16*>(value);
+    float scale = kAttentionScale;
+    auto* q2k_index_arg = q2k_index;
+    auto* q2k_count_arg = q2k_count;
+    int32_t max_kv_blocks = total_tiles;
+    auto* valid_sizes_arg = const_cast<int32_t*>(valid_sizes);
+    auto* lse_arg = lse;
+    auto* output_arg = output;
+    const int32_t tokens = total_tiles * kTileTokens;
+    int32_t stride_z = heads * tokens * kHeadDim;
+    int32_t stride_h = tokens * kHeadDim;
+    int32_t stride_m = kHeadDim;
+    int32_t heads_arg = heads;
+    int32_t query_tokens = tokens;
+    int32_t key_tokens = tokens;
+    void* global_scratch = nullptr;
+    void* profile_scratch = nullptr;
+    void* arguments[] = {
+        &query_arg,      &key_arg,         &value_arg,       &scale,        &q2k_index_arg,
+        &q2k_count_arg,  &max_kv_blocks,   &valid_sizes_arg, &lse_arg,      &output_arg,
+        &stride_z,       &stride_h,        &stride_m,        &stride_z,     &stride_h,
+        &stride_m,       &stride_z,        &stride_h,        &stride_m,     &stride_z,
+        &stride_h,       &stride_m,        &heads_arg,       &query_tokens, &key_tokens,
+        &global_scratch, &profile_scratch,
+    };
+    check_cuda(cudaLaunchKernel(reinterpret_cast<const void*>(kernel), dim3(total_tiles, heads, 1),
+                                dim3(kSm121Threads, 1, 1), arguments, kSm121SharedBytes, stream),
+               "FastH3 SM121 online-attention launch");
+    zero_sm121_padded_query_rows_kernel<<<heads * total_tiles, kSm121Threads, 0, stream>>>(
+        output, valid_sizes, total_tiles);
+    check_launch("FastH3 SM121 padding cleanup launch");
+}
+#endif
+
 __global__ void block_sparse_attention_64_kernel(
     const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv_bfloat16* value,
     const int32_t* valid_sizes, const int32_t* selected_video_tiles, __nv_bfloat16* output,
     int32_t total_tiles, int32_t prefix_tiles, int32_t top_video_tiles) {
     extern __shared__ unsigned char shared_bytes[];
     auto* shared_q = reinterpret_cast<__nv_bfloat16*>(shared_bytes);
-    auto* shared_scores = reinterpret_cast<float*>(shared_q + kTileTokens * kHeadDim);
+    auto* shared_scores = reinterpret_cast<float*>(shared_q + kAttentionQueryRows * kHeadDim);
     auto* shared_probabilities =
-        reinterpret_cast<__nv_bfloat16*>(shared_scores + kTileTokens * kTileTokens);
-    auto* shared_output =
-        reinterpret_cast<float*>(shared_probabilities + kTileTokens * kTileTokens);
-    auto* row_maximum = shared_output + kTileTokens * kHeadDim;
-    auto* row_denominator = row_maximum + kTileTokens;
+        reinterpret_cast<__nv_bfloat16*>(shared_scores + kAttentionQueryRows * kTileTokens);
+    // Each warp needs one 16x16 FP32 landing tile only while converting its
+    // accumulator to BF16. Reusing it across the two output-column fragments
+    // avoids a full 64x128 FP32 shared-output allocation.
+    auto* shared_warp_store =
+        reinterpret_cast<float*>(shared_probabilities + kAttentionQueryRows * kTileTokens);
+    auto* row_maximum = shared_warp_store + (kAttentionThreads / kWarpSize) * 16 * 16;
+    auto* row_denominator = row_maximum + kAttentionQueryRows;
 
     const int32_t query_tile = blockIdx.x;
     const int32_t head = blockIdx.y;
+    const int32_t query_slice = blockIdx.z;
+    const int32_t query_row_offset = query_slice * kAttentionQueryRows;
     const int32_t warp = threadIdx.x / kWarpSize;
-    const int32_t valid_query_rows = valid_sizes[query_tile];
+    const int32_t lane = threadIdx.x % kWarpSize;
+    const int32_t remaining_query_rows = valid_sizes[query_tile] - query_row_offset;
+    const int32_t valid_query_rows =
+        remaining_query_rows <= 0
+            ? 0
+            : (remaining_query_rows < kAttentionQueryRows ? remaining_query_rows
+                                                          : kAttentionQueryRows);
     const int32_t key_count =
         query_tile < prefix_tiles ? total_tiles : prefix_tiles + top_video_tiles;
     const std::int64_t query_begin =
-        (static_cast<std::int64_t>(head) * total_tiles + query_tile) * kTileTokens * kHeadDim;
+        (static_cast<std::int64_t>(head) * total_tiles + query_tile) * kTileTokens * kHeadDim +
+        query_row_offset * kHeadDim;
 
-    for (int32_t index = threadIdx.x; index < kTileTokens * kHeadDim; index += blockDim.x) {
+    for (int32_t index = threadIdx.x; index < kAttentionQueryRows * kHeadDim; index += blockDim.x) {
         const int32_t row = index / kHeadDim;
         shared_q[index] =
             row < valid_query_rows ? query[query_begin + index] : __float2bfloat16_rn(0.0F);
-        shared_output[index] = 0.0F;
     }
-    if (threadIdx.x < kTileTokens) {
+    if (threadIdx.x < kAttentionQueryRows) {
         row_maximum[threadIdx.x] = -FLT_MAX;
         row_denominator[threadIdx.x] = 0.0F;
     }
@@ -273,31 +463,22 @@ __global__ void block_sparse_attention_64_kernel(
             key +
             (static_cast<std::int64_t>(head) * total_tiles + key_tile) * kTileTokens * kHeadDim;
 
+        const int32_t column_block = warp;
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
+        wmma::fill_fragment(accumulator, 0.0F);
 #pragma unroll
-        for (int32_t part = 0; part < 2; ++part) {
-            const int32_t score_tile = warp + part * 8;
-            const int32_t row_block = score_tile / 4;
-            const int32_t column_block = score_tile % 4;
-            wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
-            wmma::fill_fragment(accumulator, 0.0F);
-#pragma unroll
-            for (int32_t depth_block = 0; depth_block < 8; ++depth_block) {
-                wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major>
-                    query_fragment;
-                wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major>
-                    key_fragment;
-                wmma::load_matrix_sync(query_fragment,
-                                       shared_q + row_block * 16 * kHeadDim + depth_block * 16,
-                                       kHeadDim);
-                wmma::load_matrix_sync(key_fragment,
-                                       key_begin + column_block * 16 * kHeadDim + depth_block * 16,
-                                       kHeadDim);
-                wmma::mma_sync(accumulator, query_fragment, key_fragment, accumulator);
-            }
-            wmma::store_matrix_sync(shared_scores + row_block * 16 * kTileTokens +
-                                        column_block * 16,
-                                    accumulator, kTileTokens, wmma::mem_row_major);
+        for (int32_t depth_block = 0; depth_block < 8; ++depth_block) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major>
+                query_fragment;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> key_fragment;
+            wmma::load_matrix_sync(query_fragment, shared_q + depth_block * 16, kHeadDim);
+            wmma::load_matrix_sync(key_fragment,
+                                   key_begin + column_block * 16 * kHeadDim + depth_block * 16,
+                                   kHeadDim);
+            wmma::mma_sync(accumulator, query_fragment, key_fragment, accumulator);
         }
+        wmma::store_matrix_sync(shared_scores + column_block * 16, accumulator, kTileTokens,
+                                wmma::mem_row_major);
         __syncthreads();
         if (threadIdx.x < valid_query_rows) {
             float maximum = row_maximum[threadIdx.x];
@@ -309,9 +490,9 @@ __global__ void block_sparse_attention_64_kernel(
         __syncthreads();
     }
 
-    wmma::fragment<wmma::accumulator, 16, 16, 16, float> output_accumulators[4];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> output_accumulators[2];
 #pragma unroll
-    for (int32_t part = 0; part < 4; ++part)
+    for (int32_t part = 0; part < 2; ++part)
         wmma::fill_fragment(output_accumulators[part], 0.0F);
 
     // Pass two recomputes QK, accumulates the unrounded denominator, casts
@@ -326,33 +507,24 @@ __global__ void block_sparse_attention_64_kernel(
         const __nv_bfloat16* key_begin = key + key_begin_offset;
         const __nv_bfloat16* value_begin = value + key_begin_offset;
 
+        const int32_t column_block = warp;
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
+        wmma::fill_fragment(accumulator, 0.0F);
 #pragma unroll
-        for (int32_t part = 0; part < 2; ++part) {
-            const int32_t score_tile = warp + part * 8;
-            const int32_t row_block = score_tile / 4;
-            const int32_t column_block = score_tile % 4;
-            wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
-            wmma::fill_fragment(accumulator, 0.0F);
-#pragma unroll
-            for (int32_t depth_block = 0; depth_block < 8; ++depth_block) {
-                wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major>
-                    query_fragment;
-                wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major>
-                    key_fragment;
-                wmma::load_matrix_sync(query_fragment,
-                                       shared_q + row_block * 16 * kHeadDim + depth_block * 16,
-                                       kHeadDim);
-                wmma::load_matrix_sync(key_fragment,
-                                       key_begin + column_block * 16 * kHeadDim + depth_block * 16,
-                                       kHeadDim);
-                wmma::mma_sync(accumulator, query_fragment, key_fragment, accumulator);
-            }
-            wmma::store_matrix_sync(shared_scores + row_block * 16 * kTileTokens +
-                                        column_block * 16,
-                                    accumulator, kTileTokens, wmma::mem_row_major);
+        for (int32_t depth_block = 0; depth_block < 8; ++depth_block) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major>
+                query_fragment;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> key_fragment;
+            wmma::load_matrix_sync(query_fragment, shared_q + depth_block * 16, kHeadDim);
+            wmma::load_matrix_sync(key_fragment,
+                                   key_begin + column_block * 16 * kHeadDim + depth_block * 16,
+                                   kHeadDim);
+            wmma::mma_sync(accumulator, query_fragment, key_fragment, accumulator);
         }
+        wmma::store_matrix_sync(shared_scores + column_block * 16, accumulator, kTileTokens,
+                                wmma::mem_row_major);
         __syncthreads();
-        if (threadIdx.x < kTileTokens) {
+        if (threadIdx.x < kAttentionQueryRows) {
             const int32_t row = threadIdx.x;
             float sum = 0.0F;
             for (int32_t column = 0; column < kTileTokens; ++column) {
@@ -371,19 +543,15 @@ __global__ void block_sparse_attention_64_kernel(
         __syncthreads();
 
 #pragma unroll
-        for (int32_t part = 0; part < 4; ++part) {
-            const int32_t output_tile = warp + part * 8;
-            const int32_t row_block = output_tile / 8;
-            const int32_t dimension_block = output_tile % 8;
+        for (int32_t part = 0; part < 2; ++part) {
+            const int32_t dimension_block = warp + part * 4;
 #pragma unroll
             for (int32_t key_block = 0; key_block < 4; ++key_block) {
                 wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major>
                     probability_fragment;
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major>
                     value_fragment;
-                wmma::load_matrix_sync(probability_fragment,
-                                       shared_probabilities + row_block * 16 * kTileTokens +
-                                           key_block * 16,
+                wmma::load_matrix_sync(probability_fragment, shared_probabilities + key_block * 16,
                                        kTileTokens);
                 wmma::load_matrix_sync(
                     value_fragment, value_begin + key_block * 16 * kHeadDim + dimension_block * 16,
@@ -396,21 +564,21 @@ __global__ void block_sparse_attention_64_kernel(
     }
 
 #pragma unroll
-    for (int32_t part = 0; part < 4; ++part) {
-        const int32_t output_tile = warp + part * 8;
-        const int32_t row_block = output_tile / 8;
-        const int32_t dimension_block = output_tile % 8;
-        wmma::store_matrix_sync(shared_output + row_block * 16 * kHeadDim + dimension_block * 16,
-                                output_accumulators[part], kHeadDim, wmma::mem_row_major);
-    }
-    __syncthreads();
-
-    for (int32_t index = threadIdx.x; index < kTileTokens * kHeadDim; index += blockDim.x) {
-        const int32_t row = index / kHeadDim;
-        const float denominator = row_denominator[row];
-        output[query_begin + index] = row < valid_query_rows && denominator > 0.0F
-                                          ? __float2bfloat16_rn(shared_output[index] / denominator)
-                                          : __float2bfloat16_rn(0.0F);
+    for (int32_t part = 0; part < 2; ++part) {
+        const int32_t dimension_block = warp + part * 4;
+        float* warp_store = shared_warp_store + warp * 16 * 16;
+        wmma::store_matrix_sync(warp_store, output_accumulators[part], 16, wmma::mem_row_major);
+        __syncwarp();
+        for (int32_t index = lane; index < 16 * 16; index += kWarpSize) {
+            const int32_t row = index / 16;
+            const int32_t column = index % 16;
+            const float denominator = row_denominator[row];
+            output[query_begin + row * kHeadDim + dimension_block * 16 + column] =
+                row < valid_query_rows && denominator > 0.0F
+                    ? __float2bfloat16_rn(warp_store[index] / denominator)
+                    : __float2bfloat16_rn(0.0F);
+        }
+        __syncwarp();
     }
 }
 
@@ -559,6 +727,30 @@ void select_video_topk_async(const float* scores, int32_t* selected_video_tiles,
     check_launch("FastH3 VSA selector launch");
 }
 
+Sm121AttentionStatus block_sparse_attention_sm121_status() {
+#if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
+    int32_t device = 0;
+    int32_t major = 0;
+    int32_t minor = 0;
+    if (cudaGetDevice(&device) != cudaSuccess ||
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device) != cudaSuccess ||
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device) != cudaSuccess) {
+        cudaGetLastError();
+        return Sm121AttentionStatus::kLoadFailed;
+    }
+    if (major != 12 || minor != 1)
+        return Sm121AttentionStatus::kUnsupportedDevice;
+    return sm121_kernel() != nullptr ? Sm121AttentionStatus::kReady
+                                     : Sm121AttentionStatus::kLoadFailed;
+#else
+    return Sm121AttentionStatus::kNotBuilt;
+#endif
+}
+
+bool block_sparse_attention_sm121_available() {
+    return block_sparse_attention_sm121_status() == Sm121AttentionStatus::kReady;
+}
+
 void block_sparse_attention_64_async(const __nv_bfloat16* query, const __nv_bfloat16* key,
                                      const __nv_bfloat16* value, const int32_t* valid_sizes,
                                      const int32_t* selected_video_tiles, __nv_bfloat16* output,
@@ -569,19 +761,50 @@ void block_sparse_attention_64_async(const __nv_bfloat16* query, const __nv_bflo
     if (query == nullptr || key == nullptr || value == nullptr || valid_sizes == nullptr ||
         selected_video_tiles == nullptr || output == nullptr)
         throw std::invalid_argument("FastH3 VSA attention launch received null tensors");
-    constexpr std::size_t shared_bytes =
-        kTileTokens * kHeadDim * sizeof(__nv_bfloat16) + kTileTokens * kTileTokens * sizeof(float) +
-        kTileTokens * kTileTokens * sizeof(__nv_bfloat16) + kTileTokens * kHeadDim * sizeof(float) +
-        2 * kTileTokens * sizeof(float);
+    constexpr std::size_t shared_bytes = kAttentionQueryRows * kHeadDim * sizeof(__nv_bfloat16) +
+                                         kAttentionQueryRows * kTileTokens * sizeof(float) +
+                                         kAttentionQueryRows * kTileTokens * sizeof(__nv_bfloat16) +
+                                         (kAttentionThreads / kWarpSize) * 16 * 16 * sizeof(float) +
+                                         2 * kAttentionQueryRows * sizeof(float);
     check_cuda(cudaFuncSetAttribute(block_sparse_attention_64_kernel,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     static_cast<int32_t>(shared_bytes)),
                "FastH3 VSA attention shared-memory opt-in");
-    block_sparse_attention_64_kernel<<<dim3(total_tiles, heads), kAttentionThreads, shared_bytes,
-                                       stream>>>(query, key, value, valid_sizes,
-                                                 selected_video_tiles, output, total_tiles,
-                                                 prefix_tiles, top_video_tiles);
+    block_sparse_attention_64_kernel<<<dim3(total_tiles, heads, kAttentionQuerySlices),
+                                       kAttentionThreads, shared_bytes, stream>>>(
+        query, key, value, valid_sizes, selected_video_tiles, output, total_tiles, prefix_tiles,
+        top_video_tiles);
     check_launch("FastH3 VSA attention launch");
+}
+
+void block_sparse_attention_64_sm121_async(
+    const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv_bfloat16* value,
+    const int32_t* valid_sizes, const int32_t* selected_video_tiles, __nv_bfloat16* output,
+    int32_t heads, int32_t total_tiles, int32_t prefix_tiles, int32_t video_tiles,
+    int32_t top_video_tiles, cudaStream_t stream, const Sm121AttentionWorkspace& workspace) {
+    validate_sparse_geometry(heads, total_tiles, prefix_tiles, video_tiles, top_video_tiles);
+    if (query == nullptr || key == nullptr || value == nullptr || valid_sizes == nullptr ||
+        selected_video_tiles == nullptr || output == nullptr)
+        throw std::invalid_argument("FastH3 SM121 attention launch received null tensors");
+    const auto rows = static_cast<std::size_t>(heads) * total_tiles;
+    const auto required_q2k_index = rows * total_tiles;
+    const auto required_lse = rows * kTileTokens;
+    if (workspace.q2k_index == nullptr || workspace.q2k_count == nullptr ||
+        workspace.lse == nullptr || workspace.q2k_index_capacity < required_q2k_index ||
+        workspace.q2k_count_capacity < rows || workspace.lse_capacity < required_lse) {
+        throw std::invalid_argument("FastH3 SM121 attention workspace is too small");
+    }
+#if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
+    auto kernel = sm121_kernel();
+    if (kernel == nullptr)
+        throw std::runtime_error("FastH3 SM121 attention specialization is unavailable");
+    launch_sm121_attention(kernel, query, key, value, valid_sizes, selected_video_tiles, output,
+                           workspace.q2k_index, workspace.q2k_count, workspace.lse, heads,
+                           total_tiles, prefix_tiles, top_video_tiles, stream);
+#else
+    static_cast<void>(stream);
+    throw std::runtime_error("FastH3 SM121 attention specialization was not built");
+#endif
 }
 
 void pooled_gate_attention_async(const float* scores, const float* pooled_v, float* compressed,

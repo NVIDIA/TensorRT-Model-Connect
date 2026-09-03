@@ -114,6 +114,36 @@ void block_sparse_attention_64_async(const __nv_bfloat16* query, const __nv_bflo
                                      int32_t video_tiles, int32_t top_video_tiles,
                                      cudaStream_t stream);
 
+struct Sm121AttentionWorkspace {
+    int32_t* q2k_index{nullptr};
+    std::size_t q2k_index_capacity{0};
+    int32_t* q2k_count{nullptr};
+    std::size_t q2k_count_capacity{0};
+    float* lse{nullptr};
+    std::size_t lse_capacity{0};
+};
+
+// Launch the embedded-PTX SM121 specialization. Each workspace must remain
+// exclusively owned by this stream through completion; capacities are element
+// counts, not bytes. Throws if the specialization is unavailable.
+void block_sparse_attention_64_sm121_async(
+    const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv_bfloat16* value,
+    const int32_t* valid_sizes, const int32_t* selected_video_tiles, __nv_bfloat16* output,
+    int32_t heads, int32_t total_tiles, int32_t prefix_tiles, int32_t video_tiles,
+    int32_t top_video_tiles, cudaStream_t stream, const Sm121AttentionWorkspace& workspace);
+
+// Report whether the embedded SM121 online-attention specialization was built,
+// applies to the current device, and loaded successfully.
+enum class Sm121AttentionStatus {
+    kNotBuilt,
+    kUnsupportedDevice,
+    kReady,
+    kLoadFailed,
+};
+
+Sm121AttentionStatus block_sparse_attention_sm121_status();
+bool block_sparse_attention_sm121_available();
+
 // Dense pooled attention used by FastH3's learned compression branch:
 // softmax(scores) @ pooled_v -> [heads, tiles, 128], in FP32.
 void pooled_gate_attention_async(const float* scores, const float* pooled_v, float* compressed,

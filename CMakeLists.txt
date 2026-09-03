@@ -292,6 +292,11 @@ if(TRTMC_LOCKED_H3_RUNTIME)
     message(FATAL_ERROR
       "TRTMC_LOCKED_H3_RUNTIME requires CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded")
   endif()
+  if(NOT CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA" OR
+     CMAKE_CUDA_COMPILER_VERSION VERSION_LESS "12.9")
+    message(FATAL_ERROR
+      "TRTMC_LOCKED_H3_RUNTIME requires NVIDIA CUDA compiler 12.9 or newer")
+  endif()
   get_filename_component(_trtmc_locked_cudart_name "${TRTMC_CUDART_LIBRARY}" NAME)
   string(TOLOWER "${_trtmc_locked_cudart_name}" _trtmc_locked_cudart_name)
   if(NOT _trtmc_locked_cudart_name STREQUAL "cudart_static.lib")
@@ -584,6 +589,36 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
     ${_trtmc_model_cuda_sources}
     ${TRTMC_MODEL_${_trtmc_model_var}_REGISTRATION_SOURCE}
   )
+  if(_trtmc_model STREQUAL "minimax_h3")
+    if(CMAKE_CUDA_COMPILER AND CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA" AND
+       CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.9")
+      set(_trtmc_h3_sm121_ptx
+        "${PROJECT_SOURCE_DIR}/src/runtime/models/minimax_h3/vsa_attention_sm121.ptx")
+      set(_trtmc_h3_sm121_header
+        "${PROJECT_BINARY_DIR}/generated/models/minimax_h3/vsa_attention_sm121_ptx.h")
+      add_custom_command(
+        OUTPUT "${_trtmc_h3_sm121_header}"
+        COMMAND ${CMAKE_COMMAND}
+          "-DINPUT_FILE=${_trtmc_h3_sm121_ptx}"
+          "-DOUTPUT_FILE=${_trtmc_h3_sm121_header}"
+          "-DSYMBOL=kMiniMaxH3VsaSm121Ptx"
+          -P "${PROJECT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        DEPENDS
+          "${_trtmc_h3_sm121_ptx}"
+          "${PROJECT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        COMMENT "Embedding MiniMax-H3 SM121 VSA PTX"
+        VERBATIM
+      )
+      target_sources(trtmc_model_${_trtmc_model} PRIVATE "${_trtmc_h3_sm121_header}")
+      target_include_directories(trtmc_model_${_trtmc_model} PRIVATE
+        "${PROJECT_BINARY_DIR}/generated/models/minimax_h3")
+      target_compile_definitions(trtmc_model_${_trtmc_model}
+        PRIVATE TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION=1)
+    else()
+      target_compile_definitions(trtmc_model_${_trtmc_model}
+        PRIVATE TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION=0)
+    endif()
+  endif()
   add_dependencies(trtmc_model_plugins trtmc_model_${_trtmc_model})
   target_include_directories(trtmc_model_${_trtmc_model}
     PRIVATE
@@ -1376,6 +1411,10 @@ if(TRTMC_LOCKED_H3_RUNTIME)
   target_compile_definitions(test_pipeline_api PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
 endif()
 trtmc_add_model_manifest_tests()
+if(TARGET test_minimax_h3_vsa_cuda AND TRTMC_LOCKED_H3_RUNTIME)
+  target_compile_definitions(test_minimax_h3_vsa_cuda PRIVATE
+    TRTMC_MINIMAX_H3_EXPECT_SM121_SPECIALIZATION=1)
+endif()
 
 # Tokenizers
 trtmc_add_test(test_vocab_tokenizer     NO_SRC_INCLUDE)

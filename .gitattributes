@@ -1,0 +1,2 @@
+# Keep embedded generated code byte-for-byte reproducible across host Git settings.
+src/runtime/models/minimax_h3/vsa_attention_sm121.ptx text eol=lf

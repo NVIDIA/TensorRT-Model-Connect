@@ -17,11 +17,11 @@
 
 namespace {
 
-constexpr int32_t kHeads = 1;
+constexpr int32_t kHeads = 2;
 constexpr int32_t kPrefixTiles = 2;
 constexpr int32_t kVideoTiles = 3;
 constexpr int32_t kTotalTiles = kPrefixTiles + kVideoTiles;
-constexpr int32_t kTopVideoTiles = 1;
+constexpr int32_t kTopVideoTiles = 2;
 constexpr int32_t kTile = trtmc::minimax_h3::vsa::kTileTokens;
 constexpr int32_t kDim = trtmc::minimax_h3::vsa::kHeadDim;
 constexpr float kScale = 0.08838834764831844055F;
@@ -87,6 +87,7 @@ std::size_t tiled_offset(int32_t head, int32_t tile, int32_t row, int32_t dimens
 }
 
 void test_tile_pool_and_untile(cudaStream_t stream) {
+    constexpr int32_t tile_heads = 1;
     const std::vector<int32_t> valid_sizes = {5, 3, 7, 4, 6};
     const int32_t logical_rows = 25;
     std::vector<int32_t> map(static_cast<std::size_t>(kTotalTiles) * kTile, -1);
@@ -114,12 +115,12 @@ void test_tile_pool_and_untile(cudaStream_t stream) {
     upload(device_valid, valid_sizes, stream);
 
     trtmc::minimax_h3::vsa::tile_bhsd_async(device_packed.get(), device_map.get(),
-                                            device_tiled.get(), kHeads, logical_rows, kTotalTiles,
-                                            stream);
-    trtmc::minimax_h3::vsa::mean_pool_tiles_async(device_tiled.get(), device_valid.get(),
-                                                  device_pool.get(), kHeads, kTotalTiles, stream);
+                                            device_tiled.get(), tile_heads, logical_rows,
+                                            kTotalTiles, stream);
+    trtmc::minimax_h3::vsa::mean_pool_tiles_async(
+        device_tiled.get(), device_valid.get(), device_pool.get(), tile_heads, kTotalTiles, stream);
     trtmc::minimax_h3::vsa::untile_bhsd_async(device_tiled.get(), device_map.get(),
-                                              device_roundtrip.get(), kHeads, logical_rows,
+                                              device_roundtrip.get(), tile_heads, logical_rows,
                                               kTotalTiles, stream);
 
     const auto tiled = download(device_tiled, stream);
@@ -148,7 +149,7 @@ void test_tile_pool_and_untile(cudaStream_t stream) {
 }
 
 struct AttentionFixture {
-    std::vector<int32_t> valid_sizes{5, 3, 7, 4, 6};
+    std::vector<int32_t> valid_sizes{64, 49, 33, 17, 1};
     std::vector<__nv_bfloat16> query;
     std::vector<__nv_bfloat16> key;
     std::vector<__nv_bfloat16> value;
@@ -160,16 +161,18 @@ struct AttentionFixture {
         key.resize(count, to_bf16(0.0F));
         value.resize(count, to_bf16(0.0F));
         gate.resize(count, to_bf16(0.0F));
-        for (int32_t tile = 0; tile < kTotalTiles; ++tile) {
-            for (int32_t row = 0; row < valid_sizes[static_cast<std::size_t>(tile)]; ++row) {
-                for (int32_t dimension = 0; dimension < kDim; ++dimension) {
-                    const auto index = tiled_offset(0, tile, row, dimension);
-                    const float x =
-                        static_cast<float>(tile * 1009 + row * 137 + dimension * 17 + 1);
-                    query[index] = to_bf16(0.18F * std::sin(x * 0.013F) + tile * 0.006F);
-                    key[index] = to_bf16(0.17F * std::cos(x * 0.019F) - tile * 0.004F);
-                    value[index] = to_bf16(0.35F * std::sin(x * 0.007F + 0.2F));
-                    gate[index] = to_bf16(0.12F * std::cos(x * 0.011F) + 0.015F * row);
+        for (int32_t head = 0; head < kHeads; ++head) {
+            for (int32_t tile = 0; tile < kTotalTiles; ++tile) {
+                for (int32_t row = 0; row < valid_sizes[static_cast<std::size_t>(tile)]; ++row) {
+                    for (int32_t dimension = 0; dimension < kDim; ++dimension) {
+                        const auto index = tiled_offset(head, tile, row, dimension);
+                        const float x = static_cast<float>(head * 7919 + tile * 1009 + row * 137 +
+                                                           dimension * 17 + 1);
+                        query[index] = to_bf16(0.18F * std::sin(x * 0.013F) + tile * 0.006F);
+                        key[index] = to_bf16(0.17F * std::cos(x * 0.019F) - tile * 0.004F);
+                        value[index] = to_bf16(0.35F * std::sin(x * 0.007F + 0.2F));
+                        gate[index] = to_bf16(0.12F * std::cos(x * 0.011F) + 0.015F * row);
+                    }
                 }
             }
         }
@@ -325,6 +328,7 @@ void test_complete_sparse_and_gate_path(cudaStream_t stream) {
     DeviceBuffer<__nv_bfloat16> device_value(tiled_count);
     DeviceBuffer<__nv_bfloat16> device_gate(tiled_count);
     DeviceBuffer<__nv_bfloat16> device_sparse(tiled_count);
+    DeviceBuffer<__nv_bfloat16> device_sparse_sm121(tiled_count);
     DeviceBuffer<__nv_bfloat16> device_output(tiled_count);
     DeviceBuffer<int32_t> device_valid(fixture.valid_sizes.size());
     DeviceBuffer<int32_t> device_selected(selected_count);
@@ -333,6 +337,9 @@ void test_complete_sparse_and_gate_path(cudaStream_t stream) {
     DeviceBuffer<float> device_pooled_v(pooled_count);
     DeviceBuffer<float> device_scores(score_count);
     DeviceBuffer<float> device_compressed(pooled_count);
+    DeviceBuffer<int32_t> device_sm121_q2k_index(score_count);
+    DeviceBuffer<int32_t> device_sm121_q2k_count(static_cast<std::size_t>(kHeads) * kTotalTiles);
+    DeviceBuffer<float> device_sm121_lse(static_cast<std::size_t>(kHeads) * kTotalTiles * kTile);
     upload(device_query, fixture.query, stream);
     upload(device_key, fixture.key, stream);
     upload(device_value, fixture.value, stream);
@@ -351,6 +358,8 @@ void test_complete_sparse_and_gate_path(cudaStream_t stream) {
     trtmc::minimax_h3::vsa::select_video_topk_async(device_scores.get(), device_selected.get(),
                                                     kHeads, kTotalTiles, kPrefixTiles, kVideoTiles,
                                                     kTopVideoTiles, stream);
+    // The baseline API is portable-only, so both implementations remain
+    // covered even when this test runs on an SM121 device.
     trtmc::minimax_h3::vsa::block_sparse_attention_64_async(
         device_query.get(), device_key.get(), device_value.get(), device_valid.get(),
         device_selected.get(), device_sparse.get(), kHeads, kTotalTiles, kPrefixTiles, kVideoTiles,
@@ -399,28 +408,116 @@ void test_complete_sparse_and_gate_path(cudaStream_t stream) {
                 "BF16 tensor-core sparse attention differs from CPU reference");
     }
 
+    int32_t device = 0;
+    int32_t major = 0;
+    int32_t minor = 0;
+    check_cuda(cudaGetDevice(&device), "cudaGetDevice");
+    check_cuda(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device),
+               "cudaDeviceGetAttribute major");
+    check_cuda(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device),
+               "cudaDeviceGetAttribute minor");
+    const bool sm121 = major == 12 && minor == 1;
+    const auto sm121_status = trtmc::minimax_h3::vsa::block_sparse_attention_sm121_status();
+    require(sm121_status != trtmc::minimax_h3::vsa::Sm121AttentionStatus::kLoadFailed,
+            "SM121 specialization load or configuration failed");
+#if defined(TRTMC_MINIMAX_H3_EXPECT_SM121_SPECIALIZATION)
+    require(sm121 && sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kReady,
+            "locked SM121 qualification build did not load its embedded specialization");
+#else
+    require(!sm121 || sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kReady ||
+                sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kNotBuilt,
+            "SM121 device could not load the embedded online-attention PTX");
+#endif
+    if (sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kReady) {
+        upload(
+            device_sm121_lse,
+            std::vector<float>(device_sm121_lse.count(), std::numeric_limits<float>::quiet_NaN()),
+            stream);
+        const trtmc::minimax_h3::vsa::Sm121AttentionWorkspace workspace{
+            device_sm121_q2k_index.get(), device_sm121_q2k_index.count(),
+            device_sm121_q2k_count.get(), device_sm121_q2k_count.count(),
+            device_sm121_lse.get(),       device_sm121_lse.count(),
+        };
+        trtmc::minimax_h3::vsa::block_sparse_attention_64_sm121_async(
+            device_query.get(), device_key.get(), device_value.get(), device_valid.get(),
+            device_selected.get(), device_sparse_sm121.get(), kHeads, kTotalTiles, kPrefixTiles,
+            kVideoTiles, kTopVideoTiles, stream, workspace);
+        const auto sparse_sm121 = download(device_sparse_sm121, stream);
+        const auto sm121_q2k_index = download(device_sm121_q2k_index, stream);
+        const auto sm121_q2k_count = download(device_sm121_q2k_count, stream);
+        const auto sm121_lse = download(device_sm121_lse, stream);
+        for (int32_t head = 0; head < kHeads; ++head) {
+            for (int32_t query_tile = 0; query_tile < kTotalTiles; ++query_tile) {
+                const std::size_t query_index =
+                    static_cast<std::size_t>(head) * kTotalTiles + query_tile;
+                const auto expected_keys = trtmc::minimax_h3::vsa::attended_key_tiles_reference(
+                    selected.data() + query_index * kTopVideoTiles, query_tile, kPrefixTiles,
+                    kVideoTiles, kTopVideoTiles);
+                require(sm121_q2k_count[query_index] == static_cast<int32_t>(expected_keys.size()),
+                        "SM121 q2k count differs from the compact selector contract");
+                for (std::size_t rank = 0; rank < expected_keys.size(); ++rank) {
+                    require(sm121_q2k_index[query_index * kTotalTiles + rank] ==
+                                expected_keys[rank],
+                            "SM121 q2k index differs from the compact selector contract");
+                }
+            }
+        }
+        for (int32_t head = 0; head < kHeads; ++head) {
+            for (int32_t tile = 0; tile < kTotalTiles; ++tile) {
+                const int32_t valid_rows = fixture.valid_sizes[static_cast<std::size_t>(tile)];
+                for (int32_t row = 0; row < kTile; ++row) {
+                    if (row < valid_rows) {
+                        const std::size_t lse_index =
+                            (static_cast<std::size_t>(head) * kTotalTiles + tile) * kTile + row;
+                        require(std::isfinite(sm121_lse[lse_index]),
+                                "SM121 specialization did not write finite LSE");
+                    }
+                    for (int32_t dimension = 0; dimension < kDim; ++dimension) {
+                        const auto index = tiled_offset(head, tile, row, dimension);
+                        const float actual = to_float(sparse_sm121[index]);
+                        require(std::isfinite(actual),
+                                "SM121 sparse attention produced a non-finite value");
+                        if (row < valid_rows) {
+                            const float difference =
+                                std::abs(actual - to_float(expected_sparse[index]));
+                            require(difference <= 0.012F,
+                                    "SM121 online sparse attention differs from CPU reference");
+                        } else {
+                            require(actual == 0.0F,
+                                    "SM121 padded sparse-attention row must be exact zero");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     const auto expected_compressed = gate_attention_reference(scores, expected_pooled_v);
     for (std::size_t index = 0; index < pooled_count; ++index)
         require(std::abs(compressed[index] - expected_compressed[index]) < 3.0e-5F,
                 "pooled gate attention differs from reference");
 
-    for (int32_t tile = 0; tile < kTotalTiles; ++tile) {
-        for (int32_t row = 0; row < kTile; ++row) {
-            for (int32_t dimension = 0; dimension < kDim; ++dimension) {
-                const auto index = tiled_offset(0, tile, row, dimension);
-                float expected = 0.0F;
-                if (row < fixture.valid_sizes[static_cast<std::size_t>(tile)]) {
-                    expected =
-                        to_float(expected_sparse[index]) +
-                        to_float(fixture.gate[index]) *
-                            expected_compressed[static_cast<std::size_t>(tile) * kDim + dimension];
-                    expected = to_float(to_bf16(expected));
+    for (int32_t head = 0; head < kHeads; ++head) {
+        for (int32_t tile = 0; tile < kTotalTiles; ++tile) {
+            for (int32_t row = 0; row < kTile; ++row) {
+                for (int32_t dimension = 0; dimension < kDim; ++dimension) {
+                    const auto index = tiled_offset(head, tile, row, dimension);
+                    float expected = 0.0F;
+                    if (row < fixture.valid_sizes[static_cast<std::size_t>(tile)]) {
+                        const std::size_t compressed_index =
+                            (static_cast<std::size_t>(head) * kTotalTiles + tile) * kDim +
+                            dimension;
+                        expected =
+                            to_float(expected_sparse[index]) +
+                            to_float(fixture.gate[index]) * expected_compressed[compressed_index];
+                        expected = to_float(to_bf16(expected));
+                    }
+                    require(std::abs(to_float(output[index]) - expected) <= 0.014F,
+                            "gate merge differs from sparse + gate * compressed");
+                    if (row >= fixture.valid_sizes[static_cast<std::size_t>(tile)])
+                        require(to_float(output[index]) == 0.0F,
+                                "padded output row must stay exact zero");
                 }
-                require(std::abs(to_float(output[index]) - expected) <= 0.014F,
-                        "gate merge differs from sparse + gate * compressed");
-                if (row >= fixture.valid_sizes[static_cast<std::size_t>(tile)])
-                    require(to_float(output[index]) == 0.0F,
-                            "padded output row must stay exact zero");
             }
         }
     }

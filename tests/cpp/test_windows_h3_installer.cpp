@@ -263,6 +263,8 @@ std::vector<trtmc::installer::PayloadEntry> valid_runtime_entries() {
              "bin/tensorrt_rtx_1_6.dll",
              "models/MiniMax-H3.bundle",
              "licenses/LICENSE",
+             "licenses/NOTICE",
+             "licenses/ASSET_LICENSES.md",
          }) {
         entries.push_back(manifest_entry(path));
     }

@@ -2217,6 +2217,15 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_segmented_vsa_denoiser(
         transition->reset_execution_context();
     denoiser_segmented_finish->reset_execution_context();
 
+    const auto sm121_status = minimax_h3::vsa::block_sparse_attention_sm121_status();
+    if (sm121_status == minimax_h3::vsa::Sm121AttentionStatus::kLoadFailed) {
+        throw std::runtime_error(
+            "MiniMax-H3 could not load or configure its SM121 attention specialization");
+    }
+    const bool use_sm121_attention = sm121_status == minimax_h3::vsa::Sm121AttentionStatus::kReady;
+    std::cerr << "[minimax-h3] VSA attention backend="
+              << (use_sm121_attention ? "sm121_embedded_ptx" : "portable_cuda") << '\n';
+
     const auto run_attention = [&]() {
         using namespace minimax_h3::vsa;
         const auto* row_map = static_cast<const int32_t*>(vsa_tiled_to_packed->data());
@@ -2249,17 +2258,35 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_segmented_vsa_denoiser(
         select_video_topk_async(static_cast<const float*>(vsa_scores->data()),
                                 static_cast<int32_t*>(vsa_selected_tiles->data()), kAttentionHeads,
                                 total_tiles, prefix_tiles, video_tiles, top_video_tiles, stream);
-        block_sparse_attention_64_async(
-            static_cast<const __nv_bfloat16*>(vsa_tiled_query->data()),
-            static_cast<const __nv_bfloat16*>(vsa_tiled_key->data()),
-            static_cast<const __nv_bfloat16*>(vsa_tiled_value->data()), valid,
-            static_cast<const int32_t*>(vsa_selected_tiles->data()),
-            static_cast<__nv_bfloat16*>(vsa_sparse_output->data()), kAttentionHeads, total_tiles,
-            prefix_tiles, video_tiles, top_video_tiles, stream);
         pooled_gate_attention_async(static_cast<const float*>(vsa_scores->data()),
                                     static_cast<const float*>(vsa_pooled_value->data()),
                                     static_cast<float*>(vsa_compressed->data()), kAttentionHeads,
                                     total_tiles, stream);
+        if (use_sm121_attention) {
+            const Sm121AttentionWorkspace workspace{
+                static_cast<int32_t*>(vsa_scores->data()),
+                vsa_scores->nbytes() / sizeof(int32_t),
+                static_cast<int32_t*>(vsa_pooled_query->data()),
+                vsa_pooled_query->nbytes() / sizeof(int32_t),
+                static_cast<float*>(vsa_pooled_key->data()),
+                vsa_pooled_key->nbytes() / sizeof(float),
+            };
+            block_sparse_attention_64_sm121_async(
+                static_cast<const __nv_bfloat16*>(vsa_tiled_query->data()),
+                static_cast<const __nv_bfloat16*>(vsa_tiled_key->data()),
+                static_cast<const __nv_bfloat16*>(vsa_tiled_value->data()), valid,
+                static_cast<const int32_t*>(vsa_selected_tiles->data()),
+                static_cast<__nv_bfloat16*>(vsa_sparse_output->data()), kAttentionHeads,
+                total_tiles, prefix_tiles, video_tiles, top_video_tiles, stream, workspace);
+        } else {
+            block_sparse_attention_64_async(
+                static_cast<const __nv_bfloat16*>(vsa_tiled_query->data()),
+                static_cast<const __nv_bfloat16*>(vsa_tiled_key->data()),
+                static_cast<const __nv_bfloat16*>(vsa_tiled_value->data()), valid,
+                static_cast<const int32_t*>(vsa_selected_tiles->data()),
+                static_cast<__nv_bfloat16*>(vsa_sparse_output->data()), kAttentionHeads,
+                total_tiles, prefix_tiles, video_tiles, top_video_tiles, stream);
+        }
         merge_gate_async(static_cast<const __nv_bfloat16*>(vsa_sparse_output->data()),
                          static_cast<const __nv_bfloat16*>(vsa_tiled_gate->data()),
                          static_cast<const float*>(vsa_compressed->data()),
