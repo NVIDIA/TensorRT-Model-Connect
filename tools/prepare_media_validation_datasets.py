@@ -24,9 +24,16 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
+VBENCH_REPOSITORY = "https://github.com/Vchitect/VBench.git"
+VBENCH_REVISION = "fd18b3d055cb0fc6f066ca90fe2c3c8cbb698490"
 VBENCH_SOURCE = (
-    "https://github.com/Vchitect/VBench/blob/master/vbench/VBench_full_info.json"
+    f"https://github.com/Vchitect/VBench/blob/{VBENCH_REVISION}/"
+    "vbench/VBench_full_info.json"
 )
+VBENCH_INFO_SHA256 = "5dd2de80ee43cda750b2b72ea7023657c0b90d3702041c7e4608c65dbe50dccd"
+VBENCH_LICENSE = "Apache-2.0"
+VBENCH_LICENSE_SHA256 = "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+VBENCH_MODEL_PLUGIN_DIR = "VBench-fd18b3d-model-plugin-v1"
 GEDIT_SOURCE = "https://huggingface.co/datasets/stepfun-ai/GEdit-Bench"
 GEDIT_REVISION = "50766778e2a737474c7e9bdf84cdce82c3ea3f4f"
 SANA_WM_SOURCE = "https://huggingface.co/datasets/Efficient-Large-Model/SANA-WM-Bench"
@@ -83,7 +90,7 @@ def _safe_name(value: str) -> str:
     return cleaned or "sample"
 
 
-def prepare_vbench(source_info: Path, output_root: Path, limit: int = 10) -> Path:
+def _select_vbench_requests(source_info: Path, limit: int) -> list[dict[str, Any]]:
     """Select one unique official prompt from each review dimension."""
     raw = json.loads(source_info.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
@@ -118,19 +125,116 @@ def prepare_vbench(source_info: Path, output_root: Path, limit: int = 10) -> Pat
         )
     if limit < 1 or limit > len(selected):
         raise ValueError(f"VBench validation limit must be in [1, {len(selected)}]")
-    selected = selected[:limit]
+    return selected[:limit]
+
+
+def prepare_vbench(source_info: Path, output_root: Path, limit: int = 10) -> Path:
+    """Write the shared diffusion-runner view of the VBench prompt slice."""
+    selected = _select_vbench_requests(source_info, limit)
     return _write_json(
         output_root / "VBench" / "vbench_t2v_task_eval.json",
         {
             "dataset": "VBench text-to-video prompt suite (validation slice)",
             "source": VBENCH_SOURCE,
             "source_info_sha256": _sha256(source_info),
-            "license": "Apache-2.0",
+            "source_revision": VBENCH_REVISION,
+            "license": VBENCH_LICENSE,
             "sampling": "first unique prompt in each fixed review dimension",
             "request_count": len(selected),
             "requests": selected,
         },
     )
+
+
+def prepare_vbench_model_plugin_dataset(
+    source_info: Path,
+    source_license: Path,
+    output_root: Path,
+    limit: int = 10,
+) -> Path:
+    """Package the pinned VBench slice for prompt-file model plugins.
+
+    The output is a versioned, portable dataset asset intended for NAS
+    publication. It contains no model outputs and runs no external evaluator.
+    """
+    source_info = source_info.resolve(strict=True)
+    source_license = source_license.resolve(strict=True)
+    if _sha256(source_info) != VBENCH_INFO_SHA256:
+        raise ValueError("VBench_full_info.json does not match the pinned revision")
+    if _sha256(source_license) != VBENCH_LICENSE_SHA256:
+        raise ValueError("VBench LICENSE does not match the pinned revision")
+
+    output_dir = output_root / VBENCH_MODEL_PLUGIN_DIR
+    if output_dir.exists():
+        raise FileExistsError(f"refusing to overwrite existing dataset: {output_dir}")
+    selected = _select_vbench_requests(source_info, limit)
+    output_dir.mkdir(parents=True)
+
+    upstream_dir = output_dir / "upstream"
+    upstream_dir.mkdir()
+    shutil.copyfile(source_info, upstream_dir / "VBench_full_info.json")
+    license_dir = output_dir / "licenses"
+    license_dir.mkdir()
+    shutil.copyfile(source_license, license_dir / "VBench-LICENSE")
+
+    requests: list[dict[str, Any]] = []
+    for row in selected:
+        sample_id = str(row["sample_id"])
+        prompt_relative = Path("prompts") / f"{sample_id}.json"
+        _write_json(
+            output_dir / prompt_relative,
+            {"prompt": str(row["prompt"]), "seed": 0},
+        )
+        requests.append(
+            {
+                **row,
+                "inputs": {"prompt_file": prompt_relative.as_posix()},
+            }
+        )
+
+    dataset_name = "VBench text-to-video prompt suite (TRTMC model-plugin slice)"
+    dataset_path = _write_json(
+        output_dir / "dataset.json",
+        {
+            "schema_version": "trtmc.model-plugin-validation/v1",
+            "dataset": dataset_name,
+            "version": f"{VBENCH_REVISION}-model-plugin-v1",
+            "source": VBENCH_REPOSITORY,
+            "source_revision": VBENCH_REVISION,
+            "source_info_sha256": VBENCH_INFO_SHA256,
+            "license": VBENCH_LICENSE,
+            "sampling": "first unique prompt in each fixed review dimension",
+            "request_count": len(requests),
+            "requests": requests,
+        },
+    )
+
+    files = sorted(path for path in output_dir.rglob("*") if path.is_file())
+    _write_json(
+        output_dir / "DATASET_MANIFEST.json",
+        {
+            "schema_version": "trtmc.dataset-manifest/v1",
+            "dataset": dataset_name,
+            "source": {
+                "repository": VBENCH_REPOSITORY,
+                "revision": VBENCH_REVISION,
+                "info_sha256": VBENCH_INFO_SHA256,
+                "license": VBENCH_LICENSE,
+                "license_sha256": VBENCH_LICENSE_SHA256,
+            },
+            "request_count": len(requests),
+            "path_policy": "manifest_relative",
+            "files": [
+                {
+                    "path": path.relative_to(output_dir).as_posix(),
+                    "sha256": _sha256(path),
+                    "bytes": path.stat().st_size,
+                }
+                for path in files
+            ],
+        },
+    )
+    return dataset_path
 
 
 def _english_gedit_rows(rows: Iterable[Mapping[str, Any]]) -> Iterator[Mapping[str, Any]]:
@@ -422,13 +526,29 @@ def prepare_media_datasets(
     *,
     output_root: Path,
     vbench_info: Path | None = None,
+    vbench_license: Path | None = None,
+    vbench_model_plugin: bool = False,
     gedit_source: str = "",
     sana_wm_root: Path | None = None,
     limit: int = 10,
 ) -> list[Path]:
     outputs: list[Path] = []
     if vbench_info:
-        outputs.append(prepare_vbench(vbench_info, output_root, limit))
+        if vbench_model_plugin:
+            if vbench_license is None:
+                raise ValueError("--vbench-model-plugin requires --vbench-license")
+            outputs.append(
+                prepare_vbench_model_plugin_dataset(
+                    vbench_info,
+                    vbench_license,
+                    output_root,
+                    limit,
+                )
+            )
+        else:
+            outputs.append(prepare_vbench(vbench_info, output_root, limit))
+    elif vbench_model_plugin or vbench_license is not None:
+        raise ValueError("VBench model-plugin preparation requires --vbench-info")
     if gedit_source:
         outputs.append(prepare_gedit(gedit_source, output_root, limit))
     if sana_wm_root:

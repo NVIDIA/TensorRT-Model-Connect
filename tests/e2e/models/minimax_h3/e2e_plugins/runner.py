@@ -37,7 +37,7 @@ def build_native_command(
 ) -> list[str]:
     validate_fixed_profile(case)
     python = ctx.runtime_python_path() or sys.executable
-    command = [
+    return [
         python,
         str(MODEL_DIR / "native_reference.py"),
         "--bundle",
@@ -53,9 +53,6 @@ def build_native_command(
         "--source-revision",
         source_revision(case, ctx),
     ]
-    if case.inputs.get("validation_mode") == "vbench_siglip":
-        command.extend(("--retain-frame-indices", "0,18,35,53,70,88,105,123"))
-    return command
 
 
 class MiniMaxH3NativeRunner:
@@ -110,10 +107,9 @@ class MiniMaxH3NativeRunner:
         frames_path = output_dir / "trt_frames.npy"
         frames_dir = output_dir / "frames"
         frame_paths = sorted(frames_dir.glob("frame_*.png"))
-        logical_num_frames = int(receipt.get("shape", [len(frame_paths)])[0])
         data = {
             "returncode": result.returncode,
-            "num_frames": logical_num_frames,
+            "num_frames": len(frame_paths),
             "frames_dir": str(frames_dir),
             "frame_paths": [str(path) for path in frame_paths],
             "frames_path": str(frames_path) if frames_path.is_file() else "",

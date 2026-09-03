@@ -1934,20 +1934,18 @@ suites:
         GB300-only full-profile validation. The model-owned comparator keeps
         the checked-in visual thresholds; this suite adds no threshold override.
 
-  - id: minimax_h3_vbench_siglip_task_quality
+  - id: minimax_h3_vbench_reference_parity
     description: >
-      Candidate-only task-quality metrics over a deterministic 10-prompt slice
-      from pinned VBench. A pinned Apache-2.0 SigLIP model scores prompt/video
-      alignment over eight evenly spaced frames; frame-feature cosine and pixel
-      deltas report temporal consistency and motion. These TRTMC proxy metrics
-      are not an official VBench score or aggregate.
-    task_type: Text → Video (VBench prompt slice; TRTMC SigLIP quality proxy)
+      HF-to-TRTMC reference consistency at the pinned MiniMax-H3 1344x768,
+      124-frame, 50-step profile over ten task-diverse prompts from VBench.
+      The versioned NAS asset carries the pinned Apache-2.0 source, license,
+      prompt files, and checksums. This is not an official VBench aggregate
+      score; the model-owned visual comparator gates every generated sample.
     user_contract: diffusion_video
     default_model_names: [minimax-h3-768p]
     dataset:
       kind: model_plugin_json
-      default_path: >-
-        /mnt/data/vbench-fd18b3d-minimax-h3-siglip-v1/dataset.json
+      default_path: /mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json
       input_asset_fields: [prompt_file]
     selectors:
       model_names: [minimax-h3-768p]
@@ -1955,26 +1953,20 @@ suites:
       runtime_strategies: [diffusion_minimax_h3]
       user_contracts: [diffusion_video]
       families: [minimax_h3]
-    reference:
-      mode: metric_only
+    model_overrides:
+      by_model:
+        minimax-h3-768p:
+          reference_source_revision: current
     scoring:
-      scorer: model_owned_external
-      entrypoint: vbench_siglip_score.py
-      python_profile: reference_common
-      options:
-        device: cuda:0
+      scorer: model_plugin_parity
     gates:
-      min_structural_pass_rate: 1.0
-    gate_metric_kinds:
-      min_structural_pass_rate: proportion
+      min_sample_pass_rate: 1.0
     ci:
       eligible: false
       lane: local_only
       notes: >
-        GB300-only candidate-quality campaign. The scorer loads the exact
-        exact Apache-2.0 SigLIP snapshot is cached automatically for online
-        runs; --local-files-only requires it to be prewarmed. Quality metrics
-        remain report-only until a reviewed reference baseline calibrates gates.
+        GB300-only sampled reference consistency. Use the model catalog limit
+        of ten; VBench benchmark scoring is outside this workload.
 
   - id: lfm2_model_card_sampling_parity
     description: >

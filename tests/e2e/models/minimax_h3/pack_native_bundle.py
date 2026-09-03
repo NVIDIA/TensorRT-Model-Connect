@@ -166,9 +166,6 @@ def main() -> int:
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         runtime_strategy="diffusion_minimax_h3",
         precision="bf16",
-        # MiniMax-H3 does not use a text-generation KV cache, but validation
-        # still applies the repository-wide minimum bundle capacity contract.
-        max_cache_length=256,
         tokenizer_add_special_tokens=False,
     )
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -26,26 +26,6 @@ def test_cache_threshold_cli_args_are_model_namespaced() -> None:
     ]
 
 
-def test_parse_retained_frame_indices_accepts_vbench_siglip_subset() -> None:
-    assert MODULE.parse_retained_frame_indices("0,18,35,53,70,88,105,123") == (
-        0,
-        18,
-        35,
-        53,
-        70,
-        88,
-        105,
-        123,
-    )
-    assert MODULE.parse_retained_frame_indices("") == ()
-
-
-@pytest.mark.parametrize("value", ["24,0", "0,0", "-1", "124", "zero"])
-def test_parse_retained_frame_indices_rejects_invalid_subsets(value: str) -> None:
-    with pytest.raises(ValueError, match="retained frame indices"):
-        MODULE.parse_retained_frame_indices(value)
-
-
 def test_canonical_build_selects_first_block_cache() -> None:
     model_config = tomllib.loads(SCRIPT.with_name("MODEL.toml").read_text())
     assert {

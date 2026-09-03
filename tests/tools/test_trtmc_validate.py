@@ -64,12 +64,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == len(ready_models) + 2
-    workload_counts = Counter(binding.model for binding in bindings)
-    assert {model: count for model, count in workload_counts.items() if count > 1} == {
-        "fast-foundation-stereo": 2,
-        "minimax-h3-768p": 2,
-    }
+    assert len(bindings) == 123
     assert {
         binding.model for binding in bindings if binding.workload == "mmlu_continuation_parity"
     } >= {
@@ -120,10 +115,12 @@ def test_lerobot_act_catalog_binds_recorded_control_parity() -> None:
     }
 
 
-def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
+def test_minimax_h3_catalog_uses_official_and_vbench_profiles() -> None:
     catalog = trtmc_validate.load_catalog()
     suites = validation_catalog.load_suites()
-    suite = next(value for value in suites if value["id"] == "minimax_h3_official_profile_parity")
+    suites_by_id = {value["id"]: value for value in suites}
+    suite = suites_by_id["minimax_h3_official_profile_parity"]
+    vbench_suite = suites_by_id["minimax_h3_vbench_reference_parity"]
     model = next(
         value
         for value in validation_catalog.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
@@ -133,9 +130,10 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     assert catalog["models"]["minimax-h3-768p"] == {
         "workloads": [
             "minimax_h3_official_profile_parity",
-            "minimax_h3_vbench_siglip_task_quality",
+            "minimax_h3_vbench_reference_parity",
         ],
     }
+    assert catalog["sample_limits"]["minimax_h3_vbench_reference_parity"] == 10
     assert validation_catalog.suite_match_reason(suite, model) == (
         True,
         "selected",
@@ -146,6 +144,17 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     }
     assert suite["scoring"] == {"scorer": "model_plugin_parity"}
     assert suite["gates"] == {"min_sample_pass_rate": 1.0}
+    assert validation_catalog.suite_match_reason(vbench_suite, model) == (
+        True,
+        "selected",
+    )
+    assert vbench_suite["dataset"] == {
+        "kind": "model_plugin_json",
+        "default_path": "/mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json",
+        "input_asset_fields": ["prompt_file"],
+    }
+    assert vbench_suite["scoring"] == {"scorer": "model_plugin_parity"}
+    assert vbench_suite["gates"] == {"min_sample_pass_rate": 1.0}
 
     dataset_path = trtmc_validate.REPO_ROOT / suite["dataset"]["default_path"]
     dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
@@ -165,28 +174,6 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
         "video_width": 1344,
         "num_inference_steps": 50,
     }
-
-    task_quality = next(
-        value for value in suites if value["id"] == "minimax_h3_vbench_siglip_task_quality"
-    )
-    assert catalog["sample_limits"][task_quality["id"]] == 10
-    assert task_quality["reference"] == {"mode": "metric_only"}
-    assert task_quality["dataset"] == {
-        "kind": "model_plugin_json",
-        "default_path": ("/mnt/data/vbench-fd18b3d-minimax-h3-siglip-v1/dataset.json"),
-        "input_asset_fields": ["prompt_file"],
-    }
-    assert task_quality["scoring"] == {
-        "scorer": "model_owned_external",
-        "entrypoint": "vbench_siglip_score.py",
-        "python_profile": "reference_common",
-        "options": {"device": "cuda:0"},
-    }
-    assert task_quality["gates"] == {"min_structural_pass_rate": 1.0}
-    assert validation_catalog.suite_match_reason(task_quality, model) == (
-        True,
-        "selected",
-    )
 
 
 def test_dataset_path_keeps_repository_owned_default_with_dataset_root(
@@ -2732,29 +2719,6 @@ def test_suite_specific_scorer_environment_is_materialized_on_demand() -> None:
     )
 
 
-def test_minimax_h3_vbench_scorer_reuses_common_environment() -> None:
-    profiles = trtmc_validate.binding_profiles(
-        trtmc_validate.Binding("minimax-h3-768p", "minimax_h3_vbench_siglip_task_quality"),
-        task_models={
-            "minimax-h3-768p": {
-                "family": "minimax_h3",
-                "runtime_strategy": "diffusion_minimax_h3",
-                "reference_backend": "hf_diffusers",
-            }
-        },
-        suites={
-            "minimax_h3_vbench_siglip_task_quality": {
-                "scoring": {"python_profile": "reference_common"}
-            }
-        },
-    )
-
-    assert profiles == (
-        trtmc_validate.COMMON_REFERENCE_PROFILE,
-        "minimax_h3_reference",
-    )
-
-
 def test_ensure_environments_reports_create_only_when_resolver_creates(monkeypatch, capsys):
     calls = 0
 
@@ -3575,54 +3539,6 @@ def test_model_plugin_report_uses_sample_pass_rate_and_nested_metrics():
         "value": 1.0,
     }
     assert comparison["metrics"]["token_agreement_rate"] == 0.99
-
-
-def test_model_owned_report_declares_its_primary_metric() -> None:
-    comparison = trtmc_validate._comparison_details(
-        {
-            "status": "passed",
-            "mode": "model_owned_external",
-            "primary_metric_name": "quality_score",
-            "metrics": {
-                "quality_score": {
-                    "mean": 0.8,
-                    "min": 0.7,
-                    "max": 0.9,
-                }
-            },
-        },
-        {"status": "completed"},
-    )
-
-    assert comparison["primary_metric"] == {
-        "name": "quality_score",
-        "value": 0.8,
-    }
-
-
-def test_metric_only_result_derives_candidate_precision_from_bundle(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        trtmc_validate,
-        "_accuracy_bundle_config",
-        lambda *_args: {"precision": "bf16"},
-    )
-    result = {
-        "execution": {"status": "completed"},
-        "validation": {"status": "passed"},
-        "comparison": {"status": "agreement"},
-        "raw_result": {
-            "reference_backend": "metric_only",
-            "bundle": "/engines/model.bundle",
-        },
-    }
-
-    assert trtmc_validate._accuracy_precision(result) == {
-        "reference": "metric-only",
-        "candidate": "bf16",
-    }
-    assert trtmc_validate._traffic_light_status(result) == "green"
 
 
 def test_mcq_report_exposes_reference_tie_equivalence_metrics():

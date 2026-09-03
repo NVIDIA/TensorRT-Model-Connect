@@ -125,8 +125,7 @@ def test_packer_preserves_validated_workspace_mapping(
         ),
     )
 
-    def capture_bundle(_output, info, sections) -> None:
-        captured["max_cache_length"] = info.max_cache_length
+    def capture_bundle(_output, _info, sections) -> None:
         config_section = next(section for section in sections if section.name == "config.json")
         captured.update(json.loads(config_section.data))
 
@@ -148,7 +147,6 @@ def test_packer_preserves_validated_workspace_mapping(
 
     assert pack_native_bundle.main() == 0
     assert captured["workspace_limit_bytes"] == workspace_limits
-    assert captured["max_cache_length"] == 256
     assert captured["first_block_cache"] is first_block_cache
     assert captured["denoiser_cache_mode"] == ("first_block" if first_block_cache else "monolithic")
     assert captured["first_block_cache_threshold"] == 0.025

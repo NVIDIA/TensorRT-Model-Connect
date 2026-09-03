@@ -44,24 +44,6 @@ CACHE_THRESHOLD_PATTERN = re.compile(
     r"\[minimax-h3\.perf\][^\n]* cache_threshold=(?P<threshold>[0-9.]+)"
 )
 CACHE_THRESHOLD_CONFIG_KEY = "minimax_h3.first_block_cache_threshold"
-EXPECTED_FRAME_COUNT = 124
-EXPECTED_FRAME_SIZE = (1344, 768)
-
-
-def parse_retained_frame_indices(value: str) -> tuple[int, ...]:
-    """Parse a strict, ordered subset of the fixed MiniMax-H3 frame profile."""
-
-    if not value:
-        return ()
-    try:
-        indices = tuple(int(token) for token in value.split(","))
-    except ValueError as error:
-        raise ValueError("retained frame indices must be comma-separated integers") from error
-    if not indices or tuple(sorted(set(indices))) != indices:
-        raise ValueError("retained frame indices must be unique and strictly increasing")
-    if indices[0] < 0 or indices[-1] >= EXPECTED_FRAME_COUNT:
-        raise ValueError(f"retained frame indices must be within [0, {EXPECTED_FRAME_COUNT - 1}]")
-    return indices
 
 
 def evict_file_pages(path: Path) -> dict[str, bool | str]:
@@ -135,16 +117,7 @@ def main() -> int:
         type=float,
         help=f"override {CACHE_THRESHOLD_CONFIG_KEY} for this visual run",
     )
-    parser.add_argument(
-        "--retain-frame-indices",
-        default="",
-        help=(
-            "retain only this comma-separated frame subset after validating all "
-            "decoded frames; omits the full decoded NPY artifact"
-        ),
-    )
     args = parser.parse_args()
-    retained_frame_indices = parse_retained_frame_indices(args.retain_frame_indices)
     if args.cache_threshold is not None and (
         not math.isfinite(args.cache_threshold) or args.cache_threshold <= 0.0
     ):
@@ -191,7 +164,7 @@ def main() -> int:
         "seed": int(prompt_spec["seed"]),
         "height": 768,
         "width": 1344,
-        "num_frames": EXPECTED_FRAME_COUNT,
+        "num_frames": 124,
         "num_inference_steps": 50,
         "output_type": "decoded_png_frames",
     }
@@ -245,32 +218,12 @@ def main() -> int:
     for label, path in bound_paths.items():
         validate_file_identity(path, identities[label], label)
     paths = sorted(frames_dir.glob("frame_*.png"))
-    if len(paths) != EXPECTED_FRAME_COUNT:
-        raise RuntimeError(
-            f"Native H3 returned {len(paths)} frames instead of {EXPECTED_FRAME_COUNT}"
-        )
-    decoded_frames = []
-    for index, path in enumerate(paths):
-        with Image.open(path) as image:
-            image.load()
-            if image.mode != "RGB" or image.size != EXPECTED_FRAME_SIZE:
-                raise RuntimeError(
-                    f"Native H3 frame {index} has mode/size {image.mode}/{image.size}; "
-                    f"expected RGB/{EXPECTED_FRAME_SIZE}"
-                )
-            if not retained_frame_indices:
-                decoded_frames.append(np.asarray(image, dtype=np.float32) / 255.0)
-    frames_record = None
-    if retained_frame_indices:
-        retained = set(retained_frame_indices)
-        for index, path in enumerate(paths):
-            if index not in retained:
-                path.unlink()
-    else:
-        frames = np.stack(decoded_frames)
-        frames_path = output / "trt_frames.npy"
-        np.save(frames_path, frames)
-        frames_record, _ = stable_file_record(frames_path, "native decoded frames")
+    if len(paths) != 124:
+        raise RuntimeError(f"Native H3 returned {len(paths)} frames instead of 124")
+    frames = np.stack([np.asarray(Image.open(path), dtype=np.float32) / 255.0 for path in paths])
+    frames_path = output / "trt_frames.npy"
+    np.save(frames_path, frames)
+    frames_record, _ = stable_file_record(frames_path, "native decoded frames")
     native_stderr = stderr_path.read_text()
     loaded_backends = [match.group("dso") for match in BACKEND_PATTERN.finditer(native_stderr)]
     if loaded_backends != [backend.name]:
@@ -318,14 +271,12 @@ def main() -> int:
         "loaded_backend_dso": loaded_backends[0],
         "runtime_includes_plan_deserialization": True,
         "collective_transport": "none",
-        "shape": [EXPECTED_FRAME_COUNT, EXPECTED_FRAME_SIZE[1], EXPECTED_FRAME_SIZE[0], 3],
-        "retained_frame_indices": list(retained_frame_indices),
+        "shape": list(frames.shape),
+        "frames": frames_record,
         "bundle_page_cache_eviction": bundle_page_cache_eviction,
         "host": platform.node(),
         "command": command,
     }
-    if frames_record is not None:
-        receipt["frames"] = frames_record
     atomic_write_json(output / "trt_receipt.json", receipt)
     print(json.dumps(receipt, indent=2))
     return 0

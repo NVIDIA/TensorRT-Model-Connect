@@ -23,7 +23,6 @@ _PROPORTION_METRICS = {
     "sample_agreement_rate",
     "sample_pass_rate",
     "shared_sampling_inputs_match_rate",
-    "structural_pass_rate",
     "tie_adjusted_exact_match_rate",
     "top1_agreement",
     "vector_pass_rate",

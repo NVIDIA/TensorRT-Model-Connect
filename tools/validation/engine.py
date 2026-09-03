@@ -9682,28 +9682,6 @@ def resolve_reference_precision_contract(
     }
 
 
-def resolve_metric_only_precision_contract(
-    model: Mapping[str, Any], bundle_path: Path
-) -> dict[str, str]:
-    """Record candidate precision without inventing a model reference dtype."""
-
-    bundle_config = _read_optional_bundle_json_object(bundle_path, "config.json") or {}
-    base_precision = _canonical_reference_precision(
-        bundle_config.get("precision") or model.get("precision", "fp32"),
-        field="TRTMC bundle precision",
-    )
-    quantization = str(bundle_config.get("quantization", "") or "").strip().lower()
-    if not quantization:
-        quantization = _model_quantization_format(model)
-    return {
-        "trtmc_base_precision": base_precision,
-        "trtmc_quantization": quantization or "none",
-        "reference_precision": "metric-only",
-        "reference_dtype": "metric-only",
-        "comparison": "candidate_only",
-    }
-
-
 def resolve_hf_reference_dtype(
     args: argparse.Namespace,
     model: Mapping[str, Any],
@@ -11316,139 +11294,6 @@ def run_full_duplex_bench_comparison(
     return summary
 
 
-
-def model_owned_scorer_entrypoint(
-    model: Mapping[str, Any], scoring: Mapping[str, Any]
-) -> Path:
-    """Resolve a scorer below the directory that owns the model manifest."""
-
-    manifest_value = str(model.get("manifest", "") or "")
-    if not manifest_value:
-        raise ValueError("model-owned external scoring requires a model manifest")
-    manifest = Path(manifest_value)
-    if not manifest.is_absolute():
-        manifest = REPO_ROOT / manifest
-    manifest = manifest.resolve()
-    model_root = manifest.parent.parent if manifest.parent.name == "manifests" else manifest.parent
-
-    entrypoint_value = str(scoring.get("entrypoint", "") or "")
-    entrypoint_path = Path(entrypoint_value)
-    if not entrypoint_value or entrypoint_path.is_absolute():
-        raise ValueError("model-owned external scoring requires a relative scoring.entrypoint")
-    entrypoint = (model_root / entrypoint_path).resolve()
-    if not entrypoint.is_relative_to(model_root.resolve()):
-        raise ValueError("scoring.entrypoint must stay inside the model owner directory")
-    if not entrypoint.is_file():
-        raise FileNotFoundError(f"model-owned scorer entrypoint is missing: {entrypoint}")
-    return entrypoint
-
-
-def _model_owned_scoring_input_count(bundle_predictions: Path, answers: Path) -> int:
-    predictions = json.loads(bundle_predictions.read_text(encoding="utf-8"))
-    answer_payload = json.loads(answers.read_text(encoding="utf-8"))
-    responses = predictions.get("responses") if isinstance(predictions, Mapping) else None
-    requests = answer_payload.get("requests") if isinstance(answer_payload, Mapping) else None
-    if not isinstance(responses, list) or not isinstance(requests, list):
-        raise ValueError("model-owned scoring inputs must contain responses and requests lists")
-    if len(responses) != len(requests):
-        raise ValueError(
-            "model-owned scoring input length mismatch: "
-            f"{len(responses)} responses != {len(requests)} requests"
-        )
-    for index, (response, request) in enumerate(zip(responses, requests, strict=True)):
-        if not isinstance(response, Mapping) or not isinstance(request, Mapping):
-            raise ValueError(f"model-owned scoring row {index} must contain objects")
-        response_id = str(response.get("sample_id", "") or "")
-        request_id = str(request.get("sample_id", "") or "")
-        if not request_id or response_id != request_id:
-            raise ValueError(
-                "model-owned scoring sample id mismatch at "
-                f"{index}: {request_id!r} != {response_id!r}"
-            )
-    return len(requests)
-
-
-def run_model_owned_external_scoring(
-    *,
-    python: str,
-    entrypoint: Path,
-    bundle_predictions: Path,
-    answers: Path,
-    work_dir: Path,
-    options: Mapping[str, Any],
-    gates: Mapping[str, Any],
-    local_files_only: bool,
-) -> dict[str, Any]:
-    """Run a model-owned scorer through the shared JSON process contract."""
-
-    selected_input_count = _model_owned_scoring_input_count(bundle_predictions, answers)
-    output_path = work_dir / "summary.json"
-    output_path.unlink(missing_ok=True)
-    command = [
-        python,
-        str(entrypoint),
-        "--predictions",
-        str(bundle_predictions),
-        "--answers",
-        str(answers),
-        "--output",
-        str(output_path),
-        "--options-json",
-        json.dumps(dict(options), sort_keys=True),
-        "--gates-json",
-        json.dumps(dict(gates), sort_keys=True),
-    ]
-    if local_files_only:
-        command.append("--local-files-only")
-    completed = subprocess.run(command, check=False, text=True, capture_output=True)
-    log_path = work_dir / "model_owned_score.log"
-    log_path.write_text(
-        f"$ {shlex.join(command)}\n{completed.stdout}{completed.stderr}",
-        encoding="utf-8",
-    )
-    if completed.returncode not in {0, 1}:
-        raise RuntimeError(f"Model-owned scorer failed (rc={completed.returncode}); see {log_path}")
-    if not output_path.is_file():
-        raise RuntimeError(f"Model-owned scorer produced no summary; see {log_path}")
-    summary = json.loads(output_path.read_text(encoding="utf-8"))
-    if not isinstance(summary, dict):
-        raise RuntimeError(f"Model-owned scorer summary must be an object; see {log_path}")
-    expected_status = "passed" if completed.returncode == 0 else "failed"
-    if summary.get("status") != expected_status:
-        raise RuntimeError(
-            "Model-owned scorer exit status does not match summary; see "
-            f"{log_path}"
-        )
-    for key, expected_type in (
-        ("sample_count", int),
-        ("valid_count", int),
-        ("passed_count", int),
-        ("metrics", dict),
-        ("gates", dict),
-        ("gate_failures", list),
-    ):
-        value = summary.get(key)
-        if not isinstance(value, expected_type) or (
-            expected_type is int and isinstance(value, bool)
-        ):
-            raise RuntimeError(
-                f"Model-owned scorer summary field {key!r} has an invalid type; see {log_path}"
-            )
-    sample_count = summary["sample_count"]
-    valid_count = summary["valid_count"]
-    passed_count = summary["passed_count"]
-    if sample_count != selected_input_count:
-        raise RuntimeError(
-            f"Model-owned scorer sample_count {sample_count} does not match selected input count "
-            f"{selected_input_count}; see {log_path}"
-        )
-    if not 0 <= passed_count <= valid_count <= sample_count:
-        raise RuntimeError(
-            "Model-owned scorer counts must satisfy "
-            f"0 <= passed_count <= valid_count <= sample_count; see {log_path}"
-        )
-    return summary
-
 def _full_duplex_gate_actuals(summary: Mapping[str, Any]) -> dict[str, float]:
     metrics = summary.get("metrics", {})
     metrics = metrics if isinstance(metrics, Mapping) else {}
@@ -11690,10 +11535,6 @@ def eval_one_model(
     if precision_contract is not None:
         base_result["reference_dtype"] = precision_contract["reference_dtype"]
         base_result["precision_contract"] = precision_contract
-    elif reference_mode == "metric_only":
-        base_result["precision_contract"] = resolve_metric_only_precision_contract(
-            model, bundle_path
-        )
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
@@ -11770,47 +11611,6 @@ def eval_one_model(
                     "error": (
                         f"{len(summary['gate_failures'])} Full-Duplex-Bench "
                         "HF/TRTMC metric delta gate(s) failed"
-                    ),
-                }
-            )
-    elif scorer == "model_owned_external":
-        scoring = suite.get("scoring", {})
-        scorer_profile = str(scoring.get("python_profile", "") or "")
-        if not scorer_profile:
-            raise ValueError("model-owned external scoring requires scoring.python_profile")
-        scorer_options = scoring.get("options", {})
-        if not isinstance(scorer_options, Mapping):
-            raise ValueError("model-owned external scoring options must be an object")
-        scorer_python = resolve_profile_python(
-            scorer_profile,
-            str(getattr(args, "hf_python", "") or sys.executable),
-        )
-        summary = run_model_owned_external_scoring(
-            python=scorer_python,
-            entrypoint=model_owned_scorer_entrypoint(model, scoring),
-            bundle_predictions=work_dir / "bundle_predictions.json",
-            answers=answers_path,
-            work_dir=work_dir,
-            options=scorer_options,
-            gates=suite.get("gates", {}),
-            local_files_only=bool(args.local_files_only),
-        )
-        report = {
-            key: value
-            for key, value in summary.items()
-            if key not in {*base_result, "samples", "mode"}
-        }
-        result = {
-            **base_result,
-            **report,
-            "mode": str(summary.get("mode", "") or scorer),
-        }
-        if summary["gate_failures"]:
-            result.update(
-                {
-                    "error_type": "BenchmarkGateError",
-                    "error": (
-                        f"{len(summary['gate_failures'])} model-owned scorer gate(s) failed"
                     ),
                 }
             )
@@ -12711,22 +12511,6 @@ def write_diffusion_text_summary_markdown(summary: dict[str, Any], path: Path) -
 
 def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
-    if result.get("mode") == "model_owned_external":
-        primary_metric_name = str(result.get("primary_metric_name", "") or "").strip()
-        primary_metric = result.get("metrics", {}).get(primary_metric_name, {})
-        primary_metric_mean = (
-            primary_metric.get("mean") if isinstance(primary_metric, Mapping) else None
-        )
-        primary_metric_text = (
-            f" {primary_metric_name}={float(primary_metric_mean):.4f}"
-            if primary_metric_name and isinstance(primary_metric_mean, (int, float))
-            else ""
-        )
-        return (
-            f"model={model['name']}{primary_metric_text} "
-            f"passed={result['passed_count']}/{result['valid_count']} "
-            f"status={result.get('status', '')} {common}"
-        )
     if result.get("mode") == "full_duplex_bench_behavior_parity":
         return (
             f"model={model['name']} metric_gate_pass_rate="
@@ -12930,6 +12714,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("prepare-media")
     p.add_argument("--output-root", type=Path, required=True)
     p.add_argument("--vbench-info", type=Path)
+    p.add_argument("--vbench-license", type=Path)
+    p.add_argument("--vbench-model-plugin", action="store_true")
     p.add_argument("--gedit-source", default="")
     p.add_argument("--sana-wm-root", type=Path)
     p.add_argument("--limit", type=int, default=10)
@@ -13418,6 +13204,8 @@ def cmd_prepare_media(args: argparse.Namespace) -> int:
     outputs = prepare_media_datasets(
         output_root=args.output_root,
         vbench_info=args.vbench_info,
+        vbench_license=args.vbench_license,
+        vbench_model_plugin=args.vbench_model_plugin,
         gedit_source=args.gedit_source,
         sana_wm_root=args.sana_wm_root,
         limit=args.limit,
