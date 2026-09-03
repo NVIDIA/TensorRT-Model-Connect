@@ -1,57 +1,52 @@
 # FoundationPose preprocessed refinement
 
-This native example loads the pinned official FoundationPose refiner and scorer
-from one TensorRT Model Connect bundle, refines three object-to-camera pose
-hypotheses twice, ranks them, and writes row-major 4x4 transforms.
+This example refines and ranks three object-to-camera pose hypotheses with the
+FoundationPose refiner and scorer in one TensorRT Model Connect bundle. It takes
+preprocessed RGB+XYZ crops and writes row-major 4x4 transforms.
 
-The integration boundary starts after segmentation and CAD rendering. Each
-network input is NHWC `[N,160,160,6]` float32: RGB in `[0,1]`, followed by XYZ
-relative to the current candidate translation and divided by half the mesh
-diameter. Invalid/background XYZ samples are zero. A production crop callback
-must render again from the current poses for every refinement iteration. The
-deterministic example reuses static preprocessed crops solely for reproducible
-neural inference qualification.
+## Build and run
 
-## Pinned artifacts
+Run these commands from the repository root. The `trtmc` command must be
+installed and available on `PATH`.
 
-- Source: `NVlabs/FoundationPose` commit
-  `a1b694b83e633c2cb6115b9063d940a687759392`.
-- NGC model: `nvidia/isaac/foundationpose:1.0.1_onnx`.
-- `refine_model.onnx`: SHA-256
-  `dcc695a19c4bcfe5e1d909a22d8f652d8ec8bab1e19bd1544c6b45f2d3595cf7`.
-- `score_model.onnx`: SHA-256
-  `0bf1026c0db7320ebf9a548ecf0d3c810c8dbd377948630bd3e5af1d49440503`.
-
-Place both ONNX files in one directory and build the FP32 bundle:
+Set `MODEL_DIR` to the pinned `nvidia/isaac/foundationpose:1.0.1_onnx` weight
+directory. It contains `refine_model.onnx` and `score_model.onnx`; their exact
+digests are in the family
+[`MODEL.toml`](../../../../python/tensorrt_model_connect/families/foundationpose/MODEL.toml).
+The native builder reads only their initializer tensors—it does not parse or
+execute either ONNX graph. A different weight format is not currently supported.
 
 ```bash
-trtmc build /path/to/foundationpose-onnx \
-  --precision fp32 -o /tmp/foundationpose.bundle
-python3 examples/models/foundationpose/preprocessed_refinement/prepare_synthetic_inputs.py \
-  /tmp/foundationpose-inputs
-cmake -S examples/models/foundationpose/preprocessed_refinement \
-  -B /tmp/foundationpose-example
-cmake --build /tmp/foundationpose-example \
-  --target trtmc_foundationpose_preprocessed -j
-/tmp/foundationpose-example/trtmc_foundationpose_preprocessed \
-  /tmp/foundationpose.bundle /tmp/foundationpose-inputs /tmp/refined-poses.f32
+MODEL_DIR=/path/to/foundationpose-weights
+BUNDLE=/tmp/foundationpose.bundle
+INPUTS=/tmp/foundationpose-inputs
+EXAMPLE_BUILD=/tmp/foundationpose-example
+
+trtmc build "$MODEL_DIR" --precision fp32 -o "$BUNDLE"
+python3 examples/models/foundationpose/preprocessed_refinement/prepare_synthetic_inputs.py "$INPUTS"
+
+cmake -S examples/models/foundationpose/preprocessed_refinement -B "$EXAMPLE_BUILD"
+cmake --build "$EXAMPLE_BUILD" --target trtmc_foundationpose_preprocessed -j
+
+"$EXAMPLE_BUILD"/trtmc_foundationpose_preprocessed \
+  "$BUNDLE" "$INPUTS" /tmp/refined-poses.f32
 ```
 
-The initial bundle supports FP32, 1-42 hypotheses per refiner invocation,
-up to 252 hypotheses overall (refinement is chunked), 1-10 refinement
-iterations, and joint scoring of up to 252 hypotheses. `reset()` clears the
-tracked best pose while preserving both TensorRT execution contexts.
+The executable prints the best hypothesis, its score, and whether every output
+pose is rigid. All refined poses are written to `/tmp/refined-poses.f32` as
+FP32 matrices.
 
-## Qualification and limitations
+## Input contract
 
-The E2E test compares all refined poses, score logits, and the complete stable
-hypothesis ordering with ONNX Runtime, checks rigid-transform invariants, rejects bad
-shapes/non-finite values/non-rigid inputs, exercises dynamic batches and reset,
-and gates single-hypothesis tracking at at least 10 Hz. The recorded GB300,
-TensorRT 11.1 qualification is under `qualification/`.
+Inputs are FP32 NHWC `[N,160,160,6]`: RGB in `[0,1]`, followed by XYZ relative
+to the candidate translation and normalized by half the mesh diameter.
+Invalid/background XYZ values are zero. The bundle supports 1-252 hypotheses,
+1-10 refinement iterations, and FP32 only.
 
-This example does not perform object segmentation, mesh loading, CAD rendering,
-camera calibration, collision checking, motion planning, or actuator control.
-Its pose output is not a physical-robot safety guarantee. Applications must
-validate calibration, units, coordinate frames, workspace limits, and failure
-handling before consuming a pose in a control system.
+## Scope
+
+The example uses fixed synthetic crops for reproducibility. A production
+application must regenerate rendered crops from the current pose after every
+refinement iteration. Segmentation, mesh loading, CAD rendering, calibration,
+collision checking, motion planning, and robot-safety validation are outside
+this example.
