@@ -402,13 +402,13 @@ def test_inventory_report_is_deterministic_and_serializable(tmp_path: Path) -> N
 def test_repository_registers_all_current_families() -> None:
     repo_root = Path(__file__).resolve().parents[2]
 
-    families = specialization.family_dirs(repo_root, ())
+    family_names = {
+        family.name for family in specialization.family_dirs(repo_root, ())
+    }
+    e2e_owner_names = {
+        owner.name
+        for owner in (repo_root / "tests/e2e/models").iterdir()
+        if (owner / "MODEL.toml").is_file()
+    }
 
-    assert len(families) == 89
-    assert any(family.name == "cosmos3" for family in families)
-    assert any(family.name == "dinov3" for family in families)
-    assert any(family.name == "fast_foundation_stereo" for family in families)
-    assert any(family.name == "lfm2" for family in families)
-    assert any(family.name == "minimax_h3" for family in families)
-    assert any(family.name == "nemotron_voicechat" for family in families)
-    assert any(family.name == "sam2" for family in families)
+    assert family_names == e2e_owner_names

@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 import yaml
 
+from benchmarks.performance.baselines.timing_contracts import MODEL_CALL_FAMILIES
 from tools import perf_matrix
 from tools.performance import catalog as performance_catalog
 
@@ -266,9 +267,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
     performance_catalog.validate_release_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 113
-    assert len(raw_entries) == 83
-    assert len(raw_additional) == 30
+    assert len(cases) == len(raw_entries) + len(raw_additional)
     assert excluded_profiles == {
         "lfm2-1.2b": LFM2_EXCLUSION_REASON,
         "lfm2-2.6b": LFM2_EXCLUSION_REASON,
@@ -284,16 +283,23 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
     assert not any(performance_catalog.is_l0_profile(case["model"]) for case in cases)
-    assert len({(case["family"], case["operation"]) for case in cases}) == 83
-    assert len({case["family"] for case in cases}) == 81
-    assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
-        "embed",
-        "rerank",
-    ]
-    assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
-        "model_call_wall": 26,
-        "public_pipeline_call_wall": 87,
+    assert len({(case["family"], case["operation"]) for case in cases}) == len(raw_entries)
+    operations_by_family: dict[str, set[str]] = {}
+    for case in cases:
+        operations_by_family.setdefault(case["family"], set()).add(case["operation"])
+    assert {
+        family: operations
+        for family, operations in operations_by_family.items()
+        if len(operations) > 1
+    } == {
+        "bert": {"embed", "encode"},
+        "eagle_vlm": {"embed", "rerank"},
     }
+    assert {
+        case["family"]
+        for case in cases
+        if perf_matrix._candidate_timing_scope(case) == "model_call_wall"
+    } == MODEL_CALL_FAMILIES & set(operations_by_family)
     assert {case["id"] for case in cases if case["baseline"]["asset_loading_included"]} == {
         "canary.transcribe",
         "deepseek_ocr.generate",
@@ -2186,7 +2192,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 113
+    assert set(rows) == {
+        case["id"] for case in performance_catalog.load_suite(SUITE).cases
+    }
     assert results["environment_config"]["name"] == "test-gb300"
     assert results["environment_config"]["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert results["environment_config"]["source"] == str(environment.resolve())
