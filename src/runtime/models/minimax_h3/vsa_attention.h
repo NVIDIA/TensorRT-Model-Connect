@@ -114,6 +114,15 @@ void block_sparse_attention_64_async(const __nv_bfloat16* query, const __nv_bflo
                                      int32_t video_tiles, int32_t top_video_tiles,
                                      cudaStream_t stream);
 
+// Synchronize the supplied stream and report whether every element is finite.
+// The one-word workspace may alias storage that is dead after the inspected
+// producer has completed, but must not overlap the inspected values.
+inline constexpr std::size_t kAllFiniteWorkspaceWords = 1;
+bool bfloat16_all_finite_sync(const __nv_bfloat16* values, std::size_t count, uint32_t* workspace,
+                              std::size_t workspace_capacity, cudaStream_t stream);
+bool float_all_finite_sync(const float* values, std::size_t count, uint32_t* workspace,
+                           std::size_t workspace_capacity, cudaStream_t stream);
+
 struct Sm121AttentionWorkspace {
     int32_t* q2k_index{nullptr};
     std::size_t q2k_index_capacity{0};
@@ -123,9 +132,10 @@ struct Sm121AttentionWorkspace {
     std::size_t lse_capacity{0};
 };
 
-// Launch the embedded-PTX SM121 specialization. Each workspace must remain
-// exclusively owned by this stream through completion; capacities are element
-// counts, not bytes. Throws if the specialization is unavailable.
+// Launch the build-time-assembled, embedded-cubin SM121 specialization. Each
+// workspace must remain exclusively owned by this stream through completion;
+// capacities are element counts, not bytes. Throws if the specialization is
+// unavailable.
 void block_sparse_attention_64_sm121_async(
     const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv_bfloat16* value,
     const int32_t* valid_sizes, const int32_t* selected_video_tiles, __nv_bfloat16* output,
@@ -142,6 +152,9 @@ enum class Sm121AttentionStatus {
 };
 
 Sm121AttentionStatus block_sparse_attention_sm121_status();
+// Return the CUDA failure retained for the current device after kLoadFailed.
+// Returns cudaSuccess when the specialization is ready.
+cudaError_t block_sparse_attention_sm121_failure();
 bool block_sparse_attention_sm121_available();
 
 // Dense pooled attention used by FastH3's learned compression branch:

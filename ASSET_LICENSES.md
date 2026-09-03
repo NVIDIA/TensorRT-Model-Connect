@@ -38,11 +38,13 @@ distributed under the Apache License 2.0 and attributed in `NOTICE`.
 
 The generated PTX was modified by removing every `.loc` and `.file` directive
 and every DWARF/debug section. This removes generator-machine paths while
-leaving the kernel instruction sequence unchanged. CMake embeds the sanitized
-PTX into the MiniMax-H3 plugin when building with CUDA 12.9 or newer. At
-runtime it is loaded only on compute capability 12.1; all other devices retain
-the portable CUDA implementation. Python, PyTorch, Triton, and FastVideo are
-not runtime dependencies.
+leaving the kernel instruction sequence unchanged. When building with CUDA
+12.9 or newer, CMake uses `ptxas` from the selected CUDA compiler toolchain to
+assemble the sanitized PTX for `sm_121a`, then embeds the resulting cubin into
+the MiniMax-H3 plugin. At runtime that cubin is loaded only on compute
+capability 12.1, without driver PTX JIT; all other devices retain the portable
+CUDA implementation. Python, PyTorch, Triton, and FastVideo are not runtime
+dependencies.
 
 ## Shared vehicle test photograph
 

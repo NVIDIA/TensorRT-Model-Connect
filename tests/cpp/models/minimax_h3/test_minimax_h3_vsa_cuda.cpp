@@ -86,6 +86,60 @@ std::size_t tiled_offset(int32_t head, int32_t tile, int32_t row, int32_t dimens
             dimension);
 }
 
+void test_bfloat16_all_finite(cudaStream_t stream) {
+    constexpr std::size_t threads = 256;
+    constexpr std::size_t maximum_blocks = 4096;
+    std::vector<__nv_bfloat16> values(maximum_blocks * threads + 1, to_bf16(1.0F));
+    DeviceBuffer<__nv_bfloat16> device_values(values.size());
+    DeviceBuffer<uint32_t> workspace(trtmc::minimax_h3::vsa::kAllFiniteWorkspaceWords);
+    upload(device_values, values, stream);
+    require(trtmc::minimax_h3::vsa::bfloat16_all_finite_sync(device_values.get(),
+                                                             device_values.count(), workspace.get(),
+                                                             workspace.count(), stream),
+            "finite BF16 scan rejected finite values");
+
+    values.back() = to_bf16(std::numeric_limits<float>::infinity());
+    upload(device_values, values, stream);
+    require(
+        !trtmc::minimax_h3::vsa::bfloat16_all_finite_sync(
+            device_values.get(), device_values.count(), workspace.get(), workspace.count(), stream),
+        "finite BF16 scan missed a grid-stride tail infinity");
+
+    values.back() = to_bf16(1.0F);
+    values.front() = to_bf16(std::numeric_limits<float>::quiet_NaN());
+    upload(device_values, values, stream);
+    require(
+        !trtmc::minimax_h3::vsa::bfloat16_all_finite_sync(
+            device_values.get(), device_values.count(), workspace.get(), workspace.count(), stream),
+        "finite BF16 scan accepted a NaN");
+}
+
+void test_float_all_finite(cudaStream_t stream) {
+    std::vector<float> values = {0.0F, -1.0F, std::numeric_limits<float>::max(), 0.125F};
+    DeviceBuffer<float> device_values(values.size());
+    DeviceBuffer<uint32_t> workspace(trtmc::minimax_h3::vsa::kAllFiniteWorkspaceWords);
+    upload(device_values, values, stream);
+    require(trtmc::minimax_h3::vsa::float_all_finite_sync(device_values.get(),
+                                                          device_values.count(), workspace.get(),
+                                                          workspace.count(), stream),
+            "finite FP32 scan rejected finite values");
+
+    values[1] = -std::numeric_limits<float>::infinity();
+    upload(device_values, values, stream);
+    require(!trtmc::minimax_h3::vsa::float_all_finite_sync(device_values.get(),
+                                                           device_values.count(), workspace.get(),
+                                                           workspace.count(), stream),
+            "finite FP32 scan accepted an infinity");
+
+    values[1] = -1.0F;
+    values.back() = std::numeric_limits<float>::quiet_NaN();
+    upload(device_values, values, stream);
+    require(!trtmc::minimax_h3::vsa::float_all_finite_sync(device_values.get(),
+                                                           device_values.count(), workspace.get(),
+                                                           workspace.count(), stream),
+            "finite FP32 scan accepted a NaN");
+}
+
 void test_tile_pool_and_untile(cudaStream_t stream) {
     constexpr int32_t tile_heads = 1;
     const std::vector<int32_t> valid_sizes = {5, 3, 7, 4, 6};
@@ -418,15 +472,23 @@ void test_complete_sparse_and_gate_path(cudaStream_t stream) {
                "cudaDeviceGetAttribute minor");
     const bool sm121 = major == 12 && minor == 1;
     const auto sm121_status = trtmc::minimax_h3::vsa::block_sparse_attention_sm121_status();
+    if (sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kLoadFailed) {
+        require(trtmc::minimax_h3::vsa::block_sparse_attention_sm121_failure() != cudaSuccess,
+                "SM121 load failure did not preserve its CUDA diagnostic");
+    }
     require(sm121_status != trtmc::minimax_h3::vsa::Sm121AttentionStatus::kLoadFailed,
             "SM121 specialization load or configuration failed");
+    if (sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kReady) {
+        require(trtmc::minimax_h3::vsa::block_sparse_attention_sm121_failure() == cudaSuccess,
+                "ready SM121 specialization retained a stale CUDA diagnostic");
+    }
 #if defined(TRTMC_MINIMAX_H3_EXPECT_SM121_SPECIALIZATION)
     require(sm121 && sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kReady,
             "locked SM121 qualification build did not load its embedded specialization");
 #else
     require(!sm121 || sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kReady ||
                 sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kNotBuilt,
-            "SM121 device could not load the embedded online-attention PTX");
+            "SM121 device could not load the embedded online-attention cubin");
 #endif
     if (sm121_status == trtmc::minimax_h3::vsa::Sm121AttentionStatus::kReady) {
         upload(
@@ -554,6 +616,8 @@ int main() {
     try {
         check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
                    "cudaStreamCreateWithFlags");
+        test_bfloat16_all_finite(stream);
+        test_float_all_finite(stream);
         test_tile_pool_and_untile(stream);
         test_complete_sparse_and_gate_path(stream);
         test_worst_profile_selector_capacity(stream);

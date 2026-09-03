@@ -35,8 +35,11 @@ The entry, 49 transition, and finish execution contexts run serially on the
 pipeline's explicit CUDA stream and share one TensorRT-RTX user-managed
 activation arena sized to the largest context. This replaces 51 simultaneous
 maximum-shape activation allocations with one allocation without changing the
-execution order. CUDA graph capture is rejected for this explicitly serialized
-path because captured contexts require stable, private activation addresses.
+execution order. Before each SM121 attention launch, the runtime also performs
+a device-wide synchronization so TensorRT-RTX auxiliary and weight streams
+have completed before the next context can reuse that arena. CUDA graph capture
+is rejected for this explicitly serialized path because captured contexts
+require stable, private activation addresses.
 
 Each `generation_ms` sample includes native conditioning, denoising, video VAE
 decode, audio VAE decode, device-to-host copies, and host result assembly. It
@@ -58,21 +61,26 @@ samples the reported median is the mean of the two middle observations.
 
 ## Native VSA backend boundary
 
-The qualified SM121 path embeds its VSA CUDA kernel in the MiniMax H3 model
-plugin. The installed payload has no PTX sidecar and neither loads nor invokes
-Python, Triton, FastVideo, or another attention runtime. On an SM121 device the
-plugin must print this line once per generation:
+The qualified SM121 path assembles its sanitized VSA PTX into an `sm_121a`
+cubin at build time and embeds that cubin in the MiniMax H3 model plugin. The
+installed payload has no PTX sidecar, performs no driver PTX JIT, and neither
+loads nor invokes Python, Triton, FastVideo, or another attention runtime. On
+an SM121 device the plugin must print this line once per generation:
 
 ```text
-[minimax-h3] VSA attention backend=sm121_embedded_ptx
+[minimax-h3] VSA attention backend=sm121_embedded_cubin
 ```
 
 Loading, configuring, or launching that specialization is fail-closed on
-SM121; the runtime does not silently substitute the slower portable kernel.
-Other supported NVIDIA architectures use the in-tree `portable_cuda` backend.
-Do not set a model-plugin directory, backend directory, or external VSA-plugin
-option for this package. The locked CLI discovers its sibling ModelConnect
-DLLs, and the MiniMax H3 plugin contains the specialization.
+SM121. Every packed attention output is checked before it can reach the next
+transformer block. A non-finite output causes the complete attention branch to
+be rebuilt and replayed once with the in-tree portable CUDA implementation;
+a failed replay terminates generation. The denoiser finish outputs and updated
+scheduler latents are also checked at each step. Other supported NVIDIA
+architectures use the portable backend directly. Do not set a model-plugin
+directory, backend directory, or external VSA-plugin option for this package.
+The locked CLI discovers its sibling ModelConnect DLLs, and the MiniMax H3
+plugin contains both paths.
 
 ## Five-second T2VA workload
 
@@ -156,9 +164,10 @@ bundle, cache policy, and `1 + 2` same-process timing contract shown above. The
 | 120 nominal frames | 124 frames / 5.167 s | 286,417.720 ms; 285,284.762 ms | 285,851.241 ms (4:45.851) |
 | 345 frames | 345 frames / 14.375 s | 964,505.670 ms; 959,489.510 ms | 961,997.590 ms (16:01.998) |
 
-Each run recorded 53 warmup engine-cache fills, 106 measured cache hits, three
-`sm121_embedded_ptx` selections, zero `portable_cuda` selections, and three
-successful finite-output validations. The 124-frame MP4 SHA-256 is
+These historical `f029eeeb` runs predate build-time cubin assembly and recorded
+the legacy `sm121_embedded_ptx` label: 53 warmup engine-cache fills, 106
+measured cache hits, three selections, zero `portable_cuda` selections, and
+three successful finite-output validations. The 124-frame MP4 SHA-256 is
 `18D6C5395D9B56FD35CC87A4419D37B6548EA30358AEE1B92575012A9E9FE38D`; the
 345-frame MP4 SHA-256 is
 `E69AAAD4764C8E1DB0F193B383ED0F391055A8848AC48B5C3BC0E3D9C81FD37F`.
@@ -227,11 +236,13 @@ function Assert-MiniMaxH3HotCache(
     }
 
     $Sm121 = @(Select-String -Path $LogPath -SimpleMatch `
-        'VSA attention backend=sm121_embedded_ptx').Count
-    $Portable = @(Select-String -Path $LogPath -SimpleMatch `
+        'VSA attention backend=sm121_embedded_cubin').Count
+    $PortableBackend = @(Select-String -Path $LogPath -SimpleMatch `
         'VSA attention backend=portable_cuda').Count
-    if ($Sm121 -ne 3 -or $Portable -ne 0) {
-        throw "Expected three SM121 selections and no portable fallback; got SM121=$Sm121 portable=$Portable"
+    $Recovery = @(Select-String -Path $LogPath -Pattern `
+        'replaying .*portable_cuda|replaying finish').Count
+    if ($Sm121 -ne 3 -or $PortableBackend -ne 0 -or $Recovery -ne 0) {
+        throw "Expected three clean SM121 cubin selections; got SM121=$Sm121 portable_backend=$PortableBackend recovery=$Recovery"
     }
 
     $Validations = @(Select-String -Path $LogPath -Pattern `

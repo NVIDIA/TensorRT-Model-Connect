@@ -2237,49 +2237,91 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_segmented_vsa_denoiser(
 
     const auto sm121_status = minimax_h3::vsa::block_sparse_attention_sm121_status();
     if (sm121_status == minimax_h3::vsa::Sm121AttentionStatus::kLoadFailed) {
+        const auto failure = minimax_h3::vsa::block_sparse_attention_sm121_failure();
+        const std::string detail = failure == cudaSuccess
+                                       ? std::string{}
+                                       : ": " + std::string(cudaGetErrorString(failure)) +
+                                             " (CUDA error " +
+                                             std::to_string(static_cast<int>(failure)) + ')';
         throw std::runtime_error(
-            "MiniMax-H3 could not load or configure its SM121 attention specialization");
+            "MiniMax-H3 could not load or configure its SM121 attention specialization" + detail);
     }
     const bool use_sm121_attention = sm121_status == minimax_h3::vsa::Sm121AttentionStatus::kReady;
     std::cerr << "[minimax-h3] VSA attention backend="
-              << (use_sm121_attention ? "sm121_embedded_ptx" : "portable_cuda") << '\n';
+              << (use_sm121_attention ? "sm121_embedded_cubin" : "portable_cuda") << '\n';
+    auto* finite_workspace = static_cast<uint32_t*>(vsa_pooled_value->data());
+    const auto finite_workspace_capacity = vsa_pooled_value->nbytes() / sizeof(uint32_t);
 
-    const auto run_attention = [&]() {
+    const auto run_attention = [&](std::size_t step, int32_t block_index) {
         using namespace minimax_h3::vsa;
         const auto* row_map = static_cast<const int32_t*>(vsa_tiled_to_packed->data());
         const auto* valid = static_cast<const int32_t*>(vsa_valid_sizes->data());
-        tile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_query->data()), row_map,
-                        static_cast<__nv_bfloat16*>(vsa_tiled_query->data()), kAttentionHeads,
-                        static_cast<int32_t>(sequence_rows), total_tiles, stream);
-        tile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_key->data()), row_map,
-                        static_cast<__nv_bfloat16*>(vsa_tiled_key->data()), kAttentionHeads,
-                        static_cast<int32_t>(sequence_rows), total_tiles, stream);
-        tile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_value->data()), row_map,
-                        static_cast<__nv_bfloat16*>(vsa_tiled_value->data()), kAttentionHeads,
-                        static_cast<int32_t>(sequence_rows), total_tiles, stream);
-        tile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_gate->data()), row_map,
-                        static_cast<__nv_bfloat16*>(vsa_tiled_gate->data()), kAttentionHeads,
-                        static_cast<int32_t>(sequence_rows), total_tiles, stream);
-        mean_pool_tiles_async(static_cast<const __nv_bfloat16*>(vsa_tiled_query->data()), valid,
-                              static_cast<float*>(vsa_pooled_query->data()), kAttentionHeads,
-                              total_tiles, stream);
-        mean_pool_tiles_async(static_cast<const __nv_bfloat16*>(vsa_tiled_key->data()), valid,
-                              static_cast<float*>(vsa_pooled_key->data()), kAttentionHeads,
-                              total_tiles, stream);
-        mean_pool_tiles_async(static_cast<const __nv_bfloat16*>(vsa_tiled_value->data()), valid,
-                              static_cast<float*>(vsa_pooled_value->data()), kAttentionHeads,
-                              total_tiles, stream);
-        pooled_qk_scores_async(static_cast<const float*>(vsa_pooled_query->data()),
-                               static_cast<const float*>(vsa_pooled_key->data()),
-                               static_cast<float*>(vsa_scores->data()), kAttentionHeads,
-                               total_tiles, stream);
-        select_video_topk_async(static_cast<const float*>(vsa_scores->data()),
-                                static_cast<int32_t*>(vsa_selected_tiles->data()), kAttentionHeads,
-                                total_tiles, prefix_tiles, video_tiles, top_video_tiles, stream);
-        pooled_gate_attention_async(static_cast<const float*>(vsa_scores->data()),
-                                    static_cast<const float*>(vsa_pooled_value->data()),
-                                    static_cast<float*>(vsa_compressed->data()), kAttentionHeads,
-                                    total_tiles, stream);
+        if (use_sm121_attention) {
+            const auto synchronize_status = cudaDeviceSynchronize();
+            if (synchronize_status != cudaSuccess) {
+                throw std::runtime_error(
+                    "MiniMax-H3 failed to synchronize TensorRT-RTX auxiliary work before "
+                    "SM121 attention: " +
+                    std::string(cudaGetErrorString(synchronize_status)));
+            }
+        }
+        const auto prepare_attention = [&]() {
+            tile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_query->data()), row_map,
+                            static_cast<__nv_bfloat16*>(vsa_tiled_query->data()), kAttentionHeads,
+                            static_cast<int32_t>(sequence_rows), total_tiles, stream);
+            tile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_key->data()), row_map,
+                            static_cast<__nv_bfloat16*>(vsa_tiled_key->data()), kAttentionHeads,
+                            static_cast<int32_t>(sequence_rows), total_tiles, stream);
+            tile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_value->data()), row_map,
+                            static_cast<__nv_bfloat16*>(vsa_tiled_value->data()), kAttentionHeads,
+                            static_cast<int32_t>(sequence_rows), total_tiles, stream);
+            tile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_gate->data()), row_map,
+                            static_cast<__nv_bfloat16*>(vsa_tiled_gate->data()), kAttentionHeads,
+                            static_cast<int32_t>(sequence_rows), total_tiles, stream);
+            mean_pool_tiles_async(static_cast<const __nv_bfloat16*>(vsa_tiled_query->data()), valid,
+                                  static_cast<float*>(vsa_pooled_query->data()), kAttentionHeads,
+                                  total_tiles, stream);
+            mean_pool_tiles_async(static_cast<const __nv_bfloat16*>(vsa_tiled_key->data()), valid,
+                                  static_cast<float*>(vsa_pooled_key->data()), kAttentionHeads,
+                                  total_tiles, stream);
+            mean_pool_tiles_async(static_cast<const __nv_bfloat16*>(vsa_tiled_value->data()), valid,
+                                  static_cast<float*>(vsa_pooled_value->data()), kAttentionHeads,
+                                  total_tiles, stream);
+            pooled_qk_scores_async(static_cast<const float*>(vsa_pooled_query->data()),
+                                   static_cast<const float*>(vsa_pooled_key->data()),
+                                   static_cast<float*>(vsa_scores->data()), kAttentionHeads,
+                                   total_tiles, stream);
+            select_video_topk_async(static_cast<const float*>(vsa_scores->data()),
+                                    static_cast<int32_t*>(vsa_selected_tiles->data()),
+                                    kAttentionHeads, total_tiles, prefix_tiles, video_tiles,
+                                    top_video_tiles, stream);
+            pooled_gate_attention_async(static_cast<const float*>(vsa_scores->data()),
+                                        static_cast<const float*>(vsa_pooled_value->data()),
+                                        static_cast<float*>(vsa_compressed->data()),
+                                        kAttentionHeads, total_tiles, stream);
+        };
+        const auto run_portable_attention = [&]() {
+            block_sparse_attention_64_async(
+                static_cast<const __nv_bfloat16*>(vsa_tiled_query->data()),
+                static_cast<const __nv_bfloat16*>(vsa_tiled_key->data()),
+                static_cast<const __nv_bfloat16*>(vsa_tiled_value->data()), valid,
+                static_cast<const int32_t*>(vsa_selected_tiles->data()),
+                static_cast<__nv_bfloat16*>(vsa_sparse_output->data()), kAttentionHeads,
+                total_tiles, prefix_tiles, video_tiles, top_video_tiles, stream);
+        };
+        const auto merge_and_untile = [&]() {
+            merge_gate_async(static_cast<const __nv_bfloat16*>(vsa_sparse_output->data()),
+                             static_cast<const __nv_bfloat16*>(vsa_tiled_gate->data()),
+                             static_cast<const float*>(vsa_compressed->data()),
+                             static_cast<__nv_bfloat16*>(vsa_sparse_output->data()),
+                             kAttentionHeads, total_tiles, stream);
+            untile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_sparse_output->data()), row_map,
+                              static_cast<__nv_bfloat16*>(vsa_attention_output->data()),
+                              kAttentionHeads, static_cast<int32_t>(sequence_rows), total_tiles,
+                              stream);
+        };
+
+        prepare_attention();
         if (use_sm121_attention) {
             const Sm121AttentionWorkspace workspace{
                 static_cast<int32_t*>(vsa_scores->data()),
@@ -2297,23 +2339,31 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_segmented_vsa_denoiser(
                 static_cast<__nv_bfloat16*>(vsa_sparse_output->data()), kAttentionHeads,
                 total_tiles, prefix_tiles, video_tiles, top_video_tiles, stream, workspace);
         } else {
-            block_sparse_attention_64_async(
-                static_cast<const __nv_bfloat16*>(vsa_tiled_query->data()),
-                static_cast<const __nv_bfloat16*>(vsa_tiled_key->data()),
-                static_cast<const __nv_bfloat16*>(vsa_tiled_value->data()), valid,
-                static_cast<const int32_t*>(vsa_selected_tiles->data()),
-                static_cast<__nv_bfloat16*>(vsa_sparse_output->data()), kAttentionHeads,
-                total_tiles, prefix_tiles, video_tiles, top_video_tiles, stream);
+            run_portable_attention();
         }
-        merge_gate_async(static_cast<const __nv_bfloat16*>(vsa_sparse_output->data()),
-                         static_cast<const __nv_bfloat16*>(vsa_tiled_gate->data()),
-                         static_cast<const float*>(vsa_compressed->data()),
-                         static_cast<__nv_bfloat16*>(vsa_sparse_output->data()), kAttentionHeads,
-                         total_tiles, stream);
-        untile_bhsd_async(static_cast<const __nv_bfloat16*>(vsa_sparse_output->data()), row_map,
-                          static_cast<__nv_bfloat16*>(vsa_attention_output->data()),
-                          kAttentionHeads, static_cast<int32_t>(sequence_rows), total_tiles,
-                          stream);
+        merge_and_untile();
+
+        const auto packed_elements = static_cast<std::size_t>(kAttentionHeads) *
+                                     static_cast<std::size_t>(sequence_rows) * kAttentionHeadDim;
+        if (use_sm121_attention &&
+            !bfloat16_all_finite_sync(
+                static_cast<const __nv_bfloat16*>(vsa_attention_output->data()), packed_elements,
+                finite_workspace, finite_workspace_capacity, stream)) {
+            std::cerr << "[minimax-h3] SM121 packed attention output was non-finite; "
+                         "replaying the complete attention call with portable_cuda"
+                      << " step=" << (step + 1) << " block=" << block_index << '\n';
+            prepare_attention();
+            run_portable_attention();
+            merge_and_untile();
+            if (!bfloat16_all_finite_sync(
+                    static_cast<const __nv_bfloat16*>(vsa_attention_output->data()),
+                    packed_elements, finite_workspace, finite_workspace_capacity, stream)) {
+                throw std::runtime_error(
+                    "MiniMax-H3 packed attention output remained non-finite after complete "
+                    "portable CUDA replay at step " +
+                    std::to_string(step + 1) + " block " + std::to_string(block_index));
+            }
+        }
     };
 
     DenoiserStats stats;
@@ -2324,7 +2374,7 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_segmented_vsa_denoiser(
                              Tensor{modulation.blocks[0].bytes.data(), modulation.blocks[0].shape,
                                     modulation.blocks[0].dtype});
         denoiser_entry->forward_async(entry_inputs);
-        run_attention();
+        run_attention(step, 0);
 
         for (int32_t index = 0; index < 49; ++index) {
             TensorMap transition_inputs;
@@ -2339,7 +2389,7 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_segmented_vsa_denoiser(
                        modulation.blocks[static_cast<std::size_t>(index + 1)].shape,
                        modulation.blocks[static_cast<std::size_t>(index + 1)].dtype});
             denoiser_transitions[static_cast<std::size_t>(index)]->forward_async(transition_inputs);
-            run_attention();
+            run_attention(step, index + 1);
         }
 
         TensorMap finish_inputs;
@@ -2349,7 +2399,41 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_segmented_vsa_denoiser(
         finish_inputs.emplace(
             "final_modulation",
             Tensor{modulation.final.bytes.data(), modulation.final.shape, modulation.final.dtype});
+        const auto synchronize_finish = [&]() {
+            const auto status = cudaDeviceSynchronize();
+            if (status != cudaSuccess) {
+                throw std::runtime_error(
+                    "MiniMax-H3 failed to synchronize TensorRT-RTX finish work at step " +
+                    std::to_string(step + 1) + ": " + cudaGetErrorString(status));
+            }
+        };
+        const auto finish_outputs_finite = [&]() {
+            const bool video_finite = minimax_h3::vsa::float_all_finite_sync(
+                static_cast<const float*>(video_velocity->data()), video_rows_host.size(),
+                finite_workspace, finite_workspace_capacity, stream);
+            const bool audio_finite = minimax_h3::vsa::float_all_finite_sync(
+                static_cast<const float*>(audio_velocity->data()), audio_rows_host.size(),
+                finite_workspace, finite_workspace_capacity, stream);
+            return std::array<bool, 2>{video_finite, audio_finite};
+        };
         denoiser_segmented_finish->forward_async(finish_inputs);
+        synchronize_finish();
+        auto finish_finite = finish_outputs_finite();
+        if (!finish_finite[0] || !finish_finite[1]) {
+            std::cerr << "[minimax-h3] TensorRT-RTX finish output was non-finite; replaying finish"
+                      << " step=" << (step + 1)
+                      << " video_velocity=" << (finish_finite[0] ? "finite" : "non-finite")
+                      << " audio_velocity=" << (finish_finite[1] ? "finite" : "non-finite") << '\n';
+            denoiser_segmented_finish->forward_async(finish_inputs);
+            synchronize_finish();
+            finish_finite = finish_outputs_finite();
+            if (!finish_finite[0] || !finish_finite[1]) {
+                throw std::runtime_error(
+                    "MiniMax-H3 TensorRT-RTX finish output remained non-finite after replay at "
+                    "step " +
+                    std::to_string(step + 1));
+            }
+        }
         const std::size_t condition_elements =
             static_cast<std::size_t>(denoiser_geometry.condition_video_rows) * kPatchDim;
         const std::size_t target_elements =
@@ -2364,6 +2448,16 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_segmented_vsa_denoiser(
             static_cast<const float*>(audio_velocity->data()), audio_rows_host.size(),
             audio_schedule.timesteps[step], audio_schedule.sigmas[step],
             audio_schedule.sigmas[step + 1], stream);
+        const bool video_rows_finite = minimax_h3::vsa::float_all_finite_sync(
+            static_cast<const float*>(video_rows->data()), video_rows_host.size(), finite_workspace,
+            finite_workspace_capacity, stream);
+        const bool audio_rows_finite = minimax_h3::vsa::float_all_finite_sync(
+            static_cast<const float*>(audio_rows->data()), audio_rows_host.size(), finite_workspace,
+            finite_workspace_capacity, stream);
+        if (!video_rows_finite || !audio_rows_finite) {
+            throw std::runtime_error("MiniMax-H3 scheduler produced a non-finite latent at step " +
+                                     std::to_string(step + 1));
+        }
         ++stats.full_steps;
         std::cerr << "[minimax-h3] segmented native VSA transformer " << (step + 1) << '/'
                   << video_schedule.timesteps.size() << " cuda_attention_calls=50\n";

@@ -14,7 +14,7 @@
 #endif
 
 #if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
-#include "vsa_attention_sm121_ptx.h"
+#include "vsa_attention_sm121_cubin.h"
 #endif
 
 #include <algorithm>
@@ -61,10 +61,15 @@ struct Sm121KernelState {
     std::mutex mutex;
     cudaLibrary_t library{nullptr};
     cudaKernel_t kernel{nullptr};
+    cudaError_t library_failure{cudaSuccess};
     bool attempted{false};
     // 0: unconfigured, 1: ready, 2: failed. CUDA supports at most 32 devices.
     std::array<unsigned char, 32> device_status{};
+    std::array<cudaError_t, 32> device_query_failure{};
+    std::array<cudaError_t, 32> device_configuration_failure{};
 };
+
+thread_local cudaError_t sm121_thread_query_failure = cudaSuccess;
 
 Sm121KernelState& sm121_kernel_state() {
     // The CUDA Runtime owns loaded library lifetime. Keeping this state until
@@ -73,32 +78,51 @@ Sm121KernelState& sm121_kernel_state() {
     return *state;
 }
 
-cudaKernel_t sm121_kernel() {
-    int32_t device = 0;
+bool query_sm121_device(int32_t& device, bool& supported) {
+    device = -1;
+    supported = false;
     int32_t major = 0;
     int32_t minor = 0;
-    if (cudaGetDevice(&device) != cudaSuccess) {
+    cudaError_t status = cudaGetDevice(&device);
+    if (status != cudaSuccess) {
+        sm121_thread_query_failure = status;
         cudaGetLastError();
-        return nullptr;
+        return false;
     }
-    if (device < 0 || device >= 32)
-        return nullptr;
-    if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device) != cudaSuccess ||
-        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device) != cudaSuccess) {
-        cudaGetLastError();
-        return nullptr;
-    }
-    if (major != 12 || minor != 1) {
-        return nullptr;
+    if (device < 0 || device >= 32) {
+        sm121_thread_query_failure = cudaErrorInvalidDevice;
+        return false;
     }
 
+    status = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    if (status == cudaSuccess)
+        status = cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    {
+        auto& state = sm121_kernel_state();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.device_query_failure[static_cast<std::size_t>(device)] = status;
+    }
+    sm121_thread_query_failure = status;
+    if (status != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    supported = major == 12 && minor == 1;
+    return true;
+}
+
+cudaKernel_t sm121_kernel_for_device(int32_t device) {
     auto& state = sm121_kernel_state();
     std::lock_guard<std::mutex> lock(state.mutex);
     if (!state.attempted) {
         state.attempted = true;
-        if (cudaLibraryLoadData(&state.library, kMiniMaxH3VsaSm121Ptx, nullptr, nullptr, 0, nullptr,
-                                nullptr, 0) != cudaSuccess ||
-            cudaLibraryGetKernel(&state.kernel, state.library, "_attn_fwd_sparse") != cudaSuccess) {
+        state.library_failure = cudaLibraryLoadData(&state.library, kMiniMaxH3VsaSm121Cubin,
+                                                    nullptr, nullptr, 0, nullptr, nullptr, 0);
+        if (state.library_failure == cudaSuccess) {
+            state.library_failure =
+                cudaLibraryGetKernel(&state.kernel, state.library, "_attn_fwd_sparse");
+        }
+        if (state.library_failure != cudaSuccess) {
             state.kernel = nullptr;
             cudaGetLastError();
         }
@@ -108,6 +132,7 @@ cudaKernel_t sm121_kernel() {
     if (state.device_status[static_cast<std::size_t>(device)] == 0) {
         const cudaError_t status = cudaKernelSetAttributeForDevice(
             state.kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSm121SharedBytes, device);
+        state.device_configuration_failure[static_cast<std::size_t>(device)] = status;
         state.device_status[static_cast<std::size_t>(device)] = status == cudaSuccess ? 1 : 2;
         if (status != cudaSuccess) {
             cudaGetLastError();
@@ -115,6 +140,14 @@ cudaKernel_t sm121_kernel() {
         }
     }
     return state.kernel;
+}
+
+cudaKernel_t sm121_kernel() {
+    int32_t device = -1;
+    bool supported = false;
+    if (!query_sm121_device(device, supported) || !supported)
+        return nullptr;
+    return sm121_kernel_for_device(device);
 }
 #endif
 
@@ -143,6 +176,25 @@ void validate_sparse_geometry(int32_t heads, int32_t total_tiles, int32_t prefix
         top_video_tiles <= 0 || top_video_tiles > video_tiles ||
         top_video_tiles > kMaxTopVideoTiles) {
         throw std::invalid_argument("FastH3 VSA launch received unsupported geometry");
+    }
+}
+
+__device__ bool finite_value(__nv_bfloat16 value) {
+    return isfinite(__bfloat162float(value));
+}
+
+__device__ bool finite_value(float value) {
+    return isfinite(value);
+}
+
+template <typename Value>
+__global__ void all_finite_kernel(const Value* values, std::size_t count, uint32_t* all_finite) {
+    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         index < count; index += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+        if (!finite_value(values[index])) {
+            atomicExch(all_finite, 0U);
+            return;
+        }
     }
 }
 
@@ -645,6 +697,28 @@ __global__ void merge_gate_kernel(const __nv_bfloat16* sparse, const __nv_bfloat
     }
 }
 
+template <typename Value>
+bool all_finite_sync(const Value* values, std::size_t count, uint32_t* workspace,
+                     std::size_t workspace_capacity, cudaStream_t stream) {
+    if (values == nullptr || workspace == nullptr || count == 0 ||
+        workspace_capacity < kAllFiniteWorkspaceWords) {
+        throw std::invalid_argument("FastH3 finite-output scan received invalid arguments");
+    }
+    check_cuda(cudaMemsetAsync(workspace, 0xff, sizeof(uint32_t), stream),
+               "FastH3 finite-output reset");
+    constexpr std::size_t threads = 256;
+    constexpr std::size_t maximum_blocks = 4096;
+    const auto blocks = static_cast<uint32_t>(
+        std::min<std::size_t>((count + threads - 1) / threads, maximum_blocks));
+    all_finite_kernel<<<blocks, threads, 0, stream>>>(values, count, workspace);
+    check_launch("FastH3 finite-output scan launch");
+    uint32_t host = 0;
+    check_cuda(cudaMemcpyAsync(&host, workspace, sizeof(host), cudaMemcpyDeviceToHost, stream),
+               "FastH3 finite-output download");
+    check_cuda(cudaStreamSynchronize(stream), "FastH3 finite-output synchronize");
+    return host != 0;
+}
+
 } // namespace
 
 void tile_bhsd_async(const __nv_bfloat16* packed, const int32_t* tiled_to_packed,
@@ -729,26 +803,59 @@ void select_video_topk_async(const float* scores, int32_t* selected_video_tiles,
 
 Sm121AttentionStatus block_sparse_attention_sm121_status() {
 #if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
-    int32_t device = 0;
-    int32_t major = 0;
-    int32_t minor = 0;
-    if (cudaGetDevice(&device) != cudaSuccess ||
-        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device) != cudaSuccess ||
-        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device) != cudaSuccess) {
-        cudaGetLastError();
+    int32_t device = -1;
+    bool supported = false;
+    if (!query_sm121_device(device, supported))
         return Sm121AttentionStatus::kLoadFailed;
-    }
-    if (major != 12 || minor != 1)
+    if (!supported)
         return Sm121AttentionStatus::kUnsupportedDevice;
-    return sm121_kernel() != nullptr ? Sm121AttentionStatus::kReady
-                                     : Sm121AttentionStatus::kLoadFailed;
+    return sm121_kernel_for_device(device) != nullptr ? Sm121AttentionStatus::kReady
+                                                      : Sm121AttentionStatus::kLoadFailed;
 #else
     return Sm121AttentionStatus::kNotBuilt;
 #endif
 }
 
+cudaError_t block_sparse_attention_sm121_failure() {
+#if TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION
+    int32_t device = -1;
+    const cudaError_t current_device_status = cudaGetDevice(&device);
+    if (current_device_status != cudaSuccess) {
+        cudaGetLastError();
+        return current_device_status;
+    }
+    if (device < 0 || device >= 32)
+        return cudaErrorInvalidDevice;
+
+    auto& state = sm121_kernel_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.library_failure != cudaSuccess)
+        return state.library_failure;
+    const auto query_failure = state.device_query_failure[static_cast<std::size_t>(device)];
+    if (query_failure != cudaSuccess)
+        return query_failure;
+    const auto configuration_failure =
+        state.device_configuration_failure[static_cast<std::size_t>(device)];
+    if (configuration_failure != cudaSuccess)
+        return configuration_failure;
+    return sm121_thread_query_failure;
+#else
+    return cudaErrorNotSupported;
+#endif
+}
+
 bool block_sparse_attention_sm121_available() {
     return block_sparse_attention_sm121_status() == Sm121AttentionStatus::kReady;
+}
+
+bool bfloat16_all_finite_sync(const __nv_bfloat16* values, std::size_t count, uint32_t* workspace,
+                              std::size_t workspace_capacity, cudaStream_t stream) {
+    return all_finite_sync(values, count, workspace, workspace_capacity, stream);
+}
+
+bool float_all_finite_sync(const float* values, std::size_t count, uint32_t* workspace,
+                           std::size_t workspace_capacity, cudaStream_t stream) {
+    return all_finite_sync(values, count, workspace, workspace_capacity, stream);
 }
 
 void block_sparse_attention_64_async(const __nv_bfloat16* query, const __nv_bfloat16* key,

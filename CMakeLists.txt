@@ -592,24 +592,58 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   if(_trtmc_model STREQUAL "minimax_h3")
     if(CMAKE_CUDA_COMPILER AND CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA" AND
        CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.9")
+      get_filename_component(_trtmc_cuda_compiler_realpath
+        "${CMAKE_CUDA_COMPILER}" REALPATH)
+      get_filename_component(_trtmc_cuda_compiler_directory
+        "${_trtmc_cuda_compiler_realpath}" DIRECTORY)
+      set(_trtmc_h3_ptxas_hints "${_trtmc_cuda_compiler_directory}")
+      if(CMAKE_CUDA_COMPILER_TOOLKIT_ROOT)
+        list(APPEND _trtmc_h3_ptxas_hints
+          "${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}/bin")
+      endif()
+      # Do not retain a ptxas path if a build tree switches CUDA toolchains.
+      unset(_trtmc_h3_ptxas CACHE)
+      unset(_trtmc_h3_ptxas)
+      find_program(_trtmc_h3_ptxas
+        NAMES ptxas
+        HINTS ${_trtmc_h3_ptxas_hints}
+        NO_DEFAULT_PATH)
+      if(NOT _trtmc_h3_ptxas)
+        message(FATAL_ERROR
+          "MiniMax-H3 SM121 specialization requires ptxas from the selected "
+          "CUDA 12.9 or newer compiler toolchain")
+      endif()
       set(_trtmc_h3_sm121_ptx
         "${PROJECT_SOURCE_DIR}/src/runtime/models/minimax_h3/vsa_attention_sm121.ptx")
+      set(_trtmc_h3_sm121_cubin
+        "${PROJECT_BINARY_DIR}/generated/models/minimax_h3/vsa_attention_sm121.cubin")
       set(_trtmc_h3_sm121_header
-        "${PROJECT_BINARY_DIR}/generated/models/minimax_h3/vsa_attention_sm121_ptx.h")
+        "${PROJECT_BINARY_DIR}/generated/models/minimax_h3/vsa_attention_sm121_cubin.h")
       add_custom_command(
-        OUTPUT "${_trtmc_h3_sm121_header}"
+        OUTPUT
+          "${_trtmc_h3_sm121_cubin}"
+          "${_trtmc_h3_sm121_header}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${PROJECT_BINARY_DIR}/generated/models/minimax_h3"
+        COMMAND "${_trtmc_h3_ptxas}"
+          -arch=sm_121a
+          -O3
+          "${_trtmc_h3_sm121_ptx}"
+          -o "${_trtmc_h3_sm121_cubin}"
         COMMAND ${CMAKE_COMMAND}
-          "-DINPUT_FILE=${_trtmc_h3_sm121_ptx}"
+          "-DINPUT_FILE=${_trtmc_h3_sm121_cubin}"
           "-DOUTPUT_FILE=${_trtmc_h3_sm121_header}"
-          "-DSYMBOL=kMiniMaxH3VsaSm121Ptx"
+          "-DSYMBOL=kMiniMaxH3VsaSm121Cubin"
           -P "${PROJECT_SOURCE_DIR}/cmake/embed_binary.cmake"
         DEPENDS
           "${_trtmc_h3_sm121_ptx}"
+          "${_trtmc_h3_ptxas}"
           "${PROJECT_SOURCE_DIR}/cmake/embed_binary.cmake"
-        COMMENT "Embedding MiniMax-H3 SM121 VSA PTX"
+        COMMENT "Assembling and embedding MiniMax-H3 SM121 VSA cubin"
         VERBATIM
       )
-      target_sources(trtmc_model_${_trtmc_model} PRIVATE "${_trtmc_h3_sm121_header}")
+      target_sources(trtmc_model_${_trtmc_model} PRIVATE
+        "${_trtmc_h3_sm121_header}")
       target_include_directories(trtmc_model_${_trtmc_model} PRIVATE
         "${PROJECT_BINARY_DIR}/generated/models/minimax_h3")
       target_compile_definitions(trtmc_model_${_trtmc_model}
@@ -1414,6 +1448,8 @@ trtmc_add_model_manifest_tests()
 if(TARGET test_minimax_h3_vsa_cuda AND TRTMC_LOCKED_H3_RUNTIME)
   target_compile_definitions(test_minimax_h3_vsa_cuda PRIVATE
     TRTMC_MINIMAX_H3_EXPECT_SM121_SPECIALIZATION=1)
+  set_tests_properties(test_minimax_h3_vsa_cuda PROPERTIES
+    ENVIRONMENT "CUDA_DISABLE_PTX_JIT=1")
 endif()
 
 # Tokenizers

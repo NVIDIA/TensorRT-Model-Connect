@@ -96,10 +96,12 @@ specialization. A portable-backend developer build for another supported GPU
 is outside this locked package and performance contract. The helper requires a
 clean Git checkout so the bundle and binaries can record one source revision.
 
-Concretely, this helper emits `120-real` CUDA code plus the embedded `sm_121a`
-VSA PTX specialization. The resulting distribution is qualified only on the
-compute-capability 12.1 Spark cohort and makes no packaged-hardware support
-claim for any other compute capability.
+Concretely, this helper emits `120-real` CUDA code and uses the selected CUDA
+12.9 `ptxas` to assemble the checked-in, sanitized VSA PTX into an `sm_121a`
+cubin at build time. That cubin is embedded in the model plugin, so the
+installed runtime does not invoke the driver PTX JIT. The resulting
+distribution is qualified only on the compute-capability 12.1 Spark cohort and
+makes no packaged-hardware support claim for any other compute capability.
 
 ```powershell
 $RepoRoot = (Resolve-Path '<ModelConnect-checkout>').Path
