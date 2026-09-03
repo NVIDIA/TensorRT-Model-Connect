@@ -25,6 +25,8 @@
 //                        [--negative-prompt "text"] [--height N] [--width N]
 //   trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]
 //   trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]
+//   trtmc predict-structure <bundle.bundle> --input REQUEST --output STRUCTURE.cif
+//                        [--output-json METADATA.json] [--benchmark N] [--warmup N]
 //   trtmc geometry        <bundle.bundle> --image PATH --output DIR
 //   trtmc act             <bundle.bundle> --image PATH --state STATE.f32
 //                        --output ACTIONS.f32 --control-hz F
@@ -1623,6 +1625,85 @@ int cmd_rerank(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+int cmd_predict_structure(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.input_path.empty() || args.output_dir.empty()) {
+        std::cerr << "Error: predict-structure requires bundle + --input + --output\n";
+        return EXIT_FAILURE;
+    }
+
+    std::ifstream request_stream(args.input_path, std::ios::binary);
+    if (!request_stream) {
+        std::cerr << "Error: failed to open structure request: " << args.input_path << '\n';
+        return EXIT_FAILURE;
+    }
+    const std::string request_document((std::istreambuf_iterator<char>(request_stream)),
+                                       std::istreambuf_iterator<char>());
+    auto pipeline = load_pipeline(args);
+    const std::string request =
+        pipeline->prepare_structure_input(request_document, args.input_path);
+    trtmc::StructurePredictionConfig config;
+    if (args.seed >= 0)
+        config.seed = args.seed;
+    if (args.num_steps >= 0)
+        config.sampling_steps = args.num_steps;
+    config.diffusion_samples = args.num_samples;
+
+    if (args.benchmark < 0) {
+        std::cerr << "Error: --benchmark must be non-negative\n";
+        return EXIT_FAILURE;
+    }
+    const int warmup_runs = args.benchmark > 0 ? std::max(0, args.warmup) : 0;
+    for (int run = 0; run < warmup_runs; ++run)
+        (void)pipeline->predict_structure(request, config);
+    const int measured_runs = args.benchmark > 0 ? args.benchmark : 1;
+    const auto begin = std::chrono::steady_clock::now();
+    trtmc::StructurePredictionResult result;
+    for (int run = 0; run < measured_runs; ++run)
+        result = pipeline->predict_structure(request, config);
+    const auto end = std::chrono::steady_clock::now();
+
+    const auto output_path = std::filesystem::path(args.output_dir);
+    if (!output_path.parent_path().empty())
+        std::filesystem::create_directories(output_path.parent_path());
+    std::ofstream structure_stream(output_path, std::ios::binary);
+    if (!structure_stream)
+        throw std::runtime_error("failed to open structure output: " + args.output_dir);
+    structure_stream.write(result.structure.data(),
+                           static_cast<std::streamsize>(result.structure.size()));
+    structure_stream.close();
+    if (!structure_stream)
+        throw std::runtime_error("failed to write structure output: " + args.output_dir);
+
+    const std::string metadata_path =
+        args.output_json.empty() ? args.output_dir + ".metadata.json" : args.output_json;
+    const auto metadata_file = std::filesystem::path(metadata_path);
+    if (!metadata_file.parent_path().empty())
+        std::filesystem::create_directories(metadata_file.parent_path());
+    std::ofstream metadata_stream(metadata_file, std::ios::binary);
+    if (!metadata_stream)
+        throw std::runtime_error("failed to open structure metadata output: " + metadata_path);
+    metadata_stream.write(result.metadata_json.data(),
+                          static_cast<std::streamsize>(result.metadata_json.size()));
+    metadata_stream.close();
+    if (!metadata_stream)
+        throw std::runtime_error("failed to write structure metadata output: " + metadata_path);
+
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(end - begin).count();
+    const nlohmann::json summary = {
+        {"structure_path", output_path.string()},
+        {"metadata_path", metadata_path},
+        {"measured_runs", measured_runs},
+        {"mean_latency_ms", elapsed_ms / static_cast<double>(measured_runs)},
+        {"throughput_samples_per_second", 1000.0 * static_cast<double>(measured_runs) / elapsed_ms},
+        {"confidence_score", result.confidence.confidence_score},
+        {"complex_plddt", result.confidence.complex_plddt},
+        {"ptm", result.confidence.ptm},
+        {"plddt_count", result.confidence.plddt.size()},
+    };
+    std::cout << summary.dump() << '\n';
+    return EXIT_SUCCESS;
+}
+
 std::vector<float> parse_numeric_csv(const std::string& csv) {
     std::vector<float> values;
     std::string token;
@@ -2056,6 +2137,8 @@ int main(int argc, char** argv) {
             return cmd_embed(args);
         if (args.command == "rerank")
             return cmd_rerank(args);
+        if (args.command == "predict-structure")
+            return cmd_predict_structure(args);
         if (args.command == "solve")
             return cmd_solve(args);
         if (args.command == "speak")

@@ -191,6 +191,19 @@ void test_extract_features_parses_contract_flags() {
     check(args.output_json == "features.json", "extract-features output json");
 }
 
+void test_predict_structure_parses_contract_flags() {
+    auto args = parse({"trtmc", "predict-structure", "boltz2.bundle", "--input", "request.yaml",
+                       "--output", "structure.cif", "--output-json", "metadata.json", "--benchmark",
+                       "5", "--warmup", "1"});
+    check(!args.parse_error, "predict-structure parses cleanly");
+    check(args.command == "predict-structure", "predict-structure command");
+    check(args.bundle_path == "boltz2.bundle", "predict-structure bundle");
+    check(args.input_path == "request.yaml", "predict-structure input");
+    check(args.output_dir == "structure.cif", "predict-structure output");
+    check(args.output_json == "metadata.json", "predict-structure metadata");
+    check(args.benchmark == 5 && args.warmup == 1, "predict-structure benchmark controls");
+}
+
 void test_disparity_parses_stereo_images() {
     auto args = parse({"trtmc", "disparity", "bundle.bundle", "--image", "left.png",
                        "--right-image", "right.png", "--output", "disparity.f32"});
@@ -574,6 +587,7 @@ int main() {
     test_diffusion_flags();
     test_detect_parses_contract_flags();
     test_extract_features_parses_contract_flags();
+    test_predict_structure_parses_contract_flags();
     test_disparity_parses_stereo_images();
     test_geometry_parses_image_and_output_directory();
     test_act_parses_recorded_control_contract();

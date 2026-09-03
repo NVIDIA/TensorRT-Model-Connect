@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "boltz2"
+runtime_library = "libtrtmc_model_boltz2.so"
+runtime_plugins = ["plugin.cpp|register_boltz2_plugin"]
+runtime_strategies = ["boltz2_structure_prediction"]
+runtime_tests = [
+  "test_boltz2_sections|test_boltz2_sections.cpp|trtmc_model_boltz2|_|_",
+]

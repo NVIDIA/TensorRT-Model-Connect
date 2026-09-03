@@ -1,0 +1,13 @@
+{
+  "schema_version": "trtmc.model-plugin-validation/v1",
+  "dataset": "Boltz-2 bounded static-profile native validation",
+  "version": "1",
+  "requests": [
+    {
+      "sample_id": "boltz2-native-structure",
+      "stage": "end_to_end",
+      "category": "protein-monomer",
+      "inputs": {}
+    }
+  ]
+}
