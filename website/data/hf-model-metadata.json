@@ -1334,6 +1334,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/resnet18.a1_in1k",
+      "revision": "491b427b45c94c7fb0e78b5474cc919aff584bbf",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "resnet18"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",
@@ -1341,6 +1352,17 @@
       "model_type": null,
       "architectures": [
         "resnet50"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
+      "hf_id": "timm/resnext50_32x4d.a1h_in1k",
+      "revision": "cc736cb0940158d05966023116d90fca4c38dae3",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "resnext50_32x4d"
       ],
       "architecture_source": "config.architecture"
     },

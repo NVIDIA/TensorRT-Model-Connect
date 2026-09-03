@@ -4,7 +4,9 @@
 id = "timm_resnet"
 plugin = "timm_resnet"
 test_manifests = [
+  "manifests/resnet18-a1-in1k.json",
   "manifests/resnet50-a1-in1k.json",
+  "manifests/resnext50-32x4d-a1h-in1k.json",
 ]
 
 [e2e_defaults.image_classification]
