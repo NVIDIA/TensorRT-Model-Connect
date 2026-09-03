@@ -78,8 +78,10 @@ class FakeMogeModule final : public trtmc::ITrtModule {
   public:
     FakeMogeModule(int32_t height, int32_t width, bool invalidate_pixel = false,
                    trtmc::DType valid_dtype = trtmc::DType::kFloat16)
-        : height_(height), width_(width), points_(affine_points(height, width, 0.8F, 1.25F)),
-          depth_(affine_depth(points_)), samples_(focal_samples(points_, height, width)),
+        : height_(height), width_(width), min_height_(height), min_width_(width),
+          max_height_(height), max_width_(width),
+          points_(affine_points(height, width, 0.8F, 1.25F)), depth_(affine_depth(points_)),
+          samples_(focal_samples(points_, height, width)),
           valid_(static_cast<std::size_t>(height) * width, uint16_t{0x3C00}),
           valid_dtype_(valid_dtype) {
         if (invalidate_pixel)
@@ -87,6 +89,7 @@ class FakeMogeModule final : public trtmc::ITrtModule {
     }
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        ++forward_count_;
         const auto image = inputs.find("image");
         if (image != inputs.end()) {
             input_shape = image->second.shape;
@@ -107,7 +110,7 @@ class FakeMogeModule final : public trtmc::ITrtModule {
     cudaStream_t stream() const override { return nullptr; }
     void enable_cuda_graph() override {}
     bool cuda_graph_active() const override { return false; }
-    int32_t profile_idx() const override { return 0; }
+    int32_t profile_idx() const override { return profile_index_; }
     std::vector<trtmc::TensorInfo> input_info() const override { return {}; }
     std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
     bool has_input(const std::string& name) const override { return name == "image"; }
@@ -129,11 +132,17 @@ class FakeMogeModule final : public trtmc::ITrtModule {
             return {1};
         throw std::runtime_error("unknown fake tensor");
     }
-    std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
-                                             trtmc::ProfileShapeSelector) const override {
+    std::vector<int64_t> input_profile_shape(const std::string&, int32_t profile_index,
+                                             trtmc::ProfileShapeSelector selector) const override {
+        last_queried_profile_index_ = profile_index;
+        ++profile_query_count_;
+        if (selector == trtmc::ProfileShapeSelector::kMin)
+            return {1, min_height_, min_width_, 3};
+        if (selector == trtmc::ProfileShapeSelector::kMax)
+            return {1, max_height_, max_width_, 3};
         return {1, height_, width_, 3};
     }
-    int32_t optimization_profile_count() const override { return 1; }
+    int32_t optimization_profile_count() const override { return profile_index_ + 1; }
     void* device_ptr(const std::string&) const override { return nullptr; }
     void bind_external(const std::string&, void*) override {}
     bool ok() const override { return true; }
@@ -156,6 +165,17 @@ class FakeMogeModule final : public trtmc::ITrtModule {
         samples_.at(sample + 2U) = pz;
     }
     uint16_t valid_bits(std::size_t pixel) const { return valid_.at(pixel); }
+    int32_t forward_count() const { return forward_count_; }
+    int32_t last_queried_profile_index() const { return last_queried_profile_index_; }
+    int32_t profile_query_count() const { return profile_query_count_; }
+    void set_profile_index(int32_t profile_index) { profile_index_ = profile_index; }
+    void set_profile_bounds(int32_t min_height, int32_t min_width, int32_t max_height,
+                            int32_t max_width) {
+        min_height_ = min_height;
+        min_width_ = min_width;
+        max_height_ = max_height;
+        max_width_ = max_width;
+    }
 
     std::vector<int64_t> input_shape;
     std::vector<float> input_values;
@@ -163,6 +183,14 @@ class FakeMogeModule final : public trtmc::ITrtModule {
   private:
     int32_t height_;
     int32_t width_;
+    int32_t min_height_;
+    int32_t min_width_;
+    int32_t max_height_;
+    int32_t max_width_;
+    int32_t forward_count_{0};
+    int32_t profile_index_{0};
+    mutable int32_t last_queried_profile_index_{-1};
+    mutable int32_t profile_query_count_{0};
     std::vector<float> points_;
     std::vector<float> depth_;
     std::vector<float> samples_;
@@ -288,6 +316,45 @@ void test_invalid_rgb_values_are_rejected() {
     }
 }
 
+void test_loaded_engine_profile_bounds_are_enforced_before_forward() {
+    constexpr int32_t height = 64;
+    constexpr int32_t width = 80;
+    auto module = std::make_unique<FakeMogeModule>(height, width);
+    module->set_profile_index(2);
+    module->set_profile_bounds(height, width, 128, 160);
+    auto* module_ptr = module.get();
+    trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl");
+    check(module_ptr->last_queried_profile_index() == 2 && module_ptr->profile_query_count() == 2,
+          "MoGe reads min and max bounds from the active engine profile");
+
+    for (const auto& [input_height, input_width] :
+         {std::pair{height - 1, width}, std::pair{height, width - 1}, std::pair{129, width},
+          std::pair{height, 161}}) {
+        auto image = rgb_image(input_height, input_width);
+        try {
+            (void)pipeline.estimate_geometry(image.data(), input_height, input_width);
+            check(false, "MoGe rejects dimensions outside the loaded engine profile");
+        } catch (const std::invalid_argument& error) {
+            check(std::string(error.what()).find("outside the bundle profile") != std::string::npos,
+                  "MoGe profile-bound rejection is explicit");
+        }
+    }
+    check(module_ptr->forward_count() == 0,
+          "MoGe rejects profile-incompatible dimensions before TensorRT forward");
+}
+
+void test_invalid_loaded_engine_profile_is_rejected() {
+    auto module = std::make_unique<FakeMogeModule>(64, 80);
+    module->set_profile_bounds(128, 160, 64, 80);
+    try {
+        trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl");
+        check(false, "MoGe rejects an invalid loaded engine profile");
+    } catch (const std::runtime_error& error) {
+        check(std::string(error.what()).find("invalid TensorRT image profile") != std::string::npos,
+              "MoGe invalid engine profile rejection is explicit");
+    }
+}
+
 void test_focal_sampling_excludes_mapped_image_edges() {
     constexpr int32_t size = 64;
     auto module = std::make_unique<FakeMogeModule>(size, size);
@@ -354,6 +421,8 @@ int main() {
     test_legacy_int8_valid_contract_is_rejected();
     test_focal_recovery_failure_is_reported();
     test_invalid_rgb_values_are_rejected();
+    test_loaded_engine_profile_bounds_are_enforced_before_forward();
+    test_invalid_loaded_engine_profile_is_rejected();
     test_focal_sampling_excludes_mapped_image_edges();
     test_focal_sampling_excludes_invalid_three_by_three_neighborhood();
     test_focal_sampling_retains_complete_interior_neighborhoods();

@@ -28,6 +28,10 @@ class MogePipeline final : public IPipeline, public moge::IGeometryEstimator {
   private:
     std::unique_ptr<ITrtModule> model_;
     std::string model_id_;
+    int32_t min_image_height_{0};
+    int32_t min_image_width_{0};
+    int32_t max_image_height_{0};
+    int32_t max_image_width_{0};
 };
 
 } // namespace trtmc
