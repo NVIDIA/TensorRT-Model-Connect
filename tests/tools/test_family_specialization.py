@@ -399,7 +399,7 @@ def test_inventory_report_is_deterministic_and_serializable(tmp_path: Path) -> N
     assert first["schema_version"] == specialization.SCHEMA_VERSION
 
 
-def test_repository_family_packages_match_e2e_owners() -> None:
+def test_repository_registers_all_current_families() -> None:
     repo_root = Path(__file__).resolve().parents[2]
 
     family_names = {
