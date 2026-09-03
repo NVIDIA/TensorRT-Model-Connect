@@ -21,10 +21,33 @@ namespace {
 
 constexpr int32_t kFocalRecoverySize = 64;
 constexpr double kDenominatorEpsilon = 1.0e-9;
-constexpr int32_t kMinImageSize = 64;
-constexpr int32_t kMaxImageSize = 4096;
 constexpr float kMinAspectRatio = 0.5F;
 constexpr float kMaxAspectRatio = 2.0F;
+
+struct ImageProfileBounds {
+    int32_t min_height{0};
+    int32_t min_width{0};
+    int32_t max_height{0};
+    int32_t max_width{0};
+};
+
+bool valid_image_profile_shape(const std::vector<int64_t>& shape) {
+    constexpr auto kInt32Max = std::numeric_limits<int32_t>::max();
+    return shape.size() == 4U && shape[0] == 1 && shape[1] > 0 && shape[1] <= kInt32Max &&
+           shape[2] > 0 && shape[2] <= kInt32Max && shape[3] == 3;
+}
+
+ImageProfileBounds image_profile_bounds(const ITrtModule& model) {
+    const auto profile = model.profile_idx();
+    const auto minimum = model.input_profile_shape("image", profile, ProfileShapeSelector::kMin);
+    const auto maximum = model.input_profile_shape("image", profile, ProfileShapeSelector::kMax);
+    if (!valid_image_profile_shape(minimum) || !valid_image_profile_shape(maximum) ||
+        minimum[1] > maximum[1] || minimum[2] > maximum[2]) {
+        throw std::runtime_error("MogePipeline: invalid TensorRT image profile");
+    }
+    return {static_cast<int32_t>(minimum[1]), static_cast<int32_t>(minimum[2]),
+            static_cast<int32_t>(maximum[1]), static_cast<int32_t>(maximum[2])};
+}
 
 struct FocalSample {
     double u{0.0};
@@ -284,9 +307,9 @@ void populate_geometry_result(moge::GeometryResult& result, const float* affine_
     }
 }
 
-bool supported_image_size(int32_t height, int32_t width) {
-    return height >= kMinImageSize && width >= kMinImageSize && height <= kMaxImageSize &&
-           width <= kMaxImageSize;
+bool supported_image_size(int32_t height, int32_t width, const ImageProfileBounds& profile) {
+    return height >= profile.min_height && width >= profile.min_width &&
+           height <= profile.max_height && width <= profile.max_width;
 }
 
 bool supported_aspect_ratio(int32_t height, int32_t width) {
@@ -298,10 +321,11 @@ bool valid_rgb_value(float value) {
     return value >= 0.0F && value <= 1.0F;
 }
 
-void validate_image_input(const float* pixels, int32_t height, int32_t width) {
+void validate_image_input(const float* pixels, int32_t height, int32_t width,
+                          const ImageProfileBounds& profile) {
     if (pixels == nullptr)
         throw std::invalid_argument("MoGe image pointer is null");
-    if (!supported_image_size(height, width))
+    if (!supported_image_size(height, width, profile))
         throw std::invalid_argument("MoGe image dimensions are outside the bundle profile");
     if (!supported_aspect_ratio(height, width))
         throw std::invalid_argument("MoGe image aspect ratio is outside the supported range");
@@ -369,11 +393,18 @@ MogePipeline::MogePipeline(std::unique_ptr<ITrtModule> model, std::string model_
     : model_(std::move(model)), model_id_(std::move(model_id)) {
     if (!model_ || !model_->ok())
         throw std::runtime_error("MogePipeline: invalid model");
+    const auto profile = image_profile_bounds(*model_);
+    min_image_height_ = profile.min_height;
+    min_image_width_ = profile.min_width;
+    max_image_height_ = profile.max_height;
+    max_image_width_ = profile.max_width;
 }
 
 moge::GeometryResult MogePipeline::estimate_geometry(const float* pixels, int32_t height,
                                                      int32_t width) {
-    validate_image_input(pixels, height, width);
+    validate_image_input(
+        pixels, height, width,
+        {min_image_height_, min_image_width_, max_image_height_, max_image_width_});
     Tensor image{const_cast<float*>(pixels), {1, height, width, 3}, DType::kFloat32};
     const auto outputs = model_->forward({{"image", image}});
     const auto* affine_depth = require_float_output(outputs, "affine_depth", {1, height, width});
