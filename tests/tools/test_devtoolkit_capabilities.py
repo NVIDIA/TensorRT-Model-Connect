@@ -54,6 +54,7 @@ from trtmc_devtoolkit.spi import (  # noqa: E402
 )
 from trtmc_devtoolkit import receipt as receipt_module  # noqa: E402
 from trtmc_devtoolkit import catalogs as catalogs_module  # noqa: E402
+from trtmc_devtoolkit.building import BuildContext  # noqa: E402
 from trtmc_devtoolkit.builtin_providers import (  # noqa: E402
     ManagedArtifactToolchainSource,
 )
@@ -202,6 +203,15 @@ def test_nvidia_catalog_resolves_managed_cuda_when_target_has_none(
             )
         ).encode()
     )
+    bootstrap = {
+        "pip": ("24.0", "pip-24.0-py3-none-any.whl", "e" * 64),
+        "setuptools": (
+            "68.1.2",
+            "setuptools-68.1.2-py3-none-any.whl",
+            "f" * 64,
+        ),
+        "wheel": ("0.42.0", "wheel-0.42.0-py3-none-any.whl", "0" * 64),
+    }
 
     def fetch(url: str) -> bytes | None:
         if url.endswith("/redistrib_13.3.0.json"):
@@ -214,6 +224,19 @@ def test_nvidia_catalog_resolves_managed_cuda_when_target_has_none(
             return simple
         if url.endswith("/ubuntu2404/x86_64/Packages.gz"):
             return packages
+        for package, (package_version, filename, digest) in bootstrap.items():
+            if url.endswith(f"/{package}/{package_version}/json"):
+                return json.dumps(
+                    {
+                        "urls": [
+                            {
+                                "filename": filename,
+                                "url": f"https://files.example/{filename}",
+                                "digests": {"sha256": digest},
+                            }
+                        ]
+                    }
+                ).encode()
         raise AssertionError(url)
 
     monkeypatch.setattr(catalogs_module, "target_runtime_baseline", lambda *args: None)
@@ -249,7 +272,15 @@ def test_nvidia_catalog_resolves_managed_cuda_when_target_has_none(
     assert candidate.identity["cuda_artifacts"] == tuple(
         f"cuda-component-{component}" for component in cuda_components
     )
-    assert len(candidate.artifacts) == 12
+    assert candidate.identity["python_bootstrap_artifacts"] == (
+        "python-bootstrap-pip",
+        "python-bootstrap-setuptools",
+        "python-bootstrap-wheel",
+    )
+    assert [artifact.name for artifact in candidate.artifacts[-3:]] == list(
+        candidate.identity["python_bootstrap_artifacts"]
+    )
+    assert len(candidate.artifacts) == 15
 
 
 def test_nvidia_catalog_ignores_a_malformed_cuda_manifest() -> None:
@@ -490,11 +521,19 @@ class ManagedProvisionRunner:
         (self.trt / "libnvinfer.so").touch()
 
     def run(self, command, **kwargs):
-        del kwargs
+        check = kwargs.get("check", True)
         arguments = [str(item) for item in command]
         output = ""
+        returncode = 0
         script = arguments[2] if len(arguments) > 2 and arguments[1] == "-c" else ""
-        if arguments[:2] == ["dpkg-deb", "--extract"]:
+        if arguments[0] == "test":
+            path = Path(arguments[-1])
+            returncode = 0 if path.is_file() else 1
+        elif arguments[:2] == ["mkdir", "-p"]:
+            Path(arguments[-1]).mkdir(parents=True, exist_ok=True)
+        elif arguments[0] == "touch":
+            Path(arguments[-1]).touch()
+        elif arguments[:2] == ["dpkg-deb", "--extract"]:
             include = Path(arguments[3]) / "usr" / "include" / "x86_64-linux-gnu"
             self.header_include = include
             include.mkdir(parents=True)
@@ -536,7 +575,10 @@ class ManagedProvisionRunner:
             output = "11.2.0.113\n"
         elif "getInferLib" in arguments[-1]:
             output = "11.2.0.113\n"
-        return subprocess.CompletedProcess(arguments, 0, output, "")
+        result = subprocess.CompletedProcess(arguments, returncode, output, "")
+        if check and returncode != 0:
+            raise DevToolkitError(f"simulated target command failure: {arguments}")
+        return result
 
 
 class CommandRecordingRunner:
@@ -565,6 +607,8 @@ class CommandRecordingRunner:
                     "cublas": "/cuda/lib64/libcublas.so",
                 }
             )
+        elif "shutil.which" in arguments[-1]:
+            output = "Ninja\n"
         return subprocess.CompletedProcess(arguments, 0, output, "")
 
 
@@ -892,6 +936,37 @@ class ManagedContainerCatalog:
         )
 
 
+class BootstrapManagedContainerCatalog(ManagedContainerCatalog):
+    descriptor = ProviderDescriptor("bootstrap-container-catalog", "tests==1", 1)
+
+    def resolve(self, request, context, *, repository, runner):
+        candidate = super().resolve(
+            request,
+            context,
+            repository=repository,
+            runner=runner,
+        )[0]
+        names = (
+            "python-bootstrap-pip",
+            "python-bootstrap-setuptools",
+            "python-bootstrap-wheel",
+        )
+        artifacts = tuple(
+            ArtifactPin(name, f"https://example.invalid/{name}.whl", str(index) * 64)
+            for index, name in enumerate(names, start=5)
+        )
+        return (
+            replace(
+                candidate,
+                identity={
+                    **dict(candidate.identity),
+                    "python_bootstrap_artifacts": names,
+                },
+                artifacts=(*candidate.artifacts, *artifacts),
+            ),
+        )
+
+
 class ManagedCudaContainerCatalog(ManagedContainerCatalog):
     descriptor = ProviderDescriptor("managed-cuda-container-catalog", "tests==1", 1)
 
@@ -929,7 +1004,10 @@ class ManagedContainerContext:
 
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
+        self.command_environments: list[dict[str, str]] = []
         self.cuda_version = "13.0"
+        self.venv_requires_bootstrap = False
+        self.target_files: set[str] = set()
 
     def resolve(self, request, *, repository, runner):
         del request, repository, runner
@@ -948,10 +1026,21 @@ class ManagedContainerContext:
         del kwargs
 
         def execute(command, check, capture_output):
-            del check, capture_output
+            del capture_output
             arguments = [str(item) for item in command.arguments]
             self.commands.append(arguments)
-            returncode = 1 if arguments[0] == "test" else 0
+            self.command_environments.append(dict(command.environment))
+            returncode = 0
+            if arguments[0] == "test":
+                returncode = 0 if arguments[-1] in self.target_files else 1
+            elif (
+                self.venv_requires_bootstrap
+                and arguments[:3] == ["/usr/bin/python3", "-m", "venv"]
+                and "--without-pip" not in arguments
+            ):
+                returncode = 1
+            elif arguments[0] == "touch":
+                self.target_files.add(arguments[-1])
             output = ""
             script = arguments[2] if len(arguments) > 2 and arguments[1] == "-c" else ""
             if "os.environ.get" in script and '"LD_LIBRARY_PATH"' in script:
@@ -972,6 +1061,8 @@ class ManagedContainerContext:
                         "tensorrt_library": "/target/state/venv/tensorrt_libs/libnvinfer.so",
                     }
                 )
+            elif "source package produced no wheel" in script:
+                output = "/target/state/managed-toolchain/lock/built-wheels/tensorrt.whl\n"
             elif '"tensorrt_python"' in script:
                 output = json.dumps(
                     {
@@ -994,7 +1085,10 @@ class ManagedContainerContext:
                         },
                     }
                 )
-            return subprocess.CompletedProcess(arguments, returncode, output, "")
+            result = subprocess.CompletedProcess(arguments, returncode, output, "")
+            if check and returncode != 0:
+                raise DevToolkitError(f"simulated target command failure: {arguments}")
+            return result
 
         return ContextHandle(
             provider=self.descriptor,
@@ -1201,6 +1295,85 @@ def test_managed_catalog_installs_into_an_isolated_container_prefix(tmp_path: Pa
         ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
     )
     assert environment.context.environment["LD_LIBRARY_PATH"].endswith(":/image/lib")
+
+
+def test_managed_target_bootstraps_python_without_ensurepip(tmp_path: Path) -> None:
+    context = ManagedContainerContext()
+    context.venv_requires_bootstrap = True
+    materializer = ManagedArtifactToolchainSource()
+    registry = ProviderRegistry()
+    registry.register_context(context)
+    registry.register_toolchain(materializer)
+    registry.register_catalog(BootstrapManagedContainerCatalog(materializer.descriptor))
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+    )
+
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-container"),
+        )
+    )
+    toolkit.provision(lock)
+
+    venv_commands = [command for command in context.commands if command[1:3] == ["-m", "venv"]]
+    assert any("--without-pip" in command for command in venv_commands)
+    bootstrap_install_index = next(
+        index
+        for index, command in enumerate(context.commands)
+        if command[1:4] == ["-m", "pip", "install"]
+        and "python-bootstrap-pip.whl" in " ".join(command)
+    )
+    bootstrap_environment = context.command_environments[bootstrap_install_index]
+    assert "python-bootstrap-pip.whl" in bootstrap_environment["PYTHONPATH"]
+    wheel_build = next(
+        command for command in context.commands if command[1:3] == ["-m", "pip"] and "wheel" in command
+    )
+    assert wheel_build[0].endswith("/venv/bin/python")
+
+
+def test_managed_target_reuses_a_completed_toolchain_prefix(tmp_path: Path) -> None:
+    context = ManagedContainerContext()
+    materializer = ManagedArtifactToolchainSource()
+    registry = ProviderRegistry()
+    registry.register_context(context)
+    registry.register_toolchain(materializer)
+    registry.register_catalog(ManagedContainerCatalog(materializer.descriptor))
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-container"),
+        )
+    )
+
+    first = toolkit.provision(lock)
+    first_wheel_builds = sum(
+        command[1:3] == ["-m", "pip"] and "wheel" in command for command in context.commands
+    )
+    first_downloads = sum(
+        "artifact download failed" in command[2]
+        for command in context.commands
+        if len(command) > 2 and command[1] == "-c"
+    )
+    second = toolkit.provision(lock)
+
+    assert second.environment_id == first.environment_id
+    assert sum(
+        command[1:3] == ["-m", "pip"] and "wheel" in command for command in context.commands
+    ) == first_wheel_builds
+    assert sum(
+        "artifact download failed" in command[2]
+        for command in context.commands
+        if len(command) > 2 and command[1] == "-c"
+    ) == first_downloads
 
 
 def test_managed_cuda_components_are_extracted_into_the_target_prefix(
@@ -1939,6 +2112,76 @@ def test_native_build_identity_includes_source_sm_options_and_outputs(
     assert runner.commands[-1][0] == "sha256sum"
 
 
+def test_native_recipe_resolves_thor_architecture_through_cuda_driver() -> None:
+    runtime = ToolchainRuntime(
+        python_executable="/managed/venv/bin/python",
+        cuda_root="/managed/cuda",
+        nvcc="/managed/cuda/bin/nvcc",
+        tensorrt_include_dir="/managed/include",
+        tensorrt_library="/managed/lib/libnvinfer.so",
+    )
+
+    def probe(command: CommandSpec) -> str:
+        arguments = [str(argument) for argument in command.arguments]
+        script = arguments[2] if len(arguments) > 2 and arguments[1] == "-c" else ""
+        if "cuDeviceGetAttribute" in script:
+            return "110\n"
+        if "CUDA runtime headers are missing" in script:
+            return json.dumps(
+                {
+                    "include": "/managed/cuda/include",
+                    "cudart": "/managed/cuda/lib/libcudart.so",
+                    "cublas": "/managed/cuda/lib/libcublas.so",
+                }
+            )
+        if "shutil.which" in script:
+            return "Unix Makefiles\n"
+        if arguments[0] == "nvidia-smi":
+            raise FileNotFoundError("nvidia-smi")
+        raise AssertionError(arguments)
+
+    inputs = TrtmcBuildRecipe().inputs(
+        BuildContext(runtime=runtime, architecture="aarch64", _probe=probe)
+    )
+
+    assert inputs["cuda_architectures"] == ("110",)
+    assert inputs["generator"] == "Unix Makefiles"
+
+
+def test_native_recipe_auto_generator_prefers_ninja_when_available() -> None:
+    runtime = ToolchainRuntime(
+        python_executable="python3",
+        cuda_root="/cuda",
+        nvcc="/cuda/bin/nvcc",
+        tensorrt_include_dir="/trt/include",
+        tensorrt_library="/trt/lib/libnvinfer.so",
+    )
+
+    generator_probes: list[list[str]] = []
+
+    def probe(command: CommandSpec) -> str:
+        script = str(command.arguments[2])
+        if "CUDA runtime headers are missing" in script:
+            return json.dumps(
+                {
+                    "include": "/cuda/include",
+                    "cudart": "/cuda/lib/libcudart.so",
+                    "cublas": "/cuda/lib/libcublas.so",
+                }
+            )
+        if "shutil.which" in script:
+            generator_probes.append([str(argument) for argument in command.arguments])
+            return "Ninja\n"
+        raise AssertionError(command.arguments)
+
+    inputs = TrtmcBuildRecipe(cuda_architectures=("110",)).inputs(
+        BuildContext(runtime=runtime, architecture="aarch64", _probe=probe)
+    )
+
+    assert inputs["generator"] == "Ninja"
+    assert len(generator_probes) == 1
+
+
 def test_native_build_records_attestation_preflight_failure(tmp_path: Path) -> None:
     registry = ProviderRegistry()
     registry.register_context(StaticLocalContext())
@@ -2004,9 +2247,40 @@ def test_identical_builds_are_serialized(tmp_path: Path) -> None:
 
     assert not first.is_alive()
     assert not second.is_alive()
-    assert runner.second_configure_entered.is_set()
+    assert not runner.second_configure_entered.is_set()
     assert len(results) == 2
     assert results[0].build_request_id == results[1].build_request_id
+
+
+def test_completed_build_receipt_skips_reexecution(tmp_path: Path) -> None:
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(ExistingToolchainSource())
+    runner = CommandRecordingRunner()
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+        runner=runner,
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock)
+    recipe = TrtmcBuildRecipe(cuda_architectures=("100",), generator="Ninja")
+
+    first = toolkit.build(environment, recipe)
+    first_configures = sum(command[:2] == ["cmake", "-S"] for command in runner.commands)
+    first_builds = sum(command[:2] == ["cmake", "--build"] for command in runner.commands)
+    second = toolkit.build(environment, recipe)
+
+    assert second.build_id == first.build_id
+    assert sum(command[:2] == ["cmake", "-S"] for command in runner.commands) == first_configures
+    assert sum(command[:2] == ["cmake", "--build"] for command in runner.commands) == first_builds
 
 
 def test_qualification_is_optional_provenance_not_an_allowlist(

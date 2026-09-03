@@ -1321,7 +1321,7 @@ class PrefixToolchainSource(SystemToolchainSource):
 class ManagedArtifactToolchainSource:
     """Resolve caller-supplied, digest-pinned managed toolchain artifacts."""
 
-    descriptor = ProviderDescriptor("managed-artifacts", "trtmc-devtoolkit-managed-artifacts==5", 1)
+    descriptor = ProviderDescriptor("managed-artifacts", "trtmc-devtoolkit-managed-artifacts==6", 1)
 
     def resolve(
         self,
@@ -1406,6 +1406,18 @@ class ManagedArtifactToolchainSource:
             ):
                 return ()
             cuda_artifacts = configured_cuda_artifacts
+        configured_python_bootstrap = request.toolchain_options.get(
+            "python_bootstrap_artifacts", ()
+        )
+        artifact_names = {artifact.name for artifact in request.artifacts}
+        if (
+            not isinstance(configured_python_bootstrap, tuple)
+            or any(
+                not isinstance(name, str) or not name or name not in artifact_names
+                for name in configured_python_bootstrap
+            )
+        ):
+            return ()
         return (
             ToolchainCandidate(
                 provider=self.descriptor,
@@ -1415,12 +1427,13 @@ class ManagedArtifactToolchainSource:
                 cuda=cuda,
                 python=request.python,
                 identity={
-                    "layout_schema": 3,
+                    "layout_schema": 4,
                     "cuda_module": f"nvidia.cu{cuda_major}",
                     "tensorrt_lib_distribution": f"tensorrt_cu{cuda_major}_libs",
                     "system_cuda_root": system_cuda_root,
                     "system_nvcc": system_nvcc,
                     "cuda_artifacts": cuda_artifacts,
+                    "python_bootstrap_artifacts": configured_python_bootstrap,
                     "cuda_release": request.toolchain_options.get("cuda_release"),
                 },
                 artifacts=request.artifacts,
@@ -1552,46 +1565,105 @@ class ManagedArtifactToolchainSource:
         root_path = state_path(f"managed-toolchain/{lock.lock_id}")
         root = context.map_path(root_path)
         base_python = str(context.execution_identity["python"])
-        venv_python = str(PurePosixPath(root) / "venv" / "bin" / "python")
-        exists = context.execute(
-            CommandSpec(("test", "-x", venv_python)),
+        venv = str(PurePosixPath(root) / "venv")
+        venv_python = str(PurePosixPath(venv) / "bin" / "python")
+        ready_marker = str(PurePosixPath(root) / ".complete")
+        headers_root = str(PurePosixPath(root) / "headers")
+        cuda_root = (
+            str(PurePosixPath(root) / "cuda")
+            if lock.toolchain.cuda_source == "managed"
+            else None
+        )
+        context.execute(CommandSpec(("mkdir", "-p", root)))
+        complete = context.execute(
+            CommandSpec(("test", "-f", ready_marker)),
             check=False,
             capture_output=True,
         )
-        if exists.returncode != 0:
-            context.execute(
-                CommandSpec((base_python, "-m", "venv", str(PurePosixPath(root) / "venv")))
-            )
-
-        downloads = context.map_path(state_path("artifact-cache"))
-        context.execute(CommandSpec(("mkdir", "-p", downloads)))
-        paths: dict[str, str] = {}
-        for artifact in lock.toolchain.artifacts:
-            filename = Path(urllib.parse.urlsplit(artifact.uri).path).name
-            if not filename:
-                raise DevToolkitError(f"Artifact URI has no filename for {artifact.name}")
-            destination = str(PurePosixPath(downloads) / artifact.sha256 / filename)
-            context.execute(
-                CommandSpec(
-                    (base_python, "-c", _TARGET_DOWNLOAD_SCRIPT, destination),
-                    environment={
-                        "TRTMC_ARTIFACT_URI": artifact.uri,
-                        "TRTMC_ARTIFACT_SHA256": artifact.sha256,
-                    },
+        newly_materialized = complete.returncode != 0
+        if newly_materialized:
+            downloads = context.map_path(state_path("artifact-cache"))
+            context.execute(CommandSpec(("mkdir", "-p", downloads)))
+            paths: dict[str, str] = {}
+            for artifact in lock.toolchain.artifacts:
+                filename = Path(urllib.parse.urlsplit(artifact.uri).path).name
+                if not filename:
+                    raise DevToolkitError(f"Artifact URI has no filename for {artifact.name}")
+                destination = str(PurePosixPath(downloads) / artifact.sha256 / filename)
+                context.execute(
+                    CommandSpec(
+                        (base_python, "-c", _TARGET_DOWNLOAD_SCRIPT, destination),
+                        environment={
+                            "TRTMC_ARTIFACT_URI": artifact.uri,
+                            "TRTMC_ARTIFACT_SHA256": artifact.sha256,
+                        },
+                    )
                 )
-            )
-            paths[artifact.name] = destination
+                paths[artifact.name] = destination
 
-        cuda_root: str | None = None
-        if lock.toolchain.cuda_source == "managed":
-            cuda_root = str(PurePosixPath(root) / "cuda")
-            marker = str(PurePosixPath(cuda_root) / ".complete")
-            complete = context.execute(
-                CommandSpec(("test", "-f", marker)),
+            exists = context.execute(
+                CommandSpec(("test", "-x", venv_python)),
                 check=False,
                 capture_output=True,
             )
-            if complete.returncode != 0:
+            if exists.returncode != 0:
+                created = context.execute(
+                    CommandSpec((base_python, "-m", "venv", venv)),
+                    check=False,
+                    capture_output=True,
+                )
+                if created.returncode != 0:
+                    context.execute(
+                        CommandSpec((base_python, "-c", _TARGET_REMOVE_PATH_SCRIPT, venv))
+                    )
+                    context.execute(
+                        CommandSpec((base_python, "-m", "venv", "--without-pip", venv))
+                    )
+
+            bootstrap_names = self._python_bootstrap_artifact_names(lock)
+            if bootstrap_names:
+                bootstrap_paths = tuple(paths[name] for name in bootstrap_names)
+                context.execute(
+                    CommandSpec(
+                        (
+                            venv_python,
+                            "-m",
+                            "pip",
+                            "install",
+                            "--no-index",
+                            "--no-deps",
+                            *bootstrap_paths,
+                        ),
+                        environment={"PYTHONPATH": ":".join(bootstrap_paths)},
+                    )
+                )
+            else:
+                needs_wheel_builder = any(
+                    urllib.parse.urlsplit(artifact.uri).path.endswith(".tar.gz")
+                    for artifact in lock.toolchain.artifacts
+                )
+                python_build_ready = context.execute(
+                    CommandSpec(
+                        (
+                            venv_python,
+                            "-c",
+                            (
+                                "import pip, setuptools, wheel"
+                                if needs_wheel_builder
+                                else "import pip"
+                            ),
+                        )
+                    ),
+                    check=False,
+                    capture_output=True,
+                )
+                if python_build_ready.returncode != 0:
+                    raise DevToolkitError(
+                        "Target Python cannot build wheels; the immutable lock must include "
+                        "python_bootstrap_artifacts for pip, setuptools, and wheel"
+                    )
+
+            if cuda_root is not None:
                 context.execute(CommandSpec(("mkdir", "-p", cuda_root)))
                 for name in self._cuda_artifact_names(lock):
                     archive = paths.get(name)
@@ -1612,74 +1684,77 @@ class ManagedArtifactToolchainSource:
                             )
                         )
                     )
-                context.execute(CommandSpec(("touch", marker)))
-            context.execute(
-                CommandSpec((base_python, "-c", _TARGET_NORMALIZE_CUDA_LAYOUT_SCRIPT, cuda_root))
-            )
-
-        wheels = [
-            paths[artifact.name]
-            for artifact in lock.toolchain.artifacts
-            if urllib.parse.urlsplit(artifact.uri).path.endswith(".whl")
-        ]
-        source_packages = [
-            paths[artifact.name]
-            for artifact in lock.toolchain.artifacts
-            if urllib.parse.urlsplit(artifact.uri).path.endswith(".tar.gz")
-        ]
-        if source_packages:
-            built_wheels = str(PurePosixPath(root) / "built-wheels")
-            context.execute(CommandSpec(("mkdir", "-p", built_wheels)))
-            for source_package in source_packages:
                 context.execute(
                     CommandSpec(
-                        (
-                            base_python,
-                            "-m",
-                            "pip",
-                            "wheel",
-                            "--no-deps",
-                            "--no-build-isolation",
-                            "--wheel-dir",
-                            built_wheels,
-                            source_package,
-                        )
+                        (base_python, "-c", _TARGET_NORMALIZE_CUDA_LAYOUT_SCRIPT, cuda_root)
                     )
                 )
-            wheel_result = context.execute(
-                CommandSpec((base_python, "-c", _TARGET_WHEELS_SCRIPT, built_wheels)),
-                capture_output=True,
-            )
-            wheels.extend(line for line in wheel_result.stdout.splitlines() if line)
-        if not wheels:
-            raise DevToolkitError("Managed toolchain lock contains no Python packages")
-        context.execute(
-            CommandSpec(
-                (
-                    venv_python,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--no-index",
-                    "--no-deps",
-                    "--no-build-isolation",
-                    *wheels,
+
+            bootstrap_set = set(bootstrap_names)
+            wheels = [
+                paths[artifact.name]
+                for artifact in lock.toolchain.artifacts
+                if artifact.name not in bootstrap_set
+                and urllib.parse.urlsplit(artifact.uri).path.endswith(".whl")
+            ]
+            source_packages = [
+                paths[artifact.name]
+                for artifact in lock.toolchain.artifacts
+                if urllib.parse.urlsplit(artifact.uri).path.endswith(".tar.gz")
+            ]
+            if source_packages:
+                built_wheels = str(PurePosixPath(root) / "built-wheels")
+                context.execute(CommandSpec(("mkdir", "-p", built_wheels)))
+                for source_package in source_packages:
+                    context.execute(
+                        CommandSpec(
+                            (
+                                venv_python,
+                                "-m",
+                                "pip",
+                                "wheel",
+                                "--no-deps",
+                                "--no-build-isolation",
+                                "--wheel-dir",
+                                built_wheels,
+                                source_package,
+                            )
+                        )
+                    )
+                wheel_result = context.execute(
+                    CommandSpec((venv_python, "-c", _TARGET_WHEELS_SCRIPT, built_wheels)),
+                    capture_output=True,
+                )
+                wheels.extend(line for line in wheel_result.stdout.splitlines() if line)
+            if not wheels:
+                raise DevToolkitError("Managed toolchain lock contains no Python packages")
+            context.execute(
+                CommandSpec(
+                    (
+                        venv_python,
+                        "-m",
+                        "pip",
+                        "install",
+                        "--no-index",
+                        "--no-deps",
+                        "--no-build-isolation",
+                        *wheels,
+                    )
                 )
             )
-        )
-        context.execute(CommandSpec((venv_python, "-m", "pip", "check")))
+            context.execute(CommandSpec((venv_python, "-m", "pip", "check")))
 
-        headers_root = str(PurePosixPath(root) / "headers")
-        context.execute(CommandSpec(("mkdir", "-p", headers_root)))
-        headers_archives = [
-            paths[artifact.name]
-            for artifact in lock.toolchain.artifacts
-            if urllib.parse.urlsplit(artifact.uri).path.endswith(".deb")
-        ]
-        if not headers_archives:
-            raise DevToolkitError("Managed toolchain lock contains no TensorRT headers")
-        for archive in headers_archives:
-            context.execute(CommandSpec(("dpkg-deb", "--extract", archive, headers_root)))
+            context.execute(CommandSpec(("mkdir", "-p", headers_root)))
+            headers_archives = [
+                paths[artifact.name]
+                for artifact in lock.toolchain.artifacts
+                if urllib.parse.urlsplit(artifact.uri).path.endswith(".deb")
+            ]
+            if not headers_archives:
+                raise DevToolkitError("Managed toolchain lock contains no TensorRT headers")
+            for archive in headers_archives:
+                context.execute(CommandSpec(("dpkg-deb", "--extract", archive, headers_root)))
+
         header_result = context.execute(
             CommandSpec(
                 (
@@ -1742,6 +1817,8 @@ class ManagedArtifactToolchainSource:
             lock.context.architecture,
             base_environment=base_environment,
         )
+        if newly_materialized:
+            context.execute(CommandSpec(("touch", ready_marker)))
         return ToolchainHandle(
             provider=self.descriptor,
             identity=lock.toolchain.identity,
@@ -1758,6 +1835,20 @@ class ManagedArtifactToolchainSource:
             or any(not isinstance(name, str) or not name for name in raw)
         ):
             raise DevToolkitError("Managed CUDA requires a non-empty digest-pinned component set")
+        return raw
+
+    @staticmethod
+    def _python_bootstrap_artifact_names(lock) -> tuple[str, ...]:
+        raw = lock.toolchain.identity.get("python_bootstrap_artifacts", ())
+        artifact_names = {artifact.name for artifact in lock.toolchain.artifacts}
+        if (
+            not isinstance(raw, tuple)
+            or any(
+                not isinstance(name, str) or not name or name not in artifact_names
+                for name in raw
+            )
+        ):
+            raise DevToolkitError("Managed Python bootstrap artifact set is invalid")
         return raw
 
     @classmethod
@@ -1914,6 +2005,17 @@ wheels = sorted(Path(sys.argv[1]).glob("*.whl"))
 if not wheels:
     raise SystemExit("source package produced no wheel")
 print("\n".join(str(wheel.resolve()) for wheel in wheels))
+""".strip()
+
+
+_TARGET_REMOVE_PATH_SCRIPT = r"""
+import shutil
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if path.exists() or path.is_symlink():
+    shutil.rmtree(path)
 """.strip()
 
 

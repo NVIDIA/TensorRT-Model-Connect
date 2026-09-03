@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import hashlib
+import platform
 import re
 from pathlib import Path
 
 from .models import DevToolkitError, ToolchainObservation
+from .platforms import normalize_architecture
 from .runner import Runner, command_output
 
 
@@ -100,6 +102,7 @@ def observe_local_toolchain(
         tensorrt_include_dir=str(tensorrt_include_dir),
         tensorrt_library=str(tensorrt_library),
         cuda_root=str(cuda_root) if cuda_root is not None else None,
+        architecture=normalize_architecture(platform.machine()),
         evidence={
             "nvcc": _sha256(Path(nvcc)),
             "tensorrt-header": _sha256(tensorrt_include_dir / "NvInferVersion.h"),

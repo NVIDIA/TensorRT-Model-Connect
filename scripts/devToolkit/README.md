@@ -61,7 +61,10 @@ selected recipe, hashes outputs, and writes evidence. `TrtmcBuildRecipe` is an
 optional sample recipe that configures CMake against the resolved TensorRT
 runtime and builds only the requested targets. It does not install the checkout
 into or otherwise mutate the locked toolchain Python environment. User recipes
-can replace it completely.
+can replace it completely. The sample recipe queries GPU compute capability
+through the CUDA Driver API (with `nvidia-smi` as a fallback), and automatically
+selects Ninja when available or Unix Makefiles otherwise. Both can be overridden
+explicitly.
 
 For a user-owned unified CUDA/TensorRT installation, pass
 the prefix as toolchain-owned configuration. Resolution checks the prefix
@@ -127,7 +130,9 @@ artifacts. With no complete target CUDA, it also resolves the CUDA 13.3 native
 build component closure from NVIDIA's redistribution manifest. Provisioning
 downloads those pins into a content-addressed cache and installs them under the
 environment's isolated state prefix; it does not modify the target's system
-Python or `/usr/local/cuda`.
+Python or `/usr/local/cuda`. The public lock also pins `pip`, `setuptools`, and
+`wheel`, so a minimal target whose Python lacks `ensurepip` can bootstrap its
+isolated virtual environment without an OS-package install.
 
 Versions unavailable from the public indexes, such as an internal or pre-release
 build, can be supplied through a team JSON catalog. This is still automatic
@@ -175,9 +180,12 @@ the target's complete CUDA toolkit by major version:
 
 For an entirely managed CUDA, use `{"source": "managed", "version":
 "13.3", "release": "13.3.0", "artifacts": [...]}` and list the named CUDA
-component artifacts in the record's common `artifacts` array. Relative artifact
-paths are resolved relative to the manifest and must be reachable from the
-execution target. Artifact URI userinfo cannot contain credentials. Use
+component artifacts in the record's common `artifacts` array. A private source
+distribution targeting a minimal Python can likewise list digest-pinned
+bootstrap wheels in the common array and reference their names through
+`python_bootstrap_artifacts`. Relative artifact paths are resolved relative to
+the manifest and must be reachable from the execution target. Artifact URI
+userinfo cannot contain credentials. Use
 pre-authorized URLs, target-visible local paths, or a custom catalog and
 materializer when the artifact store requires another transport or
 authentication scheme.
@@ -247,7 +255,9 @@ commands write their own v3 receipts below that environment directory. Receipts
 do not serialize provider secrets or environment variable values. JSON receipts
 are replaced atomically, and provisioning for one environment ID is serialized
 across processes to avoid partial or competing terminal state. Identical build
-requests are also serialized across processes.
+requests are also serialized across processes. A completed managed prefix is
+reused after fresh attestation, and a completed build is reused only after its
+receipt identity and output digests are revalidated.
 Build failures before a build request ID can be computed are recorded below
 `builds/preflight/` with the environment ID and failed stage.
 

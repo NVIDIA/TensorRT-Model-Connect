@@ -47,16 +47,81 @@ print(json.dumps({
 """.strip()
 
 
+_CUDA_ARCHITECTURES_SCRIPT = r"""
+import ctypes
+
+driver = None
+errors = []
+for name in ("libcuda.so.1", "libcuda.so"):
+    try:
+        driver = ctypes.CDLL(name)
+        break
+    except OSError as error:
+        errors.append(str(error))
+if driver is None:
+    raise SystemExit("CUDA driver library is unavailable: " + "; ".join(errors))
+
+driver.cuInit.argtypes = [ctypes.c_uint]
+driver.cuInit.restype = ctypes.c_int
+driver.cuDeviceGetCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
+driver.cuDeviceGetCount.restype = ctypes.c_int
+driver.cuDeviceGet.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+driver.cuDeviceGet.restype = ctypes.c_int
+driver.cuDeviceGetAttribute.argtypes = [
+    ctypes.POINTER(ctypes.c_int),
+    ctypes.c_int,
+    ctypes.c_int,
+]
+driver.cuDeviceGetAttribute.restype = ctypes.c_int
+
+def checked(code, operation):
+    if code != 0:
+        raise SystemExit(f"{operation} failed with CUDA error {code}")
+
+checked(driver.cuInit(0), "cuInit")
+count = ctypes.c_int()
+checked(driver.cuDeviceGetCount(ctypes.byref(count)), "cuDeviceGetCount")
+architectures = set()
+for ordinal in range(count.value):
+    device = ctypes.c_int()
+    major = ctypes.c_int()
+    minor = ctypes.c_int()
+    checked(driver.cuDeviceGet(ctypes.byref(device), ordinal), "cuDeviceGet")
+    checked(
+        driver.cuDeviceGetAttribute(ctypes.byref(major), 75, device.value),
+        "cuDeviceGetAttribute(major)",
+    )
+    checked(
+        driver.cuDeviceGetAttribute(ctypes.byref(minor), 76, device.value),
+        "cuDeviceGetAttribute(minor)",
+    )
+    architectures.add(f"{major.value}{minor.value}")
+print("\n".join(sorted(architectures)))
+""".strip()
+
+
+_GENERATOR_SCRIPT = r"""
+import shutil
+
+if shutil.which("ninja"):
+    print("Ninja")
+elif shutil.which("make") or shutil.which("gmake"):
+    print("Unix Makefiles")
+else:
+    raise SystemExit("neither ninja nor make is available")
+""".strip()
+
+
 @dataclass(frozen=True)
 class TrtmcBuildRecipe:
     """Sample recipe for the repository's native TRTMC targets."""
 
-    descriptor: str = field(default="trtmc-native==2", init=False)
+    descriptor: str = field(default="trtmc-native==3", init=False)
     targets: tuple[str, ...] = ("trtmc", "trtmc_backend_trt")
     cmake_defines: Mapping[str, str | int | bool] = field(default_factory=dict)
     cuda_architectures: tuple[str, ...] | None = None
     build_type: str = "Release"
-    generator: str = "Ninja"
+    generator: str = "auto"
     jobs: int | None = None
     outputs: Mapping[str, str] = field(default_factory=lambda: {"trtmc": "trtmc"})
 
@@ -67,6 +132,8 @@ class TrtmcBuildRecipe:
             raise DevToolkitError("cuda_architectures cannot be empty")
         if self.jobs is not None and self.jobs < 1:
             raise DevToolkitError("Build jobs must be positive")
+        if not self.generator:
+            raise DevToolkitError("Build generator must be non-empty")
         for name, relative in self.outputs.items():
             path = PurePosixPath(relative)
             if not name or path.is_absolute() or ".." in path.parts:
@@ -80,20 +147,54 @@ class TrtmcBuildRecipe:
     def inputs(self, context: BuildContext) -> Mapping[str, object]:
         architectures = self.cuda_architectures
         if architectures is None:
-            output = context.probe(
-                CommandSpec(
-                    (
-                        "nvidia-smi",
-                        "--query-gpu=compute_cap",
-                        "--format=csv,noheader,nounits",
+            try:
+                output = context.probe(
+                    CommandSpec(
+                        (
+                            context.runtime.python_executable,
+                            "-c",
+                            _CUDA_ARCHITECTURES_SCRIPT,
+                        )
                     )
                 )
-            )
+            except (DevToolkitError, FileNotFoundError, OSError):
+                try:
+                    output = context.probe(
+                        CommandSpec(
+                            (
+                                "nvidia-smi",
+                                "--query-gpu=compute_cap",
+                                "--format=csv,noheader,nounits",
+                            )
+                        )
+                    )
+                except (DevToolkitError, FileNotFoundError, OSError) as error:
+                    raise DevToolkitError(
+                        "Could not query CUDA architecture through the driver or nvidia-smi"
+                    ) from error
             architectures = tuple(
                 line.strip().replace(".", "") for line in output.splitlines() if line.strip()
             )
-        if not architectures:
+        if not architectures or any(not architecture.isdigit() for architecture in architectures):
             raise DevToolkitError("Could not resolve a CUDA architecture for the TRTMC recipe")
+        generator = self.generator
+        if generator == "auto":
+            try:
+                generator = context.probe(
+                    CommandSpec(
+                        (
+                            context.runtime.python_executable,
+                            "-c",
+                            _GENERATOR_SCRIPT,
+                        )
+                    )
+                ).strip()
+            except (DevToolkitError, FileNotFoundError, OSError) as error:
+                raise DevToolkitError(
+                    "Could not resolve a CMake generator; install ninja or make, or select one"
+                ) from error
+            if generator not in {"Ninja", "Unix Makefiles"}:
+                raise DevToolkitError(f"Unsupported auto-selected CMake generator: {generator!r}")
         try:
             cuda = json.loads(
                 context.probe(
@@ -115,7 +216,7 @@ class TrtmcBuildRecipe:
             "cmake_defines": dict(self.cmake_defines),
             "cuda_architectures": architectures,
             "build_type": self.build_type,
-            "generator": self.generator,
+            "generator": generator,
             "jobs": self.jobs,
             "outputs": dict(self.outputs),
             "cuda": cuda_inputs,
@@ -132,7 +233,7 @@ class TrtmcBuildRecipe:
         defines: dict[str, str | int | bool] = {
             "TRTMC_BUILD_BACKEND_TRT": True,
             "TRTMC_BUILD_BACKEND_RTX": False,
-            **dict(self.cmake_defines),
+            **dict(inputs["cmake_defines"]),
             "CMAKE_CUDA_ARCHITECTURES": ";".join(
                 item if not item.isdigit() else f"{item}-real" for item in architectures
             ),
@@ -149,8 +250,8 @@ class TrtmcBuildRecipe:
             "-B",
             build_dir,
             "-G",
-            self.generator,
-            f"-DCMAKE_BUILD_TYPE={self.build_type}",
+            str(inputs["generator"]),
+            f"-DCMAKE_BUILD_TYPE={inputs['build_type']}",
         ]
         configure.extend(
             f"-D{name}={_define_value(value)}" for name, value in sorted(defines.items())
@@ -162,14 +263,14 @@ class TrtmcBuildRecipe:
             build_dir,
             "--parallel",
         ]
-        if self.jobs is not None:
-            build_command.append(str(self.jobs))
-        build_command.extend(("--target", *self.targets))
+        if inputs["jobs"] is not None:
+            build_command.append(str(inputs["jobs"]))
+        build_command.extend(("--target", *(str(target) for target in inputs["targets"])))
         commands.append(CommandSpec(build_command))
         return BuildPlan(
             commands=tuple(commands),
             outputs={
                 name: EnvironmentPath(build_dir.scope, build_dir.path / relative)
-                for name, relative in self.outputs.items()
+                for name, relative in dict(inputs["outputs"]).items()
             },
         )

@@ -44,6 +44,12 @@ _CUDA_COMPONENTS = (
     "libnvvm",
 )
 
+_PYTHON_BOOTSTRAP_PACKAGES = (
+    ("python-bootstrap-pip", "pip", "24.0"),
+    ("python-bootstrap-setuptools", "setuptools", "68.1.2"),
+    ("python-bootstrap-wheel", "wheel", "0.42.0"),
+)
+
 
 class _Links(HTMLParser):
     def __init__(self) -> None:
@@ -81,7 +87,7 @@ class NvidiaPackageIndexCatalog:
 
     descriptor = ProviderDescriptor(
         "nvidia-package-index",
-        "trtmc-devtoolkit-nvidia-package-index==2",
+        "trtmc-devtoolkit-nvidia-package-index==3",
         1,
     )
 
@@ -158,8 +164,12 @@ class NvidiaPackageIndexCatalog:
         )
         if not artifacts:
             return ()
+        python_bootstrap = self._python_bootstrap_distribution()
+        if not python_bootstrap:
+            return ()
         cuda_major = cuda.split(".", 1)[0]
         managed_names = tuple(artifact.name for artifact in cuda_artifacts)
+        bootstrap_names = tuple(artifact.name for artifact in python_bootstrap)
         return (
             ToolchainCandidate(
                 provider=ManagedArtifactToolchainSource.descriptor,
@@ -169,7 +179,7 @@ class NvidiaPackageIndexCatalog:
                 cuda=cuda,
                 python=request.python,
                 identity={
-                    "layout_schema": 3,
+                    "layout_schema": 4,
                     "catalog": {
                         "name": self.descriptor.name,
                         "implementation": self.descriptor.implementation,
@@ -180,12 +190,29 @@ class NvidiaPackageIndexCatalog:
                     "system_cuda_root": cuda_root,
                     "system_nvcc": nvcc,
                     "cuda_artifacts": managed_names,
+                    "python_bootstrap_artifacts": bootstrap_names,
                     "cuda_release": cuda_release,
                     "headers_package_version": headers_version,
                 },
-                artifacts=(*artifacts, *cuda_artifacts),
+                artifacts=(*artifacts, *cuda_artifacts, *python_bootstrap),
             ),
         )
+
+    def _python_bootstrap_distribution(self) -> tuple[ArtifactPin, ...]:
+        artifacts = tuple(
+            self._pypi_file(
+                package,
+                version,
+                lambda filename, expected=f"{package.replace('-', '_')}-{version}": (
+                    filename == f"{expected}-py3-none-any.whl"
+                ),
+                name,
+            )
+            for name, package, version in _PYTHON_BOOTSTRAP_PACKAGES
+        )
+        if any(artifact is None for artifact in artifacts):
+            return ()
+        return tuple(artifact for artifact in artifacts if artifact is not None)
 
     def _cuda_distribution(
         self,
@@ -573,6 +600,16 @@ class JsonToolchainCatalog:
             raise DevToolkitError(
                 f"Toolchain catalog record {record_id} references an unknown CUDA artifact"
             )
+        raw_bootstrap = record.get("python_bootstrap_artifacts", [])
+        if (
+            not isinstance(raw_bootstrap, list)
+            or any(not isinstance(name, str) or not name for name in raw_bootstrap)
+            or any(name not in artifact_names for name in raw_bootstrap)
+        ):
+            raise DevToolkitError(
+                f"Toolchain catalog record {record_id} has invalid Python bootstrap artifacts"
+            )
+        python_bootstrap_artifacts = tuple(raw_bootstrap)
         cuda_major = resolved_cuda.split(".", 1)[0]
         distribution = record.get(
             "tensorrt_lib_distribution",
@@ -590,7 +627,7 @@ class JsonToolchainCatalog:
             cuda=resolved_cuda,
             python=request.python,
             identity={
-                "layout_schema": 3,
+                "layout_schema": 4,
                 "catalog": {
                     "name": self.descriptor.name,
                     "implementation": self.descriptor.implementation,
@@ -603,6 +640,7 @@ class JsonToolchainCatalog:
                 "system_cuda_root": cuda_root,
                 "system_nvcc": nvcc,
                 "cuda_artifacts": cuda_artifact_names,
+                "python_bootstrap_artifacts": python_bootstrap_artifacts,
                 "cuda_release": cuda_release,
             },
             artifacts=artifacts,

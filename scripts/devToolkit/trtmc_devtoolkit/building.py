@@ -122,6 +122,7 @@ class Builder:
         environment: ProvisionedEnvironment,
         command: CommandSpec,
         *,
+        check: bool = True,
         capture_output: bool = False,
     ):
         context = self.providers.context(environment.context.provider.name)
@@ -131,8 +132,97 @@ class Builder:
             repository=self.repository,
             state_dir=environment.state_dir,
             runner=self.runner,
-            check=True,
+            check=check,
             capture_output=capture_output,
+        )
+
+    def _completed_result(
+        self,
+        environment: ProvisionedEnvironment,
+        recipe: BuildRecipe,
+        source: SourceSnapshot,
+        inputs: Mapping[str, object],
+        request_id: str,
+        build_dir: EnvironmentPath,
+        receipt: Path,
+        plan: BuildPlan,
+    ) -> BuildResult | None:
+        try:
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        expected_identity = {
+            "schema_version": 3,
+            "environment_id": environment.environment_id,
+            "source": asdict(source),
+            "recipe": recipe.descriptor,
+            "inputs": inputs,
+            "build_request_id": request_id,
+            "status": "completed",
+        }
+        try:
+            normalized_identity = json.loads(
+                json.dumps(expected_identity, sort_keys=True, separators=(",", ":"))
+            )
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict) or any(
+            payload.get(name) != value for name, value in normalized_identity.items()
+        ):
+            return None
+        raw_artifacts = payload.get("artifacts")
+        if not isinstance(raw_artifacts, list) or len(raw_artifacts) != len(plan.outputs):
+            return None
+        artifacts_by_name: dict[str, object] = {}
+        for raw_artifact in raw_artifacts:
+            if not isinstance(raw_artifact, dict):
+                return None
+            name = raw_artifact.get("name")
+            if not isinstance(name, str) or name in artifacts_by_name:
+                return None
+            artifacts_by_name[name] = raw_artifact
+        artifacts: list[BuildArtifact] = []
+        for name, path in sorted(plan.outputs.items()):
+            raw_artifact = artifacts_by_name.get(name)
+            if not isinstance(raw_artifact, dict):
+                return None
+            recorded_sha256 = raw_artifact.get("sha256")
+            if (
+                raw_artifact.get("path") != str(path.path)
+                or not isinstance(recorded_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", recorded_sha256) is None
+            ):
+                return None
+            hash_result = self._execute(
+                environment,
+                CommandSpec(("sha256sum", path)),
+                check=False,
+                capture_output=True,
+            )
+            output = hash_result.stdout.strip()
+            observed_sha256 = output.split(None, 1)[0] if output else ""
+            if hash_result.returncode != 0 or observed_sha256 != recorded_sha256:
+                return None
+            artifacts.append(BuildArtifact(name, path, recorded_sha256))
+        artifact_payload = [
+            {"name": item.name, "path": str(item.path.path), "sha256": item.sha256}
+            for item in artifacts
+        ]
+        build_id = _digest(
+            {"build_request_id": request_id, "artifacts": artifact_payload},
+            b"trtmc-devtoolkit-build-result-v3",
+        )
+        if payload.get("build_id") != build_id:
+            return None
+        return BuildResult(
+            build_request_id=request_id,
+            build_id=build_id,
+            environment_id=environment.environment_id,
+            recipe=recipe.descriptor,
+            source=source,
+            build_dir=build_dir,
+            artifacts=tuple(artifacts),
+            receipt=receipt,
         )
 
     def _source_snapshot(self, environment: ProvisionedEnvironment) -> SourceSnapshot:
@@ -235,6 +325,18 @@ class Builder:
         with exclusive_lock(receipt.parent / ".build.lock"):
             try:
                 plan = recipe.plan(context, MappingProxyType(inputs), build_dir)
+                completed = self._completed_result(
+                    environment,
+                    recipe,
+                    source,
+                    inputs,
+                    request_id,
+                    build_dir,
+                    receipt,
+                    plan,
+                )
+                if completed is not None:
+                    return completed
                 for command in plan.commands:
                     self._execute(environment, command)
                 artifacts: list[BuildArtifact] = []
