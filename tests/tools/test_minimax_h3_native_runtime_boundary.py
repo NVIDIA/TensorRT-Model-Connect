@@ -108,6 +108,10 @@ def test_windows_h3_distribution_disables_optional_runtime_frameworks() -> None:
     assert 'Join-Path $PayloadRoot "models\\MiniMax-H3.bundle"' in package_script
     assert "trtmc\\models\\minimax_h3\\trtmc_model_minimax_h3.dll" in package_script
     assert "--verify-only --quiet" in package_script
+    assert "Start-Process" in package_script
+    assert "-WindowStyle Hidden" in package_script
+    assert "-Wait" in package_script
+    assert "$VerifyProcess.ExitCode" in package_script
     assert "expectedSections.Count -ne 61" in package_script
     assert "Assert-RuntimeOnlyCli" in package_script
     assert "trtmc build" in package_script

@@ -424,10 +424,18 @@ $PackagedPeFiles = @(
 Assert-NativeDependencyBoundary $PackagedPeFiles
 
 # Re-run the native installer verifier after every package validation step.
-# It rejects any payload file that is not represented by the SHA-256 manifest.
-$VerifyOutput = @(& $PackagedSetup --payload-dir $PayloadRoot --verify-only --quiet 2>&1)
-if ($LASTEXITCODE -ne 0) {
-    throw "Native installer rejected the exact package payload:`n$($VerifyOutput -join [Environment]::NewLine)"
+# MiniMaxH3Setup.exe uses the Windows GUI subsystem, so an ordinary PowerShell
+# invocation can return before it exits. Explicitly wait for --verify-only --quiet
+# and hide its non-interactive window before accepting the package.
+$QuotedPayloadRoot = '"' + $PayloadRoot + '"'
+$VerifyProcess = Start-Process `
+    -FilePath $PackagedSetup `
+    -ArgumentList @("--payload-dir", $QuotedPayloadRoot, "--verify-only", "--quiet") `
+    -WindowStyle Hidden `
+    -Wait `
+    -PassThru
+if ($VerifyProcess.ExitCode -ne 0) {
+    throw "Native installer rejected the exact package payload with exit code $($VerifyProcess.ExitCode)"
 }
 
 Write-Host "Native MiniMax-H3 installation layout created: $OutputRoot"
