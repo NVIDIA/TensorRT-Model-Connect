@@ -109,6 +109,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     # still receive the structured TRT/reference fallback renderer.
     "object_detection": "detection",
     "stereo_disparity": "numeric",
+    "structure_prediction": "numeric",
 }
 
 

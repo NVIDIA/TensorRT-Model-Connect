@@ -4,6 +4,39 @@
 version: 1
 
 suites:
+  - id: boltz2_native_structure_validation
+    description: >
+      Model-owned native validation for the bounded reusable Boltz-2 profile.
+      The complete TensorRT recycling, diffusion, confidence, and mmCIF path
+      must pass the profile's fail-closed structure and confidence invariants.
+      Pinned-reference numeric quality and performance remain gated by the
+      model-owned thresholds and snapshots.
+    user_contract: structure_prediction
+    task_type: Protein Structure Prediction
+    default_model_names:
+      - boltz2-protein-monomer
+    dataset:
+      kind: model_plugin_json
+      default_path: tests/e2e/models/boltz2/data/validation.json
+      input_asset_fields: []
+    selectors:
+      model_names:
+        - boltz2-protein-monomer
+      task_strategies: [structure_prediction]
+      runtime_strategies: [boltz2_structure_prediction]
+      user_contracts: [structure_prediction]
+      families: [boltz2]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        The model-owned native profile runs locally because bundle construction
+        needs the pinned Boltz package.
+
   - id: mmlu_five_shot_mcq
     description: >
       Local five-shot MMLU multiple-choice accuracy evaluation. This validates

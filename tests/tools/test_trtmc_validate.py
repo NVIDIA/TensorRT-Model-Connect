@@ -223,6 +223,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     }
     assert min(catalog["sample_limits"].values()) >= 1
     assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
+        "boltz2_native_structure_validation",
         "dinov3_image_feature_extraction_parity",
         "fast_foundation_stereo_synthetic_parity",
         "lfm2_model_card_sampling_parity",

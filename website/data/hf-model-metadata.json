@@ -530,6 +530,15 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "boltz-community/boltz-2",
+      "revision": "6fdef46d763fee7fbb83ca5501ccceff43b85607",
+      "revision_source": "resolved",
+      "metadata_file": null,
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
+    },
+    {
       "hf_id": "bytedance-research/Lance",
       "revision": "7395315758865e6f56ab87ad06a88c7ac172f056",
       "revision_source": "declared",

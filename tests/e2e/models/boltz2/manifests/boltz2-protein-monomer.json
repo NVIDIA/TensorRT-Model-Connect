@@ -1,0 +1,45 @@
+{
+  "name": "boltz2-protein-monomer",
+  "hf_id": "boltz-community/boltz-2",
+  "hf_revision": "6fdef46d763fee7fbb83ca5501ccceff43b85607",
+  "bundle": "boltz2-protein-monomer.bundle",
+  "benchmark_exclusion_reason": "Boltz-2 structure quality and performance use the model-owned pinned qualification workflow rather than the shared benchmark catalog.",
+  "family": "boltz2",
+  "runtime_strategy": "boltz2_structure_prediction",
+  "task_strategy": "structure_prediction",
+  "precision": "bf16",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_timeout_s": 7200,
+  "benchmark_assets": [
+    "data/protein_monomer.a3m",
+    "data/protein_monomer_variant/protein_monomer_variant.a3m"
+  ],
+  "testcases": [
+    {
+      "name": "boltz2-protein-monomer",
+      "trace_id": "IT-E2E-BOLTZ2-PROTEIN-MONOMER-01",
+      "ci_tier": "default",
+      "runtime_timeout_s": 1800,
+      "reference_backend": "boltz2_snapshot",
+      "oracle_level": "L3_snapshot_regression",
+      "reference_family": "boltz2_native_structure_snapshot",
+      "user_contract": "structure_prediction",
+      "prompt_file": "data/protein_monomer.yaml",
+      "seed": 42,
+      "notes": "Native reusable-profile smoke for the complete TensorRT trunk, recycling, diffusion, confidence, and mmCIF path. Rebuilding this bundle requires the documented local package containing the checkpoint, processed fixture, and molecule dictionary."
+    },
+    {
+      "name": "boltz2-protein-monomer-variant-reuse",
+      "trace_id": "IT-E2E-BOLTZ2-PROFILE-REUSE-03",
+      "ci_tier": "nightly_only",
+      "runtime_timeout_s": 1800,
+      "reference_backend": "boltz2_snapshot",
+      "oracle_level": "L3_snapshot_regression",
+      "reference_family": "boltz2_native_structure_snapshot",
+      "user_contract": "structure_prediction",
+      "prompt_file": "data/protein_monomer_variant/protein_monomer_variant.yaml",
+      "seed": 42,
+      "notes": "Reuses the primary 117-token/928-atom bundle after changing an amino acid and its A3M query; no TensorRT plan build is allowed between testcases."
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "boltz2"
+plugin = "boltz2"
+module = "plugin"
+config_adapter = "model_config.py|config_from_dir"
+default_build_route = "model_config.py|prefer_native_default"
+python_profile_specs = [
+  "boltz2_build|families/boltz2/python_profile_requirements/boltz2_build.lock.txt|families/boltz2/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "build|boltz2_build",
+  "reference|boltz2_build",
+]
+aliases = [
+  "boltz2",
+  "boltz_2",
+  "boltz-community/boltz-2",
+]
+prefixes = [
+  "boltz2",
+  "boltz_2",
+]

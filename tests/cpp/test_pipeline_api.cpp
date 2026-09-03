@@ -383,6 +383,15 @@ static void test_ipipeline_default_virtuals() {
     }
     check(threw, "default transcribe_streaming throws");
 
+    // Default biomolecular structure prediction should throw.
+    threw = false;
+    try {
+        pipeline.predict_structure("version: 1\nsequences: []\n");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "default predict_structure throws");
+
     // Default speak should throw
     threw = false;
     try {
@@ -674,6 +683,23 @@ static void test_pipeline_pool_leases_and_adapter_maintenance() {
     check(pool.loaded_lora_adapters().empty(), "pipeline pool unloads adapter across lanes");
 }
 
+static void test_structure_prediction_contract_defaults() {
+    trtmc::StructurePredictionConfig config;
+    check(config.recycling_steps == 3, "structure config: default recycling steps");
+    check(config.sampling_steps == 200, "structure config: default sampling steps");
+    check(config.diffusion_samples == 1, "structure config: default diffusion samples");
+    check(config.seed == 42, "structure config: default seed");
+    check(config.output_format == trtmc::StructureFormat::kMmcif,
+          "structure config: default output format");
+
+    trtmc::StructurePredictionResult result;
+    check(result.format == trtmc::StructureFormat::kMmcif,
+          "structure result: default output format");
+    check(result.structure.empty(), "structure result: empty structure by default");
+    check(result.confidence.plddt.empty(), "structure result: empty plddt by default");
+    check(result.metadata_json.empty(), "structure result: empty metadata by default");
+}
+
 int main() {
     test_null_input_returns_null();
     test_invalid_path_returns_null();
@@ -688,6 +714,7 @@ int main() {
     test_speech_tool_session_optional_interface();
     test_transcription_batch_preserves_per_request_config();
     test_pipeline_pool_leases_and_adapter_maintenance();
+    test_structure_prediction_contract_defaults();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
