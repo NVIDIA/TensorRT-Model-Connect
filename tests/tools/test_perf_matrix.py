@@ -77,6 +77,7 @@ TASK_ADAPTERS = {
     "segformer.segment": "hf-transformers-vision",
     "timesfm.solve": "pytorch-timeseries",
     "timm_resnet.classify": "hf-transformers-vision",
+    "timm_vgg.classify": "hf-transformers-vision",
     "timm_vit.classify": "hf-transformers-vision",
     "wan_t2v.generate_image": "hf-diffusers",
     "wan2_2_ti2v.generate_image": "hf-diffusers",

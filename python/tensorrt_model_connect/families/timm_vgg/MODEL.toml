@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_vgg"
+plugin = "timm_vgg"
+module = "plugin"
+python_profile_specs = [
+  "timm_vgg_reference|families/timm_vgg/python_profile_requirements/timm_vgg_reference.lock.txt|families/timm_vgg/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_vgg_reference",
+]
+aliases = [
+  "timm_vgg",
+  "timmvgg",
+  "vgg",
+  "vgg16",
+]
+prefixes = [
+  "timm_vgg",
+  "vgg",
+]

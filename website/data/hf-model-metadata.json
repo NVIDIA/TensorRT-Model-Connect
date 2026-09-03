@@ -1323,6 +1323,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/vgg16.tv_in1k",
+      "revision": "b8d8aa2dd860af9233c8c67385a8097fd6c35d3f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "vgg16"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/vit_base_patch16_224.augreg_in21k_ft_in1k",
       "revision": "2ec9fb3d7bb664aac471ac44582c94d18de33780",
       "revision_source": "resolved",

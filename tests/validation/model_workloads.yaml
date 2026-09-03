@@ -290,6 +290,8 @@ models:
     workloads: [imagenette_image_classification]
   tinyllama-1.1b:
     workloads: [mmlu_five_shot_mcq]
+  vgg16-tv-in1k:
+    workloads: [imagenette_image_classification]
   wan21-t2v-1.3b:
     workloads: [vbench_t2v_diffusion_video]
   wan22-ti2v-5b:
