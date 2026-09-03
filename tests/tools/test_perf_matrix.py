@@ -85,6 +85,7 @@ TASK_ADAPTERS = {
     "timm_densenet.classify": "hf-transformers-vision",
     "timm_mnasnet.classify": "hf-transformers-vision",
     "timm_inception.classify": "hf-transformers-vision",
+    "timm_repvgg.classify": "hf-transformers-vision",
     "timm_resnet.classify": "hf-transformers-vision",
     "timm_vgg.classify": "hf-transformers-vision",
     "timm_vit.classify": "hf-transformers-vision",

@@ -978,6 +978,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: timm_repvgg.classify
+    family: timm_repvgg
+    operation: classify
+    model: repvgg-a2-rvgg-in1k
+    workload:
+      testcase: repvgg-a2-rvgg-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_inception.classify
     family: timm_inception
     operation: classify
