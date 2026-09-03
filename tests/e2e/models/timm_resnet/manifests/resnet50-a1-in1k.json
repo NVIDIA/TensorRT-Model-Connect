@@ -1,7 +1,6 @@
 {
   "name": "resnet50-a1-in1k",
   "hf_id": "timm/resnet50.a1_in1k",
-  "hf_revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
   "bundle": "resnet50-a1-in1k.bundle",
   "family": "timm_resnet",
   "runtime_strategy": "timm_resnet_image_classification",
