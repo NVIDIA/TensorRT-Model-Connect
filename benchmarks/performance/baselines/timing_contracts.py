@@ -25,6 +25,7 @@ MODEL_CALL_FAMILIES = {
     "sam3",
     "segformer",
     "timesfm",
+    "timm_mobilenetv3",
     "timm_resnet",
     "timm_vgg",
     "timm_vit",

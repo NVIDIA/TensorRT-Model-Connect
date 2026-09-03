@@ -179,6 +179,8 @@ models:
     workloads: [mmlu_continuation_parity]
   moge-2-vitl:
     workloads: [moge_monocular_geometry_fp32_parity]
+  mobilenetv3-large-100-ra-in1k:
+    workloads: [imagenette_image_classification]
   modernbert-base:
     workloads: [stsbenchmark_encoder_embedding_parity]
   multilingual-e5-small:

@@ -1259,10 +1259,12 @@ suites:
       runtime_strategies:
         - timm_vit_image_classification
         - timm_resnet_image_classification
+        - timm_mobilenetv3_image_classification
         - timm_vgg_image_classification
       families:
         - timm_vit
         - timm_resnet
+        - timm_mobilenetv3
         - timm_vgg
       user_contracts:
         - image_classification
