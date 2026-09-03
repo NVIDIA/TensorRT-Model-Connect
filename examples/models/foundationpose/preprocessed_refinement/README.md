@@ -22,7 +22,7 @@ BUNDLE=/tmp/foundationpose.bundle
 INPUTS=/tmp/foundationpose-inputs
 EXAMPLE_BUILD=/tmp/foundationpose-example
 
-trtmc build "$MODEL_DIR" --precision fp32 -o "$BUNDLE"
+trtmc build "$MODEL_DIR" -o "$BUNDLE"
 python3 examples/models/foundationpose/preprocessed_refinement/prepare_synthetic_inputs.py "$INPUTS"
 
 cmake -S examples/models/foundationpose/preprocessed_refinement -B "$EXAMPLE_BUILD"
@@ -40,8 +40,10 @@ FP32 matrices.
 
 Inputs are FP32 NHWC `[N,160,160,6]`: RGB in `[0,1]`, followed by XYZ relative
 to the candidate translation and normalized by half the mesh diameter.
-Invalid/background XYZ values are zero. The bundle supports 1-252 hypotheses,
-1-10 refinement iterations, and FP32 only.
+Invalid/background XYZ values are zero. The bundle supports 1-252 hypotheses
+and 1-10 refinement iterations. The default mixed-FP16 build keeps the
+numerically sensitive scorer cross-attention in FP32. Pass `--precision fp32`
+to build the entire model in FP32 instead.
 
 ## Scope
 

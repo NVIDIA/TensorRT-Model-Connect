@@ -74,7 +74,7 @@ class FoundationPosePlugin:
     name = "foundationpose"
     runtime_strategy = "foundationpose_pose_refinement"
     requires_tokenizer = False
-    default_build_precision = "fp32"
+    default_build_precision = "fp16"
 
     def matches(self, model_type: str) -> bool:
         return (model_type or "").lower().replace("-", "_") == "foundationpose"
@@ -87,10 +87,10 @@ class FoundationPosePlugin:
         model_dir: str,
         config: ModelConfig,
         *,
-        precision: str = "fp32",
+        precision: str = "fp16",
     ) -> dict[str, str]:
-        if precision != "fp32":
-            raise ValueError("The pinned FoundationPose accuracy contract supports fp32 only")
+        if precision not in {"fp16", "fp32"}:
+            raise ValueError("FoundationPose supports fp16 or fp32 builds")
         refiner, scorer = _validate_models(model_dir)
         config.raw["_foundationpose_model_dir"] = str(Path(model_dir).resolve())
         return {"refiner": str(refiner), "scorer": str(scorer)}
@@ -101,7 +101,7 @@ class FoundationPosePlugin:
         weights: dict[str, str],
         max_cache_length: int,
         *,
-        precision: str = "fp32",
+        precision: str = "fp16",
         quant_ctx=None,
         verbose: bool = False,
     ) -> bytes:
@@ -120,7 +120,7 @@ class FoundationPosePlugin:
         weights: dict[str, str],
         max_cache_length: int,
         *,
-        precision: str = "fp32",
+        precision: str = "fp16",
         quant_ctx=None,
         verbose: bool = False,
     ) -> dict[str, bytes]:

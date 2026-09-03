@@ -11,7 +11,11 @@
   "family": "foundationpose",
   "runtime_strategy": "foundationpose_pose_refinement",
   "task_strategy": "pose_hypothesis_refinement",
-  "precision": "fp32",
+  "precision": "fp16",
+  "task_eval": {
+    "reference_precision": "fp32",
+    "allow_reference_precision_mismatch": true
+  },
   "trust_remote_code": false,
   "execution_profiles": {
     "build": "base",
@@ -37,7 +41,7 @@
       "ngc_version": "1.0.1_onnx",
       "refiner_sha256": "dcc695a19c4bcfe5e1d909a22d8f652d8ec8bab1e19bd1544c6b45f2d3595cf7",
       "scorer_sha256": "0bf1026c0db7320ebf9a548ecf0d3c810c8dbd377948630bd3e5af1d49440503",
-      "notes": "Runs two refinement iterations and joint scoring on deterministic preprocessed RGB+XYZ crop pairs, compares to the official NGC ONNX pair, validates rigid transforms and ranking, and measures single-hypothesis tracking capacity. Segmentation, CAD rendering, collision safety, and physical robot safety are outside this qualification."
+      "notes": "Runs the default mixed-FP16 build for two refinement iterations and joint scoring on deterministic preprocessed RGB+XYZ crop pairs, compares to the official NGC ONNX pair in FP32, validates rigid transforms and ranking, and measures single-hypothesis tracking capacity. The scorer cross-hypothesis attention and score projection remain FP32 for numerical stability. Segmentation, CAD rendering, collision safety, and physical robot safety are outside this qualification."
     }
   ]
 }

@@ -12,6 +12,7 @@ family = importlib.import_module("tensorrt_model_connect.families.foundationpose
 
 
 def test_bundle_contract_is_pinned_and_explicit():
+    assert family.plugin.default_build_precision == "fp16"
     metadata = family.plugin.get_bundle_config_overrides(SimpleNamespace(raw={}))
     assert metadata["foundationpose_source_revision"] == family.SOURCE_REVISION
     assert metadata["foundationpose_ngc_version"] == "1.0.1_onnx"
@@ -47,10 +48,22 @@ def test_digest_mismatch_fails_closed(monkeypatch, tmp_path: Path):
         family.config_from_dir(tmp_path)
 
 
-def test_only_fp32_and_unquantized_builds_are_admitted(tmp_path: Path):
+def test_fp16_and_fp32_unquantized_builds_are_admitted(monkeypatch, tmp_path: Path):
+    for name in (family.REFINER_FILE, family.SCORER_FILE):
+        (tmp_path / name).write_bytes(b"weights")
+    digests = {
+        family.REFINER_FILE: family.REFINER_SHA256,
+        family.SCORER_FILE: family.SCORER_SHA256,
+    }
+    monkeypatch.setattr(family, "_sha256", lambda path: digests[path.name])
     config = SimpleNamespace(raw={})
-    with pytest.raises(ValueError, match="fp32"):
-        family.plugin.load_weights(str(tmp_path), config, precision="fp16")
+
+    for precision in ("fp16", "fp32"):
+        weights = family.plugin.load_weights(str(tmp_path), config, precision=precision)
+        assert set(weights) == {"refiner", "scorer"}
+
+    with pytest.raises(ValueError, match="fp16 or fp32"):
+        family.plugin.load_weights(str(tmp_path), config, precision="bf16")
     with pytest.raises(ValueError, match="quantized"):
         family.plugin.build_engine(
             config,

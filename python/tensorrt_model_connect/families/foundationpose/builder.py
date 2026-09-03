@@ -98,11 +98,19 @@ class _OnnxWeightArchive:
 
 
 class _FoundationPoseGraph:
-    def __init__(self, trt: Any, network: Any, archive: _OnnxWeightArchive, kind: str) -> None:
+    def __init__(
+        self,
+        trt: Any,
+        network: Any,
+        archive: _OnnxWeightArchive,
+        kind: str,
+        work_np_dtype: type[np.float16] | type[np.float32],
+    ) -> None:
         self.trt = trt
         self.network = network
         self.archive = archive
         self.kind = kind
+        self.work_np_dtype = work_np_dtype
         self._host_weights: list[np.ndarray] = []
 
     def layer(self, value: Any, kind: str, name: str) -> Any:
@@ -111,12 +119,25 @@ class _FoundationPoseGraph:
         value.name = name
         return value
 
-    def constant(self, value: np.ndarray | float, name: str) -> Any:
-        array = np.ascontiguousarray(value, dtype=np.float32)
+    def constant(
+        self,
+        value: np.ndarray | float,
+        name: str,
+        dtype: type[np.float16] | type[np.float32] | None = None,
+    ) -> Any:
+        array = np.ascontiguousarray(value, dtype=dtype or self.work_np_dtype)
         self._host_weights.append(array)
         return self.layer(
             self.network.add_constant(array.shape, self.trt.Weights(array)), "constant", name
         ).get_output(0)
+
+    def cast(self, tensor: Any, dtype: Any, name: str) -> Any:
+        if tensor.dtype == dtype:
+            return tensor
+        return self.layer(self.network.add_cast(tensor, dtype), "cast", name).get_output(0)
+
+    def numpy_dtype(self, tensor: Any) -> type[np.float16] | type[np.float32]:
+        return np.float32 if tensor.dtype == self.trt.float32 else np.float16
 
     def add(self, left: Any, right: Any, name: str) -> Any:
         return self.layer(
@@ -171,6 +192,9 @@ class _FoundationPoseGraph:
             node_name, 1, self._conv_shape(node_name), operation="Conv"
         )
         bias = self.archive.node_parameter(node_name, 2, (int(weight.shape[0]),), operation="Conv")
+        dtype = self.numpy_dtype(tensor)
+        weight = np.ascontiguousarray(weight, dtype=dtype)
+        bias = np.ascontiguousarray(bias, dtype=dtype)
         self._host_weights.extend((weight, bias))
         convolution = self.layer(
             self.network.add_convolution_nd(
@@ -253,14 +277,15 @@ class _FoundationPoseGraph:
         bias: np.ndarray | None,
         name: str,
     ) -> Any:
-        weight = np.ascontiguousarray(weight, dtype=np.float32)
+        dtype = self.numpy_dtype(tensor)
+        weight = np.ascontiguousarray(weight, dtype=dtype)
         self._host_weights.append(weight)
         weight_shape = (1,) * (len(tuple(tensor.shape)) - 2) + tuple(weight.shape)
         output = self.layer(
             self.network.add_matrix_multiply(
                 tensor,
                 self.trt.MatrixOperation.NONE,
-                self.constant(weight.reshape(weight_shape), f"{name}.weight"),
+                self.constant(weight.reshape(weight_shape), f"{name}.weight", dtype),
                 self.trt.MatrixOperation.NONE,
             ),
             "matrix multiply",
@@ -269,7 +294,9 @@ class _FoundationPoseGraph:
         if bias is None:
             return output
         bias_shape = (1,) * (len(tuple(output.shape)) - 1) + (int(bias.shape[0]),)
-        return self.add(output, self.constant(bias.reshape(bias_shape), f"{name}.bias"), name)
+        return self.add(
+            output, self.constant(bias.reshape(bias_shape), f"{name}.bias", dtype), name
+        )
 
     def linear_torch(
         self,
@@ -278,14 +305,15 @@ class _FoundationPoseGraph:
         bias: np.ndarray | None,
         name: str,
     ) -> Any:
-        weight = np.ascontiguousarray(weight, dtype=np.float32)
+        dtype = self.numpy_dtype(tensor)
+        weight = np.ascontiguousarray(weight, dtype=dtype)
         self._host_weights.append(weight)
         weight_shape = (1,) * (len(tuple(tensor.shape)) - 2) + tuple(weight.shape)
         output = self.layer(
             self.network.add_matrix_multiply(
                 tensor,
                 self.trt.MatrixOperation.NONE,
-                self.constant(weight.reshape(weight_shape), f"{name}.weight"),
+                self.constant(weight.reshape(weight_shape), f"{name}.weight", dtype),
                 self.trt.MatrixOperation.TRANSPOSE,
             ),
             "matrix multiply",
@@ -294,9 +322,22 @@ class _FoundationPoseGraph:
         if bias is None:
             return output
         bias_shape = (1,) * (len(tuple(output.shape)) - 1) + (int(bias.shape[0]),)
-        return self.add(output, self.constant(bias.reshape(bias_shape), f"{name}.bias"), name)
+        return self.add(
+            output, self.constant(bias.reshape(bias_shape), f"{name}.bias", dtype), name
+        )
 
-    def attention(self, tensor: Any, prefix: str, name: str, *, dynamic_tokens: bool) -> Any:
+    def attention(
+        self,
+        tensor: Any,
+        prefix: str,
+        name: str,
+        *,
+        dynamic_tokens: bool,
+        force_fp32: bool = False,
+    ) -> Any:
+        if force_fp32:
+            tensor = self.cast(tensor, self.trt.float32, f"{name}.to_fp32")
+        dtype = self.numpy_dtype(tensor)
         root = prefix.split(".", maxsplit=1)[0]
         if prefix.endswith(".self_attn"):
             module, operation = prefix.rsplit(".", maxsplit=1)
@@ -339,15 +380,21 @@ class _FoundationPoseGraph:
         if self.kind == "refiner":
             split_scale = np.array([[[[float(_HEAD_DIM) ** -0.25]]]], dtype=np.float32)
             query = self.multiply(
-                query, self.constant(split_scale, f"{name}.query_scale"), f"{name}.scaled_query"
+                query,
+                self.constant(split_scale, f"{name}.query_scale", dtype),
+                f"{name}.scaled_query",
             )
             key = self.multiply(
-                key, self.constant(split_scale, f"{name}.key_scale"), f"{name}.scaled_key"
+                key,
+                self.constant(split_scale, f"{name}.key_scale", dtype),
+                f"{name}.scaled_key",
             )
         else:
             scale = np.array([[[[math.sqrt(_HEAD_DIM)]]]], dtype=np.float32)
             query = self.divide(
-                query, self.constant(scale, f"{name}.scale"), f"{name}.scaled_query"
+                query,
+                self.constant(scale, f"{name}.scale", dtype),
+                f"{name}.scaled_query",
             )
         scores = self.layer(
             self.network.add_matrix_multiply(
@@ -458,8 +505,14 @@ class _FoundationPoseGraph:
             "candidate_attention.mean",
         ).get_output(0)
         candidates = self.reshape(pooled, (1, -1, _HIDDEN), "candidates.to_sequence")
+        # Cross-hypothesis attention directly controls the score ordering and is
+        # more numerically sensitive than the per-candidate feature extractor.
         candidates = self.attention(
-            candidates, "att_cross", "candidate_cross_attention", dynamic_tokens=True
+            candidates,
+            "att_cross",
+            "candidate_cross_attention",
+            dynamic_tokens=True,
+            force_fp32=self.work_np_dtype is np.float16,
         )
         logits = self.linear_onnx(
             candidates,
@@ -479,8 +532,8 @@ def build_foundationpose_engine(
     verbose: bool = False,
 ) -> bytes:
     """Build a FoundationPose engine from family-owned TensorRT layers."""
-    if precision != "fp32":
-        raise ValueError("FoundationPose engines currently support fp32 builds only")
+    if precision not in {"fp16", "fp32"}:
+        raise ValueError("FoundationPose engines support fp16 or fp32 builds")
     if kind not in {"refiner", "scorer"}:
         raise ValueError(f"Unsupported FoundationPose engine kind: {kind!r}")
     if max_batch <= 0:
@@ -489,26 +542,33 @@ def build_foundationpose_engine(
     from tensorrt_model_connect import trt_compat
 
     trt = trt_compat.get_trt()
+    work_np_dtype = np.float16 if precision == "fp16" else np.float32
+    work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32
     logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
         trt_compat.network_creation_flags(explicit_batch=True, strongly_typed=True)
     )
     archive = _OnnxWeightArchive(path, kind)
-    graph = _FoundationPoseGraph(trt, network, archive, kind)
+    graph = _FoundationPoseGraph(trt, network, archive, kind, work_np_dtype)
     input_shape = (-1, _INPUT_HEIGHT, _INPUT_WIDTH, _INPUT_CHANNELS)
     input1 = network.add_input("input1", trt.float32, input_shape)
     input2 = network.add_input("input2", trt.float32, input_shape)
     if input1 is None or input2 is None:
         raise RuntimeError("TensorRT rejected the FoundationPose input contract")
+    input1 = graph.cast(input1, work_trt_dtype, "input1.to_working_precision")
+    input2 = graph.cast(input2, work_trt_dtype, "input2.to_working_precision")
     if kind == "refiner":
         translation, rotation = graph.build_refiner(input1, input2)
+        translation = graph.cast(translation, trt.float32, "output1.to_fp32")
+        rotation = graph.cast(rotation, trt.float32, "output2.to_fp32")
         translation.name = "output1"
         rotation.name = "output2"
         network.mark_output(translation)
         network.mark_output(rotation)
     else:
         score = graph.build_scorer(input1, input2)
+        score = graph.cast(score, trt.float32, "output1.to_fp32")
         score.name = "output1"
         network.mark_output(score)
 
@@ -536,7 +596,7 @@ def build_foundationpose_engine(
     if verbose:
         print(
             f"[trtmc build] Building native FoundationPose {kind} graph "
-            f"(batch=1..{max_batch}, input=160x160x6, precision=fp32) ...",
+            f"(batch=1..{max_batch}, input=160x160x6, precision={precision}) ...",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, config)
