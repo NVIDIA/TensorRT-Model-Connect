@@ -56,22 +56,43 @@ The CLI also reports:
 Do not compare `total_ms` with a same-process hot target. For an even number of
 samples the reported median is the mean of the two middle observations.
 
+## Native VSA backend boundary
+
+The qualified SM121 path embeds its VSA CUDA kernel in the MiniMax H3 model
+plugin. The installed payload has no PTX sidecar and neither loads nor invokes
+Python, Triton, FastVideo, or another attention runtime. On an SM121 device the
+plugin must print this line once per generation:
+
+```text
+[minimax-h3] VSA attention backend=sm121_embedded_ptx
+```
+
+Loading, configuring, or launching that specialization is fail-closed on
+SM121; the runtime does not silently substitute the slower portable kernel.
+Other supported NVIDIA architectures use the in-tree `portable_cuda` backend.
+Do not set a model-plugin directory, backend directory, or external VSA-plugin
+option for this package. The locked CLI discovers its sibling ModelConnect
+DLLs, and the MiniMax H3 plugin contains the specialization.
+
 ## Five-second T2VA workload
 
-Use the exact bundle, source revision, checkpoint, adapter, TensorRT-RTX SDK,
-driver, prompt, geometry, and seed in every reproduction. Close other GPU and
-unified-memory workloads before starting.
+Use the exact bundle, bundle-builder revision, runtime revision, checkpoint,
+adapter, TensorRT-RTX SDK, driver, prompt, geometry, and seed in every
+reproduction. Close other GPU and unified-memory workloads before starting.
 
 ```powershell
-$Bundle = Join-Path $env:LOCALAPPDATA `
-    'Programs\ModelConnect\MiniMax-H3\models\MiniMax-H3.bundle'
+$InstallRoot = Join-Path $env:LOCALAPPDATA 'Programs\ModelConnect\MiniMax-H3'
+$Trtmc = Join-Path $InstallRoot 'bin\trtmc.exe'
+$Bundle = Join-Path $InstallRoot 'models\MiniMax-H3.bundle'
+$RepoRoot = (Resolve-Path '<ModelConnect-checkout>').Path
 $Prompt = (Get-Content -Raw `
-    .\tests\e2e\models\minimax_h3\prompts\t2va-example-1.json |
+    (Join-Path $RepoRoot `
+        'tests\e2e\models\minimax_h3\prompts\t2va-example-1.json') |
     ConvertFrom-Json).prompt
 $RuntimeCache = Join-Path (Get-Location) 'minimax-h3-fast-h3.rtxcache'
 $FiveSecondLog = Join-Path (Get-Location) 'minimax-h3-t2va-124f.log'
 
-trtmc generate-video $Bundle `
+& $Trtmc generate-video $Bundle `
     --prompt $Prompt `
     --num-frames 120 --height 768 --width 1344 --seed 0 `
     --runtime-cache $RuntimeCache `
@@ -83,10 +104,9 @@ if ($LASTEXITCODE -ne 0) { throw "MiniMax-H3 124-frame benchmark failed" }
 ```
 
 The request aligns 120 nominal frames to 124 output frames, or 5.167 seconds
-at 24 fps. The current performance qualification target is approximately
-8--9 minutes for the same-process hot `generation_ms` median on the qualified
-Spark hardware/software cohort. It is a target, not a portable latency
-guarantee.
+at 24 fps. The acceptance ceiling is 555,000 ms (9:15) for the same-process
+hot `generation_ms` median on the qualified Spark hardware/software cohort.
+It is a qualification threshold, not a portable latency guarantee.
 
 ## Long aligned T2VA workload
 
@@ -96,7 +116,7 @@ frames, or 14.375 seconds:
 ```powershell
 $LongLog = Join-Path (Get-Location) 'minimax-h3-t2va-345f.log'
 
-trtmc generate-video $Bundle `
+& $Trtmc generate-video $Bundle `
     --prompt $Prompt `
     --num-frames 345 --height 768 --width 1344 --seed 0 `
     --runtime-cache $RuntimeCache `
@@ -107,9 +127,50 @@ trtmc generate-video $Bundle `
 if ($LASTEXITCODE -ne 0) { throw "MiniMax-H3 345-frame benchmark failed" }
 ```
 
-The current qualification target is approximately 20 minutes for the hot
-`generation_ms` result. A full `1 + 2` command runs three generations, so its
-wall time is expected to be much longer than one reported sample.
+The acceptance ceiling is 1,200,000 ms (20:00) for the hot `generation_ms`
+median. A full `1 + 2` command runs three generations, so its wall time is
+expected to be much longer than one reported sample.
+
+## Qualified SM121 result
+
+The retained bundle used for this result was constructed at ModelConnect
+builder revision `45bff91397da2875f93c0af9b847eb7308fce60d`; its embedded metadata
+and build receipt record that revision. The qualified native SM121 runtime was
+implementation revision `f029eeeb595b41ef6decf120aa9512fd59e6c4c0`. The
+intervening commits change native runtime/build/package code, not the Python
+bundle builder or model-plan inputs. Keep these two provenance fields separate:
+a bundle rebuilt from a later clean revision records that later revision and is
+not expected to have the retained bundle's byte hash.
+
+The run used an NVIDIA RTX Spark N1X (driver 616.67), CUDA 12.9.1, and
+TensorRT-RTX 1.6. Both commands used the same prompt fixture (file SHA-256
+`44DE7939AAABA9EAFCE0600653417900EADCC5362EC32C2BD5FE6FA70192E787`; extracted
+prompt UTF-8 SHA-256
+`98F36B879692095E099AE824C18D9E93E7006A490E082FD474A5F531769DCF06`), seed,
+bundle, cache policy, and `1 + 2` same-process timing contract shown above. The
+194,569,514,211-byte bundle SHA-256 was
+`18B69E84EF919399489A0D538117E84938F5768C365433C9C1D125772263F7E3`.
+
+| Request | Output | Measured samples | Hot median |
+| --- | --- | --- | --- |
+| 120 nominal frames | 124 frames / 5.167 s | 286,417.720 ms; 285,284.762 ms | 285,851.241 ms (4:45.851) |
+| 345 frames | 345 frames / 14.375 s | 964,505.670 ms; 959,489.510 ms | 961,997.590 ms (16:01.998) |
+
+Each run recorded 53 warmup engine-cache fills, 106 measured cache hits, three
+`sm121_embedded_ptx` selections, zero `portable_cuda` selections, and three
+successful finite-output validations. The 124-frame MP4 SHA-256 is
+`18D6C5395D9B56FD35CC87A4419D37B6548EA30358AEE1B92575012A9E9FE38D`; the
+345-frame MP4 SHA-256 is
+`E69AAAD4764C8E1DB0F193B383ED0F391055A8848AC48B5C3BC0E3D9C81FD37F`.
+Both files contain 1344x768 H.264 video at 24 fps and AAC-LC stereo audio at
+32 kHz. Normal AAC tail padding makes the encoded audio/container duration a
+few milliseconds longer than the raw generated audio.
+
+Pipeline loading and the warmup are intentionally outside each
+`generation_ms` sample. On this qualification run, the complete process took
+45:23.639 for the 124-frame command and 1:18:40.582 for the 345-frame command;
+those wall times cover load, warmup, both measured generations, validation,
+and MP4 output and must not be reported as single-generation latency.
 
 ## Verify the hot engine cache
 
@@ -119,21 +180,70 @@ requests must then produce 106 retained-engine hits. Validate the complete log
 before accepting its timing:
 
 ```powershell
-function Assert-MiniMaxH3HotCache([string] $LogPath) {
-    $Misses = @(Select-String -Path $LogPath -SimpleMatch `
-        '[trtmc.rtx_engine_cache] hit=0 retained=1').Count
-    $Hits = @(Select-String -Path $LogPath -SimpleMatch `
-        '[trtmc.rtx_engine_cache] hit=1').Count
-    if ($Misses -ne 53 -or $Hits -ne 106) {
-        throw "Expected 53 warmup cache fills and 106 measured hits; got $Misses and $Hits"
+function Assert-MiniMaxH3HotCache(
+    [string] $LogPath,
+    [double] $MedianCeilingMs
+) {
+    $MissRecords = @(Select-String -Path $LogPath -SimpleMatch `
+        '[trtmc.rtx_engine_cache] hit=0 retained=1')
+    $HitRecords = @(Select-String -Path $LogPath -SimpleMatch `
+        '[trtmc.rtx_engine_cache] hit=1')
+    if ($MissRecords.Count -ne 53 -or $HitRecords.Count -ne 106) {
+        throw "Expected 53 warmup cache fills and 106 measured hits; got $($MissRecords.Count) and $($HitRecords.Count)"
     }
-    $Samples = @(Select-String -Path $LogPath -SimpleMatch `
-        '[trtmc.video_benchmark_sample]').Count
-    if ($Samples -ne 2) { throw "Expected exactly two measured samples; got $Samples" }
+
+    $WarmupValidation = @(Select-String -Path $LogPath -Pattern `
+        '^\[trtmc\.video_validation\] phase=warmup .*status=passed$')
+    if ($WarmupValidation.Count -ne 1 -or
+        @($MissRecords | Where-Object LineNumber -gt $WarmupValidation[0].LineNumber).Count -ne 0 -or
+        @($HitRecords | Where-Object LineNumber -lt $WarmupValidation[0].LineNumber).Count -ne 0) {
+        throw 'Engine-cache misses must be confined to warmup and all hits to measured requests'
+    }
+
+    $SampleRecords = @(Select-String -Path $LogPath -Pattern `
+        '^\[trtmc\.video_benchmark_sample\].*generation_ms=([0-9]+(?:\.[0-9]+)?)$')
+    if ($SampleRecords.Count -ne 2) {
+        throw "Expected exactly two measured samples; got $($SampleRecords.Count)"
+    }
+    $Samples = @($SampleRecords | ForEach-Object {
+        [double]::Parse($_.Matches[0].Groups[1].Value,
+            [Globalization.CultureInfo]::InvariantCulture)
+    })
+    if (@($Samples | Where-Object {
+        [double]::IsNaN($_) -or [double]::IsInfinity($_) -or $_ -le 0
+    }).Count) {
+        throw 'Generation samples must be finite and positive'
+    }
+    $ComputedMedian = ($Samples[0] + $Samples[1]) / 2.0
+    $SummaryRecord = @(Select-String -Path $LogPath -Pattern `
+        '^\[trtmc\.video_benchmark_summary\].*median_ms=([0-9]+(?:\.[0-9]+)?).*$')
+    if ($SummaryRecord.Count -ne 1) { throw 'Expected exactly one benchmark summary' }
+    $ReportedMedian = [double]::Parse(
+        $SummaryRecord[0].Matches[0].Groups[1].Value,
+        [Globalization.CultureInfo]::InvariantCulture)
+    if ([math]::Abs($ComputedMedian - $ReportedMedian) -gt 0.002 -or
+        $ReportedMedian -gt $MedianCeilingMs) {
+        throw "Invalid or over-ceiling median: computed=$ComputedMedian reported=$ReportedMedian ceiling=$MedianCeilingMs"
+    }
+
+    $Sm121 = @(Select-String -Path $LogPath -SimpleMatch `
+        'VSA attention backend=sm121_embedded_ptx').Count
+    $Portable = @(Select-String -Path $LogPath -SimpleMatch `
+        'VSA attention backend=portable_cuda').Count
+    if ($Sm121 -ne 3 -or $Portable -ne 0) {
+        throw "Expected three SM121 selections and no portable fallback; got SM121=$Sm121 portable=$Portable"
+    }
+
+    $Validations = @(Select-String -Path $LogPath -Pattern `
+        '^\[trtmc\.video_validation\].*status=passed$').Count
+    if ($Validations -ne 3) {
+        throw "Expected three successful output validations; got $Validations"
+    }
 }
 
-Assert-MiniMaxH3HotCache $FiveSecondLog
-Assert-MiniMaxH3HotCache $LongLog
+Assert-MiniMaxH3HotCache $FiveSecondLog 555000
+# After running the long workload instead, call:
+# Assert-MiniMaxH3HotCache $LongLog 1200000
 ```
 
 `denoiser_resident_hit=0` and `vae_resident_hit=0` in `[minimax-h3.perf]` are
@@ -144,9 +254,10 @@ bundle, TensorRT-RTX SDK, or driver changes.
 
 ## Acceptance
 
-Keep the complete stderr/stdout log and record the Git revision, bundle hash,
-bundle inspection output, TensorRT-RTX version, driver version, GPU, request,
-and MP4 hash. A timing result is accepted only when:
+Keep the complete stderr/stdout log and record the separate runtime and bundle
+builder Git revisions, bundle hash, bundle inspection output, TensorRT-RTX
+version, driver version, GPU, request, and MP4 hash. A timing result is accepted
+only when:
 
 - the native dependency audit passed during packaging;
 - the runtime-only CLI, core, RTX backend, H3 plugin, bundle, and

@@ -71,18 +71,37 @@ sidecar. `--runtime-cache PATH` is the one explicit exception: when the user
 selects it, TensorRT-RTX may persist its JIT cache at exactly that path. No
 cache file is created by default.
 
+On the qualified SM121 GPU, the MiniMax H3 model plugin uses an embedded native
+VSA specialization. It is part of the DLL rather than a PTX sidecar, and its
+load/configuration/launch path fails closed instead of silently falling back.
+No FastVideo, Triton, Python, or external VSA runtime is installed or invoked.
+The source tree also contains a portable CUDA backend for developer builds
+configured for other supported NVIDIA architectures; that is not the locked
+SM121 installer or performance-qualified binary described here.
+
 ## Build the runtime
 
 Start in an x64 Visual Studio 2022 developer PowerShell. Supply compatible
-local CUDA 12.9 and TensorRT-RTX SDK roots. The helper requires a clean Git
-checkout so the bundle and binaries can record one source revision.
+local CUDA 12.9 and TensorRT-RTX SDK roots. The locked distributable helper is
+the SM121 Spark qualification build. With `-BuildTests`, its VSA CUDA test
+requires a live compute-capability 12.1 GPU and refuses to skip the embedded
+specialization. A portable-backend developer build for another supported GPU
+is outside this locked package and performance contract. The helper requires a
+clean Git checkout so the bundle and binaries can record one source revision.
+
+Concretely, this helper emits `120-real` CUDA code plus the embedded `sm_121a`
+VSA PTX specialization. The resulting distribution is qualified only on the
+compute-capability 12.1 Spark cohort and makes no packaged-hardware support
+claim for any other compute capability.
 
 ```powershell
+$RepoRoot = (Resolve-Path '<ModelConnect-checkout>').Path
+Set-Location -LiteralPath $RepoRoot
 $CudaRoot = '<CUDA-12.9-root>'
 $RtxRoot = '<TensorRT-RTX-root>'
 $BuildRoot = 'D:\build\modelconnect-h3'
 
-& .\scripts\build_windows_h3.ps1 `
+& (Join-Path $RepoRoot 'scripts\build_windows_h3.ps1') `
     -CudaRoot $CudaRoot `
     -TensorRtRtxRoot $RtxRoot `
     -BuildDirectory $BuildRoot `
@@ -108,6 +127,7 @@ cache view is the exact path printed by this pinned download:
 ```powershell
 $H3Revision = '48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc'
 $Checkpoint = (& hf download MiniMaxAI/MiniMax-H3 --revision $H3Revision).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Pinned MiniMax-H3 download failed' }
 ```
 
 An existing `hf download --local-dir` tree is also accepted. Keep its
@@ -129,13 +149,55 @@ hf download MiniMaxAI/MiniMax-H3 `
 if ($LASTEXITCODE -ne 0) { throw 'Pinned checkpoint download failed' }
 ```
 
-```powershell
-python -m pip install --no-deps -e . -C py-only=true
+The accelerated profile uses the authorized `vsa-datafree` adapter from the
+pinned preview repository. Authenticate with Hugging Face if access is gated,
+then retrieve and verify the exact file:
 
-$FastH3Adapter = '<authorized-FastH3-adapter.safetensors>'
+```powershell
+$FastH3Repository = 'FastVideo/FastVideo-FastH3-4-step-Preview-v1-LoRA'
+$FastH3Revision = 'bcf40ca6f457ed66f8badf13514943e390205fca'
+$FastH3Adapter = (& hf download $FastH3Repository `
+    'vsa-datafree/adapter_model.safetensors' `
+    --revision $FastH3Revision).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Pinned FastH3 adapter download failed' }
+$FastH3Item = Get-Item -LiteralPath $FastH3Adapter
+$FastH3Hash = (Get-FileHash -Algorithm SHA256 `
+    -LiteralPath $FastH3Adapter).Hash.ToLowerInvariant()
+if ($FastH3Item.Length -ne 5339117712 -or
+    $FastH3Hash -ne '42dc502a2078f166c396a1fa75f29728d1844363652d345d5ef3e2b444ed6470') {
+    throw 'FastH3 vsa-datafree adapter identity mismatch'
+}
+```
+
+Its authenticated metadata pins the originating FastVideo source revision to
+`317ac01648c4d367ec792e960ece12abe38662b0`; the builder verifies that metadata
+and exhaustive tensor accounting in addition to the file hash.
+
+Install the build-only package and prove the source/build revision boundary
+before starting the bundle build:
+
+```powershell
+python -m pip install --no-deps -e $RepoRoot -C py-only=true
+if ($LASTEXITCODE -ne 0) { throw 'ModelConnect build package install failed' }
+
+$SourceRevision = (& git -C $RepoRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $SourceRevision -notmatch '^[0-9a-f]{40}$') {
+    throw 'Unable to resolve the ModelConnect source revision'
+}
+if ((& git -C $RepoRoot status --porcelain | Out-String).Trim()) {
+    throw 'MiniMax-H3 bundle construction requires a clean source checkout'
+}
+$RuntimeRevisionLine = (Select-String -LiteralPath `
+    (Join-Path $BuildRoot 'CMakeCache.txt') `
+    -Pattern '^TRTMC_SOURCE_REVISION:STRING=').Line
+$RuntimeRevision = ($RuntimeRevisionLine -split '=', 2)[1]
+if ($RuntimeRevision -ne $SourceRevision) {
+    throw "Runtime/source revision mismatch: runtime=$RuntimeRevision source=$SourceRevision"
+}
+
 $TransformerRef = Join-Path $Checkpoint 'transformer_ref'
 $Bundle = 'D:\artifacts\MiniMax-H3.bundle'
-$env:TRTMC_MINIMAX_H3_SOURCE_REVISION = (& git rev-parse HEAD).Trim()
+$env:TRTMC_MINIMAX_H3_SOURCE_REVISION = $SourceRevision
 $env:PATH = @(
     (Join-Path $RtxRoot 'bin')
     (Join-Path $CudaRoot 'bin')
@@ -207,9 +269,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Native package failed' }
 
 By default, packaging makes an independent copy of the bundle. The package is
 therefore unaffected if the build bundle is later modified, but the packaging
-step needs one additional bundle-sized allocation (about 238 GiB for the
-qualified bundle). On a space-constrained release machine, explicitly consume
-the build artifact with a same-volume atomic rename:
+step needs one additional bundle-sized allocation (about 181 GiB for the
+current 194,569,514,211-byte qualified bundle). On a space-constrained release
+machine, explicitly consume the build artifact with a same-volume atomic
+rename:
 
 ```powershell
 & .\scripts\package_windows_h3.ps1 `
