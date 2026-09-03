@@ -36,3 +36,16 @@ def test_one_token_generation_does_not_prime_an_unused_decoder_graph() -> None:
     )[0]
 
     assert "run_prefill(input_ids, logits, gpu_sampling, max_new_tokens > 1)" in generate
+
+
+def test_decoder_graph_is_only_primed_before_its_first_capture() -> None:
+    source = RUNTIME_SOURCE.read_text(encoding="utf-8")
+    prime = source.split(
+        "void QwenTextGenerationPipeline::prime_decoder_after_batched_prefill(", maxsplit=1
+    )[1].split("void QwenTextGenerationPipeline::run_prefill(", maxsplit=1)[0]
+
+    assert "decoder.cuda_graph_active()" in prime
+    assert "decoder.cuda_graph_captured()" in prime
+    assert prime.index("decoder.cuda_graph_captured()") < prime.index(
+        "decoder.forward_async(inputs)"
+    )
