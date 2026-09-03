@@ -61,6 +61,15 @@ def test_windows_h3_distribution_disables_optional_runtime_frameworks() -> None:
     )
     assert "cudart_static.lib" in build_script
     assert "cudart64_12.dll" not in build_script
+    assert (
+        '(Get-Command "cl.exe" -CommandType Application -ErrorAction Stop).Source'
+        in build_script
+    )
+    assert '-replace "\\\\", "/"' in build_script
+    assert "-DCMAKE_CXX_COMPILER=$CxxCompiler" in build_script
+    assert "-DCMAKE_CUDA_HOST_COMPILER=$CxxCompiler" in build_script
+    assert "-DCMAKE_CXX_COMPILER=cl.exe" not in build_script
+    assert "-DCMAKE_CUDA_HOST_COMPILER=cl.exe" not in build_script
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     assert "requires CMAKE_CUDA_RUNTIME_LIBRARY=Static" in cmake
     assert "requires CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" in cmake

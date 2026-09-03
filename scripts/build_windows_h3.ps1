@@ -64,6 +64,8 @@ foreach ($tool in @("cmake", "ninja", "cl.exe", "git")) {
         throw "$tool is required; run from an x64 Visual Studio developer PowerShell"
     }
 }
+$CxxCompiler = (Get-Command "cl.exe" -CommandType Application -ErrorAction Stop).Source `
+    -replace "\\", "/"
 
 $RepositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $CudaSdk = Resolve-SdkRoot $CudaRoot "CUDA 12.9 Toolkit" "bin\nvcc.exe"
@@ -103,9 +105,9 @@ $ConfigureArguments = @(
     "-B", $BuildPath,
     "-G", "Ninja",
     "-DCMAKE_BUILD_TYPE=Release",
-    "-DCMAKE_CXX_COMPILER=cl.exe",
+    "-DCMAKE_CXX_COMPILER=$CxxCompiler",
     "-DCMAKE_CUDA_COMPILER=$(Join-Path $CudaSdk 'bin\nvcc.exe')",
-    "-DCMAKE_CUDA_HOST_COMPILER=cl.exe",
+    "-DCMAKE_CUDA_HOST_COMPILER=$CxxCompiler",
     "-DCMAKE_CUDA_ARCHITECTURES=120-real",
     "-DCMAKE_CUDA_RUNTIME_LIBRARY=Static",
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
