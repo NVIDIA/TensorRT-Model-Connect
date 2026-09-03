@@ -147,6 +147,13 @@ const HF_TASKS = [
     description: 'Policies that map robot observations and state to control actions.',
     hfUrl: 'https://huggingface.co/models?pipeline_tag=robotics',
   },
+  {
+    slug: 'protein-folding',
+    label: 'Protein Folding',
+    category: 'Biology',
+    description: 'Models that predict three-dimensional protein structures from sequences.',
+    hfUrl: 'https://huggingface.co/tasks/protein-folding',
+  },
 ];
 
 const CLI_COMMANDS_BY_TASK_STRATEGY = {
@@ -165,6 +172,7 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   speech_to_speech: ['speak'],
   speech_to_text: ['transcribe'],
   stereo_disparity: ['disparity'],
+  structure_prediction: ['predict-structure'],
   text_generation_causal: ['run'],
   text_to_audio: ['generate-audio'],
   vision_language_generation: ['run'],
@@ -343,6 +351,8 @@ function hfTasksForManifest(manifest) {
       return ['time-series-forecasting'];
     case 'robot_action_chunk':
       return ['robotics'];
+    case 'structure_prediction':
+      return ['protein-folding'];
     case 'diffusion_media_generation': {
       const tasks = new Set();
       for (const testcase of testcases.length > 0 ? testcases : [{}]) {
@@ -1245,6 +1255,20 @@ function commandContractForProfile(profile, capability) {
           option('--field-input <CSV>', 'One input mode', 'Single numerical field input.'),
           option('--branch-input <CSV>', 'One input mode', 'Branch input for operator-style recipes.'),
           option('--trunk-input <CSV>', 'Optional with --branch-input', 'Trunk input for operator-style recipes.'),
+        ],
+        evidence,
+      };
+    case 'structure_prediction':
+      return {
+        command: 'predict-structure',
+        purpose: 'Predict a biomolecular structure from a model-owned request.',
+        syntax: 'trtmc predict-structure <bundle.bundle> --input <request.yaml> --output <prediction.cif>',
+        options: [
+          option('--input <PATH>', 'Required', 'Model-owned structure-prediction request.'),
+          option('--output <PATH>', 'Required', 'Predicted mmCIF structure path.'),
+          option('--output-json <PATH>', 'Optional', 'Confidence and provenance metadata path.'),
+          option('--benchmark <N>', 'Optional', 'Number of measured predictions.'),
+          option('--warmup <N>', 'Optional', 'Number of unmeasured warm-up predictions.'),
         ],
         evidence,
       };

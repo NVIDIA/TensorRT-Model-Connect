@@ -16,6 +16,7 @@ SPDX-License-Identifier: Apache-2.0
 | `google-bert/bert-base-uncased` | `bert-base-uncased` | `FP16` | None | — | 🟢 Green |
 | `BAAI/bge-small-en-v1.5` | `bge-small-en-v1.5` | `FP16` | None | — | 🟢 Green |
 | `bigscience/bloom-560m` | `bloom-560m` | `FP32` | None | — | 🟢 Green |
+| `boltz-community/boltz-2`<br />Revision: `6fdef46d763fee7fbb83ca5501ccceff43b85607` | `boltz2-protein-monomer` | `BF16` | None | — | 🟢 Green |
 | `almanach/camembert-base` | `camembert-base` | `FP16` | None | — | 🟢 Green |
 | `nvidia/canary-1b-v2` | `canary-1b-v2` | `FP16` | None | — | 🟢 Green |
 | `amazon/chronos-bolt-tiny` | `chronos-bolt-tiny-official` | `FP32` | None | — | 🟢 Green |

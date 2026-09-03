@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "boltz2"
+plugin = "boltz2"
+test_manifests = [
+  "manifests/boltz2-protein-monomer.json",
+]
+
+[e2e_defaults.structure_prediction]
+reference_backend = "boltz2_snapshot"
+oracle_level = "L3_snapshot_regression"
+stages = [
+  { name = "end_to_end", required = true, artifact_type = "structure", comparison_mode = "snapshot_regression" },
+]
+input_fields = [
+  { input = "request", manifest = "prompt_file" },
+]
+preflight_asset_fields = ["prompt_file"]

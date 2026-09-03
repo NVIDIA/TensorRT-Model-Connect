@@ -18,6 +18,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -162,6 +163,45 @@ struct StereoDisparityResult {
     std::vector<float> disparity; // [H, W] non-negative disparity in pixels
     int32_t height{0};
     int32_t width{0};
+};
+
+enum class StructureFormat {
+    kMmcif,
+    kPdb,
+};
+
+struct StructurePredictionConfig {
+    // Boltz-style folding controls. Families validate their supported ranges
+    // and may reject values that are not represented by the bundle profiles.
+    int32_t recycling_steps{3};
+    int32_t sampling_steps{200};
+    int32_t diffusion_samples{1};
+    int32_t seed{42};
+    StructureFormat output_format{StructureFormat::kMmcif};
+};
+
+struct StructureConfidence {
+    float confidence_score{0.0F};
+    float ptm{0.0F};
+    float iptm{0.0F};
+    float ligand_iptm{0.0F};
+    float protein_iptm{0.0F};
+    float complex_plddt{0.0F};
+    float complex_iplddt{0.0F};
+    // One value per output token, ordered as declared by the model-owned
+    // structure metadata.
+    std::vector<float> plddt;
+};
+
+struct StructurePredictionResult {
+    // Complete UTF-8 mmCIF or PDB document. The format matches the request.
+    std::string structure;
+    StructureFormat format{StructureFormat::kMmcif};
+    StructureConfidence confidence;
+    // Family-owned JSON containing ranking, chain-pair confidence and exact
+    // request/profile provenance. Keeping extensible metadata out of the
+    // shared contract lets each structure family evolve independently.
+    std::string metadata_json;
 };
 
 struct PromptedSegmentationResult {
@@ -750,6 +790,30 @@ class IPipeline {
     // Clear model-owned request/episode state while retaining reusable engine
     // allocations. Stateless pipelines may keep the default no-op.
     virtual void reset() {}
+
+    // -- Biomolecular structure prediction --
+    // Append new virtual methods here to preserve the slot ordering used by
+    // model-plugin DSOs compiled against older IPipeline declarations.
+    // `input` is the complete model-owned request document. Structure
+    // families must document whether they accept YAML, JSON, or both and own
+    // all parsing, feature generation, masking, and output serialization.
+    virtual StructurePredictionResult predict_structure(const std::string& input,
+                                                        const StructurePredictionConfig& cfg = {}) {
+        (void)input;
+        (void)cfg;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support predict_structure()");
+    }
+
+    // Resolve request-relative assets and perform family-owned preprocessing
+    // once before warm-up or repeated inference. The default keeps existing
+    // structure families source-compatible. Append-only to preserve plugin
+    // DSO virtual slot ordering.
+    virtual std::string prepare_structure_input(const std::string& input,
+                                                const std::string& input_path) {
+        (void)input_path;
+        return input;
+    }
 };
 
 // --- Factory ---
