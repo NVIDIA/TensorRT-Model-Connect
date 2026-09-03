@@ -279,6 +279,8 @@ models:
     workloads: [imagenette_image_classification]
   repvgg-a2-rvgg-in1k:
     workloads: [imagenette_image_classification]
+  regnety-040-ra3-in1k:
+    workloads: [imagenette_image_classification]
   riva-translate-4b:
     workloads: [flores200_en_fr_riva_translation_parity]
   roberta-base:
