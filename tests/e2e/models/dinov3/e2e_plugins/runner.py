@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -115,33 +116,46 @@ class ImageFeatureExtractionRunner:
             metadata=metadata,
         )
 
-
     @staticmethod
-    def _read_pooler_jsonl(path: Path, expected_count: int) -> np.ndarray:
-        rows = []
-        with path.open(encoding="utf-8") as source:
-            for line_number, line in enumerate(source, start=1):
-                if not line.strip():
-                    continue
-                payload = json.loads(line)
-                pooler = payload.get("pooler_output")
-                if not isinstance(pooler, dict):
-                    raise ValueError(f"{path}:{line_number}: missing pooler_output")
-                shape = pooler.get("shape")
-                values = np.asarray(pooler.get("data"), dtype=np.float32)
-                if (
-                    not isinstance(shape, list)
-                    or len(shape) != 2
-                    or shape[0] != 1
-                    or shape[1] <= 0
-                    or values.size != shape[1]
-                    or not np.isfinite(values).all()
-                ):
-                    raise ValueError(f"{path}:{line_number}: invalid pooler_output")
-                rows.append(values)
-        if len(rows) != expected_count:
-            raise ValueError(f"{path}: expected {expected_count} rows, got {len(rows)}")
-        return np.stack(rows)
+    def _read_pooler_artifact(path: Path, expected_count: int, expected_digest: str) -> np.ndarray:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != "trtmc.benchmark-worker-result/v1":
+            raise ValueError(f"{path}: unsupported worker result schema")
+        if payload.get("status") != "completed":
+            raise ValueError(f"{path}: worker did not complete")
+        if payload.get("operation") != "extract_features":
+            raise ValueError(f"{path}: unexpected worker operation")
+        if payload.get("case_digest") != expected_digest:
+            raise ValueError(f"{path}: worker result digest mismatch")
+        summary = payload.get("output_summary")
+        if not isinstance(summary, dict):
+            raise ValueError(f"{path}: missing output_summary")
+        shape = summary.get("pooler_output_shape")
+        if (
+            not isinstance(shape, list)
+            or len(shape) != 2
+            or shape[0] != expected_count
+            or not isinstance(shape[1], int)
+            or isinstance(shape[1], bool)
+            or shape[1] <= 0
+            or summary.get("pooler_output_dtype") != "float32"
+            or summary.get("pooler_output_layout") != "row_major"
+        ):
+            raise ValueError(f"{path}: invalid pooler output contract")
+        artifact_value = summary.get("pooler_output_artifact")
+        if not isinstance(artifact_value, str) or not artifact_value:
+            raise ValueError(f"{path}: missing pooler output artifact")
+        artifact = Path(artifact_value)
+        values = np.fromfile(artifact, dtype=np.float32)
+        expected_elements = shape[0] * shape[1]
+        if (
+            summary.get("image_count") != expected_count
+            or summary.get("pooler_output_elements") != expected_elements
+            or values.size != expected_elements
+            or not np.isfinite(values).all()
+        ):
+            raise ValueError(f"{path}: invalid pooler output artifact")
+        return values.reshape(shape)
 
     def _extract_poolers(
         self,
@@ -152,23 +166,43 @@ class ImageFeatureExtractionRunner:
         artifact_dir: Path,
         stem: str,
     ) -> tuple[np.ndarray, list[str], subprocess.CompletedProcess[str]]:
-        images_file = artifact_dir / f"{stem}-images.txt"
-        images_file.write_text(
-            "".join(f"{path}\n" for path in images), encoding="utf-8"
-        )
-        output_path = artifact_dir / f"{stem}-pooler.jsonl"
+        worker_path = Path(ctx.binary_path).with_name("trtmc_benchmark_worker")
+        request_path = artifact_dir / f"{stem}-worker-request.json"
+        output_path = artifact_dir / f"{stem}-worker-result.json"
+        runtime: dict[str, object] = {
+            "backend_search_paths": [str(Path(ctx.binary_path).parent)],
+        }
+        if ctx.model_plugin_dir:
+            runtime["model_plugin_search_paths"] = [ctx.model_plugin_dir]
+        hf_python = ctx.runtime_cli_hf_python()
+        if hf_python:
+            runtime["hf_python"] = hf_python
+        request = {
+            "schema_version": 1,
+            "case_name": f"{case.name}:{stem}",
+            "bundle": str(Path(ctx.engine_dir) / case.bundle),
+            "operation": "extract_features",
+            "runtime": runtime,
+            "request": {"image_paths": [str(path) for path in images]},
+            "measurement": {
+                "warmup": 0,
+                "iterations": 1,
+                "timing_scope": "public_pipeline_call_wall",
+                "asset_loading_included": False,
+            },
+        }
+        digest = hashlib.sha256(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        request["case_digest"] = digest
+        request_path.write_text(json.dumps(request, indent=2), encoding="utf-8")
         command = [
-            ctx.binary_path,
-            "extract-features",
-            str(Path(ctx.engine_dir) / case.bundle),
-            "--images-file",
-            str(images_file),
-            "--pooler-only",
-            "--output-json",
+            str(worker_path),
+            "--request",
+            str(request_path),
+            "--output",
             str(output_path),
         ]
-        if ctx.model_plugin_dir:
-            command.extend(["--model-plugin-dir", ctx.model_plugin_dir])
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -181,12 +215,16 @@ class ImageFeatureExtractionRunner:
         )
         if completed.returncode:
             raise RuntimeError(
-                f"DINOv3 batch feature extraction failed (rc={completed.returncode}): "
+                f"DINOv3 feature worker failed (rc={completed.returncode}): "
                 f"{(completed.stderr or '')[-2000:]}"
             )
         if not output_path.is_file():
-            raise RuntimeError(f"DINOv3 CLI did not create {output_path}")
-        return self._read_pooler_jsonl(output_path, len(images)), command, completed
+            raise RuntimeError(f"DINOv3 feature worker did not create {output_path}")
+        return (
+            self._read_pooler_artifact(output_path, len(images), digest),
+            command,
+            completed,
+        )
 
     def _run_knn_stage(
         self,
@@ -197,9 +235,7 @@ class ImageFeatureExtractionRunner:
         bank_manifest = str(case.inputs.get("bank_manifest", "") or "")
         query_manifest = str(case.inputs.get("query_manifest", "") or "")
         if not bank_manifest or not query_manifest:
-            raise ValueError(
-                "DINOv3 k-NN Accuracy requires bank_manifest and query_manifest"
-            )
+            raise ValueError("DINOv3 k-NN Accuracy requires bank_manifest and query_manifest")
         bank_images, bank_labels, bank_classes = load_image_manifest(bank_manifest)
         query_images, query_labels, query_classes = load_image_manifest(query_manifest)
         if bank_classes != query_classes:

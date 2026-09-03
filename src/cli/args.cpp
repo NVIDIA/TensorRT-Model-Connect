@@ -214,8 +214,7 @@ void print_usage() {
            "  trtmc segment-prompted <bundle.bundle> --image PATH --output DIR "
            "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\n"
            "  trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]\n"
-           "  trtmc extract-features <bundle.bundle> "
-           "(--image PATH | --images-file PATH) [--pooler-only] [--output-json PATH]\n"
+           "  trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]\n"
            "  trtmc detect          <bundle.bundle> --image PATH [--output-json PATH] "
            "[--score-threshold F]\n"
            "  trtmc generate-audio  <bundle.bundle> --prompt \"text\" --output PATH "
@@ -521,10 +520,6 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--image" && need_value(arg)) {
             args.image_path = argv[++i];
-            continue;
-        }
-        if (arg == "--images-file" && need_value(arg)) {
-            args.images_file = argv[++i];
             continue;
         }
         if (arg == "--right-image" && need_value(arg)) {
@@ -837,10 +832,6 @@ CliArgs parse_args(int argc, char** argv) {
             args.cuda_graphs = true;
             continue;
         }
-        if (arg == "--pooler-only") {
-            args.pooler_only = true;
-            continue;
-        }
         if (arg == "--list-engines") {
             args.list_engines = true;
             continue;
@@ -887,11 +878,7 @@ CliArgs parse_args(int argc, char** argv) {
         args.parse_error = true;
         args.error_message = "act requires bundle + --image + --state + --output + --control-hz";
     }
-    if (args.command == "extract-features" && !args.image_path.empty() &&
-        !args.images_file.empty()) {
-        args.parse_error = true;
-        args.error_message = "--image and --images-file are mutually exclusive";
-    }
+
     return args;
 }
 

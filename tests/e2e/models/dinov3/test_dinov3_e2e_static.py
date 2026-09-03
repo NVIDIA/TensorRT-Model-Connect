@@ -219,6 +219,69 @@ def test_runtime_runner_invokes_extract_features_and_reads_full_json(
     assert output.data["num_register_tokens"] == 4
 
 
+def test_knn_feature_extraction_uses_internal_worker_artifact(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    case = _case("dinov3-vits16-pretrain-lvd1689m")
+    expected = np.arange(12, dtype=np.float32).reshape(3, 4)
+    observed_request = {}
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        request_path = Path(command[command.index("--request") + 1])
+        output_path = Path(command[command.index("--output") + 1])
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        observed_request.update(request)
+        artifact_path = Path(f"{output_path}.pooler.f32")
+        expected.tofile(artifact_path)
+        output_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "trtmc.benchmark-worker-result/v1",
+                    "status": "completed",
+                    "case_digest": request["case_digest"],
+                    "operation": "extract_features",
+                    "output_summary": {
+                        "image_count": 3,
+                        "pooler_output_shape": [3, 4],
+                        "pooler_output_elements": 12,
+                        "pooler_output_dtype": "float32",
+                        "pooler_output_layout": "row_major",
+                        "pooler_output_artifact": str(artifact_path),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    ctx = RunContext(
+        case=case,
+        binary_path="/opt/trtmc/bin/trtmc",
+        engine_dir=str(tmp_path / "engines"),
+        artifacts_dir=str(tmp_path / "artifacts"),
+        model_plugin_dir="/opt/trtmc/bin/models",
+    )
+    features, command, _ = runner_module.ImageFeatureExtractionRunner()._extract_poolers(
+        case=case,
+        ctx=ctx,
+        images=[tmp_path / f"image-{index}.jpg" for index in range(3)],
+        artifact_dir=tmp_path,
+        stem="knn-query",
+    )
+
+    assert command[0] == "/opt/trtmc/bin/trtmc_benchmark_worker"
+    assert "--images-file" not in command
+    assert "--pooler-only" not in command
+    assert observed_request["operation"] == "extract_features"
+    assert len(observed_request["case_digest"]) == 64
+    assert len(observed_request["request"]["image_paths"]) == 3
+    assert observed_request["runtime"]["model_plugin_search_paths"] == ["/opt/trtmc/bin/models"]
+    np.testing.assert_array_equal(features, expected)
+
+
 def test_repro_provider_owns_native_cli_command(tmp_path: Path) -> None:
     case = _case("dinov3-convnext-tiny-pretrain-lvd1689m")
     command = Dinov3ReproCommandProvider().build_trt_inference_command(

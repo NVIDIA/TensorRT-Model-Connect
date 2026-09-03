@@ -139,6 +139,20 @@ std::vector<float> read_float32_values(const std::string& path) {
     return values;
 }
 
+void write_float32_values(const std::string& path, const std::vector<float>& values) {
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream) {
+        throw std::runtime_error("cannot create float32 output: " + path);
+    }
+    if (!values.empty()) {
+        stream.write(reinterpret_cast<const char*>(values.data()),
+                     static_cast<std::streamsize>(values.size() * sizeof(float)));
+    }
+    if (!stream) {
+        throw std::runtime_error("cannot write float32 output: " + path);
+    }
+}
+
 std::vector<float> optional_float32_values(const Json& request, const std::string& value_key,
                                            const std::string& path_key) {
     if (request.contains(value_key) && request.contains(path_key)) {
@@ -774,14 +788,99 @@ Json run_classify(trtmc::IPipeline& pipeline, const Json& request, const TimingC
     };
 }
 
+Json run_extract_feature_batch(trtmc::IImageFeatureExtractor& extractor, const Json& request,
+                               const TimingConfig& timing) {
+    const auto image_paths = request.at("image_paths").get<std::vector<std::string>>();
+    if (image_paths.empty()) {
+        throw std::runtime_error("extract_features image_paths cannot be empty");
+    }
+
+    auto first_image =
+        load_request_image({{"image_path", image_paths.front()}}, "extract_features");
+    for (int index = 0; index < timing.warmup; ++index) {
+        extractor.extract_image_features(first_image.pixels.data(), first_image.height,
+                                         first_image.width);
+    }
+
+    std::vector<float> pooler_outputs;
+    std::size_t pooler_width = 0;
+    std::vector<double> measured_ms(static_cast<std::size_t>(timing.iterations), 0.0);
+    std::vector<std::size_t> feature_elements(static_cast<std::size_t>(timing.iterations), 0);
+    for (const auto& image_path : image_paths) {
+        auto image = load_request_image({{"image_path", image_path}}, "extract_features");
+        for (int iteration = 0; iteration < timing.iterations; ++iteration) {
+            const IterationTimer timer(timing.scope);
+            const auto result =
+                extractor.extract_image_features(image.pixels.data(), image.height, image.width);
+            measured_ms[static_cast<std::size_t>(iteration)] += timer.elapsed_ms();
+            feature_elements[static_cast<std::size_t>(iteration)] +=
+                result.last_hidden_state.size() + result.pooler_output.size();
+            if (result.pooler_output_shape.size() != 2 || result.pooler_output_shape[0] != 1 ||
+                result.pooler_output_shape[1] <= 0 ||
+                static_cast<std::size_t>(result.pooler_output_shape[1]) !=
+                    result.pooler_output.size()) {
+                throw std::runtime_error(
+                    "extract_features batch requires one rank-2 pooler row per image");
+            }
+            const auto width = static_cast<std::size_t>(result.pooler_output_shape[1]);
+            if (pooler_width == 0) {
+                pooler_width = width;
+            } else if (pooler_width != width) {
+                throw std::runtime_error(
+                    "extract_features batch returned inconsistent pooler widths");
+            }
+            if (iteration + 1 == timing.iterations) {
+                pooler_outputs.insert(pooler_outputs.end(), result.pooler_output.begin(),
+                                      result.pooler_output.end());
+            }
+        }
+    }
+    Json observations = Json::array();
+    for (int iteration = 0; iteration < timing.iterations; ++iteration) {
+        observations.push_back({
+            {"iteration", iteration},
+            {"measured_wall_ms", measured_ms[static_cast<std::size_t>(iteration)]},
+            {"runtime_e2e_wall_ms", measured_ms[static_cast<std::size_t>(iteration)]},
+            {"processed_images", image_paths.size()},
+            {"feature_elements", feature_elements[static_cast<std::size_t>(iteration)]},
+        });
+    }
+
+    const std::string artifact_path = request.at("output_artifact_path").get<std::string>();
+    write_float32_values(artifact_path, pooler_outputs);
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary",
+         {
+             {"image_count", image_paths.size()},
+             {"pooler_output_shape", {image_paths.size(), pooler_width}},
+             {"pooler_output_elements", pooler_outputs.size()},
+             {"pooler_output_finite_sum", finite_sum(pooler_outputs)},
+             {"pooler_output_dtype", "float32"},
+             {"pooler_output_layout", "row_major"},
+             {"pooler_output_artifact", artifact_path},
+         }},
+    };
+}
+
 Json run_extract_features(trtmc::IPipeline& pipeline, const Json& request,
                           const TimingConfig& timing) {
     const int warmup = timing.warmup;
     const int iterations = timing.iterations;
-    const auto image = load_request_image(request, "extract_features");
     auto* extractor = dynamic_cast<trtmc::IImageFeatureExtractor*>(&pipeline);
     if (extractor == nullptr)
         throw std::runtime_error("pipeline does not support image feature extraction");
+    const bool has_image = request.contains("image_path");
+    const bool has_images = request.contains("image_paths");
+    if (has_image == has_images) {
+        throw std::runtime_error(
+            "extract_features requires exactly one of image_path or image_paths");
+    }
+    if (has_images) {
+        return run_extract_feature_batch(*extractor, request, timing);
+    }
+
+    const auto image = load_request_image(request, "extract_features");
     trtmc::ImageFeaturesResult last;
     for (int index = 0; index < warmup; ++index) {
         last = extractor->extract_image_features(image.pixels.data(), image.height, image.width);
@@ -1099,6 +1198,9 @@ Json execute(const Json& request, const std::string& output_path) {
     Json operation_request = request.at("request");
     if (operation == "disparity") {
         operation_request["output_artifact_path"] = output_path + ".disparity.f32";
+    }
+    if (operation == "extract_features" && operation_request.contains("image_paths")) {
+        operation_request["output_artifact_path"] = output_path + ".pooler.f32";
     }
     const TimingConfig timing =
         timing_config(request.at("measurement"), operation, operation_request);
