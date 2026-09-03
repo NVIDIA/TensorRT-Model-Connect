@@ -299,7 +299,7 @@ def test_shadow_gate_metrics_include_plugin_task_accuracy() -> None:
     }
 
 
-def test_shadow_gate_metrics_prefer_task_aggregate_over_sample_range() -> None:
+def test_shadow_gate_metrics_preserve_sample_range_with_task_aggregate() -> None:
     metrics = trtmc_validate._shadow_gate_metrics(
         {"metrics": {"sample_pass_rate": 1.0}},
         {
@@ -310,7 +310,12 @@ def test_shadow_gate_metrics_prefer_task_aggregate_over_sample_range() -> None:
         },
     )
 
-    assert metrics == {"sample_pass_rate": 1.0, "query_count": 128}
+    assert metrics == {
+        "sample_pass_rate": 1.0,
+        "query_count": 128,
+        "min_query_count": 16.0,
+        "max_query_count": 16.0,
+    }
 
 
 def test_resolve_binding_requires_an_explicit_choice_for_multi_workload_model():
@@ -1473,7 +1478,7 @@ def test_accuracy_shadow_gate_preserves_worst_nested_metric(tmp_path):
     assert evaluation["checks"][0]["actual"] == 0.9
 
 
-def test_accuracy_shadow_gate_uses_task_aggregate_for_exact_count(tmp_path):
+def test_accuracy_shadow_gate_uses_query_count_as_its_evidence_count(tmp_path):
     case_dir = tmp_path / "model-a" / "suite-a"
     case_dir.mkdir(parents=True)
     result_path = case_dir / "comparison.json"
@@ -1495,8 +1500,11 @@ def test_accuracy_shadow_gate_uses_task_aggregate_for_exact_count(tmp_path):
                 "metrics": {
                     "query_count": {"mean": 16.0, "min": 16.0, "max": 16.0},
                 },
-                "task_accuracy": {"query_count": 128},
-                "configured_gates": {"expected_query_count": 128},
+                "task_accuracy": {"task_query_count": 128},
+                "configured_gates": {"exact_task_query_count": 128},
+                "gate_sample_count_metrics": {
+                    "exact_task_query_count": "task_query_count"
+                },
                 "gate_policy": "blocking",
             },
             "reproduce": {
@@ -1511,13 +1519,17 @@ def test_accuracy_shadow_gate_uses_task_aggregate_for_exact_count(tmp_path):
     assert evaluation["status"] == "pass"
     assert evaluation["checks"] == [
         {
-            "gate": "expected_query_count",
-            "metric": "query_count",
+            "gate": "exact_task_query_count",
+            "metric": "task_query_count",
             "operator": "==",
             "actual": 128.0,
             "required": 128.0,
             "verdict": "pass",
-            "effective": {"kind": "exact", "sample_count": 8},
+            "effective": {
+                "kind": "exact",
+                "sample_count": 128,
+                "sample_count_metric": "task_query_count",
+            },
         }
     ]
 

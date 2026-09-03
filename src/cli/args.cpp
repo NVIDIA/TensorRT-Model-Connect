@@ -892,11 +892,6 @@ CliArgs parse_args(int argc, char** argv) {
         args.parse_error = true;
         args.error_message = "--image and --images-file are mutually exclusive";
     }
-    if (args.command == "extract-features" && args.pooler_only && args.images_file.empty()) {
-        args.parse_error = true;
-        args.error_message = "--pooler-only requires --images-file";
-    }
-
     return args;
 }
 

@@ -39,6 +39,10 @@ def test_release_suite_uses_model_owned_dinov3_parity_thresholds() -> None:
     assert cases["dinov3-convnext-tiny-pretrain-lvd1689m"]["baseline"][
         "max_image_feature_relative_frobenius"
     ] == 0.015
+    assert all(
+        case["workload"]["request"] == {"include_feature_tensors": True}
+        for case in cases.values()
+    )
 
 
 def test_selection_rejects_multiple_modes() -> None:

@@ -33,20 +33,12 @@ _PROPORTION_DROP_METRICS = {
     "top1_accuracy_drop_from_hf",
 }
 _DIRECT_GATE_SPECS = {
-    "candidate_reference_20nn_top1_agreement_min": (
-        "candidate_reference_20nn_top1_agreement",
-        ">=",
-    ),
     "exact_num_frames": ("num_frames", "=="),
     "exact_video_height": ("video_height", "=="),
     "exact_video_width": ("video_width", "=="),
     "kendall_tau": ("min_kendall_tau", ">="),
-    "expected_query_count": ("query_count", "=="),
     "pairwise_ordering_agreement": ("min_pairwise_ordering_agreement", ">="),
     "psnr": ("min_psnr", ">="),
-    "query_pooler_cosine_min": ("query_pooler_cosine_min", ">="),
-    "query_pooler_relative_l2_max": ("query_pooler_relative_l2_max", "<="),
-    "reference_20nn_top1_accuracy_min": ("reference_20nn_top1_accuracy", ">="),
     "require_matching_initial_latents": ("matching_initial_latents", ">="),
     "score_correlation": ("min_score_correlation", ">="),
     "spearman_rho": ("min_spearman_rho", ">="),
@@ -63,25 +55,19 @@ _REFERENCE_PLUS_GATE_SPECS = {
         "reference_nonocc_bp2_fraction",
     ),
 }
-_REFERENCE_MINUS_GATE_SPECS = {
-    "candidate_20nn_top1_accuracy_max_drop_from_reference": (
-        "candidate_20nn_top1_accuracy",
-        "reference_20nn_top1_accuracy",
-    ),
-}
 
 _METRIC_KINDS = {"continuous", "proportion", "proportion_drop"}
 
 
 def _gate_spec(gate: str) -> tuple[str, str] | None:
+    if gate.startswith("exact_"):
+        return gate.removeprefix("exact_"), "=="
     if gate.startswith("min_"):
         return gate.removeprefix("min_"), ">="
     if gate.startswith("max_"):
         return gate.removeprefix("max_"), "<="
     if gate in _REFERENCE_PLUS_GATE_SPECS:
         return _REFERENCE_PLUS_GATE_SPECS[gate][0], "<="
-    if gate in _REFERENCE_MINUS_GATE_SPECS:
-        return _REFERENCE_MINUS_GATE_SPECS[gate][0], ">="
     return _DIRECT_GATE_SPECS.get(gate)
 
 
@@ -218,6 +204,37 @@ def _passed(actual: float, operator: str, required: float) -> bool:
     return actual == required
 
 
+def _metric_sample_count(
+    *,
+    gate: str,
+    metrics: Mapping[str, Any],
+    default: int | None,
+    sample_count_metrics: Mapping[str, str],
+) -> tuple[int | None, str, dict[str, Any] | None]:
+    metric = str(sample_count_metrics.get(gate, "") or "")
+    if not metric:
+        return default, "", None
+    value = metrics.get(metric)
+    if value is None:
+        return None, metric, {
+            "code": "sample_count_metric_unavailable",
+            "gate": gate,
+            "metric": metric,
+        }
+    try:
+        number = _finite_number(value)
+    except (TypeError, ValueError):
+        number = -1.0
+    if isinstance(value, bool) or number <= 0 or not number.is_integer():
+        return None, metric, {
+            "code": "invalid_sample_count_metric",
+            "gate": gate,
+            "metric": metric,
+            "value": _issue_value(value),
+        }
+    return int(number), metric, None
+
+
 def evaluate_sample_acceptance(
     *,
     policy: Mapping[str, Any],
@@ -326,6 +343,7 @@ def describe_shadow_gate_policy(
     sample_count: int | None,
     policy_mode: str = "blocking",
     metric_kinds: Mapping[str, str] | None = None,
+    sample_count_metrics: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Describe configured gate targets without requiring runtime metrics."""
 
@@ -340,12 +358,20 @@ def describe_shadow_gate_policy(
         and not isinstance(sample_count, bool)
         and sample_count > 0
     )
-    if configured_gates and not sample_count_available:
+    resolved_sample_count_metrics = sample_count_metrics or {}
+    if configured_gates and not sample_count_available and any(
+        gate not in resolved_sample_count_metrics for gate in configured_gates
+    ):
         issues.append({"code": "sample_count_unavailable"})
     resolved_metric_kinds = metric_kinds or {}
     for gate_name in resolved_metric_kinds:
         if gate_name not in configured_gates:
             issues.append({"code": "metric_kind_without_gate", "gate": str(gate_name)})
+    for gate_name in resolved_sample_count_metrics:
+        if gate_name not in configured_gates:
+            issues.append(
+                {"code": "sample_count_metric_without_gate", "gate": str(gate_name)}
+            )
     for gate, required_value in configured_gates.items():
         gate_name = str(gate)
         spec = _gate_spec(gate_name)
@@ -376,16 +402,22 @@ def describe_shadow_gate_policy(
             )
             continue
         kind = "exact" if operator == "==" else _metric_kind(metric_name, configured_kind)
-        if not sample_count_available:
+        sample_count_metric = str(
+            resolved_sample_count_metrics.get(gate_name, "") or ""
+        )
+        gate_sample_count = None if sample_count_metric else sample_count
+        if gate_sample_count is None:
             effective = {"kind": kind, "sample_count": None}
         elif kind == "exact":
-            effective = {"kind": kind, "sample_count": sample_count}
+            effective = {"kind": kind, "sample_count": gate_sample_count}
         else:
             effective = _effective_target(
                 kind=kind,
                 required=required,
-                sample_count=sample_count,
+                sample_count=gate_sample_count,
             )
+        if sample_count_metric:
+            effective["sample_count_metric"] = sample_count_metric
         gate_description = {
             "gate": gate_name,
             "metric": metric_name,
@@ -393,9 +425,7 @@ def describe_shadow_gate_policy(
             "required": required,
             "effective": effective,
         }
-        reference_relative = _REFERENCE_PLUS_GATE_SPECS.get(
-            gate_name
-        ) or _REFERENCE_MINUS_GATE_SPECS.get(gate_name)
+        reference_relative = _REFERENCE_PLUS_GATE_SPECS.get(gate_name)
         if reference_relative:
             gate_description.update(
                 {
@@ -420,6 +450,7 @@ def evaluate_shadow_gates(
     sample_count: int | None,
     policy_mode: str = "blocking",
     metric_kinds: Mapping[str, str] | None = None,
+    sample_count_metrics: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Explain the effective sample-level meaning of existing gate values."""
     checks: list[dict[str, Any]] = []
@@ -433,15 +464,34 @@ def evaluate_shadow_gates(
         and not isinstance(sample_count, bool)
         and sample_count > 0
     )
-    if configured_gates and not sample_count_available:
+    resolved_sample_count_metrics = sample_count_metrics or {}
+    if configured_gates and not sample_count_available and any(
+        gate not in resolved_sample_count_metrics for gate in configured_gates
+    ):
         issues.append({"code": "sample_count_unavailable"})
-    gates_to_evaluate = configured_gates if sample_count_available else {}
+    gates_to_evaluate = configured_gates
     resolved_metric_kinds = metric_kinds or {}
     for gate_name in resolved_metric_kinds:
         if gate_name not in configured_gates:
             issues.append({"code": "metric_kind_without_gate", "gate": str(gate_name)})
+    for gate_name in resolved_sample_count_metrics:
+        if gate_name not in configured_gates:
+            issues.append(
+                {"code": "sample_count_metric_without_gate", "gate": str(gate_name)}
+            )
     for gate, required_value in gates_to_evaluate.items():
         gate_name = str(gate)
+        gate_sample_count, sample_count_metric, sample_count_issue = _metric_sample_count(
+            gate=gate_name,
+            metrics=metrics,
+            default=sample_count if sample_count_available else None,
+            sample_count_metrics=resolved_sample_count_metrics,
+        )
+        if sample_count_issue:
+            issues.append(sample_count_issue)
+            continue
+        if gate_sample_count is None:
+            continue
         spec = _gate_spec(gate_name)
         if spec is None:
             issues.append({"code": "unsupported_gate", "gate": gate_name})
@@ -465,17 +515,18 @@ def evaluate_shadow_gates(
                 metric=metric_name,
                 required=required,
                 metrics=metrics,
-                sample_count=sample_count,
+                sample_count=gate_sample_count,
             )
             if exact_issue:
                 issues.append(exact_issue)
                 continue
             if exact_check:
+                if sample_count_metric:
+                    exact_check["effective"]["sample_count_metric"] = sample_count_metric
                 checks.append(exact_check)
                 continue
         reference_plus = _REFERENCE_PLUS_GATE_SPECS.get(gate_name)
-        reference_minus = _REFERENCE_MINUS_GATE_SPECS.get(gate_name)
-        reference_relative = reference_plus or reference_minus
+        reference_relative = reference_plus
         reference_metric = reference_relative[1] if reference_relative else ""
         if reference_metric and metrics.get(reference_metric) is None:
             issues.append(
@@ -523,9 +574,7 @@ def evaluate_shadow_gates(
                 )
                 continue
             allowance = required
-            required = (
-                reference + allowance if reference_plus else reference - allowance
-            )
+            required = reference + allowance
         configured_kind = str(resolved_metric_kinds.get(gate_name, "") or "")
         if configured_kind and configured_kind not in _METRIC_KINDS:
             issues.append(
@@ -544,8 +593,10 @@ def evaluate_shadow_gates(
             ),
             actual=actual,
             required=required,
-            sample_count=sample_count,
+            sample_count=gate_sample_count,
         )
+        if sample_count_metric:
+            effective["sample_count_metric"] = sample_count_metric
         check = {
             "gate": gate_name,
             "metric": actual_metric,

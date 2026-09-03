@@ -1877,12 +1877,8 @@ def _load_vision(
             with torch.inference_mode():
                 outputs = model(**inputs)
             return {
-                "last_hidden_state_shape": _tensor_summary(
-                    outputs.last_hidden_state
-                )["shape"],
-                "pooler_output_shape": _tensor_summary(outputs.pooler_output)[
-                    "shape"
-                ],
+                "last_hidden_state_shape": list(outputs.last_hidden_state.shape),
+                "pooler_output_shape": list(outputs.pooler_output.shape),
             }
 
         def probe() -> Mapping[str, Any]:

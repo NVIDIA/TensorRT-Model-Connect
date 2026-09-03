@@ -799,19 +799,21 @@ Json run_extract_features(trtmc::IPipeline& pipeline, const Json& request,
             {"feature_elements", last.last_hidden_state.size() + last.pooler_output.size()},
         });
     }
+    Json output_summary = {
+        {"last_hidden_state_shape", last.last_hidden_state_shape},
+        {"last_hidden_state_elements", last.last_hidden_state.size()},
+        {"last_hidden_state_finite_sum", finite_sum(last.last_hidden_state)},
+        {"pooler_output_shape", last.pooler_output_shape},
+        {"pooler_output_elements", last.pooler_output.size()},
+        {"pooler_output_finite_sum", finite_sum(last.pooler_output)},
+    };
+    if (request.value("include_feature_tensors", false)) {
+        output_summary["last_hidden_state"] = last.last_hidden_state;
+        output_summary["pooler_output"] = last.pooler_output;
+    }
     return {
         {"observations", std::move(observations)},
-        {"output_summary",
-         {
-             {"last_hidden_state_shape", last.last_hidden_state_shape},
-             {"last_hidden_state_elements", last.last_hidden_state.size()},
-             {"last_hidden_state_finite_sum", finite_sum(last.last_hidden_state)},
-             {"last_hidden_state", last.last_hidden_state},
-             {"pooler_output_shape", last.pooler_output_shape},
-             {"pooler_output_elements", last.pooler_output.size()},
-             {"pooler_output_finite_sum", finite_sum(last.pooler_output)},
-             {"pooler_output", last.pooler_output},
-         }},
+        {"output_summary", std::move(output_summary)},
     };
 }
 

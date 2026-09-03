@@ -192,29 +192,31 @@ def test_reference_plus_gate_requires_the_reference_metric() -> None:
     ]
 
 
-def test_reference_minus_accuracy_drop_gate_uses_reference_floor() -> None:
+def test_family_derived_accuracy_drop_uses_generic_maximum_gate() -> None:
     evaluation = evaluate_shadow_gates(
-        metrics={
-            "candidate_20nn_top1_accuracy": 0.78,
-            "reference_20nn_top1_accuracy": 0.80,
-        },
-        configured_gates={"candidate_20nn_top1_accuracy_max_drop_from_reference": 0.01},
+        metrics={"candidate_accuracy_drop_from_reference": 0.02},
+        configured_gates={"max_candidate_accuracy_drop_from_reference": 0.01},
         sample_count=128,
+        metric_kinds={
+            "max_candidate_accuracy_drop_from_reference": "proportion_drop"
+        },
     )
 
     assert evaluation["status"] == "fail"
     assert evaluation["checks"] == [
         {
-            "gate": "candidate_20nn_top1_accuracy_max_drop_from_reference",
-            "metric": "candidate_20nn_top1_accuracy",
-            "reference_metric": "reference_20nn_top1_accuracy",
-            "operator": ">=",
-            "actual": 0.78,
-            "reference": 0.80,
-            "allowance": 0.01,
-            "required": 0.79,
+            "gate": "max_candidate_accuracy_drop_from_reference",
+            "metric": "candidate_accuracy_drop_from_reference",
+            "operator": "<=",
+            "actual": 0.02,
+            "required": 0.01,
             "verdict": "fail",
-            "effective": {"kind": "continuous", "sample_count": 128},
+            "effective": {
+                "kind": "proportion_drop",
+                "allowed_drop_count": 1,
+                "observed_drop_count": 3,
+                "resolution": 1 / 128,
+            },
         }
     ]
     assert evaluation["issues"] == []
@@ -469,6 +471,68 @@ def test_exact_gate_uses_equality_instead_of_a_range() -> None:
     assert evaluation["checks"][0]["effective"] == {
         "kind": "exact",
         "sample_count": 1,
+    }
+
+
+def test_generic_exact_gate_uses_the_metric_named_after_its_prefix() -> None:
+    evaluation = evaluate_shadow_gates(
+        metrics={"task_query_count": 128},
+        configured_gates={"exact_task_query_count": 128},
+        sample_count=8,
+    )
+
+    assert evaluation["status"] == "pass"
+    assert evaluation["checks"] == [
+        {
+            "gate": "exact_task_query_count",
+            "metric": "task_query_count",
+            "operator": "==",
+            "actual": 128.0,
+            "required": 128.0,
+            "verdict": "pass",
+            "effective": {"kind": "exact", "sample_count": 8},
+        }
+    ]
+
+
+def test_gate_can_use_a_metric_specific_sample_count() -> None:
+    evaluation = evaluate_shadow_gates(
+        metrics={
+            "sample_pass_rate": 1.0,
+            "candidate_reference_20nn_top1_agreement": 127 / 128,
+            "task_query_count": 128,
+        },
+        configured_gates={
+            "min_sample_pass_rate": 1.0,
+            "min_candidate_reference_20nn_top1_agreement": 0.98,
+        },
+        sample_count=8,
+        metric_kinds={
+            "min_candidate_reference_20nn_top1_agreement": "proportion"
+        },
+        sample_count_metrics={
+            "min_candidate_reference_20nn_top1_agreement": "task_query_count"
+        },
+    )
+
+    assert evaluation["status"] == "pass"
+    shard_check, query_check = evaluation["checks"]
+    assert shard_check["effective"] == {
+        "kind": "proportion",
+        "required_passes": 8,
+        "allowed_failures": 0,
+        "observed_passes": 8,
+        "observed_failures": 0,
+        "resolution": 0.125,
+    }
+    assert query_check["effective"] == {
+        "kind": "proportion",
+        "required_passes": 126,
+        "allowed_failures": 2,
+        "observed_passes": 127,
+        "observed_failures": 1,
+        "resolution": 1 / 128,
+        "sample_count_metric": "task_query_count",
     }
 
 

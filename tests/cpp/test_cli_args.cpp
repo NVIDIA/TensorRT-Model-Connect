@@ -199,16 +199,16 @@ void test_extract_features_parses_batch_pooler_flags() {
     check(args.pooler_only, "extract-features pooler-only mode");
 }
 
-void test_extract_features_rejects_ambiguous_or_incomplete_batch_flags() {
+void test_extract_features_rejects_ambiguous_inputs_and_projects_single_output() {
     auto ambiguous = parse({"trtmc", "extract-features", "dinov3.bundle", "--image", "cat.png",
                             "--images-file", "images.txt"});
     check(ambiguous.parse_error, "extract-features rejects image plus images-file");
     check(ambiguous.error_message == "--image and --images-file are mutually exclusive",
           "extract-features ambiguous input message");
-    auto incomplete = parse({"trtmc", "extract-features", "dinov3.bundle", "--pooler-only"});
-    check(incomplete.parse_error, "extract-features rejects pooler-only without images-file");
-    check(incomplete.error_message == "--pooler-only requires --images-file",
-          "extract-features incomplete batch message");
+    auto single = parse(
+        {"trtmc", "extract-features", "dinov3.bundle", "--image", "cat.png", "--pooler-only"});
+    check(!single.parse_error, "extract-features projects a single-image output");
+    check(single.pooler_only, "extract-features preserves single-image output projection");
 }
 
 void test_disparity_parses_stereo_images() {
@@ -595,7 +595,7 @@ int main() {
     test_detect_parses_contract_flags();
     test_extract_features_parses_contract_flags();
     test_extract_features_parses_batch_pooler_flags();
-    test_extract_features_rejects_ambiguous_or_incomplete_batch_flags();
+    test_extract_features_rejects_ambiguous_inputs_and_projects_single_output();
     test_disparity_parses_stereo_images();
     test_geometry_parses_image_and_output_directory();
     test_act_parses_recorded_control_contract();

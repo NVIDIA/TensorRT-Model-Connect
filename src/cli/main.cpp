@@ -1248,8 +1248,12 @@ int cmd_classify(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
-void write_image_features_json(std::ostream& out, const trtmc::ImageFeaturesResult& result) {
-    out << trtmc::cli::build_image_features_record(result).dump() << '\n';
+void write_image_features_json(std::ostream& out, const trtmc::ImageFeaturesResult& result,
+                               bool pooler_only) {
+    auto record = trtmc::cli::build_image_features_record(result);
+    if (pooler_only)
+        record.erase("last_hidden_state");
+    out << record.dump() << '\n';
 }
 
 int cmd_extract_features(const CliArgs& args) {
@@ -1271,13 +1275,18 @@ int cmd_extract_features(const CliArgs& args) {
             std::cerr << "Error: failed to open images file: " << args.images_file << '\n';
             return EXIT_FAILURE;
         }
-        std::vector<std::string> paths;
+        const auto images_dir = std::filesystem::absolute(args.images_file).parent_path();
+        std::vector<std::filesystem::path> paths;
         std::string path;
         while (std::getline(inputs, path)) {
             if (!path.empty() && path.back() == '\r')
                 path.pop_back();
-            if (!path.empty())
-                paths.push_back(path);
+            if (!path.empty()) {
+                auto image_path = std::filesystem::path(path);
+                if (image_path.is_relative())
+                    image_path = images_dir / image_path;
+                paths.push_back(image_path.lexically_normal());
+            }
         }
         if (paths.empty()) {
             std::cerr << "Error: images file is empty: " << args.images_file << '\n';
@@ -1299,7 +1308,7 @@ int cmd_extract_features(const CliArgs& args) {
             output = &output_file;
         }
         for (const auto& image_path : paths) {
-            const auto image = trtmc::io::read_image(image_path);
+            const auto image = trtmc::io::read_image(image_path.string());
             if (image.empty()) {
                 std::cerr << "Error: failed to load image: " << image_path << '\n';
                 return EXIT_FAILURE;
@@ -1307,7 +1316,7 @@ int cmd_extract_features(const CliArgs& args) {
             const auto result =
                 extractor->extract_image_features(image.pixels.data(), image.height, image.width);
             nlohmann::json record;
-            record["image_path"] = image_path;
+            record["image_path"] = image_path.string();
             record["pooler_output"] =
                 trtmc::cli::build_tensor_record(result.pooler_output_shape, result.pooler_output);
             if (!args.pooler_only) {
@@ -1333,7 +1342,7 @@ int cmd_extract_features(const CliArgs& args) {
     const auto result =
         extractor->extract_image_features(image.pixels.data(), image.height, image.width);
     if (args.output_json.empty()) {
-        write_image_features_json(std::cout, result);
+        write_image_features_json(std::cout, result, args.pooler_only);
         return EXIT_SUCCESS;
     }
 
@@ -1346,7 +1355,7 @@ int cmd_extract_features(const CliArgs& args) {
         std::cerr << "Error: failed to open " << args.output_json << " for writing\n";
         return EXIT_FAILURE;
     }
-    write_image_features_json(out, result);
+    write_image_features_json(out, result, args.pooler_only);
     if (!out) {
         std::cerr << "Error: failed to write " << args.output_json << '\n';
         return EXIT_FAILURE;

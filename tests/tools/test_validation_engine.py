@@ -7910,6 +7910,7 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
         "issues": [],
     }
     assert result["gate_metric_kinds"] == {}
+    assert result["gate_sample_count_metrics"] == {}
     assert result["gate_policy"] == "blocking"
     assert result["gate_failures"] == [
         {

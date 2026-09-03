@@ -47,12 +47,12 @@ def _metric_case(sample_id: str, result) -> dict:
 
 def _gates() -> dict:
     return {
-        "expected_query_count": 4,
-        "reference_20nn_top1_accuracy_min": 0.5,
-        "candidate_20nn_top1_accuracy_max_drop_from_reference": 0.01,
-        "candidate_reference_20nn_top1_agreement_min": 0.98,
-        "query_pooler_cosine_min": 0.999,
-        "query_pooler_relative_l2_max": 0.01,
+        "exact_task_query_count": 4,
+        "min_reference_20nn_top1_accuracy": 0.5,
+        "max_candidate_20nn_top1_accuracy_drop_from_reference": 0.01,
+        "min_candidate_reference_20nn_top1_agreement": 0.98,
+        "min_task_query_pooler_cosine": 0.999,
+        "max_task_query_pooler_relative_l2": 0.01,
     }
 
 
@@ -89,10 +89,16 @@ def test_knn_aggregate_gates_complete_ground_truth_task_accuracy() -> None:
     aggregate = comparator.aggregate([_metric_case("all", result)], _gates())
 
     assert aggregate["passed"] is True
-    assert aggregate["task_accuracy"]["query_count"] == 4
+    assert aggregate["task_accuracy"]["task_query_count"] == 4
     assert aggregate["task_accuracy"]["candidate_20nn_top1_accuracy"] == 0.75
     assert aggregate["task_accuracy"]["reference_20nn_top1_accuracy"] == 0.75
     assert aggregate["task_accuracy"]["candidate_reference_20nn_top1_agreement"] == 1.0
+    assert (
+        aggregate["task_accuracy"][
+            "candidate_20nn_top1_accuracy_drop_from_reference"
+        ]
+        == 0.0
+    )
 
 
 def test_knn_aggregate_fails_candidate_accuracy_drop() -> None:

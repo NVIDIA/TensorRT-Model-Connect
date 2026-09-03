@@ -12123,6 +12123,9 @@ def eval_one_model(
     )
     result["configured_gates"] = configured_gates
     result["gate_metric_kinds"] = dict(suite.get("gate_metric_kinds", {}))
+    result["gate_sample_count_metrics"] = dict(
+        suite.get("gate_sample_count_metrics", {})
+    )
     if isinstance(sample_acceptance, Mapping):
         result["configured_sample_acceptance"] = dict(sample_acceptance)
     result["gate_policy"] = str(

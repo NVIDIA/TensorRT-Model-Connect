@@ -3216,9 +3216,6 @@ def _shadow_gate_metrics(
             for name, metric in task_accuracy.items()
             if isinstance(metric, (int, float)) and not isinstance(metric, bool)
         }
-        for name in aggregate_metrics:
-            metrics.pop(f"min_{name}", None)
-            metrics.pop(f"max_{name}", None)
         metrics.update(aggregate_metrics)
     return metrics
 
@@ -3320,6 +3317,11 @@ def _public_accuracy_result(
             metric_kinds=(
                 raw_result.get("gate_metric_kinds")
                 if isinstance(raw_result.get("gate_metric_kinds"), Mapping)
+                else {}
+            ),
+            sample_count_metrics=(
+                raw_result.get("gate_sample_count_metrics")
+                if isinstance(raw_result.get("gate_sample_count_metrics"), Mapping)
                 else {}
             ),
         )

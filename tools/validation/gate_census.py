@@ -28,6 +28,10 @@ def _variant(
     acceptance = acceptance if isinstance(acceptance, Mapping) else None
     metric_kinds = suite.get("gate_metric_kinds", {})
     metric_kinds = metric_kinds if isinstance(metric_kinds, Mapping) else {}
+    sample_count_metrics = suite.get("gate_sample_count_metrics", {})
+    sample_count_metrics = (
+        sample_count_metrics if isinstance(sample_count_metrics, Mapping) else {}
+    )
     policy = describe_shadow_gate_policy(
         configured_gates=gates,
         sample_count=sample_count,
@@ -39,6 +43,9 @@ def _variant(
             else str(suite.get("gate_policy", "blocking") or "blocking")
         ),
         metric_kinds={str(name): str(kind) for name, kind in metric_kinds.items()},
+        sample_count_metrics={
+            str(name): str(metric) for name, metric in sample_count_metrics.items()
+        },
     )
     if acceptance:
         policy["policy_mode"] = "blocking"
@@ -93,6 +100,7 @@ def _signature(suite: Mapping[str, Any]) -> str:
             "gates": suite.get("gates", {}),
             "gate_policy": suite.get("gate_policy", "blocking"),
             "gate_metric_kinds": suite.get("gate_metric_kinds", {}),
+            "gate_sample_count_metrics": suite.get("gate_sample_count_metrics", {}),
             "sample_acceptance": suite.get("sample_acceptance", {}),
         },
         sort_keys=True,

@@ -368,16 +368,16 @@ class ImageFeatureExtractionComparator:
         )
 
     def aggregate(self, cases: list[dict], gates: dict) -> dict:
-        task_gate = "candidate_20nn_top1_accuracy_max_drop_from_reference"
+        task_gate = "max_candidate_20nn_top1_accuracy_drop_from_reference"
         if task_gate not in gates:
             return {"evaluated": False, "passed": True}
         required_gates = (
-            "expected_query_count",
-            "reference_20nn_top1_accuracy_min",
+            "exact_task_query_count",
+            "min_reference_20nn_top1_accuracy",
             task_gate,
-            "candidate_reference_20nn_top1_agreement_min",
-            "query_pooler_cosine_min",
-            "query_pooler_relative_l2_max",
+            "min_candidate_reference_20nn_top1_agreement",
+            "min_task_query_pooler_cosine",
+            "max_task_query_pooler_relative_l2",
         )
         missing_gates = [name for name in required_gates if name not in gates]
         if missing_gates:
@@ -418,8 +418,8 @@ class ImageFeatureExtractionComparator:
         query_count = int(
             sum(float(case["metrics"]["query_count"]["value"]) for case in cases)
         )
-        expected_query_count = int(gates["expected_query_count"])
-        task_accuracy: dict[str, float | int] = {"query_count": query_count}
+        expected_query_count = int(gates["exact_task_query_count"])
+        task_accuracy: dict[str, float | int] = {"task_query_count": query_count}
         for k in _KNN_K_VALUES:
             for side in ("candidate", "reference"):
                 correct = sum(
@@ -436,36 +436,41 @@ class ImageFeatureExtractionComparator:
             task_accuracy[f"candidate_reference_{k}nn_top1_agreement"] = (
                 agreement / query_count if query_count else 0.0
             )
-        task_accuracy["query_pooler_cosine_min"] = min(
+        task_accuracy["candidate_20nn_top1_accuracy_drop_from_reference"] = max(
+            0.0,
+            task_accuracy["reference_20nn_top1_accuracy"]
+            - task_accuracy["candidate_20nn_top1_accuracy"],
+        )
+        task_accuracy["task_query_pooler_cosine"] = min(
             float(case["metrics"]["query_pooler_cosine_min"]["value"]) for case in cases
         )
-        task_accuracy["query_pooler_relative_l2_max"] = max(
+        task_accuracy["task_query_pooler_relative_l2"] = max(
             float(case["metrics"]["query_pooler_relative_l2_max"]["value"])
             for case in cases
         )
 
-        reference_floor = float(gates["reference_20nn_top1_accuracy_min"])
+        reference_floor = float(gates["min_reference_20nn_top1_accuracy"])
         drop_allowance = float(gates[task_gate])
-        agreement_floor = float(gates["candidate_reference_20nn_top1_agreement_min"])
-        cosine_floor = float(gates["query_pooler_cosine_min"])
-        relative_l2_limit = float(gates["query_pooler_relative_l2_max"])
+        agreement_floor = float(gates["min_candidate_reference_20nn_top1_agreement"])
+        cosine_floor = float(gates["min_task_query_pooler_cosine"])
+        relative_l2_limit = float(gates["max_task_query_pooler_relative_l2"])
         gate_results = {
             "complete_test_split": query_count == expected_query_count,
             "reference_20nn_top1_accuracy": (
                 task_accuracy["reference_20nn_top1_accuracy"] >= reference_floor
             ),
             "candidate_20nn_top1_accuracy": (
-                task_accuracy["candidate_20nn_top1_accuracy"]
-                >= task_accuracy["reference_20nn_top1_accuracy"] - drop_allowance
+                task_accuracy["candidate_20nn_top1_accuracy_drop_from_reference"]
+                <= drop_allowance
             ),
             "candidate_reference_20nn_top1_agreement": (
                 task_accuracy["candidate_reference_20nn_top1_agreement"]
                 >= agreement_floor
             ),
-            "query_pooler_cosine": task_accuracy["query_pooler_cosine_min"]
+            "query_pooler_cosine": task_accuracy["task_query_pooler_cosine"]
             >= cosine_floor,
             "query_pooler_relative_l2": (
-                task_accuracy["query_pooler_relative_l2_max"] <= relative_l2_limit
+                task_accuracy["task_query_pooler_relative_l2"] <= relative_l2_limit
             ),
         }
         failures = [name for name, passed in gate_results.items() if not passed]
@@ -474,12 +479,12 @@ class ImageFeatureExtractionComparator:
             "passed": not failures,
             "task_accuracy": task_accuracy,
             "gates": {
-                "expected_query_count": expected_query_count,
-                "reference_20nn_top1_accuracy_min": reference_floor,
+                "exact_task_query_count": expected_query_count,
+                "min_reference_20nn_top1_accuracy": reference_floor,
                 task_gate: drop_allowance,
-                "candidate_reference_20nn_top1_agreement_min": agreement_floor,
-                "query_pooler_cosine_min": cosine_floor,
-                "query_pooler_relative_l2_max": relative_l2_limit,
+                "min_candidate_reference_20nn_top1_agreement": agreement_floor,
+                "min_task_query_pooler_cosine": cosine_floor,
+                "max_task_query_pooler_relative_l2": relative_l2_limit,
             },
             "gate_results": gate_results,
             "gate_failures": failures,
