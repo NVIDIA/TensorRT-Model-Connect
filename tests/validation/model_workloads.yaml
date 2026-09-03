@@ -263,6 +263,8 @@ models:
     workloads: [mmlu_five_shot_mcq]
   qwen38-27b:
     workloads: [mmlu_five_shot_mcq]
+  resnet50-a1-in1k:
+    workloads: [imagenette_image_classification]
   riva-translate-4b:
     workloads: [flores200_en_fr_riva_translation_parity]
   roberta-base:

@@ -70,6 +70,7 @@ TASK_ADAPTERS = {
     "sana_wm.generate_image": "upstream-sana-wm",
     "segformer.segment": "hf-transformers-vision",
     "timesfm.solve": "pytorch-timeseries",
+    "timm_resnet.classify": "hf-transformers-vision",
     "timm_vit.classify": "hf-transformers-vision",
     "wan_t2v.generate_image": "hf-diffusers",
     "wan2_2_ti2v.generate_image": "hf-diffusers",
@@ -265,8 +266,8 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
     performance_catalog.validate_release_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 112
-    assert len(raw_entries) == 82
+    assert len(cases) == 113
+    assert len(raw_entries) == 83
     assert len(raw_additional) == 30
     assert excluded_profiles == {
         "lfm2-1.2b": LFM2_EXCLUSION_REASON,
@@ -283,14 +284,14 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
     assert not any(performance_catalog.is_l0_profile(case["model"]) for case in cases)
-    assert len({(case["family"], case["operation"]) for case in cases}) == 82
-    assert len({case["family"] for case in cases}) == 80
+    assert len({(case["family"], case["operation"]) for case in cases}) == 83
+    assert len({case["family"] for case in cases}) == 81
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
-        "model_call_wall": 25,
+        "model_call_wall": 26,
         "public_pipeline_call_wall": 87,
     }
     assert {case["id"] for case in cases if case["baseline"]["asset_loading_included"]} == {
@@ -2185,7 +2186,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 112
+    assert len(rows) == 113
     assert results["environment_config"]["name"] == "test-gb300"
     assert results["environment_config"]["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert results["environment_config"]["source"] == str(environment.resolve())

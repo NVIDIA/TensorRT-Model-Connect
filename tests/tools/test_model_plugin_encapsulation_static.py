@@ -7875,7 +7875,7 @@ def test_hf_transformers_model_plugins_do_not_name_sibling_families() -> None:
             ),
         ),
         (
-            {"timm_vit"},
+            {"timm_vit", "timm_resnet"},
             (
                 "import timm",
                 "timm.create_model",
@@ -7987,7 +7987,7 @@ def test_single_family_e2e_task_sidecars_are_model_owned() -> None:
     """
     cases = {
         "image_classification": {
-            "owners": {"timm_vit"},
+            "owners": {"timm_vit", "timm_resnet"},
             "paths": (
                 "e2e_plugins/runners/image_classification.py",
                 "e2e_plugins/comparators/image_classification.py",
@@ -9197,14 +9197,14 @@ def test_generated_e2e_task_sidecars_are_task_owned() -> None:
         (
             "runners",
             "image_classification.py",
-            {"timm_vit"},
+            {"timm_vit", "timm_resnet"},
             "ImageClassificationRunner",
             "image_classification",
         ),
         (
             "comparators",
             "image_classification.py",
-            {"timm_vit"},
+            {"timm_vit", "timm_resnet"},
             "ImageClassificationComparator",
             "image_classification",
         ),

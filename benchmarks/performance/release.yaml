@@ -980,6 +980,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: timm_resnet.classify
+    family: timm_resnet
+    operation: classify
+    model: resnet50-a1-in1k
+    workload:
+      testcase: resnet50-a1-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: wan_t2v.generate_image
     family: wan_t2v
     operation: generate_image

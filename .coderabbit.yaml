@@ -13,12 +13,83 @@ reviews:
   request_changes_workflow: false
   high_level_summary: true
   high_level_summary_in_walkthrough: true
+  high_level_summary_instructions: |
+    Summarize intent and behavior, then add an "Architecture impact" section.
+    Identify family-owned files, changed shared surfaces, new dependency
+    directions, affected consumers, and unresolved blast-radius questions.
+    Use PASS, BLOCK, or HUMAN REVIEW REQUIRED as defined in REVIEW.md. Do not
+    repeat inline findings or claim that an absence of findings proves safety.
   poem: false
   in_progress_fortune: false
 
   auto_review:
     enabled: true
     drafts: false
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+
+  # Keep semantic checks advisory until their signal has been calibrated on
+  # real pull requests. Architecture owners remain the decision authority.
+  pre_merge_checks:
+    override_requested_reviewers_only: true
+    custom_checks:
+      - name: "Family ownership boundary"
+        mode: "warning"
+        instructions: |
+          Evaluate only dependencies introduced, expanded, or newly relied on
+          by this pull request. Fail when one model family imports, includes,
+          links, loads, reads, inherits from, or reuses implementation, fixtures,
+          reference code, comparators, or validation artifacts owned by another
+          family. Also fail when adding or changing one family requires editing
+          another family or a central family registry, switch, source list, or
+          strategy map. Do not fail because model-specific code is duplicated or
+          similar; that duplication is intentional. Shared model-agnostic
+          contracts and mechanics are allowed. Cite exact changed lines and both
+          sides of the dependency. Return inconclusive when a dynamic dependency
+          cannot be resolved from repository evidence.
+
+      - name: "Shared semantic neutrality"
+        mode: "warning"
+        instructions: |
+          Evaluate changed shared code outside the model-owned Python, runtime,
+          C++ test, E2E, and family-tool directories. Fail when shared code adds
+          or expands model-specific configuration, topology, tensor or output
+          semantics, engine composition, runtime orchestration, preprocessing,
+          postprocessing, reference behavior, validation evidence, datasets,
+          task metrics, thresholds, probes, or runtime strategies. A literal
+          family/model name, family conditional, or model tensor name in shared
+          code is evidence requiring investigation, not automatic proof. Pass a
+          shared change only when its behavior is model-agnostic and family-owned
+          data fully supplies specialization through an existing narrow
+          contract. Do not fail solely for pre-existing unchanged debt. Cite the
+          changed semantic decision and its owning family or affected consumers.
+
+      - name: "Benchmark validation integrity"
+        mode: "warning"
+        instructions: |
+          Apply when benchmark, performance, reference, metric, gate, workload,
+          report, or validation behavior changes. Fail when compared
+          implementations time different semantic regions; synchronization,
+          device-to-host transfer, reduction, output validation, or serialization
+          is included on only one side; execution units such as shards or batches
+          are conflated with task units such as queries or samples; aggregation
+          changes the evidence level; or a shared behavior change lacks evidence
+          for affected consumers. Do not require identical implementations, only
+          equivalent measurement and validation meaning. Cite both compared
+          paths or the before/after accounting contract.
+
+      - name: "Shared change blast radius"
+        mode: "warning"
+        instructions: |
+          Apply when a family-oriented pull request changes shared code,
+          contracts, tooling, examples, benchmarks, catalogs, or validation
+          infrastructure. Fail when the pull request description and repository
+          evidence do not identify the concrete model-agnostic need, affected
+          consumers, behavior or compatibility impact, validation evidence, and
+          why the implementation cannot remain family-owned. Do not fail a
+          family-local change that does not alter a shared surface. Return
+          inconclusive when consumer or compatibility evidence is unavailable;
+          do not infer that missing evidence is safe.
 
   # Do not let review finishing touches create follow-up code changes. Authors
   # remain responsible for applying and validating any suggested change.
@@ -38,6 +109,100 @@ reviews:
     - "!third_party/**"
 
   path_instructions:
+    # Keep both the current split ownership roots and the consolidated family
+    # root used by the horizontal-scaling layout. This makes the review policy
+    # continuous across the repository migration.
+    - path: "families/**"
+      instructions: |
+        Treat each direct child as an independently owned model-family vertical
+        slice, including build code, runtime code, tests, fixtures, references,
+        comparators, thresholds, and probes. Similar or duplicated
+        model-specific code is intentional isolation; do not suggest extracting,
+        deduplicating, or importing sibling-family implementation solely because
+        code looks alike. Flag cross-family imports, includes, links, loads,
+        inheritance, file reads, fixtures, validation reuse, or required edits.
+        A new shared contract requires a concrete model-agnostic need; reduced
+        line count is not evidence.
+
+    - path: "python/tensorrt_model_connect/families/**"
+      instructions: |
+        Treat each direct child as an independently owned model-family slice.
+        Similar or duplicated model-specific code is intentional isolation; do
+        not suggest extracting, deduplicating, or importing sibling-family
+        implementation solely because code looks alike. Flag new cross-family
+        imports, file reads, inheritance, fixtures, reference behavior, or
+        validation reuse. A new shared contract requires a concrete
+        model-agnostic need; reduced line count is not evidence.
+
+    - path: "src/runtime/models/**"
+      instructions: |
+        Treat each direct child as an independently owned runtime model DSO.
+        Similar or duplicated implementation is intentional isolation; do not
+        suggest sharing model-specific helpers solely because code looks alike.
+        Flag cross-family includes, links, loads, source references, symlinks,
+        or runtime dependencies between model-owner directories.
+
+    - path: "tests/e2e/models/**"
+      instructions: |
+        Treat each direct child as family-owned validation. Similar fixtures,
+        runners, references, comparators, thresholds, and probes may remain
+        duplicated as intentional isolation that preserves independent evidence
+        and rollback. Flag reuse across sibling families or movement of
+        model-specific validation semantics into the shared E2E harness.
+
+    - path: "core/**"
+      instructions: |
+        Treat core as model-agnostic contracts and mechanics. Flag literal
+        model/family names, family conditionals, model topology or tensor
+        semantics, model-specific orchestration or validation, and dependencies
+        from core into families or applications. A family-specific need should
+        remain in its owning family unless multiple independent consumers prove
+        a narrow shared contract.
+
+    - path: "apps/**"
+      instructions: |
+        Applications and benchmarks must consume public core and family
+        contracts without becoming a source of model semantics. Flag shared app
+        code that branches on a family, interprets family-specific tensors or
+        outputs, owns family validation policy, or becomes a dependency of core
+        or family implementation.
+
+    - path: "apps/benchmark/**"
+      instructions: |
+        Check semantic equivalence of timed regions, synchronization, warmup,
+        preprocessing, transfer, execution, postprocessing, validation, and
+        serialization. Keep shards, batches, requests, queries, samples, tokens,
+        and generated artifacts as distinct accounting units. Flag family
+        behavior embedded in shared benchmark code.
+
+    - path: "tools/**"
+      instructions: |
+        Treat tools as shared infrastructure. Flag model/family branches,
+        model-specific tensor or output semantics, datasets, task metrics,
+        thresholds, probes, reference behavior, aggregation policy, or runtime
+        strategies. Require a concrete model-agnostic need for shared changes.
+
+    - path: "benchmarks/**"
+      instructions: |
+        Check semantic equivalence of timed regions, synchronization, warmup,
+        preprocessing, transfer, execution, postprocessing, validation, and
+        serialization. Keep shards, batches, requests, queries, samples, tokens,
+        and generated artifacts as distinct accounting units. Flag family
+        behavior embedded in shared benchmark code.
+
+    - path: "examples/**"
+      instructions: |
+        Examples must consume public build, load, task, and runtime APIs. Flag
+        family-specific orchestration or output interpretation added to a shared
+        executable or worker, and any reverse dependency into example code.
+
+    - path: "tests/validation/**"
+      instructions: |
+        Flag model-specific datasets, metrics, gates, thresholds, tensor
+        semantics, reference behavior, or runtime strategies stored in central
+        catalogs or implemented by shared validation code. Do not weaken
+        validation evidence or acceptance criteria.
+
     - path: ".github/**"
       instructions: |
         Treat fork pull requests as untrusted. Preserve the trust boundary
@@ -74,3 +239,10 @@ chat:
   auto_reply: true
   art: false
   allow_non_org_members: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - files: "REVIEW.md"
+        applyTo: "**/*"

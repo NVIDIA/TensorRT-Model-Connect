@@ -1258,8 +1258,10 @@ suites:
         - image_classification
       runtime_strategies:
         - timm_vit_image_classification
+        - timm_resnet_image_classification
       families:
         - timm_vit
+        - timm_resnet
       user_contracts:
         - image_classification
     scoring:

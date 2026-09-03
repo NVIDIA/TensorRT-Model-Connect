@@ -103,6 +103,7 @@ SPDX-License-Identifier: Apache-2.0
 | `bigcode/starcoder2-3b` | `starcoder2-3b` | `FP16` | None | — | 🟢 Green |
 | `google-t5/t5-small` | `t5-small` | `FP16` | None | — | 🟢 Green |
 | `google/timesfm-2.0-500m-pytorch` | `timesfm-2.0-500m-official` | `FP32` | None | — | 🟢 Green |
+| `timm/resnet50.a1_in1k` | `resnet50-a1-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/vit_base_patch16_224.augreg_in21k_ft_in1k` | `timm-vit-base-p16-224-augreg-in21k-ft-in1k` | `FP16` | None | — | 🟢 Green |
 | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | `tinyllama-1.1b` | `FP16` | None | — | 🟢 Green |
 | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | `wan21-t2v-1.3b` | `FP16`<br />FP32 layers: `24` | None | — | 🟢 Green |
