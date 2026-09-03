@@ -294,6 +294,12 @@ def test_native_worker_has_a_runner_for_every_advertised_operation() -> None:
     ):
         assert replay_input in worker_source
 
+    image_runner = worker_source.split("Json run_generate_image", 1)[1].split(
+        "std::size_t audio_sample_count", 1
+    )[0]
+    assert image_runner.index("timer.elapsed_ms()") < image_runner.index("generated_pixels")
+    assert "benchmark worker output contains non-finite values" in worker_source
+
 
 def test_default_catalog_falls_back_to_installed_package_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

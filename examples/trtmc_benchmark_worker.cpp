@@ -248,7 +248,10 @@ class IterationTimer {
 
 double finite_sum(const std::vector<float>& values) {
     return std::accumulate(values.begin(), values.end(), 0.0, [](double total, float value) {
-        return std::isfinite(value) ? total + value : total;
+        if (!std::isfinite(value)) {
+            throw std::runtime_error("benchmark worker output contains non-finite values");
+        }
+        return total + value;
     });
 }
 
@@ -520,6 +523,7 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request,
     for (int index = 0; index < timing.iterations; ++index) {
         const IterationTimer timer(timing.scope);
         last = generate();
+        const double measured_ms = timer.elapsed_ms();
         const std::size_t generated_pixels =
             std::accumulate(last.begin(), last.end(), std::size_t{0},
                             [](std::size_t count, const trtmc::ImageResult& image) {
@@ -530,7 +534,6 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request,
             [](std::size_t count, const trtmc::ImageResult& image) {
                 return count + static_cast<std::size_t>(std::max<int32_t>(image.num_frames, 1));
             });
-        const double measured_ms = timer.elapsed_ms();
         observations.push_back({
             {"iteration", index},
             {"measured_wall_ms", measured_ms},

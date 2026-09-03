@@ -2191,7 +2191,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
     ]
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
-    rows = {row["id"]: row for row in results["cases"]}
+    result_cases = results["cases"]
+    rows = {row["id"]: row for row in result_cases}
+    assert len(rows) == len(result_cases)
     assert set(rows) == {
         case["id"] for case in performance_catalog.load_suite(SUITE).cases
     }
@@ -4109,7 +4111,7 @@ def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -
             ],
         },
     )
-    summary = session.invoke()
+    _, summary = runner["_measure"](session, 0, 1)
 
     assert captured["action"] == "w-80,jw-40"
     assert captured["intrinsics"] == "1,2,3,4"
@@ -4158,6 +4160,7 @@ def test_diffusers_adapter_preserves_batched_prompts_and_seeds(
     globals_ = runner["_load_diffusers"].__globals__
     globals_["_diffusion_pipeline"] = lambda *_args: FakePipeline()
     globals_["_resolved_revision"] = lambda *_args: "snapshot"
+    globals_["_synchronize"] = lambda: None
     monkeypatch.setitem(sys.modules, "torch", Namespace(Generator=FakeGenerator))
     arguments = Namespace(
         family="flux",
@@ -4179,8 +4182,8 @@ def test_diffusers_adapter_preserves_batched_prompts_and_seeds(
         {},
     )
 
-    assert session.invoke()["media_count"] == 2
-    assert session.invoke()["media_count"] == 2
+    _, summary = runner["_measure"](session, 1, 1)
+    assert summary["media_count"] == 2
     assert captured == [
         {"prompt": ["red cube", "blue sphere"], "seeds": [41, 42]},
         {"prompt": ["red cube", "blue sphere"], "seeds": [41, 42]},
@@ -4235,7 +4238,8 @@ def test_diffusers_adapter_requests_numeric_output_before_summary(
         {},
     )
 
-    assert session.invoke()["finite"] is True
+    _, summary = runner["_measure"](session, 0, 1)
+    assert summary["finite"] is True
     assert captured == {"prompt": "cat", "output_type": "np"}
 
 
@@ -4270,6 +4274,7 @@ def test_minimax_h3_diffusers_adapter_times_video_output_only_with_cpu_generator
     globals_["_diffusion_pipeline"] = lambda *_args: FakePipeline()
     globals_["_resolved_revision"] = lambda *_args: "snapshot"
     globals_["_pinned_checkout_revision"] = lambda _repo, revision, **_kwargs: revision
+    globals_["_synchronize"] = lambda: None
     monkeypatch.setitem(sys.modules, "torch", Namespace(Generator=FakeGenerator))
     diffusers_repo = tmp_path / "diffusers"
     diffusers_package = diffusers_repo / "src/diffusers"
@@ -4321,7 +4326,8 @@ def test_minimax_h3_diffusers_adapter_times_video_output_only_with_cpu_generator
         },
     )
 
-    assert session.invoke() == {
+    _, summary = runner["_measure"](session, 0, 1)
+    assert summary == {
         "media_type": "video",
         "media_count": 2,
         "height": 4,
@@ -4356,6 +4362,31 @@ def test_diffusers_media_summary_rejects_non_finite_pixels() -> None:
     invalid[0, 0, 0, 0] = np.nan
     with pytest.raises(RuntimeError, match="non-finite"):
         runner["_media_summary"](invalid, "image")
+
+
+def test_task_reference_summarizes_only_after_all_timed_invocations() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    events: list[str] = []
+
+    def invoke() -> dict[str, str]:
+        events.append("invoke")
+        return {"text": "ok"}
+
+    def summarize(output: dict[str, str]) -> dict[str, str]:
+        events.append("summarize")
+        return output
+
+    session = runner["Session"](
+        invoke,
+        "revision",
+        "framework",
+        summarize=summarize,
+    )
+
+    _, summary = runner["_measure"](session, 1, 2)
+
+    assert events == ["invoke", "invoke", "invoke", "summarize"]
+    assert summary == {"text": "ok"}
 
 
 def test_personaplex_loader_adds_vendored_moshi_package_root() -> None:

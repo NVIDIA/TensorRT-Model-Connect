@@ -87,7 +87,7 @@ PYTORCH_ADAPTERS = {
 class Session:
     """One loaded reference model and its repeatable timed operation."""
 
-    invoke: Callable[[], Mapping[str, Any]]
+    invoke: Callable[[], Any]
     resolved_revision: str
     framework: str
     timing_scope: str = "task-model-call-wall"
@@ -95,6 +95,7 @@ class Session:
     asset_loading_included: bool = False
     reference_dependencies: Mapping[str, str] | None = None
     reference_source: Mapping[str, str] | None = None
+    summarize: Callable[[Any], Mapping[str, Any]] | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1638,7 +1639,9 @@ def _load_diffusers(
         else:
             call_values["generator"] = torch.Generator(generator_device).manual_seed(seeds)
 
-    def invoke() -> Mapping[str, Any]:
+    media_type = str(request.get("media_type", "image"))
+
+    def invoke() -> Any:
         if "generator" in call_values:
             generators = call_values["generator"]
             if isinstance(generators, list):
@@ -1655,8 +1658,7 @@ def _load_diffusers(
                 media = result.get(name)
                 if media is not None:
                     break
-        media_type = str(request.get("media_type", "image"))
-        return _media_summary(media, media_type)
+        return media
 
     requested_revision = str(
         options.get("model_revision", getattr(arguments, "revision", None) or "")
@@ -1685,6 +1687,7 @@ def _load_diffusers(
             "revision": revision,
         },
         reference_dependencies=dependencies,
+        summarize=lambda media: _media_summary(media, media_type),
     )
 
 
@@ -2408,7 +2411,7 @@ def _synchronize() -> None:
 
 
 def _measure(session: Session, warmup: int, iterations: int) -> tuple[list[float], dict[str, Any]]:
-    output: Mapping[str, Any] = {}
+    output: Any = {}
     for _ in range(warmup):
         output = session.invoke()
         _synchronize()
@@ -2419,7 +2422,8 @@ def _measure(session: Session, warmup: int, iterations: int) -> tuple[list[float
         output = session.invoke()
         _synchronize()
         samples.append((time.perf_counter() - started) * 1000.0)
-    return samples, dict(output)
+    summary = session.summarize(output) if session.summarize is not None else output
+    return samples, dict(summary)
 
 
 def _run_elf(
