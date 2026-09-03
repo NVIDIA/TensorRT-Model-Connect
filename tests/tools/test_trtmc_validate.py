@@ -64,7 +64,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 119
+    assert len(bindings) == 121
     assert {
         binding.model for binding in bindings if binding.workload == "mmlu_continuation_parity"
     } >= {
