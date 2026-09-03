@@ -53,7 +53,10 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py check \
 The JSON includes `resolved_revision` and `target_preflight`. A missing dataset,
 native executable, TensorRT backend, model-plugin directory, worker metadata,
 or matching embedded worker SHA makes the command fail before profile or bundle
-preparation.
+preparation. When Perf is selected, preflight also loads the packaged TensorRT
+backend through the declared Perf runner Python. The command fails if that
+loader smoke test cannot resolve or load the backend and records the result in
+`target_preflight.perf_backend_loader`.
 
 Select exact Accuracy suites per model:
 

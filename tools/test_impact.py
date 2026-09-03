@@ -1873,20 +1873,32 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=455,
+            name="lerobot_act_recorded_control_example",
+            matcher=_regex_rule(r"examples/models/(lerobot_act)/recorded_control/.+$"),
+            resolver=_match_result(
+                "lerobot_act_recorded_control_example",
+                _family_models,
+                ["cpp", "tools"],
+                True,
+            ),
+            covered_by=("TestUnitTiers.test_lerobot_act_recorded_control_example_is_model_owned",),
+        ),
+        ClassificationRule(
+            priority=456,
             name="cpp_example_tool",
             matcher=_regex_rule(r"examples/.+\.cpp$"),
             resolver=_match_result("cpp_example_tool", _no_models, ["cpp"], True),
             covered_by=("TestUnitTiers.test_cpp_example_tool_triggers_cpp_tier",),
         ),
         ClassificationRule(
-            priority=456,
+            priority=457,
             name="benchmark_cli_asset",
             matcher=_path_in({"examples/trtmc_bench.yaml", "scripts/trtmc-bench"}),
             resolver=_match_result("benchmark_cli_asset", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_benchmark_cli_assets_trigger_tools_tier",),
         ),
         ClassificationRule(
-            priority=457,
+            priority=458,
             name="release_performance",
             matcher=_path_startswith("benchmarks/performance/"),
             resolver=_match_result("release_performance", _no_models, ["tools"], False),
@@ -2036,6 +2048,19 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=491,
+            name="devtoolkit_contract",
+            matcher=_path_startswith_any(
+                ("configs/environment-cohorts/", "scripts/devToolkit/")
+            ),
+            resolver=_match_result(
+                "devtoolkit_contract", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestNoImpact.test_devtoolkit_contract_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
+            priority=492,
             name="source_container_contract",
             matcher=_path_in({"Dockerfile.dev.aarch64", "Dockerfile.dev.x86"}),
             resolver=_match_result(
@@ -2046,7 +2071,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=492,
+            priority=493,
             name="community_cpu_contract",
             matcher=_path_in(
                 {
@@ -2065,14 +2090,14 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=493,
+            priority=494,
             name="github_ci_config",
             matcher=_path_startswith(".github/"),
             resolver=_match_result("github_ci_config", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_github_ci_config_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=494,
+            priority=495,
             name="no_impact",
             matcher=_no_impact_matcher,
             resolver=_no_impact_resolver,

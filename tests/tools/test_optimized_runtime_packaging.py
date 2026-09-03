@@ -148,6 +148,7 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
     )
     (catalog_family / "manifests/example.json").write_text(
         '{"fp8_scales": "data/fp8-scales.json", '
+        '"benchmark_assets": ["data/left.png", "data/right.png"], '
         '"testcases": [{"test_image": "data/test_img.jpeg", '
         '"prompt_file": "data/prompt.txt", '
         '"test_input_audio": "data/transcription.wav"}]}\n',
@@ -156,6 +157,8 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
     (catalog_family / "data").mkdir()
     (catalog_family / "data/Recording.wav").write_bytes(b"RIFF-test-audio")
     (catalog_family / "data/fp8-scales.json").write_text("{}\n", encoding="utf-8")
+    (catalog_family / "data/left.png").write_bytes(b"left-image")
+    (catalog_family / "data/right.png").write_bytes(b"right-image")
     (catalog_family / "data/test_img.jpeg").write_bytes(b"test-image")
     (catalog_family / "data/prompt.txt").write_text("test prompt\n", encoding="utf-8")
     (catalog_family / "data/transcription.wav").write_bytes(b"RIFF-transcription-audio")
@@ -271,6 +274,8 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert (catalog / "manifests" / "example.json").is_file()
     assert (catalog / "data/Recording.wav").is_file()
     assert (catalog / "data/fp8-scales.json").is_file()
+    assert (catalog / "data/left.png").is_file()
+    assert (catalog / "data/right.png").is_file()
     assert (catalog / "data/test_img.jpeg").is_file()
     assert (catalog / "data/prompt.txt").is_file()
     assert (catalog / "data/transcription.wav").is_file()
@@ -301,6 +306,8 @@ def test_package_stages_the_complete_canonical_benchmark_catalog(
     assert (installed / "whisper/data/librispeech-test-clean-6930-75918-0003.wav").is_file()
     assert (installed / "flux/data/flux2-fp8-scales.json").is_file()
     assert (installed / "qwen_image/data/test_img.jpeg").is_file()
+    assert (installed / "fast_foundation_stereo/data/office_left.png").is_file()
+    assert (installed / "fast_foundation_stereo/data/office_right.png").is_file()
     assert (installed / "sana_wm/assets/demo_0.png").is_file()
     assert (installed / "sana_wm/assets/demo_0.txt").is_file()
     missing_audio_assets = [
@@ -325,6 +332,7 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
     (family / "MODEL.toml").write_text('id = "example"\n', encoding="utf-8")
     (family / "manifests/example.json").write_text(
         '{"fp8_scales": "data/fp8-scales.json", '
+        '"benchmark_assets": ["data/left.png", "data/right.png"], '
         '"testcases": [{"test_image": "data/test_img.jpeg", '
         '"prompt_file": "data/prompt.txt", '
         '"test_input_audio": "data/transcription.wav"}]}\n',
@@ -333,6 +341,8 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
     (family / "data").mkdir()
     (family / "data/Recording.wav").write_bytes(b"RIFF-test-audio")
     (family / "data/fp8-scales.json").write_text("{}\n", encoding="utf-8")
+    (family / "data/left.png").write_bytes(b"left-image")
+    (family / "data/right.png").write_bytes(b"right-image")
     (family / "data/test_img.jpeg").write_bytes(b"test-image")
     (family / "data/prompt.txt").write_text("test prompt\n", encoding="utf-8")
     (family / "data/transcription.wav").write_bytes(b"RIFF-transcription-audio")
@@ -351,6 +361,8 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
     assert f"{prefix}/manifests/example.json" in names
     assert f"{prefix}/data/Recording.wav" in names
     assert f"{prefix}/data/fp8-scales.json" in names
+    assert f"{prefix}/data/left.png" in names
+    assert f"{prefix}/data/right.png" in names
     assert f"{prefix}/data/test_img.jpeg" in names
     assert f"{prefix}/data/prompt.txt" in names
     assert f"{prefix}/data/transcription.wav" in names

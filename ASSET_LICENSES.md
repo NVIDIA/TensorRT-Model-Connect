@@ -175,4 +175,21 @@ licensed and is attributed in `NOTICE`.
 | `elf-b-xsum-replay/initial_latents.f32` | `5153428af20ad73e2ba40e72a7d7cbd5dd10bf4cc7026bbdaad91fb12ae4ddd0` |
 | `elf-b-xsum-replay/sampling_steps.f32` | `79c790d0590ebf5d1838da98ed968b0e7c6b4309d56d50890ae3b0e025cc982e` |
 
+## LeRobot ACT recorded-observation fixture
+
+The files below `tests/e2e/models/lerobot_act/data/recorded_observation/` are a
+lossless PNG decoding and an exact little-endian float32 state row from episode
+0, frame 0 of `lerobot/aloha_sim_transfer_cube_human` revision
+`6a43d500f101255823a9d2b9dc244eeb01a2cd31`. The source dataset is distributed
+under the MIT License. `recorded_observation.json` records the pinned source
+parquet and video paths and their SHA-256 digests.
+
+- Dataset: https://huggingface.co/datasets/lerobot/aloha_sim_transfer_cube_human/tree/6a43d500f101255823a9d2b9dc244eeb01a2cd31
+- `observation.images.top.png`; SHA-256
+  `a53369bda31c6563548bd834e88f6640eb28e3233807c499a56d012de992799c`
+- `observation.state.f32`; SHA-256
+  `40cd79b41ce45e9ffc35f6dc70f74a980d8760857326a9482e109b1d763f54c0`
+- `recorded_observation.json`; SHA-256
+  `aecd4e0c5123d2e7fb632b32772c60c4175fa37e6425393f182b53e76bd1278f`
+
 <!-- Collaborative review anchor: batch 2. -->

@@ -22,6 +22,7 @@ sample_limits:
   humaneval_code_continuation_parity: 10
   imagenette_image_classification: 100
   lfm2_model_card_sampling_parity: 1
+  lerobot_act_recorded_control_fp32_parity: 1
   librispeech_clean_asr: 10
   librispeech_clean_asr_streaming: 5
   flores200_en_fr_seq2seq_parity: 10
@@ -59,6 +60,8 @@ sample_limits:
 # remain visible as not compared; E2E execution is never treated as reference
 # consistency.
 models:
+  act-aloha-sim-transfer-cube:
+    workloads: [lerobot_act_recorded_control_fp32_parity]
   albert-base:
     workloads: [stsbenchmark_encoder_embedding_parity]
   all-minilm-l6-v2:

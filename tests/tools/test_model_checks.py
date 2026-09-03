@@ -935,6 +935,11 @@ def test_check_target_preflight_reports_missing_dataset(
         "_validate_native_build",
         lambda *_args: {"source_revision": revision},
     )
+    monkeypatch.setattr(
+        model_checks,
+        "_probe_perf_backend_loader",
+        lambda *_args: {"status": "ready"},
+    )
 
     assert (
         model_checks.main(
@@ -989,6 +994,11 @@ def test_check_target_preflight_accepts_ready_dataset_and_native_build(
         "_validate_native_build",
         lambda *_args: {"source_revision": revision},
     )
+    monkeypatch.setattr(
+        model_checks,
+        "_probe_perf_backend_loader",
+        lambda *_args: {"status": "ready"},
+    )
 
     assert (
         model_checks.main(
@@ -1009,11 +1019,108 @@ def test_check_target_preflight_accepts_ready_dataset_and_native_build(
 
     plan = json.loads(capsys.readouterr().out)
     assert plan["target_preflight"]["status"] == "ready"
+    assert plan["target_preflight"]["perf_backend_loader"] == {"status": "ready"}
     assert plan["target_preflight"]["datasets"] == [
         {
             "workload": "wikitext103_distilgpt2_continuation_parity",
             "path": str(dataset.resolve()),
             "status": "ready",
+        }
+    ]
+
+
+def test_perf_backend_loader_preflight_uses_declared_runner_and_native_dir(
+    tmp_path,
+    monkeypatch,
+):
+    native_dir = tmp_path / "runtime"
+    native_dir.mkdir()
+    backend = native_dir / "libtrtmc_backend_trt.so"
+    backend.touch()
+    runner = tmp_path / "python"
+    runner.touch(mode=0o755)
+    environment = {
+        "tasks": {
+            "accuracy": {"options": {"backend-dir": str(native_dir)}},
+            "perf": {"runner_python": str(runner)},
+        }
+    }
+
+    def fake_run(command, **options):
+        assert command[0] == str(runner.resolve())
+        assert command[1] == "-c"
+        assert options["cwd"] == model_checks.REPOSITORY
+        assert options["env"]["_TRTMC_INTERNAL_NATIVE_BIN_DIR"] == str(
+            native_dir.resolve()
+        )
+        return model_checks.subprocess.CompletedProcess(
+            command, 0, '{"status": "loaded"}\n', ""
+        )
+
+    monkeypatch.setattr(model_checks.subprocess, "run", fake_run)
+
+    assert model_checks._probe_perf_backend_loader(environment) == {
+        "status": "ready",
+        "python": str(runner.resolve()),
+        "native_dir": str(native_dir.resolve()),
+        "backend": str(backend.resolve()),
+    }
+
+
+def test_check_target_preflight_blocks_when_perf_backend_cannot_load(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    revision = "c" * 40
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: revision)
+    monkeypatch.setattr(
+        model_checks,
+        "_validate_native_build",
+        lambda *_args: {"source_revision": revision},
+    )
+
+    def reject_backend(*_args):
+        raise model_checks.ModelCheckError("backend loader could not find its DSO")
+
+    monkeypatch.setattr(
+        model_checks,
+        "_probe_perf_backend_loader",
+        reject_backend,
+        raising=False,
+    )
+
+    assert (
+        model_checks.main(
+            [
+                "check",
+                "--platform",
+                "gb300",
+                "--task",
+                "perf",
+                "--model",
+                "distilgpt2",
+                "--environment",
+                "gb300",
+                "--target-preflight",
+                "--json",
+            ]
+        )
+        == 2
+    )
+
+    plan = json.loads(capsys.readouterr().out)
+    preflight = plan["target_preflight"]
+    assert preflight["status"] == "blocked"
+    assert preflight["perf_backend_loader"]["status"] == "blocked"
+    assert preflight["blockers"] == [
+        {
+            "category": "perf_backend_loader_unavailable",
+            "detail": "backend loader could not find its DSO",
         }
     ]
 

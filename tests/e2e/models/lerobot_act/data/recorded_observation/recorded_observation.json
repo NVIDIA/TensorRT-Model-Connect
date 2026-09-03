@@ -1,0 +1,23 @@
+{
+  "data_file": "data/chunk-000/file-000.parquet",
+  "data_sha256": "8d02ba269356ed960741c3169e8106383b960583e9cd1e5960a0495580a9d6c2",
+  "dataset_codebase_version": "v3.0",
+  "dataset_id": "lerobot/aloha_sim_transfer_cube_human",
+  "dataset_revision": "6a43d500f101255823a9d2b9dc244eeb01a2cd31",
+  "episode_index": 0,
+  "fps": 50,
+  "frame_index": 0,
+  "global_index": 0,
+  "image_sha256": "a53369bda31c6563548bd834e88f6640eb28e3233807c499a56d012de992799c",
+  "image_shape_hwc": [
+    480,
+    640,
+    3
+  ],
+  "state_sha256": "40cd79b41ce45e9ffc35f6dc70f74a980d8760857326a9482e109b1d763f54c0",
+  "state_shape": [
+    14
+  ],
+  "video_file": "videos/observation.images.top/chunk-000/file-000.mp4",
+  "video_sha256": "e16528b7da7dd433a60cb0e17c59689fc834be43fc0f0b24586377c833fcd0de"
+}

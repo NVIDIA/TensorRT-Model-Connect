@@ -201,6 +201,227 @@ else:
     )
 
 
+def _community_ready_alert_script() -> str:
+    workflow = yaml.safe_load(
+        (
+            REPO_ROOT
+            / ".github"
+            / "workflows"
+            / "community-activity-slack-alert.yml"
+        ).read_text(encoding="utf-8")
+    )
+    return workflow["jobs"]["notify-ready-pr"]["steps"][0]["run"]
+
+
+def _run_community_ready_alert(
+    tmp_path: Path,
+    *,
+    current_head_sha: str,
+    check_conclusions: dict[str, str],
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/usr/bin/env python3
+import os
+import sys
+
+endpoint = next(
+    (argument for argument in sys.argv[1:] if argument.startswith("repos/")),
+    "",
+)
+if "/pulls/" in endpoint:
+    print(os.environ["FAKE_PULL_JSON"])
+elif "/check-runs" in endpoint:
+    print(os.environ["FAKE_CHECKS_JSON"])
+else:
+    print(f"unexpected gh invocation: {sys.argv[1:]}", file=sys.stderr)
+    raise SystemExit(2)
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    fake_jq = fake_bin / "jq"
+    fake_jq.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+
+arguments = sys.argv[1:]
+if "-cn" in arguments:
+    values = {}
+    index = 0
+    while index < len(arguments):
+        if arguments[index] == "--arg":
+            values[arguments[index + 1]] = arguments[index + 2]
+            index += 3
+        else:
+            index += 1
+    safe_title = (
+        values["title"]
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    print(
+        json.dumps(
+            {
+                "text": (
+                    "✅ 🔀 External PR ready for maintainer\\n"
+                    f"Pull request #{values['number']} · required checks passed\\n"
+                    f"{values['author']} ({values['association']})"
+                ),
+                "blocks": [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "✅ 🔀 External PR ready for maintainer",
+                            "emoji": True,
+                        },
+                    },
+                    {
+                        "type": "section",
+                        "fields": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "*Event:*\\nPull request · required checks passed",
+                            },
+                            {
+                                "type": "mrkdwn",
+                                "text": (
+                                    f"*Author:*\\n{values['author']} "
+                                    f"({values['association']})"
+                                ),
+                            },
+                        ],
+                    },
+                    {
+                        "type": "section",
+                        "fields": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "*Checks:*\\nCommunity CPU · DCO · PR Metadata",
+                            },
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*Head:*\\n{values['head']}",
+                            },
+                        ],
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"*Pull request #{values['number']}*\\n"
+                                f"<{values['url']}|{safe_title}>"
+                            ),
+                        },
+                    },
+                ],
+            }
+        )
+    )
+    raise SystemExit
+
+document = json.load(sys.stdin)
+expression = arguments[-1]
+if "--arg" in arguments:
+    name = arguments[arguments.index("--arg") + 2]
+    matching = [run for run in document["check_runs"] if run["name"] == name]
+    latest = max(matching, key=lambda run: run["started_at"], default={})
+    value = latest.get("conclusion", "")
+else:
+    paths = {
+        ".head.sha": ("head", "sha"),
+        ".state": ("state",),
+        ".draft": ("draft",),
+        ".base.ref": ("base", "ref"),
+        ".author_association": ("author_association",),
+        ".user.login": ("user", "login"),
+        ".title": ("title",),
+        ".html_url": ("html_url",),
+    }
+    value = document
+    for component in paths[expression]:
+        value = value[component]
+
+if isinstance(value, bool):
+    print(json.dumps(value))
+else:
+    print(value)
+""",
+        encoding="utf-8",
+    )
+    fake_jq.chmod(0o755)
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        """#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+arguments = sys.argv[1:]
+payload = arguments[arguments.index("--data") + 1]
+Path(os.environ["FAKE_SLACK_PAYLOAD"]).write_text(payload, encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    fake_sleep = fake_bin / "sleep"
+    fake_sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_sleep.chmod(0o755)
+
+    pull = {
+        "number": 1127,
+        "state": "open",
+        "draft": False,
+        "title": "External contribution",
+        "html_url": "https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1127",
+        "author_association": "CONTRIBUTOR",
+        "user": {"login": "external-author"},
+        "base": {"ref": "main"},
+        "head": {"sha": current_head_sha},
+    }
+    checks = {
+        "check_runs": [
+            {
+                "name": name,
+                "started_at": f"2026-09-02T05:00:0{index}Z",
+                "conclusion": conclusion,
+            }
+            for index, (name, conclusion) in enumerate(check_conclusions.items())
+        ]
+    }
+    payload_path = tmp_path / "slack-payload.json"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FAKE_CHECKS_JSON": json.dumps(checks),
+            "FAKE_PULL_JSON": json.dumps(pull),
+            "FAKE_SLACK_PAYLOAD": str(payload_path),
+            "GH_TOKEN": "test-token",
+            "HEAD_SHA": "a" * 40,
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
+            "SLACK_WEBHOOK_URL": "https://hooks.slack.test/community",
+            "WORKFLOW_RUN_NAME": f"PR #1127 · public CPU · merge {'b' * 40}",
+        }
+    )
+    process = subprocess.run(
+        ["bash", "-c", _community_ready_alert_script()],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return process, payload_path
+
+
 def _ci_source(*filenames: str) -> str:
     """Return the review surface for one or more class-based CI modules."""
     return "\n".join(
@@ -255,55 +476,68 @@ def test_community_activity_alert_only_posts_trusted_external_metadata() -> None
     path = REPO_ROOT / ".github" / "workflows" / "community-activity-slack-alert.yml"
     source = path.read_text(encoding="utf-8")
     workflow = yaml.safe_load(source)
-    job = workflow["jobs"]["notify"]
-    steps = job["steps"]
-    post = steps[0]
+    ready_job = workflow["jobs"]["notify-ready-pr"]
+    activity_job = workflow["jobs"]["notify-activity"]
+    activity_post = activity_job["steps"][0]
 
     assert "issues:" in source
     assert "issue_comment:" in source
     assert "discussion:" in source
     assert "discussion_comment:" in source
-    assert "pull_request_target:" in source
-    assert "branches: [main]" in source
-    assert "types: [opened, reopened, synchronize, ready_for_review]" in source
+    assert "workflow_run:" in source
+    assert 'workflows: ["Community CPU"]' in source
+    assert "types: [completed]" in source
+    assert "pull_request_target:" not in source
     assert source.count("types: [created]") == 3
     assert workflow["permissions"] == {}
-    assert job["permissions"] == {}
-    assert job["timeout-minutes"] == 5
-    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in job["if"]
-    assert "github.event.sender.type != 'Bot'" in job["if"]
+    assert ready_job["permissions"] == {
+        "actions": "read",
+        "checks": "read",
+        "pull-requests": "read",
+    }
+    assert activity_job["permissions"] == {}
+    assert ready_job["timeout-minutes"] == 7
+    assert activity_job["timeout-minutes"] == 5
+    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in ready_job["if"]
+    assert "github.event.workflow_run.conclusion == 'success'" in ready_job["if"]
+    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in activity_job["if"]
+    assert "github.event.sender.type != 'Bot'" in activity_job["if"]
     association_fields = {
         "issues": "github.event.issue.author_association",
         "issue_comment": "github.event.comment.author_association",
         "discussion": "github.event.discussion.author_association",
         "discussion_comment": "github.event.comment.author_association",
-        "pull_request_target": "github.event.pull_request.author_association",
     }
     for event_name, association in association_fields.items():
-        assert f"github.event_name == '{event_name}'" in job["if"]
+        assert f"github.event_name == '{event_name}'" in activity_job["if"]
         for trusted in ("OWNER", "MEMBER", "COLLABORATOR"):
-            assert f"{association} != '{trusted}'" in job["if"]
+            assert f"{association} != '{trusted}'" in activity_job["if"]
 
-    assert len(steps) == 1
-    assert all("uses" not in step for step in steps)
+    assert all(
+        "uses" not in step
+        for job in (ready_job, activity_job)
+        for step in job["steps"]
+    )
     assert "actions/checkout" not in source
-    assert "github.event.pull_request.head" not in source
     assert set(re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", source)) == {
         "SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL"
     }
-    assert post["env"]["SLACK_WEBHOOK_URL"] == (
+    assert activity_post["env"]["SLACK_WEBHOOK_URL"] == (
         "${{ secrets.SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL }}"
     )
-    assert post["env"]["EVENT_NAME"] == "${{ github.event_name }}"
-    assert post["env"]["EVENT_ACTION"] == "${{ github.event.action }}"
-    assert post["env"]["ITEM_TITLE"] == (
-        "${{ github.event.pull_request.title || github.event.issue.title || "
-        "github.event.discussion.title }}"
+    assert activity_post["env"]["EVENT_NAME"] == "${{ github.event_name }}"
+    assert activity_post["env"]["EVENT_ACTION"] == "${{ github.event.action }}"
+    assert activity_post["env"]["ITEM_TITLE"] == (
+        "${{ github.event.issue.title || github.event.discussion.title }}"
     )
-    assert post["env"]["ITEM_URL"].startswith("${{ github.event.comment.html_url ||")
-    assert "github.event.issue.pull_request != null" in post["env"]["IS_PULL_REQUEST"]
+    assert activity_post["env"]["ITEM_URL"].startswith(
+        "${{ github.event.comment.html_url ||"
+    )
+    assert "github.event.issue.pull_request != null" in activity_post["env"][
+        "IS_PULL_REQUEST"
+    ]
 
-    script = post["run"]
+    script = activity_post["run"]
     assert "${{" not in script
     assert 'if [ -z "$SLACK_WEBHOOK_URL" ]; then' in script
     for kind in ("Pull request", "Issue", "Discussion"):
@@ -313,28 +547,155 @@ def test_community_activity_alert_only_posts_trusted_external_metadata() -> None
     assert 'gsub(">"; "&gt;")' in script
     assert "($title | slack_escape)" in script
     assert '" + $title +' not in script
-    assert "External community activity" in script
+    for icon, heading in (
+        ("🔀", "External pull request activity"),
+        ("🎫", "External issue activity"),
+        ("💬", "External discussion activity"),
+    ):
+        assert f'item_icon="{icon}"' in script
+        assert f'item_heading="{heading}"' in script
     assert '"*Event:*\\n" + $kind + " · " + $action' in script
     assert "curl --fail-with-body --silent --show-error" in script
     assert '--data "$payload"' in script
     assert '"$SLACK_WEBHOOK_URL"' in script
 
 
+def test_community_pr_alerts_wait_for_required_checks_and_keep_requests() -> None:
+    path = REPO_ROOT / ".github" / "workflows" / "community-activity-slack-alert.yml"
+    source = path.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(source)
+    ready_job = workflow["jobs"]["notify-ready-pr"]
+    activity_job = workflow["jobs"]["notify-activity"]
+    activity_condition = activity_job["if"]
+    ready_post = ready_job["steps"][0]
+    activity_post = activity_job["steps"][0]
+
+    assert "synchronize" not in source
+    assert "github.event.comment.body" not in activity_condition
+    assert activity_post["env"]["COMMENT_BODY"] == (
+        "${{ github.event.comment.body || '' }}"
+    )
+    activity_script = activity_post["run"]
+    for icon, heading in (
+        ("🔀", "External pull request activity"),
+        ("🎫", "External issue activity"),
+        ("💬", "External discussion activity"),
+    ):
+        assert f'item_icon="{icon}"' in activity_script
+        assert f'item_heading="{heading}"' in activity_script
+    for activity_signal in (
+        "@yifeif-nv",
+        "@chaofengw-nv",
+        "/request-internal-ci",
+        "internal ci",
+        "internal-ci",
+        "trigger ci",
+    ):
+        assert activity_signal in activity_script
+
+    assert activity_post["env"]["IS_COMMENT"] == (
+        "${{ github.event_name == 'issue_comment' || "
+        "github.event_name == 'discussion_comment' }}"
+    )
+    assert 'alert_heading="External maintainer request"' in activity_script
+    assert 'alert_emoji="🚨 $item_icon"' in activity_script
+
+    assert ready_post["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert ready_post["env"]["HEAD_SHA"] == (
+        "${{ github.event.workflow_run.head_sha }}"
+    )
+    assert ready_post["env"]["WORKFLOW_RUN_NAME"] == (
+        "${{ github.event.workflow_run.display_title }}"
+    )
+    ready_script = ready_post["run"]
+    assert "repos/$REPOSITORY/pulls/$pr_number" in ready_script
+    assert 'current_head_sha="$(jq -r ".head.sha"' in ready_script
+    assert '[ "$(jq -r ".draft"' in ready_script
+    assert "for attempt in {1..30}; do" in ready_script
+    assert "sleep 10" in ready_script
+    for required_check in (
+        "Community CPU / Required",
+        "PR Metadata / Required",
+        "DCO",
+    ):
+        assert required_check in ready_script
+    assert "sort_by(.started_at) | last" in ready_script
+    assert "✅ 🔀 External PR ready for maintainer" in ready_script
+
+
+def test_community_ready_alert_posts_only_after_all_required_checks(
+    tmp_path: Path,
+) -> None:
+    process, payload_path = _run_community_ready_alert(
+        tmp_path,
+        current_head_sha="a" * 40,
+        check_conclusions={
+            "Community CPU / Required": "success",
+            "PR Metadata / Required": "success",
+            "DCO": "success",
+        },
+    )
+
+    assert process.returncode == 0, process.stderr
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert payload["text"].startswith("✅ 🔀 External PR ready for maintainer")
+    assert payload["blocks"][0]["text"]["text"] == (
+        "✅ 🔀 External PR ready for maintainer"
+    )
+    assert "Community CPU · DCO · PR Metadata" in json.dumps(
+        payload, ensure_ascii=False
+    )
+
+
+def test_community_ready_alert_skips_a_stale_pr_head(tmp_path: Path) -> None:
+    process, payload_path = _run_community_ready_alert(
+        tmp_path,
+        current_head_sha="c" * 40,
+        check_conclusions={
+            "Community CPU / Required": "success",
+            "PR Metadata / Required": "success",
+            "DCO": "success",
+        },
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert "advanced beyond" in process.stdout
+    assert not payload_path.exists()
+
+
+def test_community_ready_alert_skips_when_a_required_check_is_not_green(
+    tmp_path: Path,
+) -> None:
+    process, payload_path = _run_community_ready_alert(
+        tmp_path,
+        current_head_sha="a" * 40,
+        check_conclusions={
+            "Community CPU / Required": "success",
+            "PR Metadata / Required": "success",
+            "DCO": "failure",
+        },
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert "did not satisfy all alert gates" in process.stdout
+    assert not payload_path.exists()
+
+
 def test_community_activity_alert_uses_structured_slack_blocks() -> None:
     path = REPO_ROOT / ".github" / "workflows" / "community-activity-slack-alert.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-    script = workflow["jobs"]["notify"]["steps"][0]["run"]
+    scripts = [job["steps"][0]["run"] for job in workflow["jobs"].values()]
 
-    assert r"\\n" not in script
-    assert 'type: "header"' in script
-    assert 'type: "plain_text"' in script
-    assert 'type: "section"' in script
-    assert 'fields: [' in script
-    for label in ("Event", "Author"):
-        assert f'"*{label}:*\\n"' in script
-    assert '"*Repository:*\\n"' not in script
-    assert '"*Association:*\\n"' not in script
-    assert "$repository" not in script
+    for script in scripts:
+        assert r"\\n" not in script
+        assert 'type: "header"' in script
+        assert 'type: "plain_text"' in script
+        assert 'type: "section"' in script
+        assert 'fields: [' in script
+        for label in ("Event", "Author"):
+            assert f'"*{label}:*\\n' in script
+        assert '"*Repository:*\\n"' not in script
+        assert '"*Association:*\\n"' not in script
 
 
 def test_only_pages_workflow_creates_deployment_objects() -> None:

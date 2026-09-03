@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "qualified_at": "2026-09-01",
+  "target": {
+    "gpu": "NVIDIA GB300",
+    "gpu_count_used": 1,
+    "gpu_memory_total_mib": 283136.0,
+    "driver": "580.105.08",
+    "cuda_toolkit": "13.3.73",
+    "tensorrt": "11.1.0.106",
+    "container": "trtmc-dev-gb300:manylinux_2_39",
+    "precision": "fp32",
+    "tf32_enabled": false
+  },
+  "pins": {
+    "policy_id": "lerobot/act_aloha_sim_transfer_cube_human",
+    "policy_revision": "ba73b2766f1371cdc133ca4efb97eb090d744625",
+    "checkpoint_sha256": "42772891cb6eba1e7bc36ad8e12c0fa0723c61f036fa235c725ce6026e6e81df",
+    "lerobot_revision": "3c0a209f9fac4d2a57617e686a7f2a2309144ba2",
+    "dataset_id": "lerobot/aloha_sim_transfer_cube_human",
+    "dataset_revision": "6a43d500f101255823a9d2b9dc244eeb01a2cd31",
+    "dataset_parquet_sha256": "8d02ba269356ed960741c3169e8106383b960583e9cd1e5960a0495580a9d6c2",
+    "dataset_video_sha256": "e16528b7da7dd433a60cb0e17c59689fc834be43fc0f0b24586377c833fcd0de",
+    "episode_index": 0,
+    "frame_index": 0,
+    "observation_image_sha256": "a53369bda31c6563548bd834e88f6640eb28e3233807c499a56d012de992799c",
+    "observation_state_sha256": "40cd79b41ce45e9ffc35f6dc70f74a980d8760857326a9482e109b1d763f54c0"
+  },
+  "build": {
+    "total_seconds": 77.2,
+    "engine_seconds": 72.4,
+    "engine_size_mib": 151.1,
+    "builder_peak_gpu_allocator_mib": 150.0,
+    "bundle_sha256": "d792e0bab1650d8670504e4e91c4ef0bde6380ab95b9dce3cbefa30ce38f6f3b"
+  },
+  "native_runtime": {
+    "warmup_chunks": 2,
+    "timed_chunks": 10,
+    "startup_ms": 1519.901018,
+    "chunk_inference_p50_ms": 3.970588,
+    "chunk_inference_p95_ms": 3.9999378,
+    "chunk_throughput_per_second": 251.8518668,
+    "action_step_capacity_hz": 25185.1866776,
+    "peak_resident_memory_mib": 1256.6875,
+    "gpu_memory_delta_mib": 199.4375,
+    "chunk_horizon_ms": 2000.0,
+    "control_frequency_hz": 50.0,
+    "control_effective_hz": 50.0008068,
+    "control_p99_abs_jitter_ms": 0.01896706,
+    "control_missed_deadlines": 0,
+    "within_training_bounds": true
+  },
+  "external_reference_parity": {
+    "compared_values": 1400,
+    "action_max_abs_error": 0.0000017881393432617188,
+    "action_mean_abs_error": 0.00000009957530762351651,
+    "action_rmse": 0.0000001861854424894804
+  },
+  "qualification_limits": {
+    "action_max_abs_error": 0.00005,
+    "action_mean_abs_error": 0.000005,
+    "action_rmse": 0.00001,
+    "chunk_inference_p95_ms": 2000.0,
+    "control_effective_hz_min": 49.0,
+    "control_p99_abs_jitter_ms": 5.0,
+    "control_missed_deadlines": 0,
+    "startup_ms": 5000.0,
+    "peak_resident_memory_mib": 2048.0,
+    "gpu_memory_delta_mib": 1024.0,
+    "training_bounds_fraction": 1.0
+  },
+  "robotics_safety_validated": false
+}

@@ -211,6 +211,33 @@ void test_geometry_parses_image_and_output_directory() {
     check(args.output_dir == "geometry-out", "geometry output directory");
 }
 
+void test_act_parses_recorded_control_contract() {
+    auto args = parse({"trtmc", "act", "policy.bundle", "--image", "frame.png", "--state",
+                       "state.f32", "--output", "actions.f32", "--control-hz", "50", "--benchmark",
+                       "10", "--warmup", "2"});
+    check(!args.parse_error, "act contract parses cleanly");
+    check(args.command == "act", "act command");
+    check(args.bundle_path == "policy.bundle", "act bundle");
+    check(args.image_path == "frame.png", "act image");
+    check(args.state_path == "state.f32", "act state");
+    check(args.output_dir == "actions.f32", "act output");
+    check(args.control_frequency_hz == 50.0F, "act control rate");
+    check(args.benchmark == 10 && args.warmup == 2, "act benchmark controls");
+
+    auto missing = parse({"trtmc", "act", "policy.bundle", "--image", "frame.png"});
+    check(missing.parse_error, "act incomplete contract rejected");
+    check_message_contains(missing.error_message, "--state", "act missing contract message");
+
+    auto invalid_rate = parse({"trtmc", "act", "policy.bundle", "--image", "frame.png", "--state",
+                               "state.f32", "--output", "actions.f32", "--control-hz", "nan"});
+    check(invalid_rate.parse_error, "act non-finite control rate rejected");
+
+    auto defaults = parse({"trtmc", "act", "policy.bundle", "--image", "frame.png", "--state",
+                           "state.f32", "--output", "actions.f32", "--control-hz", "50"});
+    check(!defaults.parse_error && defaults.benchmark == 10 && defaults.warmup == 1,
+          "act benchmark defaults are qualification-ready");
+}
+
 void test_inspect_and_config_flags() {
     auto args = parse({"trtmc", "inspect", "bundle.bundle", "--list-engines", "--config",
                        "profile.json", "--set", "audio.seed=7"});
@@ -549,6 +576,7 @@ int main() {
     test_extract_features_parses_contract_flags();
     test_disparity_parses_stereo_images();
     test_geometry_parses_image_and_output_directory();
+    test_act_parses_recorded_control_contract();
     test_inspect_and_config_flags();
     test_audio_and_solve_flags();
     test_canary_transcription_flags_and_batch();

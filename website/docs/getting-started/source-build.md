@@ -6,6 +6,49 @@ description: Build the CLI, TensorRT backend, and Qwen DSO for one selected GPU.
 Use this path on Linux x86_64 or aarch64 for the first Qwen inference from
 source. Start at the repository root.
 
+## Automated environment preparation
+
+The repository-local `scripts/devToolkit` Python API can inspect the host,
+resolve an exact TensorRT/CUDA cohort, build or reuse the development image,
+start an owned persistent container, build TRTMC, verify the installation, and
+write a reproducibility receipt:
+
+```python
+from pathlib import Path
+import sys
+
+repo = Path.cwd()
+sys.path.insert(0, str(repo / "scripts" / "devToolkit"))
+
+from trtmc_devtoolkit import DevToolkit, DockerTarget, PrepareRequest
+
+toolkit = DevToolkit.from_checkout(repo)
+plan = toolkit.plan(
+    PrepareRequest(
+        tensorrt="11.1.0.106",
+        cuda="13.3",
+        target=DockerTarget(gpu="0"),
+        mode="development",
+    )
+)
+
+for step in plan.steps:
+    print(step.id, step.description)
+
+result = toolkit.apply(plan)
+print(result.environment.activate_command)
+print(result.receipt)
+```
+
+`plan()` is read-only. `apply()` leaves the labelled container running for
+later development and stores state under `.devtoolkit/`. It never installs a
+host driver or changes host CUDA/TensorRT libraries. See
+`scripts/devToolkit/README.md` for local, installed-wheel, model-smoke, and
+downstream handoff examples.
+
+The manual commands below remain the direct source-build path and show the
+operations performed by development mode.
+
 ## 1. Select the GPU and start the container
 
 Change only `GPU`. The commands derive the SM used by CMake and select the

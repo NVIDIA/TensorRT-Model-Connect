@@ -26,6 +26,8 @@
 //   trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]
 //   trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]
 //   trtmc geometry        <bundle.bundle> --image PATH --output DIR
+//   trtmc act             <bundle.bundle> --image PATH --state STATE.f32
+//                        --output ACTIONS.f32 --control-hz F
 //   trtmc detect          <bundle.bundle> --image PATH [--output-json PATH]
 //   trtmc inspect         <bundle.bundle> [--list-engines]
 //   trtmc version
@@ -60,6 +62,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -167,6 +170,82 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
 
 std::unique_ptr<trtmc::IPipeline> load_pipeline(const CliArgs& args) {
     return trtmc::load(args.bundle_path, make_load_options(args), args.kernel_bindings_path);
+}
+
+std::vector<float> read_float_file(const std::string& path) {
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream)
+        throw std::runtime_error("failed to open float32 input: " + path);
+    const auto size = stream.tellg();
+    if (size < 0 || size % static_cast<std::streamoff>(sizeof(float)) != 0)
+        throw std::runtime_error("float32 input has an invalid byte length: " + path);
+    std::vector<float> values(static_cast<std::size_t>(size) / sizeof(float));
+    stream.seekg(0);
+    if (!values.empty()) {
+        stream.read(reinterpret_cast<char*>(values.data()),
+                    static_cast<std::streamsize>(values.size() * sizeof(float)));
+    }
+    if (!stream)
+        throw std::runtime_error("failed to read float32 input: " + path);
+    return values;
+}
+
+void write_float_file(const std::string& path, const std::vector<float>& values) {
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream)
+        throw std::runtime_error("failed to create float32 output: " + path);
+    if (!values.empty()) {
+        stream.write(reinterpret_cast<const char*>(values.data()),
+                     static_cast<std::streamsize>(values.size() * sizeof(float)));
+    }
+    stream.close();
+    if (!stream)
+        throw std::runtime_error("failed to write float32 output: " + path);
+}
+
+double percentile(std::vector<double> values, double fraction) {
+    if (values.empty())
+        return 0.0;
+    std::sort(values.begin(), values.end());
+    const double position = fraction * static_cast<double>(values.size() - 1);
+    const auto lower = static_cast<std::size_t>(std::floor(position));
+    const auto upper = static_cast<std::size_t>(std::ceil(position));
+    const double weight = position - static_cast<double>(lower);
+    return values[lower] * (1.0 - weight) + values[upper] * weight;
+}
+
+double peak_resident_memory_mib() {
+    std::ifstream status("/proc/self/status");
+    std::string label;
+    while (status >> label) {
+        if (label == "VmHWM:") {
+            double kib = 0.0;
+            std::string unit;
+            status >> kib >> unit;
+            return unit == "kB" ? kib / 1024.0 : 0.0;
+        }
+        std::string remainder;
+        std::getline(status, remainder);
+    }
+    return 0.0;
+}
+
+struct GpuMemoryInfo {
+    std::size_t free_bytes{0};
+    std::size_t total_bytes{0};
+    bool available{false};
+};
+
+GpuMemoryInfo gpu_memory_info() {
+    using CudaMemGetInfo = int (*)(std::size_t*, std::size_t*);
+    static void* library = dlopen("libcudart.so", RTLD_LAZY | RTLD_LOCAL);
+    static auto function = library == nullptr
+                               ? nullptr
+                               : reinterpret_cast<CudaMemGetInfo>(dlsym(library, "cudaMemGetInfo"));
+    GpuMemoryInfo result;
+    result.available =
+        function != nullptr && function(&result.free_bytes, &result.total_bytes) == 0;
+    return result;
 }
 
 void preload_cli_config_schema_owner(const CliArgs& args) {
@@ -1017,6 +1096,117 @@ int cmd_geometry(const CliArgs& args) {
 #endif
 }
 
+int cmd_act(const CliArgs& args) {
+    if (args.benchmark < 1 || args.warmup < 0) {
+        std::cerr << "Error: act requires --benchmark >= 1 and --warmup >= 0\n";
+        return EXIT_FAILURE;
+    }
+    const auto image = trtmc::io::read_image(args.image_path);
+    if (image.empty()) {
+        std::cerr << "Error: failed to load image: " << args.image_path << '\n';
+        return EXIT_FAILURE;
+    }
+    const auto state = read_float_file(args.state_path);
+    if (state.empty()) {
+        std::cerr << "Error: state input is empty\n";
+        return EXIT_FAILURE;
+    }
+    const auto load_begin = std::chrono::steady_clock::now();
+    const auto memory_before = gpu_memory_info();
+    auto pipeline = load_pipeline(args);
+    const auto load_end = std::chrono::steady_clock::now();
+    const double startup_ms =
+        std::chrono::duration<double, std::milli>(load_end - load_begin).count();
+
+    const trtmc::RobotObservation observation{
+        image.pixels.data(), image.height,
+        image.width,         3,
+        state.data(),        static_cast<int32_t>(state.size())};
+    auto output = pipeline->predict_action_chunk(observation);
+    if (output.num_actions <= 0 || output.action_dim <= 0 ||
+        output.actions.size() != static_cast<std::size_t>(output.num_actions) * output.action_dim) {
+        std::cerr << "Error: robot policy returned an invalid action chunk\n";
+        return EXIT_FAILURE;
+    }
+    write_float_file(args.output_dir, output.actions);
+
+    for (int index = 0; index < args.warmup; ++index)
+        (void)pipeline->predict_action_chunk(observation);
+    std::vector<double> inference_ms;
+    inference_ms.reserve(static_cast<std::size_t>(args.benchmark));
+    for (int index = 0; index < args.benchmark; ++index)
+        inference_ms.push_back(pipeline->predict_action_chunk(observation).inference_ms);
+
+    using Clock = std::chrono::steady_clock;
+    const auto period = std::chrono::duration<double>(1.0 / args.control_frequency_hz);
+    const auto period_clock = std::chrono::duration_cast<Clock::duration>(period);
+    const auto control_start = Clock::now() + std::chrono::milliseconds(10);
+    std::vector<Clock::time_point> emitted;
+    emitted.reserve(static_cast<std::size_t>(output.num_actions));
+    int missed_deadlines = 0;
+    volatile float action_checksum = 0.0F;
+    for (int32_t step = 0; step < output.num_actions; ++step) {
+        const auto target = control_start + step * period_clock;
+        std::this_thread::sleep_until(target);
+        const auto emitted_at = Clock::now();
+        emitted.push_back(emitted_at);
+        if (emitted_at > target + period_clock)
+            ++missed_deadlines;
+        const auto offset = static_cast<std::size_t>(step) * output.action_dim;
+        action_checksum += output.actions[offset];
+    }
+    (void)action_checksum;
+
+    std::vector<double> interval_jitter_ms;
+    interval_jitter_ms.reserve(emitted.size() > 1 ? emitted.size() - 1 : 0);
+    for (std::size_t index = 1; index < emitted.size(); ++index) {
+        const double interval_ms =
+            std::chrono::duration<double, std::milli>(emitted[index] - emitted[index - 1]).count();
+        const double expected_ms = 1000.0 / args.control_frequency_hz;
+        const double jitter_ms = std::abs(interval_ms - expected_ms);
+        interval_jitter_ms.push_back(jitter_ms);
+    }
+    double effective_hz = args.control_frequency_hz;
+    if (emitted.size() > 1) {
+        const double elapsed =
+            std::chrono::duration<double>(emitted.back() - emitted.front()).count();
+        effective_hz = static_cast<double>(emitted.size() - 1) / elapsed;
+    }
+
+    const double p50_ms = percentile(inference_ms, 0.50);
+    const double p95_ms = percentile(inference_ms, 0.95);
+    const auto memory_after = gpu_memory_info();
+    const double gpu_memory_mib =
+        memory_before.available && memory_after.available &&
+                memory_before.free_bytes >= memory_after.free_bytes
+            ? static_cast<double>(memory_before.free_bytes - memory_after.free_bytes) /
+                  (1024.0 * 1024.0)
+            : 0.0;
+    const nlohmann::json summary = {
+        {"action_dim", output.action_dim},
+        {"actions_output", args.output_dir},
+        {"chunk_horizon_ms", 1000.0 * output.num_actions / args.control_frequency_hz},
+        {"chunk_inference_p50_ms", p50_ms},
+        {"chunk_inference_p95_ms", p95_ms},
+        {"chunk_throughput_per_second", p50_ms > 0.0 ? 1000.0 / p50_ms : 0.0},
+        {"action_step_capacity_hz", p50_ms > 0.0 ? 1000.0 * output.num_actions / p50_ms : 0.0},
+        {"control_effective_hz", effective_hz},
+        {"control_frequency_hz", args.control_frequency_hz},
+        {"control_missed_deadlines", missed_deadlines},
+        {"control_p99_abs_jitter_ms", percentile(interval_jitter_ms, 0.99)},
+        {"gpu_memory_delta_mib", gpu_memory_mib},
+        {"gpu_memory_total_mib",
+         memory_after.available ? static_cast<double>(memory_after.total_bytes) / (1024.0 * 1024.0)
+                                : 0.0},
+        {"num_actions", output.num_actions},
+        {"peak_resident_memory_mib", peak_resident_memory_mib()},
+        {"startup_ms", startup_ms},
+        {"within_training_bounds", output.within_training_bounds},
+    };
+    std::cout << summary.dump() << '\n';
+    return EXIT_SUCCESS;
+}
+
 int cmd_classify(const CliArgs& args) {
     if (args.bundle_path.empty() || args.image_path.empty()) {
         std::cerr << "Error: classify requires bundle + --image\n";
@@ -1846,6 +2036,8 @@ int main(int argc, char** argv) {
             return cmd_disparity(args);
         if (args.command == "geometry")
             return cmd_geometry(args);
+        if (args.command == "act")
+            return cmd_act(args);
         if (args.command == "segment-prompted")
             return cmd_segment_prompted(args);
         if (args.command == "classify")

@@ -140,6 +140,13 @@ const HF_TASKS = [
     description: 'Forecasting and neural-operator models that consume numerical sequences.',
     hfUrl: 'https://huggingface.co/models?pipeline_tag=time-series-forecasting',
   },
+  {
+    slug: 'robotics',
+    label: 'Robotics',
+    category: 'Robotics',
+    description: 'Policies that map robot observations and state to control actions.',
+    hfUrl: 'https://huggingface.co/models?pipeline_tag=robotics',
+  },
 ];
 
 const CLI_COMMANDS_BY_TASK_STRATEGY = {
@@ -153,6 +160,7 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   omni_multimodal: ['generate-audio'],
   prompted_segmentation: ['segment-prompted'],
   reranking: ['rerank'],
+  robot_action_chunk: ['act'],
   segmentation: ['segment'],
   speech_to_speech: ['speak'],
   speech_to_text: ['transcribe'],
@@ -333,6 +341,8 @@ function hfTasksForManifest(manifest) {
       return ['mask-generation'];
     case 'neural_operator':
       return ['time-series-forecasting'];
+    case 'robot_action_chunk':
+      return ['robotics'];
     case 'diffusion_media_generation': {
       const tasks = new Set();
       for (const testcase of testcases.length > 0 ? testcases : [{}]) {
@@ -1211,6 +1221,21 @@ function commandContractForProfile(profile, capability) {
         evidence,
       };
     }
+    case 'robot_action_chunk':
+      return {
+        command: 'act',
+        purpose: 'Predict and emit a robot policy action chunk from one observation.',
+        syntax: 'trtmc act <bundle.bundle> --image <frame.png> --state <state.f32> --output <actions.f32> --control-hz <F>',
+        options: [
+          option('--image <PATH>', 'Required', 'RGB observation image.'),
+          option('--state <PATH>', 'Required', 'Raw float32 robot state vector.'),
+          option('--output <PATH>', 'Required', 'Raw float32 action-chunk output.'),
+          option('--control-hz <F>', 'Required', 'Positive action emission frequency.'),
+          option('--benchmark <N>', 'Optional', 'Timed policy chunk iterations; defaults to 10.'),
+          option('--warmup <N>', 'Optional', 'Warmup policy chunk iterations; defaults to 1.'),
+        ],
+        evidence,
+      };
     case 'neural_operator':
       return {
         command: 'solve',

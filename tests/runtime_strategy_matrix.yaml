@@ -58,6 +58,7 @@
     "sam3_prompted_segmentation",
     "dinov3_image_feature_extraction",
     "moge_monocular_geometry",
+    "lerobot_act_action_chunk",
     "timm_vit_image_classification",
     "whisper_speech_to_text",
     "canary_speech_to_text",
@@ -908,6 +909,17 @@
       "comparator_class": "monocular_geometry.MonocularGeometryComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['moge_monocular_geometry']; the model-owned E2E comparator gates explicit-token mask, depth, point-map, and normalized-intrinsics numerical parity against the pinned official MoGe-2 reference.",
+      "performance_mode": "single_pass"
+    },
+    "lerobot_act_action_chunk": {
+      "task_strategy": "robot_action_chunk",
+      "cli_commands": [
+        "act"
+      ],
+      "runner_class": "runner.RobotActionChunkRunner",
+      "comparator_class": "comparator.RobotActionChunkComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "The family-owned E2E comparator gates all 100x14 actions against the exact pinned LeRobot source and separately gates the recorded 50 Hz control loop, chunk horizon, and training bounds.",
       "performance_mode": "single_pass"
     },
     "timm_vit_image_classification": {

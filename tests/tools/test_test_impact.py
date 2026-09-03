@@ -287,6 +287,13 @@ class TorchReference:
             "hf_id": "example/cosmos3-case",
         },
         {
+            "name": "lerobot-act-case",
+            "family": "lerobot_act",
+            "runtime_strategy": "lerobot_act_action_chunk",
+            "task_strategy": "robot_action_chunk",
+            "hf_id": "example/lerobot-act-case",
+        },
+        {
             "name": "media-core",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
@@ -1555,6 +1562,25 @@ class TestNoImpact:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "configs/environment-cohorts/schema.json",
+            "configs/environment-cohorts/trt111-cu133.json",
+            "scripts/devToolkit/README.md",
+            "scripts/devToolkit/examples/prepare_environment.py",
+            "scripts/devToolkit/trtmc_devtoolkit/api.py",
+        ],
+    )
+    def test_devtoolkit_contract_triggers_tools_tier(self, imap, path):
+        """devToolkit contracts run their tools tests without model proofs."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "devtoolkit_contract"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_test_impact_tool_triggers_tools_tier(self, imap):
         """Changing impact analysis should run tools-tier tests."""
         match = test_impact.classify_file("tools/test_impact.py", imap)
@@ -1987,6 +2013,24 @@ class TestUnitTiers:
 
         assert match.rule == "cosmos3_dual_spark_example"
         assert match.models == ["cosmos3-case"]
+        assert match.unit_tiers == ["cpp", "tools"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "examples/models/lerobot_act/recorded_control/CMakeLists.txt",
+            "examples/models/lerobot_act/recorded_control/README.md",
+            "examples/models/lerobot_act/recorded_control/main.cpp",
+            "examples/models/lerobot_act/recorded_control/qualification/gb300-trt11.1-fp32.json",
+        ],
+    )
+    def test_lerobot_act_recorded_control_example_is_model_owned(self, imap, path):
+        """The recorded-control example runs LeRobot ACT plus C++ and tools checks."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "lerobot_act_recorded_control_example"
+        assert match.models == ["lerobot-act-case"]
         assert match.unit_tiers == ["cpp", "tools"]
         assert match.rebuild_cpp is True
 

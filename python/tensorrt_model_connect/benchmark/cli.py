@@ -189,7 +189,11 @@ def _run(arguments: argparse.Namespace) -> int:
         except BenchmarkError:
             pass
     backend_abi = worker_backend_abi(worker) if worker is not None else None
-    builder = BundleBuilder(arguments.bundle_cache, backend_abi=backend_abi)
+    builder = BundleBuilder(
+        arguments.bundle_cache,
+        backend_abi=backend_abi,
+        native_bin_dir=worker.parent if worker is not None else None,
+    )
     cases = _resolve_cases(arguments, spec, catalog, builder)
     cases, bundle_preparation = builder.prepare(
         cases,

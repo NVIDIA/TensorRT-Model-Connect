@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "lerobot_act"
+runtime_library = "libtrtmc_model_lerobot_act.so"
+runtime_plugins = ["plugin.cpp|register_lerobot_act_plugin"]
+runtime_strategies = ["lerobot_act_action_chunk"]
+runtime_tests = [
+  "test_lerobot_act_pipeline|test_lerobot_act_pipeline.cpp|trtmc_model_lerobot_act|_|_",
+]
+task_strategy = "robot_action_chunk"

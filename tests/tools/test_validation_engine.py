@@ -992,6 +992,23 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
     }
     assert geometry["gates"] == {"min_sample_pass_rate": 1.0}
 
+    robotics = validation_engine.suite_by_id(
+        suites, "lerobot_act_recorded_control_fp32_parity"
+    )
+    assert robotics["dataset"] == {
+        "kind": "model_plugin_json",
+        "default_path": "tests/e2e/models/lerobot_act/data/validation.json",
+    }
+    assert robotics["selectors"] == {
+        "model_names": ["act-aloha-sim-transfer-cube"],
+        "task_strategies": ["robot_action_chunk"],
+        "runtime_strategies": ["lerobot_act_action_chunk"],
+        "user_contracts": ["recorded_robot_action_chunk"],
+        "families": ["lerobot_act"],
+    }
+    assert robotics["scoring"] == {"scorer": "model_plugin_parity"}
+    assert robotics["gates"] == {"min_sample_pass_rate": 1.0}
+
     classification = validation_engine.suite_by_id(suites, "imagenette_image_classification")
     assert classification["dataset"]["kind"] == "image_classification_json"
     assert classification["scoring"]["task_metric"] == "top1_accuracy"
