@@ -5,6 +5,7 @@
 
 from .api import DevToolkit
 from .building import BuildArtifact, BuildResult, SourceSnapshot
+from .catalogs import JsonToolchainCatalog, NvidiaPackageIndexCatalog
 from .commands import (
     ArtifactInput,
     CommandArgument,
@@ -49,6 +50,8 @@ __all__ = [
     "ExecutionTarget",
     "IncompatibleCombination",
     "JsonQualificationSource",
+    "JsonToolchainCatalog",
+    "NvidiaPackageIndexCatalog",
     "ProvisionedEnvironment",
     "ProvisionPolicy",
     "QualificationRef",

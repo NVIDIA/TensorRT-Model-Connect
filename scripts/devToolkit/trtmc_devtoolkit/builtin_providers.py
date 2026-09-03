@@ -17,11 +17,11 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 
-from .commands import CommandSpec, EnvironmentPath, PathScope
+from .commands import CommandSpec, EnvironmentPath, PathScope, state_path
 from .models import DevToolkitError, ToolchainObservation, ToolchainRuntime
 from .platforms import normalize_architecture
 from .provisioning import ContextHandle, ProvisionPolicy, ToolchainHandle
@@ -41,17 +41,21 @@ from .toolchain import (
 )
 
 
-def _os_release() -> dict[str, str]:
-    path = Path("/etc/os-release")
-    if not path.is_file():
-        return {}
+def _parse_os_release(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if "=" not in line or line.startswith("#"):
             continue
         key, value = line.split("=", 1)
         values[key] = value.strip().strip('"')
     return values
+
+
+def _os_release() -> dict[str, str]:
+    path = Path("/etc/os-release")
+    if not path.is_file():
+        return {}
+    return _parse_os_release(path.read_text(encoding="utf-8"))
 
 
 class LocalExecutionContext:
@@ -105,7 +109,7 @@ class LocalExecutionContext:
     ) -> ContextHandle:
         base_python = str(context.locator.get("python", "python3"))
         python = base_python
-        if policy is not ProvisionPolicy.ADOPT_ONLY:
+        if policy is not ProvisionPolicy.ADOPT_ONLY and inherit_system_packages:
             venv = state_dir / "venv"
             python_path = venv / "bin" / "python"
             if not python_path.is_file():
@@ -119,7 +123,7 @@ class LocalExecutionContext:
             "PATH": f"{Path(python).parent}:{os.environ.get('PATH', '')}",
             "CUDA_VISIBLE_DEVICES": str(context.locator.get("gpu", "0")),
         }
-        return ContextHandle(
+        handle = ContextHandle(
             provider=self.descriptor,
             identity=context.identity,
             execution_identity={
@@ -128,6 +132,28 @@ class LocalExecutionContext:
             },
             locator={"python": python, "gpu": context.locator.get("gpu", "0")},
             environment=environment,
+            capabilities=context.capabilities,
+        )
+        return replace(
+            handle,
+            _executor=lambda command, check, capture_output: self.execute(
+                handle,
+                command,
+                repository=repository,
+                state_dir=state_dir,
+                runner=runner,
+                check=check,
+                capture_output=capture_output,
+            ),
+            _path_mapper=lambda value: (
+                str(repository / Path(value.path))
+                if isinstance(value, EnvironmentPath) and value.scope is PathScope.REPOSITORY
+                else str(state_dir / Path(value.path))
+                if isinstance(value, EnvironmentPath) and value.scope is PathScope.STATE
+                else str(value.path)
+                if isinstance(value, EnvironmentPath)
+                else str(value)
+            ),
         )
 
     def execute(
@@ -174,7 +200,10 @@ def _first_library(root: Path, name: str, architecture: str) -> Path | None:
 def _toolchain_environment(
     runtime: ToolchainRuntime,
     architecture: str,
+    *,
+    base_environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
+    base = os.environ if base_environment is None else base_environment
     cuda_root = Path(runtime.cuda_root)
     tensorrt_library = Path(runtime.tensorrt_library)
     library_paths = [str(tensorrt_library.parent)]
@@ -185,10 +214,12 @@ def _toolchain_environment(
     cudart = _first_library(cuda_root, "libcudart.so", architecture)
     if cudart is not None and str(cudart.parent) not in library_paths:
         library_paths.append(str(cudart.parent))
+    inherited_libraries = base.get("LD_LIBRARY_PATH", "")
+    if inherited_libraries:
+        library_paths.append(inherited_libraries)
     return {
         "PATH": (
-            f"{Path(runtime.python_executable).parent}:{cuda_root / 'bin'}:"
-            f"{os.environ.get('PATH', '')}"
+            f"{Path(runtime.python_executable).parent}:{cuda_root / 'bin'}:{base.get('PATH', '')}"
         ),
         "CUDA_HOME": runtime.cuda_root,
         "CUDA_PATH": runtime.cuda_root,
@@ -517,7 +548,7 @@ def _container_observation(
 class DockerExecutionContext:
     """Adopt a running user container without imposing a Dockerfile or image version."""
 
-    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-adoption==5", 1)
+    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-adoption==6", 1)
 
     def resolve(
         self,
@@ -562,6 +593,20 @@ class DockerExecutionContext:
                 )
             )
         )
+        release = _parse_os_release(
+            command_output(
+                runner,
+                _docker_command(
+                    docker_context,
+                    "exec",
+                    container_id,
+                    "cat",
+                    "/etc/os-release",
+                ),
+                cwd=repository,
+                timeout=30,
+            )
+        )
         _require_docker_binding(
             runner,
             repository,
@@ -578,6 +623,8 @@ class DockerExecutionContext:
                 "container_id": container_id,
                 "daemon_id": daemon_id,
                 "image_id": image_id,
+                "os_id": release.get("ID", "unknown"),
+                "os_version": release.get("VERSION_ID", "unknown"),
                 "runtime": "docker",
             },
             execution={
@@ -610,7 +657,7 @@ class DockerExecutionContext:
         policy: ProvisionPolicy,
         runner: Runner,
     ) -> ContextHandle:
-        del state_dir, inherit_system_packages
+        del inherit_system_packages
         if policy is ProvisionPolicy.CREATE:
             raise DevToolkitError("The built-in Docker provider is adoption-only")
         _require_docker_binding(
@@ -621,7 +668,7 @@ class DockerExecutionContext:
             container_id=str(context.identity["container_id"]),
             image_id=str(context.identity["image_id"]),
         )
-        return ContextHandle(
+        handle = ContextHandle(
             provider=self.descriptor,
             identity=context.identity,
             execution_identity={
@@ -630,6 +677,28 @@ class DockerExecutionContext:
                 "python": context.locator["python"],
             },
             locator={**dict(context.locator), **dict(context.execution)},
+            capabilities=context.capabilities,
+        )
+        return replace(
+            handle,
+            _executor=lambda command, check, capture_output: self.execute(
+                handle,
+                command,
+                repository=repository,
+                state_dir=state_dir,
+                runner=runner,
+                check=check,
+                capture_output=capture_output,
+            ),
+            _path_mapper=lambda value: (
+                str(PurePosixPath(str(handle.locator["workspace"])) / value.path)
+                if isinstance(value, EnvironmentPath) and value.scope is PathScope.REPOSITORY
+                else str(PurePosixPath(str(handle.locator["target_state"])) / value.path)
+                if isinstance(value, EnvironmentPath) and value.scope is PathScope.STATE
+                else str(value.path)
+                if isinstance(value, EnvironmentPath)
+                else str(value)
+            ),
         )
 
     def execute(
@@ -966,6 +1035,196 @@ class SystemToolchainSource:
         return (cuda_root, nvcc, match.group(1)) if match is not None else None
 
 
+@dataclass(frozen=True)
+class TargetRuntimeBaseline:
+    python: str
+    python_executable: str
+    cuda: str
+    cuda_root: str
+    nvcc: str
+    cuda_source: CudaSource
+
+
+@dataclass(frozen=True)
+class TargetPythonBaseline:
+    python: str
+    python_executable: str
+
+
+_TARGET_PYTHON_SCRIPT = (
+    "import json, sys; "
+    "print(json.dumps({'python': "
+    "f'{sys.version_info.major}.{sys.version_info.minor}', "
+    "'python_executable': sys.executable}))"
+)
+
+
+_CONTAINER_BASELINE_SCRIPT = r"""
+import json
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+nvcc = shutil.which("nvcc")
+if not nvcc:
+    raise RuntimeError("nvcc is not available")
+text = subprocess.check_output([nvcc, "--version"], text=True)
+match = re.search(r"release\s+([0-9]+\.[0-9]+)", text, re.I)
+if match is None:
+    raise RuntimeError("nvcc did not report a CUDA release")
+root = Path(nvcc).resolve().parent.parent
+required = (
+    root / "include" / "cuda.h",
+    next(root.rglob("libcudart.so"), None),
+    next(root.rglob("libcublas.so"), None),
+    next(root.rglob("libcurand.so"), None),
+)
+if not all(path is not None and path.is_file() for path in required):
+    raise RuntimeError("CUDA toolkit is incomplete")
+print(json.dumps({
+    "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+    "python_executable": sys.executable,
+    "cuda": match.group(1),
+    "cuda_root": str(root),
+    "nvcc": str(Path(nvcc).resolve()),
+}))
+""".strip()
+
+
+def target_python_baseline(
+    context: ContextLock,
+    repository: Path,
+    runner: Runner,
+) -> TargetPythonBaseline | None:
+    """Observe target Python without requiring CUDA or TensorRT."""
+
+    python = str(context.locator.get("python", "python3"))
+    try:
+        if "host-filesystem" in context.capabilities:
+            output = command_output(
+                runner,
+                [python, "-c", _TARGET_PYTHON_SCRIPT],
+                cwd=repository,
+                timeout=30,
+            )
+        elif "container-process" in context.capabilities:
+            _require_docker_binding(
+                runner,
+                repository,
+                docker_context=str(context.locator["docker_context"]),
+                daemon_id=str(context.identity["daemon_id"]),
+                container_id=str(context.identity["container_id"]),
+                image_id=str(context.identity["image_id"]),
+            )
+            output = command_output(
+                runner,
+                _docker_command(
+                    str(context.locator["docker_context"]),
+                    "exec",
+                    str(context.identity["container_id"]),
+                    python,
+                    "-c",
+                    _TARGET_PYTHON_SCRIPT,
+                ),
+                cwd=repository,
+                timeout=30,
+            )
+        else:
+            return None
+        payload = json.loads(output)
+        return TargetPythonBaseline(
+            python=str(payload["python"]),
+            python_executable=str(payload["python_executable"]),
+        )
+    except (
+        DevToolkitError,
+        json.JSONDecodeError,
+        KeyError,
+        OSError,
+        subprocess.TimeoutExpired,
+    ):
+        return None
+
+
+def target_runtime_baseline(
+    context: ContextLock,
+    repository: Path,
+    runner: Runner,
+) -> TargetRuntimeBaseline | None:
+    """Observe Python and a complete CUDA toolkit without requiring TensorRT."""
+
+    if "host-filesystem" in context.capabilities:
+        discovered = SystemToolchainSource.discover_cuda(context, repository, runner)
+        if discovered is None:
+            return None
+        cuda_root, nvcc, cuda = discovered
+        python = str(context.locator.get("python", "python3"))
+        try:
+            python_version = command_output(
+                runner,
+                [
+                    python,
+                    "-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                ],
+                cwd=repository,
+                timeout=30,
+            )
+        except (DevToolkitError, OSError, subprocess.TimeoutExpired):
+            return None
+        return TargetRuntimeBaseline(
+            python_version,
+            python,
+            cuda,
+            str(cuda_root),
+            str(nvcc),
+            "system",
+        )
+    if "container-process" not in context.capabilities:
+        return None
+    try:
+        _require_docker_binding(
+            runner,
+            repository,
+            docker_context=str(context.locator["docker_context"]),
+            daemon_id=str(context.identity["daemon_id"]),
+            container_id=str(context.identity["container_id"]),
+            image_id=str(context.identity["image_id"]),
+        )
+        output = command_output(
+            runner,
+            _docker_command(
+                str(context.locator["docker_context"]),
+                "exec",
+                str(context.identity["container_id"]),
+                str(context.locator.get("python", "python3")),
+                "-c",
+                _CONTAINER_BASELINE_SCRIPT,
+            ),
+            cwd=repository,
+            timeout=30,
+        )
+        payload = json.loads(output)
+        return TargetRuntimeBaseline(
+            str(payload["python"]),
+            str(payload["python_executable"]),
+            str(payload["cuda"]),
+            str(payload["cuda_root"]),
+            str(payload["nvcc"]),
+            "image",
+        )
+    except (
+        DevToolkitError,
+        json.JSONDecodeError,
+        KeyError,
+        OSError,
+        subprocess.TimeoutExpired,
+    ):
+        return None
+
+
 class PrefixToolchainSource(SystemToolchainSource):
     """Adopt a complete CUDA/TensorRT toolchain rooted at a user-owned prefix."""
 
@@ -1062,7 +1321,7 @@ class PrefixToolchainSource(SystemToolchainSource):
 class ManagedArtifactToolchainSource:
     """Resolve caller-supplied, digest-pinned managed toolchain artifacts."""
 
-    descriptor = ProviderDescriptor("managed-artifacts", "trtmc-devtoolkit-managed-artifacts==3", 1)
+    descriptor = ProviderDescriptor("managed-artifacts", "trtmc-devtoolkit-managed-artifacts==5", 1)
 
     def resolve(
         self,
@@ -1072,7 +1331,9 @@ class ManagedArtifactToolchainSource:
         repository: Path,
         runner: Runner,
     ) -> tuple[ToolchainCandidate, ...]:
-        if "host-filesystem" not in context.capabilities or not request.artifacts:
+        if not ({"host-filesystem", "container-process"} & context.capabilities):
+            return ()
+        if not request.artifacts:
             return ()
         headers = next(
             (artifact for artifact in request.artifacts if artifact.name == "tensorrt-headers"),
@@ -1089,14 +1350,19 @@ class ManagedArtifactToolchainSource:
             return ()
         policy = request.cuda
         configured_prefix = request.toolchain_options.get("cuda_prefix")
-        if isinstance(configured_prefix, str):
+        if isinstance(configured_prefix, str) and "host-filesystem" in context.capabilities:
             system_cuda = SystemToolchainSource.discover_cuda_at(
                 Path(configured_prefix), context, repository, runner
             )
             existing_cuda_source: CudaSource = "prefix"
         else:
-            system_cuda = SystemToolchainSource.discover_cuda(context, repository, runner)
-            existing_cuda_source = "system"
+            baseline = target_runtime_baseline(context, repository, runner)
+            system_cuda = (
+                (Path(baseline.cuda_root), Path(baseline.nvcc), baseline.cuda)
+                if baseline is not None
+                else None
+            )
+            existing_cuda_source = baseline.cuda_source if baseline is not None else "system"
         cuda_source = "managed"
         system_cuda_root: str | None = None
         system_nvcc: str | None = None
@@ -1126,6 +1392,20 @@ class ManagedArtifactToolchainSource:
         if cuda is None:
             return ()
         cuda_major = cuda.split(".", 1)[0]
+        cuda_artifacts: tuple[str, ...] = ()
+        if cuda_source == "managed":
+            configured_cuda_artifacts = request.toolchain_options.get("cuda_artifacts")
+            artifact_names = {artifact.name for artifact in request.artifacts}
+            if (
+                not isinstance(configured_cuda_artifacts, tuple)
+                or not configured_cuda_artifacts
+                or any(
+                    not isinstance(name, str) or name not in artifact_names
+                    for name in configured_cuda_artifacts
+                )
+            ):
+                return ()
+            cuda_artifacts = configured_cuda_artifacts
         return (
             ToolchainCandidate(
                 provider=self.descriptor,
@@ -1135,11 +1415,13 @@ class ManagedArtifactToolchainSource:
                 cuda=cuda,
                 python=request.python,
                 identity={
-                    "layout_schema": 1,
+                    "layout_schema": 3,
                     "cuda_module": f"nvidia.cu{cuda_major}",
                     "tensorrt_lib_distribution": f"tensorrt_cu{cuda_major}_libs",
                     "system_cuda_root": system_cuda_root,
                     "system_nvcc": system_nvcc,
+                    "cuda_artifacts": cuda_artifacts,
+                    "cuda_release": request.toolchain_options.get("cuda_release"),
                 },
                 artifacts=request.artifacts,
             ),
@@ -1154,21 +1436,32 @@ class ManagedArtifactToolchainSource:
         state_dir: Path,
         runner: Runner,
     ) -> ToolchainHandle:
+        if context.supports_target_operations:
+            return self._provision_target(lock, context, repository=repository, runner=runner)
         python = Path(str(context.locator["python"]))
         downloads = state_dir / "managed-artifacts"
         paths = {
             artifact.name: self._download(artifact, downloads)
             for artifact in lock.toolchain.artifacts
         }
-        wheels = [
+        packages = [
             paths[artifact.name]
             for artifact in lock.toolchain.artifacts
-            if urllib.parse.urlparse(artifact.uri).path.endswith(".whl")
+            if urllib.parse.urlparse(artifact.uri).path.endswith((".whl", ".tar.gz"))
         ]
-        if not wheels:
-            raise DevToolkitError("Managed toolchain lock contains no wheel artifacts")
+        if not packages:
+            raise DevToolkitError("Managed toolchain lock contains no Python packages")
         runner.run(
-            [python, "-m", "pip", "install", "--no-index", "--no-deps", *wheels],
+            [
+                python,
+                "-m",
+                "pip",
+                "install",
+                "--no-index",
+                "--no-deps",
+                "--no-build-isolation",
+                *packages,
+            ],
             cwd=repository,
         )
         runner.run([python, "-m", "pip", "check"], cwd=repository)
@@ -1191,15 +1484,13 @@ class ManagedArtifactToolchainSource:
             raise DevToolkitError(
                 "Managed artifacts must provide exactly one matching NvInferVersion.h"
             )
-        if lock.toolchain.cuda_source in {"system", "prefix"}:
+        if lock.toolchain.cuda_source in {"system", "prefix", "image"}:
             cuda_expression = (
                 f"Path({str(lock.toolchain.identity['system_cuda_root'])!r}).resolve()"
             )
         else:
-            cuda_expression = (
-                "Path(next(iter(importlib.import_module("
-                f"{str(lock.toolchain.identity['cuda_module'])!r}).__path__))).resolve()"
-            )
+            cuda_root = self._materialize_local_cuda(lock, paths, state_dir, runner, repository)
+            cuda_expression = f"Path({str(cuda_root)!r}).resolve()"
         location_script = (
             "import importlib, importlib.metadata as m, json; from pathlib import Path; "
             f"cuda={cuda_expression}; "
@@ -1249,6 +1540,266 @@ class ManagedArtifactToolchainSource:
             environment=environment,
         )
 
+    def _provision_target(
+        self,
+        lock,
+        context: ContextHandle,
+        *,
+        repository: Path,
+        runner: Runner,
+    ) -> ToolchainHandle:
+        del repository, runner
+        root_path = state_path(f"managed-toolchain/{lock.lock_id}")
+        root = context.map_path(root_path)
+        base_python = str(context.execution_identity["python"])
+        venv_python = str(PurePosixPath(root) / "venv" / "bin" / "python")
+        exists = context.execute(
+            CommandSpec(("test", "-x", venv_python)),
+            check=False,
+            capture_output=True,
+        )
+        if exists.returncode != 0:
+            context.execute(
+                CommandSpec((base_python, "-m", "venv", str(PurePosixPath(root) / "venv")))
+            )
+
+        downloads = context.map_path(state_path("artifact-cache"))
+        context.execute(CommandSpec(("mkdir", "-p", downloads)))
+        paths: dict[str, str] = {}
+        for artifact in lock.toolchain.artifacts:
+            filename = Path(urllib.parse.urlsplit(artifact.uri).path).name
+            if not filename:
+                raise DevToolkitError(f"Artifact URI has no filename for {artifact.name}")
+            destination = str(PurePosixPath(downloads) / artifact.sha256 / filename)
+            context.execute(
+                CommandSpec(
+                    (base_python, "-c", _TARGET_DOWNLOAD_SCRIPT, destination),
+                    environment={
+                        "TRTMC_ARTIFACT_URI": artifact.uri,
+                        "TRTMC_ARTIFACT_SHA256": artifact.sha256,
+                    },
+                )
+            )
+            paths[artifact.name] = destination
+
+        cuda_root: str | None = None
+        if lock.toolchain.cuda_source == "managed":
+            cuda_root = str(PurePosixPath(root) / "cuda")
+            marker = str(PurePosixPath(cuda_root) / ".complete")
+            complete = context.execute(
+                CommandSpec(("test", "-f", marker)),
+                check=False,
+                capture_output=True,
+            )
+            if complete.returncode != 0:
+                context.execute(CommandSpec(("mkdir", "-p", cuda_root)))
+                for name in self._cuda_artifact_names(lock):
+                    archive = paths.get(name)
+                    if archive is None:
+                        raise DevToolkitError(f"Managed CUDA artifact {name!r} is missing")
+                    context.execute(
+                        CommandSpec(
+                            (
+                                "tar",
+                                "--extract",
+                                "--xz",
+                                "--file",
+                                archive,
+                                "--directory",
+                                cuda_root,
+                                "--strip-components=1",
+                                "--no-same-owner",
+                            )
+                        )
+                    )
+                context.execute(CommandSpec(("touch", marker)))
+            context.execute(
+                CommandSpec((base_python, "-c", _TARGET_NORMALIZE_CUDA_LAYOUT_SCRIPT, cuda_root))
+            )
+
+        wheels = [
+            paths[artifact.name]
+            for artifact in lock.toolchain.artifacts
+            if urllib.parse.urlsplit(artifact.uri).path.endswith(".whl")
+        ]
+        source_packages = [
+            paths[artifact.name]
+            for artifact in lock.toolchain.artifacts
+            if urllib.parse.urlsplit(artifact.uri).path.endswith(".tar.gz")
+        ]
+        if source_packages:
+            built_wheels = str(PurePosixPath(root) / "built-wheels")
+            context.execute(CommandSpec(("mkdir", "-p", built_wheels)))
+            for source_package in source_packages:
+                context.execute(
+                    CommandSpec(
+                        (
+                            base_python,
+                            "-m",
+                            "pip",
+                            "wheel",
+                            "--no-deps",
+                            "--no-build-isolation",
+                            "--wheel-dir",
+                            built_wheels,
+                            source_package,
+                        )
+                    )
+                )
+            wheel_result = context.execute(
+                CommandSpec((base_python, "-c", _TARGET_WHEELS_SCRIPT, built_wheels)),
+                capture_output=True,
+            )
+            wheels.extend(line for line in wheel_result.stdout.splitlines() if line)
+        if not wheels:
+            raise DevToolkitError("Managed toolchain lock contains no Python packages")
+        context.execute(
+            CommandSpec(
+                (
+                    venv_python,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-index",
+                    "--no-deps",
+                    "--no-build-isolation",
+                    *wheels,
+                )
+            )
+        )
+        context.execute(CommandSpec((venv_python, "-m", "pip", "check")))
+
+        headers_root = str(PurePosixPath(root) / "headers")
+        context.execute(CommandSpec(("mkdir", "-p", headers_root)))
+        headers_archives = [
+            paths[artifact.name]
+            for artifact in lock.toolchain.artifacts
+            if urllib.parse.urlsplit(artifact.uri).path.endswith(".deb")
+        ]
+        if not headers_archives:
+            raise DevToolkitError("Managed toolchain lock contains no TensorRT headers")
+        for archive in headers_archives:
+            context.execute(CommandSpec(("dpkg-deb", "--extract", archive, headers_root)))
+        header_result = context.execute(
+            CommandSpec(
+                (
+                    venv_python,
+                    "-c",
+                    _TARGET_HEADER_SCRIPT,
+                    headers_root,
+                    lock.toolchain.tensorrt,
+                )
+            ),
+            capture_output=True,
+        )
+        include_dir = header_result.stdout.strip()
+        if not include_dir:
+            raise DevToolkitError("Managed artifacts produced no matching TensorRT headers")
+
+        locations_result = context.execute(
+            CommandSpec(
+                (
+                    venv_python,
+                    "-c",
+                    _TARGET_LOCATIONS_SCRIPT,
+                    str(lock.toolchain.identity["tensorrt_lib_distribution"]),
+                    cuda_root or str(lock.toolchain.identity["system_cuda_root"]),
+                )
+            ),
+            capture_output=True,
+        )
+        try:
+            locations = json.loads(locations_result.stdout)
+            cuda_root = str(locations["cuda_root"])
+            tensorrt_library = str(locations["tensorrt_library"])
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise DevToolkitError(f"Could not locate managed toolchain paths: {error}") from error
+        runtime = ToolchainRuntime(
+            python_executable=venv_python,
+            cuda_root=cuda_root,
+            nvcc=str(PurePosixPath(cuda_root) / "bin" / "nvcc"),
+            tensorrt_include_dir=include_dir,
+            tensorrt_library=tensorrt_library,
+        )
+        base_environment_result = context.execute(
+            CommandSpec((base_python, "-c", _TARGET_ENVIRONMENT_SCRIPT)),
+            capture_output=True,
+        )
+        try:
+            raw_environment = json.loads(base_environment_result.stdout)
+            if not isinstance(raw_environment, dict) or any(
+                not isinstance(name, str) or not isinstance(value, str)
+                for name, value in raw_environment.items()
+            ):
+                raise TypeError
+            base_environment = raw_environment
+        except (json.JSONDecodeError, TypeError) as error:
+            raise DevToolkitError(
+                f"Could not observe target process environment: {error}"
+            ) from error
+        environment = _toolchain_environment(
+            runtime,
+            lock.context.architecture,
+            base_environment=base_environment,
+        )
+        return ToolchainHandle(
+            provider=self.descriptor,
+            identity=lock.toolchain.identity,
+            runtime=runtime,
+            environment=environment,
+        )
+
+    @staticmethod
+    def _cuda_artifact_names(lock) -> tuple[str, ...]:
+        raw = lock.toolchain.identity.get("cuda_artifacts", ())
+        if (
+            not isinstance(raw, tuple)
+            or not raw
+            or any(not isinstance(name, str) or not name for name in raw)
+        ):
+            raise DevToolkitError("Managed CUDA requires a non-empty digest-pinned component set")
+        return raw
+
+    @classmethod
+    def _materialize_local_cuda(
+        cls,
+        lock,
+        paths: dict[str, Path],
+        state_dir: Path,
+        runner: Runner,
+        repository: Path,
+    ) -> Path:
+        cuda_root = state_dir / "managed-toolchain" / lock.lock_id / "cuda"
+        marker = cuda_root / ".complete"
+        if not marker.is_file():
+            cuda_root.mkdir(parents=True, exist_ok=True)
+            for name in cls._cuda_artifact_names(lock):
+                archive = paths.get(name)
+                if archive is None:
+                    raise DevToolkitError(f"Managed CUDA artifact {name!r} is missing")
+                runner.run(
+                    [
+                        "tar",
+                        "--extract",
+                        "--xz",
+                        "--file",
+                        archive,
+                        "--directory",
+                        cuda_root,
+                        "--strip-components=1",
+                        "--no-same-owner",
+                    ],
+                    cwd=repository,
+                )
+            marker.touch()
+        lib = cuda_root / "lib"
+        lib64 = cuda_root / "lib64"
+        if lib.is_dir() and not lib64.exists() and not lib64.is_symlink():
+            lib64.symlink_to("lib", target_is_directory=True)
+        if not all((lib64 / name).is_file() for name in ("libcudart_static.a", "libcudadevrt.a")):
+            raise DevToolkitError("Managed CUDA lacks static compiler runtime libraries")
+        return cuda_root
+
     def observe(
         self,
         lock,
@@ -1260,6 +1811,43 @@ class ManagedArtifactToolchainSource:
     ) -> ToolchainObservation:
         del lock
         runtime = toolchain.runtime
+        if "container-process" in context.capabilities:
+            result = context.execute(
+                CommandSpec(
+                    (
+                        runtime.python_executable,
+                        "-c",
+                        _TARGET_TOOLCHAIN_PROBE_SCRIPT,
+                        runtime.nvcc,
+                        runtime.tensorrt_include_dir,
+                        runtime.tensorrt_library,
+                        runtime.cuda_root,
+                    ),
+                    environment=dict(toolchain.environment),
+                ),
+                capture_output=True,
+            )
+            try:
+                payload = json.loads(result.stdout)
+                return ToolchainObservation(
+                    python_version=str(payload["python"]),
+                    cuda_version=str(payload["cuda"]),
+                    tensorrt_python_version=str(payload["tensorrt_python"]),
+                    tensorrt_native_version=str(payload["tensorrt_native"]),
+                    tensorrt_header_version=str(payload["tensorrt_headers"]),
+                    tensorrt_include_dir=str(payload["tensorrt_include_dir"]),
+                    tensorrt_library=str(payload["tensorrt_library"]),
+                    cuda_root=str(payload["cuda_root"]),
+                    image_id=str(context.identity.get("image_id", "")) or None,
+                    architecture=normalize_architecture(str(payload["architecture"])),
+                    evidence={
+                        str(name): str(digest) for name, digest in dict(payload["evidence"]).items()
+                    },
+                )
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                raise DevToolkitError(
+                    f"Managed target toolchain probe returned invalid data: {error}"
+                ) from error
         return observe_local_toolchain(
             runner,
             repository=repository,
@@ -1276,18 +1864,24 @@ class ManagedArtifactToolchainSource:
         filename = Path(urllib.parse.urlparse(artifact.uri).path).name
         if not filename:
             raise DevToolkitError(f"Artifact URI has no filename: {artifact.uri}")
-        destination = root / f"{artifact.sha256}-{filename}"
+        destination = root / artifact.sha256 / filename
         if (
             destination.is_file()
             and ManagedArtifactToolchainSource._sha256(destination) == artifact.sha256
         ):
             return destination
-        root.mkdir(parents=True, exist_ok=True)
-        partial = destination.with_suffix(destination.suffix + f".partial-{os.getpid()}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
+        partial: Path | None = None
         try:
-            with urllib.request.urlopen(artifact.uri, timeout=120) as response:
-                with partial.open("wb") as stream:
+            with NamedTemporaryFile(
+                dir=destination.parent,
+                prefix=f".{filename}.",
+                suffix=".partial",
+                delete=False,
+            ) as stream:
+                partial = Path(stream.name)
+                with urllib.request.urlopen(artifact.uri, timeout=120) as response:
                     while chunk := response.read(1024 * 1024):
                         digest.update(chunk)
                         stream.write(chunk)
@@ -1295,11 +1889,12 @@ class ManagedArtifactToolchainSource:
                 raise DevToolkitError(
                     f"Artifact checksum mismatch for {artifact.name}: {digest.hexdigest()}"
                 )
-            partial.replace(destination)
+            os.replace(partial, destination)
         except (OSError, urllib.error.URLError) as error:
             raise DevToolkitError(f"Could not download {artifact.name}: {error}") from error
         finally:
-            partial.unlink(missing_ok=True)
+            if partial is not None:
+                partial.unlink(missing_ok=True)
         return destination
 
     @staticmethod
@@ -1309,3 +1904,203 @@ class ManagedArtifactToolchainSource:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
         return digest.hexdigest()
+
+
+_TARGET_WHEELS_SCRIPT = r"""
+import sys
+from pathlib import Path
+
+wheels = sorted(Path(sys.argv[1]).glob("*.whl"))
+if not wheels:
+    raise SystemExit("source package produced no wheel")
+print("\n".join(str(wheel.resolve()) for wheel in wheels))
+""".strip()
+
+
+_TARGET_ENVIRONMENT_SCRIPT = r"""
+import json
+import os
+
+print(json.dumps({
+    "PATH": os.environ.get("PATH", ""),
+    "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
+}))
+""".strip()
+
+
+_TARGET_NORMALIZE_CUDA_LAYOUT_SCRIPT = r"""
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+library = root / "lib"
+library64 = root / "lib64"
+if library.is_dir() and not os.path.lexists(library64):
+    library64.symlink_to("lib", target_is_directory=True)
+required = (library64 / "libcudart_static.a", library64 / "libcudadevrt.a")
+if not all(path.is_file() for path in required):
+    raise SystemExit("managed CUDA lacks static compiler runtime libraries")
+""".strip()
+
+
+_TARGET_DOWNLOAD_SCRIPT = r"""
+import hashlib
+import os
+import sys
+import urllib.request
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+
+destination = Path(sys.argv[1])
+expected = os.environ["TRTMC_ARTIFACT_SHA256"]
+destination.parent.mkdir(parents=True, exist_ok=True)
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+if destination.is_file():
+    if sha256(destination) == expected:
+        raise SystemExit(0)
+digest = hashlib.sha256()
+partial = None
+try:
+    with NamedTemporaryFile(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".partial",
+        delete=False,
+    ) as stream:
+        partial = Path(stream.name)
+        with urllib.request.urlopen(os.environ["TRTMC_ARTIFACT_URI"], timeout=120) as response:
+            for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                digest.update(chunk)
+                stream.write(chunk)
+except Exception as error:
+    if partial is not None:
+        partial.unlink(missing_ok=True)
+    raise SystemExit(f"artifact download failed: {type(error).__name__}")
+if digest.hexdigest() != expected:
+    if partial is not None:
+        partial.unlink(missing_ok=True)
+    raise SystemExit("artifact checksum mismatch")
+os.replace(partial, destination)
+""".strip()
+
+
+_TARGET_HEADER_SCRIPT = r"""
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+expected = sys.argv[2]
+matches = []
+for header in root.rglob("NvInferVersion.h"):
+    definitions = dict(re.findall(
+        r"^#define\s+([A-Za-z0-9_]+)\s+([A-Za-z0-9_]+)\b",
+        header.read_text(),
+        re.M,
+    ))
+    parts = []
+    for name in ("MAJOR", "MINOR", "PATCH", "BUILD"):
+        value = definitions.get(f"NV_TENSORRT_{name}", "")
+        parts.append(definitions.get(value, value))
+    if ".".join(parts) == expected:
+        matches.append(header.parent.resolve())
+if len(matches) != 1:
+    raise SystemExit(f"expected one matching TensorRT header tree, found {len(matches)}")
+print(matches[0])
+""".strip()
+
+
+_TARGET_LOCATIONS_SCRIPT = r"""
+import importlib.metadata as metadata
+import json
+import sys
+from pathlib import Path
+
+distribution = metadata.distribution(sys.argv[1])
+libraries = Path(distribution.locate_file("tensorrt_libs")).resolve()
+candidates = sorted(
+    libraries.glob("libnvinfer.so*"),
+    key=lambda path: (path.name != "libnvinfer.so", path.name),
+)
+if not candidates:
+    raise SystemExit("TensorRT library was not installed")
+cuda_root = Path(sys.argv[2]).resolve()
+required = (
+    cuda_root / "bin" / "nvcc",
+    cuda_root / "include" / "cuda.h",
+    next(cuda_root.rglob("libcudart.so"), None),
+    next(cuda_root.rglob("libcublas.so"), None),
+    next(cuda_root.rglob("libcurand.so"), None),
+)
+if not all(path is not None and path.is_file() for path in required):
+    raise SystemExit("CUDA toolkit is incomplete")
+print(json.dumps({
+    "cuda_root": str(cuda_root),
+    "tensorrt_library": str(candidates[0].resolve()),
+}))
+""".strip()
+
+
+_TARGET_TOOLCHAIN_PROBE_SCRIPT = r"""
+import ctypes
+import hashlib
+import json
+import platform
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import tensorrt
+
+nvcc, include_dir, library, cuda_root = map(Path, sys.argv[1:5])
+text = subprocess.check_output([nvcc, "--version"], text=True)
+cuda = re.search(r"release\s+([0-9]+\.[0-9]+)", text, re.I)
+if cuda is None:
+    raise SystemExit("nvcc did not report a CUDA release")
+header = include_dir / "NvInferVersion.h"
+definitions = dict(re.findall(
+    r"^#define\s+([A-Za-z0-9_]+)\s+([A-Za-z0-9_]+)\b",
+    header.read_text(),
+    re.M,
+))
+parts = []
+for name in ("MAJOR", "MINOR", "PATCH", "BUILD"):
+    value = definitions.get(f"NV_TENSORRT_{name}", "")
+    parts.append(definitions.get(value, value))
+native_library = ctypes.CDLL(str(library))
+functions = [
+    getattr(native_library, f"getInferLib{name}Version")
+    for name in ("Major", "Minor", "Patch", "Build")
+]
+for function in functions:
+    function.restype = ctypes.c_int32
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+print(json.dumps({
+    "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+    "cuda": cuda.group(1),
+    "tensorrt_python": tensorrt.__version__,
+    "tensorrt_native": ".".join(str(function()) for function in functions),
+    "tensorrt_headers": ".".join(parts),
+    "tensorrt_include_dir": str(include_dir),
+    "tensorrt_library": str(library),
+    "cuda_root": str(cuda_root),
+    "architecture": platform.machine(),
+    "evidence": {
+        "nvcc": sha256(nvcc),
+        "tensorrt-header": sha256(header),
+        "tensorrt-library": sha256(library),
+    },
+}))
+""".strip()

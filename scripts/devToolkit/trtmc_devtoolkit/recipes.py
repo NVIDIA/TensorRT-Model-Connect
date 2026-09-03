@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -21,11 +22,36 @@ def _define_value(value: str | int | bool) -> str:
     return str(value)
 
 
+_CUDA_BUILD_INPUTS_SCRIPT = r"""
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+include = root / "include"
+if not (include / "cuda_runtime_api.h").is_file():
+    raise SystemExit("CUDA runtime headers are missing")
+def library(name):
+    preferred = (root / "lib64" / name, root / "lib" / name)
+    matches = [path for path in preferred if path.is_file()]
+    if not matches:
+        matches = [path for path in root.rglob(name) if path.is_file()]
+    if not matches:
+        raise SystemExit(f"CUDA library {name} is missing")
+    return str(matches[0].resolve())
+print(json.dumps({
+    "include": str(include),
+    "cudart": library("libcudart.so"),
+    "cublas": library("libcublas.so"),
+}))
+""".strip()
+
+
 @dataclass(frozen=True)
 class TrtmcBuildRecipe:
     """Sample recipe for the repository's native TRTMC targets."""
 
-    descriptor: str = field(default="trtmc-native==1", init=False)
+    descriptor: str = field(default="trtmc-native==2", init=False)
     targets: tuple[str, ...] = ("trtmc", "trtmc_backend_trt")
     cmake_defines: Mapping[str, str | int | bool] = field(default_factory=dict)
     cuda_architectures: tuple[str, ...] | None = None
@@ -33,7 +59,6 @@ class TrtmcBuildRecipe:
     generator: str = "Ninja"
     jobs: int | None = None
     outputs: Mapping[str, str] = field(default_factory=lambda: {"trtmc": "trtmc"})
-    install_python_editable: bool = True
 
     def __post_init__(self) -> None:
         if not self.targets or any(not target for target in self.targets):
@@ -69,6 +94,22 @@ class TrtmcBuildRecipe:
             )
         if not architectures:
             raise DevToolkitError("Could not resolve a CUDA architecture for the TRTMC recipe")
+        try:
+            cuda = json.loads(
+                context.probe(
+                    CommandSpec(
+                        (
+                            context.runtime.python_executable,
+                            "-c",
+                            _CUDA_BUILD_INPUTS_SCRIPT,
+                            context.runtime.cuda_root,
+                        )
+                    )
+                )
+            )
+            cuda_inputs = {name: str(cuda[name]) for name in ("include", "cudart", "cublas")}
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise DevToolkitError(f"Could not resolve locked CUDA build inputs: {error}") from error
         return {
             "targets": self.targets,
             "cmake_defines": dict(self.cmake_defines),
@@ -77,7 +118,7 @@ class TrtmcBuildRecipe:
             "generator": self.generator,
             "jobs": self.jobs,
             "outputs": dict(self.outputs),
-            "install_python_editable": self.install_python_editable,
+            "cuda": cuda_inputs,
         }
 
     def plan(
@@ -88,22 +129,6 @@ class TrtmcBuildRecipe:
     ) -> BuildPlan:
         architectures = tuple(str(value) for value in inputs["cuda_architectures"])
         commands: list[CommandSpec] = []
-        if self.install_python_editable:
-            commands.append(
-                CommandSpec(
-                    (
-                        context.runtime.python_executable,
-                        "-m",
-                        "pip",
-                        "install",
-                        "--no-deps",
-                        "-e",
-                        repository_path("."),
-                        "-C",
-                        "py-only=true",
-                    )
-                )
-            )
         defines: dict[str, str | int | bool] = {
             "TRTMC_BUILD_BACKEND_TRT": True,
             "TRTMC_BUILD_BACKEND_RTX": False,
@@ -113,6 +138,9 @@ class TrtmcBuildRecipe:
             ),
             "TRTMC_TRT_INCLUDE_DIR": context.runtime.tensorrt_include_dir,
             "TRTMC_TRT_LIBRARY": context.runtime.tensorrt_library,
+            "TRTMC_CUDA_INCLUDE_DIR": str(inputs["cuda"]["include"]),
+            "TRTMC_CUDART_LIBRARY": str(inputs["cuda"]["cudart"]),
+            "TRTMC_CUBLAS_LIBRARY": str(inputs["cuda"]["cublas"]),
         }
         configure: list[str | EnvironmentPath] = [
             "cmake",

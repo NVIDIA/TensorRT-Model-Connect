@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .models import DevToolkitError, ToolchainObservation, ToolchainRuntime
 from .providers import FrozenProviderRegistry
@@ -62,6 +62,17 @@ class ContextHandle:
     execution_identity: Mapping[str, object]
     locator: Mapping[str, object] = field(default_factory=dict, compare=False)
     environment: Mapping[str, str] = field(default_factory=dict, compare=False)
+    capabilities: frozenset[str] = frozenset()
+    _executor: Callable[[object, bool, bool], object] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _path_mapper: Callable[[object], str] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "identity", _freeze_mapping(self.identity))
@@ -72,6 +83,33 @@ class ContextHandle:
         )
         object.__setattr__(self, "locator", _freeze_mapping(self.locator))
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
+        object.__setattr__(self, "capabilities", frozenset(self.capabilities))
+
+    def execute(
+        self,
+        command: object,
+        *,
+        check: bool = True,
+        capture_output: bool = False,
+    ) -> object:
+        if self._executor is None:
+            raise DevToolkitError(
+                f"Execution context {self.provider.name} does not expose target commands"
+            )
+        return self._executor(command, check, capture_output)
+
+    def map_path(self, path: object) -> str:
+        if self._path_mapper is None:
+            raise DevToolkitError(
+                f"Execution context {self.provider.name} does not expose target path mapping"
+            )
+        return self._path_mapper(path)
+
+    @property
+    def supports_target_operations(self) -> bool:
+        """Whether a materializer can execute commands and map paths on the target."""
+
+        return self._executor is not None and self._path_mapper is not None
 
 
 @dataclass(frozen=True)

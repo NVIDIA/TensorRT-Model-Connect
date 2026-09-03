@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import subprocess
@@ -32,6 +33,8 @@ from trtmc_devtoolkit import (  # noqa: E402
     ExecutionTarget,
     IncompatibleCombination,
     JsonQualificationSource,
+    JsonToolchainCatalog,
+    NvidiaPackageIndexCatalog,
     ProvisionPolicy,
     ToolchainRuntime,
     TrtmcBuildRecipe,
@@ -50,11 +53,291 @@ from trtmc_devtoolkit.spi import (  # noqa: E402
     ToolchainSource,
 )
 from trtmc_devtoolkit import receipt as receipt_module  # noqa: E402
+from trtmc_devtoolkit import catalogs as catalogs_module  # noqa: E402
+from trtmc_devtoolkit.builtin_providers import (  # noqa: E402
+    ManagedArtifactToolchainSource,
+)
 
 
 def test_extension_protocols_are_isolated_in_spi() -> None:
     assert ExecutionContext.__name__ == "ExecutionContext"
     assert ToolchainSource.__name__ == "ToolchainSource"
+
+
+def test_nvidia_catalog_resolves_a_digest_pinned_development_toolchain() -> None:
+    version = "11.2.0.113"
+    meta = {
+        "urls": [
+            {
+                "filename": f"tensorrt_cu13-{version}.tar.gz",
+                "url": f"https://files.example/tensorrt_cu13-{version}.tar.gz",
+                "digests": {"sha256": "1" * 64},
+            }
+        ]
+    }
+    bindings = {
+        "urls": [
+            {
+                "filename": (
+                    f"tensorrt_cu13_bindings-{version}-cp312-none-manylinux_2_28_x86_64.whl"
+                ),
+                "url": f"https://files.example/bindings-{version}.whl",
+                "digests": {"sha256": "2" * 64},
+            }
+        ]
+    }
+    simple = (
+        f'<a href="tensorrt_cu13_libs-{version}-py3-none-manylinux_2_28_x86_64.whl'
+        f'#sha256={"3" * 64}">runtime</a>'
+    ).encode()
+    packages = gzip.compress(
+        "\n".join(
+            (
+                "Package: libnvinfer-headers-dev",
+                f"Version: {version}-1+cuda13.3",
+                "Architecture: amd64",
+                f"Filename: ./headers-{version}.deb",
+                f"SHA256: {'4' * 64}",
+                "",
+            )
+        ).encode()
+    )
+
+    def fetch(url: str) -> bytes | None:
+        if url.endswith(f"/tensorrt-cu13/{version}/json"):
+            return json.dumps(meta).encode()
+        if url.endswith(f"/tensorrt-cu13-bindings/{version}/json"):
+            return json.dumps(bindings).encode()
+        if url.endswith("/tensorrt-cu13-libs/"):
+            return simple
+        if url.endswith("/ubuntu2404/x86_64/Packages.gz"):
+            return packages
+        raise AssertionError(url)
+
+    catalog = NvidiaPackageIndexCatalog(fetch=fetch)
+    artifacts, headers_version = catalog._distribution(
+        version,
+        "13.0",
+        "3.12",
+        "x86_64",
+        "ubuntu",
+        "24.04",
+    )
+
+    assert [artifact.name for artifact in artifacts] == [
+        "tensorrt-python",
+        "tensorrt-bindings",
+        "tensorrt-libs",
+        "tensorrt-headers",
+    ]
+    assert [artifact.sha256 for artifact in artifacts] == [
+        "1" * 64,
+        "2" * 64,
+        "3" * 64,
+        "4" * 64,
+    ]
+    assert headers_version == f"{version}-1+cuda13.3"
+
+
+def test_nvidia_catalog_resolves_managed_cuda_when_target_has_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version = "11.2.0.113"
+    cuda_components = (
+        "cuda_crt",
+        "cuda_cudart",
+        "cuda_culibos",
+        "cuda_nvcc",
+        "libcublas",
+        "libcurand",
+        "libnvvm",
+        "cccl",
+    )
+    redistrib = {
+        "release_label": "13.3.0",
+        **{
+            component: {
+                "linux-x86_64": {
+                    "relative_path": f"{component}/{component}.tar.xz",
+                    "sha256": str(index) * 64,
+                }
+            }
+            for index, component in enumerate(cuda_components, start=1)
+        },
+    }
+    meta = {
+        "urls": [
+            {
+                "filename": f"tensorrt_cu13-{version}.tar.gz",
+                "url": f"https://files.example/tensorrt_cu13-{version}.tar.gz",
+                "digests": {"sha256": "a" * 64},
+            }
+        ]
+    }
+    bindings = {
+        "urls": [
+            {
+                "filename": (
+                    f"tensorrt_cu13_bindings-{version}-cp312-none-manylinux_2_28_x86_64.whl"
+                ),
+                "url": f"https://files.example/bindings-{version}.whl",
+                "digests": {"sha256": "b" * 64},
+            }
+        ]
+    }
+    simple = (
+        f'<a href="tensorrt_cu13_libs-{version}-py3-none-manylinux_2_28_x86_64.whl'
+        f'#sha256={"c" * 64}">runtime</a>'
+    ).encode()
+    packages = gzip.compress(
+        "\n".join(
+            (
+                "Package: libnvinfer-headers-dev",
+                f"Version: {version}-1+cuda13.3",
+                "Architecture: amd64",
+                f"Filename: ./headers-{version}.deb",
+                f"SHA256: {'d' * 64}",
+                "",
+            )
+        ).encode()
+    )
+
+    def fetch(url: str) -> bytes | None:
+        if url.endswith("/redistrib_13.3.0.json"):
+            return json.dumps(redistrib).encode()
+        if url.endswith(f"/tensorrt-cu13/{version}/json"):
+            return json.dumps(meta).encode()
+        if url.endswith(f"/tensorrt-cu13-bindings/{version}/json"):
+            return json.dumps(bindings).encode()
+        if url.endswith("/tensorrt-cu13-libs/"):
+            return simple
+        if url.endswith("/ubuntu2404/x86_64/Packages.gz"):
+            return packages
+        raise AssertionError(url)
+
+    monkeypatch.setattr(catalogs_module, "target_runtime_baseline", lambda *args: None)
+    monkeypatch.setattr(
+        catalogs_module,
+        "target_python_baseline",
+        lambda *args: type(
+            "PythonBaseline",
+            (),
+            {"python": "3.12", "python_executable": "/usr/bin/python3"},
+        )(),
+    )
+    context = ContextLock(
+        provider=ProviderDescriptor("test", "tests==1", 1),
+        operating_system="linux",
+        architecture="x86_64",
+        identity={"os_id": "ubuntu", "os_version": "24.04"},
+        capabilities=frozenset({"container-process"}),
+    )
+    candidate = NvidiaPackageIndexCatalog(fetch=fetch).resolve(
+        EnvironmentRequest(
+            tensorrt=version,
+            target=ExecutionTarget("test"),
+        ),
+        context,
+        repository=tmp_path,
+        runner=CommandRecordingRunner(),
+    )[0]
+
+    assert candidate.cuda == "13.3"
+    assert candidate.cuda_source == "managed"
+    assert candidate.identity["cuda_release"] == "13.3.0"
+    assert candidate.identity["cuda_artifacts"] == tuple(
+        f"cuda-component-{component}" for component in cuda_components
+    )
+    assert len(candidate.artifacts) == 12
+
+
+def test_nvidia_catalog_ignores_a_malformed_cuda_manifest() -> None:
+    catalog = NvidiaPackageIndexCatalog(fetch=lambda _url: json.dumps([]).encode())
+
+    artifacts, release = catalog._cuda_distribution("13.3", "x86_64")
+
+    assert artifacts == ()
+    assert release == ""
+
+
+def test_json_catalog_supplies_a_private_exact_version_from_target_cuda(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version = "11.2.0.113"
+    manifest = tmp_path / "private-toolchains.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "toolchains": [
+                    {
+                        "id": "gb300-trt-1120113",
+                        "tensorrt": version,
+                        "python": "3.12",
+                        "architecture": "x86_64",
+                        "cuda": {"source": "target", "major": "13"},
+                        "artifacts": [
+                            {
+                                "name": "tensorrt-bindings",
+                                "uri": "artifacts/bindings.whl",
+                                "sha256": "1" * 64,
+                            },
+                            {
+                                "name": "tensorrt-libs",
+                                "uri": "https://artifacts.example/libs.whl",
+                                "sha256": "2" * 64,
+                            },
+                            {
+                                "name": "tensorrt-headers",
+                                "uri": "https://artifacts.example/headers.deb",
+                                "sha256": "3" * 64,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        catalogs_module,
+        "target_runtime_baseline",
+        lambda *args: type(
+            "RuntimeBaseline",
+            (),
+            {
+                "python": "3.12",
+                "python_executable": "/usr/bin/python3",
+                "cuda": "13.0",
+                "cuda_root": "/usr/local/cuda-13.0",
+                "nvcc": "/usr/local/cuda-13.0/bin/nvcc",
+                "cuda_source": "image",
+            },
+        )(),
+    )
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(EmptySystemToolchainSource())
+    registry.register_toolchain(ManagedArtifactToolchainSource())
+    registry.register_catalog(JsonToolchainCatalog((manifest,)))
+    toolkit = DevToolkit.from_checkout(tmp_path, providers=registry.freeze())
+
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt=version,
+            target=ExecutionTarget("test-local"),
+            architecture="x86_64",
+            toolchain_options={"catalog": "json-toolchain-catalog"},
+        )
+    )
+
+    assert lock.tensorrt == version
+    assert lock.cuda == "13.0"
+    assert lock.toolchain.cuda_source == "image"
+    assert lock.toolchain.identity["catalog"]["record_id"] == "gb300-trt-1120113"
+    assert lock.toolchain.artifacts[0].uri == (tmp_path / "artifacts/bindings.whl").as_uri()
 
 
 def test_public_api_exposes_capabilities_without_plan_or_apply(tmp_path: Path) -> None:
@@ -158,7 +441,9 @@ class DockerAdoptionRunner:
                         environment_file.stat().st_mode & 0o777,
                     )
                 )
-            if "uname" in arguments:
+            if arguments[-2:] == ["cat", "/etc/os-release"]:
+                output = 'ID="ubuntu"\nVERSION_ID="24.04"\n'
+            elif "uname" in arguments:
                 output = "aarch64\n"
             else:
                 output = json.dumps(
@@ -188,6 +473,7 @@ class DockerAdoptionRunner:
 
 class ManagedProvisionRunner:
     def __init__(self, root: Path) -> None:
+        self.header_include: Path | None = None
         self.cuda = root / "managed-cuda"
         self.trt = root / "managed-trt"
         for directory in (self.cuda / "bin", self.cuda / "include", self.cuda / "lib"):
@@ -207,8 +493,10 @@ class ManagedProvisionRunner:
         del kwargs
         arguments = [str(item) for item in command]
         output = ""
+        script = arguments[2] if len(arguments) > 2 and arguments[1] == "-c" else ""
         if arguments[:2] == ["dpkg-deb", "--extract"]:
             include = Path(arguments[3]) / "usr" / "include" / "x86_64-linux-gnu"
+            self.header_include = include
             include.mkdir(parents=True)
             (include / "NvInferVersion.h").write_text(
                 "\n".join(
@@ -221,11 +509,23 @@ class ManagedProvisionRunner:
                 ),
                 encoding="utf-8",
             )
-        elif "m.distribution" in arguments[-1]:
+        elif "expected one matching TensorRT header tree" in script:
+            assert self.header_include is not None
+            output = str(self.header_include) + "\n"
+        elif "metadata.distribution" in script or "m.distribution" in arguments[-1]:
+            if not (self.cuda / "lib" / "libcurand.so").is_file():
+                raise DevToolkitError("Managed artifacts produced an incomplete CUDA toolkit")
             output = json.dumps(
                 {
                     "cuda_root": str(self.cuda),
-                    "trt_library": str(self.trt / "libnvinfer.so"),
+                    "tensorrt_library": str(self.trt / "libnvinfer.so"),
+                }
+            )
+        elif "os.environ.get" in script and '"LD_LIBRARY_PATH"' in script:
+            output = json.dumps(
+                {
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin",
+                    "LD_LIBRARY_PATH": "",
                 }
             )
         elif arguments[-1] == "--version":
@@ -249,14 +549,22 @@ class CommandRecordingRunner:
         arguments = [str(item) for item in command]
         self.commands.append(arguments)
         output = "trtmc 0.1\n"
-        if arguments[:3] == ["git", "rev-parse", "HEAD"]:
+        if arguments[-2:] == ["rev-parse", "HEAD"]:
             output = "b" * 40 + "\n"
-        elif arguments[:3] == ["git", "diff", "--binary"]:
+        elif arguments[-3:-1] == ["diff", "--binary"]:
             output = ""
-        elif arguments[:3] == ["git", "ls-files", "--others"]:
+        elif arguments[-3:-1] == ["ls-files", "--others"]:
             output = ""
         elif arguments[0] == "sha256sum":
             output = f"{self.artifact_digest}  {arguments[1]}\n"
+        elif "CUDA runtime headers are missing" in arguments[-2]:
+            output = json.dumps(
+                {
+                    "include": "/cuda/include",
+                    "cudart": "/cuda/lib64/libcudart.so",
+                    "cublas": "/cuda/lib64/libcublas.so",
+                }
+            )
         return subprocess.CompletedProcess(arguments, 0, output, "")
 
 
@@ -471,6 +779,10 @@ class ReplacementToolchainSource(ExistingToolchainSource):
     descriptor = ProviderDescriptor("test-system", "tests==2", 1)
 
 
+class AlternateExistingToolchainSource(ExistingToolchainSource):
+    descriptor = ProviderDescriptor("alternate-system", "tests==1", 1)
+
+
 class FailingReattestationSource(ExistingToolchainSource):
     def __init__(self) -> None:
         super().__init__()
@@ -511,6 +823,192 @@ class EmptySystemToolchainSource:
     def resolve(self, request, context, *, repository, runner):
         del request, context, repository, runner
         return ()
+
+
+class RecordingToolchainCatalog:
+    descriptor = ProviderDescriptor("test-catalog", "tests==1", 1)
+
+    def __init__(self, materializer: ProviderDescriptor) -> None:
+        self.materializer = materializer
+        self.requests: list[str] = []
+
+    def resolve(self, request, context, *, repository, runner):
+        del context, repository, runner
+        self.requests.append(request.tensorrt)
+        return (
+            ToolchainCandidate(
+                provider=self.materializer,
+                origin="managed",
+                cuda_source="managed",
+                tensorrt=request.tensorrt,
+                cuda="13.3",
+                python=request.python,
+                identity={"catalog": self.descriptor.name},
+                artifacts=(
+                    ArtifactPin(
+                        "toolchain",
+                        "https://example.invalid/toolchain.tar.xz",
+                        "f" * 64,
+                    ),
+                ),
+            ),
+        )
+
+
+class ManagedContainerCatalog:
+    descriptor = ProviderDescriptor("container-catalog", "tests==1", 1)
+
+    def __init__(self, materializer: ProviderDescriptor) -> None:
+        self.materializer = materializer
+
+    def resolve(self, request, context, *, repository, runner):
+        del context, repository, runner
+        suffixes = ("module.tar.gz", "bindings.whl", "libs.whl", "headers.deb")
+        names = (
+            "tensorrt-python",
+            "tensorrt-bindings",
+            "tensorrt-libs",
+            "tensorrt-headers",
+        )
+        return (
+            ToolchainCandidate(
+                provider=self.materializer,
+                origin="managed",
+                cuda_source="image",
+                tensorrt=request.tensorrt,
+                cuda="13.0",
+                python=request.python,
+                identity={
+                    "layout_schema": 2,
+                    "tensorrt_lib_distribution": "tensorrt_cu13_libs",
+                    "system_cuda_root": "/usr/local/cuda",
+                    "system_nvcc": "/usr/local/cuda/bin/nvcc",
+                },
+                artifacts=tuple(
+                    ArtifactPin(name, f"https://example.invalid/{suffix}", str(index) * 64)
+                    for index, (name, suffix) in enumerate(zip(names, suffixes), start=1)
+                ),
+            ),
+        )
+
+
+class ManagedCudaContainerCatalog(ManagedContainerCatalog):
+    descriptor = ProviderDescriptor("managed-cuda-container-catalog", "tests==1", 1)
+
+    def resolve(self, request, context, *, repository, runner):
+        candidate = super().resolve(
+            request,
+            context,
+            repository=repository,
+            runner=runner,
+        )[0]
+        cuda_artifact = ArtifactPin(
+            "cuda-component-cuda-nvcc",
+            "https://example.invalid/cuda-nvcc.tar.xz",
+            "5" * 64,
+        )
+        return (
+            replace(
+                candidate,
+                cuda="13.3",
+                cuda_source="managed",
+                identity={
+                    **dict(candidate.identity),
+                    "system_cuda_root": None,
+                    "system_nvcc": None,
+                    "cuda_artifacts": (cuda_artifact.name,),
+                    "cuda_release": "13.3.0",
+                },
+                artifacts=(*candidate.artifacts, cuda_artifact),
+            ),
+        )
+
+
+class ManagedContainerContext:
+    descriptor = ProviderDescriptor("test-container", "tests==1", 1)
+
+    def __init__(self) -> None:
+        self.commands: list[list[str]] = []
+        self.cuda_version = "13.0"
+
+    def resolve(self, request, *, repository, runner):
+        del request, repository, runner
+        return ContextLock(
+            provider=self.descriptor,
+            operating_system="linux",
+            architecture="x86_64",
+            identity={"image_id": "sha256:test-image"},
+            execution={"python": "/usr/bin/python3", "target_state": "/target/state"},
+            locator={"python": "/usr/bin/python3", "target_state": "/target/state"},
+            capabilities=frozenset({"container-process", "posix-process"}),
+            qualification={"execution": "container"},
+        )
+
+    def provision(self, context, **kwargs):
+        del kwargs
+
+        def execute(command, check, capture_output):
+            del check, capture_output
+            arguments = [str(item) for item in command.arguments]
+            self.commands.append(arguments)
+            returncode = 1 if arguments[0] == "test" else 0
+            output = ""
+            script = arguments[2] if len(arguments) > 2 and arguments[1] == "-c" else ""
+            if "os.environ.get" in script and '"LD_LIBRARY_PATH"' in script:
+                output = json.dumps(
+                    {
+                        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin",
+                        "LD_LIBRARY_PATH": "/image/lib",
+                    }
+                )
+            elif "expected one matching TensorRT header tree" in script:
+                output = (
+                    "/target/state/managed-toolchain/lock/headers/usr/include/x86_64-linux-gnu\n"
+                )
+            elif "metadata.distribution" in script:
+                output = json.dumps(
+                    {
+                        "cuda_root": arguments[-1],
+                        "tensorrt_library": "/target/state/venv/tensorrt_libs/libnvinfer.so",
+                    }
+                )
+            elif '"tensorrt_python"' in script:
+                output = json.dumps(
+                    {
+                        "python": "3.12",
+                        "cuda": self.cuda_version,
+                        "tensorrt_python": "11.2.0.113",
+                        "tensorrt_native": "11.2.0.113",
+                        "tensorrt_headers": "11.2.0.113",
+                        "tensorrt_include_dir": (
+                            "/target/state/managed-toolchain/lock/headers/usr/include/"
+                            "x86_64-linux-gnu"
+                        ),
+                        "tensorrt_library": ("/target/state/venv/tensorrt_libs/libnvinfer.so"),
+                        "cuda_root": arguments[-1],
+                        "architecture": "x86_64",
+                        "evidence": {
+                            "nvcc": "a" * 64,
+                            "tensorrt-header": "b" * 64,
+                            "tensorrt-library": "c" * 64,
+                        },
+                    }
+                )
+            return subprocess.CompletedProcess(arguments, returncode, output, "")
+
+        return ContextHandle(
+            provider=self.descriptor,
+            identity=context.identity,
+            execution_identity={"python": "/usr/bin/python3"},
+            locator=context.locator,
+            capabilities=context.capabilities,
+            _executor=execute,
+            _path_mapper=lambda path: f"/target/state/{path.path}",
+        )
+
+    def execute(self, context, command, **kwargs):
+        del kwargs
+        return context.execute(command)
 
 
 class ManagedCudaToolchainSource:
@@ -569,6 +1067,14 @@ class ManagedCudaToolchainSource:
         )
 
 
+class CatalogMaterializer(ManagedCudaToolchainSource):
+    descriptor = ProviderDescriptor("test-catalog-materializer", "tests==1", 1)
+
+    def resolve(self, request, context, *, repository, runner):
+        del request, context, repository, runner
+        return ()
+
+
 def test_arbitrary_tensorrt_reaches_provider_without_a_cohort(tmp_path: Path) -> None:
     source = ExistingToolchainSource()
     registry = ProviderRegistry()
@@ -596,6 +1102,135 @@ def test_arbitrary_tensorrt_reaches_provider_without_a_cohort(tmp_path: Path) ->
     assert lock.cuda_origin == "system"
     assert len(lock.lock_id) == 64
     assert not state_root.exists()
+
+
+def test_missing_version_falls_through_to_a_toolchain_catalog(tmp_path: Path) -> None:
+    materializer = CatalogMaterializer()
+    catalog = RecordingToolchainCatalog(materializer.descriptor)
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(EmptySystemToolchainSource())
+    registry.register_toolchain(materializer)
+    registry.register_catalog(catalog)
+    toolkit = DevToolkit.from_checkout(tmp_path, providers=registry.freeze())
+
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+        )
+    )
+
+    assert catalog.requests == ["11.2.0.113"]
+    assert lock.toolchain.provider == materializer.descriptor
+    assert lock.toolchain.origin == "managed"
+    assert lock.toolchain.artifacts[0].sha256 == "f" * 64
+
+
+def test_exact_installed_toolchain_does_not_query_catalog(tmp_path: Path) -> None:
+    installed = ExistingToolchainSource()
+    catalog = RecordingToolchainCatalog(installed.descriptor)
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(installed)
+    registry.register_catalog(catalog)
+    toolkit = DevToolkit.from_checkout(tmp_path, providers=registry.freeze())
+
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+        )
+    )
+
+    assert lock.toolchain.origin == "system"
+    assert catalog.requests == []
+
+
+def test_ambiguous_installed_toolchains_do_not_query_a_catalog(tmp_path: Path) -> None:
+    installed = ExistingToolchainSource()
+    alternate = AlternateExistingToolchainSource()
+    catalog = RecordingToolchainCatalog(installed.descriptor)
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(installed)
+    registry.register_toolchain(alternate)
+    registry.register_catalog(catalog)
+    toolkit = DevToolkit.from_checkout(tmp_path, providers=registry.freeze())
+
+    with pytest.raises(IncompatibleCombination, match="ambiguous exact candidates"):
+        toolkit.resolve(
+            EnvironmentRequest(
+                tensorrt="11.2.0.113",
+                target=ExecutionTarget("test-local"),
+            )
+        )
+
+    assert catalog.requests == []
+
+
+def test_managed_catalog_installs_into_an_isolated_container_prefix(tmp_path: Path) -> None:
+    context = ManagedContainerContext()
+    materializer = ManagedArtifactToolchainSource()
+    registry = ProviderRegistry()
+    registry.register_context(context)
+    registry.register_toolchain(materializer)
+    registry.register_catalog(ManagedContainerCatalog(materializer.descriptor))
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+    )
+
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-container"),
+        )
+    )
+    environment = toolkit.provision(lock)
+
+    assert environment.observation.tensorrt_native_version == "11.2.0.113"
+    pip_install = next(
+        command for command in context.commands if command[1:4] == ["-m", "pip", "install"]
+    )
+    assert pip_install[0].startswith(f"/target/state/managed-toolchain/{lock.lock_id}/venv/")
+    assert pip_install[0] != "/usr/bin/python3"
+    assert "--no-index" in pip_install
+    assert environment.context.environment["PATH"].endswith(
+        ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+    )
+    assert environment.context.environment["LD_LIBRARY_PATH"].endswith(":/image/lib")
+
+
+def test_managed_cuda_components_are_extracted_into_the_target_prefix(
+    tmp_path: Path,
+) -> None:
+    context = ManagedContainerContext()
+    context.cuda_version = "13.3"
+    materializer = ManagedArtifactToolchainSource()
+    registry = ProviderRegistry()
+    registry.register_context(context)
+    registry.register_toolchain(materializer)
+    registry.register_catalog(ManagedCudaContainerCatalog(materializer.descriptor))
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+    )
+
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-container"),
+        )
+    )
+    environment = toolkit.provision(lock)
+
+    extraction = next(command for command in context.commands if command[0] == "tar")
+    assert "--strip-components=1" in extraction
+    assert environment.toolchain.runtime.cuda_root.endswith(f"/{lock.lock_id}/cuda")
+    assert environment.observation.cuda_version == "13.3"
 
 
 def test_system_first_falls_back_to_managed_cuda_13_3(tmp_path: Path) -> None:
@@ -1275,14 +1910,20 @@ def test_native_build_identity_includes_source_sm_options_and_outputs(
     configure = next(command for command in runner.commands if command[:2] == ["cmake", "-S"])
     assert "-DCMAKE_CUDA_ARCHITECTURES=100-real" in configure
     assert "-DTRTMC_BUILD_TESTS=OFF" in configure
-    editable = next(
-        command for command in runner.commands if command[1:4] == ["-m", "pip", "install"]
-    )
-    assert "--no-deps" in editable
+    assert "-DTRTMC_CUDA_INCLUDE_DIR=/cuda/include" in configure
+    assert "-DTRTMC_CUDART_LIBRARY=/cuda/lib64/libcudart.so" in configure
+    assert "-DTRTMC_CUBLAS_LIBRARY=/cuda/lib64/libcublas.so" in configure
+    assert not any(command[1:4] == ["-m", "pip", "install"] for command in runner.commands)
     receipt = json.loads(build.receipt.read_text(encoding="utf-8"))
     assert receipt["environment_id"] == environment.environment_id
     assert receipt["source"]["revision"] == "b" * 40
     assert receipt["artifacts"][0]["sha256"] == "c" * 64
+    source_git = next(command for command in runner.commands if "rev-parse" in command)
+    assert source_git[:3] == [
+        "git",
+        "-c",
+        f"safe.directory={tmp_path.resolve()}",
+    ]
 
     command = toolkit.run_trtmc(environment, ("version",), build=build)
     command_receipt = json.loads(command.receipt.read_text(encoding="utf-8"))
@@ -1519,6 +2160,11 @@ def test_builtin_managed_source_accepts_arbitrary_trt_with_pinned_artifacts(
             uri="https://example.invalid/tensorrt-11.2.0.113.whl?token=super-secret",
             sha256="e" * 64,
         ),
+        ArtifactPin(
+            name="cuda-component-nvcc",
+            uri="https://example.invalid/cuda-nvcc.tar.xz",
+            sha256="f" * 64,
+        ),
     )
     toolkit = DevToolkit.from_checkout(tmp_path, runner=BuiltinProbeRunner())
 
@@ -1527,6 +2173,7 @@ def test_builtin_managed_source_accepts_arbitrary_trt_with_pinned_artifacts(
             tensorrt="11.2.0.113",
             target=ExecutionTarget.local(),
             artifacts=artifacts,
+            toolchain_options={"cuda_artifacts": ["cuda-component-nvcc"]},
         )
     )
 
@@ -1544,8 +2191,10 @@ def test_builtin_managed_source_materializes_and_attests_pinned_artifacts(
     monkeypatch.setenv("CUDA_HOME", str(tmp_path / "missing-cuda"))
     headers = tmp_path / "libnvinfer-headers.deb"
     wheel = tmp_path / "tensorrt-11.2.0.113-py3-none-any.whl"
+    cuda = tmp_path / "cuda-nvcc.tar.xz"
     headers.write_bytes(b"pinned headers")
     wheel.write_bytes(b"pinned wheel")
+    cuda.write_bytes(b"pinned CUDA")
 
     def pin(name: str, path: Path) -> ArtifactPin:
         return ArtifactPin(
@@ -1563,7 +2212,12 @@ def test_builtin_managed_source_materializes_and_attests_pinned_artifacts(
         EnvironmentRequest(
             tensorrt="11.2.0.113",
             target=ExecutionTarget.local(),
-            artifacts=(pin("tensorrt-headers", headers), pin("tensorrt-wheel", wheel)),
+            artifacts=(
+                pin("tensorrt-headers", headers),
+                pin("tensorrt-wheel", wheel),
+                pin("cuda-component-nvcc", cuda),
+            ),
+            toolchain_options={"cuda_artifacts": ["cuda-component-nvcc"]},
         )
     )
 
@@ -1583,15 +2237,21 @@ def test_builtin_managed_source_rejects_an_incomplete_cuda_toolkit(
     monkeypatch.setenv("CUDA_HOME", str(tmp_path / "missing-cuda"))
     headers = tmp_path / "headers.deb"
     wheel = tmp_path / "tensorrt.whl"
+    cuda = tmp_path / "cuda-nvcc.tar.xz"
     headers.write_bytes(b"headers")
     wheel.write_bytes(b"wheel")
+    cuda.write_bytes(b"CUDA")
     artifacts = tuple(
         ArtifactPin(
             name,
             path.as_uri(),
             hashlib.sha256(path.read_bytes()).hexdigest(),
         )
-        for name, path in (("tensorrt-headers", headers), ("tensorrt-wheel", wheel))
+        for name, path in (
+            ("tensorrt-headers", headers),
+            ("tensorrt-wheel", wheel),
+            ("cuda-component-nvcc", cuda),
+        )
     )
     runner = ManagedProvisionRunner(tmp_path)
     (runner.cuda / "lib" / "libcurand.so").unlink()
@@ -1605,6 +2265,7 @@ def test_builtin_managed_source_rejects_an_incomplete_cuda_toolkit(
             tensorrt="11.2.0.113",
             target=ExecutionTarget.local(),
             artifacts=artifacts,
+            toolchain_options={"cuda_artifacts": ["cuda-component-nvcc"]},
         )
     )
 

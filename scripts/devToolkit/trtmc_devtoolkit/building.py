@@ -16,7 +16,7 @@ from types import MappingProxyType
 from typing import Protocol
 from uuid import uuid4
 
-from .commands import CommandSpec, EnvironmentPath, state_path
+from .commands import CommandSpec, EnvironmentPath, repository_path, state_path
 from .models import DevToolkitError, ToolchainRuntime
 from .providers import FrozenProviderRegistry
 from .provisioning import ProvisionedEnvironment, attest_environment
@@ -136,26 +136,38 @@ class Builder:
         )
 
     def _source_snapshot(self, environment: ProvisionedEnvironment) -> SourceSnapshot:
+        if environment.context.supports_target_operations:
+            safe_directory = environment.context.map_path(repository_path())
+        else:
+            # Third-party contexts written against the original SPI may not expose
+            # target path mapping yet. Their commands historically ran locally.
+            safe_directory = str(self.repository.resolve())
+
+        def git(*arguments: str) -> CommandSpec:
+            # Bind the exception to this invocation only. Do not mutate either the
+            # user's or the target environment's global Git configuration.
+            return CommandSpec(("git", "-c", f"safe.directory={safe_directory}", *arguments))
+
         revision = self._execute(
             environment,
-            CommandSpec(("git", "rev-parse", "HEAD")),
+            git("rev-parse", "HEAD"),
             capture_output=True,
         ).stdout.strip()
         diff = self._execute(
             environment,
-            CommandSpec(("git", "diff", "--binary", "HEAD")),
+            git("diff", "--binary", "HEAD"),
             capture_output=True,
         ).stdout
         untracked_output = self._execute(
             environment,
-            CommandSpec(("git", "ls-files", "--others", "--exclude-standard")),
+            git("ls-files", "--others", "--exclude-standard"),
             capture_output=True,
         ).stdout
         untracked: list[tuple[str, str]] = []
         for path in sorted(line for line in untracked_output.splitlines() if line):
             file_hash = self._execute(
                 environment,
-                CommandSpec(("git", "hash-object", "--", path)),
+                git("hash-object", "--", path),
                 capture_output=True,
             ).stdout.strip()
             untracked.append((path, file_hash))

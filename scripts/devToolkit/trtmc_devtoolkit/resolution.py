@@ -316,6 +316,10 @@ class IncompatibleCombination(ResolutionError):
     """Providers found candidates, but none formed one unambiguous exact match."""
 
 
+class _AmbiguousCombination(IncompatibleCombination):
+    """Multiple installed/resolved candidates matched; catalogs cannot disambiguate them."""
+
+
 class EnvironmentResolver:
     def __init__(
         self,
@@ -354,7 +358,28 @@ class EnvironmentResolver:
             )
             candidates.extend(resolved)
             attempts.append(f"{source.descriptor.name}: {len(resolved)} candidate(s)")
-        selected, decision = self._select(request, tuple(candidates), tuple(attempts))
+        try:
+            selected, decision = self._select(request, tuple(candidates), tuple(attempts))
+        except _AmbiguousCombination:
+            raise
+        except ResolutionError:
+            for catalog in self.providers.catalogs:
+                resolved = catalog.resolve(
+                    request,
+                    context,
+                    repository=self.repository,
+                    runner=self.runner,
+                )
+                for candidate in resolved:
+                    materializer = self.providers.toolchain(candidate.provider.name)
+                    if materializer.descriptor != candidate.provider:
+                        raise DevToolkitError(
+                            f"Catalog {catalog.descriptor.name} selected an incompatible "
+                            f"materializer {candidate.provider.name}"
+                        )
+                candidates.extend(resolved)
+                attempts.append(f"catalog:{catalog.descriptor.name}: {len(resolved)} candidate(s)")
+            selected, decision = self._select(request, tuple(candidates), tuple(attempts))
         qualifications = self._qualifications(request, context, selected)
         lock_id = self._lock_id(request, context, selected)
         return EnvironmentLock(
@@ -428,9 +453,9 @@ class EnvironmentResolver:
             ]
             if not managed and not found_any:
                 raise ArtifactUnavailable(
-                    "No complete target CUDA/toolchain was found, and the managed "
-                    f"CUDA {policy.fallback} fallback has no digest-pinned artifacts. "
-                    "Supply EnvironmentRequest.artifacts or register a ToolchainSource.",
+                    "No complete target CUDA/toolchain was found, and no toolchain catalog "
+                    f"could resolve digest-pinned managed CUDA {policy.fallback} artifacts. "
+                    "Register a private ToolchainCatalog or supply a complete pinned closure.",
                     attempts=attempts,
                 )
             return EnvironmentResolver._one(managed, attempts, found_any), "managed-default"
@@ -469,7 +494,13 @@ class EnvironmentResolver:
     ) -> ToolchainCandidate:
         if len(candidates) != 1:
             reason = "no exact candidate" if not candidates else "ambiguous exact candidates"
-            error_type = IncompatibleCombination if found_any else ArtifactUnavailable
+            error_type = (
+                _AmbiguousCombination
+                if candidates
+                else IncompatibleCombination
+                if found_any
+                else ArtifactUnavailable
+            )
             raise error_type(
                 f"Environment resolution failed: {reason}",
                 attempts=attempts,

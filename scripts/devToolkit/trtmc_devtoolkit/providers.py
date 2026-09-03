@@ -60,6 +60,21 @@ class ToolchainSource(Protocol):
     ) -> ToolchainObservation: ...
 
 
+class ToolchainCatalog(Protocol):
+    """Resolve version intent into immutable artifacts for a materializer."""
+
+    descriptor: ProviderDescriptor
+
+    def resolve(
+        self,
+        request: EnvironmentRequest,
+        context: ContextLock,
+        *,
+        repository: Path,
+        runner: Runner,
+    ) -> tuple[ToolchainCandidate, ...]: ...
+
+
 class ExecutionContext(Protocol):
     descriptor: ProviderDescriptor
 
@@ -99,6 +114,7 @@ class ExecutionContext(Protocol):
 class FrozenProviderRegistry:
     contexts: tuple[ExecutionContext, ...]
     toolchains: tuple[ToolchainSource, ...]
+    catalogs: tuple[ToolchainCatalog, ...] = ()
 
     def context(self, name: str) -> ExecutionContext:
         matches = [provider for provider in self.contexts if provider.descriptor.name == name]
@@ -119,6 +135,7 @@ class ProviderRegistry:
     def __init__(self) -> None:
         self._contexts: dict[str, ExecutionContext] = {}
         self._toolchains: dict[str, ToolchainSource] = {}
+        self._catalogs: dict[str, ToolchainCatalog] = {}
 
     @classmethod
     def with_builtins(cls) -> ProviderRegistry:
@@ -130,6 +147,7 @@ class ProviderRegistry:
             PrefixToolchainSource,
             SystemToolchainSource,
         )
+        from .catalogs import NvidiaPackageIndexCatalog
 
         registry = cls()
         registry.register_context(LocalExecutionContext())
@@ -138,6 +156,7 @@ class ProviderRegistry:
         registry.register_toolchain(PrefixToolchainSource())
         registry.register_toolchain(ContainerImageToolchainSource())
         registry.register_toolchain(ManagedArtifactToolchainSource())
+        registry.register_catalog(NvidiaPackageIndexCatalog())
         return registry
 
     def register_context(self, provider: ExecutionContext) -> None:
@@ -146,10 +165,14 @@ class ProviderRegistry:
     def register_toolchain(self, provider: ToolchainSource) -> None:
         self._register(self._toolchains, provider, "toolchain")
 
+    def register_catalog(self, provider: ToolchainCatalog) -> None:
+        self._register(self._catalogs, provider, "toolchain catalog")
+
     def freeze(self) -> FrozenProviderRegistry:
         return FrozenProviderRegistry(
             contexts=tuple(self._contexts.values()),
             toolchains=tuple(self._toolchains.values()),
+            catalogs=tuple(self._catalogs.values()),
         )
 
     @staticmethod

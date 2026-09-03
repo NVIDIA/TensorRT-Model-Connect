@@ -58,9 +58,10 @@ toolkit.run_trtmc(environment, ("version",), build=build)
 
 `build()` itself only snapshots source, serializes identical builds, runs the
 selected recipe, hashes outputs, and writes evidence. `TrtmcBuildRecipe` is an
-optional sample recipe that installs the checkout's Python package editable
-with `--no-deps`, configures CMake against the resolved TensorRT runtime, and
-builds only the requested targets. User recipes can replace it completely.
+optional sample recipe that configures CMake against the resolved TensorRT
+runtime and builds only the requested targets. It does not install the checkout
+into or otherwise mutate the locked toolchain Python environment. User recipes
+can replace it completely.
 
 For a user-owned unified CUDA/TensorRT installation, pass
 the prefix as toolchain-owned configuration. Resolution checks the prefix
@@ -118,39 +119,72 @@ env file and removed after execution; they are never placed in Docker argv.
 
 ## Managed fallback and arbitrary TensorRT
 
-Arbitrary-version support is accept-and-attempt, not accept-and-download-
-unverified. The built-in managed source requires a complete caller-supplied set
-of wheel artifacts plus a `tensorrt-headers` Debian artifact. Every artifact
-must have an immutable SHA-256 digest. With no complete system CUDA, omitted
-CUDA selects managed 13.3:
+Arbitrary-version support is accept, resolve, install, and attest. Resolution
+first tries the target's installed toolchains. If none matches, the built-in
+NVIDIA catalog resolves an exact public TensorRT distribution (Python package,
+bindings, native libraries, and development headers) to immutable SHA-256
+artifacts. With no complete target CUDA, it also resolves the CUDA 13.3 native
+build component closure from NVIDIA's redistribution manifest. Provisioning
+downloads those pins into a content-addressed cache and installs them under the
+environment's isolated state prefix; it does not modify the target's system
+Python or `/usr/local/cuda`.
+
+Versions unavailable from the public indexes, such as an internal or pre-release
+build, can be supplied through a team JSON catalog. This is still automatic
+installation—the manifest is discovery metadata, not a cohort allowlist:
 
 ```python
-from trtmc_devtoolkit import ArtifactPin
+from trtmc_devtoolkit import DevToolkit, JsonToolchainCatalog
+from trtmc_devtoolkit.spi import ProviderRegistry
+
+registry = ProviderRegistry.with_builtins()
+registry.register_catalog(JsonToolchainCatalog((repo / "private-toolchains.json",)))
+toolkit = DevToolkit.from_checkout(repo, providers=registry.freeze())
 
 lock = toolkit.resolve(
     EnvironmentRequest(
-        tensorrt="11.0.0.114",
+        tensorrt="11.2.0.113",
         target=ExecutionTarget.local(),
-        artifacts=(
-            ArtifactPin(
-                name="tensorrt-headers",
-                uri="https://artifact.example/libnvinfer-headers.deb",
-                sha256="<64 lowercase hex characters>",
-            ),
-            # Include the complete, mutually compatible wheel closure.
-            ArtifactPin(
-                name="tensorrt-wheel",
-                uri="https://artifact.example/tensorrt.whl",
-                sha256="<64 lowercase hex characters>",
-            ),
-        ),
+        toolchain_options={"catalog": "json-toolchain-catalog"},
     )
 )
 ```
 
-If no trusted artifacts or custom `ToolchainSource` can satisfy the request,
-resolution raises `ArtifactUnavailable`; it never silently weakens verification.
-Use `CudaPolicy.exact("12.8")`, `CudaPolicy.system_only()`, or
+The corresponding manifest binds the private artifacts by digest and can reuse
+the target's complete CUDA toolkit by major version:
+
+```json
+{
+  "schema_version": 1,
+  "toolchains": [
+    {
+      "id": "gb300-trt-11.2.0.113",
+      "tensorrt": "11.2.0.113",
+      "python": "3.12",
+      "architecture": "x86_64",
+      "cuda": {"source": "target", "major": "13"},
+      "artifacts": [
+        {"name": "tensorrt-bindings", "uri": "https://artifact.example/bindings.whl", "sha256": "<64 lowercase hex>"},
+        {"name": "tensorrt-libs", "uri": "https://artifact.example/libs.whl", "sha256": "<64 lowercase hex>"},
+        {"name": "tensorrt-headers", "uri": "https://artifact.example/headers.deb", "sha256": "<64 lowercase hex>"}
+      ]
+    }
+  ]
+}
+```
+
+For an entirely managed CUDA, use `{"source": "managed", "version":
+"13.3", "release": "13.3.0", "artifacts": [...]}` and list the named CUDA
+component artifacts in the record's common `artifacts` array. Relative artifact
+paths are resolved relative to the manifest and must be reachable from the
+execution target. Artifact URI userinfo cannot contain credentials. Use
+pre-authorized URLs, target-visible local paths, or a custom catalog and
+materializer when the artifact store requires another transport or
+authentication scheme.
+
+If neither a public nor an explicitly registered catalog can supply the exact
+version, resolution raises `ArtifactUnavailable`; it never substitutes a nearby
+version. Use `CudaPolicy.exact("12.8")`, `CudaPolicy.system_only()`, or
 `CudaPolicy.managed("13.3")` to override the default policy.
 
 ## Qualification is explicit and source-neutral
@@ -219,9 +253,11 @@ Build failures before a build request ID can be computed are recorded below
 
 ## Extension points
 
-There are two provider protocols:
+There are three provider protocols:
 
 - `ToolchainSource`: discover, materialize, and observe a CUDA/TensorRT toolchain.
+- `ToolchainCatalog`: turn version intent into immutable artifacts for a
+  registered materializer.
 - `ExecutionContext`: resolve/provision a target and execute mapped commands.
 
 Extension contracts live under `trtmc_devtoolkit.spi`. Execution contexts

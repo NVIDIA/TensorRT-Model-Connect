@@ -8,6 +8,7 @@ from .providers import (
     ExecutionContext,
     FrozenProviderRegistry,
     ProviderRegistry,
+    ToolchainCatalog,
     ToolchainSource,
 )
 from .provisioning import ContextHandle, ToolchainHandle
@@ -32,6 +33,7 @@ __all__ = [
     "QualificationRegistry",
     "QualificationSource",
     "ToolchainCandidate",
+    "ToolchainCatalog",
     "ToolchainHandle",
     "ToolchainSource",
 ]
