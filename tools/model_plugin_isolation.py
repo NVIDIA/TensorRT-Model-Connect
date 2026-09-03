@@ -383,6 +383,10 @@ def _include_source_path(path: Path, owners: dict[str, set[str]]) -> bool:
     return True
 
 
+def _is_model_owned_path(path: Path) -> bool:
+    return any(_owner_under(path, root) is not None for root in _MODEL_OWNED_ROOTS)
+
+
 def _copy_source_files(
     repo_root: Path,
     output_dir: Path,
@@ -405,6 +409,11 @@ def _copy_source_files(
         destination = output_dir / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         if source.is_symlink():
+            if _is_model_owned_path(relative):
+                raise SystemExit(
+                    "Model-owned source isolation rejects symlinks: "
+                    f"{relative.as_posix()}"
+                )
             destination.symlink_to(os.readlink(source))
         elif source.is_file():
             shutil.copy2(source, destination)

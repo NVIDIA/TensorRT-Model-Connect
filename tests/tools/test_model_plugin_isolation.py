@@ -313,6 +313,40 @@ def test_stage_source_masks_sibling_model_roots(tmp_path: Path) -> None:
     assert all(value > 0 for value in manifest["excluded_model_files"].values())
 
 
+def test_stage_source_rejects_model_owned_symlink_escape(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+    _add_projection_fixture_files(repo_root)
+    borrowed = (
+        repo_root
+        / "python/tensorrt_model_connect/families/decoder_family/borrowed.py"
+    )
+    borrowed.symlink_to(
+        repo_root / "python/tensorrt_model_connect/families/sibling/plugin.py"
+    )
+    subprocess.run(["git", "-C", str(repo_root), "add", str(borrowed)], check=True)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "stage-source",
+            "--repo-root",
+            str(repo_root),
+            "--model",
+            "decoder-small",
+            "--output-dir",
+            str(tmp_path / "isolated"),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "source isolation rejects symlinks" in result.stderr
+    assert "decoder_family/borrowed.py" in result.stderr
+
+
 def test_stage_source_requires_clean_to_replace_output(tmp_path: Path) -> None:
     repo_root = _make_repo(tmp_path)
     _add_projection_fixture_files(repo_root)

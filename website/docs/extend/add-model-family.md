@@ -35,6 +35,12 @@ tests/e2e/models/qwen/
 Copy only the files the new family actually needs. Do not import or include a
 sibling family's model-owned implementation in production code.
 
+Selective CI rebuilds affected models from a source projection containing only
+the owning Python family, runtime model DSO, C++ model tests, and E2E family.
+It also runs with only that model DSO available at runtime. Cross-family
+imports, file reads, native dependencies, and symlink escapes therefore fail
+the real model proof even when they evade static source checks.
+
 `scripts/new_family.py` is only a preliminary Python bootstrap in this
 revision. It creates `plugin.py` and `__init__.py`, but it does not create the
 required `MODEL.toml`, family-local builder modules, runtime DSO, or E2E
