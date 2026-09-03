@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_xception"
+runtime_library = "libtrtmc_model_timm_xception.so"
+runtime_plugins = ["plugin.cpp|register_timm_xception_plugin"]
+runtime_strategies = ["timm_xception_image_classification"]
+runtime_tests = [
+  "test_timm_xception_image_preprocess_seam|test_timm_xception_image_preprocess_seam.cpp|trtmc_model_timm_xception|_|_",
+]
