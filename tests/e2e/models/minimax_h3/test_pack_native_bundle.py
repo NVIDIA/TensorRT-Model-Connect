@@ -125,9 +125,10 @@ def test_packer_preserves_validated_workspace_mapping(
         ),
     )
 
-    def capture_bundle(_output, _info, sections) -> None:
+    def capture_bundle(_output, info, sections) -> None:
         config_section = next(section for section in sections if section.name == "config.json")
         captured.update(json.loads(config_section.data))
+        captured["bundle_max_cache_length"] = info.max_cache_length
 
     monkeypatch.setattr(pack_native_bundle, "write_bundle", capture_bundle)
     argv = [
@@ -150,6 +151,10 @@ def test_packer_preserves_validated_workspace_mapping(
     assert captured["first_block_cache"] is first_block_cache
     assert captured["denoiser_cache_mode"] == ("first_block" if first_block_cache else "monolithic")
     assert captured["first_block_cache_threshold"] == 0.025
+    manifest = json.loads(
+        (Path(pack_native_bundle.__file__).parent / "manifests" / "minimax-h3-768p.json").read_text()
+    )
+    assert captured["bundle_max_cache_length"] == manifest["max_cache_length"] == 32
     assert (
         captured["text_rows_min"],
         captured["text_rows_opt"],

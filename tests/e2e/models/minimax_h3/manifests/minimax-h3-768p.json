@@ -6,6 +6,7 @@
   "family": "minimax_h3",
   "runtime_strategy": "diffusion_minimax_h3",
   "task_strategy": "diffusion_media_generation",
+  "max_cache_length": 32,
   "precision": "bf16",
   "reference_precision": "bf16",
   "e2e_parallel_resource": "exclusive_gpu",
