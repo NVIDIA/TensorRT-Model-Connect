@@ -27,6 +27,7 @@ MODEL_CALL_FAMILIES = {
     "timesfm",
     "timm_mobilenetv3",
     "timm_efficientnet",
+    "timm_densenet",
     "timm_resnet",
     "timm_vgg",
     "timm_vit",
