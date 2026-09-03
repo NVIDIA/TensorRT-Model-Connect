@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 family = importlib.import_module("tensorrt_model_connect.families.foundationpose.plugin")
+builder = importlib.import_module("tensorrt_model_connect.families.foundationpose.builder")
 
 
 def test_bundle_contract_is_pinned_and_explicit():
@@ -18,6 +19,7 @@ def test_bundle_contract_is_pinned_and_explicit():
     assert metadata["pose_refiner_max_batch"] == 42
     assert metadata["pose_max_hypotheses"] == 252
     assert metadata["pose_crop_layout"] == "NHWC"
+    assert metadata["foundationpose_engine_builder"] == "tensorrt_python_api"
     assert metadata["includes_segmentation"] is False
     assert metadata["includes_cad_rendering"] is False
     assert metadata["robotics_safety_validated"] is False
@@ -66,3 +68,23 @@ def test_reference_profile_version_check_survives_python_optimization():
 
     assert "raise RuntimeError" in source
     assert not [node for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+
+
+def test_builder_authors_the_network_with_tensorrt_python_apis():
+    source = Path(builder.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    assert "OnnxParser" not in source
+    assert ".parse(" not in source
+    calls = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert {
+        "add_convolution_nd",
+        "add_matrix_multiply",
+        "add_normalization_v2",
+        "add_reduce",
+        "add_softmax",
+    } <= calls

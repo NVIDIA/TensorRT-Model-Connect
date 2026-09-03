@@ -108,11 +108,10 @@ class FoundationPosePlugin:
         del config, max_cache_length
         if quant_ctx is not None:
             raise ValueError("FoundationPose does not support quantized builds")
-        from .builder import build_onnx_engine
+        from .builder import build_foundationpose_engine
 
-        return build_onnx_engine(
-            weights["refiner"], kind="refiner", max_batch=42,
-            precision=precision, verbose=verbose
+        return build_foundationpose_engine(
+            weights["refiner"], kind="refiner", max_batch=42, precision=precision, verbose=verbose
         )
 
     def build_extra_engines(
@@ -128,12 +127,15 @@ class FoundationPosePlugin:
         del config, max_cache_length
         if quant_ctx is not None:
             raise ValueError("FoundationPose does not support quantized builds")
-        from .builder import build_onnx_engine
+        from .builder import build_foundationpose_engine
 
         return {
-            SCORE_SECTION: build_onnx_engine(
-                weights["scorer"], kind="scorer", max_batch=252,
-                precision=precision, verbose=verbose
+            SCORE_SECTION: build_foundationpose_engine(
+                weights["scorer"],
+                kind="scorer",
+                max_batch=252,
+                precision=precision,
+                verbose=verbose,
             )
         }
 
@@ -146,6 +148,7 @@ class FoundationPosePlugin:
             "foundationpose_ngc_version": NGC_VERSION,
             "foundationpose_refiner_sha256": REFINER_SHA256,
             "foundationpose_scorer_sha256": SCORER_SHA256,
+            "foundationpose_engine_builder": "tensorrt_python_api",
             "pose_crop_layout": "NHWC",
             "pose_crop_height": 160,
             "pose_crop_width": 160,
