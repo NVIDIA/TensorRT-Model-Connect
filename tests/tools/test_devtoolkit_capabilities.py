@@ -29,6 +29,7 @@ from trtmc_devtoolkit import (  # noqa: E402
     ContextLock,
     ContextHandle,
     CudaPolicy,
+    DevToolkitError,
     DevToolkit,
     EnvironmentRequest,
     ExecutionContext,
@@ -37,18 +38,34 @@ from trtmc_devtoolkit import (  # noqa: E402
     ProviderDescriptor,
     ProviderRegistry,
     ProvisionPolicy,
+    QualificationRegistry,
     ToolchainObservation,
     ToolchainCandidate,
     ToolchainSource,
     repository_path,
 )
-from trtmc_devtoolkit.models import DevToolkitError  # noqa: E402
 from trtmc_devtoolkit import receipt as receipt_module  # noqa: E402
 
 
 def test_extension_protocols_are_public() -> None:
     assert ExecutionContext.__name__ == "ExecutionContext"
     assert ToolchainSource.__name__ == "ToolchainSource"
+
+
+def test_public_api_exposes_capabilities_without_plan_or_apply(tmp_path: Path) -> None:
+    toolkit = DevToolkit.from_checkout(tmp_path)
+
+    assert not hasattr(toolkit, "plan")
+    assert not hasattr(toolkit, "apply")
+
+
+def test_checked_in_cohorts_load_as_optional_qualification_records() -> None:
+    records = QualificationRegistry(
+        (REPO_ROOT / "configs" / "environment-cohorts",)
+    ).load_all()
+
+    assert records
+    assert all(record.reference.digest for record in records)
 
 
 class BuiltinProbeRunner:
@@ -1430,16 +1447,9 @@ def test_environment_identity_depends_on_resolution_not_request_spelling(
     registry = ProviderRegistry()
     registry.register_context(StaticLocalContext())
     registry.register_toolchain(ExistingToolchainSource())
-    toolkit_a = DevToolkit.from_checkout(
-        tmp_path,
-        source_revision_override="a" * 40,
-        providers=registry.freeze(),
-    )
-    toolkit_b = DevToolkit.from_checkout(
-        tmp_path,
-        source_revision_override="b" * 40,
-        providers=registry.freeze(),
-    )
+    providers = registry.freeze()
+    toolkit_a = DevToolkit.from_checkout(tmp_path, providers=providers)
+    toolkit_b = DevToolkit.from_checkout(tmp_path, providers=providers)
     common = {
         "tensorrt": "11.2.0.113",
         "target": ExecutionTarget("test-local"),

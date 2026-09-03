@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Public API for planning and applying TRTMC environment preparation."""
+"""Public capability API for TRTMC development environments."""
 
 from __future__ import annotations
 
@@ -10,9 +10,6 @@ from pathlib import Path
 
 from .building import BuildResult, BuildSpec, NativeBuilder
 from .commands import CommandArgument, CommandExecutor, CommandResult, CommandSpec
-from .doctor import EnvironmentDoctor
-from .models import PrepareRequest, PrepareResult, PreparationPlan
-from .planner import Planner
 from .providers import FrozenProviderRegistry, ProviderRegistry
 from .qualifications import QualificationRegistry
 from .provisioning import (
@@ -20,10 +17,8 @@ from .provisioning import (
     ProvisionedEnvironment,
     ProvisionPolicy,
 )
-from .receipt import write_doctor, write_failure, write_plan, write_success
 from .resolution import EnvironmentLock, EnvironmentRequest, EnvironmentResolver
 from .runner import CommandRunner, Runner
-from .targets import DockerEnvironment, LocalEnvironment
 
 
 class DevToolkit:
@@ -34,7 +29,6 @@ class DevToolkit:
         repository: Path,
         *,
         state_root: Path | None = None,
-        source_revision_override: str | None = None,
         runner: Runner | None = None,
         providers: FrozenProviderRegistry | None = None,
         qualification_roots: Sequence[Path] = (),
@@ -49,11 +43,6 @@ class DevToolkit:
                 *(Path(root).resolve() for root in qualification_roots),
             )
         )
-        self._planner = Planner(
-            self.repository,
-            state_root,
-            source_revision_override,
-        )
 
     @classmethod
     def from_checkout(
@@ -61,7 +50,6 @@ class DevToolkit:
         repository: Path | None = None,
         *,
         state_root: Path | None = None,
-        source_revision_override: str | None = None,
         runner: Runner | None = None,
         providers: FrozenProviderRegistry | None = None,
         qualification_roots: Sequence[Path] = (),
@@ -69,7 +57,6 @@ class DevToolkit:
         return cls(
             repository or Path.cwd(),
             state_root=state_root,
-            source_revision_override=source_revision_override,
             runner=runner,
             providers=providers,
             qualification_roots=qualification_roots,
@@ -145,44 +132,3 @@ class DevToolkit:
             check=check,
             capture_output=capture_output,
         )
-
-    def plan(self, request: PrepareRequest) -> PreparationPlan:
-        """Resolve an immutable plan without changing Docker, venvs, or build state."""
-        return self._planner.create(request)
-
-    def apply(self, plan: PreparationPlan) -> PrepareResult:
-        """Apply one plan and leave a reusable environment plus a receipt."""
-        plan.state_dir.mkdir(parents=True, exist_ok=True)
-        write_plan(plan)
-        runner = self._runner or CommandRunner(plan.state_dir / "commands.log")
-        try:
-            probes, sm = EnvironmentDoctor(self.repository, runner).inspect(
-                plan.request,
-                plan.cohort,
-                plan.architecture,
-            )
-            write_doctor(plan, probes, sm)
-            if plan.request.target.kind == "docker":
-                environment, wheel, bundle = DockerEnvironment(self.repository, runner).prepare(
-                    plan, sm=sm
-                )
-            else:
-                environment, wheel, bundle = LocalEnvironment(self.repository, runner).prepare(
-                    plan, sm=sm
-                )
-            receipt = write_success(
-                plan,
-                environment,
-                wheel=wheel,
-                bundle=bundle,
-            )
-            return PrepareResult(
-                plan=plan,
-                environment=environment,
-                receipt=receipt,
-                wheel=wheel,
-                bundle=bundle,
-            )
-        except BaseException as error:
-            write_failure(plan, error)
-            raise

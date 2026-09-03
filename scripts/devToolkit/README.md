@@ -209,11 +209,9 @@ registry.register_toolchain(MyTensorRTSource())
 toolkit = DevToolkit.from_checkout(repo, providers=registry.freeze())
 ```
 
-## Legacy recipe
+## API scope
 
-`DevToolkit.plan(PrepareRequest(...))` and `apply()` remain as a compatibility
-recipe for the checked-in cohort-based local/Docker setup. It is not the
-arbitrary-version capability API. Its old model-smoke field now fails with a
-message directing callers to compose the appropriate family CLI through
-`run_trtmc()`. Handoff helpers remain under `trtmc_devtoolkit.recipes` with
-top-level compatibility imports.
+DevToolkit exposes only environment capabilities: `resolve()`, `provision()`,
+`build()`, `run()`, and `run_trtmc()`. Higher-level development flows belong in
+user code or examples composed from those capabilities; DevToolkit does not
+define a workflow DAG or a second cohort-gated preparation API.

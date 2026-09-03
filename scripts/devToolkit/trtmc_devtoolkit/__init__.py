@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Repository-local environment preparation API for TensorRT-Model-Connect."""
+"""Composable development-environment API for TensorRT-Model-Connect."""
 
 from .api import DevToolkit
 from .building import BuildArtifact, BuildResult, BuildSpec, SourceSnapshot
@@ -14,17 +14,7 @@ from .commands import (
     state_path,
     target_path,
 )
-from .handoff import performance_handoff, profiling_handoff, validation_handoff
-from .models import (
-    DockerTarget,
-    EnvironmentHandle,
-    HandoffPlan,
-    LocalTarget,
-    PrepareRequest,
-    PrepareResult,
-    PreparationPlan,
-    ToolchainObservation,
-)
+from .models import DevToolkitError, ToolchainObservation
 from .providers import (
     ExecutionContext,
     FrozenProviderRegistry,
@@ -54,13 +44,6 @@ from .resolution import (
 
 __all__ = [
     "DevToolkit",
-    "DockerTarget",
-    "EnvironmentHandle",
-    "HandoffPlan",
-    "LocalTarget",
-    "PrepareRequest",
-    "PrepareResult",
-    "PreparationPlan",
     "ArtifactPin",
     "ArtifactUnavailable",
     "AttestationFailed",
@@ -73,6 +56,7 @@ __all__ = [
     "ContextHandle",
     "ContextLock",
     "CudaPolicy",
+    "DevToolkitError",
     "EnvironmentLock",
     "EnvironmentPath",
     "EnvironmentRequest",
@@ -94,7 +78,4 @@ __all__ = [
     "repository_path",
     "state_path",
     "target_path",
-    "performance_handoff",
-    "profiling_handoff",
-    "validation_handoff",
 ]

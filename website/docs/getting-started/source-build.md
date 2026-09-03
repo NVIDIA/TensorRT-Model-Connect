@@ -54,7 +54,7 @@ requires digest-pinned artifacts; it never downloads an unverified version.
 `provision()` attests Python, CUDA, TensorRT Python/native/header versions and
 writes the evidence under `.devtoolkit/`. See `scripts/devToolkit/README.md` for
 local targets, explicit CUDA policies, generic TRTMC CLI calls, extension
-providers, and the legacy `plan()`/`apply()` compatibility recipe.
+providers, and receipt identity semantics.
 
 The manual commands below remain the direct source-build path and show the
 operations performed by development mode.

@@ -21,8 +21,8 @@ from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 
 from .commands import CommandSpec, EnvironmentPath, PathScope
-from .cohorts import normalize_architecture
 from .models import DevToolkitError, ToolchainObservation
+from .platforms import normalize_architecture
 from .provisioning import ContextHandle, ProvisionPolicy
 from .resolution import (
     CudaSource,
