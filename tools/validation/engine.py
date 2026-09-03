@@ -12685,6 +12685,22 @@ def write_diffusion_text_summary_markdown(summary: dict[str, Any], path: Path) -
 
 def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
+    if result.get("mode") == "model_owned_external":
+        primary_metric_name = str(result.get("primary_metric_name", "") or "").strip()
+        primary_metric = result.get("metrics", {}).get(primary_metric_name, {})
+        primary_metric_mean = (
+            primary_metric.get("mean") if isinstance(primary_metric, Mapping) else None
+        )
+        primary_metric_text = (
+            f" {primary_metric_name}={float(primary_metric_mean):.4f}"
+            if primary_metric_name and isinstance(primary_metric_mean, (int, float))
+            else ""
+        )
+        return (
+            f"model={model['name']}{primary_metric_text} "
+            f"passed={result['passed_count']}/{result['valid_count']} "
+            f"status={result.get('status', '')} {common}"
+        )
     if result.get("mode") == "full_duplex_bench_behavior_parity":
         return (
             f"model={model['name']} metric_gate_pass_rate="

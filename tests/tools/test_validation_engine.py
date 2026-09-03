@@ -1518,6 +1518,28 @@ def test_vision_result_lines_use_task_specific_metrics(result, expected) -> None
     assert expected in line
 
 
+def test_model_owned_external_result_line_uses_generic_quality_fields() -> None:
+    line = validation_engine._format_result_line(
+        {"name": "model-owned-quality"},
+        {
+            "mode": "model_owned_external",
+            "status": "passed",
+            "sample_count": 10,
+            "valid_count": 10,
+            "passed_count": 10,
+            "primary_metric_name": "siglip_alignment",
+            "metrics": {"siglip_alignment": {"mean": 0.1178848}},
+            "hf_reused": False,
+            "bundle_built": False,
+        },
+    )
+
+    assert line == (
+        "model=model-owned-quality siglip_alignment=0.1179 "
+        "passed=10/10 status=passed hf_reused=False bundle_built=False"
+    )
+
+
 def test_default_suites_include_encoder_embedding_parity() -> None:
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(), "stsbenchmark_encoder_embedding_parity"
