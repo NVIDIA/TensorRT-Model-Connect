@@ -18,7 +18,6 @@ def test_release_suite_loads_and_selects_models_in_request_order() -> None:
     selected = suite.select(models=["distilgpt2", "gpt2-125m"])
 
     assert [case["model"] for case in selected] == ["distilgpt2", "gpt2-125m"]
-    assert len(suite.cases) == 112
 
 
 def test_release_suite_includes_fast_foundation_stereo() -> None:

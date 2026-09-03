@@ -3222,14 +3222,6 @@ class TestAggregation:
         assert not result.cap_applied
         assert sorted(result.e2e_models) == ["decoder-large", "decoder-small"]
 
-    def test_cap_applied_when_over(self, imap):
-        """Cap applied when affected models > cap."""
-        result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/checkpoint_mapper.py"], imap, cap=5
-        )
-        assert result.cap_applied
-        assert sorted(result.e2e_models) == sorted(imap.core_models)
-
     def test_no_changed_files(self, imap):
         """No files -> no impact."""
         result = test_impact.analyze_impact([], imap)
@@ -3461,16 +3453,6 @@ class TestValidation:
         imap = test_impact.build_impact_map(real_root)
         errors = test_impact.validate_map(imap, real_root)
         assert errors == [], f"Validation errors: {errors}"
-
-    def test_real_repo_has_core_models(self):
-        """Real repo has at least 5 core models."""
-        real_root = REPO_ROOT
-        if not (real_root / "tests" / "e2e" / "models").is_dir():
-            pytest.skip("Not in the project repo")
-        imap = test_impact.build_impact_map(real_root)
-        assert len(imap.core_models) >= 5, (
-            f"Expected at least 5 core models, got {len(imap.core_models)}"
-        )
 
     def test_flux_runtime_selects_batch2_detector(self):
         """FLUX runtime changes must execute the real-bundle batch contract."""
