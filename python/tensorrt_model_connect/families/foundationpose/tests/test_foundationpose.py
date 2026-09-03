@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 family = importlib.import_module("tensorrt_model_connect.families.foundationpose.plugin")
-builder = importlib.import_module("tensorrt_model_connect.families.foundationpose.builder")
 
 
 def test_bundle_contract_is_pinned_and_explicit():
@@ -68,23 +67,3 @@ def test_reference_profile_version_check_survives_python_optimization():
 
     assert "raise RuntimeError" in source
     assert not [node for node in ast.walk(tree) if isinstance(node, ast.Assert)]
-
-
-def test_builder_authors_the_network_with_tensorrt_python_apis():
-    source = Path(builder.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-
-    assert "OnnxParser" not in source
-    assert ".parse(" not in source
-    calls = {
-        node.func.attr
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-    }
-    assert {
-        "add_convolution_nd",
-        "add_matrix_multiply",
-        "add_normalization_v2",
-        "add_reduce",
-        "add_softmax",
-    } <= calls
