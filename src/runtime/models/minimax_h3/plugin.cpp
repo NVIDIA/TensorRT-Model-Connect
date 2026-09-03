@@ -936,34 +936,37 @@ ModuleCreateOptions module_options(cudaStream_t stream, const std::string& runti
 
 std::int64_t staged_plan_budget(const std::string& name, const RuntimeMemoryConfig& memory,
                                 const HotEngineConfig& hot) {
-    if (retain_hot_engine(name, hot)) {
-        if (name == "denoiser_head_plan" || name == "denoiser_finish_plan" ||
-            name == "vae_tile_decoder_plan" || name == "audio_vae_decoder_plan")
-            return std::numeric_limits<std::int64_t>::max();
-        if (name == "denoiser_tail_plan")
-            return std::min<std::int64_t>(memory.weight_streaming_budget_bytes,
-                                          hot.tail_weight_budget_bytes);
-    }
-    return (name == "denoiser_head_plan" || name == "denoiser_finish_plan")
-               ? 0
-               : memory.weight_streaming_budget_bytes;
+    return minimax_h3::staged_plan_weight_streaming_budget(
+        name, memory.weight_streaming_budget_bytes, hot.retain_engines,
+        hot.tail_weight_budget_bytes);
 }
 
-std::unique_ptr<ITrtModule>
-load_staged_module(const std::string& name, const BundleSectionInfo& section,
-                   const std::string& bundle_path, const PlanSha256Map& plan_sha256,
-                   IFileBackedBackend* file_backed_backend, const ModuleCreateOptions& options,
-                   const std::vector<ModuleExternalBinding>& external_bindings,
-                   const RuntimeMemoryConfig& memory, const HotEngineConfig& hot) {
+std::unique_ptr<ITrtModule> load_staged_module(
+    const std::string& name, const BundleSectionInfo& section, const std::string& bundle_path,
+    const PlanSha256Map& plan_sha256, IFileBackedBackend* file_backed_backend,
+    const ModuleCreateOptions& options, const std::vector<ModuleExternalBinding>& external_bindings,
+    const RuntimeMemoryConfig& memory, const HotEngineConfig& hot, bool serial_execution_context) {
     if (file_backed_backend == nullptr)
         throw std::runtime_error("MiniMax-H3 TensorRT-RTX backend lacks file-backed plan support");
     const auto digest = plan_sha256.find(name);
     if (digest == plan_sha256.end())
         throw std::runtime_error("MiniMax-H3 plan SHA-256 is missing: " + name);
     const auto range = ResolveBundleSectionFileRange(bundle_path, section);
-    auto module = file_backed_backend->create_module_from_file(
-        bundle_path.c_str(), range.offset, range.size, digest->second.c_str(), options,
-        external_bindings, staged_plan_budget(name, memory, hot), retain_hot_engine(name, hot));
+    std::unique_ptr<ITrtModule> module;
+    if (serial_execution_context) {
+        auto* serial_backend = dynamic_cast<ISerialFileBackedBackend*>(file_backed_backend);
+        if (serial_backend == nullptr) {
+            throw std::runtime_error(
+                "MiniMax-H3 TensorRT-RTX backend lacks serial activation arena support");
+        }
+        module = serial_backend->create_serial_module_from_file(
+            bundle_path.c_str(), range.offset, range.size, digest->second.c_str(), options,
+            external_bindings, staged_plan_budget(name, memory, hot), retain_hot_engine(name, hot));
+    } else {
+        module = file_backed_backend->create_module_from_file(
+            bundle_path.c_str(), range.offset, range.size, digest->second.c_str(), options,
+            external_bindings, staged_plan_budget(name, memory, hot), retain_hot_engine(name, hot));
+    }
     if (!module)
         throw std::runtime_error("MiniMax-H3 backend rejected file-backed plan deserialization");
     return module;
@@ -995,8 +998,11 @@ std::unique_ptr<ITrtModule> load_module(const std::string& name, cudaStream_t st
     auto* prebound_backend = dynamic_cast<IPreboundBackend*>(backend);
     if (memory.staged) {
         auto* file_backed_backend = dynamic_cast<IFileBackedBackend*>(backend);
+        const bool serial_execution_context = minimax_h3::uses_serial_execution_context(
+            name, memory.staged && sections.count("denoiser_entry_plan") != 0);
         return load_staged_module(name, section, bundle_path, plan_sha256, file_backed_backend,
-                                  options, external_bindings, memory, hot);
+                                  options, external_bindings, memory, hot,
+                                  serial_execution_context);
     }
     return load_in_memory_module(section, bundle_path, backend, prebound_backend, options,
                                  external_bindings);

@@ -5,6 +5,9 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <string_view>
 
 namespace trtmc::minimax_h3 {
@@ -31,6 +34,34 @@ inline bool should_retain_hot_engine(std::string_view name, bool retain_engines)
            name == "denoiser_finish_plan" || name == "denoiser_entry_plan" ||
            is_fast_h3_transition_plan(name) || name == "vae_tile_decoder_plan" ||
            name == "audio_vae_decoder_plan";
+}
+
+inline bool uses_serial_execution_context(std::string_view name, bool segmented_vsa_bundle) {
+    return segmented_vsa_bundle &&
+           (name == "denoiser_entry_plan" || is_fast_h3_transition_plan(name) ||
+            name == "denoiser_finish_plan");
+}
+
+inline std::int64_t staged_plan_weight_streaming_budget(std::string_view name,
+                                                        std::int64_t bundle_budget_bytes,
+                                                        bool retain_engines,
+                                                        std::int64_t retained_tail_budget_bytes) {
+    // The segmented denoiser holds all 49 transition engines at once. Their
+    // weights must therefore remain fully streamable even when the engines
+    // themselves are retained across requests on the 64 GiB Windows profile.
+    if (is_fast_h3_transition_plan(name))
+        return 0;
+
+    if (should_retain_hot_engine(name, retain_engines)) {
+        if (name == "denoiser_head_plan" || name == "denoiser_finish_plan" ||
+            name == "vae_tile_decoder_plan" || name == "audio_vae_decoder_plan") {
+            return std::numeric_limits<std::int64_t>::max();
+        }
+        if (name == "denoiser_tail_plan")
+            return std::min(bundle_budget_bytes, retained_tail_budget_bytes);
+    }
+    return (name == "denoiser_head_plan" || name == "denoiser_finish_plan") ? 0
+                                                                            : bundle_budget_bytes;
 }
 
 } // namespace trtmc::minimax_h3

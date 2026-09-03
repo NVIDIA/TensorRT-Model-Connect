@@ -27,6 +27,7 @@ namespace trtmc {
 
 IPreboundBackend::~IPreboundBackend() = default;
 IFileBackedBackend::~IFileBackedBackend() = default;
+ISerialFileBackedBackend::~ISerialFileBackedBackend() = default;
 IRuntimeCacheBackend::~IRuntimeCacheBackend() = default;
 IRuntimeCacheControl::~IRuntimeCacheControl() = default;
 

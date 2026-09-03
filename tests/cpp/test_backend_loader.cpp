@@ -49,6 +49,8 @@ int main() {
     auto* runtime_cache_backend = dynamic_cast<trtmc::IRuntimeCacheBackend*>(backend);
     check(runtime_cache_backend != nullptr,
           "TensorRT-RTX backend exposes explicit runtime-cache persistence");
+    check(dynamic_cast<trtmc::ISerialFileBackedBackend*>(backend) != nullptr,
+          "TensorRT-RTX backend exposes serial file-backed activation arenas");
     if (runtime_cache_backend != nullptr) {
         const std::string cache_path =
             (std::filesystem::temp_directory_path() / "trtmc-runtime-cache-lease-test.bin")

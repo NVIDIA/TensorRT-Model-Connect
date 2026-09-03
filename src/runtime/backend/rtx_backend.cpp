@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -30,6 +31,7 @@
 #include <string>
 #include <system_error>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -365,11 +367,183 @@ void configure_cuda_graphs(nvinfer1::IRuntimeConfig& config, bool enabled) {
     }
 }
 
+void validate_serial_execution_context(const ModuleCreateOptions& options,
+                                       bool serial_execution_context) {
+    if (!serial_execution_context)
+        return;
+    if (options.stream == nullptr) {
+        throw std::invalid_argument(
+            "[trtmc] Shared RTX activation memory requires an explicit CUDA stream");
+    }
+    if (options.cuda_graphs) {
+        throw std::invalid_argument(
+            "[trtmc] Shared RTX activation memory is incompatible with CUDA graph capture");
+    }
+}
+
+struct ActivationArenaKey {
+    int device{-1};
+    cudaStream_t stream{nullptr};
+
+    bool operator==(const ActivationArenaKey& other) const noexcept {
+        return device == other.device && stream == other.stream;
+    }
+};
+
+struct ActivationArenaKeyHash {
+    std::size_t operator()(const ActivationArenaKey& key) const noexcept {
+        const auto stream = reinterpret_cast<std::uintptr_t>(key.stream);
+        return std::hash<std::uintptr_t>{}(stream) ^
+               (std::hash<int>{}(key.device) + 0x9e3779b9U + (stream << 6U) + (stream >> 2U));
+    }
+};
+
+// One arena is shared only by explicitly marked contexts on one CUDA stream.
+// Context creation merely records each upper bound. Allocation is deferred to
+// the first enqueue, after a segmented pipeline has loaded all of its modules,
+// so the arena is allocated once at the maximum requirement instead of being
+// repeatedly grown while the 51 engines are deserialized.
+class RtxActivationArena final : public ITrtActivationArena {
+  public:
+    RtxActivationArena(int device, cudaStream_t stream) : device_(device), stream_(stream) {}
+
+    ~RtxActivationArena() override {
+        if (memory_ == nullptr)
+            return;
+        int previous_device = -1;
+        const bool restore_device = cudaGetDevice(&previous_device) == cudaSuccess &&
+                                    previous_device >= 0 && previous_device != device_;
+        if (restore_device && cudaSetDevice(device_) != cudaSuccess)
+            return;
+        (void)cudaStreamSynchronize(stream_);
+        if (memory_)
+            (void)cudaFree(memory_);
+        if (restore_device)
+            (void)cudaSetDevice(previous_device);
+    }
+
+    void attach(nvinfer1::IExecutionContext* context, cudaStream_t stream,
+                std::int64_t required_bytes) override {
+        if (context == nullptr)
+            throw std::invalid_argument("[trtmc] Cannot attach a null RTX execution context");
+        if (stream == nullptr || stream != stream_)
+            throw std::invalid_argument("[trtmc] RTX activation arena stream mismatch");
+        if (required_bytes < 0 ||
+            static_cast<std::uint64_t>(required_bytes) >
+                static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            throw std::overflow_error("[trtmc] RTX activation memory requirement is invalid");
+        }
+        require_current_device();
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (contexts_.count(context) != 0)
+            throw std::logic_error("[trtmc] RTX execution context is already attached to an arena");
+        if (memory_ != nullptr && required_bytes > capacity_bytes_) {
+            throw std::runtime_error(
+                "[trtmc] Cannot grow a shared RTX activation arena after execution begins");
+        }
+        contexts_.emplace(context, required_bytes);
+        required_bytes_ = std::max(required_bytes_, required_bytes);
+    }
+
+    void begin_enqueue(nvinfer1::IExecutionContext* context) override {
+        mutex_.lock();
+        try {
+            require_current_device();
+            if (contexts_.count(context) == 0) {
+                throw std::logic_error(
+                    "[trtmc] RTX execution context is not attached to its activation arena");
+            }
+            ensure_capacity_locked();
+            // setDeviceMemoryV2 has no status return. Rebind on every enqueue
+            // so each context receives the final group allocation selected
+            // after all contexts attach. The validated engine/profile upper
+            // bound guarantees the supplied size is sufficient for every
+            // runtime shape.
+            context->setDeviceMemoryV2(memory_, capacity_bytes_);
+        } catch (...) {
+            mutex_.unlock();
+            throw;
+        }
+    }
+
+    void end_enqueue() noexcept override { mutex_.unlock(); }
+
+    void detach(nvinfer1::IExecutionContext* context) noexcept override {
+        if (context == nullptr)
+            return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = contexts_.find(context);
+        if (found == contexts_.end())
+            return;
+        // TensorRT permits the activation buffer and execution context to be
+        // released only after the enqueued work completes.
+        const cudaError_t status = cudaStreamSynchronize(stream_);
+        if (status != cudaSuccess) {
+            std::cerr << "[trtmc] Failed to synchronize shared RTX activation memory during "
+                         "context teardown: "
+                      << cudaGetErrorString(status) << '\n';
+        }
+        contexts_.erase(found);
+        if (memory_ == nullptr) {
+            required_bytes_ = 0;
+            for (const auto& [attached_context, attached_bytes] : contexts_) {
+                (void)attached_context;
+                required_bytes_ = std::max(required_bytes_, attached_bytes);
+            }
+        }
+    }
+
+  private:
+    int device_{-1};
+    cudaStream_t stream_{nullptr};
+    std::mutex mutex_;
+    std::unordered_map<nvinfer1::IExecutionContext*, std::int64_t> contexts_;
+    void* memory_{nullptr};
+    std::int64_t capacity_bytes_{0};
+    std::int64_t required_bytes_{0};
+
+    void require_current_device() const {
+        int current_device = -1;
+        const cudaError_t status = cudaGetDevice(&current_device);
+        if (status != cudaSuccess) {
+            throw std::runtime_error(std::string("[trtmc] Failed to identify the CUDA device: ") +
+                                     cudaGetErrorString(status));
+        }
+        if (current_device != device_)
+            throw std::runtime_error("[trtmc] RTX activation arena CUDA device mismatch");
+    }
+
+    void ensure_capacity_locked() {
+        if (required_bytes_ <= capacity_bytes_)
+            return;
+        if (memory_ != nullptr) {
+            throw std::logic_error(
+                "[trtmc] Shared RTX activation arena capacity changed after allocation");
+        }
+
+        const cudaError_t allocation_status =
+            cudaMalloc(&memory_, static_cast<std::size_t>(required_bytes_));
+        if (allocation_status != cudaSuccess) {
+            memory_ = nullptr;
+            throw std::runtime_error(
+                std::string("[trtmc] Failed to allocate shared RTX activation memory (") +
+                std::to_string(required_bytes_) +
+                " bytes): " + cudaGetErrorString(allocation_status));
+        }
+        capacity_bytes_ = required_bytes_;
+        std::cerr << "[trtmc.rtx_activation_arena] device=" << device_
+                  << " contexts=" << contexts_.size() << " capacity_bytes=" << capacity_bytes_
+                  << '\n';
+    }
+};
+
 } // namespace
 
 class RtxBackend final : public IBackend,
                          public IPreboundBackend,
                          public IFileBackedBackend,
+                         public ISerialFileBackedBackend,
                          public IRuntimeCacheBackend {
   public:
     RtxBackend()
@@ -423,46 +597,19 @@ class RtxBackend final : public IBackend,
         const char* expected_sha256, const ModuleCreateOptions& options,
         const std::vector<ModuleExternalBinding>& external_bindings,
         std::int64_t weight_streaming_budget_bytes, bool retain_engine) override {
-        if (weight_streaming_budget_bytes >= 0 && options.cuda_graphs) {
-            throw std::invalid_argument(
-                "[trtmc] RTX weight streaming is incompatible with CUDA graph capture");
-        }
-        const std::string cache_key =
-            retain_engine ? retained_engine_key(expected_sha256, weight_streaming_budget_bytes)
-                          : std::string{};
-        std::unique_lock<std::mutex> retained_lock;
-        if (retain_engine) {
-            // Serialize retained-engine creation. Two concurrent deserializations
-            // of the same multi-GiB plan can exceed the device-memory envelope
-            // before the losing insertion is released.
-            retained_lock = std::unique_lock<std::mutex>(retained_engines_mutex_);
-            const auto hit = retained_engines_.find(cache_key);
-            if (hit != retained_engines_.end()) {
-                std::cerr << "[trtmc.rtx_engine_cache] hit=1\n";
-                return create_single_module_from_engine(hit->second, options, external_bindings,
-                                                        true);
-            }
-        }
-        BoundedPlanStreamReader reader(plan_path, plan_offset, plan_size, expected_sha256);
-        reader.verify_sha256();
-        TrtUniquePtr<nvinfer1::ICudaEngine> engine(
-            file_backed_runtime().deserializeCudaEngine(reader));
-        reader.verify_unchanged();
-        if (!engine)
-            throw std::runtime_error("[trtmc] Failed to stream-deserialize engine (RTX)");
-        if (retain_engine) {
-            std::shared_ptr<nvinfer1::ICudaEngine> retained(
-                engine.release(), [](nvinfer1::ICudaEngine* value) { delete value; });
-            apply_weight_streaming_budget(*retained, weight_streaming_budget_bytes,
-                                          options.cuda_graphs);
-            auto module =
-                create_single_module_from_engine(retained, options, external_bindings, true);
-            retained_engines_.emplace(cache_key, retained);
-            std::cerr << "[trtmc.rtx_engine_cache] hit=0 retained=1\n";
-            return module;
-        }
-        return create_single_module(engine.release(), options, external_bindings,
-                                    weight_streaming_budget_bytes, true);
+        return create_module_from_file_impl(plan_path, plan_offset, plan_size, expected_sha256,
+                                            options, external_bindings,
+                                            weight_streaming_budget_bytes, retain_engine, false);
+    }
+
+    std::unique_ptr<ITrtModule> create_serial_module_from_file(
+        const char* plan_path, std::uint64_t plan_offset, std::uint64_t plan_size,
+        const char* expected_sha256, const ModuleCreateOptions& options,
+        const std::vector<ModuleExternalBinding>& external_bindings,
+        std::int64_t weight_streaming_budget_bytes, bool retain_engine) override {
+        return create_module_from_file_impl(plan_path, plan_offset, plan_size, expected_sha256,
+                                            options, external_bindings,
+                                            weight_streaming_budget_bytes, retain_engine, true);
     }
 
     BackendDualProfileModules
@@ -566,6 +713,60 @@ class RtxBackend final : public IBackend,
     internal::RuntimeCacheLeaseState runtime_cache_leases_;
     std::mutex retained_engines_mutex_;
     std::unordered_map<std::string, std::shared_ptr<nvinfer1::ICudaEngine>> retained_engines_;
+    std::mutex activation_arenas_mutex_;
+    std::unordered_map<ActivationArenaKey, std::weak_ptr<RtxActivationArena>,
+                       ActivationArenaKeyHash>
+        activation_arenas_;
+
+    std::unique_ptr<ITrtModule>
+    create_module_from_file_impl(const char* plan_path, std::uint64_t plan_offset,
+                                 std::uint64_t plan_size, const char* expected_sha256,
+                                 const ModuleCreateOptions& options,
+                                 const std::vector<ModuleExternalBinding>& external_bindings,
+                                 std::int64_t weight_streaming_budget_bytes, bool retain_engine,
+                                 bool serial_execution_context) {
+        validate_serial_execution_context(options, serial_execution_context);
+        if (weight_streaming_budget_bytes >= 0 && options.cuda_graphs) {
+            throw std::invalid_argument(
+                "[trtmc] RTX weight streaming is incompatible with CUDA graph capture");
+        }
+        const std::string cache_key =
+            retain_engine ? retained_engine_key(expected_sha256, weight_streaming_budget_bytes)
+                          : std::string{};
+        std::unique_lock<std::mutex> retained_lock;
+        if (retain_engine) {
+            // Serialize retained-engine creation. Two concurrent deserializations
+            // of the same multi-GiB plan can exceed the device-memory envelope
+            // before the losing insertion is released.
+            retained_lock = std::unique_lock<std::mutex>(retained_engines_mutex_);
+            const auto hit = retained_engines_.find(cache_key);
+            if (hit != retained_engines_.end()) {
+                std::cerr << "[trtmc.rtx_engine_cache] hit=1\n";
+                return create_single_module_from_engine(hit->second, options, external_bindings,
+                                                        true, serial_execution_context);
+            }
+        }
+        BoundedPlanStreamReader reader(plan_path, plan_offset, plan_size, expected_sha256);
+        reader.verify_sha256();
+        TrtUniquePtr<nvinfer1::ICudaEngine> engine(
+            file_backed_runtime().deserializeCudaEngine(reader));
+        reader.verify_unchanged();
+        if (!engine)
+            throw std::runtime_error("[trtmc] Failed to stream-deserialize engine (RTX)");
+        if (retain_engine) {
+            std::shared_ptr<nvinfer1::ICudaEngine> retained(
+                engine.release(), [](nvinfer1::ICudaEngine* value) { delete value; });
+            apply_weight_streaming_budget(*retained, weight_streaming_budget_bytes,
+                                          options.cuda_graphs);
+            auto module = create_single_module_from_engine(retained, options, external_bindings,
+                                                           true, serial_execution_context);
+            retained_engines_.emplace(cache_key, retained);
+            std::cerr << "[trtmc.rtx_engine_cache] hit=0 retained=1\n";
+            return module;
+        }
+        return create_single_module(engine.release(), options, external_bindings,
+                                    weight_streaming_budget_bytes, true, serial_execution_context);
+    }
 
     nvinfer1::IRuntime& file_backed_runtime() {
 #if defined(_WIN32)
@@ -591,40 +792,75 @@ class RtxBackend final : public IBackend,
                std::to_string(weight_streaming_budget_bytes);
     }
 
-    std::unique_ptr<ITrtModule>
-    create_single_module_from_engine(const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
-                                     const ModuleCreateOptions& options,
-                                     const std::vector<ModuleExternalBinding>& external_bindings,
-                                     bool use_synchronous_allocator = false) {
+    std::unique_ptr<ITrtModule> create_single_module_from_engine(
+        const std::shared_ptr<nvinfer1::ICudaEngine>& engine, const ModuleCreateOptions& options,
+        const std::vector<ModuleExternalBinding>& external_bindings,
+        bool use_synchronous_allocator = false, bool serial_execution_context = false) {
         validate_optimization_profile(*engine, options.optimization_profile);
         const StreamSetup stream_setup = resolve_stream(options.stream);
-        auto config = create_runtime_config(*engine, options);
+        auto config = create_runtime_config(*engine, options, serial_execution_context);
         return create_execution_module(engine, config, stream_setup, options, external_bindings,
-                                       use_synchronous_allocator);
+                                       use_synchronous_allocator, serial_execution_context);
     }
 
     std::unique_ptr<ITrtModule>
     create_single_module(nvinfer1::ICudaEngine* engine_raw, const ModuleCreateOptions& options,
                          const std::vector<ModuleExternalBinding>& external_bindings,
                          std::int64_t weight_streaming_budget_bytes,
-                         bool use_synchronous_allocator = false) {
+                         bool use_synchronous_allocator = false,
+                         bool serial_execution_context = false) {
         std::shared_ptr<nvinfer1::ICudaEngine> engine(
             engine_raw, [](nvinfer1::ICudaEngine* value) { delete value; });
         apply_weight_streaming_budget(*engine, weight_streaming_budget_bytes, options.cuda_graphs);
         return create_single_module_from_engine(engine, options, external_bindings,
-                                                use_synchronous_allocator);
+                                                use_synchronous_allocator,
+                                                serial_execution_context);
     }
 
     std::shared_ptr<nvinfer1::IRuntimeConfig>
-    create_runtime_config(nvinfer1::ICudaEngine& engine, const ModuleCreateOptions& options) {
+    create_runtime_config(nvinfer1::ICudaEngine& engine, const ModuleCreateOptions& options,
+                          bool serial_execution_context) {
         std::shared_ptr<nvinfer1::IRuntimeConfig> config(
             engine.createRuntimeConfig(), [](nvinfer1::IRuntimeConfig* value) { delete value; });
         if (!config)
             throw std::runtime_error("[trtmc] Failed to create RTX runtime config");
         if (options.runtime_cache_path && options.runtime_cache_path[0] != '\0')
             ensure_runtime_cache(config.get(), options.runtime_cache_path);
+        if (serial_execution_context) {
+            config->setExecutionContextAllocationStrategy(
+                nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED);
+            if (config->getExecutionContextAllocationStrategy() !=
+                nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED) {
+                throw std::runtime_error(
+                    "[trtmc] TensorRT-RTX rejected user-managed activation memory");
+            }
+        }
         configure_cuda_graphs(*config, options.cuda_graphs);
         return config;
+    }
+
+    std::shared_ptr<ITrtActivationArena> resolve_activation_arena(bool serial_execution_context,
+                                                                  cudaStream_t stream) {
+        if (!serial_execution_context)
+            return {};
+        int device = -1;
+        const cudaError_t status = cudaGetDevice(&device);
+        if (status != cudaSuccess) {
+            throw std::runtime_error(std::string("[trtmc] Failed to identify the CUDA device: ") +
+                                     cudaGetErrorString(status));
+        }
+
+        const ActivationArenaKey key{device, stream};
+        std::lock_guard<std::mutex> lock(activation_arenas_mutex_);
+        const auto found = activation_arenas_.find(key);
+        if (found != activation_arenas_.end()) {
+            if (auto arena = found->second.lock())
+                return arena;
+            activation_arenas_.erase(found);
+        }
+        auto arena = std::make_shared<RtxActivationArena>(device, stream);
+        activation_arenas_.emplace(key, arena);
+        return arena;
     }
 
     std::unique_ptr<ITrtModule>
@@ -632,7 +868,14 @@ class RtxBackend final : public IBackend,
                             const std::shared_ptr<nvinfer1::IRuntimeConfig>& config,
                             const StreamSetup& stream_setup, const ModuleCreateOptions& options,
                             const std::vector<ModuleExternalBinding>& external_bindings,
-                            bool use_synchronous_allocator) {
+                            bool use_synchronous_allocator, bool serial_execution_context) {
+        const auto activation_arena =
+            resolve_activation_arena(serial_execution_context, stream_setup.stream);
+        const std::int64_t activation_memory_bytes =
+            activation_arena ? engine->getDeviceMemorySizeForProfileV2(options.optimization_profile)
+                             : 0;
+        if (activation_memory_bytes < 0)
+            throw std::runtime_error("[trtmc] Invalid RTX activation memory requirement");
         std::unique_ptr<nvinfer1::IExecutionContext> context(
             engine->createExecutionContext(config.get()));
         if (!context)
@@ -646,7 +889,7 @@ class RtxBackend final : public IBackend,
 #endif
         auto module = std::make_unique<TrtModuleImpl>(
             engine.get(), context.get(), stream_setup.stream, options.optimization_profile, nullptr,
-            external_bindings);
+            external_bindings, activation_arena, activation_memory_bytes);
         // A completed TrtModuleImpl owns (or has already rejected and deleted)
         // the context. Before that point the local owner handles exceptions.
         (void)context.release();

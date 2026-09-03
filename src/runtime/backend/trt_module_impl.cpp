@@ -62,9 +62,12 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
 TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
                              cudaStream_t stream, int32_t profile_idx,
                              void* distributed_communicator,
-                             const std::vector<ModuleExternalBinding>& external_bindings)
+                             const std::vector<ModuleExternalBinding>& external_bindings,
+                             std::shared_ptr<ITrtActivationArena> activation_arena,
+                             std::int64_t activation_memory_bytes)
     : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
-      distributed_communicator_(distributed_communicator) {
+      distributed_communicator_(distributed_communicator),
+      activation_arena_(std::move(activation_arena)) {
     if (!ctx_)
         return;
     try {
@@ -76,8 +79,14 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
         if (profile_idx_ > 0) {
             if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_))
                 throw std::runtime_error("failed to select the optimization profile");
-            cudaStreamSynchronize(stream_);
+            const cudaError_t status = cudaStreamSynchronize(stream_);
+            if (status != cudaSuccess) {
+                throw std::runtime_error(std::string("failed to synchronize the optimization ") +
+                                         "profile selection: " + cudaGetErrorString(status));
+            }
         }
+        if (activation_arena_)
+            activation_arena_->attach(ctx_, stream_, activation_memory_bytes);
         allocate_buffers(engine);
     } catch (const std::exception& error) {
         std::cerr << "[trt_module] Module initialization failed: " << error.what() << '\n';
@@ -85,16 +94,14 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
             free_buffers();
         } catch (...) {
         }
-        delete ctx_;
-        ctx_ = nullptr;
+        destroy_execution_context();
     } catch (...) {
         std::cerr << "[trt_module] Module initialization failed\n";
         try {
             free_buffers();
         } catch (...) {
         }
-        delete ctx_;
-        ctx_ = nullptr;
+        destroy_execution_context();
     }
 }
 
@@ -242,8 +249,22 @@ TrtModuleImpl::~TrtModuleImpl() {
     // teardown releases distributed_owner from keep_alive_.
     if (cuda_graph_)
         cuda_graph_->reset();
+    // Keep the arena alive until after the context is deleted. Its allocation
+    // may still be the address recorded by the otherwise-idle context.
+    auto activation_arena = activation_arena_;
+    if (activation_arena && ctx_)
+        activation_arena->detach(ctx_);
     free_buffers();
     delete ctx_;
+    ctx_ = nullptr;
+    activation_arena_.reset();
+}
+
+void TrtModuleImpl::destroy_execution_context() noexcept {
+    if (activation_arena_ && ctx_)
+        activation_arena_->detach(ctx_);
+    delete ctx_;
+    ctx_ = nullptr;
 }
 
 void TrtModuleImpl::keep_alive(std::shared_ptr<void> resource) {
@@ -512,8 +533,7 @@ void TrtModuleImpl::bind_alias_outputs_or_invalidate(const std::vector<std::stri
             // with mixed state addresses.
             if (cuda_graph_)
                 cuda_graph_->reset();
-            delete ctx_;
-            ctx_ = nullptr;
+            destroy_execution_context();
             throw std::runtime_error("TensorRT rejected external alias output '" + output_name +
                                      "'");
         }
@@ -629,6 +649,10 @@ TensorMap TrtModuleImpl::forward(const TensorMap& inputs) {
 // --- Forward async ---
 
 void TrtModuleImpl::enable_cuda_graph() {
+    if (activation_arena_) {
+        throw std::logic_error(
+            "CUDA graph capture is incompatible with a shared TensorRT activation arena");
+    }
     use_cuda_graph_ = true;
     cuda_graph_->reset();
 }
@@ -662,7 +686,19 @@ void TrtModuleImpl::execute_enqueue() {
         validate_alias_groups_bound();
         alias_groups_ready_ = true;
     }
-    record_timed_enqueue();
+    if (!activation_arena_) {
+        record_timed_enqueue();
+        return;
+    }
+
+    activation_arena_->begin_enqueue(ctx_);
+    try {
+        record_timed_enqueue();
+    } catch (...) {
+        activation_arena_->end_enqueue();
+        throw;
+    }
+    activation_arena_->end_enqueue();
 }
 
 bool TrtModuleImpl::cuda_graph_captured() const {

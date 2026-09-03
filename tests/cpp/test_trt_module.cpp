@@ -42,6 +42,8 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <memory>
+#include <stdexcept>
 #include <vector>
 
 static int failures = 0;
@@ -55,6 +57,40 @@ static void check(bool condition, const char* test_name) {
 
 // Process-wide logger (TRT requires a single logger for all objects).
 static trtmc::TrtLogger g_logger;
+
+class TrackingActivationArena final : public trtmc::ITrtActivationArena {
+  public:
+    void attach(nvinfer1::IExecutionContext* context, cudaStream_t stream,
+                std::int64_t required_bytes) override {
+        attached_context = context;
+        attached_stream = stream;
+        attached_bytes = required_bytes;
+        ++attach_calls;
+    }
+
+    void begin_enqueue(nvinfer1::IExecutionContext* context) override {
+        if (throw_on_begin)
+            throw std::runtime_error("injected activation arena failure");
+        check(context == attached_context, "activation arena: enqueue uses attached context");
+        ++begin_calls;
+    }
+
+    void end_enqueue() noexcept override { ++end_calls; }
+
+    void detach(nvinfer1::IExecutionContext* context) noexcept override {
+        check(context == attached_context, "activation arena: detach uses attached context");
+        ++detach_calls;
+    }
+
+    nvinfer1::IExecutionContext* attached_context{nullptr};
+    cudaStream_t attached_stream{nullptr};
+    std::int64_t attached_bytes{0};
+    int attach_calls{0};
+    int begin_calls{0};
+    int end_calls{0};
+    int detach_calls{0};
+    bool throw_on_begin{false};
+};
 
 // Build a tiny TRT engine: identity mapping input[4] → output[4] (float32)
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
@@ -371,6 +407,51 @@ static void test_keep_alive() {
     cudaStreamDestroy(stream);
 }
 
+static void test_activation_arena_lifecycle() {
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    auto arena = std::make_shared<TrackingActivationArena>();
+    {
+        auto* ctx = engine->createExecutionContext();
+        trtmc::TrtModuleImpl module(engine.get(), ctx, stream, 0, nullptr, {}, arena, 4096);
+        check(module.ok(), "activation arena: module is valid");
+        check(arena->attach_calls == 1 && arena->attached_context == ctx &&
+                  arena->attached_stream == stream && arena->attached_bytes == 4096,
+              "activation arena: context attaches with stream and upper bound");
+
+        float input_data[4] = {2.0f, 4.0f, 6.0f, 8.0f};
+        trtmc::Tensor input{input_data, {4}, trtmc::DType::kFloat32};
+        module.forward_async({{"x", input}});
+        module.sync();
+        check(arena->begin_calls == 1 && arena->end_calls == 1,
+              "activation arena: enqueue is serialized by a balanced guard");
+
+        bool graph_rejected = false;
+        try {
+            module.enable_cuda_graph();
+        } catch (const std::logic_error&) {
+            graph_rejected = true;
+        }
+        check(graph_rejected, "activation arena: CUDA graph capture is rejected");
+
+        arena->throw_on_begin = true;
+        bool enqueue_rejected = false;
+        try {
+            module.forward_async({{"x", input}});
+        } catch (const std::runtime_error&) {
+            enqueue_rejected = true;
+        }
+        check(enqueue_rejected && arena->begin_calls == 1 && arena->end_calls == 1,
+              "activation arena: prepare failure does not release an unacquired guard");
+    }
+    check(arena->detach_calls == 1, "activation arena: context detaches before destruction");
+    cudaStreamDestroy(stream);
+}
+
 static void test_forward_device() {
     // Covers TrtModule::forward_device() with empty inputs
     // Exercises: forward_device_async (enqueue only), sync, output DeviceTensorMap
@@ -490,6 +571,7 @@ int main() {
     test_bind_external();
     test_unique_ptr_ownership();
     test_keep_alive();
+    test_activation_arena_lifecycle();
     test_forward_device();
     test_forward_device_with_input();
     test_profile_idx_default();

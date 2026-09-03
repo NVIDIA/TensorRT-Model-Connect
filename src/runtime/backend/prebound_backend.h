@@ -45,6 +45,19 @@ class IFileBackedBackend {
                             std::int64_t weight_streaming_budget_bytes, bool retain_engine) = 0;
 };
 
+// Optional TensorRT-RTX capability for file-backed modules whose execution is
+// serialized on one explicit CUDA stream. Keeping this opt-in separate avoids
+// changing ModuleCreateOptions or IFileBackedBackend's installed cross-DSO ABI.
+class ISerialFileBackedBackend {
+  public:
+    virtual ~ISerialFileBackedBackend();
+    virtual std::unique_ptr<ITrtModule> create_serial_module_from_file(
+        const char* plan_path, std::uint64_t plan_offset, std::uint64_t plan_size,
+        const char* expected_sha256, const ModuleCreateOptions& options,
+        const std::vector<ModuleExternalBinding>& external_bindings,
+        std::int64_t weight_streaming_budget_bytes, bool retain_engine) = 0;
+};
+
 // Optional capability for backends that own a process-shared JIT runtime
 // cache. Windows deliberately keeps backend DSOs alive until process exit, so
 // callers need an explicit, loader-lock-free persistence point.

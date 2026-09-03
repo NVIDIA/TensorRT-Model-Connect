@@ -24,6 +24,20 @@ execution contexts from those engines; the H3 staged-memory policy still
 destroys all 51 denoiser contexts before VAE decode, so this does not make the
 denoiser and VAE contexts resident at the same time.
 
+The 49 segmented VSA transition engines retain their deserialized engine
+objects, but request a zero resident-weight budget from TensorRT-RTX whether
+retention is enabled or disabled. Their weights remain fully streamable so the
+simultaneously loaded transition set does not consume roughly 39 GiB merely by
+falling back to the bundle-wide per-engine budget. The legacy FirstBlockCache
+`denoiser_tail_plan` keeps its separate retained-tail budget behavior.
+
+The entry, 49 transition, and finish execution contexts run serially on the
+pipeline's explicit CUDA stream and share one TensorRT-RTX user-managed
+activation arena sized to the largest context. This replaces 51 simultaneous
+maximum-shape activation allocations with one allocation without changing the
+execution order. CUDA graph capture is rejected for this explicitly serialized
+path because captured contexts require stable, private activation addresses.
+
 Each `generation_ms` sample includes native conditioning, denoising, video VAE
 decode, audio VAE decode, device-to-host copies, and host result assembly. It
 excludes bundle/pipeline loading, the warmup, destruction of the prior host

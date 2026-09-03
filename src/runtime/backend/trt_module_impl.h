@@ -13,6 +13,7 @@
 
 #include <NvInfer.h>
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
@@ -24,6 +25,24 @@ namespace trtmc {
 class CudaGraphExec;
 class TrtModuleImplTestPeer;
 
+// RTX supplies this optional coordinator for execution contexts that share a
+// user-managed activation allocation. Keeping the TensorRT-RTX implementation
+// behind this interface lets the ordinary TensorRT backend retain its default
+// allocation behavior.
+class ITrtActivationArena {
+  public:
+    virtual ~ITrtActivationArena() = default;
+
+    virtual void attach(nvinfer1::IExecutionContext* context, cudaStream_t stream,
+                        std::int64_t required_bytes) = 0;
+    // begin_enqueue() holds the arena's host-side serialization guard until
+    // end_enqueue(). The guard covers pointer rebinding and the enqueue call;
+    // CUDA stream ordering covers the asynchronous device work afterwards.
+    virtual void begin_enqueue(nvinfer1::IExecutionContext* context) = 0;
+    virtual void end_enqueue() noexcept = 0;
+    virtual void detach(nvinfer1::IExecutionContext* context) noexcept = 0;
+};
+
 class TrtModuleImpl final : public ITrtModule {
   public:
     // Backend creates engine + context, passes them in.
@@ -31,7 +50,9 @@ class TrtModuleImpl final : public ITrtModule {
     TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
                   cudaStream_t stream, int32_t profile_idx = 0,
                   void* distributed_communicator = nullptr,
-                  const std::vector<ModuleExternalBinding>& external_bindings = {});
+                  const std::vector<ModuleExternalBinding>& external_bindings = {},
+                  std::shared_ptr<ITrtActivationArena> activation_arena = {},
+                  std::int64_t activation_memory_bytes = 0);
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -90,6 +111,7 @@ class TrtModuleImpl final : public ITrtModule {
     cudaStream_t stream_{nullptr};
     int32_t profile_idx_{0};
     void* distributed_communicator_{nullptr};
+    std::shared_ptr<ITrtActivationArena> activation_arena_;
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
     bool alias_groups_ready_{true};
@@ -128,6 +150,7 @@ class TrtModuleImpl final : public ITrtModule {
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
     void execute_enqueue();
+    void destroy_execution_context() noexcept;
     void flush_timing_events();
     bool begin_timing_event(TimingEvent& event);
     void finish_timing_event(TimingEvent event);
