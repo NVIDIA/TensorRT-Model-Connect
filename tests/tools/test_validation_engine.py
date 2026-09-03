@@ -138,21 +138,33 @@ def test_full_duplex_bench_scorer_rejects_stale_summary_after_crash(
         )
 
 
-def test_vbench_siglip_scorer_runs_in_declared_environment(
+def test_model_owned_external_scorer_runs_in_declared_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen: list[str] = []
+    responses = [{"sample_id": f"sample-{index}"} for index in range(10)]
+    requests = [{"sample_id": f"sample-{index}"} for index in range(10)]
+    (tmp_path / "trtmc.json").write_text(
+        json.dumps({"responses": responses}), encoding="utf-8"
+    )
+    (tmp_path / "answers.json").write_text(
+        json.dumps({"requests": requests}), encoding="utf-8"
+    )
+    (tmp_path / "summary.json").write_text(
+        json.dumps({"status": "passed", "sample_count": 999}), encoding="utf-8"
+    )
 
     def fake_run(command, **_kwargs):
         seen.extend(command)
         output = Path(command[command.index("--output") + 1])
+        assert not output.exists()
         output.write_text(
             json.dumps(
                 {
                     "status": "passed",
-                    "sample_count": 100,
-                    "valid_count": 100,
-                    "passed_count": 100,
+                    "sample_count": 10,
+                    "valid_count": 10,
+                    "passed_count": 10,
                     "structural_pass_rate": 1.0,
                     "metrics": {
                         "siglip_alignment": {"mean": 0.3, "min": 0.1, "max": 0.5},
@@ -163,6 +175,7 @@ def test_vbench_siglip_scorer_runs_in_declared_environment(
                     "quality_gate_status": "report_only",
                     "gates": {},
                     "gate_failures": [],
+                    "primary_metric_name": "siglip_alignment",
                 }
             ),
             encoding="utf-8",
@@ -171,26 +184,92 @@ def test_vbench_siglip_scorer_runs_in_declared_environment(
 
     monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
 
-    result = validation_engine.run_vbench_siglip_scoring(
+    entrypoint = tmp_path / "model" / "quality_score.py"
+    entrypoint.parent.mkdir()
+    entrypoint.write_text("# fixture\n", encoding="utf-8")
+    result = validation_engine.run_model_owned_external_scoring(
         python="/profiles/reference_common/bin/python",
+        entrypoint=entrypoint,
         bundle_predictions=tmp_path / "trtmc.json",
         answers=tmp_path / "answers.json",
         work_dir=tmp_path,
-        scoring={"device": "cuda:0"},
-        gates={
-            "required_sample_count": 100,
-            "min_structural_pass_rate": 1.0,
-            "min_siglip_alignment_mean": 0.2,
-        },
+        options={"device": "cuda:0"},
+        gates={"min_structural_pass_rate": 1.0},
         local_files_only=True,
     )
 
     assert result["metrics"]["siglip_alignment"]["mean"] == 0.3
     assert seen[0] == "/profiles/reference_common/bin/python"
-    assert seen[1].endswith("tools/vbench_siglip_score.py")
-    assert seen[seen.index("--required-sample-count") + 1] == "100"
-    assert seen[seen.index("--min-siglip-alignment-mean") + 1] == "0.2"
+    assert seen[1] == str(entrypoint)
+    assert json.loads(seen[seen.index("--options-json") + 1]) == {"device": "cuda:0"}
+    assert json.loads(seen[seen.index("--gates-json") + 1]) == {
+        "min_structural_pass_rate": 1.0
+    }
     assert "--local-files-only" in seen
+
+
+def test_model_owned_external_scorer_rejects_incomplete_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "trtmc.json").write_text(
+        json.dumps({"responses": [{"sample_id": "sample-0"}]}), encoding="utf-8"
+    )
+    (tmp_path / "answers.json").write_text(
+        json.dumps({"requests": [{"sample_id": "sample-0"}]}), encoding="utf-8"
+    )
+    entrypoint = tmp_path / "model" / "quality_score.py"
+    entrypoint.parent.mkdir()
+    entrypoint.write_text("# fixture\n", encoding="utf-8")
+
+    def fake_run(command, **_kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "status": "passed",
+                    "sample_count": 0,
+                    "valid_count": 0,
+                    "passed_count": 0,
+                    "metrics": {},
+                    "gates": {},
+                    "gate_failures": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="does not match selected input count"):
+        validation_engine.run_model_owned_external_scoring(
+            python="/profiles/reference_common/bin/python",
+            entrypoint=entrypoint,
+            bundle_predictions=tmp_path / "trtmc.json",
+            answers=tmp_path / "answers.json",
+            work_dir=tmp_path,
+            options={},
+            gates={},
+            local_files_only=False,
+        )
+
+
+def test_model_owned_scorer_entrypoint_stays_with_owning_model(tmp_path: Path) -> None:
+    model_root = tmp_path / "tests/e2e/models/example"
+    manifest = model_root / "manifests/example.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}\n", encoding="utf-8")
+    scorer = model_root / "score.py"
+    scorer.write_text("# fixture\n", encoding="utf-8")
+
+    assert validation_engine.model_owned_scorer_entrypoint(
+        {"manifest": str(manifest)}, {"entrypoint": "score.py"}
+    ) == scorer.resolve()
+
+    with pytest.raises(ValueError, match="must stay inside the model owner directory"):
+        validation_engine.model_owned_scorer_entrypoint(
+            {"manifest": str(manifest)}, {"entrypoint": "../other/score.py"}
+        )
 
 
 def test_full_duplex_gate_actuals_use_worst_aggregate_delta() -> None:

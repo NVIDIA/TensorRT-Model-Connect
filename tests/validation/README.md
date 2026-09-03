@@ -253,6 +253,14 @@ reference, TRTMC runner, and comparator are invoked directly without calling
 the E2E orchestrator. Array-valued outputs are persisted as artifacts so a
 cached reference can be compared in later runs.
 
+Candidate-only metrics that need a separate Python environment use the
+`model_owned_external` scorer. Its `scoring.entrypoint` is resolved relative
+to the directory owning the selected model manifest and cannot escape that
+directory. The shared engine passes predictions, requests, options, and gates
+through a JSON CLI contract; it validates ordered sample IDs and scorer result
+counts, while metric implementation and model-specific structure checks stay
+in the model directory.
+
 Prepare the fixed task datasets from public benchmark sources already staged
 on the validation machine:
 

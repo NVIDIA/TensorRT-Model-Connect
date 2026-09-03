@@ -1902,7 +1902,7 @@ suites:
 
   - id: minimax_h3_vbench_siglip_task_quality
     description: >
-      Candidate-only task-quality metrics over a deterministic 100-prompt slice
+      Candidate-only task-quality metrics over a deterministic 10-prompt slice
       from pinned VBench. A pinned Apache-2.0 SigLIP model scores prompt/video
       alignment over eight evenly spaced frames; frame-feature cosine and pixel
       deltas report temporal consistency and motion. These TRTMC proxy metrics
@@ -1924,11 +1924,12 @@ suites:
     reference:
       mode: metric_only
     scoring:
-      scorer: vbench_siglip
+      scorer: model_owned_external
+      entrypoint: vbench_siglip_score.py
       python_profile: reference_common
-      device: cuda:0
+      options:
+        device: cuda:0
     gates:
-      required_sample_count: 10
       min_structural_pass_rate: 1.0
     gate_metric_kinds:
       min_structural_pass_rate: proportion

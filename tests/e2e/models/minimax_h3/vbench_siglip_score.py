@@ -34,7 +34,6 @@ SIGLIP_FILE_SHA256 = {
     "tokenizer.json": "c6e405cb7c670d56636a9402c81023a55bc6c3c53d89cf02b92f5c5005bfe920",
     "tokenizer_config.json": ("d6423dae508cc3a129d22ea443841c111832a1a73125b8f25ea8736951698bcb"),
 }
-EXPECTED_SAMPLE_COUNT = 100
 EXPECTED_SHAPE = [124, 768, 1344, 3]
 EXPECTED_RETAINED_FRAME_INDICES = [0, 18, 35, 53, 70, 88, 105, 123]
 EXPECTED_FRAME_SIZE = (1344, 768)
@@ -215,21 +214,11 @@ def score_vbench_siglip_predictions(
     valid_count = len(metric_values["siglip_alignment"])
     structural_pass_rate = valid_count / sample_count if sample_count else 0.0
     metrics = {name: _metric_summary(values) for name, values in metric_values.items()}
-    required_sample_count = int(gates.get("required_sample_count", EXPECTED_SAMPLE_COUNT))
     min_structural_pass_rate = float(gates.get("min_structural_pass_rate", 1.0))
-    applied_gates: dict[str, int | float] = {
-        "required_sample_count": required_sample_count,
+    applied_gates: dict[str, float] = {
         "min_structural_pass_rate": min_structural_pass_rate,
     }
     gate_failures = []
-    if sample_count != required_sample_count:
-        gate_failures.append(
-            {
-                "gate": "required_sample_count",
-                "actual": sample_count,
-                "required": required_sample_count,
-            }
-        )
     if structural_pass_rate < min_structural_pass_rate:
         gate_failures.append(
             {
@@ -256,6 +245,7 @@ def score_vbench_siglip_predictions(
         "passed_count": valid_count,
         "structural_pass_rate": structural_pass_rate,
         "metrics": metrics,
+        "primary_metric_name": "siglip_alignment",
         "calibration_status": ("quality_gated" if quality_gates else "pending_reference_baseline"),
         "quality_gate_status": "configured" if quality_gates else "report_only",
         "gates": applied_gates,
@@ -344,31 +334,27 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--predictions", type=Path, required=True)
     parser.add_argument("--answers", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--options-json", default="{}")
+    parser.add_argument("--gates-json", default="{}")
     parser.add_argument("--local-files-only", action="store_true")
-    parser.add_argument("--required-sample-count", type=int, default=EXPECTED_SAMPLE_COUNT)
-    parser.add_argument("--min-structural-pass-rate", type=float, default=1.0)
-    parser.add_argument("--min-siglip-alignment-mean", type=float)
-    parser.add_argument("--min-temporal-consistency-mean", type=float)
-    parser.add_argument("--min-motion-l1-mean", type=float)
-    parser.add_argument("--max-motion-l1-mean", type=float)
     return parser.parse_args()
+
+
+def _json_object(raw: str, label: str) -> dict[str, Any]:
+    value = json.loads(raw)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must decode to an object")
+    return dict(value)
 
 
 def main() -> int:
     args = _parse_args()
+    options = _json_object(args.options_json, "--options-json")
+    gates = _json_object(args.gates_json, "--gates-json")
     scorer, provenance = _load_pinned_scorer(
-        device=args.device,
+        device=str(options.get("device", "cuda:0")),
         local_files_only=args.local_files_only,
     )
-    gates = {
-        "required_sample_count": args.required_sample_count,
-        "min_structural_pass_rate": args.min_structural_pass_rate,
-    }
-    for name in QUALITY_GATE_METRICS:
-        value = getattr(args, name)
-        if value is not None:
-            gates[name] = value
     summary = score_vbench_siglip_predictions(
         json.loads(args.predictions.read_text(encoding="utf-8")),
         json.loads(args.answers.read_text(encoding="utf-8")),

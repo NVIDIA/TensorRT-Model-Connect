@@ -41,7 +41,6 @@ _DIRECT_GATE_SPECS = {
     "pairwise_ordering_agreement": ("min_pairwise_ordering_agreement", ">="),
     "psnr": ("min_psnr", ">="),
     "require_matching_initial_latents": ("matching_initial_latents", ">="),
-    "required_sample_count": ("sample_count", "=="),
     "score_correlation": ("min_score_correlation", ">="),
     "spearman_rho": ("min_spearman_rho", ">="),
     "ssim": ("min_ssim", ">="),

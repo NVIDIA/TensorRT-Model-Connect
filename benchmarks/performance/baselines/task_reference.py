@@ -55,7 +55,6 @@ MAGPIE_SPEAKER_ENCODER_URL = (
 )
 ADAPTERS = (
     "hf-diffusers",
-    "hf-diffusers-minimax-h3-video",
     "hf-qwen3-omni",
     "hf-transformers-asr",
     "hf-transformers-embedding",
@@ -1354,15 +1353,19 @@ def _diffusion_pipeline(
             else ("FluxPipeline",)
         ),
         "ltx_video": ("LTXPipeline", "LTXVideoPipeline", "DiffusionPipeline"),
-        "minimax_h3": ("ModularPipeline",),
         "pixart": ("PixArtSigmaPipeline", "DiffusionPipeline"),
         "qwen_image": ("QwenImagePipeline", "DiffusionPipeline"),
         "sana_wm": ("SanaVideoPipeline", "DiffusionPipeline"),
         "wan_t2v": ("WanPipeline", "DiffusionPipeline"),
         "wan2_2_ti2v": ("WanPipeline", "DiffusionPipeline"),
         "z_image": ("ZImagePipeline", "DiffusionPipeline"),
-    }[arguments.family]
+    }.get(arguments.family, ())
     configured_classes = options.get("pipeline_classes")
+    pipeline_load_mode = str(options.get("pipeline_load_mode", "from_pretrained"))
+    if pipeline_load_mode not in {"from_pretrained", "modular_components"}:
+        raise ValueError(
+            "pipeline_load_mode must be 'from_pretrained' or 'modular_components'"
+        )
     if configured_classes is None:
         classes = default_classes
     elif (
@@ -1382,11 +1385,11 @@ def _diffusion_pipeline(
             _cached_snapshot_path(model_id, requested_revision, "model_index.json")
             or model_source
         )
-    if arguments.family == "minimax_h3":
+    if pipeline_load_mode == "modular_components":
         manager_class = getattr(diffusers, "ComponentsManager", None)
         pipeline_class = getattr(diffusers, "ModularPipeline", None)
         if manager_class is None or pipeline_class is None:
-            raise RuntimeError("Diffusers does not provide the MiniMax-H3 modular pipeline API")
+            raise RuntimeError("Diffusers does not provide the modular pipeline API")
         load_options = {
             "trust_remote_code": bool(
                 options.get("trust_remote_code", arguments.trust_remote_code)
@@ -1409,6 +1412,10 @@ def _diffusion_pipeline(
             component_options["revision"] = requested_revision
         pipeline.load_components(**component_options)
         return pipeline
+    if not classes:
+        raise ValueError(
+            f"pipeline_classes must be configured for Diffusers family {arguments.family!r}"
+        )
     errors = []
     for name in classes:
         pipeline_class = getattr(diffusers, name, None)
@@ -1480,17 +1487,17 @@ def _load_diffusers(
         transformers_revision = _pinned_checkout_revision(
             transformers_repo,
             expected_revision,
-            repository="MiniMax-H3 Transformers reference",
+            repository="pinned Transformers reference",
         )
         source_root = Path(transformers_repo).resolve() / "src"
         entrypoint = source_root / "transformers" / "__init__.py"
         if not entrypoint.is_file():
-            raise ValueError(f"MiniMax-H3 Transformers checkout is incomplete: {entrypoint}")
+            raise ValueError(f"pinned Transformers checkout is incomplete: {entrypoint}")
         imported = sys.modules.get("transformers")
         imported_path = Path(str(getattr(imported, "__file__", "") or ""))
         if imported is not None and source_root not in imported_path.parents:
             raise ValueError(
-                "Transformers was imported before the pinned MiniMax-H3 source was activated"
+                "Transformers was imported before the pinned source was activated"
             )
         if str(source_root) not in sys.path:
             sys.path.insert(0, str(source_root))
@@ -1500,17 +1507,17 @@ def _load_diffusers(
         diffusers_revision = _pinned_checkout_revision(
             diffusers_repo,
             expected_revision,
-            repository="MiniMax-H3 Diffusers reference",
+            repository="pinned Diffusers reference",
         )
         source_root = Path(diffusers_repo).resolve() / "src"
         entrypoint = source_root / "diffusers" / "__init__.py"
         if not entrypoint.is_file():
-            raise ValueError(f"MiniMax-H3 Diffusers checkout is incomplete: {entrypoint}")
+            raise ValueError(f"pinned Diffusers checkout is incomplete: {entrypoint}")
         imported = sys.modules.get("diffusers")
         imported_path = Path(str(getattr(imported, "__file__", "") or ""))
         if imported is not None and source_root not in imported_path.parents:
             raise ValueError(
-                "Diffusers was imported before the pinned MiniMax-H3 source was activated"
+                "Diffusers was imported before the pinned source was activated"
             )
         if str(source_root) not in sys.path:
             sys.path.insert(0, str(source_root))
@@ -2375,7 +2382,6 @@ LOADERS: dict[
     str, Callable[[argparse.Namespace, Mapping[str, Any], Mapping[str, Any]], Session]
 ] = {
     "hf-diffusers": _load_diffusers,
-    "hf-diffusers-minimax-h3-video": _load_diffusers,
     "hf-qwen3-omni": _load_qwen3_omni,
     "hf-transformers-asr": _load_asr,
     "hf-transformers-embedding": _load_embedding,

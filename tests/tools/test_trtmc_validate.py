@@ -163,14 +163,12 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
         "input_asset_fields": ["prompt_file"],
     }
     assert task_quality["scoring"] == {
-        "scorer": "vbench_siglip",
+        "scorer": "model_owned_external",
+        "entrypoint": "vbench_siglip_score.py",
         "python_profile": "reference_common",
-        "device": "cuda:0",
+        "options": {"device": "cuda:0"},
     }
-    assert task_quality["gates"] == {
-        "required_sample_count": 10,
-        "min_structural_pass_rate": 1.0,
-    }
+    assert task_quality["gates"] == {"min_structural_pass_rate": 1.0}
     assert validation_catalog.suite_match_reason(task_quality, model) == (
         True,
         "selected",
@@ -3562,6 +3560,29 @@ def test_model_plugin_report_uses_sample_pass_rate_and_nested_metrics():
         "value": 1.0,
     }
     assert comparison["metrics"]["token_agreement_rate"] == 0.99
+
+
+def test_model_owned_report_declares_its_primary_metric() -> None:
+    comparison = trtmc_validate._comparison_details(
+        {
+            "status": "passed",
+            "mode": "model_owned_external",
+            "primary_metric_name": "quality_score",
+            "metrics": {
+                "quality_score": {
+                    "mean": 0.8,
+                    "min": 0.7,
+                    "max": 0.9,
+                }
+            },
+        },
+        {"status": "completed"},
+    )
+
+    assert comparison["primary_metric"] == {
+        "name": "quality_score",
+        "value": 0.8,
+    }
 
 
 def test_mcq_report_exposes_reference_tie_equivalence_metrics():

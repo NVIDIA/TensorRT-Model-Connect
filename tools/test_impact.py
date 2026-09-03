@@ -1982,7 +1982,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="validation_engine_tool",
             matcher=_path_in({
                 "tools/validation/engine.py",
-                "tools/vbench_siglip_score.py",
                 "tools/elf_hf_reference.py",
                 "tools/full_duplex_bench_score.py",
                 "tools/prepare_elf_validation_datasets.py",

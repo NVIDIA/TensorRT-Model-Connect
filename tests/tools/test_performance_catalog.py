@@ -37,10 +37,16 @@ def test_release_suite_includes_minimax_h3_video_only_performance() -> None:
     assert case["id"] == "minimax_h3.generate_image"
     assert case["operation"] == "generate_image"
     assert case["measurement"] == {"warmup": 3, "iterations": 10}
+    assert case["baseline"]["adapter"] == "hf-diffusers"
+    assert case["baseline"]["adapter_environment"] == {
+        "diffusers_repo": "TRTMC_MINIMAX_H3_DIFFUSERS_REPO",
+        "transformers_repo": "TRTMC_MINIMAX_H3_TRANSFORMERS_REPO",
+    }
     assert case["baseline"]["adapter_options"] == {
         "diffusers_revision": "abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc",
         "generator_device": "cpu",
         "output_fields": ["videos"],
+        "pipeline_load_mode": "modular_components",
         "require_pinned_diffusers_source": True,
         "require_pinned_transformers_source": True,
         "transformers_compat_revision": "bed02e1faee69e866e382f835b4f7b0a3c7b8431",

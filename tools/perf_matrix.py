@@ -1237,18 +1237,21 @@ def _resolved_adapter_options(baseline: Mapping[str, Any]) -> dict[str, Any]:
     configured = baseline.get("adapter_options", {})
     options = dict(configured) if isinstance(configured, Mapping) else {}
     adapter = str(baseline.get("adapter", ""))
+    declared_environment = baseline.get("adapter_environment", {})
+    if not isinstance(declared_environment, Mapping):
+        raise PerfMatrixError("baseline adapter_environment must be an object")
     external_checkouts = {
-        "hf-diffusers-minimax-h3-video": (
-            ("diffusers_repo", "TRTMC_MINIMAX_H3_DIFFUSERS_REPO"),
-            ("transformers_repo", "TRTMC_MINIMAX_H3_TRANSFORMERS_REPO"),
-        ),
         "upstream-elf": (("reference_repo", "TRTMC_ELF_REFERENCE_REPO"),),
         "upstream-lance": (("reference_repo", "TRTMC_LANCE_REFERENCE_REPO"),),
         "upstream-sana-wm": (("reference_repo", "TRTMC_SANA_WM_REFERENCE_REPO"),),
         "pytorch-personaplex": (("official_repo", "PERSONAPLEX_OFFICIAL_REPO"),),
-    }.get(adapter, ())
+    }.get(adapter, ()) + tuple(declared_environment.items())
     for external_checkout in external_checkouts:
         option_name, environment_name = external_checkout
+        if not isinstance(option_name, str) or not isinstance(environment_name, str):
+            raise PerfMatrixError(
+                "baseline adapter_environment must map option names to environment variable names"
+            )
         environment_value = os.environ.get(environment_name, "").strip()
         if option_name not in options and environment_value:
             options[option_name] = environment_value

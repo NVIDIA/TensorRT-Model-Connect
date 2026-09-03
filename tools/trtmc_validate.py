@@ -1212,7 +1212,6 @@ _PRIMARY_METRIC_BY_MODE = {
     "reranking_parity": "mean_pairwise_ordering_agreement",
     "semantic_segmentation_parity": "backend_pixel_agreement",
     "time_series_parity": "sample_agreement_rate",
-    "vbench_siglip": "siglip_alignment_mean",
 }
 _COMPARISON_METRICS = (
     *_PRIMARY_COMPARISON_METRICS,
@@ -1252,15 +1251,6 @@ _COMPARISON_METRICS = (
     "max_relative_l2",
     "max_absolute_error",
     "structural_pass_rate",
-    "siglip_alignment_mean",
-    "siglip_alignment_min",
-    "siglip_alignment_max",
-    "temporal_consistency_mean",
-    "temporal_consistency_min",
-    "temporal_consistency_max",
-    "motion_l1_mean",
-    "motion_l1_min",
-    "motion_l1_max",
 )
 _EXECUTION_ERROR_FIELDS = ("error", "exception", "traceback", "failure_class")
 
@@ -1317,8 +1307,9 @@ def _comparison_metrics(raw_result: Mapping[str, Any]) -> dict[str, Any]:
 def _primary_metric(
     mode: str,
     metrics: Mapping[str, Any],
+    preferred: str = "",
 ) -> dict[str, Any] | None:
-    preferred = _PRIMARY_METRIC_BY_MODE.get(mode)
+    preferred = preferred or _PRIMARY_METRIC_BY_MODE.get(mode, "")
     if preferred in metrics:
         return {"name": preferred, "value": metrics[preferred]}
     for name in _PRIMARY_COMPARISON_METRICS:
@@ -1348,10 +1339,11 @@ def _comparison_details(
     metrics = _comparison_metrics(raw_result)
     failures = raw_result.get("gate_failures", [])
     mode = str(raw_result.get("mode", "") or "")
+    primary_metric_name = str(raw_result.get("primary_metric_name", "") or "")
     return {
         "status": status,
         "mode": mode,
-        "primary_metric": _primary_metric(mode, metrics),
+        "primary_metric": _primary_metric(mode, metrics, primary_metric_name),
         "metrics": metrics,
         "failures": failures if isinstance(failures, list) else [],
     }

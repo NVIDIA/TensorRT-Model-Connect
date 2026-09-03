@@ -24,7 +24,6 @@ SUITE_SCHEMA = "trtmc.perf-suite/v2"
 L0_PROFILE_PATTERN = re.compile(r"(?:^|-)l0(?:-|$)", re.IGNORECASE)
 TASK_REFERENCE_ADAPTERS = {
     "hf-diffusers",
-    "hf-diffusers-minimax-h3-video",
     "hf-qwen3-omni",
     "hf-transformers-asr",
     "hf-transformers-embedding",
@@ -302,6 +301,18 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         if not isinstance(baseline.get("adapter_options", {}), Mapping):
             raise PerformanceSuiteError(
                 f"case {case['id']} task-reference adapter_options must be an object"
+            )
+        adapter_environment = baseline.get("adapter_environment", {})
+        if not isinstance(adapter_environment, Mapping) or any(
+            not isinstance(option_name, str)
+            or not option_name
+            or not isinstance(environment_name, str)
+            or not environment_name
+            for option_name, environment_name in adapter_environment.items()
+        ):
+            raise PerformanceSuiteError(
+                f"case {case['id']} task-reference adapter_environment must map "
+                "option names to environment variable names"
             )
         expected_mode = (
             "pytorch-eager"

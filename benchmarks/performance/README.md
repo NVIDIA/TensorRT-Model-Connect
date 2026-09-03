@@ -253,6 +253,10 @@ TRTMC_SANA_WM_REFERENCE_REPO
 PERSONAPLEX_OFFICIAL_REPO
 ```
 
+Task-reference baselines declare the mapping from adapter option to environment
+variable with `baseline.adapter_environment`. This keeps model checkout names in
+the suite entry while the shared runner only resolves the declared mapping.
+
 CI should prebuild the selected Python profiles and set
 `TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1`. Dependency installation is outside the
 measured campaign.

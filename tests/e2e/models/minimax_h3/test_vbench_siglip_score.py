@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
-from tools import vbench_siglip_score as score
+from tests.e2e.models.minimax_h3 import vbench_siglip_score as score
 
 
 class _TensorLike:
@@ -79,7 +79,7 @@ def test_score_vbench_siglip_reports_metrics_without_uncalibrated_quality_gate(
         {"responses": [first_response, second_response]},
         {"requests": [first_request, second_request]},
         scorer=lambda prompt, _frames: next(values) if prompt else {},
-        gates={"required_sample_count": 2, "min_structural_pass_rate": 1.0},
+        gates={"min_structural_pass_rate": 1.0},
     )
 
     assert summary["status"] == "passed"
@@ -92,10 +92,8 @@ def test_score_vbench_siglip_reports_metrics_without_uncalibrated_quality_gate(
     }
     assert summary["calibration_status"] == "pending_reference_baseline"
     assert summary["quality_gate_status"] == "report_only"
-    assert summary["gates"] == {
-        "required_sample_count": 2,
-        "min_structural_pass_rate": 1.0,
-    }
+    assert summary["primary_metric_name"] == "siglip_alignment"
+    assert summary["gates"] == {"min_structural_pass_rate": 1.0}
 
 
 def test_score_vbench_siglip_applies_quality_gates_when_explicitly_calibrated(
@@ -112,7 +110,6 @@ def test_score_vbench_siglip_applies_quality_gates_when_explicitly_calibrated(
             "motion_l1": 0.1,
         },
         gates={
-            "required_sample_count": 1,
             "min_structural_pass_rate": 1.0,
             "min_siglip_alignment_mean": 0.3,
         },
@@ -141,7 +138,7 @@ def test_score_vbench_siglip_fails_closed_on_structural_error(tmp_path: Path) ->
             "temporal_consistency": 1.0,
             "motion_l1": 0.1,
         },
-        gates={"required_sample_count": 1, "min_structural_pass_rate": 1.0},
+        gates={"min_structural_pass_rate": 1.0},
     )
 
     assert summary["status"] == "failed"
@@ -181,7 +178,7 @@ def test_cli_summary_is_json_serializable(tmp_path: Path) -> None:
             "temporal_consistency": 0.9,
             "motion_l1": 0.05,
         },
-        gates={"required_sample_count": 1},
+        gates={},
     )
 
     encoded = json.loads(json.dumps(summary))

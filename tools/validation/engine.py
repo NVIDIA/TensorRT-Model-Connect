@@ -11295,68 +11295,135 @@ def run_full_duplex_bench_comparison(
 
 
 
-def run_vbench_siglip_scoring(
+def model_owned_scorer_entrypoint(
+    model: Mapping[str, Any], scoring: Mapping[str, Any]
+) -> Path:
+    """Resolve a scorer below the directory that owns the model manifest."""
+
+    manifest_value = str(model.get("manifest", "") or "")
+    if not manifest_value:
+        raise ValueError("model-owned external scoring requires a model manifest")
+    manifest = Path(manifest_value)
+    if not manifest.is_absolute():
+        manifest = REPO_ROOT / manifest
+    manifest = manifest.resolve()
+    model_root = manifest.parent.parent if manifest.parent.name == "manifests" else manifest.parent
+
+    entrypoint_value = str(scoring.get("entrypoint", "") or "")
+    entrypoint_path = Path(entrypoint_value)
+    if not entrypoint_value or entrypoint_path.is_absolute():
+        raise ValueError("model-owned external scoring requires a relative scoring.entrypoint")
+    entrypoint = (model_root / entrypoint_path).resolve()
+    if not entrypoint.is_relative_to(model_root.resolve()):
+        raise ValueError("scoring.entrypoint must stay inside the model owner directory")
+    if not entrypoint.is_file():
+        raise FileNotFoundError(f"model-owned scorer entrypoint is missing: {entrypoint}")
+    return entrypoint
+
+
+def _model_owned_scoring_input_count(bundle_predictions: Path, answers: Path) -> int:
+    predictions = json.loads(bundle_predictions.read_text(encoding="utf-8"))
+    answer_payload = json.loads(answers.read_text(encoding="utf-8"))
+    responses = predictions.get("responses") if isinstance(predictions, Mapping) else None
+    requests = answer_payload.get("requests") if isinstance(answer_payload, Mapping) else None
+    if not isinstance(responses, list) or not isinstance(requests, list):
+        raise ValueError("model-owned scoring inputs must contain responses and requests lists")
+    if len(responses) != len(requests):
+        raise ValueError(
+            "model-owned scoring input length mismatch: "
+            f"{len(responses)} responses != {len(requests)} requests"
+        )
+    for index, (response, request) in enumerate(zip(responses, requests, strict=True)):
+        if not isinstance(response, Mapping) or not isinstance(request, Mapping):
+            raise ValueError(f"model-owned scoring row {index} must contain objects")
+        response_id = str(response.get("sample_id", "") or "")
+        request_id = str(request.get("sample_id", "") or "")
+        if not request_id or response_id != request_id:
+            raise ValueError(
+                "model-owned scoring sample id mismatch at "
+                f"{index}: {request_id!r} != {response_id!r}"
+            )
+    return len(requests)
+
+
+def run_model_owned_external_scoring(
     *,
     python: str,
+    entrypoint: Path,
     bundle_predictions: Path,
     answers: Path,
     work_dir: Path,
-    scoring: Mapping[str, Any],
+    options: Mapping[str, Any],
     gates: Mapping[str, Any],
     local_files_only: bool,
 ) -> dict[str, Any]:
-    """Run the pinned SigLIP candidate-quality evaluator."""
+    """Run a model-owned scorer through the shared JSON process contract."""
 
+    selected_input_count = _model_owned_scoring_input_count(bundle_predictions, answers)
     output_path = work_dir / "summary.json"
+    output_path.unlink(missing_ok=True)
     command = [
         python,
-        str(REPO_ROOT / "tools" / "vbench_siglip_score.py"),
+        str(entrypoint),
         "--predictions",
         str(bundle_predictions),
         "--answers",
         str(answers),
         "--output",
         str(output_path),
-        "--device",
-        str(scoring.get("device", "cuda:0")),
-        "--required-sample-count",
-        str(int(gates.get("required_sample_count", 100))),
-        "--min-structural-pass-rate",
-        str(float(gates.get("min_structural_pass_rate", 1.0))),
+        "--options-json",
+        json.dumps(dict(options), sort_keys=True),
+        "--gates-json",
+        json.dumps(dict(gates), sort_keys=True),
     ]
-    for gate_name in (
-        "min_siglip_alignment_mean",
-        "min_temporal_consistency_mean",
-        "min_motion_l1_mean",
-        "max_motion_l1_mean",
-    ):
-        if gate_name in gates:
-            command.extend(
-                (f"--{gate_name.replace('_', '-')}", str(float(gates[gate_name])))
-            )
     if local_files_only:
         command.append("--local-files-only")
     completed = subprocess.run(command, check=False, text=True, capture_output=True)
-    (work_dir / "vbench_siglip_score.log").write_text(
+    log_path = work_dir / "model_owned_score.log"
+    log_path.write_text(
         f"$ {shlex.join(command)}\n{completed.stdout}{completed.stderr}",
         encoding="utf-8",
     )
     if completed.returncode not in {0, 1}:
-        raise RuntimeError(
-            "VBench/SigLIP scorer failed "
-            f"(rc={completed.returncode}); see {work_dir / 'vbench_siglip_score.log'}"
-        )
+        raise RuntimeError(f"Model-owned scorer failed (rc={completed.returncode}); see {log_path}")
     if not output_path.is_file():
-        raise RuntimeError(
-            "VBench/SigLIP scorer produced no summary; see "
-            f"{work_dir / 'vbench_siglip_score.log'}"
-        )
+        raise RuntimeError(f"Model-owned scorer produced no summary; see {log_path}")
     summary = json.loads(output_path.read_text(encoding="utf-8"))
+    if not isinstance(summary, dict):
+        raise RuntimeError(f"Model-owned scorer summary must be an object; see {log_path}")
     expected_status = "passed" if completed.returncode == 0 else "failed"
     if summary.get("status") != expected_status:
         raise RuntimeError(
-            "VBench/SigLIP scorer exit status does not match summary; see "
-            f"{work_dir / 'vbench_siglip_score.log'}"
+            "Model-owned scorer exit status does not match summary; see "
+            f"{log_path}"
+        )
+    for key, expected_type in (
+        ("sample_count", int),
+        ("valid_count", int),
+        ("passed_count", int),
+        ("metrics", dict),
+        ("gates", dict),
+        ("gate_failures", list),
+    ):
+        value = summary.get(key)
+        if not isinstance(value, expected_type) or (
+            expected_type is int and isinstance(value, bool)
+        ):
+            raise RuntimeError(
+                f"Model-owned scorer summary field {key!r} has an invalid type; see {log_path}"
+            )
+    sample_count = summary["sample_count"]
+    valid_count = summary["valid_count"]
+    passed_count = summary["passed_count"]
+    if sample_count != selected_input_count:
+        raise RuntimeError(
+            f"Model-owned scorer sample_count {sample_count} does not match selected input count "
+            f"{selected_input_count}; see {log_path}"
+        )
+    if not 0 <= passed_count <= valid_count <= sample_count:
+        raise RuntimeError(
+            "Model-owned scorer counts must satisfy "
+            f"0 <= passed_count <= valid_count <= sample_count; see {log_path}"
         )
     return summary
 
@@ -11680,56 +11747,44 @@ def eval_one_model(
                     ),
                 }
             )
-    elif scorer == "vbench_siglip":
+    elif scorer == "model_owned_external":
         scoring = suite.get("scoring", {})
         scorer_profile = str(scoring.get("python_profile", "") or "")
         if not scorer_profile:
-            raise ValueError("VBench/SigLIP scoring requires scoring.python_profile")
+            raise ValueError("model-owned external scoring requires scoring.python_profile")
+        scorer_options = scoring.get("options", {})
+        if not isinstance(scorer_options, Mapping):
+            raise ValueError("model-owned external scoring options must be an object")
         scorer_python = resolve_profile_python(
             scorer_profile,
             str(getattr(args, "hf_python", "") or sys.executable),
         )
-        summary = run_vbench_siglip_scoring(
+        summary = run_model_owned_external_scoring(
             python=scorer_python,
+            entrypoint=model_owned_scorer_entrypoint(model, scoring),
             bundle_predictions=work_dir / "bundle_predictions.json",
             answers=answers_path,
             work_dir=work_dir,
-            scoring=scoring,
+            options=scorer_options,
             gates=suite.get("gates", {}),
             local_files_only=bool(args.local_files_only),
         )
+        report = {
+            key: value
+            for key, value in summary.items()
+            if key not in {*base_result, "samples", "mode"}
+        }
         result = {
             **base_result,
-            "mode": scorer,
-            "status": summary["status"],
-            "sample_count": summary["sample_count"],
-            "valid_count": summary["valid_count"],
-            "passed_count": summary["passed_count"],
-            "structural_pass_rate": summary["structural_pass_rate"],
-            "siglip_alignment_mean": summary["metrics"]["siglip_alignment"]["mean"],
-            "siglip_alignment_min": summary["metrics"]["siglip_alignment"]["min"],
-            "siglip_alignment_max": summary["metrics"]["siglip_alignment"]["max"],
-            "temporal_consistency_mean": summary["metrics"]["temporal_consistency"][
-                "mean"
-            ],
-            "temporal_consistency_min": summary["metrics"]["temporal_consistency"]["min"],
-            "temporal_consistency_max": summary["metrics"]["temporal_consistency"]["max"],
-            "motion_l1_mean": summary["metrics"]["motion_l1"]["mean"],
-            "motion_l1_min": summary["metrics"]["motion_l1"]["min"],
-            "motion_l1_max": summary["metrics"]["motion_l1"]["max"],
-            "metrics": summary["metrics"],
-            "calibration_status": summary["calibration_status"],
-            "quality_gate_status": summary["quality_gate_status"],
-            "gates": summary["gates"],
-            "gate_failures": summary["gate_failures"],
-            "benchmark_provenance": summary.get("benchmark_provenance", {}),
+            **report,
+            "mode": str(summary.get("mode", "") or scorer),
         }
         if summary["gate_failures"]:
             result.update(
                 {
                     "error_type": "BenchmarkGateError",
                     "error": (
-                        f"{len(summary['gate_failures'])} VBench/SigLIP gate(s) failed"
+                        f"{len(summary['gate_failures'])} model-owned scorer gate(s) failed"
                     ),
                 }
             )

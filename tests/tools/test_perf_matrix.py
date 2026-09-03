@@ -55,7 +55,7 @@ TASK_ADAPTERS = {
     "lance.generate": "upstream-lance",
     "locateanything.generate": "hf-transformers-vlm",
     "magpie_tts.generate_audio": "nemo-tts",
-    "minimax_h3.generate_image": "hf-diffusers-minimax-h3-video",
+    "minimax_h3.generate_image": "hf-diffusers",
     "nemotron_speech_streaming.transcribe": "nemo-asr",
     "patchtsmixer.solve": "pytorch-timeseries",
     "patchtst.solve": "pytorch-timeseries",
@@ -2588,10 +2588,8 @@ def test_task_reference_commands_record_external_checkout_paths(
 ) -> None:
     monkeypatch.setenv("TRTMC_ELF_REFERENCE_REPO", "/references/ELF")
     monkeypatch.setenv("TRTMC_LANCE_REFERENCE_REPO", "/references/Lance")
-    monkeypatch.setenv("TRTMC_MINIMAX_H3_DIFFUSERS_REPO", "/references/Diffusers-MiniMax-H3")
-    monkeypatch.setenv(
-        "TRTMC_MINIMAX_H3_TRANSFORMERS_REPO", "/references/Transformers-MiniMax-H3"
-    )
+    monkeypatch.setenv("EXAMPLE_DIFFUSERS_REPO", "/references/Diffusers")
+    monkeypatch.setenv("EXAMPLE_TRANSFORMERS_REPO", "/references/Transformers")
     monkeypatch.setenv("TRTMC_SANA_WM_REFERENCE_REPO", "/references/Sana")
     monkeypatch.setenv("PERSONAPLEX_OFFICIAL_REPO", "/references/PersonaPlex")
 
@@ -2604,9 +2602,17 @@ def test_task_reference_commands_record_external_checkout_paths(
     assert perf_matrix._resolved_adapter_options({"adapter": "upstream-sana-wm"}) == {
         "reference_repo": "/references/Sana"
     }
-    assert perf_matrix._resolved_adapter_options({"adapter": "hf-diffusers-minimax-h3-video"}) == {
-        "diffusers_repo": "/references/Diffusers-MiniMax-H3",
-        "transformers_repo": "/references/Transformers-MiniMax-H3",
+    assert perf_matrix._resolved_adapter_options(
+        {
+            "adapter": "hf-diffusers",
+            "adapter_environment": {
+                "diffusers_repo": "EXAMPLE_DIFFUSERS_REPO",
+                "transformers_repo": "EXAMPLE_TRANSFORMERS_REPO",
+            },
+        }
+    ) == {
+        "diffusers_repo": "/references/Diffusers",
+        "transformers_repo": "/references/Transformers",
     }
     assert perf_matrix._resolved_adapter_options({"adapter": "pytorch-personaplex"}) == {
         "official_repo": "/references/PersonaPlex"
@@ -2631,20 +2637,28 @@ def test_external_reference_adapter_rejects_a_missing_checkout(
         perf_matrix._resolved_adapter_options({"adapter": "upstream-elf"})
 
 
-def test_minimax_h3_reference_rejects_a_missing_transformers_checkout(
+def test_declared_adapter_environment_rejects_a_missing_checkout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("TRTMC_MINIMAX_H3_DIFFUSERS_REPO", "/references/Diffusers-MiniMax-H3")
-    monkeypatch.delenv("TRTMC_MINIMAX_H3_TRANSFORMERS_REPO", raising=False)
+    monkeypatch.setenv("EXAMPLE_DIFFUSERS_REPO", "/references/Diffusers")
+    monkeypatch.delenv("EXAMPLE_TRANSFORMERS_REPO", raising=False)
 
     with pytest.raises(
         perf_matrix.PerfMatrixError,
         match=(
             "requires adapter_options.transformers_repo or "
-            "TRTMC_MINIMAX_H3_TRANSFORMERS_REPO"
+            "EXAMPLE_TRANSFORMERS_REPO"
         ),
     ):
-        perf_matrix._resolved_adapter_options({"adapter": "hf-diffusers-minimax-h3-video"})
+        perf_matrix._resolved_adapter_options(
+            {
+                "adapter": "hf-diffusers",
+                "adapter_environment": {
+                    "diffusers_repo": "EXAMPLE_DIFFUSERS_REPO",
+                    "transformers_repo": "EXAMPLE_TRANSFORMERS_REPO",
+                },
+            }
+        )
 
 
 def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
@@ -3720,7 +3734,7 @@ def test_diffusers_local_mode_loads_resolved_snapshot_path(tmp_path: Path, monke
     assert captured["kwargs"]["local_files_only"] is True
 
 
-def test_minimax_h3_diffusers_adapter_loads_pinned_modular_components(
+def test_diffusers_adapter_loads_declared_modular_components(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
@@ -3744,7 +3758,7 @@ def test_minimax_h3_diffusers_adapter_loads_pinned_modular_components(
         Namespace(ComponentsManager=FakeManager, ModularPipeline=FakePipeline),
     )
     arguments = Namespace(
-        family="minimax_h3",
+        family="example_video",
         local_files_only=False,
         model="MiniMaxAI/MiniMax-H3",
         precision="bf16",
@@ -3753,7 +3767,9 @@ def test_minimax_h3_diffusers_adapter_loads_pinned_modular_components(
     )
     torch_module = Namespace(float16="fp16", float32="fp32", bfloat16="bf16")
 
-    runner["_diffusion_pipeline"](arguments, torch_module, {})
+    runner["_diffusion_pipeline"](
+        arguments, torch_module, {"pipeline_load_mode": "modular_components"}
+    )
 
     assert captured["model"] == arguments.model
     from_pretrained = captured["from_pretrained"]
