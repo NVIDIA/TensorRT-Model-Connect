@@ -42,6 +42,7 @@ SPDX-License-Identifier: Apache-2.0
 | `openai-community/gpt2` | `gpt2-125m` | `FP32` | None | — | 🟢 Green |
 | `ibm-granite/granite-3.1-2b-base` | `granite-3.1-2b` | `FP16` | None | — | 🟢 Green |
 | `internlm/internlm2-math-plus-1_8b` | `internlm2-1.8b` | `FP16` | None | — | 🟢 Green |
+| `IFM/K2-Horizon-7B`<br />Revision: `586b03f0fd1fbbf2f13eeafc33749e95ae34dd10` | `k2-horizon-7b` | `BF16` | None | — | 🟢 Green |
 | `OpenGVLab/InternVL3-2B-hf` | `internvl3-2b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `OpenGVLab/InternVL3-8B-hf` | `internvl3-8b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `bytedance-research/Lance` | `lance-3b-x2t-image` | `BF16` | None | — | 🟢 Green |

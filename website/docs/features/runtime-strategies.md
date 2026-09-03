@@ -16,7 +16,7 @@ selects that path before reading a native strategy.
 
 | Category | Representative model-owned strategies |
 | --- | --- |
-| Text decoder | `qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, `mixtral_decoder_moe`, `gpt_oss_decoder_moe` |
+| Text decoder | `k2_horizon_decoder_kv_cache`, `qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, `mixtral_decoder_moe`, `gpt_oss_decoder_moe` |
 | Recurrent text | `mamba_ssm_recurrent`, `rwkv_recurrent`, `nemotron_h_hybrid_mamba_attention`, `qwen3_5_hybrid_mamba_attention`, `qwen3_8_hybrid_mamba_attention` |
 | Encoder and retrieval | `bert_encoder_only`, `mpnet_encoder_only`, `eagle_vlm_embedding`, `eagle_vlm_reranking` |
 | Seq2seq | `t5_text_to_text`, `marian_translation`, `bart_seq2seq_encoder_decoder`, `m2m_100_seq2seq_encoder_decoder` |
