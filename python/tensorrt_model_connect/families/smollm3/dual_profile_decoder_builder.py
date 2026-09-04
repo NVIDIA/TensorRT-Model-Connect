@@ -62,7 +62,7 @@ from . import graph_blocks
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .config import ModelConfig
+    from .config import ModelConfig, resolve_rope_layer_schedule
     from .checkpoint_mapper import WeightDict
     from ...quantization.context import QuantContext
 
@@ -613,7 +613,7 @@ def build_dual_profile_decoder_engine(
     present_v_outs: list[trt.ITensor] = []
 
     # SmolLM3 interleaves NoPE layers; layers flagged False here skip RoPE.
-    rope_schedule = config.rope_layer_schedule()
+    rope_schedule = resolve_rope_layer_schedule(config)
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"

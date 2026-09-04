@@ -26,7 +26,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from . import graph_blocks
-from .config import ModelConfig
+from .config import ModelConfig, resolve_rope_layer_schedule
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 from .utils import const_in_work_dtype
 
@@ -427,7 +427,7 @@ def build_standard_decoder_engine(
     present_v_outputs = []
 
     # SmolLM3 interleaves NoPE layers; layers flagged False here skip RoPE.
-    rope_schedule = config.rope_layer_schedule()
+    rope_schedule = resolve_rope_layer_schedule(config)
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"

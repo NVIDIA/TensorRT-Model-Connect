@@ -402,3 +402,107 @@ def test_plugin_falls_back_outside_the_native_architecture_contract(
     ) == b"legacy-plan"
     assert captured["args"][2] == 128
     assert captured["kwargs"]["precision"] == "fp16"
+
+
+def _shared_build_config(**raw_updates):
+    """Build the config the engine builder actually constructs.
+
+    ``engine_builder`` resolves a checkpoint through the shared
+    ``tensorrt_model_connect.config.ModelConfig``, never this family's
+    dataclass, so anything the builders read has to work on that object. The
+    typed fields mirror what ``from_dir`` fills in for SmolLM3-3B.
+    """
+    from tensorrt_model_connect.config import ModelConfig as SharedModelConfig
+
+    raw = {
+        "_decoder_engine_layout": "split",
+        "no_rope_layer_interval": 4,
+        "rope_scaling": None,
+    }
+    raw.update(raw_updates)
+    return SharedModelConfig(
+        model_type="smollm3",
+        architectures=["SmolLM3ForCausalLM"],
+        vocab_size=128256,
+        hidden_size=2048,
+        intermediate_size=11008,
+        num_hidden_layers=36,
+        num_attention_heads=16,
+        num_key_value_heads=4,
+        rms_norm_eps=1e-5,
+        rope_theta=5_000_000.0,
+        max_position_embeddings=65536,
+        hidden_act="silu",
+        tie_word_embeddings=True,
+        raw=raw,
+    )
+
+
+def test_rope_layer_schedule_resolves_on_the_shared_build_config():
+    from tensorrt_model_connect.families.smollm3.config import (
+        resolve_rope_layer_schedule,
+    )
+
+    schedule = resolve_rope_layer_schedule(_shared_build_config())
+
+    assert len(schedule) == 36
+    assert [index for index, uses in enumerate(schedule) if not uses] == [
+        3, 7, 11, 15, 19, 23, 27, 31, 35
+    ]
+    assert schedule == ModelConfig(
+        model_type="smollm3",
+        num_hidden_layers=36,
+        raw=dict(_shared_build_config().raw),
+    ).rope_layer_schedule(), "family and shared configs must agree"
+
+
+def test_published_no_rope_layers_wins_over_the_interval():
+    from tensorrt_model_connect.families.smollm3.config import (
+        resolve_rope_layer_schedule,
+    )
+
+    published = [1] * 36
+    published[5] = 0
+    schedule = resolve_rope_layer_schedule(
+        _shared_build_config(no_rope_layers=published)
+    )
+
+    assert [index for index, uses in enumerate(schedule) if not uses] == [5]
+
+
+@pytest.mark.parametrize(
+    "raw_updates, fragment",
+    [
+        ({"no_rope_layer_interval": 0}, "no_rope_layer_interval must be positive"),
+        ({"no_rope_layers": [1, 1, 1]}, "no_rope_layers must be a sequence"),
+    ],
+)
+def test_malformed_schedule_is_rejected_on_the_shared_build_config(
+    raw_updates, fragment
+):
+    from tensorrt_model_connect.families.smollm3.config import (
+        resolve_rope_layer_schedule,
+    )
+
+    with pytest.raises(ValueError, match=fragment):
+        resolve_rope_layer_schedule(_shared_build_config(**raw_updates))
+
+
+def test_routing_rejects_a_malformed_schedule_on_the_shared_build_config():
+    """Routing must judge the schedule on the config the build path carries.
+
+    Resolving through a family-local method left this check silently inert for
+    the shared config, so a malformed schedule routed as eligible and only
+    surfaced once the graph builder ran.
+    """
+    capability = native_kv_architecture_capability(
+        _shared_build_config(no_rope_layer_interval=0)
+    )
+
+    assert not capability.eligible
+    assert any("no_rope_layer_interval must be positive" in reason
+               for reason in capability.reason.split("; "))
+
+
+def test_routing_still_accepts_a_well_formed_schedule():
+    assert native_kv_architecture_capability(_shared_build_config()).eligible

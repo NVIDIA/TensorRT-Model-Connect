@@ -201,11 +201,12 @@ def _validate_rope_layer_schedule(
         "no_rope_layer_interval"
     ) is None:
         return
-    resolve = getattr(config, "rope_layer_schedule", None)
-    if resolve is None:
-        return
+    # Imported here so this module keeps the import surface the other
+    # native-KV routing modules have (math and operator only).
+    from .config import resolve_rope_layer_schedule
+
     try:
-        schedule = resolve()
+        schedule = resolve_rope_layer_schedule(config)
     except ValueError as exc:
         reasons.append(str(exc))
         return
