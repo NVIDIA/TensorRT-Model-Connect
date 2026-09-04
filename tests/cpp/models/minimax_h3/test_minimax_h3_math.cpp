@@ -471,6 +471,38 @@ void test_audio_latent_unpack_and_denormalize() {
                "H3 audio transpose keeps right frame order");
 }
 
+void test_audio_decoder_channel_duplication() {
+    constexpr int32_t frames = 3;
+    constexpr std::size_t channel_values = 32U * frames;
+    std::vector<float> channel_major(2U * channel_values);
+    for (std::size_t index = 0; index < channel_values; ++index) {
+        channel_major[index] = static_cast<float>(index);
+        channel_major[channel_values + index] = static_cast<float>(1000U + index);
+    }
+
+    for (int32_t channel = 0; channel < 2; ++channel) {
+        const auto duplicated =
+            trtmc::duplicate_minimax_h3_audio_decoder_channel(channel_major, frames, channel);
+        check(duplicated.size() == channel_major.size(),
+              "audio decoder duplication preserves the batch-two shape");
+        for (std::size_t index = 0; index < channel_values; ++index) {
+            const float expected =
+                channel_major[static_cast<std::size_t>(channel) * channel_values + index];
+            check(duplicated[index] == expected, "audio decoder duplication fills batch item zero");
+            check(duplicated[channel_values + index] == expected,
+                  "audio decoder duplication fills batch item one");
+        }
+    }
+
+    bool bad_channel_threw = false;
+    try {
+        (void)trtmc::duplicate_minimax_h3_audio_decoder_channel(channel_major, frames, 2);
+    } catch (const std::invalid_argument&) {
+        bad_channel_threw = true;
+    }
+    check(bad_channel_threw, "audio decoder duplication rejects an invalid channel");
+}
+
 } // namespace
 
 int main() {
@@ -486,5 +518,6 @@ int main() {
     test_fl2va_full_public_geometry_and_rotary_contract();
     test_native_vsa_runtime_metadata();
     test_audio_latent_unpack_and_denormalize();
+    test_audio_decoder_channel_duplication();
     return failures == 0 ? 0 : 1;
 }

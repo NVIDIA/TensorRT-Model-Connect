@@ -1351,6 +1351,28 @@ std::vector<float> unpack_and_denormalize_minimax_h3_audio(const std::vector<flo
     return channel_major;
 }
 
+std::vector<float>
+duplicate_minimax_h3_audio_decoder_channel(const std::vector<float>& channel_major_latents,
+                                           int32_t audio_latent_frames, int32_t stereo_channel) {
+    if (audio_latent_frames <= 0)
+        throw std::invalid_argument("MiniMax-H3 audio latent frame count must be positive");
+    if (stereo_channel < 0 || stereo_channel >= 2)
+        throw std::invalid_argument("MiniMax-H3 stereo channel must be zero or one");
+    const std::size_t channel_values =
+        static_cast<std::size_t>(kAudioChannels) * audio_latent_frames;
+    if (channel_major_latents.size() != 2U * channel_values)
+        throw std::invalid_argument("MiniMax-H3 channel-major audio latent size is invalid");
+
+    const auto source_begin = channel_major_latents.begin() +
+                              static_cast<std::ptrdiff_t>(stereo_channel * channel_values);
+    const auto source_end = source_begin + static_cast<std::ptrdiff_t>(channel_values);
+    std::vector<float> duplicated(2U * channel_values);
+    std::copy(source_begin, source_end, duplicated.begin());
+    std::copy(source_begin, source_end,
+              duplicated.begin() + static_cast<std::ptrdiff_t>(channel_values));
+    return duplicated;
+}
+
 struct MiniMaxH3Pipeline::ResidentState {
     std::string prompt;
     std::vector<float> text_embeddings;
@@ -2749,26 +2771,37 @@ AudioResult MiniMaxH3Pipeline::ResidentState::decode_audio(
         unpack_and_denormalize_minimax_h3_audio(audio_rows_host, geometry.audio_latent_frames);
     auto module = loader("audio_vae_decoder_plan", stream, {}, 0);
     module->set_timing_label("audio_vae_decoder_plan");
-    TensorMap inputs;
-    inputs.emplace("audio_latents", Tensor{audio_latents.data(),
-                                           {2, kAudioChannels, geometry.audio_latent_frames},
-                                           DType::kFloat32});
-    const auto outputs = module->forward(inputs);
     const int32_t audio_output_samples = geometry.audio_latent_frames * 800;
-    auto planar =
-        copy_float(require_output(outputs, "decoded_audio"),
-                   static_cast<std::size_t>(2) * audio_output_samples, "AudioVAE decoder");
-    module->sync();
 
     AudioResult result;
     result.channels = 2;
     result.sample_rate = kAudioSampleRate;
-    result.samples.resize(planar.size());
-    for (int32_t sample = 0; sample < audio_output_samples; ++sample) {
-        result.samples[static_cast<std::size_t>(sample) * 2] = planar[sample];
-        result.samples[static_cast<std::size_t>(sample) * 2 + 1] =
-            planar[static_cast<std::size_t>(audio_output_samples) + sample];
+    result.samples.resize(static_cast<std::size_t>(2) * audio_output_samples);
+
+    // The released AudioVAE applies one shared mono decoder independently to
+    // the left and right channels. TensorRT-RTX 1.6.1 on SM121 can return an
+    // unstable second batch item for this dynamic deconvolution graph while
+    // batch item zero remains stable. Preserve the released model semantics by
+    // decoding each real stereo latent through item zero. Duplicating the
+    // selected channel satisfies the plan's fixed batch-two profile; the
+    // duplicate output is deliberately ignored.
+    for (int32_t channel = 0; channel < 2; ++channel) {
+        auto decoder_input = duplicate_minimax_h3_audio_decoder_channel(
+            audio_latents, geometry.audio_latent_frames, channel);
+        TensorMap inputs;
+        inputs.emplace("audio_latents", Tensor{decoder_input.data(),
+                                               {2, kAudioChannels, geometry.audio_latent_frames},
+                                               DType::kFloat32});
+        const auto outputs = module->forward(inputs);
+        auto duplicated_planar =
+            copy_float(require_output(outputs, "decoded_audio"),
+                       static_cast<std::size_t>(2) * audio_output_samples, "AudioVAE decoder");
+        for (int32_t sample = 0; sample < audio_output_samples; ++sample) {
+            result.samples[static_cast<std::size_t>(sample) * 2 + channel] =
+                duplicated_planar[sample];
+        }
     }
+    module->sync();
     if (result.samples.size() > static_cast<std::size_t>(std::numeric_limits<int32_t>::max()))
         throw std::overflow_error("MiniMax-H3 decoded audio exceeds the public result capacity");
     result.num_samples = static_cast<int32_t>(result.samples.size());

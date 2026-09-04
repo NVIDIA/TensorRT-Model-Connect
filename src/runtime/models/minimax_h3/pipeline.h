@@ -133,6 +133,9 @@ std::vector<float> make_minimax_h3_position_ids(int32_t text_rows,
                                                 const MiniMaxH3Geometry& geometry);
 std::vector<float> unpack_and_denormalize_minimax_h3_audio(const std::vector<float>& audio_rows,
                                                            int32_t audio_latent_frames);
+std::vector<float>
+duplicate_minimax_h3_audio_decoder_channel(const std::vector<float>& channel_major_latents,
+                                           int32_t audio_latent_frames, int32_t stereo_channel);
 void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t count,
                                float timestep, float sigma, float sigma_next);
 
