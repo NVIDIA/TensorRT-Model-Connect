@@ -20,6 +20,7 @@ from .provisioning import (
 )
 from .resolution import EnvironmentLock, EnvironmentRequest, EnvironmentResolver
 from .runner import CommandRunner, Runner
+from .targets import TargetService
 
 
 class DevToolkit:
@@ -67,6 +68,17 @@ class DevToolkit:
             runner,
             self._qualifications,
         ).resolve(request)
+
+    @property
+    def targets(self) -> TargetService:
+        """Compose execution-target lifecycle operations independently of toolchains."""
+        runner = self._runner or CommandRunner()
+        return TargetService(
+            self.repository,
+            self._capability_state_root,
+            self._providers,
+            runner,
+        )
 
     def provision(
         self,

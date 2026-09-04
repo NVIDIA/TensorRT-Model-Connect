@@ -4,7 +4,7 @@
 development environments and commands. It is not a workflow engine: Python is
 the composition language, and each operation can be called independently.
 
-The core has four stages:
+The environment core has four stages:
 
 ```text
 EnvironmentRequest -> resolve() -> EnvironmentLock
@@ -15,6 +15,14 @@ ProvisionedEnvironment + CommandSpec -> run() -> CommandResult
 
 Attestation and receipts are automatic postconditions of these operations.
 There is no cohort admission check in this path.
+
+Execution-resource lifecycle is an independent, optional capability. It feeds a
+ready target into the same environment API instead of introducing a workflow:
+
+```text
+DockerTarget -> targets.resolve()   -> TargetPlan
+TargetPlan   -> targets.provision() -> ProvisionedTarget.execution_target
+```
 
 ## Resolve and use the target's existing toolchain
 
@@ -83,17 +91,84 @@ To combine managed TensorRT artifacts with a caller-owned CUDA prefix, use
 `toolchain_options={"cuda_prefix": "/path/to/cuda"}`. Execution target options
 never carry toolchain configuration.
 
-## Adopt an existing campaign container
+## Create, start, or adopt a Docker target
 
-The built-in Docker provider is adoption-only. It does not assume an NGC image,
-`/opt/venv`, `--gpus device=...`, or a checked-in Dockerfile. It inspects a
-running container, records its image ID, and probes its actual Python, CUDA,
-TensorRT Python package, native library, and headers before producing the lock.
+The target API owns Docker image and container lifecycle. The separate Docker
+execution-context provider consumes the resulting running container; it does
+not hide container creation inside environment resolution. The caller chooses
+the image, GPUs, mounts, workspace, state location, command, IPC mode, and
+environment instead of inheriting an NGC- or campaign-specific convention.
+
+This example pulls an image when absent, creates and starts the container, then
+passes its immutable container identity into arbitrary-version environment
+resolution:
+
+```python
+from pathlib import PurePosixPath
+
+from trtmc_devtoolkit import (
+    DockerGpuRequest,
+    DockerImageRef,
+    DockerMount,
+    DockerTarget,
+    TargetPolicy,
+)
+
+docker = toolkit.targets.ensure(
+    DockerTarget(
+        name="trtmc-dev",
+        image=DockerImageRef("registry.example/cuda:13.3-devel"),
+        gpus=DockerGpuRequest.devices("1"),
+        mounts=(
+            DockerMount(repo.resolve(), PurePosixPath("/workspace/trtmc")),
+        ),
+        workspace=PurePosixPath("/workspace/trtmc"),
+        state=PurePosixPath("/state/devtoolkit"),
+        ipc="host",
+    ),
+    policy=TargetPolicy.ENSURE,
+)
+
+lock = toolkit.resolve(
+    EnvironmentRequest(
+        tensorrt="11.2.0.113",
+        target=docker.execution_target,
+    )
+)
+environment = toolkit.provision(lock)
+```
+
+`DockerImageBuild(context=Path("image"))` can replace `DockerImageRef` when the
+image itself should be built from a caller-owned Dockerfile. Build arguments are
+read from the subprocess environment, so their values do not appear in command
+logs or receipts.
+
+Target policies are explicit:
+
+- `ADOPT` requires an already-running matching container and performs no image
+  or container mutation.
+- `START` may start an existing matching container, but never pulls, builds, or
+  creates.
+- `ENSURE` may pull/build the image and create/start the container as needed.
+- `CREATE` creates a missing container and accepts only an idempotent retry of a
+  container owned by the same target plan.
+
+No policy deletes or silently replaces an existing container. A name collision
+or configuration drift fails with the mismatched fields so ownership remains
+with the caller.
+
+After the target is ready, the execution-context provider records its Docker
+daemon ID, immutable container ID, and image ID, and probes its actual Python,
+CUDA, TensorRT Python package, native library, and headers before producing the
+environment lock.
 Docker CLI 20.10 or newer is required so command environment values can use
 `docker exec --env-file` without appearing in process arguments.
 The lock binds the Docker daemon ID, immutable container ID, and image ID. The
 binding is rechecked before provisioning, attestation, builds, and commands, so
 a recycled container name or changed Docker context fails closed.
+
+An already-running user container can still be passed directly when lifecycle
+management is not wanted:
 
 ```python
 lock = toolkit.resolve(
@@ -243,13 +318,17 @@ fails closed when the caller requests a preset or requires qualification.
 
 | Identity | Includes | Excludes |
 |---|---|---|
+| Target plan | Docker daemon, image source/build input digest, container configuration, hashed environment values | live container/image IDs, secret values |
+| Provisioned target | Docker daemon ID, immutable container and image IDs, observed configuration digest | mutable container name as identity |
 | Environment lock | resolved context, effective path mapping, exact Python/CUDA/TRT, provider versions, artifact digests | source revision, GPU SM, preset spelling, private locator |
 | Provisioned environment | lock ID, effective execution identity, normalized toolchain runtime, observed file digests | command occurrence |
 | Build request | environment ID, source snapshot, SM set, CMake/build inputs | command occurrence |
 | Build result | build request ID and output digests | unrelated later runs |
 | Command invocation | environment ID, arguments, path scopes, environment-value digest, build/artifact provenance | occurrence ID |
 
-Provisioning writes `environment-lock.json`, `provision-receipt.json`, and an
+Target provisioning writes `target-plan.json` and `provision-receipt.json`
+under `.devtoolkit/targets/<plan-id>/`. Environment provisioning writes
+`environment-lock.json`, `provision-receipt.json`, and an
 observed attestation under `.devtoolkit/environments/<lock-id>/`. Builds and
 commands write their own v3 receipts below that environment directory. Receipts
 do not serialize provider secrets or environment variable values. JSON receipts
@@ -263,12 +342,13 @@ Build failures before a build request ID can be computed are recorded below
 
 ## Extension points
 
-There are three provider protocols:
+There are four provider protocols:
 
 - `ToolchainSource`: discover, materialize, and observe a CUDA/TensorRT toolchain.
 - `ToolchainCatalog`: turn version intent into immutable artifacts for a
   registered materializer.
-- `ExecutionContext`: resolve/provision a target and execute mapped commands.
+- `TargetProvider`: resolve, materialize, and attest an execution resource.
+- `ExecutionContext`: bind a ready execution identity and execute mapped commands.
 
 Extension contracts live under `trtmc_devtoolkit.spi`. Execution contexts
 declare semantic capabilities such as `host-filesystem` or
@@ -280,6 +360,7 @@ discovery or workflow DAG.
 from trtmc_devtoolkit.spi import ProviderRegistry
 
 registry = ProviderRegistry.with_builtins()
+registry.register_target(MyRemoteTargetProvider())
 registry.register_context(MyRemoteContext())
 registry.register_toolchain(MyTensorRTSource())
 toolkit = DevToolkit.from_checkout(repo, providers=registry.freeze())
@@ -287,7 +368,8 @@ toolkit = DevToolkit.from_checkout(repo, providers=registry.freeze())
 
 ## API scope
 
-DevToolkit exposes only environment capabilities: `resolve()`, `provision()`,
-`build()`, `run()`, and `run_trtmc()`. Higher-level development flows belong in
-user code or examples composed from those capabilities; DevToolkit does not
-define a workflow DAG or a second cohort-gated preparation API.
+DevToolkit exposes independent target lifecycle through `targets`, plus
+environment capabilities `resolve()`, `provision()`, `build()`, `run()`, and
+`run_trtmc()`. Higher-level development flows belong in user code or examples
+composed from those capabilities; DevToolkit does not define a workflow DAG or
+a cohort-gated preparation API.

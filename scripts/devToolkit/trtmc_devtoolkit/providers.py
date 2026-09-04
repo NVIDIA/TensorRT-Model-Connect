@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         ToolchainCandidate,
     )
     from .runner import Runner
+    from .targets import TargetHandle, TargetPlan, TargetPolicy
 
 
 class ToolchainSource(Protocol):
@@ -110,11 +111,44 @@ class ExecutionContext(Protocol):
     ) -> subprocess.CompletedProcess[str]: ...
 
 
+class TargetProvider(Protocol):
+    """Resolve and materialize an execution target independently of toolchains."""
+
+    descriptor: ProviderDescriptor
+
+    def resolve(
+        self,
+        request: object,
+        *,
+        repository: Path,
+        runner: Runner,
+    ) -> TargetPlan: ...
+
+    def provision(
+        self,
+        plan: TargetPlan,
+        *,
+        policy: TargetPolicy,
+        repository: Path,
+        state_dir: Path,
+        runner: Runner,
+    ) -> TargetHandle: ...
+
+    def attest(
+        self,
+        target: TargetHandle,
+        *,
+        repository: Path,
+        runner: Runner,
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class FrozenProviderRegistry:
     contexts: tuple[ExecutionContext, ...]
     toolchains: tuple[ToolchainSource, ...]
     catalogs: tuple[ToolchainCatalog, ...] = ()
+    targets: tuple[TargetProvider, ...] = ()
 
     def context(self, name: str) -> ExecutionContext:
         matches = [provider for provider in self.contexts if provider.descriptor.name == name]
@@ -128,6 +162,12 @@ class FrozenProviderRegistry:
             raise DevToolkitError(f"Unknown toolchain source provider: {name}")
         return matches[0]
 
+    def target(self, name: str) -> TargetProvider:
+        matches = [provider for provider in self.targets if provider.descriptor.name == name]
+        if len(matches) != 1:
+            raise DevToolkitError(f"Unknown target provider: {name}")
+        return matches[0]
+
 
 class ProviderRegistry:
     """Mutable wiring object that is frozen when a toolkit is constructed."""
@@ -136,6 +176,7 @@ class ProviderRegistry:
         self._contexts: dict[str, ExecutionContext] = {}
         self._toolchains: dict[str, ToolchainSource] = {}
         self._catalogs: dict[str, ToolchainCatalog] = {}
+        self._targets: dict[str, TargetProvider] = {}
 
     @classmethod
     def with_builtins(cls) -> ProviderRegistry:
@@ -148,6 +189,7 @@ class ProviderRegistry:
             SystemToolchainSource,
         )
         from .catalogs import NvidiaPackageIndexCatalog
+        from .targets import DockerTargetProvider
 
         registry = cls()
         registry.register_context(LocalExecutionContext())
@@ -157,6 +199,7 @@ class ProviderRegistry:
         registry.register_toolchain(ContainerImageToolchainSource())
         registry.register_toolchain(ManagedArtifactToolchainSource())
         registry.register_catalog(NvidiaPackageIndexCatalog())
+        registry.register_target(DockerTargetProvider())
         return registry
 
     def register_context(self, provider: ExecutionContext) -> None:
@@ -168,11 +211,15 @@ class ProviderRegistry:
     def register_catalog(self, provider: ToolchainCatalog) -> None:
         self._register(self._catalogs, provider, "toolchain catalog")
 
+    def register_target(self, provider: TargetProvider) -> None:
+        self._register(self._targets, provider, "target")
+
     def freeze(self) -> FrozenProviderRegistry:
         return FrozenProviderRegistry(
             contexts=tuple(self._contexts.values()),
             toolchains=tuple(self._toolchains.values()),
             catalogs=tuple(self._catalogs.values()),
+            targets=tuple(self._targets.values()),
         )
 
     @staticmethod

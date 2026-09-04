@@ -15,13 +15,13 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 
 from .commands import CommandSpec, EnvironmentPath, PathScope, state_path
+from .docker_support import docker_environment_file
 from .models import DevToolkitError, ToolchainObservation, ToolchainRuntime
 from .platforms import normalize_architecture
 from .provisioning import ContextHandle, ProvisionPolicy, ToolchainHandle
@@ -334,49 +334,6 @@ def _require_docker_binding(
         raise DevToolkitError("Docker container identity changed after resolution")
     if inspected.get("Image") != image_id:
         raise DevToolkitError("Docker container image changed after resolution")
-
-
-_DOCKER_ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
-@contextmanager
-def _docker_environment_file(
-    state_dir: Path,
-    environment: Mapping[str, str],
-) -> Iterator[Path | None]:
-    if not environment:
-        yield None
-        return
-    for name, value in environment.items():
-        if _DOCKER_ENVIRONMENT_NAME.fullmatch(name) is None:
-            raise DevToolkitError(f"Invalid Docker environment name: {name!r}")
-        if not isinstance(value, str) or any(character in value for character in "\r\n\0"):
-            raise DevToolkitError(
-                f"Docker environment value for {name!r} must be a single text line"
-            )
-    secret_dir = state_dir / ".secrets"
-    secret_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(secret_dir, 0o700)
-    temporary: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=secret_dir,
-            prefix="docker-environment-",
-            suffix=".list",
-            delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            os.chmod(temporary, 0o600)
-            for name, value in sorted(environment.items()):
-                stream.write(f"{name}={value}\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        yield temporary
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
 
 
 _CONTAINER_PROBE_SCRIPT = r"""
@@ -734,7 +691,7 @@ class DockerExecutionContext:
             image_id=image_id,
         )
         environment = {**dict(context.environment), **dict(command.environment)}
-        with _docker_environment_file(state_dir, environment) as environment_file:
+        with docker_environment_file(state_dir, environment) as environment_file:
             arguments = _docker_command(
                 docker_context,
                 "exec",

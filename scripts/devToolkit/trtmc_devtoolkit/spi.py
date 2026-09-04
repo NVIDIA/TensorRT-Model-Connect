@@ -8,6 +8,7 @@ from .providers import (
     ExecutionContext,
     FrozenProviderRegistry,
     ProviderRegistry,
+    TargetProvider,
     ToolchainCatalog,
     ToolchainSource,
 )
@@ -18,6 +19,7 @@ from .qualifications import (
     QualificationSource,
 )
 from .resolution import ContextLock, ProviderDescriptor, ToolchainCandidate
+from .targets import TargetHandle, TargetPlan
 
 __all__ = [
     "BuildContext",
@@ -29,6 +31,9 @@ __all__ = [
     "FrozenProviderRegistry",
     "ProviderDescriptor",
     "ProviderRegistry",
+    "TargetProvider",
+    "TargetHandle",
+    "TargetPlan",
     "QualificationRecord",
     "QualificationRegistry",
     "QualificationSource",

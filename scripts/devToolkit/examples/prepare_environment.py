@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Resolve, adopt, build, and use an existing campaign container."""
+"""Create a Docker target, resolve its toolchain, build TRTMC, and run it."""
 
 from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
@@ -15,15 +15,26 @@ sys.path.insert(0, str(REPOSITORY / "scripts" / "devToolkit"))
 
 from trtmc_devtoolkit import (  # noqa: E402
     DevToolkit,
+    DockerGpuRequest,
+    DockerImageRef,
+    DockerMount,
+    DockerTarget,
     EnvironmentRequest,
-    ExecutionTarget,
+    TargetPolicy,
     TrtmcBuildRecipe,
 )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--container", required=True)
+    parser.add_argument("--container", default="trtmc-devtoolkit")
+    parser.add_argument("--image", required=True)
+    parser.add_argument(
+        "--gpu",
+        action="append",
+        default=[],
+        help="Docker GPU device ID; repeat to select several (default: all)",
+    )
     parser.add_argument("--tensorrt", required=True)
     parser.add_argument("--architecture", choices=("x86_64", "aarch64"))
     parser.add_argument(
@@ -34,14 +45,25 @@ def main() -> None:
     arguments = parser.parse_args()
 
     toolkit = DevToolkit.from_checkout(REPOSITORY)
+    target = toolkit.targets.ensure(
+        DockerTarget(
+            name=arguments.container,
+            image=DockerImageRef(arguments.image),
+            gpus=(
+                DockerGpuRequest.devices(*arguments.gpu)
+                if arguments.gpu
+                else DockerGpuRequest.all()
+            ),
+            mounts=(DockerMount(REPOSITORY.resolve(), PurePosixPath(arguments.workspace)),),
+            workspace=PurePosixPath(arguments.workspace),
+        ),
+        policy=TargetPolicy.ENSURE,
+    )
     lock = toolkit.resolve(
         EnvironmentRequest(
             tensorrt=arguments.tensorrt,
             architecture=arguments.architecture,
-            target=ExecutionTarget.docker(
-                container=arguments.container,
-                workspace=arguments.workspace,
-            ),
+            target=target.execution_target,
         )
     )
     environment = toolkit.provision(lock)
