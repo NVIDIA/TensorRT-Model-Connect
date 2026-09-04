@@ -10,7 +10,7 @@ source. Start at the repository root.
 
 The repository-local `scripts/devToolkit` Python API exposes independent
 resolution, provisioning, source-build, and command capabilities. TensorRT is
-an arbitrary exact four-part request; a cohort is optional qualification
+an arbitrary exact four-part request; qualification evidence is optional
 provenance, not an allowlist. This example adopts an existing development
 container and verifies its actual CUDA/TensorRT toolchain before building:
 
@@ -21,7 +21,12 @@ import sys
 repo = Path.cwd()
 sys.path.insert(0, str(repo / "scripts" / "devToolkit"))
 
-from trtmc_devtoolkit import BuildSpec, DevToolkit, EnvironmentRequest, ExecutionTarget
+from trtmc_devtoolkit import (
+    DevToolkit,
+    EnvironmentRequest,
+    ExecutionTarget,
+    TrtmcBuildRecipe,
+)
 
 toolkit = DevToolkit.from_checkout(repo)
 lock = toolkit.resolve(
@@ -37,7 +42,7 @@ lock = toolkit.resolve(
 environment = toolkit.provision(lock)
 build = toolkit.build(
     environment,
-    BuildSpec(targets=("trtmc", "trtmc_backend_trt", "trtmc_model_qwen")),
+    TrtmcBuildRecipe(targets=("trtmc", "trtmc_backend_trt", "trtmc_model_qwen")),
 )
 print(environment.receipt)
 print(build.receipt)
@@ -57,7 +62,7 @@ local targets, explicit CUDA policies, generic TRTMC CLI calls, extension
 providers, and receipt identity semantics.
 
 The manual commands below remain the direct source-build path and show the
-operations performed by development mode.
+operations represented by the sample recipe.
 
 ## 1. Select the GPU and start the container
 

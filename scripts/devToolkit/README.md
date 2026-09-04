@@ -14,7 +14,7 @@ ProvisionedEnvironment + CommandSpec -> run() -> CommandResult
 ```
 
 Attestation and receipts are automatic postconditions of these operations.
-There is no cohort admission check in this path.
+There is no version allowlist or preset admission check in this path.
 
 Execution-resource lifecycle is an independent, optional capability. It feeds a
 ready target into the same environment API instead of introducing a workflow:
@@ -217,7 +217,7 @@ isolated virtual environment without an OS-package install.
 
 Versions unavailable from the public indexes, such as an internal or pre-release
 build, can be supplied through a team JSON catalog. This is still automatic
-installation—the manifest is discovery metadata, not a cohort allowlist:
+installation—the manifest is discovery metadata, not a version allowlist:
 
 ```python
 from trtmc_devtoolkit import DevToolkit, JsonToolchainCatalog, builtin_provider_registry
@@ -277,9 +277,9 @@ version. Use `CudaPolicy.exact("12.8")`, `CudaPolicy.system_only()`, or
 
 ## Qualification is explicit and source-neutral
 
-DevToolkit does not scan `configs/environment-cohorts/` by default. A caller may
-attach optional qualification evidence through a source adapter; this never
-controls which TensorRT version can be attempted.
+DevToolkit has no built-in qualification dataset and loads no qualification
+records by default. A caller may attach optional qualification evidence through
+a source adapter; this never controls which TensorRT version can be attempted.
 
 ```python
 from trtmc_devtoolkit import JsonQualificationSource
@@ -293,17 +293,17 @@ toolkit = DevToolkit.from_checkout(
 request = EnvironmentRequest(
     tensorrt="11.2.1.2",
     target=ExecutionTarget.local(),
-    preset="trt112-cu133",
+    preset="team-qualified-trt112",
     require_qualification=True,
 )
 ```
 
-A JSON qualification record declares generic facts rather than the historical
-cohort shape:
+A JSON qualification record declares generic, source-neutral facts rather than
+a repository-specific environment bundle:
 
 ```json
 {
-  "id": "trt112-cu133",
+  "id": "team-qualified-trt112",
   "status": "qualified",
   "requirements": {
     "tensorrt": "11.2.1.2",
@@ -377,4 +377,4 @@ DevToolkit exposes independent target lifecycle through `targets`, plus
 environment capabilities `resolve()`, `provision()`, `build()`, `run()`, and
 `run_trtmc()`. Higher-level development flows belong in user code or examples
 composed from those capabilities; DevToolkit does not define a workflow DAG or
-a cohort-gated preparation API.
+gate environment preparation on qualification presets.
