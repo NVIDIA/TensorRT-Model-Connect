@@ -3308,6 +3308,138 @@ def test_task_reference_runner_measures_loaded_public_operation(
     }
 
 
+@pytest.mark.parametrize(
+    (
+        "family",
+        "expected_scope",
+        "input_preparation_included",
+        "calls_after_load",
+        "calls_after_invoke",
+    ),
+    [
+        (
+            "bert",
+            "task-pipeline-call-wall",
+            True,
+            [],
+            ["tokenize", "model"],
+        ),
+        (
+            "eagle_vlm",
+            "task-model-call-wall",
+            False,
+            ["tokenize"],
+            ["tokenize", "model"],
+        ),
+    ],
+)
+def test_embedding_task_reference_measures_the_family_timing_contract(
+    monkeypatch,
+    family,
+    expected_scope,
+    input_preparation_included,
+    calls_after_load,
+    calls_after_invoke,
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    calls: list[str] = []
+
+    class FakeTensor:
+        shape = (1, 2)
+        dtype = "fp32"
+
+        def to(self, *_args, **_kwargs):
+            return self
+
+        def unsqueeze(self, _dimension):
+            return self
+
+        def sum(self, **_kwargs):
+            return self
+
+        def clamp(self, **_kwargs):
+            return self
+
+        def numel(self):
+            return 2
+
+        def isfinite(self):
+            return self
+
+        def all(self):
+            return self
+
+        def item(self):
+            return True
+
+        def __mul__(self, _other):
+            return self
+
+        def __truediv__(self, _other):
+            return self
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def __call__(self, *_args, **_kwargs):
+            calls.append("tokenize")
+            return {"input_ids": FakeTensor(), "attention_mask": FakeTensor()}
+
+    class FakeModel:
+        config = Namespace(_commit_hash="model-revision")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def eval(self):
+            return self
+
+        def to(self, *_args, **_kwargs):
+            return self
+
+        def __call__(self, **_kwargs):
+            calls.append("model")
+            return Namespace(last_hidden_state=FakeTensor())
+
+    fake_torch = ModuleType("torch")
+    fake_torch.device = lambda value: value
+    fake_torch.float16 = "fp16"
+    fake_torch.float32 = "fp32"
+    fake_torch.bfloat16 = "bf16"
+    fake_torch.inference_mode = nullcontext
+    fake_torch.ones = lambda *_args, **_kwargs: FakeTensor()
+    fake_torch.nn = Namespace(functional=Namespace(normalize=lambda value, **_kwargs: value))
+    fake_transformers = ModuleType("transformers")
+    fake_transformers.AutoModel = FakeModel
+    fake_transformers.AutoTokenizer = FakeTokenizer
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    arguments = Namespace(
+        family=family,
+        model="sentence-transformers/all-MiniLM-L6-v2",
+        precision="fp32",
+        revision="model-revision",
+        trust_remote_code=False,
+        local_files_only=True,
+    )
+
+    session = runner["LOADERS"]["hf-transformers-embedding"](
+        arguments,
+        {"prompt": "The quick brown fox"},
+        {},
+    )
+
+    assert calls == calls_after_load
+    assert session.timing_scope == expected_scope
+    assert session.input_preparation_included is input_preparation_included
+    assert session.asset_loading_included is False
+    assert session.invoke()["embedding_vectors"] == 1
+    assert calls == calls_after_invoke
+
+
 def test_nemotron35_perf_reference_uses_archive_compatible_loader(monkeypatch) -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     from tools.reference import speech
