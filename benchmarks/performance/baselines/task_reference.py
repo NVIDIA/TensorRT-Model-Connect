@@ -1196,12 +1196,21 @@ def _load_embedding(
         .eval()
         .to(device)
     )
-    inputs = _to_device(
-        tokenizer(str(request.get("prompt", "")), return_tensors="pt", truncation=True),
-        device,
-    )
+    prompt = str(request.get("prompt", ""))
+    declared_timing = timing_contract(runner="task-reference", family=arguments.family)
+
+    def prepare_inputs() -> Mapping[str, Any]:
+        return _to_device(
+            tokenizer(prompt, return_tensors="pt", truncation=True),
+            device,
+        )
+
+    prepared_inputs = None
+    if not declared_timing["input_preparation_included"]:
+        prepared_inputs = prepare_inputs()
 
     def invoke() -> Mapping[str, Any]:
+        inputs = prepare_inputs() if prepared_inputs is None else prepared_inputs
         with torch.inference_mode():
             outputs = model(**inputs, output_hidden_states=True)
         hidden = getattr(outputs, "last_hidden_state", None)
@@ -1221,7 +1230,14 @@ def _load_embedding(
         )
         return summary
 
-    return Session(invoke, _resolved_revision(arguments, model), "transformers")
+    return Session(
+        invoke,
+        _resolved_revision(arguments, model),
+        "transformers",
+        timing_scope=str(declared_timing["timing_scope"]),
+        input_preparation_included=bool(declared_timing["input_preparation_included"]),
+        asset_loading_included=bool(declared_timing["asset_loading_included"]),
+    )
 
 
 def _load_reranking(
