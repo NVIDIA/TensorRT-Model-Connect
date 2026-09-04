@@ -343,13 +343,10 @@ def _actual_config_identity(container: Mapping[str, object]) -> dict[str, object
     config = container.get("Config") if isinstance(container.get("Config"), Mapping) else {}
     host = container.get("HostConfig") if isinstance(container.get("HostConfig"), Mapping) else {}
     mounts = container.get("Mounts") if isinstance(container.get("Mounts"), list) else []
-    environment: dict[str, str] = {}
-    for item in config.get("Env", []) if isinstance(config, Mapping) else []:
-        if isinstance(item, str) and "=" in item:
-            name, value = item.split("=", 1)
-            environment[name] = hashlib.sha256(
-                b"trtmc-devtoolkit-target-env-v1\0" + value.encode()
-            ).hexdigest()
+    environment = {
+        name: hashlib.sha256(b"trtmc-devtoolkit-target-env-v1\0" + value.encode()).hexdigest()
+        for name, value in sorted(_environment_values(config.get("Env")).items())
+    }
     stable_mounts = sorted(
         (_plain(mount) for mount in mounts),
         key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")),
@@ -388,7 +385,12 @@ class DockerTargetProvider:
             raise DevToolkitError("Docker target provider requires DockerTarget")
         context = request.docker_context
         if context is None:
-            context = command_output(runner, ["docker", "context", "show"], cwd=repository)
+            context = command_output(
+                runner,
+                ["docker", "context", "show"],
+                cwd=repository,
+                timeout=30,
+            )
         if not context:
             raise DevToolkitError("Docker target requires a non-empty context")
         require_docker_client_version(runner, repository, context)

@@ -352,7 +352,7 @@ There are four provider protocols:
 - `ToolchainSource`: discover, materialize, and observe a CUDA/TensorRT toolchain.
 - `ToolchainCatalog`: turn version intent into immutable artifacts for a
   registered materializer.
-- `TargetProvider`: resolve, materialize, and attest an execution resource.
+- `TargetProvider`: resolve, provision, and attest an execution resource.
 - `ExecutionContext`: bind a ready execution identity and execute mapped commands.
 
 Extension contracts live under `trtmc_devtoolkit.spi`. Execution contexts

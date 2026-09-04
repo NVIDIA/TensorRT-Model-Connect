@@ -470,6 +470,17 @@ def test_undeclared_environment_is_rejected(tmp_path: Path) -> None:
         toolkit.targets.ensure(request)
 
 
+def test_null_inspected_environment_reports_drift(tmp_path: Path) -> None:
+    runner = DockerLifecycleRunner()
+    toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
+    provisioned = toolkit.targets.ensure(target(tmp_path))
+    assert runner.container is not None
+    runner.container["Config"]["Env"] = None  # type: ignore[index]
+
+    with pytest.raises(DevToolkitError, match="configuration changed"):
+        toolkit.targets.attest(provisioned)
+
+
 def test_requested_environment_may_override_image_default(tmp_path: Path) -> None:
     runner = DockerLifecycleRunner()
     runner.image_environment.append("FEATURE=image-default")
