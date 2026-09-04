@@ -1,92 +1,76 @@
 ---
 title: MiniMax H3 Windows native benchmark
-description: Measure same-process ModelConnect H3 video-and-audio generation without a Python or third-party runtime.
+description: Measure original-weight dense H3 video-and-audio generation in the native ModelConnect TensorRT-RTX runtime.
 ---
 
 This contract measures the public `generate_video()` call inside the installed
-ModelConnect C++ runtime. It does not use a Python adapter, FastVideo, Triton,
-FFmpeg, a sidecar, or a subprocess. `trtmc.exe` keeps one pipeline alive for
-the warmup and measured iterations and writes only the last measured result as
-an MP4 through Windows Media Foundation.
+ModelConnect C++ runtime. The generation process does not load or invoke Python,
+PyTorch, FastVideo, Triton, FFmpeg, a sidecar, or a subprocess. `trtmc.exe`
+keeps one pipeline alive for the warmup and measured request and writes the
+measured result as an MP4 through Windows Media Foundation.
 
 ## Timing boundary
 
-`--warmup 1 --benchmark 2` performs one unmeasured request followed by two
-measured requests in the same process with the same prompt and request. Before
-each timer starts, the CLI destroys the prior host result. Each sample begins
-immediately before `IPipeline::generate_video(request)` and ends when it
-returns synchronized host video and audio.
+`--warmup 1 --benchmark 1` performs one unmeasured request followed by one
+measured request in the same process. The timer begins immediately before
+`IPipeline::generate_video(request)` and ends when it returns synchronized host
+video and audio.
 
-The qualified hot path also supplies an explicit TensorRT-RTX runtime-cache
-file and enables retained engines. The warmup populates the process-local
-retained-engine map and JIT runtime cache. Each measured request creates fresh
-execution contexts from those engines; the H3 staged-memory policy still
-destroys all 51 denoiser contexts before VAE decode, so this does not make the
-denoiser and VAE contexts resident at the same time.
-
-The 49 segmented VSA transition engines retain their deserialized engine
-objects, but request a zero resident-weight budget from TensorRT-RTX whether
-retention is enabled or disabled. Their weights remain fully streamable so the
-simultaneously loaded transition set does not consume roughly 39 GiB merely by
-falling back to the bundle-wide per-engine budget. The legacy FirstBlockCache
-`denoiser_tail_plan` keeps its separate retained-tail budget behavior.
-
-The entry, 49 transition, and finish execution contexts run serially on the
-pipeline's explicit CUDA stream and share one TensorRT-RTX user-managed
-activation arena sized to the largest context. This replaces 51 simultaneous
-maximum-shape activation allocations with one allocation without changing the
-execution order. Before each SM121 attention launch, the runtime also performs
-a device-wide synchronization so TensorRT-RTX auxiliary and weight streams
-have completed before the next context can reuse that arena. CUDA graph capture
-is rejected for this explicitly serialized path because captured contexts
-require stable, private activation addresses.
-
-Each `generation_ms` sample includes native conditioning, denoising, video VAE
+The reported `generation_ms` includes native conditioning, denoising, video VAE
 decode, audio VAE decode, device-to-host copies, and host result assembly. It
-excludes bundle/pipeline loading, the warmup, destruction of the prior host
-result, MP4 encoding, and file output.
+excludes bundle and pipeline loading, the warmup, MP4 encoding, and file output.
+The CLI reports those outer costs separately as `load_ms`, `media_write_ms`, and
+`total_ms`. Do not report `total_ms` as the hot single-generation latency.
 
-The CLI also reports:
+The qualified path uses a persistent TensorRT-RTX runtime cache and retains the
+hot engines inside the CLI process. The warmup populates the process-local
+text/AdaLN caches and retained-engine map. Each request still creates fresh
+execution contexts, and the staged runtime destroys the denoiser contexts
+before VAE decode to bound memory use.
 
-- `load_ms`: bundle validation, backend/plugin discovery, and pipeline load;
-- `input_decode_ms`: native image/video/audio reference decode and request
-  assembly;
-- `media_write_ms`: native H.264/AAC MP4 encoding and file output;
-- `total_ms`: the complete process-side operation after argument parsing,
-  including warmups and all measured calls; and
-- a sample summary with median, mean, minimum, and maximum generation time.
+## Original-weight dense engine boundary
 
-Do not compare `total_ms` with a same-process hot target. For an even number of
-samples the reported median is the mean of the two middle observations.
+The qualified bundle contains the official original H3 BF16 weights and uses
+TensorRT-RTX dense attention. It contains no FastH3 adapter, LoRA, VSA engine,
+VSA cubin/PTX, or external attention runtime.
 
-## Native VSA backend boundary
+The hot visual path uses the same six plan files for short and long requests:
 
-The qualified SM121 path assembles its sanitized VSA PTX into an `sm_121a`
-cubin at build time and embeds that cubin in the MiniMax H3 model plugin. The
-installed payload has no PTX sidecar, performs no driver PTX JIT, and neither
-loads nor invokes Python, Triton, FastVideo, or another attention runtime. On
-an SM121 device the plugin must print this line once per generation:
+- `text_encoder.plan`;
+- `adaln_precompute.plan`;
+- `denoiser_head.plan`;
+- `denoiser_tail.plan`;
+- `denoiser_finish.plan`; and
+- `vae_tile_decoder.plan`.
+
+T2VA additionally invokes `audio_vae_decoder.plan`. The denoiser head, tail,
+and finish engines each contain two TensorRT optimization profiles:
+
+- profile 0 exactly specializes the 537-token, 124-output-frame, 1344x768
+  qualification tuple; and
+- profile 1 covers the public dynamic envelope of 1--2641 prompt tokens,
+  124--345 output frames, and the supported canvases.
+
+The runtime selects the profile for each request. This is one implementation
+and one engine set, not separate five-second and fifteen-second models. An exact
+qualification request must print:
 
 ```text
-[minimax-h3] VSA attention backend=sm121_embedded_cubin
+[minimax-h3] denoiser optimization_profile=0/2 packed_rows=38247
 ```
 
-Loading, configuring, or launching that specialization is fail-closed on
-SM121. Every packed attention output is checked before it can reach the next
-transformer block. A non-finite output causes the complete attention branch to
-be rebuilt and replayed once with the in-tree portable CUDA implementation;
-a failed replay terminates generation. The denoiser finish outputs and updated
-scheduler latents are also checked at each step. Other supported NVIDIA
-architectures use the portable backend directly. Do not set a model-plugin
-directory, backend directory, or external VSA-plugin option for this package.
-The locked CLI discovers its sibling ModelConnect DLLs, and the MiniMax H3
-plugin contains both paths.
+The dense scheduler executes 49 transformer forwards. Head and finish execute
+on every forward. FirstBlockCache may reuse the tail residual on interior
+forwards; the first and final tail evaluations are unconditional, and a
+non-finite cache metric also forces a full tail evaluation. Head, tail, and
+finish execute serially on one CUDA stream and share one TensorRT-RTX
+user-managed activation arena sized for the selected profile.
 
 ## Five-second T2VA workload
 
-Use the exact bundle, bundle-builder revision, runtime revision, checkpoint,
-adapter, TensorRT-RTX SDK, driver, prompt, geometry, and seed in every
-reproduction. Close other GPU and unified-memory workloads before starting.
+Use the exact bundle, runtime revision, checkpoint, TensorRT-RTX SDK, driver,
+prompt, geometry, seed, and runtime settings in every reproduction. Close other
+GPU and unified-memory workloads before starting.
 
 ```powershell
 $InstallRoot = Join-Path $env:LOCALAPPDATA 'Programs\ModelConnect\MiniMax-H3'
@@ -97,211 +81,153 @@ $Prompt = (Get-Content -Raw `
     (Join-Path $RepoRoot `
         'tests\e2e\models\minimax_h3\prompts\t2va-example-1.json') |
     ConvertFrom-Json).prompt
-$RuntimeCache = Join-Path (Get-Location) 'minimax-h3-fast-h3.rtxcache'
+$RuntimeCache = Join-Path (Get-Location) 'minimax-h3-dense-fbc.rtxcache'
 $FiveSecondLog = Join-Path (Get-Location) 'minimax-h3-t2va-124f.log'
 
 & $Trtmc generate-video $Bundle `
     --prompt $Prompt `
     --num-frames 120 --height 768 --width 1344 --seed 0 `
+    --num-inference-steps 50 --guidance-scale 1 `
     --runtime-cache $RuntimeCache `
     --set minimax_h3.retain_engines=true `
-    --warmup 1 --benchmark 2 `
+    --set minimax_h3.retained_tail_weight_budget_gib=24 `
+    --set minimax_h3.first_block_cache_threshold=0.30 `
+    --warmup 1 --benchmark 1 `
     --output .\minimax-h3-t2va-124f.mp4 `
     2>&1 | Tee-Object -FilePath $FiveSecondLog
 if ($LASTEXITCODE -ne 0) { throw "MiniMax-H3 124-frame benchmark failed" }
 ```
 
-The request aligns 120 nominal frames to 124 output frames, or 5.167 seconds
-at 24 fps. The acceptance ceiling is 555,000 ms (9:15) for the same-process
-hot `generation_ms` median on the qualified Spark hardware/software cohort.
-It is a qualification threshold, not a portable latency guarantee.
+The fixture is exactly 537 tokenizer tokens, so the request routes to profile
+0. The nominal 120 frames align to 124 output frames, or 5.167 seconds at 24
+fps. The acceptance ceiling is 555,000 ms (9:15) for the hot measured sample on
+the qualified Spark hardware/software cohort. This is a qualification threshold,
+not a portable latency guarantee or a cold CLI-startup measurement.
 
-## Long aligned T2VA workload
+The `0.30` FirstBlockCache threshold is a measured delivery preset, not the
+bundle default or a universal quality/performance constant. On this exact
+fixture it produces six full tail evaluations and 43 cached tail reuses. A
+different prompt or profile may produce a different cache-decision sequence.
 
-The longest released local alignment that remains within 15 seconds is 345
-frames, or 14.375 seconds:
+## Current original-weight dense result
 
-```powershell
-$LongLog = Join-Path (Get-Location) 'minimax-h3-t2va-345f.log'
+The qualification candidate was built from
+`3226b4060f985652e7b7833a0c33b7b14f4f35e6` (tree
+`8a503ab82c9b26cca79719bb85639fc868836871`). The bundle metadata records the
+same source revision. The run used an NVIDIA RTX Spark N1X with a 63,424 MiB
+CUDA aperture, driver 616.67, CUDA 12.9.1, and TensorRT-RTX 1.6.1.
 
-& $Trtmc generate-video $Bundle `
-    --prompt $Prompt `
-    --num-frames 345 --height 768 --width 1344 --seed 0 `
-    --runtime-cache $RuntimeCache `
-    --set minimax_h3.retain_engines=true `
-    --warmup 1 --benchmark 2 `
-    --output .\minimax-h3-t2va-345f.mp4 `
-    2>&1 | Tee-Object -FilePath $LongLog
-if ($LASTEXITCODE -ne 0) { throw "MiniMax-H3 345-frame benchmark failed" }
-```
+| Request | Profile | Independent measured samples | Dense schedule | Output |
+| --- | --- | ---: | --- | --- |
+| 537 tokens, 120 nominal frames, 1344x768 | `0/2` | 542,101.711 ms (9:02.102); 546,701.314 ms (9:06.701) | 49 forwards, 6 full / 43 reused tails | 124 frames / 5.167 s, synchronized audio |
 
-The acceptance ceiling is 1,380,000 ms (23:00) for the hot `generation_ms`
-median on the qualified Spark hardware/software cohort. This leaves 20.326
-seconds of headroom over the qualified final-package median and is not a
-portable latency guarantee. A full `1 + 2` command runs three generations, so
-its wall time is expected to be much longer than one reported sample.
+Both independent `1 + 1` runs passed the native finite-value validation for RGB
+and audio and remained below the 555-second acceptance ceiling. The written MP4
+contains 1344x768 H.264 video at 24 fps and AAC stereo audio at
+32 kHz. The container reports a 5.166625-second video track and a 5.184-second
+audio track; the small difference is normal AAC framing. Representative frames
+were inspected and showed no checkerboard corruption or the severe accuracy
+failure seen in the discarded approximate-weight experiment.
 
-## Qualified final-package SM121 cubin result
+In the faster sample, the measured component totals were 481,797.980 ms for
+denoising, 58,021.071 ms for video VAE decode, and 2,199.365 ms for audio VAE
+decode. The measured request reused the text and AdaLN results from warmup.
+Raising the retained-tail
+weight budget above 24 GiB is not part of this contract: on this 63,424 MiB
+CUDA aperture it increased memory pressure and did not improve the measured
+latency.
 
-The measured native runtime and package were built from
-`610aeaa6a0acd611f38e9dceb71230d820e690ec` (tree
-`7f118e15e3585f7a46c554b6471334d004b5b014`). The retained bundle was
-constructed at ModelConnect builder revision
-`45bff91397da2875f93c0af9b847eb7308fce60d`; its embedded metadata and build
-receipt record that revision. Keep these provenance fields separate: a bundle
-rebuilt from a later clean revision records that later revision and is not
-expected to have the retained bundle's byte hash.
+## Verify the qualified hot path
 
-The run used an NVIDIA RTX Spark N1X (driver 616.67), CUDA 12.9.1, and
-TensorRT-RTX 1.6. Both commands used the same prompt fixture (file SHA-256
-`44DE7939AAABA9EAFCE0600653417900EADCC5362EC32C2BD5FE6FA70192E787`; extracted
-prompt UTF-8 SHA-256
-`98F36B879692095E099AE824C18D9E93E7006A490E082FD474A5F531769DCF06`), seed,
-bundle, cache policy, and `1 + 2` same-process timing contract shown above. The
-194,569,514,211-byte bundle SHA-256 was
-`18B69E84EF919399489A0D538117E84938F5768C365433C9C1D125772263F7E3`.
-
-| Request | Output | Measured samples | Hot median |
-| --- | --- | --- | --- |
-| 120 nominal frames | 124 frames / 5.167 s | 457,594.618 ms; 457,439.332 ms | 457,516.975 ms (7:37.517) |
-| 345 frames | 345 frames / 14.375 s | 1,357,180.330 ms; 1,362,168.359 ms | 1,359,674.344 ms (22:39.674) |
-
-Each final-package command recorded 53 warmup engine-cache fills, 106 measured
-cache hits, three `sm121_embedded_cubin` selections, zero `portable_cuda`
-selections or recovery replays, and three successful finite RGB/audio
-validations. The two 345-frame samples differ by 4,988.029 ms, or 0.367% of
-their median. The 23-minute ceiling leaves 17,831.641 ms of headroom over the
-slower sample.
-
-The 124-frame MP4 is 5,839,212 bytes with SHA-256
-`7EA70B4A333A972ABB6DE2932E49FECFD46D6ECD1B3AEB2BCA97D39B31467C35`.
-The 345-frame MP4 is 15,671,335 bytes with SHA-256
-`080761926BB5A91458E2600E12FB5D6D5F576959A7A1015790A82E54AADE27E9`.
-Both files contain 1344x768 H.264 Main video at 24 fps and AAC-LC stereo audio
-at 32 kHz. The long file contains a 14.375-second video track and a
-14.400-second audio track; the raw generated audio is 14.375 seconds and the
-difference is normal AAC tail padding.
-
-Pipeline loading and the warmup are intentionally outside each
-`generation_ms` sample. On this qualification run, the complete process took
-53:33.443 for the 124-frame command and 1:39:44.519 for the 345-frame command;
-those wall times cover load, warmup, both measured generations, validation,
-and MP4 output and must not be reported as single-generation latency.
-
-### Legacy PTX reference
-
-Earlier same-machine measurements at runtime revision
-`f029eeeb595b41ef6decf120aa9512fd59e6c4c0` predate build-time cubin assembly
-and recorded the `sm121_embedded_ptx` label. Their 124-frame samples were
-286,417.720 and 285,284.762 ms (median 285,851.241 ms); their 345-frame samples
-were 964,505.670 and 959,489.510 ms (median 961,997.590 ms). Those measurements
-remain historical references and do not qualify the final cubin package.
-
-## Verify the hot engine cache
-
-For either exact `1 + 2` command above, the warmup must retain 53 engines: the
-FastH3 entry, 49 transitions, finish, video VAE, and audio VAE. The two measured
-requests must then produce 106 retained-engine hits. Validate the complete log
-before accepting its timing:
+The `1 + 1` command must record five retained-engine fills during warmup and
+five retained-engine hits during the measured request: denoiser head, tail,
+finish, video VAE, and audio VAE. Text and AdaLN reuse are reported separately.
 
 ```powershell
-function Assert-MiniMaxH3HotCache(
+function Assert-MiniMaxH3DenseHotPath(
     [string] $LogPath,
-    [double] $MedianCeilingMs
+    [double] $CeilingMs = 555000
 ) {
-    $MissRecords = @(Select-String -Path $LogPath -SimpleMatch `
-        '[trtmc.rtx_engine_cache] hit=0 retained=1')
-    $HitRecords = @(Select-String -Path $LogPath -SimpleMatch `
-        '[trtmc.rtx_engine_cache] hit=1')
-    if ($MissRecords.Count -ne 53 -or $HitRecords.Count -ne 106) {
-        throw "Expected 53 warmup cache fills and 106 measured hits; got $($MissRecords.Count) and $($HitRecords.Count)"
+    $Misses = @(Select-String -LiteralPath $LogPath -SimpleMatch `
+        '[trtmc.rtx_engine_cache] hit=0 retained=1').Count
+    $Hits = @(Select-String -LiteralPath $LogPath -SimpleMatch `
+        '[trtmc.rtx_engine_cache] hit=1').Count
+    if ($Misses -ne 5 -or $Hits -ne 5) {
+        throw "Expected 5 warmup fills and 5 measured hits; got $Misses and $Hits"
     }
 
-    $WarmupValidation = @(Select-String -Path $LogPath -Pattern `
-        '^\[trtmc\.video_validation\] phase=warmup .*status=passed$')
-    if ($WarmupValidation.Count -ne 1 -or
-        @($MissRecords | Where-Object LineNumber -gt $WarmupValidation[0].LineNumber).Count -ne 0 -or
-        @($HitRecords | Where-Object LineNumber -lt $WarmupValidation[0].LineNumber).Count -ne 0) {
-        throw 'Engine-cache misses must be confined to warmup and all hits to measured requests'
-    }
+    $Profiles = @(Select-String -LiteralPath $LogPath -SimpleMatch `
+        'denoiser optimization_profile=0/2 packed_rows=38247').Count
+    if ($Profiles -ne 2) { throw "Expected two profile-0 selections; got $Profiles" }
 
-    $SampleRecords = @(Select-String -Path $LogPath -Pattern `
-        '^\[trtmc\.video_benchmark_sample\].*generation_ms=([0-9]+(?:\.[0-9]+)?)$')
-    if ($SampleRecords.Count -ne 2) {
-        throw "Expected exactly two measured samples; got $($SampleRecords.Count)"
-    }
-    $Samples = @($SampleRecords | ForEach-Object {
-        [double]::Parse($_.Matches[0].Groups[1].Value,
-            [Globalization.CultureInfo]::InvariantCulture)
-    })
-    if (@($Samples | Where-Object {
-        [double]::IsNaN($_) -or [double]::IsInfinity($_) -or $_ -le 0
-    }).Count) {
-        throw 'Generation samples must be finite and positive'
-    }
-    $ComputedMedian = ($Samples[0] + $Samples[1]) / 2.0
-    $SummaryRecord = @(Select-String -Path $LogPath -Pattern `
-        '^\[trtmc\.video_benchmark_summary\].*median_ms=([0-9]+(?:\.[0-9]+)?).*$')
-    if ($SummaryRecord.Count -ne 1) { throw 'Expected exactly one benchmark summary' }
-    $ReportedMedian = [double]::Parse(
-        $SummaryRecord[0].Matches[0].Groups[1].Value,
-        [Globalization.CultureInfo]::InvariantCulture)
-    if ([math]::Abs($ComputedMedian - $ReportedMedian) -gt 0.002 -or
-        $ReportedMedian -gt $MedianCeilingMs) {
-        throw "Invalid or over-ceiling median: computed=$ComputedMedian reported=$ReportedMedian ceiling=$MedianCeilingMs"
-    }
-
-    $Sm121 = @(Select-String -Path $LogPath -SimpleMatch `
-        'VSA attention backend=sm121_embedded_cubin').Count
-    $PortableBackend = @(Select-String -Path $LogPath -SimpleMatch `
-        'VSA attention backend=portable_cuda').Count
-    $Recovery = @(Select-String -Path $LogPath -Pattern `
-        'replaying .*portable_cuda|replaying finish').Count
-    if ($Sm121 -ne 3 -or $PortableBackend -ne 0 -or $Recovery -ne 0) {
-        throw "Expected three clean SM121 cubin selections; got SM121=$Sm121 portable_backend=$PortableBackend recovery=$Recovery"
-    }
-
-    $Validations = @(Select-String -Path $LogPath -Pattern `
+    $Validations = @(Select-String -LiteralPath $LogPath -Pattern `
         '^\[trtmc\.video_validation\].*status=passed$').Count
-    if ($Validations -ne 3) {
-        throw "Expected three successful output validations; got $Validations"
+    if ($Validations -ne 2) { throw "Expected two successful validations; got $Validations" }
+
+    $Measured = @(Select-String -LiteralPath $LogPath -Pattern `
+        '^\[minimax-h3\.perf\].*text_cache_hit=1 adaln_cache_hit=1.*attention_mode=dense.*transformer_forwards=49.*full_denoiser_steps=6 skipped_denoiser_steps=43$')
+    if ($Measured.Count -ne 1) { throw 'Measured dense/cache contract did not match' }
+
+    $Sample = @(Select-String -LiteralPath $LogPath -Pattern `
+        '^\[trtmc\.video_benchmark_sample\].*generation_ms=([0-9]+(?:\.[0-9]+)?)$')
+    if ($Sample.Count -ne 1) { throw "Expected one measured sample; got $($Sample.Count)" }
+    $Milliseconds = [double]::Parse(
+        $Sample[0].Matches[0].Groups[1].Value,
+        [Globalization.CultureInfo]::InvariantCulture)
+    if (-not [double]::IsFinite($Milliseconds) -or
+        $Milliseconds -le 0 -or $Milliseconds -gt $CeilingMs) {
+        throw "Invalid or over-ceiling sample: $Milliseconds ms"
     }
 }
 
-Assert-MiniMaxH3HotCache $FiveSecondLog 555000
-# After running the long workload instead, call:
-# Assert-MiniMaxH3HotCache $LongLog 1380000
+Assert-MiniMaxH3DenseHotPath $FiveSecondLog
 ```
 
-`denoiser_resident_hit=0` and `vae_resident_hit=0` in `[minimax-h3.perf]` are
-expected for this staged path: those fields describe execution contexts, not
-the retained TensorRT-RTX engines. A measured request with an engine-cache miss
-is not a qualified hot sample. Use a new runtime-cache filename whenever the
-bundle, TensorRT-RTX SDK, or driver changes.
+`denoiser_resident_hit=0` and `vae_resident_hit=0` are expected: those fields
+describe execution contexts, not retained TensorRT-RTX engine objects. Use a
+new runtime-cache filename whenever the bundle, TensorRT-RTX SDK, or driver
+changes.
+
+## Long aligned T2VA workload
+
+The same bundle and six-plan visual implementation handle the longest released
+local alignment below 15 seconds. This request routes to profile 1:
+
+```powershell
+& $Trtmc generate-video $Bundle `
+    --prompt $Prompt `
+    --num-frames 345 --height 768 --width 1344 --seed 0 `
+    --num-inference-steps 50 --guidance-scale 1 `
+    --runtime-cache $RuntimeCache `
+    --set minimax_h3.retain_engines=true `
+    --set minimax_h3.retained_tail_weight_budget_gib=24 `
+    --set minimax_h3.first_block_cache_threshold=0.30 `
+    --warmup 1 --benchmark 1 `
+    --output .\minimax-h3-t2va-345f.mp4
+```
+
+It produces 345 frames, or 14.375 seconds at 24 fps. This document does not
+assign a latency ceiling to the original-weight dense long request until that
+profile has a separate qualification run. Historical FastH3/VSA timings do not
+qualify this implementation.
 
 ## Acceptance
 
-Keep the complete stderr/stdout log and record the separate runtime and bundle
-builder Git revisions, bundle hash, bundle inspection output, TensorRT-RTX
-version, driver version, GPU, request, and MP4 hash. A timing result is accepted
-only when:
+A five-second result is accepted only when:
 
 - the native dependency audit passed during packaging;
-- the runtime-only CLI, core, RTX backend, H3 plugin, bundle, and
-  TensorRT-RTX DLL are from one package;
-- the bundle declares the authenticated FastH3 adapter, 51 native segmented
-  VSA plans, four transformer forwards, the public dynamic canvas/frame
-  profiles, and no external VSA plugin;
-- the command uses an explicit `--runtime-cache` and
-  `--set minimax_h3.retain_engines=true`, and its cache validation reports 53
-  warmup fills followed by 106 measured hits;
-- both measured samples are finite and positive and the command exits zero;
-- the output has the requested aligned geometry at 24 fps;
-- generation returns audio and the MP4 contains H.264 video plus one AAC
-  stereo 32 kHz audio stream; and
+- runtime binaries, plugin, bundle, and TensorRT-RTX DLL come from one package;
+- the bundle uses the original official BF16 weights and contains no adapter,
+  LoRA, FastH3, VSA, or external attention runtime;
+- the request selects profile `0/2` in the shared six-plan visual route;
+- the command uses an explicit runtime cache, retained engines, a 24 GiB tail
+  budget, and the calibrated `0.30` threshold;
+- the measured sample is finite, positive, and no greater than 555,000 ms;
+- the log reports dense attention, 49 forwards, 6 full and 43 reused tails,
+  and successful RGB/audio validation;
+- the output contains 124 frames at 1344x768 and 24 fps, plus AAC stereo audio
+  at 32 kHz; and
 - visual and audible playback are separately inspected for corruption.
 
-FL2VA and Ref2VA use the same CLI timing mechanism, but their results are
-separate workloads. Ref2VA uses the independent `transformer_ref` partition
-and its released 50-point/49-forward schedule; it must never be reported as a
-four-forward FastH3 result.
+FL2VA and Ref2VA use the same CLI timing mechanism, but they are separate
+workloads and are outside this exact five-second dense T2VA qualification.

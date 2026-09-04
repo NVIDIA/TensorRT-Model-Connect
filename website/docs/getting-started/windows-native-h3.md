@@ -17,30 +17,36 @@ One bundle can expose these workflows:
 - FL2VA: first frame, last frame, or both, plus a prompt; and
 - Ref2VA: an ordered mix of reference images, videos, and audio plus a prompt.
 
-The default bundle uses the official original H3 weights and dense attention.
-It does not require a FastH3 adapter, LoRA, VSA engine, or an external attention
-runtime. T2VA and FL2VA share one dynamic FirstBlockCache-capable dense
-transformer, while Ref2VA uses the official `transformer_ref/` weights and its
-released dense conditioning schedule. All three workflows use one dynamic
-duration profile; there is no separate five-second and fifteen-second
-implementation.
+The default bundle uses the official original H3 BF16 weights and dense
+attention. It does not require a FastH3 adapter, LoRA, VSA engine, or an
+external attention runtime. T2VA and FL2VA share one six-plan,
+FirstBlockCache-capable visual implementation, while Ref2VA uses the official
+`transformer_ref/` weights and its released dense conditioning schedule. The
+shared denoiser head, tail, and finish engines contain two TensorRT optimization
+profiles: profile 0 specializes the qualified 537-token, 124-frame, 1344x768
+T2VA request, and profile 1 covers the public dynamic envelope. The runtime
+selects the profile for each request; there is no separate five-second and
+fifteen-second model or engine set.
 
 The target is 24 fps with 32 kHz stereo audio. Target frames follow the video
 VAE's `17 * n + 5` alignment. A nominal five-second request uses 120 requested
 frames and produces 124 frames (5.167 seconds); the longest local aligned
-request is 345 frames (14.375 seconds). One finite native TensorRT dynamic
-profile covers every aligned duration from 124 through 345 frames. It
-accepts all 95 canvases emitted by the public resolver (multiples of 32, trained
-aspect ratios from 1:4 through 4:1, a 768-pixel short edge where the
-`768x1344` pixel budget permits it), plus the official explicit performance
-canvas `--height 544 --width 960` and its transpose. Other explicit
-multiple-of-32 canvases accepted by the eager Diffusers API are not silently
-generalized: the native runtime rejects them before plan execution.
+request is 345 frames (14.375 seconds). Profile 0 is an exact-shape performance
+specialization, not a fixed-prompt interface. Every other valid request,
+including a different prompt length or a longer duration, routes to profile 1.
+That finite native TensorRT dynamic profile covers every aligned duration from
+124 through 345 frames. It accepts all 95 canvases emitted by the public
+resolver (multiples of 32, trained aspect ratios from 1:4 through 4:1, a
+768-pixel short edge where the `768x1344` pixel budget permits it), plus the
+official explicit performance canvas `--height 544 --width 960` and its
+transpose. Other explicit multiple-of-32 canvases accepted by the eager
+Diffusers API are not silently generalized: the native runtime rejects them
+before plan execution.
 
 T2VA tokenizes each prompt supplied to the request; the prompt is not fixed or
-padded to the qualification prompt. The native dynamic profile accepts 1--2641
-tokens without truncation. Prompts beyond that finite engine profile fail
-before generation instead of being silently shortened.
+padded to the qualification prompt. Profile 1 accepts 1--2641 tokens without
+truncation. Prompts beyond that finite engine profile fail before generation
+instead of being silently shortened.
 The packaged single-video command accepts exactly one non-negative integer
 `--seed`; CSV or negative values fail before loading the model.
 
@@ -97,8 +103,10 @@ engines. T2VA additionally invokes `audio_vae_decoder.plan`. A complete FL2VA
 bundle also contains `vision_encoder.plan` and
 `fl2va_keyframe_vae_encoder.plan`, which are used when endpoint images are
 supplied. The singular visual route preserves bounded phase residency while
-avoiding per-block engine churn, and every duration follows the same weights,
-scheduler, and dynamic shape profile.
+avoiding per-block engine churn. Every supported request uses the same six
+visual plan files, original weights, scheduler, and dense attention graph; only
+the TensorRT optimization-profile index changes. The audio decoder is an
+additional T2VA plan and is not part of the six-plan visual count.
 
 ## Build the runtime
 
@@ -395,9 +403,10 @@ trtmc generate-video $Bundle `
     --output .\t2va-5s-benchmark.mp4
 ```
 
-The `0.30` override above is the explicitly selected qualified speed preset,
-not the bundle or runtime default. The official SOL-Engine FirstBlockCache
-default is `0.08`.
+The `0.30` override above is the explicitly selected and measured dense
+FirstBlockCache speed preset for this qualification machine, not the bundle or
+runtime default. On the exact profile-0 fixture it executes six full tail
+forwards and skips 43 of the 49 dense transformer forwards.
 Thresholds are tuning inputs, not universal quality/performance constants:
 lower values recompute more tail steps, while higher values may skip more work
 but can change output quality. Calibrate non-default values on the target
