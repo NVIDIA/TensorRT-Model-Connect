@@ -5,6 +5,7 @@
 
 #include "runtime/models/smollm3/chat_templates.h"
 
+#include <cstdio>
 #include <ctime>
 #include <string>
 
@@ -73,18 +74,7 @@ constexpr char kSmollm3NoThinkInstructions[] =
     "You are a helpful AI assistant named SmolLM, trained by Hugging Face.";
 
 std::string smollm3_today() {
-    // Upstream renders strftime_now("%d %B %Y"), e.g. "04 September 2026".
-    std::time_t now = std::time(nullptr);
-    std::tm tm_utc{};
-#if defined(_WIN32)
-    gmtime_s(&tm_utc, &now);
-#else
-    gmtime_r(&now, &tm_utc);
-#endif
-    char buf[64];
-    if (std::strftime(buf, sizeof(buf), "%d %B %Y", &tm_utc) == 0)
-        return {};
-    return std::string(buf);
+    return smollm3_format_date(std::time(nullptr));
 }
 
 std::string apply_smollm3(const std::string& prompt, bool enable_thinking,
@@ -108,6 +98,32 @@ std::string apply_smollm3(const std::string& prompt, bool enable_thinking,
 }
 
 } // namespace
+
+std::string smollm3_format_date(std::time_t when) {
+    // Upstream renders strftime_now("%d %B %Y"), e.g. "04 September 2026". The
+    // month name comes from this table rather than from strftime's %B, which
+    // follows LC_TIME and yields a translated name under a non-English locale.
+    // The served prompt would then stop matching the reference for those users.
+    static constexpr const char* kMonths[] = {"January",   "February", "March",    "April",
+                                              "May",       "June",     "July",     "August",
+                                              "September", "October",  "November", "December"};
+
+    std::tm tm_utc{};
+#if defined(_WIN32)
+    gmtime_s(&tm_utc, &when);
+#else
+    gmtime_r(&when, &tm_utc);
+#endif
+    if (tm_utc.tm_mon < 0 || tm_utc.tm_mon > 11)
+        return {};
+
+    char buf[32];
+    const int written = std::snprintf(buf, sizeof(buf), "%02d %s %d", tm_utc.tm_mday,
+                                      kMonths[tm_utc.tm_mon], tm_utc.tm_year + 1900);
+    if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(buf))
+        return {};
+    return std::string(buf);
+}
 
 std::string smollm3_detect_chat_template_format(const std::string& jinja_template) {
     // Ordered marker table: the first row whose markers are all present wins.

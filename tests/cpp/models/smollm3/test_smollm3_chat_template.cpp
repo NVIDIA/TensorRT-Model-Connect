@@ -7,6 +7,8 @@
 
 #include "runtime/models/smollm3/chat_templates.h"
 
+#include <clocale>
+#include <ctime>
 #include <iostream>
 #include <string>
 
@@ -178,6 +180,64 @@ static void test_apply_smollm3_thinking() {
     check(result.size() == 1369, "smollm3 /think length matches upstream (1369)");
 }
 
+// The rendered date must not follow LC_TIME. strftime's %B returns the locale's
+// translated month name where the reference says the English one, which would
+// desynchronise the served prompt from the reference for every user outside an
+// English locale. Fixed timestamps are used so this does not depend on which
+// month the suite happens to run in.
+static void test_date_is_locale_independent() {
+    // 15th of each month in 2026, UTC.
+    struct Case {
+        std::time_t when;
+        const char* expected;
+    };
+    static const Case kCases[] = {
+        {1768435200, "15 January 2026"},   {1771113600, "15 February 2026"},
+        {1773532800, "15 March 2026"},     {1776211200, "15 April 2026"},
+        {1778803200, "15 May 2026"},       {1781481600, "15 June 2026"},
+        {1784073600, "15 July 2026"},      {1786752000, "15 August 2026"},
+        {1789430400, "15 September 2026"}, {1792022400, "15 October 2026"},
+        {1794700800, "15 November 2026"},  {1797292800, "15 December 2026"},
+    };
+
+    // The formatter is a pure function of the timestamp, so these hold under
+    // whatever locale the suite was started in. This part never skips.
+    for (const Case& one : kCases)
+        check(trtmc::smollm3_format_date(one.when) == one.expected,
+              "date renders the English month name");
+
+    // Now the LC_TIME independence itself. setlocale succeeding proves nothing:
+    // a locale only demonstrates the property where it actually renders the date
+    // differently, so count the cases the replaced strftime("%d %B %Y") would
+    // have got wrong rather than trusting that a locale name resolved.
+    const char* const locales[] = {
+        "de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "fr_FR.utf8", "es_ES.UTF-8", "C.UTF-8", "C"};
+    int translating = 0;
+    for (const char* name : locales) {
+        if (std::setlocale(LC_TIME, name) == nullptr)
+            continue; // not installed on this host
+        for (const Case& one : kCases) {
+            const std::tm* tm_utc = std::gmtime(&one.when);
+            char native[64];
+            if (tm_utc != nullptr &&
+                std::strftime(native, sizeof(native), "%d %B %Y", tm_utc) != 0 &&
+                std::string(native) != one.expected)
+                ++translating;
+            check(trtmc::smollm3_format_date(one.when) == one.expected, "date ignores LC_TIME");
+        }
+    }
+    std::setlocale(LC_TIME, "C");
+
+    // A silent pass on a host with only English locales would be a tautology,
+    // so say which of the two happened rather than reporting a bare green.
+    if (translating == 0)
+        std::cerr << "NOTE: no locale on this host renders the date differently; the "
+                     "LC_TIME check could not exercise the property\n";
+    else
+        std::cout << "  LC_TIME check covered " << translating
+                  << " date(s) this host would otherwise render differently\n";
+}
+
 int main() {
 
     test_detect_smollm3_over_chatml();
@@ -195,6 +255,7 @@ int main() {
     test_apply_gemma();
     test_apply_llama3();
     test_apply_nemotron_h_no_thinking();
+    test_date_is_locale_independent();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
