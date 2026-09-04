@@ -138,7 +138,6 @@ def test_explicit_head_dim_is_supported_when_hidden_width_is_decoupled():
         ({"hidden_act": "gelu"}, {}, "hidden_act"),
         ({}, {"sliding_window": 4096}, "unsupported SmolLM3 fields"),
         ({}, {"num_experts": 8}, "unsupported SmolLM3 fields"),
-        ({}, {"pretraining_tp": 2}, "pretraining_tp"),
         (
             {},
             {"layer_types": ["full_attention", "linear_attention"]},
@@ -676,3 +675,86 @@ def test_standard_builder_forwards_the_flag_to_the_attention_block():
         and keyword.value.value.id == "rope_schedule"
         for keyword in forwarded
     ), "apply_rope is passed but not from the resolved schedule"
+
+
+def _published_checkpoint_config():
+    """The published SmolLM3-3B configuration, field for field.
+
+    Taken from config.json at the revision the manifest pins. It is spelled out
+    rather than trimmed so the routing contract is exercised against what users
+    actually download, including the fields this family does not read.
+    """
+    from tensorrt_model_connect.config import ModelConfig as SharedModelConfig
+
+    return SharedModelConfig(
+        model_type="smollm3",
+        architectures=["SmolLM3ForCausalLM"],
+        vocab_size=128256,
+        hidden_size=2048,
+        intermediate_size=11008,
+        num_hidden_layers=36,
+        num_attention_heads=16,
+        num_key_value_heads=4,
+        rms_norm_eps=1e-06,
+        rope_theta=5000000.0,
+        max_position_embeddings=65536,
+        hidden_act="silu",
+        tie_word_embeddings=True,
+        bos_token_id=128000,
+        eos_token_id=128012,
+        pad_token_id=128004,
+        raw={
+            "attention_bias": False,
+            "attention_dropout": 0.0,
+            "layer_types": ["full_attention"] * 36,
+            "max_window_layers": 28,
+            "mlp_bias": False,
+            "no_rope_layer_interval": 4,
+            "no_rope_layers": [
+                int((index + 1) % 4 != 0) for index in range(36)
+            ],
+            "pretraining_tp": 2,
+            "rope_scaling": None,
+            "sliding_window": None,
+            "torch_dtype": "bfloat16",
+            "use_cache": False,
+            "use_sliding_window": False,
+        },
+    )
+
+
+def test_published_checkpoint_reaches_the_native_kv_path():
+    """The checkpoint this family targets must route to its own runtime.
+
+    The published config carries pretraining_tp=2, a field SmolLM3ForCausalLM
+    neither defines nor reads. Gating on it sent the default build of the only
+    supported checkpoint to the fallback decoder.
+    """
+    config = _published_checkpoint_config()
+
+    decision = native_kv_architecture_capability(config)
+
+    assert decision.applicable
+    assert decision.eligible, decision.reason
+    assert prefer_native_default(config)
+
+
+def test_default_build_of_the_published_checkpoint_is_native():
+    """`trtmc build HuggingFaceTB/SmolLM3-3B` with no flags takes the native path."""
+    import importlib
+
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.smollm3.plugin"
+    )
+    config = _published_checkpoint_config()
+
+    precision = plugin_module.plugin.default_build_precision(config)
+    cache_length = plugin_module.plugin.default_max_cache_length(config)
+
+    assert precision == "bf16"
+    assert cache_length == config.max_position_embeddings == 65536
+
+    decision = native_kv_build_capability(
+        config, precision=precision, max_cache_length=cache_length
+    )
+    assert decision.eligible, decision.reason

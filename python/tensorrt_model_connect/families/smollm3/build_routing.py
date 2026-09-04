@@ -287,11 +287,14 @@ def native_kv_architecture_capability(
     enabled = [name for name in unsupported_flags if _enabled(raw.get(name))]
     if enabled:
         reasons.append("unsupported SmolLM3 fields: " + ", ".join(enabled))
-    try:
-        if _integer(raw.get("pretraining_tp", 1), "pretraining_tp") != 1:
-            reasons.append("native SmolLM3 requires pretraining_tp=1")
-    except ValueError as exc:
-        reasons.append(str(exc))
+    # pretraining_tp is deliberately not gated. SmolLM3ForCausalLM neither
+    # defines nor reads it -- the field is absent from both the upstream
+    # configuration class and the modeling code -- so it describes nothing
+    # about the graph this family builds. The published checkpoint still
+    # carries pretraining_tp=2 from the Llama-derived template it started
+    # from, and rejecting that would route the only checkpoint this family
+    # targets away from the path its manifest declares. Llama gates it
+    # because Llama's own implementation reads it.
     try:
         if float(raw.get("partial_rotary_factor", 1.0)) != 1.0:
             reasons.append("native SmolLM3 requires full rotary embeddings")
