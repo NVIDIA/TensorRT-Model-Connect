@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -17,16 +18,22 @@ from .models import DevToolkitError
 from .resolution import ExecutionTarget, ProviderDescriptor
 
 
-def _plain(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(name): _plain(item) for name, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_plain(item) for item in value]
+def _scalar(value: object) -> object:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise DevToolkitError("Target identity float values must be finite")
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise DevToolkitError(
         f"Target identity values must be JSON-compatible: {type(value).__name__}"
     )
+
+
+def _plain(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(name): _plain(item) for name, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_plain(item) for item in value]
+    return _scalar(value)
 
 
 def _freeze(value: object) -> object:
@@ -36,11 +43,7 @@ def _freeze(value: object) -> object:
         return MappingProxyType({name: _freeze(value[name]) for name in sorted(value)})
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return tuple(_freeze(item) for item in value)
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    raise DevToolkitError(
-        f"Target identity values must be JSON-compatible: {type(value).__name__}"
-    )
+    return _scalar(value)
 
 
 def _digest(namespace: bytes, value: object) -> str:

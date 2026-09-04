@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -347,6 +348,17 @@ def test_target_plan_intent_is_deeply_immutable(tmp_path: Path) -> None:
     container = plan.intent["container"]
     with pytest.raises(TypeError):
         container["working_dir"] = "/changed"  # type: ignore[index]
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_target_plan_rejects_non_finite_identity_numbers(value: float) -> None:
+    with pytest.raises(DevToolkitError, match="must be finite"):
+        TargetPlan(
+            ProviderDescriptor("custom-target", "custom-target==1", 1),
+            "a" * 64,
+            {"value": value},
+            object(),
+        )
 
 
 def test_ensure_pulls_creates_starts_and_returns_execution_target(tmp_path: Path) -> None:
