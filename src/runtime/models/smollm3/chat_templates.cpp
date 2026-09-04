@@ -86,7 +86,8 @@ std::string apply_smollm3(const std::string& prompt, bool enable_thinking,
     r += "## Custom Instructions\n\n";
     r += enable_thinking ? kSmolLM3ThinkInstructions : kSmolLM3NoThinkInstructions;
     r += "\n\n";
-    r += "<|im_end|>\n";
+    // Upstream does NOT close the system block with <|im_end|>: the instructions
+    // run straight into the user turn. Verified against apply_chat_template.
     r += "<|im_start|>user\n" + prompt + "<|im_end|>\n";
     r += "<|im_start|>assistant\n";
     if (!enable_thinking)

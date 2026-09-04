@@ -100,9 +100,19 @@ static void test_apply_llama3() {
 }
 
 
+// ── SmolLM3's own chat template ─────────────────────────────────────────────
+// The expected strings below are the verbatim output of the upstream
+// tokenizer's apply_chat_template() for HuggingFaceTB/SmolLM3-3B at revision
+// a07cc9a0, captured with the date pinned. Asserting against the real
+// rendering, rather than a reading of the Jinja source, is what makes this a
+// contract: SmolLM3 always emits a system block, and it does *not* close that
+// block with <|im_end|> before the user turn.
+
+static const char* kSmolLM3Date = "04 September 2026";
+
 static void test_detect_smollm3_over_chatml() {
-    // SmolLM3's own template is ChatML-framed, so generic ChatML detection must
-    // not claim it: the SmolLM3 branch also emits a mandatory system block.
+    // SmolLM3's template is ChatML-framed, so generic ChatML detection must not
+    // claim it -- the SmolLM3 branch carries the mandatory system block.
     std::string tpl =
         "{%- if enable_thinking %}{%- set reasoning_mode = \"/think\" %}{%- endif %}"
         "{{- \"<|im_start|>system\\n\" -}}"
@@ -112,36 +122,50 @@ static void test_detect_smollm3_over_chatml() {
 }
 
 static void test_apply_smollm3_no_thinking() {
-    // Byte-for-byte against the upstream chat template with a pinned date.
-    auto result = trtmc::smollm3_apply_chat_template(
-        "smollm3", "What is 2+2?", false, "04 September 2026");
     const std::string expected =
         "<|im_start|>system\n"
-        "## Metadata\n\n"
+        "## Metadata\n"
+        "\n"
         "Knowledge Cutoff Date: June 2025\n"
         "Today Date: 04 September 2026\n"
-        "Reasoning Mode: /no_think\n\n"
-        "## Custom Instructions\n\n"
-        "You are a helpful AI assistant named SmolLM, trained by Hugging Face.\n\n"
-        "<|im_end|>\n"
-        "<|im_start|>user\nWhat is 2+2?<|im_end|>\n"
+        "Reasoning Mode: /no_think\n"
+        "\n"
+        "## Custom Instructions\n"
+        "\n"
+        "You are a helpful AI assistant named SmolLM, trained by Hugging Face.\n"
+        "\n"
+        "<|im_start|>user\n"
+        "What is 2+2?<|im_end|>\n"
         "<|im_start|>assistant\n"
-        "<think>\n\n</think>\n";
-    check(result == expected, "smollm3 no-thinking matches upstream template");
+        "<think>\n"
+        "\n"
+        "</think>\n";
+    auto result = trtmc::smollm3_apply_chat_template(
+        "smollm3", "What is 2+2?", false, kSmolLM3Date);
+    check(result == expected, "smollm3 /no_think matches upstream byte for byte");
+    check(result.size() == 297, "smollm3 /no_think length matches upstream (297)");
 }
 
 static void test_apply_smollm3_thinking() {
+    const std::string expected =
+        "<|im_start|>system\n"
+        "## Metadata\n"
+        "\n"
+        "Knowledge Cutoff Date: June 2025\n"
+        "Today Date: 04 September 2026\n"
+        "Reasoning Mode: /think\n"
+        "\n"
+        "## Custom Instructions\n"
+        "\n"
+        "You are a helpful AI assistant named SmolLM, trained by Hugging Face. Your role as an assistant involves thoroughly exploring questions through a systematic thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracking, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution using the specified format: <think> Thought section </think> Solution section. In the Thought section, detail your reasoning process in steps. Each step should include detailed considerations such as analysing questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed to reach the conclusion.\n"
+        "\n"
+        "<|im_start|>user\n"
+        "What is 2+2?<|im_end|>\n"
+        "<|im_start|>assistant\n";
     auto result = trtmc::smollm3_apply_chat_template(
-        "smollm3", "hi", true, "04 September 2026");
-    check(result.find("Reasoning Mode: /think\n\n") != std::string::npos,
-          "smollm3 thinking declares /think");
-    check(result.find("systematic thinking process") != std::string::npos,
-          "smollm3 thinking uses the long custom instructions");
-    // Thinking mode leaves the assistant turn open: no <think></think> prefill.
-    const std::string tail = "<|im_start|>assistant\n";
-    check(result.size() >= tail.size()
-              && result.compare(result.size() - tail.size(), tail.size(), tail) == 0,
-          "smollm3 thinking emits no think prefill");
+        "smollm3", "What is 2+2?", true, kSmolLM3Date);
+    check(result == expected, "smollm3 /think matches upstream byte for byte");
+    check(result.size() == 1369, "smollm3 /think length matches upstream (1369)");
 }
 
 int main() {
