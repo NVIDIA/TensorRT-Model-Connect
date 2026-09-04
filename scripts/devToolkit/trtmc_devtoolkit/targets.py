@@ -644,12 +644,16 @@ def _actual_config_identity(container: Mapping[str, object]) -> dict[str, object
             environment[name] = hashlib.sha256(
                 b"trtmc-devtoolkit-target-env-v1\0" + value.encode()
             ).hexdigest()
+    stable_mounts = sorted(
+        (_plain(mount) for mount in mounts),
+        key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")),
+    )
     return {
         "image_id": container.get("Image"),
         "command": config.get("Cmd") if isinstance(config, Mapping) else None,
         "working_dir": config.get("WorkingDir") if isinstance(config, Mapping) else None,
         "environment": environment,
-        "mounts": mounts,
+        "mounts": stable_mounts,
         "device_requests": host.get("DeviceRequests") if isinstance(host, Mapping) else None,
         "ipc": host.get("IpcMode") if isinstance(host, Mapping) else None,
         "shm_size": host.get("ShmSize") if isinstance(host, Mapping) else None,

@@ -396,6 +396,36 @@ def test_repeated_ensure_is_idempotent(tmp_path: Path) -> None:
     assert sum(command[3] == "create" for command in runner.commands if len(command) > 3) == 1
 
 
+def test_mount_order_changes_do_not_fail_target_attestation(tmp_path: Path) -> None:
+    class ReorderingMountRunner(DockerLifecycleRunner):
+        def run(self, command, **kwargs):
+            arguments = [str(item) for item in command]
+            if (
+                arguments[:6]
+                == [
+                    "docker",
+                    "--context",
+                    "test-context",
+                    "inspect",
+                    "--type",
+                    "container",
+                ]
+                and self.container is not None
+            ):
+                self.container["Mounts"].reverse()
+            return super().run(command, **kwargs)
+
+    runner = ReorderingMountRunner()
+    toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
+    request = target(tmp_path)
+
+    first = toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
+    second = toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
+
+    assert first.target_id == second.target_id
+    assert second.action == "adopted"
+
+
 def test_adopt_never_pulls_even_when_image_policy_is_always(tmp_path: Path) -> None:
     runner = DockerLifecycleRunner()
     toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
