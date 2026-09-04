@@ -211,7 +211,7 @@ def _validate_rope_layer_schedule(
         )
 
         schedule = resolve_rope_layer_schedule(config)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         reasons.append(str(exc))
         return
     num_layers = int(getattr(config, "num_hidden_layers", 0) or 0)

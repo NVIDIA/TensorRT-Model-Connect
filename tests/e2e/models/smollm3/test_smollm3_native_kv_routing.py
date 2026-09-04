@@ -840,3 +840,28 @@ def test_no_runtime_name_is_imported_only_for_type_checking():
         "these names are called at runtime but imported only under "
         f"TYPE_CHECKING: {offenders}"
     )
+
+
+@pytest.mark.parametrize(
+    "published, fragment",
+    [
+        ([1, None] + [1] * 34, "int()"),
+        ([1, {}] + [1] * 34, "int()"),
+        (["x"] * 36, "invalid literal"),
+    ],
+)
+def test_non_numeric_schedule_entries_route_ineligible(published, fragment):
+    """A malformed entry must become a routing reason, not an escaping exception.
+
+    resolve_rope_layer_schedule converts entries with int(), which raises
+    TypeError for None or a mapping and ValueError for a non-numeric string.
+    Routing catches both so a bad checkpoint fails closed here rather than
+    aborting the build.
+    """
+    config = _shared_build_config(no_rope_layers=published)
+
+    decision = native_kv_architecture_capability(config)
+
+    assert decision.applicable
+    assert not decision.eligible
+    assert fragment in decision.reason
