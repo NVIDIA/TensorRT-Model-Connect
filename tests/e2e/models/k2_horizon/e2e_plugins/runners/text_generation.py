@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,12 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 from ..runtime_config import runtime_config_set_tokens
 
 logger = logging.getLogger(__name__)
+
+_CPP_PROMPT_TOKEN_RECEIPT = re.compile(
+    r"^\[trtmc\.k2_horizon\.prompt\] token_ids=(.*)$",
+    re.MULTILINE,
+)
+_STRICT_TOKEN_ID_LIST = re.compile(r"\[([0-9]+(?:,[0-9]+)*)\]")
 
 
 def _read_first_jsonl(path: Path) -> dict:
@@ -39,6 +46,29 @@ def _read_first_jsonl(path: Path) -> dict:
     return {}
 
 
+def _chat_reasoning_effort(case: E2ECase) -> str:
+    contract_config = case.metadata.get("contract_config", {})
+    if not isinstance(contract_config, dict) or not contract_config.get("use_chat_template", False):
+        return ""
+    reasoning_effort = contract_config.get("reasoning_effort")
+    if reasoning_effort != "high":
+        raise ValueError(
+            "K2-Horizon chat E2E supports only contract_config.reasoning_effort='high'"
+        )
+    return reasoning_effort
+
+
+def _parse_cpp_prompt_token_ids(stderr: str) -> list[int]:
+    """Parse the opt-in K2 production-tokenizer receipt from C++ stderr."""
+    receipts = _CPP_PROMPT_TOKEN_RECEIPT.findall(stderr)
+    if len(receipts) != 1:
+        return []
+    match = _STRICT_TOKEN_ID_LIST.fullmatch(receipts[0])
+    if match is None:
+        return []
+    return [int(token) for token in match.group(1).split(",")]
+
+
 class TextGenerationCausalRunner:
     """Execute K2-Horizon generation and retain exact token/flag evidence."""
 
@@ -53,6 +83,7 @@ class TextGenerationCausalRunner:
         bundle_path = str(Path(ctx.engine_dir) / case.bundle)
         prompt = str(case.inputs.get("prompt", ""))
         max_new_tokens = int(case.inputs.get("max_new_tokens", 30))
+        _chat_reasoning_effort(case)
         cpp_text, cpp_time, cpp_meta = self._run_cpp_binary(
             ctx,
             case,
@@ -190,6 +221,9 @@ class TextGenerationCausalRunner:
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
+        prompt_token_ids = _parse_cpp_prompt_token_ids(result.stderr)
+        if prompt_token_ids:
+            metadata["prompt_token_ids"] = prompt_token_ids
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
                 result.stderr,
@@ -233,6 +267,7 @@ class TextGenerationCausalRunner:
         use_chat_template = bool(
             isinstance(contract_config, dict) and contract_config.get("use_chat_template", False)
         )
+        reasoning_effort = _chat_reasoning_effort(case)
         trust_remote_code = bool(case.metadata.get("trust_remote_code", False))
 
         script = textwrap.dedent(
@@ -252,6 +287,7 @@ class TextGenerationCausalRunner:
             prompt = {prompt!r}
             max_new_tokens = {max_new_tokens}
             use_chat_template = {use_chat_template!r}
+            reasoning_effort = {reasoning_effort!r}
             trust_remote_code = {trust_remote_code!r}
             logits_path = {str(logits_path)!r}
 
@@ -276,6 +312,7 @@ class TextGenerationCausalRunner:
                     tokenize=True,
                     return_dict=True,
                     return_tensors="pt",
+                    reasoning_effort=reasoning_effort,
                 )
                 input_ids = [int(token) for token in encoded["input_ids"][0].tolist()]
             else:
@@ -288,10 +325,16 @@ class TextGenerationCausalRunner:
             # that same window rather than comparing prompt-prefill rows.
             start = max(len(input_ids) - 1, 0)
             generation_results = results[start:start + max_new_tokens]
-            logits = [
-                np.asarray(result["logits"]).reshape(-1)
-                for result in generation_results
-            ]
+            raw_eos = config.get("eos_token_id", [])
+            eos_token_ids = {{int(raw_eos)}} if isinstance(raw_eos, int) else {{
+                int(token) for token in raw_eos
+            }}
+            logits = []
+            for result in generation_results:
+                step_logits = np.asarray(result["logits"]).reshape(-1)
+                logits.append(step_logits)
+                if int(np.argmax(step_logits)) in eos_token_ids:
+                    break
             if logits:
                 np.save(logits_path, np.stack(logits, axis=0).astype(np.float32))
             else:
@@ -299,6 +342,7 @@ class TextGenerationCausalRunner:
             print(json.dumps({{
                 "steps": len(logits),
                 "prompt_token_ids": input_ids,
+                "reasoning_effort": reasoning_effort,
             }}))
             """
         )

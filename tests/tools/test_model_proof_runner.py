@@ -749,7 +749,8 @@ def test_k2_horizon_nightly_is_owned_by_its_family(tmp_path: Path) -> None:
 
     assert selection["suite"] == "nightly"
     assert [case["name"] for case in selection["e2e_cases"]] == [
-        "k2-horizon-7b"
+        "k2-horizon-7b",
+        "k2-horizon-7b-chat-high",
     ]
 
 

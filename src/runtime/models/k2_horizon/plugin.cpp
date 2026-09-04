@@ -7,6 +7,7 @@
 // BF16, single-engine, fixed native-KV contract is accepted.
 
 #include "plugin_helpers.h"
+#include "runtime/models/k2_horizon/chat_template.h"
 #include "runtime/models/k2_horizon/kv_cache.h"
 #include "runtime/models/k2_horizon/pipeline.h"
 #include "runtime/models/k2_horizon/tensor_names.h"
@@ -218,12 +219,61 @@ std::vector<int32_t> normalized_eos_token_ids(std::vector<int32_t> token_ids,
     return normalized;
 }
 
+std::string load_chat_template_format(const PipelineContext& ctx) {
+    const auto* section = find_section(ctx.bundle, "chat_template.jinja");
+    if (section == nullptr || section->empty()) {
+        throw std::invalid_argument(
+            "K2-Horizon bundle is missing the required publisher chat template");
+    }
+    if (!ctx.config.tokenizer_add_special_tokens_present ||
+        !ctx.config.tokenizer_add_special_tokens) {
+        throw std::invalid_argument("K2-Horizon chat requires tokenizer_add_special_tokens=1");
+    }
+    return k2_horizon_detect_chat_template_format(std::string(section->begin(), section->end()));
+}
+
+void validate_chat_tokenizer_contract(const PipelineContext& ctx, const ITokenizer& tokenizer,
+                                      const std::string& chat_template_format) {
+    constexpr int32_t bos_id = 0;
+    constexpr int32_t im_start_id = 250018;
+    constexpr int32_t im_end_id = 250019;
+    constexpr int32_t think_id = 250029;
+    if (ctx.config.id_bos != bos_id || tokenizer.id_for_token("<|ifm|begin_of_text|>") != bos_id) {
+        throw std::invalid_argument("K2-Horizon chat BOS token metadata is inconsistent");
+    }
+    if (tokenizer.id_for_token("<|ifm|im_start|>") != im_start_id ||
+        tokenizer.id_for_token("<|ifm|im_end|>") != im_end_id ||
+        tokenizer.id_for_token("<ifm|think>") != think_id) {
+        throw std::invalid_argument("K2-Horizon chat protocol token IDs are inconsistent");
+    }
+    const auto framed_probe =
+        tokenizer.encode(k2_horizon_apply_chat_template(chat_template_format, "", "high"));
+    const std::vector<int32_t> expected_probe{bos_id,      im_start_id, 2672, 200,      im_end_id,
+                                              im_start_id, 142036,      200,  think_id, 200};
+    if (std::any_of(expected_probe.begin(), expected_probe.end(), [&](int32_t token_id) {
+            return token_id < 0 || token_id >= ctx.config.vocab_size;
+        })) {
+        throw std::invalid_argument(
+            "K2-Horizon chat framing token is outside the model vocabulary");
+    }
+    if (framed_probe != expected_probe) {
+        throw std::invalid_argument(
+            "K2-Horizon native tokenizer does not reproduce the pinned chat framing");
+    }
+}
+
 } // namespace
 
 class K2HorizonDecoderPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         reject_unqualified_bundle(ctx);
+        auto eos_token_ids = normalized_eos_token_ids(ctx.config.id_eos_ids, ctx.config.id_eos,
+                                                      ctx.config.vocab_size);
+        k2_horizon_validate_chat_eos_token_ids(eos_token_ids);
+        const std::string chat_template_format = load_chat_template_format(ctx);
+        auto tokenizer = create_k2_horizon_bpe_tokenizer(ctx.bundle);
+        validate_chat_tokenizer_contract(ctx, *tokenizer, chat_template_format);
 
         const bool prefer_gpu_greedy =
             runtime_flag(ctx.runtime_config, "runtime", "prefer_gpu_greedy", false);
@@ -252,15 +302,16 @@ class K2HorizonDecoderPlugin final : public IPipelinePlugin {
 
         K2HorizonTextGenConfig generation;
         generation.vocab_size = ctx.config.vocab_size;
-        generation.eos_token_ids = normalized_eos_token_ids(
-            ctx.config.id_eos_ids, ctx.config.id_eos, ctx.config.vocab_size);
+        generation.eos_token_ids = std::move(eos_token_ids);
         generation.token_id_name = ctx.config.io_map.token_id;
         generation.logits_output_name = ctx.config.io_map.logits;
+        generation.chat_template_format = chat_template_format;
         generation.enable_cuda_graph = enable_cuda_graph;
         generation.log_runtime_stats =
             runtime_flag(ctx.runtime_config, "platform", "trt_log_stderr", false);
+        generation.emit_prompt_token_ids =
+            runtime_flag(ctx.runtime_config, "k2_horizon", "emit_prompt_token_ids", false);
 
-        auto tokenizer = create_k2_horizon_bpe_tokenizer(ctx.bundle);
         return std::make_unique<K2HorizonTextGenerationPipeline>(
             std::move(decoder), std::move(cache), std::move(generation), std::move(tokenizer),
             ctx.bundle.info.model_id);

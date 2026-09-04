@@ -4,8 +4,11 @@
 id = "k2_horizon"
 runtime_library = "libtrtmc_model_k2_horizon.so"
 runtime_plugins = ["plugin.cpp|register_k2_horizon_plugin"]
+runtime_config_schemas = ["config_schema.cpp|register_k2_horizon_schema"]
 runtime_strategies = ["k2_horizon_decoder_kv_cache"]
 runtime_tests = [
+  "test_k2_horizon_chat_template|test_k2_horizon_chat_template.cpp|trtmc_model_k2_horizon|_|_",
+  "test_k2_horizon_config_schema|test_k2_horizon_config_schema.cpp|trtmc_model_k2_horizon|_|_",
   "test_k2_horizon_sampler|test_k2_horizon_sampler.cpp|trtmc_model_k2_horizon|_|_",
 ]
 [validation_profiles]

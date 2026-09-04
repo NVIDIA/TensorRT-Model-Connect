@@ -424,6 +424,7 @@ class TextComparator:
         # --- Metric 6: normalized_text_edit_distance ---
         trt_text = (trt.text or "").strip()
         ref_text = (ref.text or "").strip()
+        texts_match_exactly = bool(trt_text) and trt_text == ref_text
 
         prompt = (trt.data or {}).get("prompt", "")
         # Prompt echo handling is TRT-side only. HF reference text is decoded
@@ -450,6 +451,11 @@ class TextComparator:
 
         if trt_text_for_ned and ref_text_for_ned:
             ned = normalized_edit_distance(trt_text_for_ned, ref_text_for_ned)
+            # A reasoning trace can quote the user prompt naturally. Generic
+            # prompt-echo cleanup is asymmetric (TRT-only), so it must never
+            # turn byte-identical continuations into a text-parity failure.
+            if texts_match_exactly:
+                ned = 0.0
             # Some TRT CLI paths stop decoding early on EOS while the debug/HF
             # text path keeps fixed-length continuation tokens. If token/logit
             # metrics already agree, compare on the common prefix to avoid
