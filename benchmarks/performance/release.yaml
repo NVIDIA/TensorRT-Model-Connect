@@ -38,6 +38,10 @@ excluded_profiles:
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
       into the release performance runner.
+  - model: smollm3-3b
+    reason: >-
+      Dense SmolLM3 functional and reference-parity qualification is present, but
+      this change does not add a matching release-performance workload or receipt.
 
 entries:
   - id: albert.encode

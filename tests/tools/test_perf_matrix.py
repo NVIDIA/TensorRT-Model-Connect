@@ -51,6 +51,10 @@ K2_HORIZON_EXCLUSION_REASON = (
     "Pinned BF16 build and Hugging Face parity qualification are present, but "
     "no matching release-performance workload or receipt has been collected."
 )
+SMOLLM3_EXCLUSION_REASON = (
+    "Dense SmolLM3 functional and reference-parity qualification is present, but "
+    "this change does not add a matching release-performance workload or receipt."
+)
 TASK_ADAPTERS = {
     "bark.generate_audio": "hf-transformers-tts",
     "bert.embed": "hf-transformers-embedding",
@@ -287,6 +291,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "lfm2-700m": LFM2_EXCLUSION_REASON,
         "k2-horizon-7b": K2_HORIZON_EXCLUSION_REASON,
         "minimax-h3-768p": MINIMAX_H3_EXCLUSION_REASON,
+        "smollm3-3b": SMOLLM3_EXCLUSION_REASON,
     }
     assert all(
         set(entry["workload"]) <= {"testcase", "request", "runtime"} for entry in raw_entries
@@ -2220,8 +2225,8 @@ def test_run_consolidates_results_and_records_replayable_commands(
     expected_catalog_coverage = {
         "total_profiles": len(catalog_entries),
         "ready_profiles": catalog_counts["ready"],
-        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 7,
-        "explicitly_excluded_profiles": 7,
+        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 8,
+        "explicitly_excluded_profiles": 8,
         "explicit_exclusions": [
             {
                 "model": "lfm2-1.2b",
@@ -2250,6 +2255,10 @@ def test_run_consolidates_results_and_records_replayable_commands(
             {
                 "model": "minimax-h3-768p",
                 "reason": MINIMAX_H3_EXCLUSION_REASON,
+            },
+            {
+                "model": "smollm3-3b",
+                "reason": SMOLLM3_EXCLUSION_REASON,
             },
         ],
         "excluded_l0_profiles": excluded_l0_profiles,
