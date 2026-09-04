@@ -8,11 +8,8 @@ import re
 
 from tests.e2e_harness.contracts import (
     CompareResult,
-    E2ECase,
     MetricResult,
-    StageOutput,
     StageStatus,
-    ThresholdProfile,
 )
 
 

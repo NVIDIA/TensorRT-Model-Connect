@@ -50,14 +50,26 @@ std::string apply_nemotron_h(const std::string& prompt, bool enable_thinking) {
     return r;
 }
 
-
 // SmolLM3 always emits a system block, even when the caller supplies no system
 // message. The two Custom Instruction bodies below are the upstream defaults for
 // the two reasoning modes; reproducing them verbatim is what keeps the served
 // prompt identical to the Hugging Face chat template.
-constexpr char kSmolLM3ThinkInstructions[] =
-    "You are a helpful AI assistant named SmolLM, trained by Hugging Face. Your role as an assistant involves thoroughly exploring questions through a systematic thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracking, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution using the specified format: <think> Thought section </think> Solution section. In the Thought section, detail your reasoning process in steps. Each step should include detailed considerations such as analysing questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed to reach the conclusion.";
-constexpr char kSmolLM3NoThinkInstructions[] =
+constexpr char kSmollm3ThinkInstructions[] =
+    "You are a helpful AI assistant named SmolLM, trained by Hugging Face. Your role as an "
+    "assistant involves thoroughly exploring questions through a systematic thinking process "
+    "before providing the final precise and accurate solutions. This requires engaging in a "
+    "comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, "
+    "backtracking, and iteration to develop well-considered thinking process. Please structure "
+    "your response into two main sections: Thought and Solution using the specified format: "
+    "<think> Thought section </think> Solution section. In the Thought section, detail your "
+    "reasoning process in steps. Each step should include detailed considerations such as "
+    "analysing questions, summarizing relevant findings, brainstorming new ideas, verifying the "
+    "accuracy of the current steps, refining any errors, and revisiting previous steps. In the "
+    "Solution section, based on various attempts, explorations, and reflections from the Thought "
+    "section, systematically present the final solution that you deem correct. The Solution "
+    "section should be logical, accurate, and concise and detail necessary steps needed to reach "
+    "the conclusion.";
+constexpr char kSmollm3NoThinkInstructions[] =
     "You are a helpful AI assistant named SmolLM, trained by Hugging Face.";
 
 std::string smollm3_today() {
@@ -84,7 +96,7 @@ std::string apply_smollm3(const std::string& prompt, bool enable_thinking,
     r += "Today Date: " + (today.empty() ? smollm3_today() : today) + "\n";
     r += "Reasoning Mode: " + mode + "\n\n";
     r += "## Custom Instructions\n\n";
-    r += enable_thinking ? kSmolLM3ThinkInstructions : kSmolLM3NoThinkInstructions;
+    r += enable_thinking ? kSmollm3ThinkInstructions : kSmollm3NoThinkInstructions;
     r += "\n\n";
     // Upstream does NOT close the system block with <|im_end|>: the instructions
     // run straight into the user turn. Verified against apply_chat_template.
@@ -98,33 +110,41 @@ std::string apply_smollm3(const std::string& prompt, bool enable_thinking,
 } // namespace
 
 std::string smollm3_detect_chat_template_format(const std::string& jinja_template) {
-    if (jinja_template.empty())
-        return {};
-    // SmolLM3's template is ChatML-framed but carries its own mandatory system
-    // block; match it before the generic ChatML fallback.
-    if (jinja_template.find("<|im_start|>") != std::string::npos &&
-        jinja_template.find("Reasoning Mode:") != std::string::npos)
-        return "smollm3";
-    if (jinja_template.find("<|im_start|>") != std::string::npos)
-        return "chatml";
-    if (jinja_template.find("[INST]") != std::string::npos)
-        return "mistral";
-    if (jinja_template.find("<|user|>") != std::string::npos ||
-        jinja_template.find("<|assistant|>") != std::string::npos)
-        return "phi";
-    if (jinja_template.find("<start_of_turn>") != std::string::npos)
-        return "gemma";
-    if (jinja_template.find("<|start_header_id|>") != std::string::npos)
-        return "llama3";
-    if (jinja_template.find("<extra_id_0>") != std::string::npos)
-        return "nemotron";
-    if (jinja_template.find("<SPECIAL_10>") != std::string::npos)
-        return "nemotron_h";
+    // Ordered marker table: the first row whose markers are all present wins.
+    // SmolLM3's template is ChatML-framed, so it is matched on its mandatory
+    // system block before the generic ChatML row below. A row's second marker
+    // is either an additional requirement (`require_both`) or an alternative.
+    struct Rule {
+        const char* first;
+        const char* second;
+        bool require_both;
+        const char* format;
+    };
+    static constexpr Rule kRules[] = {
+        {"<|im_start|>", "Reasoning Mode:", true, "smollm3"},
+        {"<|im_start|>", nullptr, false, "chatml"},
+        {"[INST]", nullptr, false, "mistral"},
+        {"<|user|>", "<|assistant|>", false, "phi"},
+        {"<start_of_turn>", nullptr, false, "gemma"},
+        {"<|start_header_id|>", nullptr, false, "llama3"},
+        {"<extra_id_0>", nullptr, false, "nemotron"},
+        {"<SPECIAL_10>", nullptr, false, "nemotron_h"},
+    };
+
+    for (const Rule& rule : kRules) {
+        const bool has_first = jinja_template.find(rule.first) != std::string::npos;
+        const bool has_second =
+            rule.second != nullptr && jinja_template.find(rule.second) != std::string::npos;
+        const bool matched =
+            rule.require_both ? (has_first && has_second) : (has_first || has_second);
+        if (matched)
+            return rule.format;
+    }
     return {};
 }
 
 std::string smollm3_apply_chat_template(const std::string& format, const std::string& prompt,
-                                      bool enable_thinking, const std::string& today) {
+                                        bool enable_thinking, const std::string& today) {
     if (format.empty())
         return prompt;
     if (format == "smollm3")

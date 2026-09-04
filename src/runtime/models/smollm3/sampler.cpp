@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// SmolLM3ISampler implementations: GreedySampler, TopKSampler, and factory.
+// Smollm3ISampler implementations: GreedySampler, TopKSampler, and factory.
 //
 // GreedySampler wraps the same std::max_element logic as the original
-// SmolLM3TextGenerationPipeline::argmax() and select_argmax_token(), producing
+// Smollm3TextGenerationPipeline::argmax() and select_argmax_token(), producing
 // bit-identical token sequences.
 //
 // TopKSampler handles temperature, top-k, top-p, and min-p sampling on host
@@ -30,7 +30,7 @@
 
 namespace trtmc {
 
-bool smollm3_is_eos_token(const SmolLM3SamplingParams& params, int32_t token_id) {
+bool smollm3_is_eos_token(const Smollm3SamplingParams& params, int32_t token_id) {
     if (!params.eos_token_ids.empty()) {
         return std::find(params.eos_token_ids.begin(), params.eos_token_ids.end(), token_id) !=
                params.eos_token_ids.end();
@@ -39,9 +39,9 @@ bool smollm3_is_eos_token(const SmolLM3SamplingParams& params, int32_t token_id)
 }
 
 // Shared argmax helper — returns {token_id, logprob} for the highest logit.
-static SmolLM3SampleResult argmax_over_logits(const float* logits, int32_t vocab_size,
-                                            const SmolLM3SamplingParams& params) {
-    SmolLM3SampleResult result;
+static Smollm3SampleResult argmax_over_logits(const float* logits, int32_t vocab_size,
+                                              const Smollm3SamplingParams& params) {
+    Smollm3SampleResult result;
     const float* best = logits;
     for (int32_t i = 1; i < vocab_size; ++i) {
         if (logits[i] > *best)
@@ -83,7 +83,7 @@ static bool top_p_enabled(float top_p) {
     return top_p > 0.0F && top_p < 1.0F - kSamplingEpsilon;
 }
 
-static bool greedy_equivalent(const SmolLM3SamplingParams& params) {
+static bool greedy_equivalent(const Smollm3SamplingParams& params) {
     const float temperature = sanitized_temperature(params.temperature);
     const float top_p = sanitized_top_p(params.top_p);
     return temperature < kSamplingEpsilon || top_p <= 0.0F;
@@ -161,7 +161,7 @@ static void renormalize_kept_prefix(FilteredDistribution& dist, int32_t keep) {
 }
 
 static FilteredDistribution build_filtered_distribution(const float* logits, int32_t vocab_size,
-                                                        const SmolLM3SamplingParams& params) {
+                                                        const Smollm3SamplingParams& params) {
     const int32_t n = vocab_size;
     const float temperature = sanitized_temperature(params.temperature);
     const float top_p = sanitized_top_p(params.top_p);
@@ -183,12 +183,12 @@ static FilteredDistribution build_filtered_distribution(const float* logits, int
 // GreedySampler: deterministic argmax (identical to select_argmax_token)
 // ─────────────────────────────────────────────────────────────
 
-class GreedySampler final : public SmolLM3ISampler {
+class GreedySampler final : public Smollm3ISampler {
   public:
-    SmolLM3SampleResult sample(const float* logits, int32_t vocab_size,
-                             const SmolLM3SamplingParams& params) override {
+    Smollm3SampleResult sample(const float* logits, int32_t vocab_size,
+                               const Smollm3SamplingParams& params) override {
         if (vocab_size <= 0 || logits == nullptr) {
-            SmolLM3SampleResult result;
+            Smollm3SampleResult result;
             result.token_id = 0;
             result.is_eos = smollm3_is_eos_token(params, 0);
             return result;
@@ -197,7 +197,7 @@ class GreedySampler final : public SmolLM3ISampler {
         return argmax_over_logits(logits, vocab_size, params);
     }
 
-    SmolLM3LogitsLocation logits_location() const override { return SmolLM3LogitsLocation::HOST; }
+    Smollm3LogitsLocation logits_location() const override { return Smollm3LogitsLocation::HOST; }
     const char* sampler_type() const override { return "greedy"; }
 };
 
@@ -206,15 +206,15 @@ class GreedySampler final : public SmolLM3ISampler {
 // (identical logic to sample_token_topk)
 // ─────────────────────────────────────────────────────────────
 
-class TopKSampler final : public SmolLM3ISampler {
+class TopKSampler final : public Smollm3ISampler {
   public:
     explicit TopKSampler(uint64_t initial_seed)
         : rng_state_(initial_seed == 0 ? 1 : initial_seed),
           initial_seed_(initial_seed == 0 ? 1 : initial_seed) {}
 
-    SmolLM3SampleResult sample(const float* logits, int32_t vocab_size,
-                             const SmolLM3SamplingParams& params) override {
-        SmolLM3SampleResult result;
+    Smollm3SampleResult sample(const float* logits, int32_t vocab_size,
+                               const Smollm3SamplingParams& params) override {
+        Smollm3SampleResult result;
 
         if (vocab_size <= 0 || logits == nullptr) {
             result.token_id = 0;
@@ -253,7 +253,7 @@ class TopKSampler final : public SmolLM3ISampler {
         return result;
     }
 
-    SmolLM3LogitsLocation logits_location() const override { return SmolLM3LogitsLocation::HOST; }
+    Smollm3LogitsLocation logits_location() const override { return Smollm3LogitsLocation::HOST; }
     const char* sampler_type() const override { return "top_k"; }
 
     void reset() override { rng_state_ = initial_seed_; }
@@ -264,7 +264,7 @@ class TopKSampler final : public SmolLM3ISampler {
 };
 
 #if TRTMC_HAS_LIBTORCH_MULTINOMIAL && TRTMC_HAS_CUDA_KERNELS
-class TorchCudaMultinomialSampler final : public SmolLM3ISampler {
+class TorchCudaMultinomialSampler final : public Smollm3ISampler {
   public:
     explicit TorchCudaMultinomialSampler(uint64_t initial_seed)
         : initial_seed_(initial_seed == 0 ? 1 : initial_seed) {
@@ -280,9 +280,9 @@ class TorchCudaMultinomialSampler final : public SmolLM3ISampler {
     TorchCudaMultinomialSampler(const TorchCudaMultinomialSampler&) = delete;
     TorchCudaMultinomialSampler& operator=(const TorchCudaMultinomialSampler&) = delete;
 
-    SmolLM3SampleResult sample(const float* logits, int32_t vocab_size,
-                             const SmolLM3SamplingParams& params) override {
-        SmolLM3SampleResult result;
+    Smollm3SampleResult sample(const float* logits, int32_t vocab_size,
+                               const Smollm3SamplingParams& params) override {
+        Smollm3SampleResult result;
 
         if (vocab_size <= 0 || logits == nullptr) {
             result.token_id = 0;
@@ -304,8 +304,8 @@ class TorchCudaMultinomialSampler final : public SmolLM3ISampler {
                         static_cast<std::size_t>(dist.keep) * sizeof(float), cudaMemcpyHostToDevice,
                         stream_);
         smollm3_gpu_sparse_torch_multinomial_exact(d_indices_, d_probs_, dist.keep, initial_seed_,
-                                                 current_offset_, total_threads_, d_token_id_,
-                                                 stream_);
+                                                   current_offset_, total_threads_, d_token_id_,
+                                                   stream_);
         cudaMemcpyAsync(&h_token_id_, d_token_id_, sizeof(int32_t), cudaMemcpyDeviceToHost,
                         stream_);
         cudaStreamSynchronize(stream_);
@@ -324,7 +324,7 @@ class TorchCudaMultinomialSampler final : public SmolLM3ISampler {
         return result;
     }
 
-    SmolLM3LogitsLocation logits_location() const override { return SmolLM3LogitsLocation::HOST; }
+    Smollm3LogitsLocation logits_location() const override { return Smollm3LogitsLocation::HOST; }
     const char* sampler_type() const override { return "torch_multinomial"; }
 
     void reset() override { current_offset_ = 0; }
@@ -342,7 +342,7 @@ class TorchCudaMultinomialSampler final : public SmolLM3ISampler {
 
     void ensure_execution_policy(int32_t vocab_size) {
         if (vocab_size != cached_vocab_size_) {
-            const SmolLM3TorchMultinomialExecutionPolicy policy =
+            const Smollm3TorchMultinomialExecutionPolicy policy =
                 smollm3_compute_torch_multinomial_execution_policy(vocab_size);
             cached_vocab_size_ = vocab_size;
             total_threads_ = policy.total_threads;
@@ -369,7 +369,7 @@ class TorchCudaMultinomialSampler final : public SmolLM3ISampler {
 // ─────────────────────────────────────────────────────────────
 
 #if TRTMC_HAS_CUDA_KERNELS
-class GpuGreedySampler final : public SmolLM3ISampler {
+class GpuGreedySampler final : public Smollm3ISampler {
   public:
     explicit GpuGreedySampler(cudaStream_t stream) : stream_(stream) {
         cudaMalloc(&d_token_id_, sizeof(int32_t));
@@ -384,9 +384,9 @@ class GpuGreedySampler final : public SmolLM3ISampler {
     GpuGreedySampler(const GpuGreedySampler&) = delete;
     GpuGreedySampler& operator=(const GpuGreedySampler&) = delete;
 
-    SmolLM3SampleResult sample(const float* logits, int32_t vocab_size,
-                             const SmolLM3SamplingParams& params) override {
-        SmolLM3SampleResult result;
+    Smollm3SampleResult sample(const float* logits, int32_t vocab_size,
+                               const Smollm3SamplingParams& params) override {
+        Smollm3SampleResult result;
         if (vocab_size <= 0 || logits == nullptr) {
             result.token_id = 0;
             result.is_eos = smollm3_is_eos_token(params, 0);
@@ -409,7 +409,7 @@ class GpuGreedySampler final : public SmolLM3ISampler {
         return result;
     }
 
-    SmolLM3LogitsLocation logits_location() const override { return SmolLM3LogitsLocation::DEVICE; }
+    Smollm3LogitsLocation logits_location() const override { return Smollm3LogitsLocation::DEVICE; }
     const char* sampler_type() const override { return "gpu_greedy"; }
 
   private:
@@ -425,10 +425,10 @@ class GpuGreedySampler final : public SmolLM3ISampler {
 // Factory
 // ─────────────────────────────────────────────────────────────
 
-SmolLM3SamplingParams
+Smollm3SamplingParams
 smollm3_sampling_params_from_config(const GenerateConfig& cfg,
-                                  const std::vector<int32_t>& default_eos_token_ids) {
-    SmolLM3SamplingParams p;
+                                    const std::vector<int32_t>& default_eos_token_ids) {
+    Smollm3SamplingParams p;
     p.temperature = cfg.temperature;
     p.top_k = cfg.top_k;
     p.top_p = cfg.top_p;
@@ -440,16 +440,16 @@ smollm3_sampling_params_from_config(const GenerateConfig& cfg,
     return p;
 }
 
-SmolLM3SamplingParams smollm3_sampling_params_from_config(const GenerateConfig& cfg,
-                                                      int32_t default_eos) {
+Smollm3SamplingParams smollm3_sampling_params_from_config(const GenerateConfig& cfg,
+                                                          int32_t default_eos) {
     const std::vector<int32_t> defaults =
         default_eos >= 0 ? std::vector<int32_t>{default_eos} : std::vector<int32_t>{};
     return smollm3_sampling_params_from_config(cfg, defaults);
 }
 
-std::unique_ptr<SmolLM3ISampler>
-create_smollm3_sampler(const SmolLM3SamplingParams& params,
-                     [[maybe_unused]] const SmolLM3SamplerFactoryOptions& options) {
+std::unique_ptr<Smollm3ISampler>
+create_smollm3_sampler(const Smollm3SamplingParams& params,
+                       [[maybe_unused]] const Smollm3SamplerFactoryOptions& options) {
     // Greedy when sampling is fully disabled and no explicit random seed is set.
     const float top_p = sanitized_top_p(params.top_p);
     const float min_p = sanitized_min_p(params.min_p);
@@ -468,11 +468,11 @@ create_smollm3_sampler(const SmolLM3SamplingParams& params,
     return std::make_unique<TopKSampler>(seed);
 }
 
-std::unique_ptr<SmolLM3ISampler> create_smollm3_sampler(const SmolLM3SamplingParams& params) {
-    return create_smollm3_sampler(params, SmolLM3SamplerFactoryOptions{});
+std::unique_ptr<Smollm3ISampler> create_smollm3_sampler(const Smollm3SamplingParams& params) {
+    return create_smollm3_sampler(params, Smollm3SamplerFactoryOptions{});
 }
 
-std::unique_ptr<SmolLM3ISampler> create_smollm3_gpu_greedy_sampler(void* stream) {
+std::unique_ptr<Smollm3ISampler> create_smollm3_gpu_greedy_sampler(void* stream) {
 #if TRTMC_HAS_CUDA_KERNELS
     return std::make_unique<GpuGreedySampler>(static_cast<cudaStream_t>(stream));
 #else

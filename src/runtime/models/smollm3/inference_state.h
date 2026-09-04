@@ -5,7 +5,7 @@
 
 #pragma once
 
-// SmolLM3InferenceState: unified interface for autoregressive inference state.
+// Smollm3InferenceState: unified interface for autoregressive inference state.
 //
 // Both KV-cache attention state and recurrent state implementations expose
 // this interface. Pipelines and plugins program against it — never against
@@ -19,9 +19,9 @@
 //   5. position()     — current sequence position
 //
 // Implementations:
-//   SmolLM3KvCache          — dense append-only (current default)
+//   Smollm3KvCache          — dense append-only (current default)
 //   Family-owned recurrent state — recurrent tensor state
-//   Family-owned hybrid state — SmolLM3KvCache + family-owned recurrent state composed
+//   Family-owned hybrid state — Smollm3KvCache + family-owned recurrent state composed
 //   (future: RingKvCache, PagedKvCache, MlaCache, SlidingWindowCache)
 
 #include "trtmc/runtime/tensor.h"
@@ -34,9 +34,9 @@ namespace trtmc {
 class ITrtModule;
 using TrtModule = ITrtModule;
 
-class SmolLM3InferenceState {
+class Smollm3InferenceState {
   public:
-    virtual ~SmolLM3InferenceState() = default;
+    virtual ~Smollm3InferenceState() = default;
 
     // --- Lifecycle ---
 
@@ -88,7 +88,7 @@ class SmolLM3InferenceState {
     virtual int32_t num_layers() const = 0;
 
     // Whether this state type needs an attention mask.
-    // SmolLM3KvCache -> true. Family-owned recurrent state -> false.
+    // Smollm3KvCache -> true. Family-owned recurrent state -> false.
     virtual bool needs_attention_mask() const = 0;
 
     // Total device memory consumed by this state (bytes).

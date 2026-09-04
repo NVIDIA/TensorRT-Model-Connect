@@ -16,24 +16,25 @@
 
 namespace trtmc {
 
-enum class SmolLM3TriAttentionScoreAggregation {
+enum class Smollm3TriAttentionScoreAggregation {
     kMean,
     kMax,
 };
 
-enum class SmolLM3TriAttentionRopeStyle {
+enum class Smollm3TriAttentionRopeStyle {
     kHalf,
     kInterleaved,
 };
 
-struct SmolLM3TriAttentionConfig {
+struct Smollm3TriAttentionConfig {
     bool enabled{false};
     int32_t kv_budget{0};
     int32_t divide_length{128};
     int32_t recent_window{128};
-    SmolLM3TriAttentionScoreAggregation score_aggregation{SmolLM3TriAttentionScoreAggregation::kMean};
-    SmolLM3TriAttentionScoreAggregation per_layer_aggregation{
-        SmolLM3TriAttentionScoreAggregation::kMean};
+    Smollm3TriAttentionScoreAggregation score_aggregation{
+        Smollm3TriAttentionScoreAggregation::kMean};
+    Smollm3TriAttentionScoreAggregation per_layer_aggregation{
+        Smollm3TriAttentionScoreAggregation::kMean};
     bool count_prompt_tokens{true};
     bool protect_prefill{true};
     bool disable_mlr{false};
@@ -61,16 +62,16 @@ struct SmolLM3TriAttentionConfig {
     bool dump_score_values{false};
 };
 
-struct SmolLM3TriAttentionHeadStats {
+struct Smollm3TriAttentionHeadStats {
     std::vector<float> q_mean_real;
     std::vector<float> q_mean_imag;
     std::vector<float> q_abs_mean;
     std::vector<float> freq_scale_sq;
 };
 
-struct SmolLM3TriAttentionStats {
+struct Smollm3TriAttentionStats {
     int32_t head_dim{0};
-    SmolLM3TriAttentionRopeStyle rope_style{SmolLM3TriAttentionRopeStyle::kHalf};
+    Smollm3TriAttentionRopeStyle rope_style{Smollm3TriAttentionRopeStyle::kHalf};
     float rope_theta{10000.0F};
     int32_t num_attention_heads{0};
     int32_t num_key_value_heads{0};
@@ -78,10 +79,10 @@ struct SmolLM3TriAttentionStats {
     int32_t num_layers{0};
     std::vector<float> inv_freq;
     std::vector<std::vector<int32_t>> sampled_score_heads_by_layer;
-    std::vector<SmolLM3TriAttentionHeadStats> layer_stats;
+    std::vector<Smollm3TriAttentionHeadStats> layer_stats;
 };
 
-struct SmolLM3TriAttentionCompactionProfile {
+struct Smollm3TriAttentionCompactionProfile {
     double host_copy_ms{0.0};
     double host_convert_ms{0.0};
     double trig_prep_ms{0.0};
@@ -103,27 +104,27 @@ namespace config {
 class ConfigBundle;
 }
 
-// Build a SmolLM3TriAttentionConfig from the bundle's JSON plus (optionally) the
+// Build a Smollm3TriAttentionConfig from the bundle's JSON plus (optionally) the
 // session-resolved ConfigBundle. Legacy bundles without the generic
 // `defaults:` block still parse through the JSON path; when ``runtime_config``
 // has a non-default layer value for a field, that value wins. Environment
 // variables (TRTMC_TRIATTN_*) are no longer read — callers supply values via
 // the registry (CLI --set / --config or bundle defaults:).
-SmolLM3TriAttentionConfig
+Smollm3TriAttentionConfig
 smollm3_parse_triattention_bundle_config(const std::string& config_json, int32_t max_cache_length,
-                                       const config::ConfigBundle* runtime_config = nullptr);
+                                         const config::ConfigBundle* runtime_config = nullptr);
 
-SmolLM3TriAttentionStats smollm3_parse_triattention_stats_json(const std::string& stats_json,
-                                                           int32_t num_attention_heads,
-                                                           int32_t num_key_value_heads,
-                                                           int32_t num_layers);
+Smollm3TriAttentionStats smollm3_parse_triattention_stats_json(const std::string& stats_json,
+                                                               int32_t num_attention_heads,
+                                                               int32_t num_key_value_heads,
+                                                               int32_t num_layers);
 
-class SmolLM3TriAttentionKvCache : public SmolLM3InferenceState {
+class Smollm3TriAttentionKvCache : public Smollm3InferenceState {
   public:
-    SmolLM3TriAttentionKvCache(int32_t num_layers, int32_t num_kv_heads, int32_t max_length,
-                             int32_t kv_dim, cudaStream_t stream, SmolLM3TriAttentionConfig config,
-                             SmolLM3TriAttentionStats stats, DType cache_dtype = DType::kFloat32,
-                             SmolLM3KvCacheNames names = {});
+    Smollm3TriAttentionKvCache(int32_t num_layers, int32_t num_kv_heads, int32_t max_length,
+                               int32_t kv_dim, cudaStream_t stream,
+                               Smollm3TriAttentionConfig config, Smollm3TriAttentionStats stats,
+                               DType cache_dtype = DType::kFloat32, Smollm3KvCacheNames names = {});
 
     void reset() override;
     void bind_to(TrtModule& module) override;
@@ -179,7 +180,7 @@ class SmolLM3TriAttentionKvCache : public SmolLM3InferenceState {
                                int32_t keep_count, std::size_t row_bytes,
                                std::size_t head_block_bytes, int32_t old_cache_length,
                                int64_t& repack_calls, std::size_t& repack_bytes);
-    void finalize_repack_profile(SmolLM3TriAttentionCompactionProfile* profile_ptr,
+    void finalize_repack_profile(Smollm3TriAttentionCompactionProfile* profile_ptr,
                                  cudaEvent_t repack_start, cudaEvent_t repack_stop,
                                  int64_t repack_calls, std::size_t repack_bytes) const;
     std::vector<std::vector<int32_t>>
@@ -189,42 +190,43 @@ class SmolLM3TriAttentionKvCache : public SmolLM3InferenceState {
     std::vector<int32_t> collect_dropped_positions(const std::vector<int32_t>& keep_indices,
                                                    int32_t keep_count) const;
     int32_t count_prefix_positions(const std::vector<int32_t>& representative_positions) const;
-    void log_compact_profile(const SmolLM3TriAttentionCompactionProfile* profile_ptr,
+    void log_compact_profile(const Smollm3TriAttentionCompactionProfile* profile_ptr,
                              int32_t keep_count) const;
-    bool should_emit_keep_dump(const SmolLM3TriAttentionCompactionProfile* profile_ptr) const;
+    bool should_emit_keep_dump(const Smollm3TriAttentionCompactionProfile* profile_ptr) const;
     void emit_keep_dump_json(const std::vector<int32_t>& keep_indices, int32_t keep_count,
                              const std::vector<std::vector<int32_t>>& new_positions_by_head,
-                             const SmolLM3TriAttentionCompactionProfile* profile_ptr,
+                             const Smollm3TriAttentionCompactionProfile* profile_ptr,
                              const std::vector<std::string>& score_cache_files,
                              const std::vector<std::string>& value_cache_files,
                              const std::vector<std::string>& post_score_cache_files,
                              const std::vector<std::string>& post_value_cache_files);
-    std::vector<int32_t> select_keep_indices(int32_t keep_budget,
-                                             SmolLM3TriAttentionCompactionProfile* profile = nullptr);
+    std::vector<int32_t>
+    select_keep_indices(int32_t keep_budget,
+                        Smollm3TriAttentionCompactionProfile* profile = nullptr);
     std::vector<char> build_reserve_mask(int32_t total_tokens, int32_t old_budget) const;
     std::vector<int32_t> broadcast_indices_per_head(std::vector<int32_t> rows,
                                                     int32_t row_count) const;
     std::vector<int32_t>
     select_keep_indices_host(int32_t keep_budget, const std::vector<int32_t>& reserved,
                              const std::vector<int32_t>& candidates,
-                             SmolLM3TriAttentionCompactionProfile* profile = nullptr) const;
+                             Smollm3TriAttentionCompactionProfile* profile = nullptr) const;
     std::vector<int32_t>
     broadcast_reserved_for_empty_budget(int32_t keep_budget,
                                         const std::vector<int32_t>& reserved) const;
     void precompute_trig_phases(std::vector<std::vector<float>>& cos_phase,
                                 std::vector<std::vector<float>>& sin_phase, int32_t half_dim,
-                                SmolLM3TriAttentionCompactionProfile* profile) const;
-    bool layer_stats_shapes_valid(const SmolLM3TriAttentionHeadStats& layer_stats,
+                                Smollm3TriAttentionCompactionProfile* profile) const;
+    bool layer_stats_shapes_valid(const Smollm3TriAttentionHeadStats& layer_stats,
                                   int32_t half_dim) const;
     void extract_k_rot(const float* row_ptr, int32_t head_offset, int32_t d, int32_t half_dim,
                        float& k_rot_real, float& k_rot_imag) const;
     float reduce_trig_sums(const std::vector<float>& trig_sums) const;
-    float score_one_row(const float* row_ptr, const SmolLM3TriAttentionHeadStats& layer_stats,
+    float score_one_row(const float* row_ptr, const Smollm3TriAttentionHeadStats& layer_stats,
                         std::size_t stats_base, int32_t head_offset, int32_t half_dim,
                         const std::vector<std::vector<float>>& cos_phase,
                         const std::vector<std::vector<float>>& sin_phase) const;
     void score_rows_for_head(std::vector<float>& scores, const std::vector<float>& layer_cache,
-                             const SmolLM3TriAttentionHeadStats& layer_stats, int32_t score_head,
+                             const Smollm3TriAttentionHeadStats& layer_stats, int32_t score_head,
                              int32_t cache_head, int32_t half_dim, int32_t total_tokens,
                              const std::vector<std::vector<float>>& cos_phase,
                              const std::vector<std::vector<float>>& sin_phase) const;
@@ -266,10 +268,10 @@ class SmolLM3TriAttentionKvCache : public SmolLM3InferenceState {
                                           int32_t& global_fallback_count,
                                           std::vector<int32_t>& contributing_layers_by_cache_head,
                                           std::vector<float>& layer_aggregate_dump,
-                                          SmolLM3TriAttentionCompactionProfile* profile) const;
+                                          Smollm3TriAttentionCompactionProfile* profile) const;
     std::vector<float>
     copy_cache_rows_to_host(const DeviceTensor& tensor, int32_t rows,
-                            SmolLM3TriAttentionCompactionProfile* profile = nullptr) const;
+                            Smollm3TriAttentionCompactionProfile* profile = nullptr) const;
     void sync_shared_positions_from_head0();
 #ifdef TRTMC_HAS_CUDA_KERNELS
     struct LayerGpuStats {
@@ -295,7 +297,7 @@ class SmolLM3TriAttentionKvCache : public SmolLM3InferenceState {
         int32_t layer, int32_t total_tokens, int32_t num_offsets,
         std::vector<float>& aggregated_scores, std::vector<float>& global_fallback_sum,
         int32_t& global_fallback_count, std::vector<int32_t>& contributing_layers_by_cache_head,
-        SmolLM3TriAttentionCompactionProfile* profile);
+        Smollm3TriAttentionCompactionProfile* profile);
     void standardize_score_rows(float* rows, int32_t num_rows, int32_t total_tokens) const;
     void accumulate_flat_fallback(const float* rows, int32_t num_rows, int32_t total_tokens,
                                   std::vector<float>& fallback_sum, int32_t& fallback_count) const;
@@ -305,14 +307,14 @@ class SmolLM3TriAttentionKvCache : public SmolLM3InferenceState {
         std::vector<int32_t>& contributing_layers_by_cache_head) const;
     bool upload_candidate_indices_identity(int32_t total_tokens);
     bool upload_gpu_trig_phases(int32_t num_offsets, int32_t half_dim,
-                                SmolLM3TriAttentionCompactionProfile* profile);
+                                Smollm3TriAttentionCompactionProfile* profile);
     bool run_gpu_selection_over_layers(int32_t total_tokens, int32_t num_offsets,
                                        std::vector<float>& aggregated_scores,
                                        std::vector<float>& global_fallback_sum,
                                        int32_t& global_fallback_count,
                                        std::vector<int32_t>& contributing_layers_by_cache_head,
                                        int32_t& contributing_layers,
-                                       SmolLM3TriAttentionCompactionProfile* profile);
+                                       Smollm3TriAttentionCompactionProfile* profile);
     void
     finalize_flat_per_head_aggregate(std::vector<float>& aggregated_scores,
                                      const std::vector<int32_t>& contributing_layers_by_cache_head,
@@ -326,7 +328,7 @@ class SmolLM3TriAttentionKvCache : public SmolLM3InferenceState {
     std::vector<int32_t>
     select_keep_indices_gpu(int32_t keep_budget, const std::vector<int32_t>& reserved,
                             const std::vector<int32_t>& candidates,
-                            SmolLM3TriAttentionCompactionProfile* profile = nullptr);
+                            Smollm3TriAttentionCompactionProfile* profile = nullptr);
 #endif
 
     std::vector<DeviceTensor> cache_k_;
@@ -353,9 +355,9 @@ class SmolLM3TriAttentionKvCache : public SmolLM3InferenceState {
     int32_t bound_cache_rows_{0};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
-    SmolLM3KvCacheNames names_;
-    SmolLM3TriAttentionConfig config_;
-    SmolLM3TriAttentionStats stats_;
+    Smollm3KvCacheNames names_;
+    Smollm3TriAttentionConfig config_;
+    Smollm3TriAttentionStats stats_;
     std::vector<int32_t> cache_positions_;
     std::vector<std::vector<int32_t>> cache_positions_per_head_;
     std::vector<float> offsets_;

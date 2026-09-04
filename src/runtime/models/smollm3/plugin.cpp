@@ -119,12 +119,13 @@ std::string format_bytes(std::uint64_t bytes) {
     return oss.str();
 }
 
-bool engine_uses_native_kv_updates(const TrtModule& module, const SmolLM3KvCacheNames& kv_names) {
+bool engine_uses_native_kv_updates(const TrtModule& module, const Smollm3KvCacheNames& kv_names) {
     const bool has_write_indices = module.has_input(kv_names.cache_write_indices);
     const bool has_kv_lengths = module.has_input(kv_names.key_value_lengths);
     if (has_write_indices != has_kv_lengths) {
-        throw std::runtime_error("SmolLM3 native KV engine must expose both cache_write_indices and "
-                                 "key_value_lengths");
+        throw std::runtime_error(
+            "SmolLM3 native KV engine must expose both cache_write_indices and "
+            "key_value_lengths");
     }
     return has_write_indices;
 }
@@ -183,9 +184,9 @@ void reject_native_kv_size_override(const PipelineContext& ctx) {
 }
 
 void apply_runtime_kv_size_override(const PipelineContext& ctx, const TrtModule& module,
-                                    const SmolLM3KvCacheNames& kv_names,
-                                    const SmolLM3TriAttentionConfig& tri_cfg, int32_t bundle_max_rows,
-                                    KvCacheRuntimeSizing& sizing) {
+                                    const Smollm3KvCacheNames& kv_names,
+                                    const Smollm3TriAttentionConfig& tri_cfg,
+                                    int32_t bundle_max_rows, KvCacheRuntimeSizing& sizing) {
     if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
         throw std::runtime_error(
             "This bundle was not built with runtime-resizable KV cache support. "
@@ -221,8 +222,8 @@ void apply_runtime_kv_size_override(const PipelineContext& ctx, const TrtModule&
 }
 
 KvCacheRuntimeSizing resolve_kv_cache_runtime_sizing(
-    const PipelineContext& ctx, const TrtModule& module, const SmolLM3KvCacheNames& kv_names,
-    DType cache_dtype, const SmolLM3TriAttentionConfig& tri_cfg, int32_t kv_dim, bool native_kv) {
+    const PipelineContext& ctx, const TrtModule& module, const Smollm3KvCacheNames& kv_names,
+    DType cache_dtype, const Smollm3TriAttentionConfig& tri_cfg, int32_t kv_dim, bool native_kv) {
     KvCacheRuntimeSizing sizing;
     const int32_t bundle_max_rows = ctx.config.max_cache_length;
     if (ctx.config.num_layers <= 0 || kv_dim <= 0 || bundle_max_rows <= 0)
@@ -249,8 +250,8 @@ KvCacheRuntimeSizing resolve_kv_cache_runtime_sizing(
 }
 
 void validate_native_kv_runtime(const PipelineContext& ctx, const TrtModule& module,
-                                const SmolLM3KvCacheNames& kv_names, DType cache_dtype,
-                                const SmolLM3TriAttentionConfig& tri_cfg,
+                                const Smollm3KvCacheNames& kv_names, DType cache_dtype,
+                                const Smollm3TriAttentionConfig& tri_cfg,
                                 const TensorParallelRuntimeConfig& tp_config, bool native_kv) {
     validate_native_kv_marker(ctx.config_json, native_kv);
     if (!native_kv)
@@ -278,11 +279,11 @@ class DecoderPlugin final : public IPipelinePlugin {
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
         const auto& io = ctx.config.io_map;
-        SmolLM3KvCacheNames kv_names;
+        Smollm3KvCacheNames kv_names;
         build_kv_names(ctx, io, kv_names);
 
         const DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        SmolLM3TriAttentionConfig tri_cfg = smollm3_parse_triattention_bundle_config(
+        Smollm3TriAttentionConfig tri_cfg = smollm3_parse_triattention_bundle_config(
             ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
 
         TensorParallelRuntime tp_runtime;
@@ -333,7 +334,7 @@ class DecoderPlugin final : public IPipelinePlugin {
             build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
         log_kv_cache_sizing(ctx, sizing, state.get());
 
-        SmolLM3TextGenConfig tgc;
+        Smollm3TextGenConfig tgc;
         populate_text_gen_config(ctx, tgc, io, decoders.front(), ctx.runtime_config);
         apply_chat_template_format(ctx.bundle, tgc);
         // Wire batched prefill. Native TensorRT KV engines update the shared
@@ -346,7 +347,7 @@ class DecoderPlugin final : public IPipelinePlugin {
         tgc.present_k_pattern = io.present_k_pattern;
         tgc.present_v_pattern = io.present_v_pattern;
 
-        return std::make_unique<SmolLM3TextGenerationPipeline>(
+        return std::make_unique<Smollm3TextGenerationPipeline>(
             std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
             ctx.bundle.info.model_id, nullptr, std::move(prefill_module), nullptr,
             tp_runtime.group.owner);
@@ -355,7 +356,7 @@ class DecoderPlugin final : public IPipelinePlugin {
   private:
     static std::unique_ptr<TrtModule>
     load_split_prefill_module(const PipelineContext& ctx, cudaStream_t stream, const IoMap& io,
-                              const SmolLM3KvCacheNames& kv_names, int32_t& prefill_profile_idx,
+                              const Smollm3KvCacheNames& kv_names, int32_t& prefill_profile_idx,
                               int32_t& prefill_max_length, std::string& prefill_log_label) {
         if (find_section(ctx.bundle, "prefill_engine_plan") == nullptr)
             return nullptr;
@@ -431,7 +432,7 @@ class DecoderPlugin final : public IPipelinePlugin {
     }
 
     static void build_kv_names(const PipelineContext& ctx, const IoMap& io,
-                               SmolLM3KvCacheNames& kv_names) {
+                               Smollm3KvCacheNames& kv_names) {
         kv_names.position_id = io.position_id;
         kv_names.attention_mask = io.attention_mask;
         for (int32_t i = 0; i < ctx.config.num_layers; ++i) {
@@ -478,11 +479,11 @@ class DecoderPlugin final : public IPipelinePlugin {
         prefill_module = std::move(entry->module);
     }
 
-    static std::vector<SmolLM3TextGenerationPipeline::DecoderContext>
+    static std::vector<Smollm3TextGenerationPipeline::DecoderContext>
     build_decoder_contexts(BackendProfileModules profile_modules, int32_t runtime_rows,
                            const DecoderProfileRoles& profile_roles,
                            std::unique_ptr<TrtModule>& prefill_module) {
-        std::vector<SmolLM3TextGenerationPipeline::DecoderContext> decoders;
+        std::vector<Smollm3TextGenerationPipeline::DecoderContext> decoders;
         decoders.reserve(profile_modules.modules.size());
         std::vector<int32_t> available_rows;
         available_rows.reserve(profile_roles.decode_profiles.size());
@@ -495,7 +496,7 @@ class DecoderPlugin final : public IPipelinePlugin {
             if (found == nullptr || !found->module)
                 continue;
             found->module->set_timing_label("engine_plan:decode");
-            decoders.push_back(SmolLM3TextGenerationPipeline::DecoderContext{
+            decoders.push_back(Smollm3TextGenerationPipeline::DecoderContext{
                 profile.kv_rows, std::move(found->module)});
         }
 
@@ -510,34 +511,34 @@ class DecoderPlugin final : public IPipelinePlugin {
         return decoders;
     }
 
-    static std::unique_ptr<SmolLM3InferenceState>
+    static std::unique_ptr<Smollm3InferenceState>
     build_inference_state(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing,
-                          SmolLM3TriAttentionConfig& tri_cfg, DType cache_dtype, int32_t kv_dim,
-                          SmolLM3KvCacheNames& kv_names, cudaStream_t stream) {
-        std::unique_ptr<SmolLM3InferenceState> state;
+                          Smollm3TriAttentionConfig& tri_cfg, DType cache_dtype, int32_t kv_dim,
+                          Smollm3KvCacheNames& kv_names, cudaStream_t stream) {
+        std::unique_ptr<Smollm3InferenceState> state;
         if (tri_cfg.enabled) {
             auto* stats_sec = find_section(ctx.bundle, tri_cfg.stats_section);
             if (stats_sec == nullptr || stats_sec->empty())
                 throw std::runtime_error("TriAttention stats section is missing: " +
                                          tri_cfg.stats_section);
             std::string stats_json(stats_sec->begin(), stats_sec->end());
-            SmolLM3TriAttentionStats tri_stats = smollm3_parse_triattention_stats_json(
+            Smollm3TriAttentionStats tri_stats = smollm3_parse_triattention_stats_json(
                 stats_json, ctx.config.num_heads, ctx.config.num_kv_heads, ctx.config.num_layers);
-            state = std::make_unique<SmolLM3TriAttentionKvCache>(
+            state = std::make_unique<Smollm3TriAttentionKvCache>(
                 ctx.config.num_layers, ctx.config.num_kv_heads, sizing.runtime_rows, kv_dim, stream,
                 std::move(tri_cfg), std::move(tri_stats), cache_dtype, std::move(kv_names));
         } else {
             state =
-                std::make_unique<SmolLM3KvCache>(ctx.config.num_layers, sizing.runtime_rows, kv_dim,
-                                               stream, cache_dtype, std::move(kv_names));
+                std::make_unique<Smollm3KvCache>(ctx.config.num_layers, sizing.runtime_rows, kv_dim,
+                                                 stream, cache_dtype, std::move(kv_names));
         }
         if (!state->ok())
-            throw std::runtime_error("Failed to create SmolLM3KvCache");
+            throw std::runtime_error("Failed to create Smollm3KvCache");
         return state;
     }
 
     static void log_kv_cache_sizing(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing,
-                                    SmolLM3InferenceState* state) {
+                                    Smollm3InferenceState* state) {
         std::cerr << "[trtmc] KV cache rows=" << sizing.runtime_rows
                   << " (bundle max=" << ctx.config.max_cache_length
                   << ", row=" << format_bytes(sizing.row_bytes)
@@ -552,8 +553,8 @@ class DecoderPlugin final : public IPipelinePlugin {
     }
 
     static void
-    populate_text_gen_config(const PipelineContext& ctx, SmolLM3TextGenConfig& tgc, const IoMap& io,
-                             const SmolLM3TextGenerationPipeline::DecoderContext& first_dec,
+    populate_text_gen_config(const PipelineContext& ctx, Smollm3TextGenConfig& tgc, const IoMap& io,
+                             const Smollm3TextGenerationPipeline::DecoderContext& first_dec,
                              const config::ConfigBundle* runtime_config) {
         tgc.vocab_size = ctx.config.vocab_size;
         tgc.id_bos = ctx.config.id_bos;
@@ -573,7 +574,7 @@ class DecoderPlugin final : public IPipelinePlugin {
         }
     }
 
-    static void apply_chat_template_format(const BundleFile& bundle, SmolLM3TextGenConfig& tgc) {
+    static void apply_chat_template_format(const BundleFile& bundle, Smollm3TextGenConfig& tgc) {
         std::string chat_tpl;
         auto* tok_cfg_sec = find_section(bundle, "tokenizer_config.json");
         if (tok_cfg_sec != nullptr && !tok_cfg_sec->empty()) {

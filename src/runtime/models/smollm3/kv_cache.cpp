@@ -73,8 +73,8 @@ bool all_tensors_ok(const std::vector<DeviceTensor>& tensors) {
 
 } // namespace
 
-SmolLM3KvCache::SmolLM3KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
-                           cudaStream_t stream, DType cache_dtype, SmolLM3KvCacheNames names)
+Smollm3KvCache::Smollm3KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
+                               cudaStream_t stream, DType cache_dtype, Smollm3KvCacheNames names)
     : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim), stream_(stream),
       cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)),
       names_(std::move(names)) {
@@ -96,7 +96,7 @@ SmolLM3KvCache::SmolLM3KvCache(int32_t num_layers, int32_t max_length, int32_t k
     const auto expected_names = static_cast<std::size_t>(num_layers);
     if (names_.cache_k.size() != expected_names || names_.cache_v.size() != expected_names ||
         names_.present_k.size() != expected_names || names_.present_v.size() != expected_names) {
-        throw std::invalid_argument("SmolLM3KvCache: per-layer tensor name count mismatch");
+        throw std::invalid_argument("Smollm3KvCache: per-layer tensor name count mismatch");
     }
 
     cache_k_.reserve(static_cast<std::size_t>(num_layers));
@@ -119,12 +119,13 @@ SmolLM3KvCache::SmolLM3KvCache(int32_t num_layers, int32_t max_length, int32_t k
     reset();
 }
 
-bool SmolLM3KvCache::configure_binding_mode(TrtModule& module) {
+bool Smollm3KvCache::configure_binding_mode(TrtModule& module) {
     const bool has_write_indices = module.has_input(names_.cache_write_indices);
     const bool has_kv_lengths = module.has_input(names_.key_value_lengths);
     if (has_write_indices != has_kv_lengths) {
-        throw std::runtime_error("SmolLM3 native KV engine must expose both cache_write_indices and "
-                                 "key_value_lengths");
+        throw std::runtime_error(
+            "SmolLM3 native KV engine must expose both cache_write_indices and "
+            "key_value_lengths");
     }
 
     const bool native_mode = has_write_indices && has_kv_lengths;
@@ -139,7 +140,7 @@ bool SmolLM3KvCache::configure_binding_mode(TrtModule& module) {
     return native_mode;
 }
 
-void SmolLM3KvCache::validate_native_kv_contract(TrtModule& module) const {
+void Smollm3KvCache::validate_native_kv_contract(TrtModule& module) const {
     validate_native_scalar_input(module, names_.cache_write_indices);
     validate_native_scalar_input(module, names_.key_value_lengths);
 
@@ -152,7 +153,7 @@ void SmolLM3KvCache::validate_native_kv_contract(TrtModule& module) const {
     }
 }
 
-void SmolLM3KvCache::ensure_legacy_present_buffers() {
+void Smollm3KvCache::ensure_legacy_present_buffers() {
     if (!present_k_.empty())
         return;
     for (int32_t i = 0; i < num_layers_; ++i) {
@@ -164,7 +165,7 @@ void SmolLM3KvCache::ensure_legacy_present_buffers() {
     }
 }
 
-void SmolLM3KvCache::bind_native_cache(TrtModule& module) {
+void Smollm3KvCache::bind_native_cache(TrtModule& module) {
     for (int32_t i = 0; i < num_layers_; ++i) {
         const auto li = static_cast<std::size_t>(i);
         module.bind_external(names_.cache_k[li], cache_k_[li].data());
@@ -179,8 +180,8 @@ void SmolLM3KvCache::bind_native_cache(TrtModule& module) {
     }
 }
 
-void SmolLM3KvCache::validate_native_aliases(const std::vector<const void*>& present_k,
-                                           const std::vector<const void*>& present_v) const {
+void Smollm3KvCache::validate_native_aliases(const std::vector<const void*>& present_k,
+                                             const std::vector<const void*>& present_v) const {
     if (static_cast<int32_t>(present_k.size()) != num_layers_ ||
         static_cast<int32_t>(present_v.size()) != num_layers_) {
         throw std::runtime_error("SmolLM3 native KV per-layer pointer count mismatch");
@@ -194,7 +195,7 @@ void SmolLM3KvCache::validate_native_aliases(const std::vector<const void*>& pre
     }
 }
 
-void SmolLM3KvCache::write_native_kv_inputs(TensorMap& inputs, int32_t seq_len) {
+void Smollm3KvCache::write_native_kv_inputs(TensorMap& inputs, int32_t seq_len) {
     if (seq_len > max_length_ - position_) {
         throw std::runtime_error("SmolLM3 sequence exceeds the model's fixed KV cache capacity");
     }
@@ -207,7 +208,7 @@ void SmolLM3KvCache::write_native_kv_inputs(TensorMap& inputs, int32_t seq_len) 
 // Masked score constant is model-local.
 static constexpr float kMaskedScore = -1.0e4F;
 
-void SmolLM3KvCache::build_attention_mask(std::vector<float>& mask) const {
+void Smollm3KvCache::build_attention_mask(std::vector<float>& mask) const {
     // DEPRECATED: use prepare_step() instead.
     const auto width = static_cast<std::size_t>(max_length_) + 1;
     mask.assign(width, kMaskedScore);
@@ -217,13 +218,13 @@ void SmolLM3KvCache::build_attention_mask(std::vector<float>& mask) const {
     mask.back() = 0.0f;
 }
 
-int32_t SmolLM3KvCache::preferred_cache_rows() const {
+int32_t Smollm3KvCache::preferred_cache_rows() const {
     if (!dynamic_binding_enabled_)
         return max_length_;
     return round_up_rows(std::max(position_, 1), kRuntimeBucketRows, max_length_);
 }
 
-void SmolLM3KvCache::rebind_cache_rows(int32_t cache_rows) {
+void Smollm3KvCache::rebind_cache_rows(int32_t cache_rows) {
     if (!dynamic_binding_enabled_ || bound_module_ == nullptr || cache_rows == bound_cache_rows_)
         return;
     const std::vector<int64_t> cache_shape{cache_rows, kv_dim_};
@@ -242,8 +243,8 @@ void SmolLM3KvCache::rebind_cache_rows(int32_t cache_rows) {
 //   * 3-D decoder mask with query dim:                 [1, 1, mask_width]
 // The tensor content is identical (width = current mask_width); only the
 // leading broadcast dimensions change.
-std::vector<int64_t> SmolLM3KvCache::mask_shape_for_engine(int32_t mask_width,
-                                                         std::size_t mask_buf_size) const {
+std::vector<int64_t> Smollm3KvCache::mask_shape_for_engine(int32_t mask_width,
+                                                           std::size_t mask_buf_size) const {
     const int32_t mask_rank =
         bound_module_ != nullptr ? bound_module_->input_rank(names_.attention_mask) : 0;
     if (mask_rank == 3)
@@ -253,7 +254,7 @@ std::vector<int64_t> SmolLM3KvCache::mask_shape_for_engine(int32_t mask_width,
     return {static_cast<int64_t>(mask_buf_size)};
 }
 
-void SmolLM3KvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
+void Smollm3KvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
     if (!has_position_input_)
         return;
     pos_buf_vec_.resize(static_cast<std::size_t>(seq_len));
@@ -266,7 +267,7 @@ void SmolLM3KvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
     inputs[names_.position_id] = pos_t;
 }
 
-void SmolLM3KvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
+void Smollm3KvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
     // Batched prefill mask: (seq_len, max_length + seq_len). Columns
     // [0, valid) are visible cache, [valid, max_length) are stale slots,
     // [max_length, max_length+seq_len) are the new tokens — causal so
@@ -290,7 +291,7 @@ void SmolLM3KvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
     inputs[names_.attention_mask] = mask_t;
 }
 
-void SmolLM3KvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len) {
+void Smollm3KvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len) {
     // Diffusion block mask: all valid prefix cache rows are visible, stale cache
     // rows are hidden, and every token in the current block can see every other
     // token in the current block.
@@ -313,7 +314,7 @@ void SmolLM3KvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len
     inputs[names_.attention_mask] = mask_t;
 }
 
-void SmolLM3KvCache::write_decode_mask(TensorMap& inputs) {
+void Smollm3KvCache::write_decode_mask(TensorMap& inputs) {
     const int32_t valid = std::max(0, std::min(position_, max_length_));
     const int32_t cache_rows = dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;
     const int32_t mask_width = dynamic_binding_enabled_ ? (cache_rows + 1) : (max_length_ + 1);
@@ -333,7 +334,7 @@ void SmolLM3KvCache::write_decode_mask(TensorMap& inputs) {
     inputs[names_.attention_mask] = mask_t;
 }
 
-void SmolLM3KvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
+void Smollm3KvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
     if (seq_len <= 0)
         seq_len = 1;
     write_position_input(inputs, seq_len);
@@ -347,7 +348,7 @@ void SmolLM3KvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
         write_decode_mask(inputs);
 }
 
-void SmolLM3KvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len) {
+void Smollm3KvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len) {
     if (seq_len <= 0)
         seq_len = 1;
     if (native_kv_update_enabled_) {
@@ -358,7 +359,7 @@ void SmolLM3KvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_l
     write_bidirectional_mask(inputs, seq_len);
 }
 
-void SmolLM3KvCache::bind_to(TrtModule& module) {
+void Smollm3KvCache::bind_to(TrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
     if (configure_binding_mode(module)) {
@@ -393,7 +394,7 @@ void SmolLM3KvCache::bind_to(TrtModule& module) {
     }
 }
 
-void SmolLM3KvCache::bind_cache_inputs(TrtModule& module) {
+void Smollm3KvCache::bind_cache_inputs(TrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
     if (configure_binding_mode(module)) {
@@ -423,16 +424,16 @@ void SmolLM3KvCache::bind_cache_inputs(TrtModule& module) {
     }
 }
 
-void SmolLM3KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
-                                    const std::vector<const void*>& prefill_v, int32_t seq_len) {
+void Smollm3KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
+                                      const std::vector<const void*>& prefill_v, int32_t seq_len) {
     if (seq_len <= 0)
         return;
     if (seq_len > max_length_)
-        throw std::runtime_error("SmolLM3KvCache::write_prefill_kv: seq_len exceeds max_length");
+        throw std::runtime_error("Smollm3KvCache::write_prefill_kv: seq_len exceeds max_length");
     if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
         static_cast<int32_t>(prefill_v.size()) != num_layers_) {
         throw std::runtime_error(
-            "SmolLM3KvCache::write_prefill_kv: per-layer pointer count mismatch");
+            "Smollm3KvCache::write_prefill_kv: per-layer pointer count mismatch");
     }
     if (native_kv_update_enabled_) {
         validate_native_aliases(prefill_k, prefill_v);
@@ -451,16 +452,16 @@ void SmolLM3KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
     position_ = seq_len;
 }
 
-void SmolLM3KvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
-                                     const std::vector<const void*>& prefill_v, int32_t seq_len) {
+void Smollm3KvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
+                                       const std::vector<const void*>& prefill_v, int32_t seq_len) {
     if (seq_len <= 0)
         return;
     if (position_ + seq_len > max_length_)
-        throw std::runtime_error("SmolLM3KvCache::append_prefill_kv: append exceeds max_length");
+        throw std::runtime_error("Smollm3KvCache::append_prefill_kv: append exceeds max_length");
     if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
         static_cast<int32_t>(prefill_v.size()) != num_layers_) {
         throw std::runtime_error(
-            "SmolLM3KvCache::append_prefill_kv: per-layer pointer count mismatch");
+            "Smollm3KvCache::append_prefill_kv: per-layer pointer count mismatch");
     }
     if (native_kv_update_enabled_) {
         validate_native_aliases(prefill_k, prefill_v);
@@ -480,19 +481,20 @@ void SmolLM3KvCache::append_prefill_kv(const std::vector<const void*>& prefill_k
     position_ += seq_len;
 }
 
-void SmolLM3KvCache::set_position(int32_t position) {
+void Smollm3KvCache::set_position(int32_t position) {
     position_ = std::max(0, std::min(position, max_length_));
 }
 
-void SmolLM3KvCache::advance(int32_t n_tokens) {
+void Smollm3KvCache::advance(int32_t n_tokens) {
     // For now, only single-token advance is supported.
     // n_tokens > 1 reserved for future batched prefill (TASK-10).
-    assert(n_tokens == 1 && "SmolLM3KvCache::advance: only n_tokens==1 supported");
+    assert(n_tokens == 1 && "Smollm3KvCache::advance: only n_tokens==1 supported");
     (void)n_tokens;
 
     if (native_kv_update_enabled_) {
         if (position_ >= max_length_) {
-            throw std::runtime_error("SmolLM3 sequence exceeds the model's fixed KV cache capacity");
+            throw std::runtime_error(
+                "SmolLM3 sequence exceeds the model's fixed KV cache capacity");
         }
         ++position_;
         return;
@@ -532,7 +534,7 @@ void SmolLM3KvCache::advance(int32_t n_tokens) {
     }
 }
 
-void SmolLM3KvCache::reset() {
+void Smollm3KvCache::reset() {
     // Reset only the logical sequence length. Attention masks hide every
     // stale cache row, and each present row is overwritten before use.
     position_ = 0;
@@ -540,7 +542,7 @@ void SmolLM3KvCache::reset() {
     key_value_length_ = 0;
 }
 
-std::size_t SmolLM3KvCache::device_memory_bytes() const {
+std::size_t Smollm3KvCache::device_memory_bytes() const {
     std::size_t total = 0;
     for (const auto& t : cache_k_)
         total += t.nbytes();
@@ -553,7 +555,7 @@ std::size_t SmolLM3KvCache::device_memory_bytes() const {
     return total;
 }
 
-bool SmolLM3KvCache::ok() const {
+bool Smollm3KvCache::ok() const {
     const auto expected_layers = static_cast<std::size_t>(num_layers_);
     if (cache_k_.size() != expected_layers)
         return false;

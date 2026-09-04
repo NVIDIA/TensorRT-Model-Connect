@@ -5,7 +5,7 @@
 
 #pragma once
 
-// SmolLM3KvCache: autoregressive KV cache state manager.
+// Smollm3KvCache: autoregressive KV cache state manager.
 // HF equivalent: DynamicCache / past_key_values.
 //
 // Manages per-layer K/V device tensors and position tracking. Native TensorRT
@@ -26,7 +26,7 @@ using TrtModule = ITrtModule;
 
 // Explicit tensor names for KV cache I/O binding.
 // Per-layer vectors hold expanded names; scalar names are for single inputs.
-struct SmolLM3KvCacheNames {
+struct Smollm3KvCacheNames {
     std::vector<std::string> cache_k;
     std::vector<std::string> cache_v;
     std::vector<std::string> present_k;
@@ -37,16 +37,16 @@ struct SmolLM3KvCacheNames {
     std::string attention_mask{"attention_mask"};
 };
 
-class SmolLM3KvCache : public SmolLM3InferenceState {
+class Smollm3KvCache : public Smollm3InferenceState {
   public:
     // Allocate cache buffers for the given configuration.
     // kv_dim = num_kv_heads * head_dim (size of one K or V row per layer).
     // cache_dtype controls the element type for K/V cache buffers (default FP32).
     // names provides explicit tensor names for engine I/O binding.
-    SmolLM3KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-                 DType cache_dtype = DType::kFloat32, SmolLM3KvCacheNames names = {});
+    Smollm3KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
+                   DType cache_dtype = DType::kFloat32, Smollm3KvCacheNames names = {});
 
-    // --- SmolLM3InferenceState overrides ---
+    // --- Smollm3InferenceState overrides ---
     void reset() override;
     void bind_to(TrtModule& module) override;
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
@@ -60,7 +60,7 @@ class SmolLM3KvCache : public SmolLM3InferenceState {
     const char* state_type() const override { return "dense_kv_cache"; }
     bool ok() const override;
 
-    // --- SmolLM3KvCache-specific methods (not on the interface) ---
+    // --- Smollm3KvCache-specific methods (not on the interface) ---
 
     // DEPRECATED: Use prepare_step() instead.
     // Kept for backward compatibility with tests that call this directly.
@@ -130,7 +130,7 @@ class SmolLM3KvCache : public SmolLM3InferenceState {
     int32_t bound_cache_rows_{0};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
-    SmolLM3KvCacheNames names_;
+    Smollm3KvCacheNames names_;
     TrtModule* bound_module_{nullptr};
 };
 

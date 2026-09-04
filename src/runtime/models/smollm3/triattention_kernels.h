@@ -23,8 +23,9 @@ bool smollm3_triattention_score_candidates_gpu(
     cudaStream_t stream);
 
 bool smollm3_triattention_compact_rows_gpu(const void* d_src, void* d_scratch, DType cache_dtype,
-                                         int32_t kv_dim, const int32_t* d_keep_indices,
-                                         int32_t keep_count, int32_t head_dim, int32_t num_kv_heads,
-                                         int32_t query_group_size, cudaStream_t stream);
+                                           int32_t kv_dim, const int32_t* d_keep_indices,
+                                           int32_t keep_count, int32_t head_dim,
+                                           int32_t num_kv_heads, int32_t query_group_size,
+                                           cudaStream_t stream);
 
 } // namespace trtmc

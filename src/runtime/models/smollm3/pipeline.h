@@ -7,7 +7,7 @@
 
 // Model-owned decoder text pipeline.
 //
-// Composes: TrtModule (decoder) + SmolLM3KvCache + ITokenizer for this runtime
+// Composes: TrtModule (decoder) + Smollm3KvCache + ITokenizer for this runtime
 // plugin. Architecture-specific behavior remains in this model directory and
 // in the TRT engine emitted by the matching family builder.
 
@@ -24,9 +24,9 @@
 
 namespace trtmc {
 
-class SmolLM3KvCache;
+class Smollm3KvCache;
 
-struct SmolLM3TextGenConfig {
+struct Smollm3TextGenConfig {
     int32_t vocab_size{0};
     int32_t id_bos{0};
     int32_t id_eos{0};
@@ -64,35 +64,35 @@ struct SmolLM3TextGenConfig {
 void apply_text_trace_config_from_registry(const std::string& path, std::int32_t start_position,
                                            std::int32_t end_position, std::int32_t top_k);
 
-class SmolLM3TextGenerationPipeline final : public IPipeline {
+class Smollm3TextGenerationPipeline final : public IPipeline {
   public:
     struct DecoderContext {
         int32_t kv_rows{0};
         std::unique_ptr<TrtModule> module;
     };
 
-    SmolLM3TextGenerationPipeline(std::unique_ptr<TrtModule> decoder,
-                                std::unique_ptr<SmolLM3InferenceState> state,
-                                SmolLM3TextGenConfig config, cudaStream_t stream,
-                                std::shared_ptr<ITokenizer> tokenizer = nullptr,
-                                std::string model_id_str = "",
-                                std::unique_ptr<SmolLM3ISampler> sampler = nullptr,
-                                std::shared_ptr<void> distributed_owner = nullptr);
-    SmolLM3TextGenerationPipeline(std::vector<DecoderContext> decoders,
-                                std::unique_ptr<SmolLM3InferenceState> state,
-                                SmolLM3TextGenConfig config, cudaStream_t stream,
-                                std::shared_ptr<ITokenizer> tokenizer = nullptr,
-                                std::string model_id_str = "",
-                                std::unique_ptr<SmolLM3ISampler> sampler = nullptr,
-                                std::unique_ptr<TrtModule> prefill = nullptr,
-                                std::unique_ptr<TrtModule> linear_spec_lora_prefill = nullptr,
-                                std::shared_ptr<void> distributed_owner = nullptr);
+    Smollm3TextGenerationPipeline(std::unique_ptr<TrtModule> decoder,
+                                  std::unique_ptr<Smollm3InferenceState> state,
+                                  Smollm3TextGenConfig config, cudaStream_t stream,
+                                  std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                                  std::string model_id_str = "",
+                                  std::unique_ptr<Smollm3ISampler> sampler = nullptr,
+                                  std::shared_ptr<void> distributed_owner = nullptr);
+    Smollm3TextGenerationPipeline(std::vector<DecoderContext> decoders,
+                                  std::unique_ptr<Smollm3InferenceState> state,
+                                  Smollm3TextGenConfig config, cudaStream_t stream,
+                                  std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                                  std::string model_id_str = "",
+                                  std::unique_ptr<Smollm3ISampler> sampler = nullptr,
+                                  std::unique_ptr<TrtModule> prefill = nullptr,
+                                  std::unique_ptr<TrtModule> linear_spec_lora_prefill = nullptr,
+                                  std::shared_ptr<void> distributed_owner = nullptr);
 
     // Public API: takes raw text, returns typed result.
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }
-    const char* pipeline_type() const override { return "SmolLM3TextGenerationPipeline"; }
+    const char* pipeline_type() const override { return "Smollm3TextGenerationPipeline"; }
 
     // Token-ID-based generation (for unit tests and internal callers).
     struct GenerationResult {
@@ -109,12 +109,12 @@ class SmolLM3TextGenerationPipeline final : public IPipeline {
     std::vector<DecoderContext> decoders_;
     std::unique_ptr<TrtModule> prefill_;
     std::unique_ptr<TrtModule> linear_spec_lora_prefill_;
-    std::unique_ptr<SmolLM3InferenceState> state_;
-    SmolLM3TextGenConfig config_;
+    std::unique_ptr<Smollm3InferenceState> state_;
+    Smollm3TextGenConfig config_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
-    std::unique_ptr<SmolLM3ISampler> sampler_;
+    std::unique_ptr<Smollm3ISampler> sampler_;
     bool prefer_gpu_greedy_{false};
     const float* d_logits_ptr_{nullptr}; // device logits pointer (for GPU sampling)
     std::string logits_output_name_;
@@ -129,21 +129,22 @@ class SmolLM3TextGenerationPipeline final : public IPipeline {
         double decode_ms{0.0};
     };
     TimedGenResult generate_from_ids(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
-                                     const SmolLM3SamplingParams& params, const GenerateConfig& cfg);
+                                     const Smollm3SamplingParams& params,
+                                     const GenerateConfig& cfg);
     TimedGenResult generate_diffusion_from_ids(const std::vector<int32_t>& input_ids,
                                                int32_t max_new_tokens,
-                                               const SmolLM3SamplingParams& params,
+                                               const Smollm3SamplingParams& params,
                                                const GenerateConfig& cfg);
     TimedGenResult generate_linear_spec_from_ids(const std::vector<int32_t>& input_ids,
                                                  int32_t max_new_tokens,
-                                                 const SmolLM3SamplingParams& params,
+                                                 const Smollm3SamplingParams& params,
                                                  const GenerateConfig& cfg, bool use_lora_draft);
     std::string resolve_generation_mode(const GenerateConfig& cfg) const;
     void reset_generation_context();
     TrtModule& require_block_prefill(int32_t sq, TrtModule* prefill_override);
-    SmolLM3KvCache& require_block_kv_cache();
+    Smollm3KvCache& require_block_kv_cache();
     void copy_block_logits(const TensorMap& outputs, std::vector<float>& logits) const;
-    void append_prefill_kv(SmolLM3KvCache& kv, TrtModule& prefill, int32_t sq);
+    void append_prefill_kv(Smollm3KvCache& kv, TrtModule& prefill, int32_t sq);
     int32_t resolve_text_diffusion_block_length(const GenerateConfig& cfg, int32_t max_new_tokens,
                                                 bool require_divisible) const;
     int32_t seed_next_token_from_prefill(const std::vector<int32_t>& input_ids,
@@ -154,7 +155,7 @@ class SmolLM3TextGenerationPipeline final : public IPipeline {
     int32_t verify_diffusion_block(const std::vector<int32_t>& block, std::vector<float>& logits,
                                    int32_t block_len, int32_t vocab);
     bool append_tokens_until_eos(const std::vector<int32_t>& tokens, std::vector<int32_t>& output,
-                                 const SmolLM3SamplingParams& params) const;
+                                 const Smollm3SamplingParams& params) const;
     void fill_linear_spec_block(std::vector<int32_t>& block, std::vector<float>& logits,
                                 int32_t block_len, int32_t vocab, bool threshold_enabled,
                                 float threshold, bool use_lora_draft);
@@ -165,7 +166,7 @@ class SmolLM3TextGenerationPipeline final : public IPipeline {
                                              const std::vector<int32_t>& block);
     bool append_linear_spec_tokens(const std::vector<int32_t>& ar_tokens, int32_t emit_count,
                                    std::vector<int32_t>& output, int32_t& generated,
-                                   const SmolLM3SamplingParams& params) const;
+                                   const Smollm3SamplingParams& params) const;
 
     // Run one decoder step: token_id → logits (D2H to host). Updates cache.
     void run_step(int32_t token_id, std::vector<float>& logits);
@@ -174,14 +175,14 @@ class SmolLM3TextGenerationPipeline final : public IPipeline {
     void run_step_device(int32_t token_id);
 
     // Decode loop (extracted for CCN).
-    int32_t run_decode_loop(SmolLM3ISampler* sampler, const SmolLM3SamplingParams& params,
+    int32_t run_decode_loop(Smollm3ISampler* sampler, const Smollm3SamplingParams& params,
                             std::vector<int32_t>& output, std::vector<float>& logits,
                             int32_t max_new_tokens, bool gpu_sampling, const GenerateConfig& cfg,
                             int32_t prompt_token_count);
     int32_t select_decoder_index(int32_t desired_rows) const;
     TrtModule& bind_decoder_for_step();
 
-    std::unique_ptr<SmolLM3ISampler> make_step_sampler(const SmolLM3SamplingParams& params);
+    std::unique_ptr<Smollm3ISampler> make_step_sampler(const Smollm3SamplingParams& params);
     void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
                      bool gpu_sampling);
     void run_prefill_block(const std::vector<int32_t>& input_ids, bool bidirectional,
@@ -193,7 +194,7 @@ class SmolLM3TextGenerationPipeline final : public IPipeline {
                              bool retain_device_logits);
     void run_prefill_chunk(const int32_t* token_ids, int32_t chunk_size,
                            const std::vector<const void*>& present_k,
-                           const std::vector<const void*>& present_v, SmolLM3KvCache& kv,
+                           const std::vector<const void*>& present_v, Smollm3KvCache& kv,
                            std::vector<float>& logits, bool retain_device_logits);
     void log_batched_prefill(int32_t token_count, int32_t chunk_count,
                              int32_t max_chunk_size) const;

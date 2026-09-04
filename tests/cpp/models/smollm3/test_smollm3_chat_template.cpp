@@ -99,7 +99,6 @@ static void test_apply_llama3() {
           "llama3 application");
 }
 
-
 // ── SmolLM3's own chat template ─────────────────────────────────────────────
 // The expected strings below are the verbatim output of the upstream
 // tokenizer's apply_chat_template() for HuggingFaceTB/SmolLM3-3B at revision
@@ -108,15 +107,14 @@ static void test_apply_llama3() {
 // contract: SmolLM3 always emits a system block, and it does *not* close that
 // block with <|im_end|> before the user turn.
 
-static const char* kSmolLM3Date = "04 September 2026";
+static const char* kSmollm3Date = "04 September 2026";
 
 static void test_detect_smollm3_over_chatml() {
     // SmolLM3's template is ChatML-framed, so generic ChatML detection must not
     // claim it -- the SmolLM3 branch carries the mandatory system block.
-    std::string tpl =
-        "{%- if enable_thinking %}{%- set reasoning_mode = \"/think\" %}{%- endif %}"
-        "{{- \"<|im_start|>system\\n\" -}}"
-        "{{- \"Reasoning Mode: \" + reasoning_mode + \"\\n\\n\" -}}";
+    std::string tpl = "{%- if enable_thinking %}{%- set reasoning_mode = \"/think\" %}{%- endif %}"
+                      "{{- \"<|im_start|>system\\n\" -}}"
+                      "{{- \"Reasoning Mode: \" + reasoning_mode + \"\\n\\n\" -}}";
     check(trtmc::smollm3_detect_chat_template_format(tpl) == "smollm3",
           "smollm3 detection wins over chatml");
 }
@@ -140,8 +138,8 @@ static void test_apply_smollm3_no_thinking() {
         "<think>\n"
         "\n"
         "</think>\n";
-    auto result = trtmc::smollm3_apply_chat_template(
-        "smollm3", "What is 2+2?", false, kSmolLM3Date);
+    auto result =
+        trtmc::smollm3_apply_chat_template("smollm3", "What is 2+2?", false, kSmollm3Date);
     check(result == expected, "smollm3 /no_think matches upstream byte for byte");
     check(result.size() == 297, "smollm3 /no_think length matches upstream (297)");
 }
@@ -157,13 +155,25 @@ static void test_apply_smollm3_thinking() {
         "\n"
         "## Custom Instructions\n"
         "\n"
-        "You are a helpful AI assistant named SmolLM, trained by Hugging Face. Your role as an assistant involves thoroughly exploring questions through a systematic thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracking, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution using the specified format: <think> Thought section </think> Solution section. In the Thought section, detail your reasoning process in steps. Each step should include detailed considerations such as analysing questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed to reach the conclusion.\n"
+        "You are a helpful AI assistant named SmolLM, trained by Hugging Face. Your role as an "
+        "assistant involves thoroughly exploring questions through a systematic thinking process "
+        "before providing the final precise and accurate solutions. This requires engaging in a "
+        "comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, "
+        "backtracking, and iteration to develop well-considered thinking process. Please structure "
+        "your response into two main sections: Thought and Solution using the specified format: "
+        "<think> Thought section </think> Solution section. In the Thought section, detail your "
+        "reasoning process in steps. Each step should include detailed considerations such as "
+        "analysing questions, summarizing relevant findings, brainstorming new ideas, verifying "
+        "the accuracy of the current steps, refining any errors, and revisiting previous steps. In "
+        "the Solution section, based on various attempts, explorations, and reflections from the "
+        "Thought section, systematically present the final solution that you deem correct. The "
+        "Solution section should be logical, accurate, and concise and detail necessary steps "
+        "needed to reach the conclusion.\n"
         "\n"
         "<|im_start|>user\n"
         "What is 2+2?<|im_end|>\n"
         "<|im_start|>assistant\n";
-    auto result = trtmc::smollm3_apply_chat_template(
-        "smollm3", "What is 2+2?", true, kSmolLM3Date);
+    auto result = trtmc::smollm3_apply_chat_template("smollm3", "What is 2+2?", true, kSmollm3Date);
     check(result == expected, "smollm3 /think matches upstream byte for byte");
     check(result.size() == 1369, "smollm3 /think length matches upstream (1369)");
 }

@@ -143,14 +143,14 @@ bool contains_final_answer(const std::string& text) {
     return false;
 }
 
-std::vector<SmolLM3TextGenerationPipeline::DecoderContext>
+std::vector<Smollm3TextGenerationPipeline::DecoderContext>
 single_decoder_context(std::unique_ptr<TrtModule> decoder) {
-    std::vector<SmolLM3TextGenerationPipeline::DecoderContext> decoders;
-    decoders.push_back(SmolLM3TextGenerationPipeline::DecoderContext{0, std::move(decoder)});
+    std::vector<Smollm3TextGenerationPipeline::DecoderContext> decoders;
+    decoders.push_back(Smollm3TextGenerationPipeline::DecoderContext{0, std::move(decoder)});
     return decoders;
 }
 
-SmolLM3TextGenConfig normalize_eos_token_ids(SmolLM3TextGenConfig config) {
+Smollm3TextGenConfig normalize_eos_token_ids(Smollm3TextGenConfig config) {
     if (config.id_eos_ids.empty() && config.id_eos >= 0)
         config.id_eos_ids.push_back(config.id_eos);
     if (!config.id_eos_ids.empty())
@@ -165,7 +165,7 @@ std::string normalize_generation_mode(std::string mode) {
     return mode;
 }
 
-bool greedy_text_diffusion_params(const SmolLM3SamplingParams& params) {
+bool greedy_text_diffusion_params(const Smollm3SamplingParams& params) {
     return params.seed < 0 &&
            (params.temperature <= 1e-6F ||
             (params.top_k <= 1 && params.top_p >= 1.0F - 1e-6F && params.min_p <= 1e-6F));
@@ -280,21 +280,21 @@ bool has_mask_token(const std::vector<int32_t>& block, int32_t mask_token_id) {
 
 } // namespace
 
-SmolLM3TextGenerationPipeline::SmolLM3TextGenerationPipeline(
-    std::unique_ptr<TrtModule> decoder, std::unique_ptr<SmolLM3InferenceState> state,
-    SmolLM3TextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-    std::string model_id_str, std::unique_ptr<SmolLM3ISampler> sampler,
+Smollm3TextGenerationPipeline::Smollm3TextGenerationPipeline(
+    std::unique_ptr<TrtModule> decoder, std::unique_ptr<Smollm3InferenceState> state,
+    Smollm3TextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+    std::string model_id_str, std::unique_ptr<Smollm3ISampler> sampler,
     std::shared_ptr<void> distributed_owner)
-    : SmolLM3TextGenerationPipeline(single_decoder_context(std::move(decoder)), std::move(state),
-                                  std::move(config), stream, std::move(tokenizer),
-                                  std::move(model_id_str), std::move(sampler),
-                                  /*prefill=*/nullptr, /*linear_spec_lora_prefill=*/nullptr,
-                                  std::move(distributed_owner)) {}
+    : Smollm3TextGenerationPipeline(single_decoder_context(std::move(decoder)), std::move(state),
+                                    std::move(config), stream, std::move(tokenizer),
+                                    std::move(model_id_str), std::move(sampler),
+                                    /*prefill=*/nullptr, /*linear_spec_lora_prefill=*/nullptr,
+                                    std::move(distributed_owner)) {}
 
-SmolLM3TextGenerationPipeline::SmolLM3TextGenerationPipeline(
-    std::vector<DecoderContext> decoders, std::unique_ptr<SmolLM3InferenceState> state,
-    SmolLM3TextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-    std::string model_id_str, std::unique_ptr<SmolLM3ISampler> sampler,
+Smollm3TextGenerationPipeline::Smollm3TextGenerationPipeline(
+    std::vector<DecoderContext> decoders, std::unique_ptr<Smollm3InferenceState> state,
+    Smollm3TextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+    std::string model_id_str, std::unique_ptr<Smollm3ISampler> sampler,
     std::unique_ptr<TrtModule> prefill, std::unique_ptr<TrtModule> linear_spec_lora_prefill,
     std::shared_ptr<void> distributed_owner)
     : distributed_owner_(std::move(distributed_owner)), decoders_(std::move(decoders)),
@@ -303,15 +303,15 @@ SmolLM3TextGenerationPipeline::SmolLM3TextGenerationPipeline(
       stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       sampler_(std::move(sampler)), logits_output_name_(config_.logits_output_name) {
     if (decoders_.empty()) {
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: no decoder modules");
+        throw std::runtime_error("Smollm3TextGenerationPipeline: no decoder modules");
     }
     for (const auto& decoder_ctx : decoders_) {
         if (!decoder_ctx.module || !decoder_ctx.module->ok()) {
-            throw std::runtime_error("SmolLM3TextGenerationPipeline: invalid decoder module");
+            throw std::runtime_error("Smollm3TextGenerationPipeline: invalid decoder module");
         }
     }
     if (!state_ || !state_->ok()) {
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: invalid inference state");
+        throw std::runtime_error("Smollm3TextGenerationPipeline: invalid inference state");
     }
 
     // CUDA Graphs: capture TRT kernels on first step, replay on subsequent
@@ -333,7 +333,7 @@ SmolLM3TextGenerationPipeline::SmolLM3TextGenerationPipeline(
 // Deduplicates the leading BOS token that chat templates embed but
 // the tokenizer's add_special_tokens may also prepend.
 static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
-                                          const SmolLM3TextGenConfig& config,
+                                          const Smollm3TextGenConfig& config,
                                           const std::string& prompt, const GenerateConfig& cfg) {
     std::string effective = prompt;
     bool templated = false;
@@ -350,10 +350,10 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
     return ids;
 }
 
-TextResult SmolLM3TextGenerationPipeline::generate(const std::string& prompt,
-                                                 const GenerateConfig& cfg) {
+TextResult Smollm3TextGenerationPipeline::generate(const std::string& prompt,
+                                                   const GenerateConfig& cfg) {
     if (!tokenizer_) {
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: no tokenizer configured");
+        throw std::runtime_error("Smollm3TextGenerationPipeline: no tokenizer configured");
     }
 
     auto input_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
@@ -374,16 +374,16 @@ TextResult SmolLM3TextGenerationPipeline::generate(const std::string& prompt,
     return result;
 }
 
-SmolLM3TextGenerationPipeline::GenerationResult
-SmolLM3TextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
-                                          const GenerateConfig& cfg) {
+Smollm3TextGenerationPipeline::GenerationResult
+Smollm3TextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
+                                            const GenerateConfig& cfg) {
     int32_t max_new = cfg.max_new_tokens; // honour exact value (0 = no generation)
     auto sp = smollm3_sampling_params_from_config(cfg, config_.id_eos_ids);
     return GenerationResult{generate_from_ids(input_ids, max_new, sp, cfg).token_ids};
 }
 
-std::unique_ptr<SmolLM3ISampler>
-SmolLM3TextGenerationPipeline::make_step_sampler(const SmolLM3SamplingParams& params) {
+std::unique_ptr<Smollm3ISampler>
+Smollm3TextGenerationPipeline::make_step_sampler(const Smollm3SamplingParams& params) {
     const bool greedy_params =
         (params.temperature < 1e-6F) ||
         (params.top_k <= 1 && params.top_p >= 1.0F && params.min_p <= 0.0F && params.seed < 0);
@@ -398,7 +398,7 @@ SmolLM3TextGenerationPipeline::make_step_sampler(const SmolLM3SamplingParams& pa
 // prefill TrtModule. Returns false if any layer's tensor is missing — in
 // that case the caller falls back to the per-token decode loop.
 namespace {
-bool gather_prefill_kv_pointers(TrtModule& prefill, const SmolLM3TextGenConfig& cfg,
+bool gather_prefill_kv_pointers(TrtModule& prefill, const Smollm3TextGenConfig& cfg,
                                 std::vector<const void*>& pk, std::vector<const void*>& pv) {
     pk.resize(static_cast<std::size_t>(cfg.num_layers));
     pv.resize(static_cast<std::size_t>(cfg.num_layers));
@@ -412,16 +412,16 @@ bool gather_prefill_kv_pointers(TrtModule& prefill, const SmolLM3TextGenConfig& 
     return true;
 }
 
-bool batched_prefill_supported(const TrtModule* prefill, const SmolLM3TextGenConfig& cfg, int32_t sq,
-                               SmolLM3InferenceState* state) {
+bool batched_prefill_supported(const TrtModule* prefill, const Smollm3TextGenConfig& cfg,
+                               int32_t sq, Smollm3InferenceState* state) {
     if (prefill == nullptr || sq <= 0)
         return false;
     if (cfg.num_layers <= 0 || cfg.vocab_size <= 0)
         return false;
-    return dynamic_cast<SmolLM3KvCache*>(state) != nullptr;
+    return dynamic_cast<Smollm3KvCache*>(state) != nullptr;
 }
 
-int32_t resolve_prefill_chunk_limit(const SmolLM3KvCache& kv, const SmolLM3TextGenConfig& cfg,
+int32_t resolve_prefill_chunk_limit(const Smollm3KvCache& kv, const Smollm3TextGenConfig& cfg,
                                     int32_t sq) {
     if (kv.needs_attention_mask()) {
         if (cfg.prefill_max_length > 0 && sq > cfg.prefill_max_length)
@@ -434,12 +434,12 @@ int32_t resolve_prefill_chunk_limit(const SmolLM3KvCache& kv, const SmolLM3TextG
 }
 
 void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
-                                  SmolLM3InferenceState* state, const TrtModule* module) {
+                                  Smollm3InferenceState* state, const TrtModule* module) {
     if (module == nullptr || !module->has_input("cache_write_indices") ||
         !module->has_input("key_value_lengths")) {
         return;
     }
-    const auto* kv = dynamic_cast<const SmolLM3KvCache*>(state);
+    const auto* kv = dynamic_cast<const Smollm3KvCache*>(state);
     if (kv == nullptr)
         return;
 
@@ -453,13 +453,13 @@ void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t
 }
 } // namespace
 
-bool SmolLM3TextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
-                                                      std::vector<float>& logits,
-                                                      bool retain_device_logits) {
+bool Smollm3TextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
+                                                        std::vector<float>& logits,
+                                                        bool retain_device_logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
     if (!batched_prefill_supported(prefill_.get(), config_, sq, state_.get()))
         return false;
-    auto* kv = static_cast<SmolLM3KvCache*>(state_.get());
+    auto* kv = static_cast<Smollm3KvCache*>(state_.get());
 
     // The prefill module shares the same external KV cache buffers as the
     // decode module(s), so we rebind the cache_k/cache_v inputs onto the
@@ -492,11 +492,12 @@ bool SmolLM3TextGenerationPipeline::run_prefill_batched(const std::vector<int32_
     return true;
 }
 
-void SmolLM3TextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, int32_t chunk_size,
-                                                    const std::vector<const void*>& present_k,
-                                                    const std::vector<const void*>& present_v,
-                                                    SmolLM3KvCache& kv, std::vector<float>& logits,
-                                                    bool retain_device_logits) {
+void Smollm3TextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, int32_t chunk_size,
+                                                      const std::vector<const void*>& present_k,
+                                                      const std::vector<const void*>& present_v,
+                                                      Smollm3KvCache& kv,
+                                                      std::vector<float>& logits,
+                                                      bool retain_device_logits) {
     TensorMap inputs;
     Tensor token_tensor;
     token_tensor.data = const_cast<int32_t*>(token_ids);
@@ -509,14 +510,14 @@ void SmolLM3TextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, 
     const auto logits_it = outputs.find(config_.logits_output_name);
     if (logits_it == outputs.end()) {
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: prefill module has no logits output");
+            "Smollm3TextGenerationPipeline: prefill module has no logits output");
     }
 
     const auto& logits_tensor = logits_it->second;
     const auto vocab = static_cast<std::size_t>(config_.vocab_size);
     if (static_cast<std::size_t>(logits_tensor.numel()) < vocab) {
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: prefill logits are smaller than vocabulary");
+            "Smollm3TextGenerationPipeline: prefill logits are smaller than vocabulary");
     }
 
     logits.resize(vocab);
@@ -528,15 +529,15 @@ void SmolLM3TextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, 
             static_cast<const float*>(prefill_->device_ptr(config_.logits_output_name));
         if (device_logits == nullptr) {
             throw std::runtime_error(
-                "SmolLM3TextGenerationPipeline: prefill logits have no device buffer");
+                "Smollm3TextGenerationPipeline: prefill logits have no device buffer");
         }
         d_logits_ptr_ = device_logits + logits_offset;
     }
     kv.append_prefill_kv(present_k, present_v, chunk_size);
 }
 
-void SmolLM3TextGenerationPipeline::log_batched_prefill(int32_t token_count, int32_t chunk_count,
-                                                      int32_t max_chunk_size) const {
+void Smollm3TextGenerationPipeline::log_batched_prefill(int32_t token_count, int32_t chunk_count,
+                                                        int32_t max_chunk_size) const {
     std::cerr << "[trtmc.prefill] tokens=" << token_count << " launches=" << chunk_count
               << " max_chunk=" << max_chunk_size << '\n';
     if (!config_.log_runtime_stats)
@@ -554,13 +555,13 @@ void SmolLM3TextGenerationPipeline::log_batched_prefill(int32_t token_count, int
     std::cerr << " (max chunk=" << max_chunk_size << ")\n";
 }
 
-const TrtModule* SmolLM3TextGenerationPipeline::generation_capacity_module() const {
+const TrtModule* Smollm3TextGenerationPipeline::generation_capacity_module() const {
     if (prefill_ != nullptr)
         return prefill_.get();
     return decoders_.front().module.get();
 }
 
-void SmolLM3TextGenerationPipeline::prime_decoder_after_batched_prefill(
+void Smollm3TextGenerationPipeline::prime_decoder_after_batched_prefill(
     const std::vector<int32_t>& input_ids) {
     if (input_ids.empty())
         return;
@@ -582,8 +583,8 @@ void SmolLM3TextGenerationPipeline::prime_decoder_after_batched_prefill(
     decoder.sync();
 }
 
-void SmolLM3TextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
-                                              std::vector<float>& logits, bool gpu_sampling) {
+void Smollm3TextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
+                                                std::vector<float>& logits, bool gpu_sampling) {
     // Fast path: batched prefill writes K/V in profile-bounded chunks and
     // exposes last-token logits on the sampler's requested host or device path.
     if (run_prefill_batched(input_ids, logits, gpu_sampling)) {
@@ -605,34 +606,34 @@ void SmolLM3TextGenerationPipeline::run_prefill(const std::vector<int32_t>& inpu
     state_->mark_prefill_complete();
 }
 
-TrtModule& SmolLM3TextGenerationPipeline::require_block_prefill(int32_t sq,
-                                                              TrtModule* prefill_override) {
+TrtModule& Smollm3TextGenerationPipeline::require_block_prefill(int32_t sq,
+                                                                TrtModule* prefill_override) {
     TrtModule* prefill = prefill_override != nullptr ? prefill_override : prefill_.get();
     if (prefill == nullptr)
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: block generation requires prefill module");
+            "Smollm3TextGenerationPipeline: block generation requires prefill module");
     if (sq <= 0)
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: empty block");
+        throw std::runtime_error("Smollm3TextGenerationPipeline: empty block");
     if (config_.prefill_max_length > 0 && sq > config_.prefill_max_length) {
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: block length exceeds prefill profile");
+            "Smollm3TextGenerationPipeline: block length exceeds prefill profile");
     }
     return *prefill;
 }
 
-SmolLM3KvCache& SmolLM3TextGenerationPipeline::require_block_kv_cache() {
-    auto* kv = dynamic_cast<SmolLM3KvCache*>(state_.get());
+Smollm3KvCache& Smollm3TextGenerationPipeline::require_block_kv_cache() {
+    auto* kv = dynamic_cast<Smollm3KvCache*>(state_.get());
     if (kv == nullptr)
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: block generation requires SmolLM3KvCache");
+            "Smollm3TextGenerationPipeline: block generation requires Smollm3KvCache");
     return *kv;
 }
 
-void SmolLM3TextGenerationPipeline::copy_block_logits(const TensorMap& outputs,
-                                                    std::vector<float>& logits) const {
+void Smollm3TextGenerationPipeline::copy_block_logits(const TensorMap& outputs,
+                                                      std::vector<float>& logits) const {
     auto logits_it = outputs.find(config_.logits_output_name);
     if (logits_it == outputs.end())
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: prefill module has no '" +
+        throw std::runtime_error("Smollm3TextGenerationPipeline: prefill module has no '" +
                                  config_.logits_output_name + "' output");
 
     const auto& lt = logits_it->second;
@@ -641,23 +642,23 @@ void SmolLM3TextGenerationPipeline::copy_block_logits(const TensorMap& outputs,
     std::memcpy(logits.data(), lt.data, num_logits * sizeof(float));
 }
 
-void SmolLM3TextGenerationPipeline::append_prefill_kv(SmolLM3KvCache& kv, TrtModule& prefill,
-                                                    int32_t sq) {
+void Smollm3TextGenerationPipeline::append_prefill_kv(Smollm3KvCache& kv, TrtModule& prefill,
+                                                      int32_t sq) {
     std::vector<const void*> pk, pv;
     if (!gather_prefill_kv_pointers(prefill, config_, pk, pv)) {
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: prefill module is missing present_k/present_v outputs");
+            "Smollm3TextGenerationPipeline: prefill module is missing present_k/present_v outputs");
     }
     kv.append_prefill_kv(pk, pv, sq);
 }
 
-void SmolLM3TextGenerationPipeline::run_prefill_block(const std::vector<int32_t>& input_ids,
-                                                    bool bidirectional, bool append_kv,
-                                                    std::vector<float>& logits,
-                                                    TrtModule* prefill_override) {
+void Smollm3TextGenerationPipeline::run_prefill_block(const std::vector<int32_t>& input_ids,
+                                                      bool bidirectional, bool append_kv,
+                                                      std::vector<float>& logits,
+                                                      TrtModule* prefill_override) {
     const auto sq = static_cast<int32_t>(input_ids.size());
     TrtModule& prefill = require_block_prefill(sq, prefill_override);
-    SmolLM3KvCache& kv = require_block_kv_cache();
+    Smollm3KvCache& kv = require_block_kv_cache();
 
     kv.bind_cache_inputs(prefill);
 
@@ -677,7 +678,8 @@ void SmolLM3TextGenerationPipeline::run_prefill_block(const std::vector<int32_t>
         append_prefill_kv(kv, prefill, sq);
 }
 
-std::string SmolLM3TextGenerationPipeline::resolve_generation_mode(const GenerateConfig& cfg) const {
+std::string
+Smollm3TextGenerationPipeline::resolve_generation_mode(const GenerateConfig& cfg) const {
     std::string mode = normalize_generation_mode(cfg.text_generation_mode);
     if (mode.empty())
         mode = "auto";
@@ -692,7 +694,7 @@ std::string SmolLM3TextGenerationPipeline::resolve_generation_mode(const Generat
     return mode;
 }
 
-void SmolLM3TextGenerationPipeline::reset_generation_context() {
+void Smollm3TextGenerationPipeline::reset_generation_context() {
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
     state_->reset();
@@ -707,34 +709,34 @@ void SmolLM3TextGenerationPipeline::reset_generation_context() {
     last_setup_ms_ = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
-int32_t SmolLM3TextGenerationPipeline::resolve_text_diffusion_block_length(
+int32_t Smollm3TextGenerationPipeline::resolve_text_diffusion_block_length(
     const GenerateConfig& cfg, int32_t max_new_tokens, bool require_divisible) const {
     if (!config_.supports_text_diffusion || config_.mask_token_id < 0)
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: bundle does not support text diffusion");
+            "Smollm3TextGenerationPipeline: bundle does not support text diffusion");
     const int32_t block_len =
         cfg.block_length > 0 ? cfg.block_length : std::max(config_.diffusion_block_length, 1);
     if (require_divisible && max_new_tokens % block_len != 0) {
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: diffusion mode requires "
+        throw std::runtime_error("Smollm3TextGenerationPipeline: diffusion mode requires "
                                  "max_new_tokens % block_length == 0");
     }
     return block_len;
 }
 
-int32_t SmolLM3TextGenerationPipeline::seed_next_token_from_prefill(
+int32_t Smollm3TextGenerationPipeline::seed_next_token_from_prefill(
     const std::vector<int32_t>& input_ids, std::vector<float>& logits, int32_t vocab) {
     run_prefill_block(input_ids, /*bidirectional=*/false, /*append_kv=*/true, logits);
     if (static_cast<int32_t>(logits.size()) < vocab)
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: missing prefill logits");
+        throw std::runtime_error("Smollm3TextGenerationPipeline: missing prefill logits");
     return argmax_with_confidence(logits.data() + logits.size() - static_cast<std::size_t>(vocab),
                                   vocab, 0)
         .token_id;
 }
 
-void SmolLM3TextGenerationPipeline::fill_diffusion_block(std::vector<int32_t>& block,
-                                                       std::vector<float>& logits,
-                                                       int32_t block_len, int32_t vocab,
-                                                       bool use_threshold, float threshold) {
+void Smollm3TextGenerationPipeline::fill_diffusion_block(std::vector<int32_t>& block,
+                                                         std::vector<float>& logits,
+                                                         int32_t block_len, int32_t vocab,
+                                                         bool use_threshold, float threshold) {
     const int32_t initial_masked = block_len - 1;
     const auto quotas = transfer_quota_schedule(initial_masked, block_len);
     for (int32_t step = 0; step < block_len && has_mask_token(block, config_.mask_token_id);
@@ -742,7 +744,7 @@ void SmolLM3TextGenerationPipeline::fill_diffusion_block(std::vector<int32_t>& b
         run_prefill_block(block, /*bidirectional=*/true, /*append_kv=*/false, logits);
         if (static_cast<int32_t>(logits.size()) < block_len * vocab) {
             throw std::runtime_error(
-                "SmolLM3TextGenerationPipeline: diffusion engine must output full block logits");
+                "Smollm3TextGenerationPipeline: diffusion engine must output full block logits");
         }
         const auto preds = masked_predictions(logits, block, config_.mask_token_id, vocab);
         apply_diffusion_transfer(block, preds, quotas[static_cast<std::size_t>(step)],
@@ -750,13 +752,13 @@ void SmolLM3TextGenerationPipeline::fill_diffusion_block(std::vector<int32_t>& b
     }
 }
 
-int32_t SmolLM3TextGenerationPipeline::verify_diffusion_block(const std::vector<int32_t>& block,
-                                                            std::vector<float>& logits,
-                                                            int32_t block_len, int32_t vocab) {
+int32_t Smollm3TextGenerationPipeline::verify_diffusion_block(const std::vector<int32_t>& block,
+                                                              std::vector<float>& logits,
+                                                              int32_t block_len, int32_t vocab) {
     run_prefill_block(block, /*bidirectional=*/false, /*append_kv=*/true, logits);
     if (static_cast<int32_t>(logits.size()) < block_len * vocab) {
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: diffusion engine must output full verify logits");
+            "Smollm3TextGenerationPipeline: diffusion engine must output full verify logits");
     }
     return argmax_with_confidence(logits.data() + (static_cast<std::size_t>(block_len - 1) *
                                                    static_cast<std::size_t>(vocab)),
@@ -764,9 +766,9 @@ int32_t SmolLM3TextGenerationPipeline::verify_diffusion_block(const std::vector<
         .token_id;
 }
 
-bool SmolLM3TextGenerationPipeline::append_tokens_until_eos(const std::vector<int32_t>& tokens,
-                                                          std::vector<int32_t>& output,
-                                                          const SmolLM3SamplingParams& params) const {
+bool Smollm3TextGenerationPipeline::append_tokens_until_eos(
+    const std::vector<int32_t>& tokens, std::vector<int32_t>& output,
+    const Smollm3SamplingParams& params) const {
     for (int32_t token : tokens) {
         output.push_back(token);
         if (smollm3_is_eos_token(params, token))
@@ -775,18 +777,18 @@ bool SmolLM3TextGenerationPipeline::append_tokens_until_eos(const std::vector<in
     return false;
 }
 
-void SmolLM3TextGenerationPipeline::fill_linear_spec_block(std::vector<int32_t>& block,
-                                                         std::vector<float>& logits,
-                                                         int32_t block_len, int32_t vocab,
-                                                         bool threshold_enabled, float threshold,
-                                                         bool use_lora_draft) {
+void Smollm3TextGenerationPipeline::fill_linear_spec_block(std::vector<int32_t>& block,
+                                                           std::vector<float>& logits,
+                                                           int32_t block_len, int32_t vocab,
+                                                           bool threshold_enabled, float threshold,
+                                                           bool use_lora_draft) {
     while (has_mask_token(block, config_.mask_token_id)) {
         TrtModule* draft_prefill = use_lora_draft ? linear_spec_lora_prefill_.get() : nullptr;
         run_prefill_block(block, /*bidirectional=*/true, /*append_kv=*/false, logits,
                           draft_prefill);
         if (static_cast<int32_t>(logits.size()) < block_len * vocab) {
             throw std::runtime_error(
-                "SmolLM3TextGenerationPipeline: linear_spec engine must output full block logits");
+                "Smollm3TextGenerationPipeline: linear_spec engine must output full block logits");
         }
         const auto preds = masked_predictions(logits, block, config_.mask_token_id, vocab);
         apply_linear_spec_transfer(block, preds, threshold_enabled, threshold);
@@ -794,13 +796,13 @@ void SmolLM3TextGenerationPipeline::fill_linear_spec_block(std::vector<int32_t>&
 }
 
 std::vector<int32_t>
-SmolLM3TextGenerationPipeline::verify_linear_spec_block(const std::vector<int32_t>& block,
-                                                      std::vector<float>& logits, int32_t block_len,
-                                                      int32_t vocab) {
+Smollm3TextGenerationPipeline::verify_linear_spec_block(const std::vector<int32_t>& block,
+                                                        std::vector<float>& logits,
+                                                        int32_t block_len, int32_t vocab) {
     run_prefill_block(block, /*bidirectional=*/false, /*append_kv=*/true, logits);
     if (static_cast<int32_t>(logits.size()) < block_len * vocab) {
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: linear_spec engine must output full verify logits");
+            "Smollm3TextGenerationPipeline: linear_spec engine must output full verify logits");
     }
 
     std::vector<int32_t> ar_tokens;
@@ -816,8 +818,8 @@ SmolLM3TextGenerationPipeline::verify_linear_spec_block(const std::vector<int32_
 }
 
 int32_t
-SmolLM3TextGenerationPipeline::count_linear_spec_accepts(const std::vector<int32_t>& ar_tokens,
-                                                       const std::vector<int32_t>& block) {
+Smollm3TextGenerationPipeline::count_linear_spec_accepts(const std::vector<int32_t>& ar_tokens,
+                                                         const std::vector<int32_t>& block) {
     if (ar_tokens.empty())
         return 0;
     if (block.size() < 2)
@@ -832,9 +834,9 @@ SmolLM3TextGenerationPipeline::count_linear_spec_accepts(const std::vector<int32
     return accepted + 1;
 }
 
-bool SmolLM3TextGenerationPipeline::append_linear_spec_tokens(
+bool Smollm3TextGenerationPipeline::append_linear_spec_tokens(
     const std::vector<int32_t>& ar_tokens, int32_t emit_count, std::vector<int32_t>& output,
-    int32_t& generated, const SmolLM3SamplingParams& params) const {
+    int32_t& generated, const Smollm3SamplingParams& params) const {
     for (int32_t i = 0; i < emit_count; ++i) {
         const int32_t token = ar_tokens[static_cast<std::size_t>(i)];
         output.push_back(token);
@@ -845,9 +847,9 @@ bool SmolLM3TextGenerationPipeline::append_linear_spec_tokens(
     return false;
 }
 
-SmolLM3TextGenerationPipeline::TimedGenResult SmolLM3TextGenerationPipeline::generate_from_ids(
+Smollm3TextGenerationPipeline::TimedGenResult Smollm3TextGenerationPipeline::generate_from_ids(
     const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
-    const SmolLM3SamplingParams& params, const GenerateConfig& cfg) {
+    const Smollm3SamplingParams& params, const GenerateConfig& cfg) {
     using Clock = std::chrono::steady_clock;
     if (max_new_tokens == 0 || input_ids.empty())
         return TimedGenResult{input_ids, 0.0, 0.0};
@@ -861,11 +863,11 @@ SmolLM3TextGenerationPipeline::TimedGenResult SmolLM3TextGenerationPipeline::gen
         return generate_linear_spec_from_ids(input_ids, max_new_tokens, params, cfg,
                                              mode == "linear_spec_lora");
     if (mode != "auto" && mode != "ar")
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: unsupported generation mode '" +
+        throw std::runtime_error("Smollm3TextGenerationPipeline: unsupported generation mode '" +
                                  mode + "'");
 
-    SmolLM3ISampler* active_sampler = sampler_.get();
-    std::unique_ptr<SmolLM3ISampler> local_sampler;
+    Smollm3ISampler* active_sampler = sampler_.get();
+    std::unique_ptr<Smollm3ISampler> local_sampler;
     if (!active_sampler) {
         local_sampler = make_step_sampler(params);
         active_sampler = local_sampler.get();
@@ -876,7 +878,7 @@ SmolLM3TextGenerationPipeline::TimedGenResult SmolLM3TextGenerationPipeline::gen
     state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-    const bool gpu_sampling = (active_sampler->logits_location() == SmolLM3LogitsLocation::DEVICE);
+    const bool gpu_sampling = (active_sampler->logits_location() == Smollm3LogitsLocation::DEVICE);
     const auto t0 = Clock::now();
     run_prefill(input_ids, logits, gpu_sampling);
     const auto t1 = Clock::now();
@@ -891,15 +893,15 @@ SmolLM3TextGenerationPipeline::TimedGenResult SmolLM3TextGenerationPipeline::gen
     return TimedGenResult{std::move(output), prefill_ms, decode_ms};
 }
 
-SmolLM3TextGenerationPipeline::TimedGenResult
-SmolLM3TextGenerationPipeline::generate_diffusion_from_ids(const std::vector<int32_t>& input_ids,
-                                                         int32_t max_new_tokens,
-                                                         const SmolLM3SamplingParams& params,
-                                                         const GenerateConfig& cfg) {
+Smollm3TextGenerationPipeline::TimedGenResult
+Smollm3TextGenerationPipeline::generate_diffusion_from_ids(const std::vector<int32_t>& input_ids,
+                                                           int32_t max_new_tokens,
+                                                           const Smollm3SamplingParams& params,
+                                                           const GenerateConfig& cfg) {
     using Clock = std::chrono::steady_clock;
     if (!greedy_text_diffusion_params(params)) {
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: diffusion mode currently supports greedy temperature=0 "
+            "Smollm3TextGenerationPipeline: diffusion mode currently supports greedy temperature=0 "
             "generation");
     }
     const int32_t block_len =
@@ -939,20 +941,20 @@ SmolLM3TextGenerationPipeline::generate_diffusion_from_ids(const std::vector<int
                           std::chrono::duration<double, std::milli>(t2 - decode_start).count()};
 }
 
-SmolLM3TextGenerationPipeline::TimedGenResult
-SmolLM3TextGenerationPipeline::generate_linear_spec_from_ids(const std::vector<int32_t>& input_ids,
-                                                           int32_t max_new_tokens,
-                                                           const SmolLM3SamplingParams& params,
-                                                           const GenerateConfig& cfg,
-                                                           bool use_lora_draft) {
+Smollm3TextGenerationPipeline::TimedGenResult
+Smollm3TextGenerationPipeline::generate_linear_spec_from_ids(const std::vector<int32_t>& input_ids,
+                                                             int32_t max_new_tokens,
+                                                             const Smollm3SamplingParams& params,
+                                                             const GenerateConfig& cfg,
+                                                             bool use_lora_draft) {
     using Clock = std::chrono::steady_clock;
     if (!greedy_text_diffusion_params(params)) {
-        throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: linear_spec mode currently supports greedy temperature=0 "
-            "generation");
+        throw std::runtime_error("Smollm3TextGenerationPipeline: linear_spec mode currently "
+                                 "supports greedy temperature=0 "
+                                 "generation");
     }
     if (use_lora_draft && linear_spec_lora_prefill_ == nullptr) {
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: linear_spec_lora mode requires a "
+        throw std::runtime_error("Smollm3TextGenerationPipeline: linear_spec_lora mode requires a "
                                  "linear-spec LoRA engine");
     }
     const int32_t block_len =
@@ -976,9 +978,10 @@ SmolLM3TextGenerationPipeline::generate_linear_spec_from_ids(const std::vector<i
                               std::chrono::duration<double, std::milli>(t1 - t0).count(), 0.0};
     }
 
-    auto* kv = dynamic_cast<SmolLM3KvCache*>(state_.get());
+    auto* kv = dynamic_cast<Smollm3KvCache*>(state_.get());
     if (kv == nullptr)
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: linear_spec requires SmolLM3KvCache");
+        throw std::runtime_error(
+            "Smollm3TextGenerationPipeline: linear_spec requires Smollm3KvCache");
 
     int32_t generated = 1;
     const auto decode_start = Clock::now();
@@ -1009,10 +1012,11 @@ SmolLM3TextGenerationPipeline::generate_linear_spec_from_ids(const std::vector<i
                           std::chrono::duration<double, std::milli>(t2 - decode_start).count()};
 }
 
-bool SmolLM3TextGenerationPipeline::should_stop_on_answer(const std::vector<int32_t>& output,
-                                                        int32_t prompt_token_count,
-                                                        const GenerateConfig& cfg, int32_t steps,
-                                                        int32_t stop_interval, bool is_eos) const {
+bool Smollm3TextGenerationPipeline::should_stop_on_answer(const std::vector<int32_t>& output,
+                                                          int32_t prompt_token_count,
+                                                          const GenerateConfig& cfg, int32_t steps,
+                                                          int32_t stop_interval,
+                                                          bool is_eos) const {
     if (!cfg.stop_on_boxed_answer || !tokenizer_)
         return false;
     if ((steps % stop_interval) != 0 && !is_eos)
@@ -1022,7 +1026,7 @@ bool SmolLM3TextGenerationPipeline::should_stop_on_answer(const std::vector<int3
     return contains_boxed_answer(decoded) || contains_final_answer(decoded);
 }
 
-void SmolLM3TextGenerationPipeline::log_decode_summary(int32_t steps, double ms) const {
+void Smollm3TextGenerationPipeline::log_decode_summary(int32_t steps, double ms) const {
     if (steps <= 0 || !config_.log_runtime_stats)
         return;
     const double tps = steps * 1000.0 / ms;
@@ -1033,8 +1037,8 @@ void SmolLM3TextGenerationPipeline::log_decode_summary(int32_t steps, double ms)
               << (cuda_graph_on ? " [CUDA Graph ON]" : "") << '\n';
 }
 
-int32_t SmolLM3TextGenerationPipeline::run_decode_loop(
-    SmolLM3ISampler* sampler, const SmolLM3SamplingParams& params, std::vector<int32_t>& output,
+int32_t Smollm3TextGenerationPipeline::run_decode_loop(
+    Smollm3ISampler* sampler, const Smollm3SamplingParams& params, std::vector<int32_t>& output,
     std::vector<float>& logits, int32_t max_new_tokens, bool gpu_sampling,
     const GenerateConfig& cfg, int32_t prompt_token_count) {
     const int32_t vocab_size =
@@ -1044,7 +1048,7 @@ int32_t SmolLM3TextGenerationPipeline::run_decode_loop(
     int32_t steps = 0;
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         const float* sample_ptr = gpu_sampling ? d_logits_ptr_ : logits.data();
-        const SmolLM3SampleResult result = sampler->sample(sample_ptr, vocab_size, params);
+        const Smollm3SampleResult result = sampler->sample(sample_ptr, vocab_size, params);
         const bool is_eos = result.is_eos || smollm3_is_eos_token(params, result.token_id);
         output.push_back(result.token_id);
         ++steps;
@@ -1063,7 +1067,7 @@ int32_t SmolLM3TextGenerationPipeline::run_decode_loop(
     return steps;
 }
 
-int32_t SmolLM3TextGenerationPipeline::select_decoder_index(int32_t desired_rows) const {
+int32_t Smollm3TextGenerationPipeline::select_decoder_index(int32_t desired_rows) const {
     if (decoders_.size() == 1)
         return 0;
 
@@ -1081,7 +1085,7 @@ int32_t SmolLM3TextGenerationPipeline::select_decoder_index(int32_t desired_rows
     return fallback_idx;
 }
 
-TrtModule& SmolLM3TextGenerationPipeline::bind_decoder_for_step() {
+TrtModule& Smollm3TextGenerationPipeline::bind_decoder_for_step() {
     const int32_t desired_rows = std::max(state_->preferred_cache_rows(), 1);
     const int32_t next_idx = select_decoder_index(desired_rows);
     if (!state_bound_ || next_idx != active_decoder_index_) {
@@ -1092,7 +1096,7 @@ TrtModule& SmolLM3TextGenerationPipeline::bind_decoder_for_step() {
     return *decoders_[static_cast<std::size_t>(active_decoder_index_)].module;
 }
 
-void SmolLM3TextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logits) {
+void Smollm3TextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logits) {
     TensorMap inputs;
     const int32_t position_before = state_->position();
     const int32_t rows_before = std::max(state_->preferred_cache_rows(), 1);
@@ -1110,7 +1114,7 @@ void SmolLM3TextGenerationPipeline::run_step(int32_t token_id, std::vector<float
 
     auto it = outputs.find(logits_output_name_);
     if (it == outputs.end()) {
-        throw std::runtime_error("SmolLM3TextGenerationPipeline: no '" + logits_output_name_ +
+        throw std::runtime_error("Smollm3TextGenerationPipeline: no '" + logits_output_name_ +
                                  "' output");
     }
 
@@ -1124,7 +1128,7 @@ void SmolLM3TextGenerationPipeline::run_step(int32_t token_id, std::vector<float
                             std::max(state_->preferred_cache_rows(), 1), logits);
 }
 
-void SmolLM3TextGenerationPipeline::run_step_device(int32_t token_id) {
+void Smollm3TextGenerationPipeline::run_step_device(int32_t token_id) {
     TensorMap inputs;
 
     Tensor token_tensor;
@@ -1147,7 +1151,7 @@ void SmolLM3TextGenerationPipeline::run_step_device(int32_t token_id) {
     state_->advance();
 }
 
-int32_t SmolLM3TextGenerationPipeline::argmax(const std::vector<float>& logits) {
+int32_t Smollm3TextGenerationPipeline::argmax(const std::vector<float>& logits) {
     if (logits.empty())
         return 0;
     return static_cast<int32_t>(

@@ -9,16 +9,16 @@
 // Trace ID:       UT-DEC-CPP-02
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-TRT-DEC-01
-// Intent:         SmolLM3TextGenerationPipeline prefill/decode loop, argmax selection, EOS stopping
+// Intent:         Smollm3TextGenerationPipeline prefill/decode loop, argmax selection, EOS stopping
 // Preconditions:  TRT + CUDA GPU available, identity engine built in-process
 // Postconditions: Pipeline generates correct tokens, stops at EOS, respects max_new_tokens
 // =============================================================================
 
 // =============================================================================
-// Test suite: SmolLM3-owned SmolLM3TextGenerationPipeline copy
+// Test suite: SmolLM3-owned Smollm3TextGenerationPipeline copy
 // =============================================================================
 //
-// Tests the SmolLM3TextGenerationPipeline using a tiny TRT identity engine.
+// Tests the Smollm3TextGenerationPipeline using a tiny TRT identity engine.
 // The identity engine maps token_id[1] → logits[4] (just copies input to output).
 // This validates the prefill→decode loop, argmax, and EOS stopping.
 //
@@ -111,15 +111,15 @@ class MockTokenizer final : public trtmc::ITokenizer {
     }
 };
 
-class SequenceSampler final : public trtmc::SmolLM3ISampler {
+class SequenceSampler final : public trtmc::Smollm3ISampler {
   public:
     explicit SequenceSampler(std::vector<int32_t> tokens) : tokens_(std::move(tokens)) {}
 
-    trtmc::SmolLM3SampleResult sample(const float* logits, int32_t vocab_size,
-                                    const trtmc::SmolLM3SamplingParams& params) override {
+    trtmc::Smollm3SampleResult sample(const float* logits, int32_t vocab_size,
+                                      const trtmc::Smollm3SamplingParams& params) override {
         (void)logits;
         (void)vocab_size;
-        trtmc::SmolLM3SampleResult result;
+        trtmc::Smollm3SampleResult result;
         const std::size_t idx = cursor_ < tokens_.size() ? cursor_ : (tokens_.size() - 1);
         result.token_id = tokens_[idx];
         result.is_eos = (result.token_id == params.eos_token_id);
@@ -128,8 +128,8 @@ class SequenceSampler final : public trtmc::SmolLM3ISampler {
         return result;
     }
 
-    trtmc::SmolLM3LogitsLocation logits_location() const override {
-        return trtmc::SmolLM3LogitsLocation::HOST;
+    trtmc::Smollm3LogitsLocation logits_location() const override {
+        return trtmc::Smollm3LogitsLocation::HOST;
     }
     const char* sampler_type() const override { return "sequence"; }
     void reset() override { cursor_ = 0; }
@@ -201,17 +201,18 @@ static void test_pipeline_construction() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::SmolLM3KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::Smollm3KvCache>(1, 8, 4, stream);
 
-    trtmc::SmolLM3TextGenConfig cfg;
+    trtmc::Smollm3TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_bos = 0;
     cfg.id_eos = 2; // argmax will always hit this!
     cfg.has_position_input = false;
 
-    trtmc::SmolLM3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::Smollm3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
-    check(std::string(pipeline.pipeline_type()) == "SmolLM3TextGenerationPipeline", "pipeline name");
+    check(std::string(pipeline.pipeline_type()) == "Smollm3TextGenerationPipeline",
+          "pipeline name");
 
     cudaStreamDestroy(stream);
 }
@@ -228,15 +229,15 @@ static void test_generate_stops_at_eos() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::SmolLM3KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::Smollm3KvCache>(1, 8, 4, stream);
 
-    trtmc::SmolLM3TextGenConfig cfg;
+    trtmc::Smollm3TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_bos = 0;
     cfg.id_eos = 2; // argmax of [0.1, 0.2, 0.9, 0.3] = 2 = eos
     cfg.has_position_input = false;
 
-    trtmc::SmolLM3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::Smollm3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 10;
@@ -261,15 +262,15 @@ static void test_generate_stops_at_any_default_eos() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::SmolLM3KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::Smollm3KvCache>(1, 8, 4, stream);
 
-    trtmc::SmolLM3TextGenConfig cfg;
+    trtmc::Smollm3TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 1;
     cfg.id_eos_ids = {1, 2};
     cfg.has_position_input = false;
 
-    trtmc::SmolLM3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::Smollm3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 10;
@@ -291,15 +292,15 @@ static void test_explicit_eos_override_replaces_default_set() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::SmolLM3KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::Smollm3KvCache>(1, 8, 4, stream);
 
-    trtmc::SmolLM3TextGenConfig cfg;
+    trtmc::Smollm3TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 1;
     cfg.id_eos_ids = {1, 2};
     cfg.has_position_input = false;
 
-    trtmc::SmolLM3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::Smollm3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 3;
@@ -324,15 +325,15 @@ static void test_generate_max_tokens() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::SmolLM3KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::Smollm3KvCache>(1, 8, 4, stream);
 
-    trtmc::SmolLM3TextGenConfig cfg;
+    trtmc::Smollm3TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_bos = 0;
     cfg.id_eos = 99; // EOS token that argmax will never produce
     cfg.has_position_input = false;
 
-    trtmc::SmolLM3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::Smollm3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 3;
@@ -351,14 +352,14 @@ static void test_generate_max_tokens() {
 
 static void test_argmax() {
     std::vector<float> logits = {0.1f, 0.5f, 0.3f, 0.8f, 0.2f};
-    int32_t result = trtmc::SmolLM3TextGenerationPipeline::argmax(logits);
+    int32_t result = trtmc::Smollm3TextGenerationPipeline::argmax(logits);
     check(result == 3, "argmax of [0.1, 0.5, 0.3, 0.8, 0.2] = 3");
 
     std::vector<float> single = {42.0f};
-    check(trtmc::SmolLM3TextGenerationPipeline::argmax(single) == 0, "argmax of single = 0");
+    check(trtmc::Smollm3TextGenerationPipeline::argmax(single) == 0, "argmax of single = 0");
 
     std::vector<float> empty;
-    check(trtmc::SmolLM3TextGenerationPipeline::argmax(empty) == 0, "argmax of empty = 0");
+    check(trtmc::Smollm3TextGenerationPipeline::argmax(empty) == 0, "argmax of empty = 0");
 }
 
 static void test_zero_max_tokens() {
@@ -371,14 +372,14 @@ static void test_zero_max_tokens() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::SmolLM3KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::Smollm3KvCache>(1, 8, 4, stream);
 
-    trtmc::SmolLM3TextGenConfig cfg;
+    trtmc::Smollm3TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2;
     cfg.has_position_input = false;
 
-    trtmc::SmolLM3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::Smollm3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 0;
@@ -393,7 +394,7 @@ static void test_kv_reset_is_logical_and_masks_stale_rows() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtmc::SmolLM3KvCache cache(1, 8, 4, stream);
+    trtmc::Smollm3KvCache cache(1, 8, 4, stream);
     std::vector<float> stale_k(32, 3.25F);
     std::vector<float> stale_v(32, -7.5F);
     check(cache.cache_k(0).copy_from_host(stale_k.data()), "upload stale K cache rows");
@@ -467,17 +468,17 @@ static void test_stop_on_boxed_answer() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::SmolLM3KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::Smollm3KvCache>(1, 8, 4, stream);
     auto tokenizer = std::make_shared<MockTokenizer>();
     auto sampler = std::make_unique<SequenceSampler>(std::vector<int32_t>{1, 2, 3, 4});
 
-    trtmc::SmolLM3TextGenConfig cfg;
+    trtmc::Smollm3TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 99;
     cfg.has_position_input = false;
 
-    trtmc::SmolLM3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream,
-                                                tokenizer, "mock", std::move(sampler));
+    trtmc::Smollm3TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream,
+                                                  tokenizer, "mock", std::move(sampler));
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 10;

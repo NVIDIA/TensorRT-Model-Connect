@@ -44,29 +44,29 @@ void require_ta(bool cond, const char* msg) {
         throw std::runtime_error(msg);
 }
 
-SmolLM3TriAttentionScoreAggregation parse_score_aggregation(const std::string& value) {
+Smollm3TriAttentionScoreAggregation parse_score_aggregation(const std::string& value) {
     if (value == "mean")
-        return SmolLM3TriAttentionScoreAggregation::kMean;
+        return Smollm3TriAttentionScoreAggregation::kMean;
     if (value == "max")
-        return SmolLM3TriAttentionScoreAggregation::kMax;
+        return Smollm3TriAttentionScoreAggregation::kMax;
     throw std::runtime_error("Unsupported TriAttention score_aggregation: " + value);
 }
 
-const char* score_aggregation_name(SmolLM3TriAttentionScoreAggregation value) {
+const char* score_aggregation_name(Smollm3TriAttentionScoreAggregation value) {
     switch (value) {
-    case SmolLM3TriAttentionScoreAggregation::kMean:
+    case Smollm3TriAttentionScoreAggregation::kMean:
         return "mean";
-    case SmolLM3TriAttentionScoreAggregation::kMax:
+    case Smollm3TriAttentionScoreAggregation::kMax:
         return "max";
     }
     return "unknown";
 }
 
-SmolLM3TriAttentionRopeStyle parse_rope_style(const std::string& value) {
+Smollm3TriAttentionRopeStyle parse_rope_style(const std::string& value) {
     if (value == "interleaved")
-        return SmolLM3TriAttentionRopeStyle::kInterleaved;
+        return Smollm3TriAttentionRopeStyle::kInterleaved;
     if (value.empty() || value == "half")
-        return SmolLM3TriAttentionRopeStyle::kHalf;
+        return Smollm3TriAttentionRopeStyle::kHalf;
     throw std::runtime_error("Unsupported TriAttention rope_style: " + value);
 }
 
@@ -135,7 +135,7 @@ std::vector<std::vector<float>> parse_float_matrix(const json& array_value, cons
     return out;
 }
 
-void maybe_generate_default_names(int32_t num_layers, SmolLM3KvCacheNames& names) {
+void maybe_generate_default_names(int32_t num_layers, Smollm3KvCacheNames& names) {
     if (!names.cache_k.empty())
         return;
     names.cache_k.reserve(static_cast<std::size_t>(num_layers));
@@ -171,7 +171,7 @@ float complex_abs(float real, float imag) {
 //
 // Previously this file contained a cluster of std::getenv readers
 // (triattention_debug_enabled, triattention_profile_enabled, etc.) plus
-// override helpers that patched SmolLM3TriAttentionConfig with
+// override helpers that patched Smollm3TriAttentionConfig with
 // TRTMC_TRIATTN_OVERRIDE_* values. All of them are deleted here — values
 // now flow through the config registry exclusively.
 template <typename T>
@@ -196,7 +196,7 @@ void apply_layer_value(const ::trtmc::config::ConfigBundle& bundle, const std::s
 
 void apply_aggregation_from_registry(const ::trtmc::config::ConfigBundle& bundle,
                                      const std::string& field,
-                                     SmolLM3TriAttentionScoreAggregation& out) {
+                                     Smollm3TriAttentionScoreAggregation& out) {
     if (!registry_has_value<std::string>(bundle, field))
         return;
     try {
@@ -239,7 +239,7 @@ namespace {
 // legacy JSON path produced. Session > Platform > BundleDefault > BuildTime
 // win; SchemaDefault reads are skipped so JSON-only bundles keep their
 // values.
-void overlay_core_runtime_from_registry(SmolLM3TriAttentionConfig& cfg,
+void overlay_core_runtime_from_registry(Smollm3TriAttentionConfig& cfg,
                                         const ::trtmc::config::ConfigBundle& bundle) {
     apply_layer_value<bool>(bundle, "enabled", cfg.enabled);
     apply_layer_value<std::int32_t>(bundle, "kv_budget", cfg.kv_budget);
@@ -258,7 +258,7 @@ void overlay_core_runtime_from_registry(SmolLM3TriAttentionConfig& cfg,
 // Populate the debug/profile fields from the registry. These have no
 // legacy JSON representation — they previously came from
 // TRTMC_TRIATTN_* env vars, which are now gone.
-void fill_debug_from_registry(SmolLM3TriAttentionConfig& cfg,
+void fill_debug_from_registry(Smollm3TriAttentionConfig& cfg,
                               const ::trtmc::config::ConfigBundle& bundle) {
     apply_layer_value<bool>(bundle, "debug", cfg.debug);
     apply_layer_value<bool>(bundle, "profile", cfg.profile);
@@ -274,8 +274,8 @@ void fill_debug_from_registry(SmolLM3TriAttentionConfig& cfg,
     apply_layer_value<bool>(bundle, "dump_score_values", cfg.dump_score_values);
 }
 
-static void fill_core_from_legacy_json(SmolLM3TriAttentionConfig& cfg, const std::string& config_json,
-                                       int32_t max_cache_length) {
+static void fill_core_from_legacy_json(Smollm3TriAttentionConfig& cfg,
+                                       const std::string& config_json, int32_t max_cache_length) {
     if (config_json.find("\"triattention\"") == std::string::npos)
         return;
     const json root = json::parse(config_json);
@@ -298,7 +298,7 @@ static void fill_core_from_legacy_json(SmolLM3TriAttentionConfig& cfg, const std
     cfg.offset_max_length = it->value("offset_max_length", 65536);
 }
 
-static void validate_triattention_config(const SmolLM3TriAttentionConfig& cfg,
+static void validate_triattention_config(const Smollm3TriAttentionConfig& cfg,
                                          int32_t max_cache_length) {
     if (cfg.kv_budget < 1)
         throw std::runtime_error("TriAttention kv_budget must be >= 1");
@@ -314,10 +314,10 @@ static void validate_triattention_config(const SmolLM3TriAttentionConfig& cfg,
 
 } // namespace
 
-SmolLM3TriAttentionConfig
+Smollm3TriAttentionConfig
 smollm3_parse_triattention_bundle_config(const std::string& config_json, int32_t max_cache_length,
-                                       const ::trtmc::config::ConfigBundle* runtime_config) {
-    SmolLM3TriAttentionConfig cfg;
+                                         const ::trtmc::config::ConfigBundle* runtime_config) {
+    Smollm3TriAttentionConfig cfg;
     // Legacy bundle path: pull core fields from the root-level
     // "triattention" object. New bundles route the same values through
     // the generic `defaults:` block which becomes the BundleDefault layer
@@ -338,8 +338,9 @@ smollm3_parse_triattention_bundle_config(const std::string& config_json, int32_t
 
 namespace {
 
-void fill_stats_header(SmolLM3TriAttentionStats& stats, const json& root, int32_t num_attention_heads,
-                       int32_t num_key_value_heads, int32_t num_layers) {
+void fill_stats_header(Smollm3TriAttentionStats& stats, const json& root,
+                       int32_t num_attention_heads, int32_t num_key_value_heads,
+                       int32_t num_layers) {
     stats.head_dim = root.value("head_dim", 0);
     stats.rope_style = parse_rope_style(root.value("rope_style", std::string("half")));
     stats.rope_theta = root.value("rope_theta", 10000.0F);
@@ -351,7 +352,7 @@ void fill_stats_header(SmolLM3TriAttentionStats& stats, const json& root, int32_
                "TriAttention stats head_dim must be a positive even number");
 }
 
-void fill_stats_inv_freq(SmolLM3TriAttentionStats& stats, const json& root) {
+void fill_stats_inv_freq(Smollm3TriAttentionStats& stats, const json& root) {
     if (root.contains("inv_freq")) {
         stats.inv_freq = parse_float_array(root["inv_freq"], "inv_freq");
     } else {
@@ -367,7 +368,7 @@ void fill_stats_inv_freq(SmolLM3TriAttentionStats& stats, const json& root) {
                "TriAttention inv_freq size does not match head_dim / 2");
 }
 
-void append_sampled_heads_from_array(SmolLM3TriAttentionStats& stats, const json& sampled_root,
+void append_sampled_heads_from_array(Smollm3TriAttentionStats& stats, const json& sampled_root,
                                      int32_t head_upper_bound) {
     for (const auto& item : sampled_root) {
         require_ta(item.is_array() && item.size() == 2,
@@ -382,7 +383,7 @@ void append_sampled_heads_from_array(SmolLM3TriAttentionStats& stats, const json
     }
 }
 
-void populate_sampled_heads(SmolLM3TriAttentionStats& stats, const json& root,
+void populate_sampled_heads(Smollm3TriAttentionStats& stats, const json& root,
                             int32_t head_upper_bound) {
     stats.sampled_score_heads_by_layer.assign(static_cast<std::size_t>(stats.num_layers), {});
     if (root.contains("sampled_heads") && root["sampled_heads"].is_array())
@@ -414,7 +415,7 @@ int32_t infer_sampled_head_upper_bound(const json& root) {
     return upper_bound;
 }
 
-void copy_dense_head_row(SmolLM3TriAttentionHeadStats& dst,
+void copy_dense_head_row(Smollm3TriAttentionHeadStats& dst,
                          const std::vector<std::vector<float>>& q_mean_real,
                          const std::vector<std::vector<float>>& q_mean_imag,
                          const std::vector<std::vector<float>>& q_abs_mean,
@@ -436,7 +437,7 @@ void copy_dense_head_row(SmolLM3TriAttentionHeadStats& dst,
     }
 }
 
-bool fill_layer_stats_from_dense(SmolLM3TriAttentionHeadStats& dst, const json& layer_node,
+bool fill_layer_stats_from_dense(Smollm3TriAttentionHeadStats& dst, const json& layer_node,
                                  int32_t& inferred_stats_heads, int32_t half_dim) {
     const auto q_mean_real =
         parse_float_matrix(layer_node["q_mean_real"], "layer_stats.q_mean_real");
@@ -469,7 +470,7 @@ bool fill_layer_stats_from_dense(SmolLM3TriAttentionHeadStats& dst, const json& 
     return true;
 }
 
-bool try_parse_dense_layer_stats(SmolLM3TriAttentionStats& stats, const json& root,
+bool try_parse_dense_layer_stats(Smollm3TriAttentionStats& stats, const json& root,
                                  int32_t half_dim) {
     if (!root.contains("layer_stats") || !root["layer_stats"].is_object() ||
         root["layer_stats"].empty())
@@ -492,7 +493,7 @@ bool try_parse_dense_layer_stats(SmolLM3TriAttentionStats& stats, const json& ro
     return true;
 }
 
-void init_layer_stats_empty(SmolLM3TriAttentionStats& stats, int32_t half_dim) {
+void init_layer_stats_empty(Smollm3TriAttentionStats& stats, int32_t half_dim) {
     stats.layer_stats.resize(static_cast<std::size_t>(stats.num_layers));
     const auto flat_size =
         static_cast<std::size_t>(stats.stats_head_count) * static_cast<std::size_t>(half_dim);
@@ -504,7 +505,7 @@ void init_layer_stats_empty(SmolLM3TriAttentionStats& stats, int32_t half_dim) {
     }
 }
 
-void accumulate_sparse_entry(SmolLM3TriAttentionStats& stats, const json& raw_stats, int32_t layer,
+void accumulate_sparse_entry(Smollm3TriAttentionStats& stats, const json& raw_stats, int32_t layer,
                              int32_t head, int32_t half_dim, std::vector<int32_t>& group_counts) {
     const std::string key = sampled_head_key(layer, head);
     auto stats_it = raw_stats.find(key);
@@ -528,8 +529,8 @@ void accumulate_sparse_entry(SmolLM3TriAttentionStats& stats, const json& raw_st
     ++group_counts[static_cast<std::size_t>(layer * stats.stats_head_count + head)];
 }
 
-bool finalize_sparse_stats(SmolLM3TriAttentionStats& stats, const std::vector<int32_t>& group_counts,
-                           int32_t half_dim) {
+bool finalize_sparse_stats(Smollm3TriAttentionStats& stats,
+                           const std::vector<int32_t>& group_counts, int32_t half_dim) {
     bool any_stats = false;
     for (int32_t layer = 0; layer < stats.num_layers; ++layer) {
         auto& layer_stats = stats.layer_stats[static_cast<std::size_t>(layer)];
@@ -552,7 +553,7 @@ bool finalize_sparse_stats(SmolLM3TriAttentionStats& stats, const std::vector<in
     return any_stats;
 }
 
-void parse_sparse_stats(SmolLM3TriAttentionStats& stats, const json& root, int32_t half_dim) {
+void parse_sparse_stats(Smollm3TriAttentionStats& stats, const json& root, int32_t half_dim) {
     require_ta(root.contains("sampled_heads") && root["sampled_heads"].is_array(),
                "TriAttention stats payload is missing sampled_heads");
     require_ta(root.contains("stats") && root["stats"].is_object(),
@@ -586,11 +587,11 @@ void parse_sparse_stats(SmolLM3TriAttentionStats& stats, const json& root, int32
 
 } // namespace
 
-SmolLM3TriAttentionStats smollm3_parse_triattention_stats_json(const std::string& stats_json,
-                                                           int32_t num_attention_heads,
-                                                           int32_t num_key_value_heads,
-                                                           int32_t num_layers) {
-    SmolLM3TriAttentionStats stats;
+Smollm3TriAttentionStats smollm3_parse_triattention_stats_json(const std::string& stats_json,
+                                                               int32_t num_attention_heads,
+                                                               int32_t num_key_value_heads,
+                                                               int32_t num_layers) {
+    Smollm3TriAttentionStats stats;
     const json root = json::parse(stats_json);
     fill_stats_header(stats, root, num_attention_heads, num_key_value_heads, num_layers);
     fill_stats_inv_freq(stats, root);
@@ -601,7 +602,7 @@ SmolLM3TriAttentionStats smollm3_parse_triattention_stats_json(const std::string
     return stats;
 }
 
-void SmolLM3TriAttentionKvCache::validate_shapes() {
+void Smollm3TriAttentionKvCache::validate_shapes() {
     require_ta(config_.kv_budget >= 1 && config_.kv_budget <= max_length_,
                "TriAttention kv_budget must be within [1, max_length]");
     require_ta(stats_.head_dim > 0 && (stats_.head_dim % 2) == 0,
@@ -623,7 +624,7 @@ void SmolLM3TriAttentionKvCache::validate_shapes() {
     require_ta(score_group_size_ > 0, "TriAttention score_group_size must be positive");
 }
 
-void SmolLM3TriAttentionKvCache::normalize_sampled_heads() {
+void Smollm3TriAttentionKvCache::normalize_sampled_heads() {
     if (stats_.sampled_score_heads_by_layer.size() != static_cast<std::size_t>(num_layers_))
         stats_.sampled_score_heads_by_layer.assign(static_cast<std::size_t>(num_layers_), {});
 
@@ -646,7 +647,7 @@ void SmolLM3TriAttentionKvCache::normalize_sampled_heads() {
     }
 }
 
-void SmolLM3TriAttentionKvCache::log_init_debug() const {
+void Smollm3TriAttentionKvCache::log_init_debug() const {
     if (!config_.debug)
         return;
     std::cerr << "[trtmc.triattention] init kv_budget=" << config_.kv_budget
@@ -662,7 +663,7 @@ void SmolLM3TriAttentionKvCache::log_init_debug() const {
               << " layers_with_stats=" << stats_.layer_stats.size() << '\n';
 }
 
-void SmolLM3TriAttentionKvCache::allocate_layer_tensors() {
+void Smollm3TriAttentionKvCache::allocate_layer_tensors() {
     cache_k_.reserve(static_cast<std::size_t>(num_layers_));
     cache_v_.reserve(static_cast<std::size_t>(num_layers_));
     present_k_.reserve(static_cast<std::size_t>(num_layers_));
@@ -680,12 +681,12 @@ void SmolLM3TriAttentionKvCache::allocate_layer_tensors() {
         head_positions.reserve(static_cast<std::size_t>(max_length_));
 }
 
-SmolLM3TriAttentionKvCache::SmolLM3TriAttentionKvCache(int32_t num_layers, int32_t num_kv_heads,
-                                                   int32_t max_length, int32_t kv_dim,
-                                                   cudaStream_t stream,
-                                                   SmolLM3TriAttentionConfig config,
-                                                   SmolLM3TriAttentionStats stats, DType cache_dtype,
-                                                   SmolLM3KvCacheNames names)
+Smollm3TriAttentionKvCache::Smollm3TriAttentionKvCache(int32_t num_layers, int32_t num_kv_heads,
+                                                       int32_t max_length, int32_t kv_dim,
+                                                       cudaStream_t stream,
+                                                       Smollm3TriAttentionConfig config,
+                                                       Smollm3TriAttentionStats stats,
+                                                       DType cache_dtype, Smollm3KvCacheNames names)
     : num_layers_(num_layers), num_kv_heads_(num_kv_heads), max_length_(max_length),
       kv_dim_(kv_dim), stream_(stream), cache_dtype_(cache_dtype),
       cache_element_size_(dtype_size(cache_dtype)), names_(std::move(names)),
@@ -705,7 +706,7 @@ SmolLM3TriAttentionKvCache::SmolLM3TriAttentionKvCache(int32_t num_layers, int32
 }
 
 #ifdef TRTMC_HAS_CUDA_KERNELS
-void SmolLM3TriAttentionKvCache::allocate_core_selection_buffers(int32_t half_dim) {
+void Smollm3TriAttentionKvCache::allocate_core_selection_buffers(int32_t half_dim) {
     candidate_indices_device_ = DeviceTensor({max_length_}, DType::kInt32, stream_);
     keep_indices_device_ = DeviceTensor({static_cast<int64_t>(cache_head_count_) * max_length_},
                                         DType::kInt32, stream_);
@@ -725,7 +726,7 @@ void SmolLM3TriAttentionKvCache::allocate_core_selection_buffers(int32_t half_di
         inv_freq_device_.copy_from_host(stats_.inv_freq.data());
 }
 
-void SmolLM3TriAttentionKvCache::build_layer_gpu_stats(int32_t layer, int32_t half_dim) {
+void Smollm3TriAttentionKvCache::build_layer_gpu_stats(int32_t layer, int32_t half_dim) {
     const auto& host = stats_.layer_stats[static_cast<std::size_t>(layer)];
     const auto& sampled_heads =
         stats_.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)];
@@ -793,7 +794,7 @@ void SmolLM3TriAttentionKvCache::build_layer_gpu_stats(int32_t layer, int32_t ha
     gpu.freq_scale_sq.copy_from_host(freq_scale_sq.data());
 }
 
-void SmolLM3TriAttentionKvCache::initialize_gpu_state() {
+void Smollm3TriAttentionKvCache::initialize_gpu_state() {
     const int32_t half_dim = stats_.head_dim / 2;
     if (half_dim <= 0 || offsets_.empty() || stats_.layer_stats.empty() || query_head_count_ <= 0)
         return;
@@ -807,13 +808,13 @@ void SmolLM3TriAttentionKvCache::initialize_gpu_state() {
     cudaStreamSynchronize(stream_);
 }
 
-bool SmolLM3TriAttentionKvCache::core_selection_buffers_ready() const {
+bool Smollm3TriAttentionKvCache::core_selection_buffers_ready() const {
     return candidate_indices_device_.ok() && keep_indices_device_.ok() && positions_device_.ok() &&
            inv_freq_device_.ok() && cos_phase_device_.ok() && sin_phase_device_.ok() &&
            scratch_k_device_.ok() && scratch_v_device_.ok();
 }
 
-bool SmolLM3TriAttentionKvCache::layer_gpu_stats_ready(const LayerGpuStats& layer) {
+bool Smollm3TriAttentionKvCache::layer_gpu_stats_ready(const LayerGpuStats& layer) {
     if (layer.score_head_count == 0)
         return true;
     return layer.head_offsets.ok() && layer.head_cache_indices.ok() && layer.q_mean_real.ok() &&
@@ -821,7 +822,7 @@ bool SmolLM3TriAttentionKvCache::layer_gpu_stats_ready(const LayerGpuStats& laye
            layer.scores.ok();
 }
 
-bool SmolLM3TriAttentionKvCache::can_use_gpu_selection() const {
+bool Smollm3TriAttentionKvCache::can_use_gpu_selection() const {
     if (config_.disable_gpu_selection)
         return false;
     if (!core_selection_buffers_ready())
@@ -834,7 +835,7 @@ bool SmolLM3TriAttentionKvCache::can_use_gpu_selection() const {
 }
 #endif
 
-void SmolLM3TriAttentionKvCache::build_attention_mask(std::vector<float>& mask) const {
+void Smollm3TriAttentionKvCache::build_attention_mask(std::vector<float>& mask) const {
     const auto width = static_cast<std::size_t>(max_length_) + 1U;
     mask.assign(width, kMaskedScore);
     for (int32_t i = 0; i < cache_length_; ++i)
@@ -842,14 +843,14 @@ void SmolLM3TriAttentionKvCache::build_attention_mask(std::vector<float>& mask) 
     mask.back() = 0.0F;
 }
 
-int32_t SmolLM3TriAttentionKvCache::preferred_cache_rows() const {
+int32_t Smollm3TriAttentionKvCache::preferred_cache_rows() const {
     if (!dynamic_binding_enabled_)
         return max_length_;
     const int32_t bucket_rows = config_.runtime_bucket_rows;
     return round_up_rows(std::max(cache_length_, 1), bucket_rows, max_length_);
 }
 
-void SmolLM3TriAttentionKvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
+void Smollm3TriAttentionKvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
     if (has_position_input_) {
         pos_buf_ = absolute_position_;
         Tensor pos_t;
@@ -885,7 +886,7 @@ void SmolLM3TriAttentionKvCache::prepare_step(TensorMap& inputs, int32_t /*seq_l
     inputs[names_.attention_mask] = mask_t;
 }
 
-void SmolLM3TriAttentionKvCache::bind_to(TrtModule& module) {
+void Smollm3TriAttentionKvCache::bind_to(TrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
     dynamic_binding_enabled_ =
@@ -910,8 +911,8 @@ void SmolLM3TriAttentionKvCache::bind_to(TrtModule& module) {
     }
 }
 
-std::vector<float> SmolLM3TriAttentionKvCache::copy_cache_rows_to_host(
-    const DeviceTensor& tensor, int32_t rows, SmolLM3TriAttentionCompactionProfile* profile) const {
+std::vector<float> Smollm3TriAttentionKvCache::copy_cache_rows_to_host(
+    const DeviceTensor& tensor, int32_t rows, Smollm3TriAttentionCompactionProfile* profile) const {
     const auto count = static_cast<std::size_t>(rows) * static_cast<std::size_t>(kv_dim_);
     std::vector<float> out(count, 0.0F);
     if (rows <= 0)
@@ -945,7 +946,7 @@ std::vector<float> SmolLM3TriAttentionKvCache::copy_cache_rows_to_host(
     return out;
 }
 
-void SmolLM3TriAttentionKvCache::sync_shared_positions_from_head0() {
+void Smollm3TriAttentionKvCache::sync_shared_positions_from_head0() {
     if (cache_positions_per_head_.empty()) {
         cache_positions_.clear();
         return;
@@ -953,7 +954,7 @@ void SmolLM3TriAttentionKvCache::sync_shared_positions_from_head0() {
     cache_positions_ = cache_positions_per_head_.front();
 }
 
-int32_t SmolLM3TriAttentionKvCache::count_prefix_rows() const {
+int32_t Smollm3TriAttentionKvCache::count_prefix_rows() const {
     const int32_t prefix_limit =
         prompt_end_position_ > 0 ? prompt_end_position_ : planned_prompt_length_;
     if (prefix_limit <= 0)
@@ -966,8 +967,8 @@ int32_t SmolLM3TriAttentionKvCache::count_prefix_rows() const {
     return count;
 }
 
-std::vector<char> SmolLM3TriAttentionKvCache::build_reserve_mask(int32_t total_tokens,
-                                                               int32_t old_budget) const {
+std::vector<char> Smollm3TriAttentionKvCache::build_reserve_mask(int32_t total_tokens,
+                                                                 int32_t old_budget) const {
     std::vector<char> reserve_mask(static_cast<std::size_t>(total_tokens), 0);
     const int32_t reserve_recent =
         std::min({std::max(config_.recent_window, 0), total_tokens, old_budget});
@@ -986,8 +987,9 @@ std::vector<char> SmolLM3TriAttentionKvCache::build_reserve_mask(int32_t total_t
     return reserve_mask;
 }
 
-std::vector<int32_t> SmolLM3TriAttentionKvCache::broadcast_indices_per_head(std::vector<int32_t> rows,
-                                                                          int32_t row_count) const {
+std::vector<int32_t>
+Smollm3TriAttentionKvCache::broadcast_indices_per_head(std::vector<int32_t> rows,
+                                                       int32_t row_count) const {
     std::sort(rows.begin(), rows.end());
     std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * row_count));
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
@@ -998,8 +1000,8 @@ std::vector<int32_t> SmolLM3TriAttentionKvCache::broadcast_indices_per_head(std:
 }
 
 std::vector<int32_t>
-SmolLM3TriAttentionKvCache::select_keep_indices(int32_t keep_budget,
-                                              SmolLM3TriAttentionCompactionProfile* profile) {
+Smollm3TriAttentionKvCache::select_keep_indices(int32_t keep_budget,
+                                                Smollm3TriAttentionCompactionProfile* profile) {
     const int32_t total_tokens = static_cast<int32_t>(cache_positions_.size());
     const int32_t old_budget = std::min(std::max(keep_budget, 0), total_tokens);
     if (total_tokens <= old_budget) {
@@ -1037,7 +1039,7 @@ SmolLM3TriAttentionKvCache::select_keep_indices(int32_t keep_budget,
     return select_keep_indices_host(old_budget, reserved, candidates, profile);
 }
 
-int32_t SmolLM3TriAttentionKvCache::compaction_keep_budget(int32_t total_tokens) const {
+int32_t Smollm3TriAttentionKvCache::compaction_keep_budget(int32_t total_tokens) const {
     const int32_t logical_budget = std::min(std::max(config_.kv_budget, 0), max_length_);
     int32_t total_budget = logical_budget;
     if (!config_.count_prompt_tokens)
@@ -1053,7 +1055,7 @@ int32_t SmolLM3TriAttentionKvCache::compaction_keep_budget(int32_t total_tokens)
     return std::min(std::max(total_budget, slack_budget), total_tokens);
 }
 
-int32_t SmolLM3TriAttentionKvCache::compaction_trigger_length() const {
+int32_t Smollm3TriAttentionKvCache::compaction_trigger_length() const {
     int32_t base_trigger = config_.kv_budget;
     int32_t slack_trigger = config_.kv_budget + std::max(config_.divide_length, 1);
     if (!config_.count_prompt_tokens) {
@@ -1064,7 +1066,7 @@ int32_t SmolLM3TriAttentionKvCache::compaction_trigger_length() const {
     return std::min(max_length_, std::max(base_trigger, slack_trigger));
 }
 
-std::vector<int32_t> SmolLM3TriAttentionKvCache::broadcast_reserved_for_empty_budget(
+std::vector<int32_t> Smollm3TriAttentionKvCache::broadcast_reserved_for_empty_budget(
     int32_t keep_budget, const std::vector<int32_t>& reserved) const {
     std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head)
@@ -1073,9 +1075,9 @@ std::vector<int32_t> SmolLM3TriAttentionKvCache::broadcast_reserved_for_empty_bu
     return keep;
 }
 
-void SmolLM3TriAttentionKvCache::precompute_trig_phases(
+void Smollm3TriAttentionKvCache::precompute_trig_phases(
     std::vector<std::vector<float>>& cos_phase, std::vector<std::vector<float>>& sin_phase,
-    int32_t half_dim, SmolLM3TriAttentionCompactionProfile* profile) const {
+    int32_t half_dim, Smollm3TriAttentionCompactionProfile* profile) const {
     if (config_.disable_trig)
         return;
     const auto trig_start = Clock::now();
@@ -1098,8 +1100,8 @@ void SmolLM3TriAttentionKvCache::precompute_trig_phases(
         profile->trig_prep_ms += elapsed_ms(trig_start);
 }
 
-bool SmolLM3TriAttentionKvCache::layer_stats_shapes_valid(
-    const SmolLM3TriAttentionHeadStats& layer_stats, int32_t half_dim) const {
+bool Smollm3TriAttentionKvCache::layer_stats_shapes_valid(
+    const Smollm3TriAttentionHeadStats& layer_stats, int32_t half_dim) const {
     if (layer_stats.q_mean_real.empty() || layer_stats.q_mean_imag.empty() ||
         layer_stats.q_abs_mean.empty() || layer_stats.freq_scale_sq.empty())
         return false;
@@ -1111,10 +1113,10 @@ bool SmolLM3TriAttentionKvCache::layer_stats_shapes_valid(
            layer_stats.freq_scale_sq.size() == expected_stats_size;
 }
 
-void SmolLM3TriAttentionKvCache::extract_k_rot(const float* row_ptr, int32_t head_offset, int32_t d,
-                                             int32_t half_dim, float& k_rot_real,
-                                             float& k_rot_imag) const {
-    if (stats_.rope_style == SmolLM3TriAttentionRopeStyle::kInterleaved) {
+void Smollm3TriAttentionKvCache::extract_k_rot(const float* row_ptr, int32_t head_offset, int32_t d,
+                                               int32_t half_dim, float& k_rot_real,
+                                               float& k_rot_imag) const {
+    if (stats_.rope_style == Smollm3TriAttentionRopeStyle::kInterleaved) {
         k_rot_real = row_ptr[head_offset + (2 * d)];
         k_rot_imag = row_ptr[head_offset + (2 * d) + 1];
     } else {
@@ -1123,17 +1125,17 @@ void SmolLM3TriAttentionKvCache::extract_k_rot(const float* row_ptr, int32_t hea
     }
 }
 
-float SmolLM3TriAttentionKvCache::reduce_trig_sums(const std::vector<float>& trig_sums) const {
+float Smollm3TriAttentionKvCache::reduce_trig_sums(const std::vector<float>& trig_sums) const {
     if (trig_sums.empty())
         return 0.0F;
-    if (config_.score_aggregation == SmolLM3TriAttentionScoreAggregation::kMax)
+    if (config_.score_aggregation == Smollm3TriAttentionScoreAggregation::kMax)
         return *std::max_element(trig_sums.begin(), trig_sums.end());
     const float sum = std::accumulate(trig_sums.begin(), trig_sums.end(), 0.0F);
     return sum / static_cast<float>(trig_sums.size());
 }
 
-float SmolLM3TriAttentionKvCache::score_one_row(
-    const float* row_ptr, const SmolLM3TriAttentionHeadStats& layer_stats, std::size_t stats_base,
+float Smollm3TriAttentionKvCache::score_one_row(
+    const float* row_ptr, const Smollm3TriAttentionHeadStats& layer_stats, std::size_t stats_base,
     int32_t head_offset, int32_t half_dim, const std::vector<std::vector<float>>& cos_phase,
     const std::vector<std::vector<float>>& sin_phase) const {
     float additive = 0.0F;
@@ -1163,9 +1165,9 @@ float SmolLM3TriAttentionKvCache::score_one_row(
     return reduce_trig_sums(trig_sums) + additive;
 }
 
-void SmolLM3TriAttentionKvCache::score_rows_for_head(
+void Smollm3TriAttentionKvCache::score_rows_for_head(
     std::vector<float>& scores, const std::vector<float>& layer_cache,
-    const SmolLM3TriAttentionHeadStats& layer_stats, int32_t score_head, int32_t cache_head,
+    const Smollm3TriAttentionHeadStats& layer_stats, int32_t score_head, int32_t cache_head,
     int32_t half_dim, int32_t total_tokens, const std::vector<std::vector<float>>& cos_phase,
     const std::vector<std::vector<float>>& sin_phase) const {
     const int32_t head_offset = cache_head * query_group_size_ * stats_.head_dim;
@@ -1179,7 +1181,7 @@ void SmolLM3TriAttentionKvCache::score_rows_for_head(
     }
 }
 
-void SmolLM3TriAttentionKvCache::standardize_scores(std::vector<float>& scores) const {
+void Smollm3TriAttentionKvCache::standardize_scores(std::vector<float>& scores) const {
     if (scores.empty())
         return;
     const float mean =
@@ -1189,7 +1191,7 @@ void SmolLM3TriAttentionKvCache::standardize_scores(std::vector<float>& scores) 
         value = (value - mean) / stddev;
 }
 
-void SmolLM3TriAttentionKvCache::accumulate_layer_fallback(
+void Smollm3TriAttentionKvCache::accumulate_layer_fallback(
     const std::vector<std::vector<float>>& layer_scores, std::vector<float>& global_fallback_sum,
     int32_t& global_fallback_count, int32_t total_tokens) const {
     for (const auto& scores : layer_scores) {
@@ -1200,11 +1202,11 @@ void SmolLM3TriAttentionKvCache::accumulate_layer_fallback(
     }
 }
 
-void SmolLM3TriAttentionKvCache::reduce_group_into_aggregate(
+void Smollm3TriAttentionKvCache::reduce_group_into_aggregate(
     int32_t cache_head, int32_t total_tokens, const std::vector<std::vector<float>>& layer_scores,
     const std::vector<int32_t>& sampled_group, std::vector<float>& aggregate,
     bool first_layer_for_cache_head, float* layer_dump) const {
-    const bool use_max = config_.per_layer_aggregation == SmolLM3TriAttentionScoreAggregation::kMax;
+    const bool use_max = config_.per_layer_aggregation == Smollm3TriAttentionScoreAggregation::kMax;
     (void)cache_head;
     for (int32_t row = 0; row < total_tokens; ++row) {
         float reduced = layer_scores[static_cast<std::size_t>(sampled_group.front())]
@@ -1227,7 +1229,7 @@ void SmolLM3TriAttentionKvCache::reduce_group_into_aggregate(
     }
 }
 
-void SmolLM3TriAttentionKvCache::accumulate_layer_to_aggregate(
+void Smollm3TriAttentionKvCache::accumulate_layer_to_aggregate(
     int32_t layer, int32_t total_tokens, const std::vector<std::vector<float>>& layer_scores,
     const std::vector<std::vector<int32_t>>& sampled_by_cache_head,
     std::vector<std::vector<float>>& aggregated_scores,
@@ -1255,9 +1257,9 @@ void SmolLM3TriAttentionKvCache::accumulate_layer_to_aggregate(
 }
 
 std::vector<float>
-SmolLM3TriAttentionKvCache::compute_fallback_mean(const std::vector<float>& global_fallback_sum,
-                                                int32_t global_fallback_count,
-                                                int32_t total_tokens) const {
+Smollm3TriAttentionKvCache::compute_fallback_mean(const std::vector<float>& global_fallback_sum,
+                                                  int32_t global_fallback_count,
+                                                  int32_t total_tokens) const {
     std::vector<float> mean(static_cast<std::size_t>(total_tokens), 0.0F);
     if (global_fallback_count <= 0)
         return mean;
@@ -1268,12 +1270,12 @@ SmolLM3TriAttentionKvCache::compute_fallback_mean(const std::vector<float>& glob
     return mean;
 }
 
-void SmolLM3TriAttentionKvCache::finalize_per_head_aggregate(
+void Smollm3TriAttentionKvCache::finalize_per_head_aggregate(
     std::vector<std::vector<float>>& aggregated_scores,
     const std::vector<int32_t>& contributing_layers_by_cache_head,
     const std::vector<float>& global_fallback_mean) const {
     const bool per_layer_max =
-        config_.per_layer_aggregation == SmolLM3TriAttentionScoreAggregation::kMax;
+        config_.per_layer_aggregation == Smollm3TriAttentionScoreAggregation::kMax;
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
         auto& scores = aggregated_scores[static_cast<std::size_t>(cache_head)];
         const int32_t head_layer_count =
@@ -1290,7 +1292,7 @@ void SmolLM3TriAttentionKvCache::finalize_per_head_aggregate(
     }
 }
 
-void SmolLM3TriAttentionKvCache::maybe_dump_score_values(
+void Smollm3TriAttentionKvCache::maybe_dump_score_values(
     const std::vector<std::vector<float>>& aggregated_scores,
     const std::vector<float>& layer_aggregate_dump, int32_t total_tokens) const {
     if (!config_.dump_score_values)
@@ -1320,7 +1322,7 @@ void SmolLM3TriAttentionKvCache::maybe_dump_score_values(
                     static_cast<std::streamsize>(layer_aggregate_dump.size() * sizeof(float)));
 }
 
-std::vector<int32_t> SmolLM3TriAttentionKvCache::build_keep_indices_per_head(
+std::vector<int32_t> Smollm3TriAttentionKvCache::build_keep_indices_per_head(
     const std::vector<std::vector<float>>& aggregated_scores, const std::vector<int32_t>& reserved,
     const std::vector<int32_t>& candidates, int32_t keep_budget, int32_t need) const {
     std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
@@ -1348,13 +1350,13 @@ std::vector<int32_t> SmolLM3TriAttentionKvCache::build_keep_indices_per_head(
     return keep;
 }
 
-bool SmolLM3TriAttentionKvCache::process_layer_for_host_selection(
+bool Smollm3TriAttentionKvCache::process_layer_for_host_selection(
     int32_t layer, int32_t half_dim, int32_t total_tokens,
     const std::vector<std::vector<float>>& cos_phase,
     const std::vector<std::vector<float>>& sin_phase,
     std::vector<std::vector<float>>& aggregated_scores, std::vector<float>& global_fallback_sum,
     int32_t& global_fallback_count, std::vector<int32_t>& contributing_layers_by_cache_head,
-    std::vector<float>& layer_aggregate_dump, SmolLM3TriAttentionCompactionProfile* profile) const {
+    std::vector<float>& layer_aggregate_dump, Smollm3TriAttentionCompactionProfile* profile) const {
     if (layer < 0 || layer >= static_cast<int32_t>(stats_.layer_stats.size()))
         return false;
     const auto& layer_stats = stats_.layer_stats[static_cast<std::size_t>(layer)];
@@ -1393,9 +1395,9 @@ bool SmolLM3TriAttentionKvCache::process_layer_for_host_selection(
     return true;
 }
 
-std::vector<int32_t> SmolLM3TriAttentionKvCache::select_keep_indices_host(
+std::vector<int32_t> Smollm3TriAttentionKvCache::select_keep_indices_host(
     int32_t keep_budget, const std::vector<int32_t>& reserved,
-    const std::vector<int32_t>& candidates, SmolLM3TriAttentionCompactionProfile* profile) const {
+    const std::vector<int32_t>& candidates, Smollm3TriAttentionCompactionProfile* profile) const {
     const int32_t need = std::max(0, keep_budget - static_cast<int32_t>(reserved.size()));
     if (need <= 0)
         return broadcast_reserved_for_empty_budget(keep_budget, reserved);
@@ -1449,8 +1451,8 @@ std::vector<int32_t> SmolLM3TriAttentionKvCache::select_keep_indices_host(
 }
 
 #ifdef TRTMC_HAS_CUDA_KERNELS
-void SmolLM3TriAttentionKvCache::standardize_score_rows(float* rows, int32_t num_rows,
-                                                      int32_t total_tokens) const {
+void Smollm3TriAttentionKvCache::standardize_score_rows(float* rows, int32_t num_rows,
+                                                        int32_t total_tokens) const {
     for (int32_t r = 0; r < num_rows; ++r) {
         float* score_row = rows + static_cast<std::size_t>(r) * total_tokens;
         float mean = 0.0F;
@@ -1470,10 +1472,10 @@ void SmolLM3TriAttentionKvCache::standardize_score_rows(float* rows, int32_t num
     }
 }
 
-void SmolLM3TriAttentionKvCache::accumulate_flat_fallback(const float* rows, int32_t num_rows,
-                                                        int32_t total_tokens,
-                                                        std::vector<float>& fallback_sum,
-                                                        int32_t& fallback_count) const {
+void Smollm3TriAttentionKvCache::accumulate_flat_fallback(const float* rows, int32_t num_rows,
+                                                          int32_t total_tokens,
+                                                          std::vector<float>& fallback_sum,
+                                                          int32_t& fallback_count) const {
     for (int32_t r = 0; r < num_rows; ++r) {
         const float* score_row = rows + static_cast<std::size_t>(r) * total_tokens;
         for (int32_t row = 0; row < total_tokens; ++row)
@@ -1482,11 +1484,11 @@ void SmolLM3TriAttentionKvCache::accumulate_flat_fallback(const float* rows, int
     }
 }
 
-void SmolLM3TriAttentionKvCache::aggregate_gpu_layer_into_cache_heads(
+void Smollm3TriAttentionKvCache::aggregate_gpu_layer_into_cache_heads(
     const std::vector<float>& host_scores, const LayerGpuStats& gpu, int32_t total_tokens,
     std::vector<float>& aggregated_scores,
     std::vector<int32_t>& contributing_layers_by_cache_head) const {
-    const bool use_max = config_.per_layer_aggregation == SmolLM3TriAttentionScoreAggregation::kMax;
+    const bool use_max = config_.per_layer_aggregation == Smollm3TriAttentionScoreAggregation::kMax;
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
         std::vector<int32_t> sampled_group;
         sampled_group.reserve(static_cast<std::size_t>(gpu.score_head_count));
@@ -1518,11 +1520,12 @@ void SmolLM3TriAttentionKvCache::aggregate_gpu_layer_into_cache_heads(
     }
 }
 
-SmolLM3TriAttentionKvCache::GpuLayerResult SmolLM3TriAttentionKvCache::process_layer_for_gpu_selection(
+Smollm3TriAttentionKvCache::GpuLayerResult
+Smollm3TriAttentionKvCache::process_layer_for_gpu_selection(
     int32_t layer, int32_t total_tokens, int32_t num_offsets, std::vector<float>& aggregated_scores,
     std::vector<float>& global_fallback_sum, int32_t& global_fallback_count,
     std::vector<int32_t>& contributing_layers_by_cache_head,
-    SmolLM3TriAttentionCompactionProfile* profile) {
+    Smollm3TriAttentionCompactionProfile* profile) {
     if (layer < 0 || layer >= static_cast<int32_t>(layer_gpu_stats_.size()))
         return GpuLayerResult::kSkipped;
     auto& gpu = layer_gpu_stats_[static_cast<std::size_t>(layer)];
@@ -1534,7 +1537,7 @@ SmolLM3TriAttentionKvCache::GpuLayerResult SmolLM3TriAttentionKvCache::process_l
     }
     const bool launched = smollm3_triattention_score_candidates_gpu(
         cache_k_[static_cast<std::size_t>(layer)].data(), cache_dtype_, kv_dim_, stats_.head_dim,
-        (stats_.rope_style == SmolLM3TriAttentionRopeStyle::kInterleaved),
+        (stats_.rope_style == Smollm3TriAttentionRopeStyle::kInterleaved),
         static_cast<const int32_t*>(candidate_indices_device_.data()), total_tokens, nullptr,
         static_cast<const float*>(inv_freq_device_.data()),
         static_cast<const float*>(cos_phase_device_.data()),
@@ -1546,7 +1549,7 @@ SmolLM3TriAttentionKvCache::GpuLayerResult SmolLM3TriAttentionKvCache::process_l
         static_cast<const float*>(gpu.q_abs_mean.data()),
         static_cast<const float*>(gpu.freq_scale_sq.data()), gpu.score_head_count,
         config_.disable_mlr, config_.disable_trig,
-        config_.score_aggregation == SmolLM3TriAttentionScoreAggregation::kMax,
+        config_.score_aggregation == Smollm3TriAttentionScoreAggregation::kMax,
         static_cast<float*>(gpu.scores.data()), stream_);
     if (!launched)
         return GpuLayerResult::kFailed;
@@ -1566,7 +1569,7 @@ SmolLM3TriAttentionKvCache::GpuLayerResult SmolLM3TriAttentionKvCache::process_l
     return GpuLayerResult::kContributed;
 }
 
-bool SmolLM3TriAttentionKvCache::upload_candidate_indices_identity(int32_t total_tokens) {
+bool Smollm3TriAttentionKvCache::upload_candidate_indices_identity(int32_t total_tokens) {
     std::vector<int32_t> score_rows(static_cast<std::size_t>(total_tokens));
     std::iota(score_rows.begin(), score_rows.end(), 0);
     const auto bytes = static_cast<std::size_t>(total_tokens) * sizeof(int32_t);
@@ -1574,8 +1577,8 @@ bool SmolLM3TriAttentionKvCache::upload_candidate_indices_identity(int32_t total
                            cudaMemcpyHostToDevice, stream_) == cudaSuccess;
 }
 
-bool SmolLM3TriAttentionKvCache::upload_gpu_trig_phases(int32_t num_offsets, int32_t half_dim,
-                                                      SmolLM3TriAttentionCompactionProfile* profile) {
+bool Smollm3TriAttentionKvCache::upload_gpu_trig_phases(
+    int32_t num_offsets, int32_t half_dim, Smollm3TriAttentionCompactionProfile* profile) {
     if (config_.disable_trig)
         return true;
     const auto trig_start = Clock::now();
@@ -1604,12 +1607,12 @@ bool SmolLM3TriAttentionKvCache::upload_gpu_trig_phases(int32_t num_offsets, int
     return ok_cos && ok_sin;
 }
 
-void SmolLM3TriAttentionKvCache::finalize_flat_per_head_aggregate(
+void Smollm3TriAttentionKvCache::finalize_flat_per_head_aggregate(
     std::vector<float>& aggregated_scores,
     const std::vector<int32_t>& contributing_layers_by_cache_head,
     const std::vector<float>& global_fallback_mean, int32_t total_tokens) const {
     const bool per_layer_max =
-        config_.per_layer_aggregation == SmolLM3TriAttentionScoreAggregation::kMax;
+        config_.per_layer_aggregation == Smollm3TriAttentionScoreAggregation::kMax;
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
         float* score_row =
             aggregated_scores.data() + static_cast<std::size_t>(cache_head) * total_tokens;
@@ -1627,7 +1630,7 @@ void SmolLM3TriAttentionKvCache::finalize_flat_per_head_aggregate(
     }
 }
 
-std::vector<int32_t> SmolLM3TriAttentionKvCache::build_keep_from_flat_aggregate(
+std::vector<int32_t> Smollm3TriAttentionKvCache::build_keep_from_flat_aggregate(
     const std::vector<float>& aggregated_scores, const std::vector<int32_t>& reserved,
     const std::vector<int32_t>& candidates, int32_t keep_budget, int32_t need,
     int32_t total_tokens) const {
@@ -1657,11 +1660,11 @@ std::vector<int32_t> SmolLM3TriAttentionKvCache::build_keep_from_flat_aggregate(
     return keep;
 }
 
-bool SmolLM3TriAttentionKvCache::run_gpu_selection_over_layers(
+bool Smollm3TriAttentionKvCache::run_gpu_selection_over_layers(
     int32_t total_tokens, int32_t num_offsets, std::vector<float>& aggregated_scores,
     std::vector<float>& global_fallback_sum, int32_t& global_fallback_count,
     std::vector<int32_t>& contributing_layers_by_cache_head, int32_t& contributing_layers,
-    SmolLM3TriAttentionCompactionProfile* profile) {
+    Smollm3TriAttentionCompactionProfile* profile) {
     for (int32_t layer = 0; layer < num_layers_; ++layer) {
         const auto status = process_layer_for_gpu_selection(
             layer, total_tokens, num_offsets, aggregated_scores, global_fallback_sum,
@@ -1674,9 +1677,9 @@ bool SmolLM3TriAttentionKvCache::run_gpu_selection_over_layers(
     return true;
 }
 
-std::vector<int32_t> SmolLM3TriAttentionKvCache::select_keep_indices_gpu(
+std::vector<int32_t> Smollm3TriAttentionKvCache::select_keep_indices_gpu(
     int32_t keep_budget, const std::vector<int32_t>& reserved,
-    const std::vector<int32_t>& candidates, SmolLM3TriAttentionCompactionProfile* profile) {
+    const std::vector<int32_t>& candidates, Smollm3TriAttentionCompactionProfile* profile) {
     const int32_t need = std::max(0, keep_budget - static_cast<int32_t>(reserved.size()));
     if (need <= 0)
         return broadcast_reserved_for_empty_budget(keep_budget, reserved);
@@ -1725,9 +1728,9 @@ std::vector<int32_t> SmolLM3TriAttentionKvCache::select_keep_indices_gpu(
 }
 #endif
 
-void SmolLM3TriAttentionKvCache::dump_cache_rows_to_file(const DeviceTensor& tensor, int32_t rows,
-                                                       const std::string& path,
-                                                       std::vector<std::string>& out_files) {
+void Smollm3TriAttentionKvCache::dump_cache_rows_to_file(const DeviceTensor& tensor, int32_t rows,
+                                                         const std::string& path,
+                                                         std::vector<std::string>& out_files) {
     const auto host_cache = copy_cache_rows_to_host(tensor, rows, nullptr);
     std::vector<float> packed(static_cast<std::size_t>(rows) *
                                   static_cast<std::size_t>(cache_head_count_) *
@@ -1751,10 +1754,10 @@ void SmolLM3TriAttentionKvCache::dump_cache_rows_to_file(const DeviceTensor& ten
     out_files.emplace_back(path);
 }
 
-void SmolLM3TriAttentionKvCache::maybe_dump_score_cache(int32_t rows, const char* k_pattern,
-                                                      const char* v_pattern,
-                                                      std::vector<std::string>& score_files,
-                                                      std::vector<std::string>& value_files) {
+void Smollm3TriAttentionKvCache::maybe_dump_score_cache(int32_t rows, const char* k_pattern,
+                                                        const char* v_pattern,
+                                                        std::vector<std::string>& score_files,
+                                                        std::vector<std::string>& value_files) {
     if (!config_.dump_score_cache)
         return;
     const char* dump_path =
@@ -1773,7 +1776,7 @@ void SmolLM3TriAttentionKvCache::maybe_dump_score_cache(int32_t rows, const char
 }
 
 #ifdef TRTMC_HAS_CUDA_KERNELS
-bool SmolLM3TriAttentionKvCache::gpu_compaction_upload_keep(
+bool Smollm3TriAttentionKvCache::gpu_compaction_upload_keep(
     int32_t keep_count, const std::vector<int32_t>& keep_indices) {
     if (config_.disable_gpu_compaction || keep_count <= 0 || !keep_indices_device_.ok())
         return false;
@@ -1784,8 +1787,8 @@ bool SmolLM3TriAttentionKvCache::gpu_compaction_upload_keep(
                            cudaMemcpyHostToDevice, stream_) == cudaSuccess;
 }
 
-bool SmolLM3TriAttentionKvCache::gpu_compact_one_layer(int32_t layer, int32_t keep_count,
-                                                     std::size_t row_bytes) {
+bool Smollm3TriAttentionKvCache::gpu_compact_one_layer(int32_t layer, int32_t keep_count,
+                                                       std::size_t row_bytes) {
     const bool ok_k = smollm3_triattention_compact_rows_gpu(
         cache_k_[static_cast<std::size_t>(layer)].data(), scratch_k_device_.data(), cache_dtype_,
         kv_dim_, static_cast<const int32_t*>(keep_indices_device_.data()), keep_count,
@@ -1807,11 +1810,11 @@ bool SmolLM3TriAttentionKvCache::gpu_compact_one_layer(int32_t layer, int32_t ke
 }
 #endif
 
-bool SmolLM3TriAttentionKvCache::compact_layer_on_gpu(int32_t layer,
-                                                    const std::vector<int32_t>& keep_indices,
-                                                    int32_t keep_count, std::size_t row_bytes,
-                                                    int64_t& repack_calls,
-                                                    std::size_t& repack_bytes) {
+bool Smollm3TriAttentionKvCache::compact_layer_on_gpu(int32_t layer,
+                                                      const std::vector<int32_t>& keep_indices,
+                                                      int32_t keep_count, std::size_t row_bytes,
+                                                      int64_t& repack_calls,
+                                                      std::size_t& repack_bytes) {
 #ifdef TRTMC_HAS_CUDA_KERNELS
     if (!gpu_compaction_upload_keep(keep_count, keep_indices))
         return false;
@@ -1831,7 +1834,7 @@ bool SmolLM3TriAttentionKvCache::compact_layer_on_gpu(int32_t layer,
 #endif
 }
 
-void SmolLM3TriAttentionKvCache::compact_layer_on_host(
+void Smollm3TriAttentionKvCache::compact_layer_on_host(
     int32_t layer, const std::vector<int32_t>& keep_indices, int32_t keep_count,
     std::size_t row_bytes, std::size_t head_block_bytes, int32_t old_cache_length,
     int64_t& repack_calls, std::size_t& repack_bytes) {
@@ -1862,13 +1865,13 @@ void SmolLM3TriAttentionKvCache::compact_layer_on_host(
     }
 }
 
-void SmolLM3TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
+void Smollm3TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
     const int32_t trigger_length = compaction_trigger_length();
     if (cache_length_ < trigger_length)
         return;
 
-    SmolLM3TriAttentionCompactionProfile profile;
-    SmolLM3TriAttentionCompactionProfile* profile_ptr = profile_enabled_ ? &profile : nullptr;
+    Smollm3TriAttentionCompactionProfile profile;
+    Smollm3TriAttentionCompactionProfile* profile_ptr = profile_enabled_ ? &profile : nullptr;
     const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
     const auto head_block_bytes =
         static_cast<std::size_t>(query_group_size_ * stats_.head_dim) * cache_element_size_;
@@ -1921,8 +1924,8 @@ void SmolLM3TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_ap
     cache_length_ = keep_count;
 }
 
-void SmolLM3TriAttentionKvCache::finalize_repack_profile(
-    SmolLM3TriAttentionCompactionProfile* profile_ptr, cudaEvent_t repack_start,
+void Smollm3TriAttentionKvCache::finalize_repack_profile(
+    Smollm3TriAttentionCompactionProfile* profile_ptr, cudaEvent_t repack_start,
     cudaEvent_t repack_stop, int64_t repack_calls, std::size_t repack_bytes) const {
     if (profile_ptr == nullptr)
         return;
@@ -1938,8 +1941,8 @@ void SmolLM3TriAttentionKvCache::finalize_repack_profile(
 }
 
 std::vector<std::vector<int32_t>>
-SmolLM3TriAttentionKvCache::build_new_positions_by_head(const std::vector<int32_t>& keep_indices,
-                                                      int32_t keep_count) const {
+Smollm3TriAttentionKvCache::build_new_positions_by_head(const std::vector<int32_t>& keep_indices,
+                                                        int32_t keep_count) const {
     std::vector<std::vector<int32_t>> out(static_cast<std::size_t>(cache_head_count_));
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
         auto& head_out = out[static_cast<std::size_t>(cache_head)];
@@ -1955,8 +1958,8 @@ SmolLM3TriAttentionKvCache::build_new_positions_by_head(const std::vector<int32_
 }
 
 std::vector<int32_t>
-SmolLM3TriAttentionKvCache::collect_dropped_positions(const std::vector<int32_t>& keep_indices,
-                                                    int32_t keep_count) const {
+Smollm3TriAttentionKvCache::collect_dropped_positions(const std::vector<int32_t>& keep_indices,
+                                                      int32_t keep_count) const {
     std::vector<char> keep_mask(static_cast<std::size_t>(cache_length_), 0);
     for (int32_t dst = 0; dst < keep_count; ++dst) {
         const int32_t idx = keep_indices[static_cast<std::size_t>(dst)];
@@ -1970,7 +1973,7 @@ SmolLM3TriAttentionKvCache::collect_dropped_positions(const std::vector<int32_t>
     return dropped;
 }
 
-int32_t SmolLM3TriAttentionKvCache::count_prefix_positions(
+int32_t Smollm3TriAttentionKvCache::count_prefix_positions(
     const std::vector<int32_t>& representative_positions) const {
     const int32_t prefix_limit =
         prompt_end_position_ > 0 ? prompt_end_position_ : planned_prompt_length_;
@@ -1984,7 +1987,7 @@ int32_t SmolLM3TriAttentionKvCache::count_prefix_positions(
     return kept;
 }
 
-void SmolLM3TriAttentionKvCache::log_compact_debug(
+void Smollm3TriAttentionKvCache::log_compact_debug(
     const std::vector<int32_t>& representative_positions, const std::vector<int32_t>& keep_indices,
     int32_t keep_count) const {
     if (!config_.debug)
@@ -2010,8 +2013,8 @@ void SmolLM3TriAttentionKvCache::log_compact_debug(
     std::cerr << '\n';
 }
 
-void SmolLM3TriAttentionKvCache::log_compact_profile(
-    const SmolLM3TriAttentionCompactionProfile* profile_ptr, int32_t keep_count) const {
+void Smollm3TriAttentionKvCache::log_compact_profile(
+    const Smollm3TriAttentionCompactionProfile* profile_ptr, int32_t keep_count) const {
     if (profile_ptr == nullptr)
         return;
     std::cerr << "[trtmc.triattention.profile] compact#" << compaction_count_
@@ -2032,8 +2035,8 @@ void SmolLM3TriAttentionKvCache::log_compact_profile(
               << " repack_calls=" << profile_ptr->repack_calls << '\n';
 }
 
-bool SmolLM3TriAttentionKvCache::should_emit_keep_dump(
-    const SmolLM3TriAttentionCompactionProfile* profile_ptr) const {
+bool Smollm3TriAttentionKvCache::should_emit_keep_dump(
+    const Smollm3TriAttentionCompactionProfile* profile_ptr) const {
     if (config_.dump_keep_path.empty())
         return false;
     const int32_t dump_compaction_index = config_.dump_compaction_index;
@@ -2042,10 +2045,10 @@ bool SmolLM3TriAttentionKvCache::should_emit_keep_dump(
     return dump_compaction_index == (compaction_count_ + (profile_ptr == nullptr ? 1 : 0));
 }
 
-void SmolLM3TriAttentionKvCache::emit_keep_dump_json(
+void Smollm3TriAttentionKvCache::emit_keep_dump_json(
     const std::vector<int32_t>& keep_indices, int32_t keep_count,
     const std::vector<std::vector<int32_t>>& new_positions_by_head,
-    const SmolLM3TriAttentionCompactionProfile* profile_ptr,
+    const Smollm3TriAttentionCompactionProfile* profile_ptr,
     const std::vector<std::string>& score_cache_files,
     const std::vector<std::string>& value_cache_files,
     const std::vector<std::string>& post_score_cache_files,
@@ -2102,8 +2105,8 @@ void SmolLM3TriAttentionKvCache::emit_keep_dump_json(
         throw std::runtime_error("TriAttention aborted after keep dump");
 }
 
-void SmolLM3TriAttentionKvCache::advance(int32_t n_tokens) {
-    assert(n_tokens == 1 && "SmolLM3TriAttentionKvCache::advance only supports n_tokens==1");
+void Smollm3TriAttentionKvCache::advance(int32_t n_tokens) {
+    assert(n_tokens == 1 && "Smollm3TriAttentionKvCache::advance only supports n_tokens==1");
     (void)n_tokens;
 
     if (cache_length_ >= max_length_)
@@ -2130,15 +2133,15 @@ void SmolLM3TriAttentionKvCache::advance(int32_t n_tokens) {
         compact_existing_cache();
 }
 
-void SmolLM3TriAttentionKvCache::set_prompt_length(int32_t prompt_length) {
+void Smollm3TriAttentionKvCache::set_prompt_length(int32_t prompt_length) {
     planned_prompt_length_ = std::max(prompt_length, 0);
 }
 
-void SmolLM3TriAttentionKvCache::mark_prefill_complete() {
+void Smollm3TriAttentionKvCache::mark_prefill_complete() {
     prompt_end_position_ = std::max(absolute_position_, planned_prompt_length_);
 }
 
-void SmolLM3TriAttentionKvCache::reset() {
+void Smollm3TriAttentionKvCache::reset() {
     cache_length_ = 0;
     absolute_position_ = 0;
     planned_prompt_length_ = 0;
@@ -2151,7 +2154,7 @@ void SmolLM3TriAttentionKvCache::reset() {
     // stale device rows are neither scored nor exposed to the attention engine.
 }
 
-std::size_t SmolLM3TriAttentionKvCache::device_memory_bytes() const {
+std::size_t Smollm3TriAttentionKvCache::device_memory_bytes() const {
     std::size_t total = 0;
     for (const auto& t : cache_k_)
         total += t.nbytes();
@@ -2183,7 +2186,7 @@ std::size_t SmolLM3TriAttentionKvCache::device_memory_bytes() const {
     return total;
 }
 
-bool SmolLM3TriAttentionKvCache::ok() const {
+bool Smollm3TriAttentionKvCache::ok() const {
     if (cache_k_.size() != static_cast<std::size_t>(num_layers_))
         return false;
     for (const auto& t : cache_k_) {

@@ -17,7 +17,7 @@ int test_dynamic_prefill_uses_runtime_cache_rows() {
 
     int failures = 0;
     {
-        trtmc::SmolLM3KvCache cache(1, 1000, 2, stream, trtmc::DType::kFloat16);
+        trtmc::Smollm3KvCache cache(1, 1000, 2, stream, trtmc::DType::kFloat16);
         trtmc::test::NativeKvModuleStub prefill(stream, 1, 131072, 1, 2, trtmc::DType::kFloat16,
                                                 /*native=*/false, nullptr, 4, 16,
                                                 /*dynamic_legacy_cache=*/true);
@@ -47,8 +47,8 @@ int test_dynamic_prefill_uses_runtime_cache_rows() {
 } // namespace
 
 int main() {
-    return trtmc::test::run_native_kv_contract_tests<
-               trtmc::SmolLM3TextGenerationPipeline, trtmc::SmolLM3KvCache, trtmc::SmolLM3TextGenConfig>(
-               "SmolLM3") +
+    return trtmc::test::run_native_kv_contract_tests<trtmc::Smollm3TextGenerationPipeline,
+                                                     trtmc::Smollm3KvCache,
+                                                     trtmc::Smollm3TextGenConfig>("SmolLM3") +
            test_dynamic_prefill_uses_runtime_cache_rows();
 }

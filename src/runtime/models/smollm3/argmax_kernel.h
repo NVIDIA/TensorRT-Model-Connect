@@ -15,6 +15,6 @@ namespace trtmc {
 // Optionally writes the max logit value to d_logit_val (pass nullptr to skip).
 // Runs asynchronously on the given stream.
 void smollm3_gpu_argmax(const float* d_logits, int32_t vocab_size, int32_t* d_token_id,
-                      float* d_logit_val, cudaStream_t stream);
+                        float* d_logit_val, cudaStream_t stream);
 
 } // namespace trtmc

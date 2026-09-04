@@ -75,7 +75,7 @@ __global__ void sparse_multinomial_exact_kernel(const int32_t* __restrict__ indi
 
 } // namespace
 
-SmolLM3TorchMultinomialExecutionPolicy smollm3_compute_torch_multinomial_execution_policy(int32_t numel) {
+Smollm3TorchMultinomialExecutionPolicy smollm3_compute_torch_multinomial_execution_policy(int32_t numel) {
     if (numel <= 0) {
         return {};
     }
@@ -97,7 +97,7 @@ SmolLM3TorchMultinomialExecutionPolicy smollm3_compute_torch_multinomial_executi
          / (total_threads * kGeneratorOffsetsPerCurandCall) + 1)
         * kGeneratorOffsetsPerCurandCall;
 
-    SmolLM3TorchMultinomialExecutionPolicy policy;
+    Smollm3TorchMultinomialExecutionPolicy policy;
     policy.total_threads = static_cast<int32_t>(total_threads);
     policy.counter_offset = counter_offset;
     return policy;
