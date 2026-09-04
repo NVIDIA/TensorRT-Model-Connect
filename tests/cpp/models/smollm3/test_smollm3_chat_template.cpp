@@ -99,14 +99,62 @@ static void test_apply_llama3() {
           "llama3 application");
 }
 
+
+static void test_detect_smollm3_over_chatml() {
+    // SmolLM3's own template is ChatML-framed, so generic ChatML detection must
+    // not claim it: the SmolLM3 branch also emits a mandatory system block.
+    std::string tpl =
+        "{%- if enable_thinking %}{%- set reasoning_mode = \"/think\" %}{%- endif %}"
+        "{{- \"<|im_start|>system\\n\" -}}"
+        "{{- \"Reasoning Mode: \" + reasoning_mode + \"\\n\\n\" -}}";
+    check(trtmc::smollm3_detect_chat_template_format(tpl) == "smollm3",
+          "smollm3 detection wins over chatml");
+}
+
+static void test_apply_smollm3_no_thinking() {
+    // Byte-for-byte against the upstream chat template with a pinned date.
+    auto result = trtmc::smollm3_apply_chat_template(
+        "smollm3", "What is 2+2?", false, "04 September 2026");
+    const std::string expected =
+        "<|im_start|>system\n"
+        "## Metadata\n\n"
+        "Knowledge Cutoff Date: June 2025\n"
+        "Today Date: 04 September 2026\n"
+        "Reasoning Mode: /no_think\n\n"
+        "## Custom Instructions\n\n"
+        "You are a helpful AI assistant named SmolLM, trained by Hugging Face.\n\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\nWhat is 2+2?<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n\n</think>\n";
+    check(result == expected, "smollm3 no-thinking matches upstream template");
+}
+
+static void test_apply_smollm3_thinking() {
+    auto result = trtmc::smollm3_apply_chat_template(
+        "smollm3", "hi", true, "04 September 2026");
+    check(result.find("Reasoning Mode: /think\n\n") != std::string::npos,
+          "smollm3 thinking declares /think");
+    check(result.find("systematic thinking process") != std::string::npos,
+          "smollm3 thinking uses the long custom instructions");
+    // Thinking mode leaves the assistant turn open: no <think></think> prefill.
+    const std::string tail = "<|im_start|>assistant\n";
+    check(result.size() >= tail.size()
+              && result.compare(result.size() - tail.size(), tail.size(), tail) == 0,
+          "smollm3 thinking emits no think prefill");
+}
+
 int main() {
 
+    test_detect_smollm3_over_chatml();
     test_detect_chatml();
     test_detect_mistral();
     test_detect_phi();
     test_detect_gemma();
     test_detect_llama3();
     test_detect_nemotron_h();
+    test_apply_smollm3_no_thinking();
+    test_apply_smollm3_thinking();
     test_apply_chatml_no_thinking();
     test_apply_mistral_no_thinking_ignored();
     test_apply_phi();
