@@ -271,6 +271,43 @@ A validation machine may download or mount the same directory and should
 verify `DATASET_MANIFEST.json` before use. This asset contains prompts and
 provenance only; it contains no generated model output or external evaluator.
 
+Before promoting a new full-reference video metric or threshold into the
+MiniMax-H3 acceptance contract, run it in shadow mode against labelled matching
+and divergent pairs. `tools/video_parity_shadow.py` records frame-level
+MS-SSIM, DISTS, and DreamSim distributions, aligned optical-flow (tOF)
+differences, and the optional full-video CGVQM score without changing pass/fail.
+Learned metrics are optional by design and must have their code, checkpoint,
+and transitive licenses reviewed before they become a validation dependency.
+For example:
+
+```bash
+python tools/video_parity_shadow.py \
+  --pairs /path/to/pairs.json \
+  --metric tof --metric ms_ssim --metric dists --metric dreamsim \
+  --output /path/to/shadow-report.json
+```
+
+The pair manifest uses schema `trtmc.video-parity-shadow/v1` and labels each
+pair as `match` or `divergent`. Comparisons remain at zero temporal lag; the
+tool intentionally does not use dynamic time warping because that could hide
+frame-ordering or scheduler defects. Select thresholds from separation between
+labelled classes and controlled mutations, never from a desired sample pass
+count.
+
+The blocking MiniMax-H3 comparator uses the smallest weight-free combination
+that separated the labelled qualification pairs and controlled mutations:
+24 zero-lag MS-SSIM frames resized to a maximum dimension of 256, plus aligned
+B-Y/R-Y chroma error. The checked-in p95 limits are 0.20 and 0.05 respectively.
+On the ten-pair GB300 qualification set, the nine matching videos had MS-SSIM
+p95 at or below 0.1161 and chroma-error p95 at or below 0.0113; the known
+divergent video measured 0.5296 and 0.0435. The chroma gate also rejects a pure
+RGB/BGR channel swap that overlaps the matching MS-SSIM range. DISTS, DreamSim,
+CGVQM, and tOF remain shadow diagnostics because they either require learned
+weights/source checkouts or do not independently cover the accepted and rejected
+mutation classes. Brightness-profile and temporal-activity Pearson correlations
+remain reported but do not gate because nearly constant profiles make their
+coefficients unstable.
+
 Prepare the fixed task datasets from public benchmark sources already staged
 on the validation machine:
 

@@ -12,3 +12,4 @@ pytest-xdist==3.8.0
 jsonschema==4.26.0
 Pillow==12.2.0
 pyarrow==25.0.1
+pytorch-msssim==1.0.0

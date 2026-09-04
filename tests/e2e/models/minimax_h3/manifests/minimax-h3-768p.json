@@ -77,7 +77,7 @@
           "required": true
         }
       ],
-      "notes": "The production profile is a real single-device execution: it creates no TensorRT distributed collective and performs no NCCL initialization or communication. The HF backend is the pinned Diffusers modular pipeline. The acceptance gate compares every decoded frame for exact shape, finite pixels, low-frequency scene structure, brightness progression, temporal activity, and non-degenerate contrast; PSNR and pixel error remain diagnostic because harmless high-frequency texture drift is allowed."
+      "notes": "The production profile is a real single-device execution: it creates no TensorRT distributed collective and performs no NCCL initialization or communication. The HF backend is the pinned Diffusers modular pipeline. The acceptance gate requires exact decoded shape and finite pixels, then compares zero-lag sampled MS-SSIM structure, aligned chroma, low-frequency scene layout, bounded motion, and non-degenerate contrast. Brightness/activity Pearson correlations, PSNR, and pixel error remain diagnostic because low-amplitude profiles are correlation-unstable and harmless high-frequency texture drift is allowed."
     }
   ]
 }

@@ -34,7 +34,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0", "torch>=2.0", "jsonschema>=4.23,<5"]
+test = [
+    "pytest>=7.0",
+    "torch>=2.0",
+    "jsonschema>=4.23,<5",
+    "pytorch-msssim==1.0.0",
+]
 # Build-only dependency for official Wan checkpoints containing T5/VAE .pth
 # files. Kept out of the base install and never required by the C++ runtime.
 wan = ["torch>=2.0"]
