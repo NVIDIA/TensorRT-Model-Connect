@@ -1,0 +1,24 @@
+{
+  "name": "smollm3-3b",
+  "hf_id": "HuggingFaceTB/SmolLM3-3B",
+  "hf_revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+  "bundle": "smollm3-3b.bundle",
+  "family": "smollm3",
+  "runtime_strategy": "smollm3_decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "precision": "bf16",
+  "max_cache_length": 256,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "smollm3-3b",
+      "trace_id": "IT-E2E-SMOLLM3-01",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "reference_precision": "fp32",
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 20
+    }
+  ]
+}

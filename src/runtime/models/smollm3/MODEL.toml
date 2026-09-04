@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "smollm3"
+runtime_library = "libtrtmc_model_smollm3.so"
+runtime_plugins = ["plugin.cpp|register_smollm3_plugin"]
+runtime_strategies = ["smollm3_decoder_kv_cache"]
+runtime_tests = [
+  "test_smollm3_plugin_helpers|test_smollm3_plugin_helpers.cpp|_|plugin_helpers.cpp|_",
+  "test_smollm3_chat_template|test_smollm3_chat_template.cpp|trtmc_model_smollm3|_|_",
+  "test_smollm3_pipeline|test_smollm3_pipeline.cpp|trtmc_model_smollm3,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
+  "test_smollm3_native_kv_cache|test_smollm3_native_kv_cache.cpp|trtmc_model_smollm3|_|REQUIRES_GPU",
+]
+
+[validation_profiles]
+decoder_debug = ["smollm3_decoder_kv_cache"]

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "smollm3"
+plugin = "smollm3"
+module = "plugin"
+capabilities = ["split_decoder_roles", "debug_layer_outputs"]
+aliases = [
+  "smollm3",
+  "SmolLM3",
+]
+prefixes = [
+  "smollm3",
+]
+architecture_patterns = [
+  "SmolLM3ForCausalLM",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+default_build_route = "build_routing.py|prefer_native_default"
+debug_runtime_strategies = [
+  "smollm3_decoder_kv_cache",
+]
