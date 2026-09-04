@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_inception_v4"
+plugin = "timm_inception_v4"
+module = "plugin"
+python_profile_specs = [
+  "timm_inception_v4_reference|families/timm_inception_v4/python_profile_requirements/timm_inception_v4_reference.lock.txt|families/timm_inception_v4/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_inception_v4_reference",
+]
+aliases = [
+  "timm_inception_v4",
+  "inception_v4",
+]
+prefixes = [
+  "timm_inception_v4",
+  "inception_v4",
+]
