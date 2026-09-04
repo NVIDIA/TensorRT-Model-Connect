@@ -978,6 +978,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: timm_mnasnet.classify
+    family: timm_mnasnet
+    operation: classify
+    model: mnasnet-100-rmsp-in1k
+    workload:
+      testcase: mnasnet-100-rmsp-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_densenet.classify
     family: timm_densenet
     operation: classify

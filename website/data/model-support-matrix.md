@@ -107,6 +107,7 @@ SPDX-License-Identifier: Apache-2.0
 | `timm/mobilenetv3_large_100.ra_in1k` | `mobilenetv3-large-100-ra-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/efficientnet_b0.ra_in1k` | `efficientnet-b0-ra-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/densenet121.ra_in1k` | `densenet121-ra-in1k` | `FP16` | None | — | 🟢 Green |
+| `timm/mnasnet_100.rmsp_in1k` | `mnasnet-100-rmsp-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/resnet50.a1_in1k` | `resnet50-a1-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/vgg16.tv_in1k` | `vgg16-tv-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/vit_base_patch16_224.augreg_in21k_ft_in1k` | `timm-vit-base-p16-224-augreg-in21k-ft-in1k` | `FP16` | None | — | 🟢 Green |

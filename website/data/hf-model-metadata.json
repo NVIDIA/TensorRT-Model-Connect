@@ -1356,6 +1356,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/mnasnet_100.rmsp_in1k",
+      "revision": "a30af72360c7a4871b0156cc11d7b767208273d7",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "mnasnet_100"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",

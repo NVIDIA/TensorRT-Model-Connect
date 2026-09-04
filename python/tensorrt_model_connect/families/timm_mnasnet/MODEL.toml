@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_mnasnet"
+plugin = "timm_mnasnet"
+module = "plugin"
+python_profile_specs = [
+  "timm_mnasnet_reference|families/timm_mnasnet/python_profile_requirements/timm_mnasnet_reference.lock.txt|families/timm_mnasnet/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_mnasnet_reference",
+]
+aliases = [
+  "timm_mnasnet",
+  "mnasnet",
+  "mnasnet_100",
+]
+prefixes = [
+  "timm_mnasnet",
+  "mnasnet",
+]
