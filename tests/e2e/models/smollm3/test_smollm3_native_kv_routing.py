@@ -791,3 +791,52 @@ def test_routing_works_without_package_context():
     # prefer_native_default is the entry point MODEL.toml names.
     assert routing.prefer_native_default(config) is True
     assert routing.native_kv_architecture_capability(config).eligible
+
+
+def test_no_runtime_name_is_imported_only_for_type_checking():
+    """A name called at runtime must not come from a TYPE_CHECKING import.
+
+    That block does not execute, so such a name raises NameError the first
+    time the function runs. The builders need TensorRT to run, so this is
+    checked on the parsed source rather than by driving them.
+    """
+    import ast
+    import pathlib
+
+    import tensorrt_model_connect.families.smollm3 as package
+
+    family = pathlib.Path(package.__file__).parent
+    offenders = {}
+    for path in sorted(family.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+        type_checking_only = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            try:
+                test_source = ast.unparse(node.test).strip()
+            except AttributeError:  # pragma: no cover - Python < 3.9
+                continue
+            if test_source not in ("TYPE_CHECKING", "typing.TYPE_CHECKING"):
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    for alias in sub.names:
+                        type_checking_only.add(
+                            alias.asname or alias.name.split(".")[0]
+                        )
+
+        called = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        overlap = type_checking_only & called
+        if overlap:
+            offenders[path.name] = sorted(overlap)
+
+    assert not offenders, (
+        "these names are called at runtime but imported only under "
+        f"TYPE_CHECKING: {offenders}"
+    )

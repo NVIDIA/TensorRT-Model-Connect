@@ -58,11 +58,14 @@ from ...native_kv_attention_builder import (
 
 from . import graph_ops
 from . import graph_blocks
+# Runtime import: the schedule is resolved while the graph is built, so this
+# cannot live under TYPE_CHECKING the way the annotation-only names do.
+from .config import resolve_rope_layer_schedule
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .config import ModelConfig, resolve_rope_layer_schedule
+    from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
     from ...quantization.context import QuantContext
 
