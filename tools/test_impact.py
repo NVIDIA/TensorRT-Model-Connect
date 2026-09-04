@@ -2063,9 +2063,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=491,
             name="devtoolkit_contract",
-            matcher=_path_startswith_any(
-                ("configs/environment-cohorts/", "scripts/devToolkit/")
-            ),
+            matcher=_path_startswith("scripts/devToolkit/"),
             resolver=_match_result(
                 "devtoolkit_contract", _no_models, ["tools"], False
             ),

@@ -1572,8 +1572,6 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
-            "configs/environment-cohorts/schema.json",
-            "configs/environment-cohorts/trt111-cu133.json",
             "scripts/devToolkit/README.md",
             "scripts/devToolkit/examples/prepare_environment.py",
             "scripts/devToolkit/trtmc_devtoolkit/api.py",
