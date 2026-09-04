@@ -62,6 +62,7 @@
     "lerobot_act_action_chunk",
     "timm_vit_image_classification",
     "timm_resnet_image_classification",
+    "timm_densenet_image_classification",
     "timm_efficientnet_image_classification",
     "timm_mobilenetv3_image_classification",
     "timm_vgg_image_classification",
@@ -961,6 +962,17 @@
       "comparator_class": "image_classification.ImageClassificationComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['timm_resnet_image_classification'].",
+      "performance_mode": "single_pass"
+    },
+    "timm_densenet_image_classification": {
+      "task_strategy": "image_classification",
+      "cli_commands": [
+        "classify"
+      ],
+      "runner_class": "image_classification.ImageClassificationRunner",
+      "comparator_class": "image_classification.ImageClassificationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['timm_densenet_image_classification'].",
       "performance_mode": "single_pass"
     },
     "timm_efficientnet_image_classification": {

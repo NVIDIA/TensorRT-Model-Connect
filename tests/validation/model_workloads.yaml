@@ -102,6 +102,8 @@ models:
     workloads: [dinov3_image_feature_extraction_parity]
   dinov3-vits16-pretrain-lvd1689m:
     workloads: [dinov3_image_feature_extraction_parity]
+  densenet121-ra-in1k:
+    workloads: [imagenette_image_classification]
   distilbert-base-uncased:
     workloads: [stsbenchmark_encoder_embedding_parity]
   distilgpt2:

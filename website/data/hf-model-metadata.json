@@ -1345,6 +1345,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/densenet121.ra_in1k",
+      "revision": "92007b6200e0b4a4fe68cb4e3947022a928aaaae",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "densenet121"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",
