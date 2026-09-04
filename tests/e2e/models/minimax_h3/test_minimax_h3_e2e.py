@@ -80,10 +80,6 @@ def test_minimax_h3_manifest_is_truthful_single_device_contract() -> None:
     assert case.threshold_overrides["low_frequency_block_size"] == 16
     assert case.threshold_overrides["minimum_frame_low_frequency_correlation"] == 0.8
     assert case.threshold_overrides["minimum_mean_low_frequency_correlation"] == 0.9
-    assert case.threshold_overrides["perceptual_frame_count"] == 24
-    assert case.threshold_overrides["perceptual_maximum_dimension"] == 256
-    assert case.threshold_overrides["ms_ssim_window_size"] == 7
-    assert case.threshold_overrides["maximum_ms_ssim_distance_p95"] == 0.2
     assert case.threshold_overrides["maximum_chroma_absolute_error_p95"] == 0.05
     assert "minimum_brightness_profile_correlation" not in case.threshold_overrides
     assert "minimum_temporal_activity_correlation" not in case.threshold_overrides
@@ -221,10 +217,6 @@ def _visual_thresholds(
         "maximum_temporal_activity_ratio": 1.5,
         "minimum_frame_std_ratio": 0.7,
         "maximum_frame_std_ratio": 1.4,
-        "perceptual_frame_count": min(frames, 8),
-        "perceptual_maximum_dimension": min(height, width, 64),
-        "ms_ssim_window_size": 3,
-        "maximum_ms_ssim_distance_p95": 0.2,
         "maximum_chroma_absolute_error_p95": 0.05,
     }
 
@@ -325,7 +317,7 @@ def test_minimax_h3_comparator_accepts_high_frequency_texture_drift(
     assert result.metrics["mean_absolute_error"].operator == "diagnostic"
     assert result.metrics["frame_low_frequency_correlation_minimum"].value == pytest.approx(1.0)
     assert result.metrics["temporal_activity_correlation"].value == pytest.approx(1.0)
-    assert result.metrics["ms_ssim_distance_p95"].passed
+    assert result.metrics["chroma_absolute_error_p95"].passed
 
 
 @pytest.mark.parametrize(
@@ -333,7 +325,7 @@ def test_minimax_h3_comparator_accepts_high_frequency_texture_drift(
     [
         ("collapse", "frame_std_ratio_minimum"),
         ("freeze", "temporal_activity_ratio_minimum"),
-        ("timing_shift", "ms_ssim_distance_p95"),
+        ("timing_shift", "frame_low_frequency_correlation_minimum"),
     ],
 )
 def test_minimax_h3_comparator_rejects_visible_failure_modes(

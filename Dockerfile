@@ -93,7 +93,6 @@ RUN pip install \
     diffusers \
     protobuf \
     scipy \
-    "pytorch-msssim==1.0.0" \
     librosa \
     soundfile \
     sentencepiece \
@@ -108,7 +107,7 @@ RUN pip install "open-clip-torch>=2.20"
 RUN pip install "nemo_toolkit[tts]==2.7.0" && \
     pip install --upgrade "transformers==5.2.0" && \
     python3 -c "import transformers; assert transformers.__version__ == '5.2.0', transformers.__version__" && \
-    python3 -c "import diffusers, ftfy, pytorch_msssim; print('deps_ok', diffusers.__version__)"
+    python3 -c "import diffusers, ftfy; print('deps_ok', diffusers.__version__)"
 
 # Upgrade NeMo to a main-branch SHA that ships
 # `nemo.collections.asr.models.rnnt_bpe_models_prompt.EncDecRNNTBPEModelWithPrompt`,

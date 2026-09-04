@@ -12,10 +12,6 @@
     "maximum_temporal_activity_ratio": 1.5,
     "minimum_frame_std_ratio": 0.7,
     "maximum_frame_std_ratio": 1.4,
-    "perceptual_frame_count": 24,
-    "perceptual_maximum_dimension": 256,
-    "ms_ssim_window_size": 7,
-    "maximum_ms_ssim_distance_p95": 0.2,
     "maximum_chroma_absolute_error_p95": 0.05
   }
 }

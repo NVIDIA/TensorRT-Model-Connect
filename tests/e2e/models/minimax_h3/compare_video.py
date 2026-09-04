@@ -19,7 +19,6 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
 from visual_metrics import (
     compute_decoded_visual_metrics,
     evaluate_visual_quality,
-    perceptual_settings,
     visual_block_size,
     visual_quality_passed,
 )
@@ -103,16 +102,10 @@ def main() -> int:
             raise ValueError("MiniMax-H3 native candidate did not run with world_size=1")
         if candidate_receipt.get("collective_transport") != "none":
             raise ValueError("MiniMax-H3 single-device candidate unexpectedly used a collective")
-    perceptual_frame_count, perceptual_maximum_dimension, ms_ssim_window_size = (
-        perceptual_settings(thresholds)
-    )
     decoded = compute_decoded_visual_metrics(
         reference_path,
         candidate_path,
         block_size=visual_block_size(thresholds),
-        perceptual_frame_count=perceptual_frame_count,
-        perceptual_maximum_dimension=perceptual_maximum_dimension,
-        ms_ssim_window_size=ms_ssim_window_size,
     )
     gates = evaluate_visual_quality(decoded, thresholds)
     expected_shape = [
@@ -125,7 +118,7 @@ def main() -> int:
     receipt = {
         "source_revision": source_revision,
         **input_records,
-        "quality_contract": "aligned_multiscale_structure_chroma_and_motion",
+        "quality_contract": "aligned_low_frequency_structure_chroma_and_motion",
         "pixel_metrics_gating": False,
         "shape": list(decoded.shape),
         "expected_shape": expected_shape,

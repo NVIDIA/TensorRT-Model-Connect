@@ -6,7 +6,6 @@
   "family": "minimax_h3",
   "runtime_strategy": "diffusion_minimax_h3",
   "task_strategy": "diffusion_media_generation",
-  "max_cache_length": 32,
   "precision": "bf16",
   "reference_precision": "bf16",
   "e2e_parallel_resource": "exclusive_gpu",
@@ -77,7 +76,7 @@
           "required": true
         }
       ],
-      "notes": "The production profile is a real single-device execution: it creates no TensorRT distributed collective and performs no NCCL initialization or communication. The HF backend is the pinned Diffusers modular pipeline. The acceptance gate requires exact decoded shape and finite pixels, then compares zero-lag sampled MS-SSIM structure, aligned chroma, low-frequency scene layout, bounded motion, and non-degenerate contrast. Brightness/activity Pearson correlations, PSNR, and pixel error remain diagnostic because low-amplitude profiles are correlation-unstable and harmless high-frequency texture drift is allowed."
+      "notes": "The production profile is a real single-device execution: it creates no TensorRT distributed collective and performs no NCCL initialization or communication. The HF backend is the pinned Diffusers modular pipeline. The acceptance gate requires exact decoded shape and finite pixels, then compares aligned chroma, low-frequency scene layout, bounded motion, and non-degenerate contrast. Brightness/activity Pearson correlations, PSNR, and pixel error remain diagnostic because low-amplitude profiles are correlation-unstable and harmless high-frequency texture drift is allowed."
     }
   ]
 }

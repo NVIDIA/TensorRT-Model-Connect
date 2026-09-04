@@ -2002,7 +2002,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 "tools/prepare_model_plugin_validation_datasets.py",
                 "tools/prepare_refcoco_validation_dataset.py",
                 "tools/prepare_vision_validation_datasets.py",
-                "tools/video_parity_shadow.py",
             }),
             resolver=_match_result(
                 "validation_engine_tool", _no_models, ["tools"], False

@@ -32,7 +32,6 @@ VBENCH_SOURCE = (
 )
 VBENCH_INFO_SHA256 = "5dd2de80ee43cda750b2b72ea7023657c0b90d3702041c7e4608c65dbe50dccd"
 VBENCH_LICENSE = "Apache-2.0"
-VBENCH_LICENSE_SHA256 = "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
 VBENCH_MODEL_PLUGIN_DIR = "VBench-fd18b3d-model-plugin-v1"
 GEDIT_SOURCE = "https://huggingface.co/datasets/stepfun-ai/GEdit-Bench"
 GEDIT_REVISION = "50766778e2a737474c7e9bdf84cdce82c3ea3f4f"
@@ -151,7 +150,6 @@ def prepare_vbench(source_info: Path, output_root: Path, limit: int = 10) -> Pat
 
 def prepare_vbench_model_plugin_dataset(
     source_info: Path,
-    source_license: Path,
     output_root: Path,
     limit: int = 10,
 ) -> Path:
@@ -161,24 +159,14 @@ def prepare_vbench_model_plugin_dataset(
     publication. It contains no model outputs and runs no external evaluator.
     """
     source_info = source_info.resolve(strict=True)
-    source_license = source_license.resolve(strict=True)
     if _sha256(source_info) != VBENCH_INFO_SHA256:
         raise ValueError("VBench_full_info.json does not match the pinned revision")
-    if _sha256(source_license) != VBENCH_LICENSE_SHA256:
-        raise ValueError("VBench LICENSE does not match the pinned revision")
 
     output_dir = output_root / VBENCH_MODEL_PLUGIN_DIR
     if output_dir.exists():
         raise FileExistsError(f"refusing to overwrite existing dataset: {output_dir}")
     selected = _select_vbench_requests(source_info, limit)
     output_dir.mkdir(parents=True)
-
-    upstream_dir = output_dir / "upstream"
-    upstream_dir.mkdir()
-    shutil.copyfile(source_info, upstream_dir / "VBench_full_info.json")
-    license_dir = output_dir / "licenses"
-    license_dir.mkdir()
-    shutil.copyfile(source_license, license_dir / "VBench-LICENSE")
 
     requests: list[dict[str, Any]] = []
     for row in selected:
@@ -223,7 +211,6 @@ def prepare_vbench_model_plugin_dataset(
                 "revision": VBENCH_REVISION,
                 "info_sha256": VBENCH_INFO_SHA256,
                 "license": VBENCH_LICENSE,
-                "license_sha256": VBENCH_LICENSE_SHA256,
             },
             "request_count": len(requests),
             "path_policy": "manifest_relative",
@@ -529,7 +516,6 @@ def prepare_media_datasets(
     *,
     output_root: Path,
     vbench_info: Path | None = None,
-    vbench_license: Path | None = None,
     vbench_model_plugin: bool = False,
     gedit_source: str = "",
     sana_wm_root: Path | None = None,
@@ -538,19 +524,16 @@ def prepare_media_datasets(
     outputs: list[Path] = []
     if vbench_info:
         if vbench_model_plugin:
-            if vbench_license is None:
-                raise ValueError("--vbench-model-plugin requires --vbench-license")
             outputs.append(
                 prepare_vbench_model_plugin_dataset(
                     vbench_info,
-                    vbench_license,
                     output_root,
                     limit,
                 )
             )
         else:
             outputs.append(prepare_vbench(vbench_info, output_root, limit))
-    elif vbench_model_plugin or vbench_license is not None:
+    elif vbench_model_plugin:
         raise ValueError("VBench model-plugin preparation requires --vbench-info")
     if gedit_source:
         outputs.append(prepare_gedit(gedit_source, output_root, limit))

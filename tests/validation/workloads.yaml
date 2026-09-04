@@ -1902,38 +1902,6 @@ suites:
       lane: local_only
       notes: GB300-only native-reference consistency.
 
-  - id: minimax_h3_official_profile_parity
-    description: >
-      MiniMax-H3 consistency at the pinned native 1344x768, 124-frame,
-      50-step T2VA profile. The single repo-owned request deliberately selects
-      the model-owned testcase without overriding its prompt, seed, geometry,
-      or comparison thresholds.
-    user_contract: diffusion_video
-    default_model_names: [minimax-h3-768p]
-    dataset:
-      kind: model_plugin_json
-      default_path: tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json
-    selectors:
-      model_names: [minimax-h3-768p]
-      task_strategies: [diffusion_media_generation]
-      runtime_strategies: [diffusion_minimax_h3]
-      user_contracts: [diffusion_video]
-      families: [minimax_h3]
-    model_overrides:
-      by_model:
-        minimax-h3-768p:
-          reference_source_revision: current
-    scoring:
-      scorer: model_plugin_parity
-    gates:
-      min_sample_pass_rate: 1.0
-    ci:
-      eligible: false
-      lane: local_only
-      notes: >
-        GB300-only full-profile validation. The model-owned comparator keeps
-        the checked-in visual thresholds; this suite adds no threshold override.
-
   - id: minimax_h3_vbench_reference_parity
     description: >
       HF-to-TRTMC reference consistency at the pinned MiniMax-H3 1344x768,

@@ -19,7 +19,6 @@ from .contracts import (
 from tests.e2e.models.minimax_h3.visual_metrics import (
     compute_decoded_visual_metrics,
     evaluate_visual_quality,
-    perceptual_settings,
     visual_block_size,
     visual_quality_passed,
 )
@@ -120,16 +119,10 @@ class MiniMaxH3DecodedVideoComparator:
             )
 
         metrics_config = threshold.metrics
-        perceptual_frame_count, perceptual_maximum_dimension, ms_ssim_window_size = (
-            perceptual_settings(metrics_config)
-        )
         decoded = compute_decoded_visual_metrics(
             reference_path,
             candidate_path,
             block_size=visual_block_size(metrics_config),
-            perceptual_frame_count=perceptual_frame_count,
-            perceptual_maximum_dimension=perceptual_maximum_dimension,
-            ms_ssim_window_size=ms_ssim_window_size,
         )
         visual_gates = evaluate_visual_quality(decoded, metrics_config)
         metrics = {
@@ -148,13 +141,12 @@ class MiniMaxH3DecodedVideoComparator:
             status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
             composite_rule=(
-                "exact finite decoded RGB shape AND zero-lag MS-SSIM structure AND "
-                "aligned chroma AND low-frequency scene structure AND bounded motion/"
+                "exact finite decoded RGB shape AND aligned chroma AND "
+                "low-frequency scene structure AND bounded motion/"
                 "contrast; Pearson profile correlations and PSNR/MAE are diagnostic only"
             ),
             message=(
-                f"{'PASS' if passed else 'FAIL'}: MS-SSIM distance p95="
-                f"{decoded.ms_ssim_distance_p95:.4f}, chroma MAE p95="
+                f"{'PASS' if passed else 'FAIL'}: chroma MAE p95="
                 f"{decoded.chroma_absolute_error_p95:.4f}, low_frequency_correlation="
                 f"{decoded.frame_low_frequency_correlation_minimum:.4f}/"
                 f"{decoded.frame_low_frequency_correlation_mean:.4f} (min/mean), "

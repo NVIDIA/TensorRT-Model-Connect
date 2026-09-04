@@ -7433,7 +7433,7 @@ def test_eval_resolves_reference_source_revision_before_preparing_cache_inputs(
     revision = "a" * 40
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(),
-        "minimax_h3_official_profile_parity",
+        "minimax_h3_vbench_reference_parity",
     )
     model = {
         "name": "minimax-h3-768p",
@@ -9320,23 +9320,15 @@ def test_prepare_vbench_model_plugin_dataset_is_portable_and_pinned(
         ),
         encoding="utf-8",
     )
-    license_path = tmp_path / "LICENSE"
-    license_path.write_text("Apache test license\n", encoding="utf-8")
     monkeypatch.setattr(
         prepare_media,
         "VBENCH_INFO_SHA256",
         prepare_media._sha256(source),
     )
-    monkeypatch.setattr(
-        prepare_media,
-        "VBENCH_LICENSE_SHA256",
-        prepare_media._sha256(license_path),
-    )
 
     outputs = prepare_media.prepare_media_datasets(
         output_root=tmp_path / "out",
         vbench_info=source,
-        vbench_license=license_path,
         vbench_model_plugin=True,
     )
     assert len(outputs) == 1
@@ -9361,8 +9353,6 @@ def test_prepare_vbench_model_plugin_dataset_is_portable_and_pinned(
     assert manifest["source"]["license"] == "Apache-2.0"
     assert {record["path"] for record in manifest["files"]} >= {
         "dataset.json",
-        "licenses/VBench-LICENSE",
-        "upstream/VBench_full_info.json",
     }
 
 

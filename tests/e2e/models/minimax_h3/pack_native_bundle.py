@@ -31,7 +31,6 @@ PLAN_SECTIONS = {
     "denoiser_plan": "denoiser.plan",
     "vae_tile_decoder_plan": "vae_tile_decoder.plan",
 }
-BUNDLE_MAX_CACHE_LENGTH = 32
 FIRST_BLOCK_CACHE_PLAN_SECTIONS = {
     "text_encoder_plan": "text_encoder.plan",
     "adaln_precompute_plan": "adaln_precompute.plan",
@@ -165,7 +164,6 @@ def main() -> int:
         trt_abi=trt_abi,
         gpu_name=gpu_name,
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        max_cache_length=BUNDLE_MAX_CACHE_LENGTH,
         runtime_strategy="diffusion_minimax_h3",
         precision="bf16",
         tokenizer_add_special_tokens=False,

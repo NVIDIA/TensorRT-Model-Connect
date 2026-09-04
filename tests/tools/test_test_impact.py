@@ -1841,7 +1841,6 @@ class TestUnitTiers:
             "tools/prepare_model_plugin_validation_datasets.py",
             "tools/prepare_refcoco_validation_dataset.py",
             "tools/prepare_vision_validation_datasets.py",
-            "tools/video_parity_shadow.py",
         ],
     )
     def test_validation_engine_tool_triggers_tools_tier(self, imap, path):
