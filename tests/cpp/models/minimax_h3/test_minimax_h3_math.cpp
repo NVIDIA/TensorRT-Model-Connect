@@ -127,6 +127,34 @@ void test_prompt_token_profile_boundaries() {
     }
 }
 
+void test_denoiser_optimization_profile_selection() {
+    const auto five_seconds = trtmc::make_minimax_h3_geometry(124, 768, 1344);
+    check(trtmc::select_minimax_h3_denoiser_profile(1, 537, five_seconds) == 0,
+          "H3 legacy single-profile denoiser always selects profile zero");
+    check(trtmc::select_minimax_h3_denoiser_profile(2, 537, five_seconds) == 0,
+          "H3 exact qualified five-second request selects the static profile");
+    check(trtmc::select_minimax_h3_denoiser_profile(2, 536, five_seconds) == 1,
+          "H3 non-reference prompt length selects the public dynamic profile");
+
+    const auto fifteen_seconds = trtmc::make_minimax_h3_geometry(345, 768, 1344);
+    check(trtmc::select_minimax_h3_denoiser_profile(2, 537, fifteen_seconds) == 1,
+          "H3 fifteen-second request selects the public dynamic profile");
+
+    const auto fl2va = trtmc::make_minimax_h3_fl2va_geometry(five_seconds, 1);
+    check(trtmc::select_minimax_h3_denoiser_profile(2, 537, fl2va) == 1,
+          "H3 FL2VA request selects the public dynamic profile");
+
+    for (const int32_t profile_count : {0, 3}) {
+        bool rejected = false;
+        try {
+            (void)trtmc::select_minimax_h3_denoiser_profile(profile_count, 537, five_seconds);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "H3 denoiser rejects an unsupported optimization-profile count");
+    }
+}
+
 void test_public_video_geometry() {
     check(trtmc::align_minimax_h3_num_frames(120) == 124,
           "H3 aligns a requested five seconds to released causal-VAE geometry");
@@ -451,6 +479,7 @@ int main() {
     test_data_ward_euler_sign();
     test_variable_text_position_layout();
     test_prompt_token_profile_boundaries();
+    test_denoiser_optimization_profile_selection();
     test_public_video_geometry();
     test_public_canvas_resolver_and_vae_tiles();
     test_variable_duration_position_layout();

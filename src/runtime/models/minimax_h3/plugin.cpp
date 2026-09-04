@@ -874,6 +874,17 @@ MiniMaxH3DenoiserConfig load_denoiser_config(const PipelineContext& ctx, const C
         const int32_t packed = root.value("padded_sequence_length", 38247);
         result.max_text_rows =
             root.value("text_rows_max", packed == 112367 ? 2641 : 537);
+        result.optimization_profile_count = root.value("denoiser_profile_count", 1);
+        const std::string profile_layout =
+            root.value("denoiser_profile_layout", std::string("public_dynamic"));
+        if (result.optimization_profile_count != 1 && result.optimization_profile_count != 2)
+            throw std::runtime_error(
+                "MiniMax-H3 bundle has an invalid denoiser optimization-profile count");
+        if (result.optimization_profile_count == 2 &&
+            (!cache.enabled || profile_layout != "five_second_reference_then_public_dynamic")) {
+            throw std::runtime_error(
+                "MiniMax-H3 dual-profile denoiser requires the native FirstBlockCache layout");
+        }
 
         if (!result.native_vsa) {
             if (result.scheduler_grid_points != 50 || result.transformer_forwards != 49 ||
@@ -885,6 +896,7 @@ MiniMaxH3DenoiserConfig load_denoiser_config(const PipelineContext& ctx, const C
         }
 
         if (cache.enabled || root.value("denoiser_cache_mode", std::string{}) != "segmented_vsa" ||
+            result.optimization_profile_count != 1 ||
             root.value("num_inference_steps", 0) != 4 || result.scheduler_grid_points != 5 ||
             result.transformer_forwards != 4 || result.guidance_scale != 1.0F ||
             !root.contains("fast_h3") || !root.at("fast_h3").is_object() || !root.contains("vsa") ||
@@ -941,12 +953,14 @@ bool retain_hot_engine(std::string_view name, const HotEngineConfig& hot) {
 }
 
 ModuleCreateOptions module_options(cudaStream_t stream, const std::string& runtime_cache,
-                                   bool cuda_graphs, bool verify_plan_sha256) {
+                                   bool cuda_graphs, bool verify_plan_sha256,
+                                   int32_t optimization_profile) {
     ModuleCreateOptions options;
     options.stream = stream;
     options.runtime_cache_path = runtime_cache.c_str();
     options.cuda_graphs = cuda_graphs;
     options.verify_plan_sha256 = verify_plan_sha256;
+    options.optimization_profile = optimization_profile;
     return options;
 }
 
@@ -1008,9 +1022,11 @@ std::unique_ptr<ITrtModule> load_module(const std::string& name, cudaStream_t st
                                         const std::string& runtime_cache, IBackend* backend,
                                         bool cuda_graphs, const RuntimeMemoryConfig& memory,
                                         const PlanSha256Map& plan_sha256,
-                                        const HotEngineConfig& hot, bool verify_plan_sha256) {
+                                        const HotEngineConfig& hot, bool verify_plan_sha256,
+                                        int32_t optimization_profile) {
     const auto& section = require_plan_section(sections, name);
-    const auto options = module_options(stream, runtime_cache, cuda_graphs, verify_plan_sha256);
+    const auto options = module_options(stream, runtime_cache, cuda_graphs, verify_plan_sha256,
+                                        optimization_profile);
     auto* prebound_backend = dynamic_cast<IPreboundBackend*>(backend);
     if (memory.staged) {
         auto* file_backed_backend = dynamic_cast<IFileBackedBackend*>(backend);
@@ -1100,11 +1116,13 @@ MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap 
             memory, hot, verify_plan_sha256, plan_sha256 = std::move(plan_sha256),
             cache_lease = std::move(cache_lease)](
             const std::string& name, cudaStream_t stream,
-            const std::vector<ModuleExternalBinding>& external_bindings) {
+            const std::vector<ModuleExternalBinding>& external_bindings,
+            int32_t optimization_profile) {
         if (cache_lease)
             cache_lease->require_active();
         return load_module(name, stream, external_bindings, sections, bundle_path, runtime_cache,
-                           backend, cuda_graphs, memory, plan_sha256, hot, verify_plan_sha256);
+                           backend, cuda_graphs, memory, plan_sha256, hot, verify_plan_sha256,
+                           optimization_profile);
     };
 }
 

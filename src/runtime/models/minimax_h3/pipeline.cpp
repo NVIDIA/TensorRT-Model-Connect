@@ -36,6 +36,7 @@ using Clock = std::chrono::steady_clock;
 
 constexpr int32_t kMinTextRows = 1;
 constexpr int32_t kMaxTextRows = 2641;
+constexpr int32_t kFiveSecondTextRows = 537;
 constexpr int32_t kTextDim = 5120;
 constexpr int32_t kAudioChannels = 32;
 constexpr int32_t kLatentChannels = 24;
@@ -93,12 +94,17 @@ constexpr int32_t kMinVideoRows =
 constexpr int32_t kMinPackedRows = kMinVideoRows + 414 + kMinTextRows;
 constexpr int32_t kOptPackedRows = 37838;
 constexpr int32_t kMaxPackedRows = 112367;
+constexpr int32_t kFiveSecondVideoRows = 37296;
+constexpr int32_t kFiveSecondAudioRows = 414;
+constexpr int32_t kFiveSecondPackedRows =
+    kFiveSecondTextRows + kFiveSecondAudioRows + kFiveSecondVideoRows;
 static_assert(((kMaxOutputFrames - 5) / 17) * 5 + 2 == kMaxVideoLatentFrames);
 static_assert(kMaxTargetVideoRows == 106488);
 static_assert(kMaxVideoRows == 108576);
 static_assert(kMaxSequenceRows == kMaxPackedRows);
 static_assert(kMinVideoRows == 18870);
 static_assert(kMinPackedRows == 19285);
+static_assert(kFiveSecondPackedRows == 38247);
 
 constexpr std::array<float, kLatentChannels> kLatentMean = {
     0.8580903411F,  -0.9606591463F, 1.0661640167F,  -0.5090325475F, -0.2727581859F, -1.3675414324F,
@@ -495,12 +501,16 @@ class StreamScopeSynchronizer {
 
 void bind_external_dynamic_input_checked(ITrtModule& module, const char* name, void* pointer,
                                          DType dtype, std::initializer_list<int64_t> runtime_shape,
-                                         std::initializer_list<int64_t> max_shape) {
+                                         std::initializer_list<int64_t> max_shape,
+                                         int32_t profile_index = 0,
+                                         int32_t profile_count = 1) {
     const std::vector<int64_t> actual(runtime_shape);
     const std::vector<int64_t> maximum(max_shape);
     if (pointer == nullptr || !module.has_input(name) || !module.input_is_dynamic(name) ||
-        module.tensor_dtype(name) != dtype || module.optimization_profile_count() != 1 ||
-        module.input_profile_shape(name, 0, ProfileShapeSelector::kMax) != maximum)
+        module.tensor_dtype(name) != dtype ||
+        module.profile_idx() != profile_index ||
+        module.optimization_profile_count() != profile_count ||
+        module.input_profile_shape(name, profile_index, ProfileShapeSelector::kMax) != maximum)
         throw std::runtime_error(std::string("MiniMax-H3 dynamic split plan ABI mismatch for ") +
                                  name);
     module.bind_external(name, pointer, actual);
@@ -1054,6 +1064,23 @@ bool device_tensors_ready(std::initializer_list<const DeviceTensor*> tensors) {
 
 } // namespace
 
+int32_t select_minimax_h3_denoiser_profile(int32_t optimization_profile_count,
+                                           int32_t text_rows,
+                                           const MiniMaxH3Geometry& geometry) {
+    if (optimization_profile_count == 1)
+        return 0;
+    if (optimization_profile_count != 2)
+        throw std::invalid_argument(
+            "MiniMax-H3 denoiser requires one or two optimization profiles");
+    const bool qualified_five_second_request =
+        text_rows == kFiveSecondTextRows && geometry.output_frames == kDefaultOutputFrames &&
+        geometry.output_height == kDefaultOutputHeight &&
+        geometry.output_width == kDefaultOutputWidth && geometry.condition_video_rows == 0 &&
+        geometry.video_rows == kFiveSecondVideoRows &&
+        geometry.audio_rows == kFiveSecondAudioRows;
+    return qualified_five_second_request ? 0 : 1;
+}
+
 void validate_minimax_h3_monolithic_denoiser_plan(ITrtModule& module, bool native_vsa,
                                                   int32_t expected_max_text_rows) {
     validate_monolithic_denoiser_plan_impl(module, native_vsa, expected_max_text_rows);
@@ -1329,6 +1356,7 @@ struct MiniMaxH3Pipeline::ResidentState {
     std::vector<float> text_embeddings;
     std::vector<int32_t> text_token_tags;
     int32_t text_rows{0};
+    int32_t denoiser_profile_index{-1};
     MiniMaxH3Geometry denoiser_geometry{};
     std::vector<StepModulation> modulations;
     std::unique_ptr<DeviceTensor> head_hidden;
@@ -1388,6 +1416,7 @@ struct MiniMaxH3Pipeline::ResidentState {
                           const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
     bool prepare_denoiser(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
                           bool first_block_cache, bool native_vsa, int32_t max_text_rows,
+                          int32_t optimization_profile_count,
                           const MiniMaxH3Geometry& geometry);
     DenoiserStats
     run_denoiser(bool first_block_cache, bool native_vsa, MiniMaxH3DenoiserMetadata& metadata,
@@ -1405,9 +1434,11 @@ struct MiniMaxH3Pipeline::ResidentState {
 
     void release_denoiser_stage(bool preserve_video_rows);
     void release_vae_stage();
-    bool denoiser_is_resident(bool first_block_cache, bool native_vsa) const;
+    bool denoiser_is_resident(bool first_block_cache, bool native_vsa,
+                               int32_t profile_index) const;
     void load_first_block_cache_denoiser(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
-                                         const MiniMaxH3Geometry& geometry);
+                                         const MiniMaxH3Geometry& geometry, int32_t profile_index,
+                                         int32_t profile_count);
     void load_segmented_vsa_denoiser(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
                                      const MiniMaxH3Geometry& geometry);
     void bind_first_block_cache_shapes(const MiniMaxH3Geometry& geometry);
@@ -1495,6 +1526,7 @@ void MiniMaxH3Pipeline::ResidentState::release_denoiser_stage(bool preserve_vide
     vsa_tiled_to_packed.reset();
     vsa_valid_sizes.reset();
     denoiser_geometry = {};
+    denoiser_profile_index = -1;
 }
 
 void MiniMaxH3Pipeline::ResidentState::release_vae_stage() {
@@ -1525,7 +1557,7 @@ void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& r
     std::vector<int32_t> position_ids(ids.size());
     for (int32_t index = 0; index < requested_text_rows; ++index)
         position_ids[static_cast<std::size_t>(index)] = index;
-    auto module = loader("text_encoder_plan", stream, {});
+    auto module = loader("text_encoder_plan", stream, {}, 0);
     module->set_timing_label("text_encoder_plan");
     TensorMap inputs;
     inputs.emplace("input_ids",
@@ -1587,7 +1619,7 @@ std::vector<std::vector<float>> MiniMaxH3Pipeline::ResidentState::load_fl2va_con
 
     auto conditioning = minimax_h3::run_fl2va_conditioning(
         requested_prompt, keyframes, tokenizer,
-        [&](const std::string& section) { return loader(section, stream, {}); });
+        [&](const std::string& section) { return loader(section, stream, {}, 0); });
     text_embeddings = std::move(conditioning.text_embeddings);
     text_token_tags = std::move(conditioning.text_token_tags);
     text_rows = static_cast<int32_t>(text_token_tags.size());
@@ -1602,14 +1634,15 @@ void MiniMaxH3Pipeline::ResidentState::load_modulations(const MiniMaxH3Schedule&
                                                         const MiniMaxH3Schedule& audio_schedule,
                                                         const MiniMaxH3ModuleLoader& loader,
                                                         cudaStream_t stream) {
-    auto module = loader("adaln_precompute_plan", stream, {});
+    auto module = loader("adaln_precompute_plan", stream, {}, 0);
     module->set_timing_label("adaln_precompute_plan");
     modulations = precompute_modulations(*module, video_schedule, audio_schedule);
     module->sync();
 }
 
 bool MiniMaxH3Pipeline::ResidentState::denoiser_is_resident(bool first_block_cache,
-                                                            bool native_vsa) const {
+                                                            bool native_vsa,
+                                                            int32_t profile_index) const {
     if (native_vsa) {
         return denoiser_entry != nullptr && denoiser_transitions.size() == 49U &&
                std::all_of(denoiser_transitions.begin(), denoiser_transitions.end(),
@@ -1646,7 +1679,8 @@ bool MiniMaxH3Pipeline::ResidentState::denoiser_is_resident(bool first_block_cac
     }
     if (!first_block_cache)
         return denoiser != nullptr;
-    return denoiser_head != nullptr && denoiser_tail != nullptr && denoiser_finish != nullptr &&
+    return denoiser_profile_index == profile_index && denoiser_head != nullptr &&
+           denoiser_tail != nullptr && denoiser_finish != nullptr &&
            device_tensors_ready({head_hidden.get(), head_residual.get(),
                                  previous_head_residual.get(), tail_residual.get(),
                                  video_rows.get(), audio_rows.get(), video_velocity.get(),
@@ -1654,17 +1688,29 @@ bool MiniMaxH3Pipeline::ResidentState::denoiser_is_resident(bool first_block_cac
 }
 
 void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
-    const MiniMaxH3ModuleLoader& loader, cudaStream_t stream, const MiniMaxH3Geometry& geometry) {
+    const MiniMaxH3ModuleLoader& loader, cudaStream_t stream, const MiniMaxH3Geometry& geometry,
+    int32_t profile_index, int32_t profile_count) {
     if (text_rows < kMinTextRows || text_rows > kMaxTextRows)
         throw std::logic_error("MiniMax-H3 text embeddings are not prepared");
-    DeviceTensor new_head_hidden({kMaxSequenceRows, kHidden}, DType::kBFloat16, stream);
-    DeviceTensor new_head_residual({kMaxSequenceRows, kHidden}, DType::kBFloat16, stream);
-    DeviceTensor new_previous_head_residual({kMaxSequenceRows, kHidden}, DType::kBFloat16, stream);
-    DeviceTensor new_tail_residual({kMaxSequenceRows, kHidden}, DType::kBFloat16, stream);
-    DeviceTensor new_video_rows({kMaxVideoRows, kPatchDim}, DType::kFloat32, stream);
-    DeviceTensor new_audio_rows({kMaxAudioRows, kAudioChannels}, DType::kFloat32, stream);
-    DeviceTensor new_video_velocity({kMaxVideoRows, kPatchDim}, DType::kFloat32, stream);
-    DeviceTensor new_audio_velocity({kMaxAudioRows, kAudioChannels}, DType::kFloat32, stream);
+    const bool five_second_profile = profile_count == 2 && profile_index == 0;
+    const int64_t profile_sequence_rows =
+        five_second_profile ? kFiveSecondPackedRows : kMaxSequenceRows;
+    const int64_t profile_video_rows =
+        five_second_profile ? kFiveSecondVideoRows : kMaxVideoRows;
+    const int64_t profile_audio_rows =
+        five_second_profile ? kFiveSecondAudioRows : kMaxAudioRows;
+    std::cerr << "[minimax-h3] denoiser optimization_profile=" << profile_index << '/'
+              << profile_count << " packed_rows=" << profile_sequence_rows << '\n';
+
+    DeviceTensor new_head_hidden({profile_sequence_rows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_head_residual({profile_sequence_rows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_previous_head_residual({profile_sequence_rows, kHidden}, DType::kBFloat16,
+                                            stream);
+    DeviceTensor new_tail_residual({profile_sequence_rows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_video_rows({profile_video_rows, kPatchDim}, DType::kFloat32, stream);
+    DeviceTensor new_audio_rows({profile_audio_rows, kAudioChannels}, DType::kFloat32, stream);
+    DeviceTensor new_video_velocity({profile_video_rows, kPatchDim}, DType::kFloat32, stream);
+    DeviceTensor new_audio_velocity({profile_audio_rows, kAudioChannels}, DType::kFloat32, stream);
     if (!device_tensors_ready({&new_head_hidden, &new_head_residual, &new_previous_head_residual,
                                &new_tail_residual, &new_video_rows, &new_audio_rows,
                                &new_video_velocity, &new_audio_velocity}))
@@ -1702,23 +1748,23 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
         external_binding("video_velocity", *resident_video_velocity),
         external_binding("audio_velocity", *resident_audio_velocity),
     };
-    auto head = loader("denoiser_head_plan", stream, head_bindings);
-    auto tail = loader("denoiser_tail_plan", stream, tail_bindings);
-    auto finish = loader("denoiser_finish_plan", stream, finish_bindings);
+    auto head = loader("denoiser_head_plan", stream, head_bindings, profile_index);
+    auto tail = loader("denoiser_tail_plan", stream, tail_bindings, profile_index);
+    auto finish = loader("denoiser_finish_plan", stream, finish_bindings, profile_index);
     head->set_timing_label("denoiser_head_plan");
     tail->set_timing_label("denoiser_tail_plan");
     finish->set_timing_label("denoiser_finish_plan");
 
     bind_external_dynamic_output_checked(*head, "head_hidden", resident_head_hidden->data(),
-                                         DType::kBFloat16, {kMaxSequenceRows, kHidden});
+                                         DType::kBFloat16, {profile_sequence_rows, kHidden});
     bind_external_dynamic_output_checked(*head, "head_residual", resident_head_residual->data(),
-                                         DType::kBFloat16, {kMaxSequenceRows, kHidden});
+                                         DType::kBFloat16, {profile_sequence_rows, kHidden});
     bind_external_dynamic_output_checked(*tail, "tail_residual", resident_tail_residual->data(),
-                                         DType::kBFloat16, {kMaxSequenceRows, kHidden});
+                                         DType::kBFloat16, {profile_sequence_rows, kHidden});
     bind_external_dynamic_output_checked(*finish, "video_velocity", resident_video_velocity->data(),
-                                         DType::kFloat32, {kMaxVideoRows, kPatchDim});
+                                         DType::kFloat32, {profile_video_rows, kPatchDim});
     bind_external_dynamic_output_checked(*finish, "audio_velocity", resident_audio_velocity->data(),
-                                         DType::kFloat32, {kMaxAudioRows, kAudioChannels});
+                                         DType::kFloat32, {profile_audio_rows, kAudioChannels});
 
     denoiser_head = std::move(head);
     denoiser_tail = std::move(tail);
@@ -1731,6 +1777,7 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     audio_rows = std::move(resident_audio_rows);
     video_velocity = std::move(resident_video_velocity);
     audio_velocity = std::move(resident_audio_velocity);
+    denoiser_profile_index = profile_index;
     bind_first_block_cache_shapes(geometry);
 }
 
@@ -1740,30 +1787,46 @@ void MiniMaxH3Pipeline::ResidentState::bind_first_block_cache_shapes(
         throw std::logic_error("MiniMax-H3 split denoiser is not loaded");
     const int64_t sequence_rows =
         static_cast<int64_t>(text_rows) + geometry.audio_rows + geometry.video_rows;
+    const int32_t profile_count = denoiser_head->optimization_profile_count();
+    const bool five_second_profile = profile_count == 2 && denoiser_profile_index == 0;
+    const int64_t profile_sequence_rows =
+        five_second_profile ? kFiveSecondPackedRows : kMaxSequenceRows;
+    const int64_t profile_video_rows =
+        five_second_profile ? kFiveSecondVideoRows : kMaxVideoRows;
+    const int64_t profile_audio_rows =
+        five_second_profile ? kFiveSecondAudioRows : kMaxAudioRows;
     bind_external_dynamic_input_checked(*denoiser_head, "previous_head_residual",
                                         previous_head_residual->data(), DType::kBFloat16,
-                                        {sequence_rows, kHidden}, {kMaxSequenceRows, kHidden});
+                                        {sequence_rows, kHidden}, {profile_sequence_rows, kHidden},
+                                        denoiser_profile_index, profile_count);
     bind_external_dynamic_input_checked(*denoiser_head, "video_hidden_states", video_rows->data(),
                                         DType::kFloat32, {geometry.video_rows, kPatchDim},
-                                        {kMaxVideoRows, kPatchDim});
+                                        {profile_video_rows, kPatchDim}, denoiser_profile_index,
+                                        profile_count);
     bind_external_dynamic_input_checked(*denoiser_head, "audio_hidden_states", audio_rows->data(),
                                         DType::kFloat32, {geometry.audio_rows, kAudioChannels},
-                                        {kMaxAudioRows, kAudioChannels});
+                                        {profile_audio_rows, kAudioChannels},
+                                        denoiser_profile_index, profile_count);
     bind_external_dynamic_input_checked(*denoiser_tail, "head_hidden", head_hidden->data(),
                                         DType::kBFloat16, {sequence_rows, kHidden},
-                                        {kMaxSequenceRows, kHidden});
+                                        {profile_sequence_rows, kHidden}, denoiser_profile_index,
+                                        profile_count);
     bind_external_dynamic_input_checked(*denoiser_finish, "head_hidden", head_hidden->data(),
                                         DType::kBFloat16, {sequence_rows, kHidden},
-                                        {kMaxSequenceRows, kHidden});
+                                        {profile_sequence_rows, kHidden}, denoiser_profile_index,
+                                        profile_count);
     bind_external_dynamic_input_checked(*denoiser_finish, "tail_residual", tail_residual->data(),
                                         DType::kBFloat16, {sequence_rows, kHidden},
-                                        {kMaxSequenceRows, kHidden});
+                                        {profile_sequence_rows, kHidden}, denoiser_profile_index,
+                                        profile_count);
     bind_external_dynamic_input_checked(*denoiser_finish, "video_hidden_states", video_rows->data(),
                                         DType::kFloat32, {geometry.video_rows, kPatchDim},
-                                        {kMaxVideoRows, kPatchDim});
+                                        {profile_video_rows, kPatchDim}, denoiser_profile_index,
+                                        profile_count);
     bind_external_dynamic_input_checked(*denoiser_finish, "audio_hidden_states", audio_rows->data(),
                                         DType::kFloat32, {geometry.audio_rows, kAudioChannels},
-                                        {kMaxAudioRows, kAudioChannels});
+                                        {profile_audio_rows, kAudioChannels},
+                                        denoiser_profile_index, profile_count);
     denoiser_geometry = geometry;
 }
 
@@ -1838,7 +1901,7 @@ void MiniMaxH3Pipeline::ResidentState::load_segmented_vsa_denoiser(
         external_binding("vsa_value", *vsa_value),
         external_binding("vsa_gate", *vsa_gate),
     };
-    auto entry = loader("denoiser_entry_plan", stream, entry_bindings);
+    auto entry = loader("denoiser_entry_plan", stream, entry_bindings, 0);
     entry->set_timing_label("denoiser_entry_plan");
     validate_minimax_h3_segment_plan(*entry, MiniMaxH3SegmentPlanKind::kEntry);
 
@@ -1865,7 +1928,7 @@ void MiniMaxH3Pipeline::ResidentState::load_segmented_vsa_denoiser(
             name += '0';
         name += std::to_string(index);
         name += "_plan";
-        auto transition = loader(name, stream, bindings);
+        auto transition = loader(name, stream, bindings, 0);
         transition->set_timing_label(name);
         validate_minimax_h3_segment_plan(*transition, MiniMaxH3SegmentPlanKind::kTransition);
         transitions.push_back(std::move(transition));
@@ -1881,7 +1944,7 @@ void MiniMaxH3Pipeline::ResidentState::load_segmented_vsa_denoiser(
         external_binding("video_velocity", *video_velocity),
         external_binding("audio_velocity", *audio_velocity),
     };
-    auto finish = loader("denoiser_finish_plan", stream, finish_bindings);
+    auto finish = loader("denoiser_finish_plan", stream, finish_bindings, 0);
     finish->set_timing_label("denoiser_finish_plan");
     validate_minimax_h3_segment_plan(*finish, MiniMaxH3SegmentPlanKind::kFinish);
 
@@ -1954,13 +2017,21 @@ void MiniMaxH3Pipeline::ResidentState::bind_segmented_vsa_shapes(
 bool MiniMaxH3Pipeline::ResidentState::prepare_denoiser(const MiniMaxH3ModuleLoader& loader,
                                                         cudaStream_t stream, bool first_block_cache,
                                                         bool native_vsa, int32_t max_text_rows,
+                                                        int32_t optimization_profile_count,
                                                         const MiniMaxH3Geometry& geometry) {
     // The previous request synchronized its VAE before returning. Release it
     // before deserializing the denoiser so the two large stages never overlap.
     release_vae_stage();
-    const bool resident_hit = denoiser_is_resident(first_block_cache, native_vsa);
+    const int32_t profile_index =
+        first_block_cache ? select_minimax_h3_denoiser_profile(
+                                optimization_profile_count, text_rows, geometry)
+                          : 0;
+    const bool same_shape = denoiser_geometry.video_rows == geometry.video_rows &&
+                            denoiser_geometry.audio_rows == geometry.audio_rows;
+    const bool resident_hit = same_shape &&
+                              denoiser_is_resident(first_block_cache, native_vsa, profile_index);
     if (!resident_hit)
-        video_rows.reset();
+        release_denoiser_stage(/*preserve_video_rows=*/false);
     if (resident_hit) {
         if (native_vsa)
             bind_segmented_vsa_shapes(geometry);
@@ -1975,9 +2046,10 @@ bool MiniMaxH3Pipeline::ResidentState::prepare_denoiser(const MiniMaxH3ModuleLoa
     if (native_vsa) {
         load_segmented_vsa_denoiser(loader, stream, geometry);
     } else if (first_block_cache) {
-        load_first_block_cache_denoiser(loader, stream, geometry);
+        load_first_block_cache_denoiser(loader, stream, geometry, profile_index,
+                                        optimization_profile_count);
     } else {
-        denoiser = loader("denoiser_plan", stream, {});
+        denoiser = loader("denoiser_plan", stream, {}, 0);
         denoiser->set_timing_label("denoiser_plan");
         validate_minimax_h3_monolithic_denoiser_plan(*denoiser, native_vsa, max_text_rows);
         denoiser_geometry = geometry;
@@ -2524,7 +2596,7 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_vae(
         external_binding("latent_tiles", *resident_latent_tiles),
         external_binding("decoded_tiles", *resident_decoded_tiles),
     };
-    auto module = loader("vae_tile_decoder_plan", stream, vae_bindings);
+    auto module = loader("vae_tile_decoder_plan", stream, vae_bindings, 0);
     module->set_timing_label("vae_tile_decoder_plan");
     const bool dynamic_tiles = validate_vae_plan_geometry(*module, geometry);
     if (dynamic_tiles) {
@@ -2574,7 +2646,7 @@ bool MiniMaxH3Pipeline::ResidentState::prepare_vae(const MiniMaxH3ModuleLoader& 
     if (first_block_cache) {
         load_first_block_cache_vae(loader, stream, geometry);
     } else {
-        vae = loader("vae_tile_decoder_plan", stream, {});
+        vae = loader("vae_tile_decoder_plan", stream, {}, 0);
         vae->set_timing_label("vae_tile_decoder_plan");
         (void)validate_vae_plan_geometry(*vae, geometry);
     }
@@ -2675,7 +2747,7 @@ AudioResult MiniMaxH3Pipeline::ResidentState::decode_audio(
     release_vae_stage();
     auto audio_latents =
         unpack_and_denormalize_minimax_h3_audio(audio_rows_host, geometry.audio_latent_frames);
-    auto module = loader("audio_vae_decoder_plan", stream, {});
+    auto module = loader("audio_vae_decoder_plan", stream, {}, 0);
     module->set_timing_label("audio_vae_decoder_plan");
     TensorMap inputs;
     inputs.emplace("audio_latents", Tensor{audio_latents.data(),
@@ -2899,7 +2971,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     const auto presentation = minimax_h3::materialize_ref2va_presentation(blueprint, *tokenizer_);
     minimax_h3::Ref2vaVisionFeatures vision_features;
     if (!blueprint.vision_invocations.empty()) {
-        auto vision_module = loader_("vision_encoder_plan", stream_, {});
+        auto vision_module = loader_("vision_encoder_plan", stream_, {}, 0);
         vision_module->set_timing_label("ref2va_shared_vision_encoder_plan");
         vision_features = minimax_h3::run_ref2va_reference_vision_encoder(
             *vision_module, prepared.references, blueprint);
@@ -2907,7 +2979,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     }
     if (vision_features.rows != presentation.vision_rows)
         throw std::runtime_error("MiniMax-H3 Ref2VA Qwen vision/presentation row counts disagree");
-    auto text_module = loader_("text_encoder_plan", stream_, {});
+    auto text_module = loader_("text_encoder_plan", stream_, {}, 0);
     text_module->set_timing_label("ref2va_shared_text_encoder_plan");
     auto text_embeddings =
         minimax_h3::run_ref2va_text_encoder(*text_module, presentation, vision_features);
@@ -2919,7 +2991,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     const auto condition_begin = Clock::now();
     std::vector<minimax_h3::Ref2vaEncodedCondition> conditions(prepared.references.size());
     if (prepared.summary.image_count > 0) {
-        auto module = loader_("fl2va_keyframe_vae_encoder_plan", stream_, {});
+        auto module = loader_("fl2va_keyframe_vae_encoder_plan", stream_, {}, 0);
         module->set_timing_label("ref2va_image_vae_encoder_plan");
         for (std::size_t index = 0; index < prepared.references.size(); ++index) {
             if (prepared.references[index].kind == VideoReferenceKind::kImage)
@@ -2929,7 +3001,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
         module->sync();
     }
     if (prepared.summary.video_count > 0) {
-        auto module = loader_("ref2va_video_vae_encoder_plan", stream_, {});
+        auto module = loader_("ref2va_video_vae_encoder_plan", stream_, {}, 0);
         module->set_timing_label("ref2va_video_vae_encoder_plan");
         for (std::size_t index = 0; index < prepared.references.size(); ++index) {
             if (prepared.references[index].kind == VideoReferenceKind::kVideo)
@@ -2939,7 +3011,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
         module->sync();
     }
     if (prepared.summary.audio_bearing_count > 0) {
-        auto module = loader_("ref2va_audio_vae_encoder_plan", stream_, {});
+        auto module = loader_("ref2va_audio_vae_encoder_plan", stream_, {}, 0);
         module->set_timing_label("ref2va_audio_vae_encoder_plan");
         for (std::size_t index = 0; index < prepared.references.size(); ++index) {
             const auto& reference = prepared.references[index];
@@ -3024,7 +3096,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     if (video_schedule.timesteps.size() != 49U || audio_schedule.timesteps.size() != 49U)
         throw std::logic_error("MiniMax-H3 Ref2VA scheduler did not produce 49 forwards");
     const auto adaln_begin = Clock::now();
-    auto adaln_module = loader_("ref2va_adaln_precompute_plan", stream_, {});
+    auto adaln_module = loader_("ref2va_adaln_precompute_plan", stream_, {}, 0);
     adaln_module->set_timing_label("ref2va_adaln_precompute_plan");
     std::vector<minimax_h3::Ref2vaModulations> modulations;
     modulations.reserve(video_schedule.timesteps.size());
@@ -3039,7 +3111,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     const auto adaln_end = Clock::now();
 
     const auto denoiser_begin = Clock::now();
-    auto denoiser = loader_("ref2va_denoiser_plan", stream_, {});
+    auto denoiser = loader_("ref2va_denoiser_plan", stream_, {}, 0);
     denoiser->set_timing_label("ref2va_denoiser_plan");
     minimax_h3::validate_ref2va_plan(*denoiser, minimax_h3::Ref2vaPlanKind::kDenoiser);
     denoiser->reset_execution_context();
@@ -3260,7 +3332,8 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
         const auto denoiser_begin = Clock::now();
         const bool denoiser_resident_hit = resident_->prepare_denoiser(
             loader_, stream_, first_block_cache_, denoiser_config_.native_vsa,
-            denoiser_config_.max_text_rows, geometry);
+            denoiser_config_.max_text_rows, denoiser_config_.optimization_profile_count,
+            geometry);
         const DenoiserStats denoiser_stats = resident_->run_denoiser(
             first_block_cache_, denoiser_config_.native_vsa, metadata, video_schedule,
             audio_schedule, video_rows, audio_rows, cache_threshold_, stream_);

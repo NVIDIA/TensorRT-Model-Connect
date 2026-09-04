@@ -24,11 +24,14 @@ from tensorrt_model_connect.families.minimax_h3.config import (  # noqa: E402
     DENOISER_DEFAULT_WORKSPACE_BYTES,
     MiniMaxH3Config,
     SOL_ENGINE_1344X768_124F,
+    SOL_ENGINE_1344X768_124F_FAST_FBC,
+    SOL_ENGINE_1344X768_124_TO_345F,
     TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
     VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
     resolve_workspace_bytes,
 )
 from tensorrt_model_connect.families.minimax_h3.dit_builder import (  # noqa: E402
+    _add_first_block_cache_profiles,
     build_dit_engine,
     build_dit_finish_engine,
     build_dit_head_engine,
@@ -228,6 +231,83 @@ def test_first_block_cache_checkpoint_partitions_are_exact() -> None:
     assert "transformer_blocks.0.norm1.weight" in head
     assert "transformer_blocks.1.norm1.weight" in tail
     assert "norm_out.norm.weight" in finish
+
+
+def test_production_first_block_cache_engines_add_fast_then_public_profiles() -> None:
+    class FakeOptimizationProfile:
+        def __init__(self) -> None:
+            self.extra_memory_target = 1.0
+            self.shapes = {}
+
+        def set_shape(self, name, *, min, opt, max) -> None:
+            self.shapes[name] = (min, opt, max)
+
+    class FakeBuilder:
+        @staticmethod
+        def create_optimization_profile():
+            return FakeOptimizationProfile()
+
+    class FakeConfig:
+        def __init__(self) -> None:
+            self.profiles = []
+
+        def add_optimization_profile(self, profile) -> int:
+            self.profiles.append(profile)
+            return len(self.profiles) - 1
+
+    config = FakeConfig()
+    production = replace(SOL_ENGINE_1344X768_124_TO_345F, first_block_cache=True)
+    _add_first_block_cache_profiles(
+        FakeBuilder(),
+        config,
+        production,
+        video_inputs=("video",),
+        audio_inputs=("audio",),
+        text_inputs=("text",),
+        packed_inputs=("position_ids", "adaln_indices", "head_hidden"),
+        head_major_inputs=("attention",),
+    )
+
+    assert len(config.profiles) == 2
+    fast, public = config.profiles
+    fast_profile = SOL_ENGINE_1344X768_124F_FAST_FBC
+    assert fast.extra_memory_target == 1.0
+    assert fast.shapes["video"] == (
+        (fast_profile.video_rows, fast_profile.video_patch_dim),
+    ) * 3
+    assert fast.shapes["audio"] == (
+        (fast_profile.audio_rows, fast_profile.audio_in_channels),
+    ) * 3
+    assert fast.shapes["text"] == ((537, fast_profile.text_dim),) * 3
+    assert fast.shapes["position_ids"] == ((38247, 3),) * 3
+    assert fast.shapes["adaln_indices"] == ((38247,),) * 3
+    assert fast.shapes["head_hidden"] == ((38247, fast_profile.hidden_size),) * 3
+    assert fast.shapes["attention"] == (
+        (fast_profile.num_heads, 38247, fast_profile.head_dim),
+    ) * 3
+
+    assert public.extra_memory_target == 0.0
+    assert public.shapes["video"] == (
+        (18870, production.video_patch_dim),
+        (37296, production.video_patch_dim),
+        (108576, production.video_patch_dim),
+    )
+    assert public.shapes["text"] == (
+        (1, production.text_dim),
+        (128, production.text_dim),
+        (2641, production.text_dim),
+    )
+    assert public.shapes["position_ids"] == (
+        (19285, 3),
+        (37838, 3),
+        (112367, 3),
+    )
+
+    custom_config = FakeConfig()
+    custom = replace(production, num_layers=2)
+    _add_first_block_cache_profiles(FakeBuilder(), custom_config, custom)
+    assert len(custom_config.profiles) == 1
+    assert custom_config.profiles[0].extra_memory_target == 1.0
 
 
 def test_split_builders_require_explicit_first_block_cache_profile() -> None:

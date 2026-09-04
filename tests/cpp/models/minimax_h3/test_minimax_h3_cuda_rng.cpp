@@ -130,7 +130,8 @@ void test_pipeline_destruction_flushes_runtime_cache() {
     bool flushed = false;
     trtmc::MiniMaxH3ModuleLoader unused_loader =
         [](const std::string&, cudaStream_t,
-           const std::vector<trtmc::ModuleExternalBinding>&) -> std::unique_ptr<trtmc::ITrtModule> {
+           const std::vector<trtmc::ModuleExternalBinding>&,
+           int32_t) -> std::unique_ptr<trtmc::ITrtModule> {
         throw std::runtime_error("test loader must not be invoked");
     };
     {
@@ -145,7 +146,8 @@ void test_pipeline_destruction_flushes_runtime_cache() {
 trtmc::MiniMaxH3ModuleLoader make_unused_pipeline_loader() {
     return
         [](const std::string&, cudaStream_t,
-           const std::vector<trtmc::ModuleExternalBinding>&) -> std::unique_ptr<trtmc::ITrtModule> {
+           const std::vector<trtmc::ModuleExternalBinding>&,
+           int32_t) -> std::unique_ptr<trtmc::ITrtModule> {
             throw std::runtime_error("test loader must not be invoked");
         };
 }

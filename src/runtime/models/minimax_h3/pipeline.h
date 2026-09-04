@@ -23,7 +23,7 @@
 namespace trtmc {
 
 using MiniMaxH3ModuleLoader = std::function<std::unique_ptr<ITrtModule>(
-    const std::string&, cudaStream_t, const std::vector<ModuleExternalBinding>&)>;
+    const std::string&, cudaStream_t, const std::vector<ModuleExternalBinding>&, int32_t)>;
 
 struct MiniMaxH3Schedule {
     std::vector<float> sigmas;
@@ -83,6 +83,7 @@ struct MiniMaxH3DenoiserConfig {
     int32_t transformer_forwards{49};
     float guidance_scale{1.0F};
     int32_t max_text_rows{537};
+    int32_t optimization_profile_count{1};
 };
 
 struct MiniMaxH3Ref2VAConfig {
@@ -116,6 +117,9 @@ MiniMaxH3VsaMetadata make_minimax_h3_vsa_metadata(int32_t text_rows,
 MiniMaxH3DenoiserMetadata make_minimax_h3_denoiser_metadata(int32_t text_rows,
                                                             const MiniMaxH3Geometry& geometry,
                                                             bool native_vsa);
+int32_t select_minimax_h3_denoiser_profile(int32_t optimization_profile_count,
+                                           int32_t text_rows,
+                                           const MiniMaxH3Geometry& geometry);
 MiniMaxH3DenoiserMetadata
 make_minimax_h3_fl2va_denoiser_metadata(const std::vector<int32_t>& text_token_tags,
                                         const std::vector<int32_t>& keyframe_anchors,

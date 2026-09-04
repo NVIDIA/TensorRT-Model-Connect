@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import math
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,8 @@ from .config import (
     DENOISER_DEFAULT_WORKSPACE_BYTES,
     MiniMaxH3Config,
     SOL_ENGINE_1344X768_124F,
+    SOL_ENGINE_1344X768_124F_FAST_FBC,
+    SOL_ENGINE_1344X768_124_TO_345F,
 )
 
 
@@ -722,8 +725,11 @@ def _add_dynamic_profile(
     text_inputs: tuple[str, ...] = (),
     packed_inputs: tuple[str, ...] = (),
     head_major_inputs: tuple[str, ...] = (),
+    extra_memory_target: float | None = None,
 ) -> None:
     optimization = builder.create_optimization_profile()
+    if extra_memory_target is not None:
+        optimization.extra_memory_target = extra_memory_target
     text_shapes = (
         profile.min_text_rows,
         profile.opt_text_rows,
@@ -770,6 +776,34 @@ def _add_dynamic_profile(
             max=(profile.num_heads, packed_shapes[2], profile.head_dim),
         )
     config.add_optimization_profile(optimization)
+
+
+def _add_first_block_cache_profiles(
+    builder,
+    config,
+    profile: MiniMaxH3Config,
+    **binding_groups,
+) -> None:
+    """Add the qualified 5-second profile before the full public envelope."""
+
+    production_profile = replace(
+        SOL_ENGINE_1344X768_124_TO_345F,
+        first_block_cache=True,
+    )
+    if profile == production_profile:
+        _add_dynamic_profile(
+            builder,
+            config,
+            SOL_ENGINE_1344X768_124F_FAST_FBC,
+            **binding_groups,
+        )
+    _add_dynamic_profile(
+        builder,
+        config,
+        profile,
+        extra_memory_target=0.0 if profile == production_profile else None,
+        **binding_groups,
+    )
 
 
 def _serialize(
@@ -1221,7 +1255,7 @@ def build_dit_head_engine(
     previous_head_residual = network.add_input(
         "previous_head_residual", trt.bfloat16, (-1, profile.hidden_size)
     )
-    _add_dynamic_profile(
+    _add_first_block_cache_profiles(
         builder,
         config,
         profile,
@@ -1334,7 +1368,7 @@ def build_dit_tail_engine(
     head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
     positions = network.add_input("position_ids", trt.float32, (-1, 3))
     adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
-    _add_dynamic_profile(
+    _add_first_block_cache_profiles(
         builder,
         config,
         profile,
@@ -1416,7 +1450,7 @@ def build_dit_finish_engine(
     audio = network.add_input(
         "audio_hidden_states", trt.float32, (-1, profile.audio_in_channels)
     )
-    _add_dynamic_profile(
+    _add_first_block_cache_profiles(
         builder,
         config,
         profile,

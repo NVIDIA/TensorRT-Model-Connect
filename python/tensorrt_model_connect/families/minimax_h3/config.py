@@ -318,6 +318,16 @@ class MiniMaxH3Config:
 
 SOL_ENGINE_1344X768_124F = MiniMaxH3Config()
 
+# Profile zero in the production FirstBlockCache engines exactly specializes
+# the 537-token reference request used by the qualified 8--9 minute path.
+# Profile one retains variable prompts and the complete public 5--15 second
+# envelope below, so both routes remain contexts of the same three engines.
+SOL_ENGINE_1344X768_124F_FAST_FBC = MiniMaxH3Config(
+    min_text_rows=537,
+    opt_text_rows=537,
+    first_block_cache=True,
+)
+
 # The released local pipeline aligns requested frame counts to ``17 * n + 5``.
 # At 24 fps its supported 5--15 second endpoints are therefore 124 and 345
 # frames.  Video tokens use 1,008 rows per latent frame at 1344x768; audio is

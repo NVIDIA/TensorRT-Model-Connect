@@ -24,6 +24,7 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     MiniMaxH3Config,
     NATIVE_EXPLICIT_CANVAS_SIZES,
     SOL_ENGINE_1344X768_124F,
+    SOL_ENGINE_1344X768_124F_FAST_FBC,
     SOL_ENGINE_1344X768_124_TO_345F,
     default_workspace_limit_bytes,
 )
@@ -73,6 +74,16 @@ def test_sol_engine_profile_matches_public_packed_shape() -> None:
     assert profile.attention_size == 7168
     assert profile.video_patch_dim == 96
     assert profile.first_block_cache is False
+
+
+def test_fast_fbc_profile_exactly_specializes_qualified_reference_request() -> None:
+    profile = SOL_ENGINE_1344X768_124F_FAST_FBC
+    profile.validate()
+    assert profile.first_block_cache is True
+    assert profile.video_row_profile == (37296, 37296, 37296)
+    assert profile.audio_row_profile == (414, 414, 414)
+    assert profile.text_row_profile == (537, 537, 537)
+    assert profile.packed_row_profile == (38247, 38247, 38247)
 
 
 def test_dynamic_media_profile_covers_released_5_to_15_second_endpoints() -> None:
@@ -297,6 +308,8 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
     assert result["workspace_limit_bytes"] == DEFAULT_WORKSPACE_LIMIT_BYTES
     assert result["first_block_cache"] is False
     assert result["denoiser_cache_mode"] == "monolithic"
+    assert result["denoiser_profile_count"] == 1
+    assert result["denoiser_profile_layout"] == "public_dynamic"
     assert result["first_block_cache_threshold"] == 0.08
     assert (
         result["vae_tile_batch_min"],
@@ -382,6 +395,8 @@ def test_fast_h3_bundle_contract_is_four_full_segmented_vsa_forwards() -> None:
     assert result["guidance_scale"] == 1.0
     assert result["first_block_cache"] is False
     assert result["denoiser_cache_mode"] == "segmented_vsa"
+    assert result["denoiser_profile_count"] == 1
+    assert result["denoiser_profile_layout"] == "public_dynamic"
     assert result["attention_mode"] == "native_vsa"
     assert result["bundle_loading"]["lazy_sections"][3] == "denoiser_entry_plan"
     assert result["bundle_loading"]["lazy_sections"][4] == ("denoiser_transition_00_plan")
@@ -472,6 +487,11 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
     )
     assert config["first_block_cache"] is True
     assert config["denoiser_cache_mode"] == "first_block"
+    assert config["denoiser_profile_count"] == 2
+    assert (
+        config["denoiser_profile_layout"]
+        == "five_second_reference_then_public_dynamic"
+    )
     assert config["first_block_cache_threshold"] == 0.08
     assert config["runtime_memory"] == {
         "mode": "staged",

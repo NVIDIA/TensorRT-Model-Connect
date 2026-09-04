@@ -1137,6 +1137,12 @@ class MiniMaxH3Plugin:
                 if profile.first_block_cache
                 else "monolithic"
             ),
+            "denoiser_profile_count": 2 if profile.first_block_cache else 1,
+            "denoiser_profile_layout": (
+                "five_second_reference_then_public_dynamic"
+                if profile.first_block_cache
+                else "public_dynamic"
+            ),
             "first_block_cache_threshold": _first_block_cache_threshold(raw),
             "text_rows": profile.text_rows,
             "text_rows_min": profile.min_text_rows,

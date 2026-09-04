@@ -259,6 +259,11 @@ def test_staged_build_uses_fresh_segment_children_resumes_and_sanitizes_bundle(
         "mode": "staged",
         "weight_streaming_budget_bytes": 32 << 30,
     }
+    assert config["denoiser_profile_count"] == 2
+    assert (
+        config["denoiser_profile_layout"]
+        == "five_second_reference_then_public_dynamic"
+    )
     assert config["checkpoint_revision"] == "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
     assert config["source_revision"] == SOURCE_REVISION
     assert len(config["builder_source_sha256"]) == 64
