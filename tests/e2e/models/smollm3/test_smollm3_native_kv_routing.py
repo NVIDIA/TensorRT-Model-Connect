@@ -758,3 +758,36 @@ def test_default_build_of_the_published_checkpoint_is_native():
         config, precision=precision, max_cache_length=cache_length
     )
     assert decision.eligible, decision.reason
+
+
+def _routing_loaded_as_production_does():
+    """Load build_routing.py the way the family loader does.
+
+    MODEL.toml points ``default_build_route`` at ``build_routing.py|
+    prefer_native_default``, and families/__init__.py loads that with
+    spec_from_file_location under a synthetic top-level name. The module
+    therefore has no package context at runtime, while the tests above import
+    it as part of the package, where a relative import would work. Load it
+    both ways so the difference cannot hide a failure again.
+    """
+    import importlib.util
+    import pathlib
+
+    import tensorrt_model_connect.families.smollm3 as package
+
+    path = pathlib.Path(package.__file__).parent / "build_routing.py"
+    spec = importlib.util.spec_from_file_location(
+        "_trtmc_family_smollm3_build_routing", path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_routing_works_without_package_context():
+    routing = _routing_loaded_as_production_does()
+    config = _published_checkpoint_config()
+
+    # prefer_native_default is the entry point MODEL.toml names.
+    assert routing.prefer_native_default(config) is True
+    assert routing.native_kv_architecture_capability(config).eligible

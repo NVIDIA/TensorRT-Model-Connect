@@ -201,11 +201,15 @@ def _validate_rope_layer_schedule(
         "no_rope_layer_interval"
     ) is None:
         return
-    # Imported here so this module keeps the import surface the other
-    # native-KV routing modules have (math and operator only).
-    from .config import resolve_rope_layer_schedule
-
     try:
+        # Absolute, not relative: MODEL.toml points default_build_route at
+        # this file, and families/__init__.py loads it by path under a
+        # synthetic top-level name, so it has no package context. The
+        # file-loaded debug_runner modules import the package the same way.
+        from tensorrt_model_connect.families.smollm3.config import (
+            resolve_rope_layer_schedule,
+        )
+
         schedule = resolve_rope_layer_schedule(config)
     except ValueError as exc:
         reasons.append(str(exc))
