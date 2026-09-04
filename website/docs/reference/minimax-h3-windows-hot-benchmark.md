@@ -111,26 +111,33 @@ different prompt or profile may produce a different cache-decision sequence.
 
 ## Current original-weight dense result
 
-The qualification candidate uses the exact source tree published by signed
-revision `6e5285d81e596d5fe7064fafd125e10475a2e512`. The run used an NVIDIA RTX
+The qualification candidate uses the exact runtime implementation published by
+signed revision `2d3b398115ed7cbfd5a293b0248da28575dfffeb`. The run used an NVIDIA RTX
 Spark N1X with a 63,424 MiB CUDA aperture, driver 616.67, CUDA 12.9.1, and
 TensorRT-RTX 1.6.1.
 
-| Request | Profile | Independent measured samples | Dense schedule | Output |
+| Request | Profile | Measured hot sample | Dense schedule | Output |
 | --- | --- | ---: | --- | --- |
-| 537 tokens, 120 nominal frames, 1344x768 | `0/2` | 542,101.711 ms (9:02.102); 546,701.314 ms (9:06.701) | 49 forwards, 6 full / 43 reused tails | 124 frames / 5.167 s, synchronized audio |
+| 537 tokens, 120 nominal frames, 1344x768 | `0/2` | 542,663.046 ms (9:02.663) | 49 forwards, 6 full / 43 reused tails | 124 frames / 5.167 s, synchronized audio |
 
-Both independent `1 + 1` runs passed the native finite-value validation for RGB
-and audio and remained below the 555-second acceptance ceiling. The written MP4
+The `1 + 1` run passed the native finite-value validation for RGB and audio and
+remained below the 555-second acceptance ceiling. The written MP4
 contains 1344x768 H.264 video at 24 fps and AAC stereo audio at
 32 kHz. The container reports a 5.166625-second video track and a 5.184-second
 audio track; the small difference is normal AAC framing. Representative frames
 were inspected and showed no checkerboard corruption or the severe accuracy
 failure seen in the discarded approximate-weight experiment.
 
-In the faster sample, the measured component totals were 481,797.980 ms for
-denoising, 58,021.071 ms for video VAE decode, and 2,199.365 ms for audio VAE
-decode. The measured request reused the text and AdaLN results from warmup.
+The decoded left and right channels had RMS levels of -25.935 and -26.478 dBFS,
+peaks of -10.824 and -10.839 dBFS, no clipped samples, and no non-finite values.
+The runtime decodes each official stereo latent through batch item zero of the
+same AudioVAE plan; the measured audio engine timing therefore reports two
+launches. This avoids the unstable second batch item observed on the qualified
+TensorRT-RTX 1.6.1 SM121 stack without changing weights or audio semantics.
+
+The measured component totals were 480,410.662 ms for denoising, 59,145.000 ms
+for video VAE decode, and 3,018.875 ms for the two AudioVAE launches. The
+measured request reused the text and AdaLN results from warmup.
 Raising the retained-tail
 weight budget above 24 GiB is not part of this contract: on this 63,424 MiB
 CUDA aperture it increased memory pressure and did not improve the measured
@@ -162,6 +169,12 @@ function Assert-MiniMaxH3DenseHotPath(
     $Validations = @(Select-String -LiteralPath $LogPath -Pattern `
         '^\[trtmc\.video_validation\].*status=passed$').Count
     if ($Validations -ne 2) { throw "Expected two successful validations; got $Validations" }
+
+    $AudioDecodes = @(Select-String -LiteralPath $LogPath -Pattern `
+        '^\[trtmc\.engine_timing\].*label="audio_vae_decoder_plan".*launches=2$').Count
+    if ($AudioDecodes -ne 2) {
+        throw "Expected two-channel AudioVAE decoding in both requests; got $AudioDecodes"
+    }
 
     $Measured = @(Select-String -LiteralPath $LogPath -Pattern `
         '^\[minimax-h3\.perf\].*text_cache_hit=1 adaln_cache_hit=1.*attention_mode=dense.*transformer_forwards=49.*full_denoiser_steps=6 skipped_denoiser_steps=43$')
@@ -223,7 +236,7 @@ A five-second result is accepted only when:
   budget, and the calibrated `0.30` threshold;
 - the measured sample is finite, positive, and no greater than 555,000 ms;
 - the log reports dense attention, 49 forwards, 6 full and 43 reused tails,
-  and successful RGB/audio validation;
+  successful RGB/audio validation, and two AudioVAE launches per request;
 - the output contains 124 frames at 1344x768 and 24 fps, plus AAC stereo audio
   at 32 kHz; and
 - visual and audible playback are separately inspected for corruption.

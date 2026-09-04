@@ -308,13 +308,15 @@ def test_minimax_h3_exposes_video_not_image_generation() -> None:
     assert "generate_image(" not in pipeline
 
 
-def test_windows_h3_hot_benchmark_qualifies_retained_fast_h3_engines() -> None:
+def test_windows_h3_hot_benchmark_qualifies_retained_dense_engines() -> None:
     benchmark = (
         ROOT / "website" / "docs" / "reference" / "minimax-h3-windows-hot-benchmark.md"
     ).read_text(encoding="utf-8")
     assert benchmark.count("--runtime-cache $RuntimeCache") == 2
     assert benchmark.count("--set minimax_h3.retain_engines=true") >= 2
-    assert "Expected 53 warmup cache fills and 106 measured hits" in benchmark
+    assert "Expected 5 warmup fills and 5 measured hits" in benchmark
+    assert "audio_vae_decoder_plan" in benchmark
+    assert "launches=2" in benchmark
     assert "denoiser_resident_hit=0" in benchmark
     assert "execution contexts" in benchmark
 
@@ -323,7 +325,7 @@ def test_windows_h3_hot_benchmark_qualifies_retained_fast_h3_engines() -> None:
     assert "retain_hot_engine(name, hot)" in plugin
 
     # Engine retention must not broaden into simultaneous stage-context
-    # residency; the 51 denoiser contexts are still torn down before VAE load.
+    # residency; the denoiser contexts are still torn down before VAE load.
     pipeline = (H3_RUNTIME / "pipeline.cpp").read_text(encoding="utf-8")
     prepare_vae = pipeline[pipeline.index("ResidentState::prepare_vae") :]
     prepare_vae = prepare_vae[: prepare_vae.index("ResidentState::decode_first_block_cache_vae")]

@@ -108,6 +108,13 @@ visual plan files, original weights, scheduler, and dense attention graph; only
 the TensorRT optimization-profile index changes. The audio decoder is an
 additional T2VA plan and is not part of the six-plan visual count.
 
+The released AudioVAE treats the two stereo latents as independent inputs to
+one shared mono decoder. The SM121 runtime invokes that same TensorRT-RTX plan
+once per real channel, duplicates the selected latent only to satisfy the
+plan's fixed batch-two profile, and retains batch item zero from each launch.
+This preserves the original left and right latents without alternate weights
+or a non-TensorRT audio path.
+
 ## Build the runtime
 
 Start in an x64 Visual Studio 2022 developer PowerShell. Supply compatible
