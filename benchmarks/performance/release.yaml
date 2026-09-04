@@ -1138,6 +1138,10 @@ additional_profiles:
     inherit: qwen.generate
   - model: qwen3-moe-tiny-random
     inherit: qwen_moe.generate
+  - model: resnet18-a1-in1k
+    inherit: timm_resnet.classify
+  - model: resnext50-32x4d-a1h-in1k
+    inherit: timm_resnet.classify
   - model: riva-translate-4b
     inherit: mistral.generate
   - model: roberta-base
