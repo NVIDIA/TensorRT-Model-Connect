@@ -45,6 +45,12 @@ __nv_bfloat16 to_bf16(float value) {
     return __float2bfloat16_rn(value);
 }
 
+float gate_merge_reference(__nv_bfloat16 sparse, __nv_bfloat16 gate, float compressed) {
+    const auto compressed_bf16 = to_bf16(compressed);
+    const auto product_bf16 = to_bf16(to_float(gate) * to_float(compressed_bf16));
+    return to_float(to_bf16(to_float(sparse) + to_float(product_bf16)));
+}
+
 template <typename T>
 class DeviceBuffer {
   public:
@@ -199,6 +205,44 @@ void test_tile_pool_and_untile(cudaStream_t stream) {
             require(to_float(tiled[tiled_offset(0, tile, row, 0)]) == 0.0F,
                     "tile padding must be exact BF16 zero");
         }
+    }
+}
+
+void test_gate_merge_bfloat16_boundaries(cudaStream_t stream) {
+    constexpr int32_t heads = 1;
+    constexpr int32_t total_tiles = 1;
+    const std::size_t count = static_cast<std::size_t>(kTile) * kDim;
+    std::vector<__nv_bfloat16> sparse(count);
+    std::vector<__nv_bfloat16> gate(count);
+    std::vector<float> compressed(kDim);
+    for (int32_t dimension = 0; dimension < kDim; ++dimension) {
+        const float x = static_cast<float>(dimension + 1);
+        compressed[static_cast<std::size_t>(dimension)] =
+            237.0F * std::sin(x * 0.173F) + 0.03125F * std::cos(x * 0.071F);
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        const float x = static_cast<float>(index + 1);
+        sparse[index] = to_bf16(219.0F * std::sin(x * 0.017F));
+        gate[index] = to_bf16(1.18F * std::cos(x * 0.011F));
+    }
+
+    DeviceBuffer<__nv_bfloat16> device_sparse(count);
+    DeviceBuffer<__nv_bfloat16> device_gate(count);
+    DeviceBuffer<float> device_compressed(compressed.size());
+    DeviceBuffer<__nv_bfloat16> device_output(count);
+    upload(device_sparse, sparse, stream);
+    upload(device_gate, gate, stream);
+    upload(device_compressed, compressed, stream);
+    trtmc::minimax_h3::vsa::merge_gate_async(
+        device_sparse.get(), device_gate.get(), device_compressed.get(), device_output.get(),
+        heads, total_tiles, stream);
+    const auto output = download(device_output, stream);
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto dimension = index % static_cast<std::size_t>(kDim);
+        const float expected =
+            gate_merge_reference(sparse[index], gate[index], compressed[dimension]);
+        require(to_float(output[index]) == expected,
+                "gate merge omitted a production BF16 precision boundary");
     }
 }
 
@@ -569,13 +613,11 @@ void test_complete_sparse_and_gate_path(cudaStream_t stream) {
                         const std::size_t compressed_index =
                             (static_cast<std::size_t>(head) * kTotalTiles + tile) * kDim +
                             dimension;
-                        expected =
-                            to_float(expected_sparse[index]) +
-                            to_float(fixture.gate[index]) * expected_compressed[compressed_index];
-                        expected = to_float(to_bf16(expected));
+                        expected = gate_merge_reference(sparse[index], fixture.gate[index],
+                                                        compressed[compressed_index]);
                     }
-                    require(std::abs(to_float(output[index]) - expected) <= 0.014F,
-                            "gate merge differs from sparse + gate * compressed");
+                    require(to_float(output[index]) == expected,
+                            "gate merge differs from production BF16 precision semantics");
                     if (row >= fixture.valid_sizes[static_cast<std::size_t>(tile)])
                         require(to_float(output[index]) == 0.0F,
                                 "padded output row must stay exact zero");
@@ -619,6 +661,7 @@ int main() {
         test_bfloat16_all_finite(stream);
         test_float_all_finite(stream);
         test_tile_pool_and_untile(stream);
+        test_gate_merge_bfloat16_boundaries(stream);
         test_complete_sparse_and_gate_path(stream);
         test_worst_profile_selector_capacity(stream);
         check_cuda(cudaStreamDestroy(stream), "cudaStreamDestroy");

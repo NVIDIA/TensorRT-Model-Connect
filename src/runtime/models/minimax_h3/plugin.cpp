@@ -188,9 +188,17 @@ void validate_plan_section_attestations(const std::string& bundle_path, const Se
     }
 }
 
+void validate_plan_section_bounds(const std::string& bundle_path, const SectionMap& sections) {
+    std::vector<BundleSectionInfo> required;
+    required.reserve(sections.size());
+    for (const auto& [_, section] : sections)
+        required.push_back(section);
+    ValidateBundleSectionBounds(bundle_path, required);
+}
+
 struct CacheConfig {
     bool enabled{false};
-    float threshold{0.025F};
+    float threshold{0.08F};
 };
 
 struct HotEngineConfig {
@@ -550,7 +558,7 @@ MiniMaxH3Ref2VAConfig load_ref2va_config(const PipelineContext& ctx) {
                     "workflow declaration");
             return {};
         }
-        if (root.value("ref2va_schema_version", 0) != 1 || !root.value("ref2va_supported", false) ||
+        if (root.value("ref2va_schema_version", 0) != 2 || !root.value("ref2va_supported", false) ||
             !public_workflows_are_exact(root, {"t2va", "fl2va", "ref2va"}) ||
             root.value("engine_backend", std::string{}) != "trt_rtx" ||
             root.value("ref2va_context_ir_supported", true) ||
@@ -635,7 +643,7 @@ MiniMaxH3Ref2VAConfig load_ref2va_config(const PipelineContext& ctx) {
             limits.value("max_seconds_each_video_or_audio", 0.0) == 15.0 &&
             limits.value("max_total_video_seconds", 0.0) == 15.0 &&
             limits.value("max_total_explicit_audio_seconds", 0.0) == 15.0 &&
-            limits.value("audio_can_be_sole_input", false) &&
+            limits.value("requires_image_or_video", false) &&
             limits.value("video_soundtrack_stays_attached", false) &&
             int_array_equals(capacity, "video_rows", {18870, 44592, 364608}) &&
             int_array_equals(capacity, "audio_rows", {414, 414, 3558}) &&
@@ -933,11 +941,12 @@ bool retain_hot_engine(std::string_view name, const HotEngineConfig& hot) {
 }
 
 ModuleCreateOptions module_options(cudaStream_t stream, const std::string& runtime_cache,
-                                   bool cuda_graphs) {
+                                   bool cuda_graphs, bool verify_plan_sha256) {
     ModuleCreateOptions options;
     options.stream = stream;
     options.runtime_cache_path = runtime_cache.c_str();
     options.cuda_graphs = cuda_graphs;
+    options.verify_plan_sha256 = verify_plan_sha256;
     return options;
 }
 
@@ -999,14 +1008,15 @@ std::unique_ptr<ITrtModule> load_module(const std::string& name, cudaStream_t st
                                         const std::string& runtime_cache, IBackend* backend,
                                         bool cuda_graphs, const RuntimeMemoryConfig& memory,
                                         const PlanSha256Map& plan_sha256,
-                                        const HotEngineConfig& hot) {
+                                        const HotEngineConfig& hot, bool verify_plan_sha256) {
     const auto& section = require_plan_section(sections, name);
-    const auto options = module_options(stream, runtime_cache, cuda_graphs);
+    const auto options = module_options(stream, runtime_cache, cuda_graphs, verify_plan_sha256);
     auto* prebound_backend = dynamic_cast<IPreboundBackend*>(backend);
     if (memory.staged) {
         auto* file_backed_backend = dynamic_cast<IFileBackedBackend*>(backend);
-        const bool serial_execution_context = minimax_h3::uses_serial_execution_context(
-            name, memory.staged && sections.count("denoiser_entry_plan") != 0);
+        const bool segmented_bundle = sections.count("denoiser_entry_plan") != 0;
+        const bool serial_execution_context =
+            minimax_h3::uses_serial_execution_context(name, segmented_bundle);
         return load_staged_module(name, section, bundle_path, plan_sha256, file_backed_backend,
                                   options, external_bindings, memory, hot,
                                   serial_execution_context);
@@ -1075,25 +1085,27 @@ MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap 
     const std::string runtime_cache = ctx.runtime_cache_path;
     IBackend* const backend = ctx.backend;
     const bool cuda_graphs = ctx.cuda_graphs;
+    const bool verify_plan_sha256 = ctx.validate_bundle_payloads;
     PlanSha256Map plan_sha256;
-    // Segmented VSA plans are always attested, even if a forged config tries
-    // to suppress the staged-runtime flag. Other staged H3 layouts retain the
-    // same fail-closed contract while legacy non-staged dense bundles remain
-    // loadable.
+    // Segmented plans are always indexed, even if a forged config tries to
+    // suppress the staged-runtime flag. Full digests can be deferred until
+    // TensorRT opens each section so large video bundles start promptly.
     if (memory.staged || sections.count("denoiser_entry_plan") != 0) {
         plan_sha256 = load_plan_sha256(ctx.config_json, sections);
-        validate_plan_section_attestations(ctx.bundle_path, sections, plan_sha256);
+        validate_plan_section_bounds(ctx.bundle_path, sections);
+        if (ctx.validate_bundle_payloads)
+            validate_plan_section_attestations(ctx.bundle_path, sections, plan_sha256);
     }
-    return
-        [sections = std::move(sections), bundle_path, runtime_cache, backend, cuda_graphs, memory,
-         hot, plan_sha256 = std::move(plan_sha256), cache_lease = std::move(cache_lease)](
+    return [sections = std::move(sections), bundle_path, runtime_cache, backend, cuda_graphs,
+            memory, hot, verify_plan_sha256, plan_sha256 = std::move(plan_sha256),
+            cache_lease = std::move(cache_lease)](
             const std::string& name, cudaStream_t stream,
             const std::vector<ModuleExternalBinding>& external_bindings) {
-            if (cache_lease)
-                cache_lease->require_active();
-            return load_module(name, stream, external_bindings, sections, bundle_path,
-                               runtime_cache, backend, cuda_graphs, memory, plan_sha256, hot);
-        };
+        if (cache_lease)
+            cache_lease->require_active();
+        return load_module(name, stream, external_bindings, sections, bundle_path, runtime_cache,
+                           backend, cuda_graphs, memory, plan_sha256, hot, verify_plan_sha256);
+    };
 }
 
 } // namespace

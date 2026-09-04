@@ -698,11 +698,15 @@ def _native_builder(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     op.configure_builder(config, weight_streaming=weight_streaming)
-    op.configure_workspace(
-        config,
-        workspace_bytes,
-        default_bytes=DENOISER_DEFAULT_WORKSPACE_BYTES,
-    )
+    # Leave TensorRT-RTX at its device-derived maximum unless the caller
+    # explicitly asks for a smaller tactic workspace. Dense H3 dynamic builds
+    # require the default ceiling on 128 GiB unified-memory systems.
+    if workspace_bytes is not None:
+        op.configure_workspace(
+            config,
+            workspace_bytes,
+            default_bytes=DENOISER_DEFAULT_WORKSPACE_BYTES,
+        )
     # Hugging Face keeps TF32 disabled for the FP32 input/output projections.
     config.clear_flag(trt.BuilderFlag.TF32)
     return logger, builder, network, config

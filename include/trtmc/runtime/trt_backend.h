@@ -29,6 +29,10 @@ struct ModuleCreateOptions {
     int32_t optimization_profile{0};         // profile selected for this execution context
     void* distributed_communicator{nullptr}; // TensorRT 11.0+ NCCL communicator, optional
     std::shared_ptr<void> distributed_owner; // keeps communicator alive
+    // File-backed RTX only: false avoids a separate content-attestation pass.
+    // The declared digest is syntax checked and combined with stable file and
+    // section identity for retained-engine caching; it is not recomputed.
+    bool verify_plan_sha256{true};
 };
 
 // Two modules created from a single engine, one per optimization profile.

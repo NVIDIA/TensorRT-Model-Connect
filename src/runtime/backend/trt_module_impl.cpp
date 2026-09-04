@@ -306,7 +306,8 @@ void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& e
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = new_shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    if (!ctx_->setInputShape(name.c_str(), dims))
+        throw std::runtime_error("TensorRT rejected dynamic input shape for '" + name + "'");
     entry.shape = new_shape;
 }
 
@@ -347,7 +348,9 @@ void TrtModuleImpl::set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int3
             continue;
         if (dims_are_dynamic(engine->getTensorShape(name.c_str()))) {
             auto dims = engine->getProfileShape(name.c_str(), profile_idx_, selector);
-            ctx_->setInputShape(name.c_str(), dims);
+            if (!ctx_->setInputShape(name.c_str(), dims))
+                throw std::runtime_error("TensorRT rejected profile input shape for '" + name +
+                                         "'");
         }
     }
 }
@@ -402,8 +405,9 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     if (entry.d_ptr)
         bind_tensor_address(name, entry);
 
-    if (is_dynamic)
-        ctx_->setInputShape(name.c_str(), init_dims);
+    if (is_dynamic && !ctx_->setInputShape(name.c_str(), init_dims))
+        throw std::runtime_error("TensorRT rejected initial dynamic input shape for '" + name +
+                                 "'");
 
     buffers_[name] = std::move(entry);
 }

@@ -42,6 +42,7 @@ from .config import (
     RTX_WEIGHT_STREAMING_BUDGET_BYTES,
     SOL_ENGINE_1344X768_124_TO_345F,
     TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
+    TRT_DEFAULT_WORKSPACE_POLICY,
     VIDEO_NUM_FRAMES_MAX,
     VIDEO_NUM_FRAMES_MIN,
     VIDEO_NUM_FRAMES_OPT,
@@ -62,13 +63,16 @@ from .ref2va_bundle_contract import REF2VA_PLAN_SECTIONS as _REF2VA_COMPONENTS
 
 _MODULE = "tensorrt_model_connect.families.minimax_h3.staged_build"
 _INVALID_RECEIPT_NAME = "build_receipt.invalid.json"
-_COMPONENTS = (
-    ("text_encoder", "text_encoder.plan", "text_encoder_plan"),
-    ("vision_encoder", "vision_encoder.plan", "vision_encoder_plan"),
+_MONOLITHIC_FBC_COMPONENTS = (
     ("adaln_precompute", "adaln_precompute.plan", "adaln_precompute_plan"),
     ("denoiser_head", "denoiser_head.plan", "denoiser_head_plan"),
     ("denoiser_tail", "denoiser_tail.plan", "denoiser_tail_plan"),
     ("denoiser_finish", "denoiser_finish.plan", "denoiser_finish_plan"),
+)
+_COMPONENTS = (
+    ("text_encoder", "text_encoder.plan", "text_encoder_plan"),
+    ("vision_encoder", "vision_encoder.plan", "vision_encoder_plan"),
+    *_MONOLITHIC_FBC_COMPONENTS,
     (
         "fl2va_keyframe_vae_encoder",
         "fl2va_keyframe_vae_encoder.plan",
@@ -123,11 +127,17 @@ def _component_workspace_bytes(component: str, *, ref2va: bool) -> int:
 
 def _workspace_limits_for_components(
     components: Sequence[tuple[str, str, str]], *, ref2va: bool
-) -> dict[str, int]:
+) -> dict[str, int | str]:
     """Return the exact per-plan workspace profile used by staged children."""
 
+    default_max_components = {name for name, _filename, _section in _MONOLITHIC_FBC_COMPONENTS}
+    monolithic_dense = all(item in components for item in _MONOLITHIC_FBC_COMPONENTS)
     limits = {
-        filename: _component_workspace_bytes(component, ref2va=ref2va)
+        filename: (
+            TRT_DEFAULT_WORKSPACE_POLICY
+            if monolithic_dense and component in default_max_components
+            else _component_workspace_bytes(component, ref2va=ref2va)
+        )
         for component, filename, _section in components
     }
     if len(limits) != len(components):
@@ -188,7 +198,7 @@ def _build_identity(
     trt_version: str,
     trt_abi: str,
     source_revision: str,
-    workspace_limits: dict[str, int],
+    workspace_limits: dict[str, int | str],
     adapter_identity=None,
     transformer_ref_identity=None,
 ) -> dict[str, object]:
@@ -538,7 +548,7 @@ def _sanitized_config(
             if profile.first_block_cache
             else "monolithic"
         ),
-        "first_block_cache_threshold": 0.025,
+        "first_block_cache_threshold": 0.08,
         "text_rows": profile.text_rows,
         "text_rows_min": profile.min_text_rows,
         "text_rows_opt": profile.opt_text_rows,
@@ -654,6 +664,9 @@ def _sanitized_config(
                 "attention_mode": "dense",
             }
         )
+        monolithic_dense = all(item in components for item in _MONOLITHIC_FBC_COMPONENTS)
+        if profile.first_block_cache and not monolithic_dense:
+            raise ValueError("MiniMax-H3 staged bundle has an incomplete dense FBC layout")
     if transformer_ref_identity is not None:
         from .ref2va_bundle_contract import ref2va_bundle_metadata
 
@@ -941,11 +954,22 @@ def _build_component(
             )
         return state
 
+    dense_default_workspace_components = {
+        component_name
+        for component_name, _filename, _section in (
+            *_MONOLITHIC_FBC_COMPONENTS,
+        )
+    }
     common = {
         "verbose": verbose,
         "consume_weights": True,
-        "workspace_bytes": _component_workspace_bytes(
-            component, ref2va=transformer_ref_path is not None
+        "workspace_bytes": (
+            None
+            if profile.first_block_cache
+            and component in dense_default_workspace_components
+            else _component_workspace_bytes(
+                component, ref2va=transformer_ref_path is not None
+            )
         ),
         "weight_streaming": True,
         "output_path": output,
@@ -1016,11 +1040,11 @@ def _build_component(
             "denoiser_finish": (build_dit_finish_engine, finish_checkpoint_keys),
             "denoiser_entry": (build_dit_vsa_entry_engine, vsa_entry_checkpoint_keys),
         }
-        transition_index = None
+        indexed_component = None
         if component.startswith("denoiser_transition_"):
-            transition_index = int(component.rsplit("_", 1)[1])
+            indexed_component = int(component.rsplit("_", 1)[1])
             builder = build_dit_vsa_transition_engine
-            keys = vsa_transition_checkpoint_keys(transition_index, profile)
+            keys = vsa_transition_checkpoint_keys(indexed_component, profile)
         elif component == "denoiser_finish" and adapter_path is not None:
             builder = build_dit_vsa_finish_engine
             keys = vsa_finish_checkpoint_keys(profile)
@@ -1033,10 +1057,10 @@ def _build_component(
         merge_adapter(state)
         weights = numpy_state(state)
         del state
-        if transition_index is None:
+        if indexed_component is None:
             result = builder(weights, profile, **common)
         else:
-            result = builder(weights, profile, transition_index, **common)
+            result = builder(weights, profile, indexed_component, **common)
     elif component == "fl2va_keyframe_vae_encoder":
         from .fl2va_vae_encoder_builder import (
             build_keyframe_vae_encoder_engine,
@@ -1148,7 +1172,14 @@ def _main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--component",
         choices=sorted(
-            {item[0] for item in (*_COMPONENTS, *_FASTH3_COMPONENTS, *_REF2VA_COMPONENTS)}
+            {
+                item[0]
+                for item in (
+                    *_COMPONENTS,
+                    *_FASTH3_COMPONENTS,
+                    *_REF2VA_COMPONENTS,
+                )
+            }
         ),
     )
     parser.add_argument("--model-dir")

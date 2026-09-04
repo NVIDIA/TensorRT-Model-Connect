@@ -175,7 +175,7 @@ def test_staged_ref2va_is_opt_in_strict_and_adds_all_sections(
     assert config["ref2va_scheduler"]["video_shift"] == 12.0
     assert config["ref2va_scheduler"]["audio_shift"] == 3.0
     assert config["ref2va_scheduler"]["guidance_distilled"] is True
-    assert config["ref2va_limits"]["audio_can_be_sole_input"] is True
+    assert config["ref2va_limits"]["requires_image_or_video"] is True
     assert config["conditioning"]["text_sequence_profile"] == [1, 1_144, 262_144]
     assert config["conditioning"]["vision_patch_profile"] == [2_040, 4_032, 65_536]
     assert set(config["ref2va_plan_sections"].values()).issubset(
@@ -281,7 +281,7 @@ def test_fast_h3_ref2va_build_is_exact_61_plan_resumable_and_path_free(
     assert config["public_workflows"] == ["t2va", "fl2va", "ref2va"]
     assert config["transformer_forwards"] == 4
     assert config["ref2va_scheduler"]["transformer_forwards"] == 49
-    assert config["ref2va_limits"]["audio_can_be_sole_input"] is True
+    assert config["ref2va_limits"]["requires_image_or_video"] is True
     assert config["workspace_limit_bytes"] == {
         filename: staged_build._component_workspace_bytes(component, ref2va=True)
         for component, filename, _section in expected

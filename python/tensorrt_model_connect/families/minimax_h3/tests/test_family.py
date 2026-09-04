@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
+import importlib
+import json
 from pathlib import Path
+import sys
+from types import ModuleType
 from types import SimpleNamespace
 import tomllib
 
@@ -39,6 +43,9 @@ from tensorrt_model_connect.families.minimax_h3.fl2va_contract import (
     split_tile_axis,
     video_latent_frames,
 )
+
+
+plugin_module = importlib.import_module("tensorrt_model_connect.families.minimax_h3.plugin")
 
 
 FAMILY_ROOT = Path(__file__).resolve().parents[1]
@@ -290,7 +297,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
     assert result["workspace_limit_bytes"] == DEFAULT_WORKSPACE_LIMIT_BYTES
     assert result["first_block_cache"] is False
     assert result["denoiser_cache_mode"] == "monolithic"
-    assert result["first_block_cache_threshold"] == 0.025
+    assert result["first_block_cache_threshold"] == 0.08
     assert (
         result["vae_tile_batch_min"],
         result["vae_tile_batch_opt"],
@@ -466,10 +473,16 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
     assert config["first_block_cache"] is True
     assert config["denoiser_cache_mode"] == "first_block"
     assert config["first_block_cache_threshold"] == 0.08
-    assert config["bundle_loading"]["lazy_sections"][3:6] == [
-        "denoiser_head_plan",
-        "denoiser_tail_plan",
-        "denoiser_finish_plan",
+    assert config["runtime_memory"] == {
+        "mode": "staged",
+        "weight_streaming_budget_bytes": 32 << 30,
+    }
+    assert "adaln_precompute_mode" not in config
+    assert "adaln_segmented" not in config
+    assert "first_block_cache_abi" not in config
+    assert "dense_tail_segment_sections" not in config
+    assert config["bundle_loading"]["lazy_sections"] == [
+        name for name in sections if name != "tokenizer.json"
     ]
     assert set(config["workspace_limit_bytes"]) == {
         "text_encoder.plan",
@@ -480,6 +493,10 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
         "vae_tile_decoder.plan",
         "audio_vae_decoder.plan",
     }
+    default_config = MiniMaxH3Plugin().diffusion_bundle_config(
+        SimpleNamespace(raw={"first_block_cache": True}), components=components
+    )
+    assert default_config["first_block_cache_threshold"] == 0.08
     with pytest.raises(ValueError, match="finite and positive"):
         MiniMaxH3Plugin().diffusion_bundle_config(
             SimpleNamespace(
@@ -501,6 +518,144 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
                 "provenance": malformed_provenance,
             },
         )
+
+
+def test_in_memory_first_block_cache_build_uses_monolithic_native_plans(
+    monkeypatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "model"
+    for name in ("transformer", "text_encoder", "vae", "audio_vae", "tokenizer"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    (root / "audio_vae" / "config.json").write_text(json.dumps(AUDIO_VAE_CONFIG))
+    (root / "tokenizer" / "tokenizer.json").write_bytes(b"{}")
+
+    builder_calls = []
+    partition_groups = []
+
+    def builder(name):
+        def build(_weights, *args, **kwargs):
+            index = args[1] if len(args) > 1 else None
+            builder_calls.append(
+                (
+                    name,
+                    index,
+                    kwargs.get("workspace_bytes"),
+                    kwargs.get("weight_streaming"),
+                )
+            )
+            return f"{name}:{index}".encode()
+
+        return build
+
+    def module(name, **attributes):
+        value = ModuleType(name)
+        for attribute, item in attributes.items():
+            setattr(value, attribute, item)
+        monkeypatch.setitem(sys.modules, name, value)
+
+    family = "tensorrt_model_connect.families.minimax_h3"
+    module(
+        f"{family}.adaln_builder",
+        build_adaln_precompute_engine=builder("adaln_precompute"),
+        checkpoint_keys=lambda _profile: ("adaln.monolithic",),
+    )
+    module(
+        f"{family}.dit_builder",
+        build_dit_engine=builder("denoiser"),
+        build_dit_finish_engine=builder("denoiser_finish"),
+        build_dit_head_engine=builder("denoiser_head"),
+        build_dit_tail_engine=builder("denoiser_tail"),
+        build_dit_vsa_entry_engine=builder("denoiser_entry"),
+        build_dit_vsa_finish_engine=builder("denoiser_vsa_finish"),
+        build_dit_vsa_transition_engine=builder("denoiser_transition"),
+        checkpoint_keys=lambda _profile, **_kwargs: ("denoiser.monolithic",),
+        finish_checkpoint_keys=lambda _profile: ("denoiser.finish",),
+        head_checkpoint_keys=lambda _profile, **_kwargs: ("denoiser.head",),
+        tail_checkpoint_keys=lambda _profile, **_kwargs: ("denoiser.tail",),
+        vsa_segment_checkpoint_partitions=lambda _profile: {},
+    )
+    module(
+        f"{family}.multimodal_text_encoder_builder",
+        build_multimodal_text_encoder_engine=builder("text_encoder"),
+        checkpoint_keys=lambda: ("text",),
+    )
+    module(
+        f"{family}.multimodal_vision_builder",
+        build_multimodal_vision_encoder_engine=builder("vision_encoder"),
+        checkpoint_keys=lambda: ("vision",),
+    )
+    module(
+        f"{family}.fl2va_vae_encoder_builder",
+        build_keyframe_vae_encoder_engine=builder("keyframe_vae_encoder"),
+        checkpoint_keys=lambda: ("keyframe_vae",),
+    )
+    module(
+        f"{family}.vae_builder",
+        build_vae_tile_decoder_engine=builder("vae_decoder"),
+        checkpoint_keys=lambda: ("vae",),
+    )
+    module(
+        f"{family}.audio_vae_builder",
+        build_audio_vae_decoder_engine=builder("audio_vae_decoder"),
+        checkpoint_keys=lambda _profile: ("audio_vae",),
+        decoder_config_from_checkpoint=lambda *_args, **_kwargs: AUDIO_DECODER_PROFILE,
+    )
+
+    monkeypatch.setattr(plugin_module, "_build_source_revision", lambda: "a" * 40)
+    monkeypatch.setattr(
+        plugin_module,
+        "checkpoint_snapshot_record",
+        lambda _root: {"inventory_sha256": "b" * 64},
+    )
+    monkeypatch.setattr(plugin_module, "builder_source_sha256", lambda: "c" * 64)
+    monkeypatch.setattr(
+        plugin_module,
+        "validate_component_key_partition",
+        lambda _root, groups: partition_groups.extend(groups),
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "load_selected_component_state_dict",
+        lambda _root, keys: {key: object() for key in keys},
+    )
+    monkeypatch.setattr(plugin_module, "numpy_state", dict)
+
+    components = MiniMaxH3Plugin().build_components(
+        str(root),
+        SimpleNamespace(raw={"first_block_cache": True}),
+        {
+            "_model_dir": str(root),
+            "_transformer_dir": str(root / "transformer"),
+            "_text_encoder_dir": str(root / "text_encoder"),
+            "_vae_dir": str(root / "vae"),
+            "_audio_vae_dir": str(root / "audio_vae"),
+            "_tokenizer_dir": str(root / "tokenizer"),
+        },
+    )
+
+    assert len(partition_groups) == 4
+    assert len(set().union(*(set(group) for group in partition_groups))) == 4
+    assert {name for name, _index, _workspace, _streaming in builder_calls} >= {
+        "adaln_precompute",
+        "denoiser_head",
+        "denoiser_tail",
+        "denoiser_finish",
+    }
+    dense_calls = [
+        call
+        for call in builder_calls
+        if call[0].startswith("adaln_") or call[0].startswith("denoiser_")
+    ]
+    assert len(dense_calls) == 4
+    assert all(
+        workspace is None and streaming is True
+        for _name, _index, workspace, streaming in dense_calls
+    )
+    assert components["adaln_precompute"] == b"adaln_precompute:None"
+    assert components["denoiser_tail"] == b"denoiser_tail:None"
+    assert set(components["provenance"]["plan_sha256"]) == set(
+        default_workspace_limit_bytes(first_block_cache=True)
+    )
 
 
 def test_production_graph_is_native_trt_only() -> None:

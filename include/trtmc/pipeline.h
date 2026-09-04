@@ -810,6 +810,11 @@ struct LoadOptions {
     std::vector<std::string> set_tokens;                // --set ns.field=value (repeatable)
     std::vector<std::string> backend_search_paths;      // Extra directories for backend DSOs
     std::vector<std::string> model_plugin_search_paths; // Extra dirs for libtrtmc_model_*.so
+    // Preserve the historical fail-fast behavior by default. Latency-sensitive
+    // callers may disable plan-content hashing. That fast path still validates
+    // section bounds and keys retained engines by stable file and section identity,
+    // but does not attest payload contents against the declared digest.
+    bool validate_bundle_payloads{true};
 };
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python = "",

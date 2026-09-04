@@ -123,7 +123,7 @@ def test_external_packer_adds_ref2va_only_with_strict_checkpoint_and_four_plans(
         "guidance_scale": 1.0,
         "guidance_distilled": True,
     }
-    assert captured["ref2va_limits"]["audio_can_be_sole_input"] is True
+    assert captured["ref2va_limits"]["requires_image_or_video"] is True
     assert captured["conditioning"]["vision_patch_profile"] == [2_040, 4_032, 65_536]
     assert set(pack_native_bundle.REF2VA_PLAN_SECTIONS).issubset(
         captured["bundle_loading"]["lazy_sections"]

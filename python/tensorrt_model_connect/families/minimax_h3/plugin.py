@@ -36,6 +36,7 @@ from .config import (
     FASTH3_TRANSFORMER_FORWARDS,
     FASTH3_VSA_MAX_VIDEO_TILES,
     FASTH3_VSA_TILE_SIZE,
+    RTX_WEIGHT_STREAMING_BUDGET_BYTES,
     SOL_ENGINE_1344X768_124_TO_345F,
     VIDEO_NUM_FRAMES_MAX,
     VIDEO_NUM_FRAMES_MIN,
@@ -216,8 +217,8 @@ def _default_canvas_size(raw: dict) -> tuple[int, int]:
     return height, width
 
 
-def _first_block_cache_threshold(raw: dict) -> float:
-    value = raw.get("first_block_cache_threshold", 0.025)
+def _first_block_cache_threshold(raw: dict, *, default: float = 0.08) -> float:
+    value = raw.get("first_block_cache_threshold", default)
     if isinstance(value, bool):
         raise ValueError("MiniMax-H3 first_block_cache_threshold must be finite and positive")
     try:
@@ -520,6 +521,15 @@ class MiniMaxH3Plugin:
         )
 
         if profile.first_block_cache:
+            adaln_specs = (
+                (
+                    "adaln_precompute",
+                    "adaln_precompute.plan",
+                    build_adaln_precompute_engine,
+                    adaln_checkpoint_keys(profile),
+                    None,
+                ),
+            )
             denoiser_specs = (
                 (
                     "denoiser_head",
@@ -544,7 +554,7 @@ class MiniMaxH3Plugin:
                 ),
             )
             checkpoint_groups = (
-                adaln_checkpoint_keys(profile),
+                *(spec[3] for spec in adaln_specs),
                 *(_base_checkpoint_keys(spec[3]) for spec in denoiser_specs),
             )
             adapter_partitions = {
@@ -554,6 +564,15 @@ class MiniMaxH3Plugin:
                 "denoiser_finish": finish_checkpoint_keys(profile),
             }
         elif adapter_path is None:
+            adaln_specs = (
+                (
+                    "adaln_precompute",
+                    "adaln_precompute.plan",
+                    build_adaln_precompute_engine,
+                    adaln_checkpoint_keys(profile),
+                    None,
+                ),
+            )
             denoiser_specs = (
                 (
                     "denoiser",
@@ -564,14 +583,23 @@ class MiniMaxH3Plugin:
                 ),
             )
             checkpoint_groups = (
-                adaln_checkpoint_keys(profile),
+                *(spec[3] for spec in adaln_specs),
                 dit_checkpoint_keys(profile),
             )
             adapter_partitions = {
-                "adaln_precompute": adaln_checkpoint_keys(profile),
+                **{spec[0]: spec[3] for spec in adaln_specs},
                 "denoiser": dit_checkpoint_keys(profile, include_vsa_gates=True),
             }
         else:
+            adaln_specs = (
+                (
+                    "adaln_precompute",
+                    "adaln_precompute.plan",
+                    build_adaln_precompute_engine,
+                    adaln_checkpoint_keys(profile),
+                    None,
+                ),
+            )
             segmented = vsa_segment_checkpoint_partitions(profile)
             denoiser_specs = (
                 (
@@ -600,11 +628,11 @@ class MiniMaxH3Plugin:
                 ),
             )
             checkpoint_groups = (
-                adaln_checkpoint_keys(profile),
+                *(spec[3] for spec in adaln_specs),
                 *(_base_checkpoint_keys(spec[3]) for spec in denoiser_specs),
             )
             adapter_partitions = {
-                "adaln_precompute": adaln_checkpoint_keys(profile),
+                **{spec[0]: spec[3] for spec in adaln_specs},
                 **segmented,
             }
         validate_component_key_partition(weights["_transformer_dir"], checkpoint_groups)
@@ -642,32 +670,50 @@ class MiniMaxH3Plugin:
         del vision_weights
         gc.collect()
 
-        adaln_state = load_selected_component_state_dict(
-            weights["_transformer_dir"], adaln_checkpoint_keys(profile)
-        )
-        if adapter_path is not None and adapter_identity is not None:
-            counts = merge_fast_h3_adapter_state(
-                adaln_state, adapter_path, adapter_partitions["adaln_precompute"]
-            )
-            if counts["tensors"] != adapter_identity.partition_tensor_counts["adaln_precompute"]:
-                raise ValueError("FastH3 AdaLN adapter accounting mismatch")
-        adaln_weights = numpy_state(adaln_state)
-        del adaln_state
-        adaln_plan = build_adaln_precompute_engine(
-            adaln_weights,
-            profile,
-            verbose=verbose,
-            consume_weights=True,
-            workspace_bytes=workspace_limits["adaln_precompute.plan"],
-        )
-        del adaln_weights
-        gc.collect()
-
+        adaln_components = {}
         denoiser_components = {}
         plan_sha256 = {
             "text_encoder.plan": hashlib.sha256(text_encoder_plan).hexdigest(),
-            "adaln_precompute.plan": hashlib.sha256(adaln_plan).hexdigest(),
         }
+        for component_name, filename, adaln_builder, selected_keys, projection_index in adaln_specs:
+            adaln_state = load_selected_component_state_dict(
+                weights["_transformer_dir"], selected_keys
+            )
+            if adapter_path is not None and adapter_identity is not None:
+                counts = merge_fast_h3_adapter_state(
+                    adaln_state, adapter_path, adapter_partitions[component_name]
+                )
+                if counts["tensors"] != adapter_identity.partition_tensor_counts[component_name]:
+                    raise ValueError(f"FastH3 adapter accounting mismatch for {component_name}")
+            adaln_weights = numpy_state(adaln_state)
+            del adaln_state
+            adaln_options = {
+                "verbose": verbose,
+                "consume_weights": True,
+                "workspace_bytes": (
+                    None if profile.first_block_cache else workspace_limits[filename]
+                ),
+            }
+            if profile.first_block_cache:
+                adaln_options["weight_streaming"] = True
+            if projection_index is None:
+                adaln_plan = adaln_builder(
+                    adaln_weights,
+                    profile,
+                    **adaln_options,
+                )
+            else:
+                adaln_plan = adaln_builder(
+                    adaln_weights,
+                    profile,
+                    projection_index,
+                    **adaln_options,
+                )
+            del adaln_weights
+            gc.collect()
+            adaln_components[component_name] = adaln_plan
+            plan_sha256[filename] = hashlib.sha256(adaln_plan).hexdigest()
+
         for (
             component_name,
             filename,
@@ -689,8 +735,12 @@ class MiniMaxH3Plugin:
             denoiser_options = {
                 "verbose": verbose,
                 "consume_weights": True,
-                "workspace_bytes": workspace_limits[filename],
+                "workspace_bytes": (
+                    None if profile.first_block_cache else workspace_limits[filename]
+                ),
             }
+            if profile.first_block_cache:
+                denoiser_options["weight_streaming"] = True
             if transition_index is None:
                 denoiser_plan = denoiser_builder(
                     dit_weights,
@@ -788,7 +838,7 @@ class MiniMaxH3Plugin:
         return {
             "text_encoder": text_encoder_plan,
             "vision_encoder": vision_encoder_plan,
-            "adaln_precompute": adaln_plan,
+            **adaln_components,
             **denoiser_components,
             "vae_decoder": vae_decoder_plan,
             "keyframe_vae_encoder": keyframe_vae_encoder_plan,
@@ -838,20 +888,21 @@ class MiniMaxH3Plugin:
                 ("denoiser_tail_plan", components["denoiser_tail"]),
                 ("denoiser_finish_plan", components["denoiser_finish"]),
             ]
-        elif components.get("fast_h3") is not None:
-            denoiser = [
-                ("denoiser_entry_plan", components["denoiser_entry"]),
-                *(
-                    (
-                        f"denoiser_transition_{index:02d}_plan",
-                        components[f"denoiser_transition_{index:02d}"],
-                    )
-                    for index in range(components["profile"].num_layers - 1)
-                ),
-                ("denoiser_finish_plan", components["denoiser_finish"]),
-            ]
         else:
-            denoiser = [("denoiser_plan", components["denoiser"])]
+            if components.get("fast_h3") is not None:
+                denoiser = [
+                    ("denoiser_entry_plan", components["denoiser_entry"]),
+                    *(
+                        (
+                            f"denoiser_transition_{index:02d}_plan",
+                            components[f"denoiser_transition_{index:02d}"],
+                        )
+                        for index in range(components["profile"].num_layers - 1)
+                    ),
+                    ("denoiser_finish_plan", components["denoiser_finish"]),
+                ]
+            else:
+                denoiser = [("denoiser_plan", components["denoiser"])]
         return [
             *shared,
             *denoiser,
@@ -904,12 +955,14 @@ class MiniMaxH3Plugin:
             segmented_vsa=fast_h3_enabled,
         )
         if profile.first_block_cache:
+            adaln_sections = ["adaln_precompute_plan"]
             denoiser_sections = [
                 "denoiser_head_plan",
                 "denoiser_tail_plan",
                 "denoiser_finish_plan",
             ]
         elif fast_h3_enabled:
+            adaln_sections = ["adaln_precompute_plan"]
             denoiser_sections = [
                 "denoiser_entry_plan",
                 *(
@@ -919,6 +972,7 @@ class MiniMaxH3Plugin:
                 "denoiser_finish_plan",
             ]
         else:
+            adaln_sections = ["adaln_precompute_plan"]
             denoiser_sections = ["denoiser_plan"]
         audio_vae_config = components.get("audio_vae_config")
         audio_decoder_profile = components.get("audio_decoder_profile")
@@ -972,6 +1026,16 @@ class MiniMaxH3Plugin:
             "scheduler_grid_points": (FASTH3_SCHEDULER_GRID_POINTS if fast_h3_enabled else 50),
             "transformer_forwards": FASTH3_TRANSFORMER_FORWARDS if fast_h3_enabled else 49,
             "attention_mode": "native_vsa" if fast_h3_enabled else "dense",
+            **(
+                {
+                    "runtime_memory": {
+                        "mode": "staged",
+                        "weight_streaming_budget_bytes": RTX_WEIGHT_STREAMING_BUDGET_BYTES,
+                    }
+                }
+                if profile.first_block_cache
+                else {}
+            ),
             **(
                 {
                     "fast_h3": fast_h3,
@@ -1058,7 +1122,7 @@ class MiniMaxH3Plugin:
                 "lazy_sections": [
                     "text_encoder_plan",
                     "vision_encoder_plan",
-                    "adaln_precompute_plan",
+                    *adaln_sections,
                     *denoiser_sections,
                     "fl2va_keyframe_vae_encoder_plan",
                     "vae_tile_decoder_plan",

@@ -104,6 +104,8 @@ enum class MiniMaxH3SegmentPlanKind {
 };
 
 MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift);
+bool should_compute_minimax_h3_tail(std::size_t step, std::size_t transformer_forwards,
+                                    float metric, float cache_threshold);
 MiniMaxH3VaeTileLayout make_minimax_h3_vae_tile_layout(int32_t output_height, int32_t output_width);
 MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output_height,
                                            int32_t output_width);
@@ -134,7 +136,7 @@ class MiniMaxH3Pipeline final : public IPipeline, public IRuntimeCacheControl {
   public:
     MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader, std::unique_ptr<ITokenizer> tokenizer,
                       std::string model_id, bool first_block_cache = false,
-                      float cache_threshold = 0.025F, MiniMaxH3DenoiserConfig denoiser_config = {},
+                      float cache_threshold = 0.08F, MiniMaxH3DenoiserConfig denoiser_config = {},
                       MiniMaxH3Ref2VAConfig ref2va_config = {},
                       std::function<void()> runtime_cache_finalize = {});
     ~MiniMaxH3Pipeline() override;
@@ -155,7 +157,7 @@ class MiniMaxH3Pipeline final : public IPipeline, public IRuntimeCacheControl {
     std::mutex generation_mutex_;
     std::unique_ptr<ResidentState> resident_;
     bool first_block_cache_{false};
-    float cache_threshold_{0.025F};
+    float cache_threshold_{0.08F};
     MiniMaxH3DenoiserConfig denoiser_config_{};
     MiniMaxH3Ref2VAConfig ref2va_config_{};
     std::function<void()> runtime_cache_finalize_;

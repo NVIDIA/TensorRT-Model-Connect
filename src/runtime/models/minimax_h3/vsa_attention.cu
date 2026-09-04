@@ -689,10 +689,15 @@ __global__ void merge_gate_kernel(const __nv_bfloat16* sparse, const __nv_bfloat
         const std::int64_t head = row / (total_tiles * kTileTokens);
         const int32_t padded_row = static_cast<int32_t>(row % (total_tiles * kTileTokens));
         const int32_t tile_in_head = padded_row / kTileTokens;
+        // FastVideo's production regional compile enables
+        // emulate_precision_casts. Preserve its three observable BF16
+        // boundaries: pooled compression, gated product, then residual add.
+        const __nv_bfloat16 compressed_bf16 = __float2bfloat16_rn(
+            compressed[(head * total_tiles + tile_in_head) * kHeadDim + dimension]);
+        const __nv_bfloat16 product_bf16 = __float2bfloat16_rn(
+            __bfloat162float(gate[index]) * __bfloat162float(compressed_bf16));
         const float value =
-            __bfloat162float(sparse[index]) +
-            __bfloat162float(gate[index]) *
-                compressed[(head * total_tiles + tile_in_head) * kHeadDim + dimension];
+            __bfloat162float(sparse[index]) + __bfloat162float(product_bf16);
         output[index] = __float2bfloat16_rn(value);
     }
 }

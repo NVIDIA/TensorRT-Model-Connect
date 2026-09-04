@@ -65,8 +65,9 @@ def test_bundle_metadata_requires_strict_transformer_ref_identity() -> None:
     assert metadata["ref2va_supported"] is True
     assert metadata["ref2va_transformer_fallback_allowed"] is False
     assert metadata["ref2va_runtime_dependencies"] == ["TensorRT-RTX"]
-    assert metadata["ref2va_limits"]["audio_can_be_sole_input"] is True
-    assert "audio_cannot_be_sole_input" not in metadata["ref2va_limits"]
+    assert metadata["ref2va_schema_version"] == 2
+    assert metadata["ref2va_limits"]["requires_image_or_video"] is True
+    assert "audio_can_be_sole_input" not in metadata["ref2va_limits"]
     assert metadata["ref2va_scheduler"] == {
         "sigma_grid_points": 50,
         "transformer_forwards": 49,

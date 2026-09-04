@@ -341,7 +341,7 @@ def main() -> int:
         },
         "first_block_cache": profile.first_block_cache,
         "denoiser_cache_mode": expected_mode,
-        "first_block_cache_threshold": 0.025,
+        "first_block_cache_threshold": 0.08,
         "height": 768,
         "width": 1344,
         "canvas_multiple": CANVAS_MULTIPLE,

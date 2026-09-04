@@ -208,7 +208,7 @@ def test_packer_preserves_validated_workspace_mapping(
     assert captured["workspace_limit_bytes"] == workspace_limits
     assert captured["first_block_cache"] is first_block_cache
     assert captured["denoiser_cache_mode"] == denoiser_mode
-    assert captured["first_block_cache_threshold"] == 0.025
+    assert captured["first_block_cache_threshold"] == 0.08
     assert (
         captured["text_rows_min"],
         captured["text_rows_opt"],

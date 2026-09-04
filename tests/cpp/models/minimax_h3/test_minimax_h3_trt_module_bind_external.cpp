@@ -260,6 +260,33 @@ void test_constructor_prebinding_accepts_dynamic_max_capacity() {
     cudaStreamDestroy(stream);
 }
 
+void test_dynamic_shape_rejection_preserves_last_valid_shape() {
+    auto engine = build_dynamic_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    {
+        auto* ctx = engine->createExecutionContext();
+        trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
+        auto* const input = module.device_ptr("x");
+        module.bind_external("x", input, {8});
+        check(module.tensor_shape("x") == std::vector<int64_t>{8},
+              "dynamic shape rejection: valid shape is applied");
+        bool rejected = false;
+        try {
+            module.bind_external("x", input, {9});
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        check(rejected, "dynamic shape rejection: out-of-profile shape is surfaced");
+        check(module.tensor_shape("x") == std::vector<int64_t>{8},
+              "dynamic shape rejection: last valid cached shape is preserved");
+    }
+    cudaStreamDestroy(stream);
+}
+
 void test_constructor_prebinding_rejects_small_dynamic_output() {
     auto engine = build_dynamic_identity_engine();
     if (!engine)
@@ -296,6 +323,7 @@ int main() {
     test_constructor_prebinding_avoids_owned_io_buffers();
     test_constructor_failure_preserves_external_buffers();
     test_constructor_prebinding_accepts_dynamic_max_capacity();
+    test_dynamic_shape_rejection_preserves_last_valid_shape();
     test_constructor_prebinding_rejects_small_dynamic_output();
     return failures == 0 ? 0 : 1;
 }

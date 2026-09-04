@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <utility>
@@ -50,6 +51,24 @@ void test_pinned_schedules() {
           "FastH3 uses exactly four transformer forwards");
     check(fast_audio.sigmas.size() == 5 && fast_audio.timesteps.size() == 4,
           "FastH3 audio uses the same four-forward grid");
+}
+
+void test_first_block_cache_tail_schedule() {
+    const auto schedule = trtmc::make_minimax_h3_schedule(50, 12.0F);
+    const std::size_t forwards = schedule.timesteps.size();
+    constexpr float threshold = 0.20F;
+    check(schedule.sigmas.back() == 0.0F, "H3 dense schedule terminates at sigma zero");
+    check(trtmc::should_compute_minimax_h3_tail(0, forwards, 0.0F, threshold),
+          "H3 FirstBlockCache always computes the first tail");
+    check(trtmc::should_compute_minimax_h3_tail(forwards - 1, forwards, 0.0F, threshold),
+          "H3 FirstBlockCache refreshes the tail before the terminal sigma-to-zero update");
+    check(!trtmc::should_compute_minimax_h3_tail(1, forwards, threshold, threshold),
+          "H3 FirstBlockCache retains its strict threshold policy for interior steps");
+    check(trtmc::should_compute_minimax_h3_tail(1, forwards, threshold + 0.01F, threshold),
+          "H3 FirstBlockCache computes an interior tail above threshold");
+    check(trtmc::should_compute_minimax_h3_tail(
+              1, forwards, std::numeric_limits<float>::quiet_NaN(), threshold),
+          "H3 FirstBlockCache computes an interior tail for a non-finite metric");
 }
 
 void test_data_ward_euler_sign() {
@@ -428,6 +447,7 @@ void test_audio_latent_unpack_and_denormalize() {
 
 int main() {
     test_pinned_schedules();
+    test_first_block_cache_tail_schedule();
     test_data_ward_euler_sign();
     test_variable_text_position_layout();
     test_prompt_token_profile_boundaries();

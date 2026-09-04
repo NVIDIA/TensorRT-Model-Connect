@@ -79,6 +79,23 @@ bool has_mp4_extension(const std::string& path) {
 }
 #endif
 
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+bool is_locked_h3_generate_video_option(const std::string& option) {
+    return option == "--prompt" || option == "-p" || option == "--first-frame" ||
+           option == "--last-frame" || option == "--reference-image" ||
+           option == "--reference-video" || option == "--reference-audio" ||
+           option == "--output" || option == "-o" || option == "--num-steps" ||
+           option == "--num-inference-steps" || option == "--num-frames" ||
+           option == "--guidance-scale" || option == "--height" || option == "--width" ||
+           option == "--seed" || option == "--benchmark" || option == "--warmup" ||
+           option == "--runtime-cache" || option == "--config" || option == "--set" ||
+           // Preserve the more specific fail-closed diagnostics below.
+           option == "--hf-python" || option == "--backend-dir" ||
+           option == "--model-plugin-dir" || option == "--kernel-bindings" ||
+           option == "--initial-latents-raw" || option == "--negative-prompt";
+}
+#endif
+
 } // namespace
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
@@ -204,6 +221,8 @@ void print_usage() {
     std::cerr << "Usage:\n"
                  "  trtmc generate-video <bundle.bundle> --prompt \"text\" --output OUTPUT.mp4 "
                  "[--num-frames N] [--height N] [--width N] [--seed N] "
+                 "[--num-inference-steps N] [--guidance-scale 1] "
+                 "[--runtime-cache PATH] [--config FILE] [--set KEY=VALUE] ... "
                  "[--warmup N --benchmark N]\n";
 #if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
     std::cerr << "                       FL2VA: [--first-frame IMAGE] [--last-frame IMAGE]\n"
@@ -390,6 +409,16 @@ CliArgs parse_args(int argc, char** argv) {
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
 
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+        if (args.command == "generate-video" && !arg.empty() && arg.front() == '-' &&
+            !is_locked_h3_generate_video_option(arg)) {
+            args.parse_error = true;
+            args.error_message =
+                arg + " is not supported by the locked MiniMax-H3 generate-video command";
+            return args;
+        }
+#endif
+
         auto need_value = [&](const std::string& name) -> bool {
             if (i + 1 >= argc) {
                 args.parse_error = true;
@@ -504,6 +533,7 @@ CliArgs parse_args(int argc, char** argv) {
                 return args;
             }
             args.warmup = *value;
+            args.warmup_provided = true;
             continue;
         }
         if (arg == "--temperature" && need_value(arg)) {
@@ -743,7 +773,13 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if ((arg == "--num-steps" || arg == "--num-inference-steps") && need_value(arg)) {
-            args.num_steps = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer > 0");
+            if (!value || *value <= 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer > 0";
+                return args;
+            }
+            args.num_steps = *value;
             continue;
         }
         if (arg == "--num-frames" && need_value(arg)) {
@@ -757,7 +793,21 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--guidance-scale" && need_value(arg)) {
-            args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
+            auto value = parse_float_value(arg, "a finite number >= 0");
+            if (!value || *value < 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number >= 0";
+                return args;
+            }
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+            if (*value != 1.0F) {
+                args.parse_error = true;
+                args.error_message =
+                    "--guidance-scale must be 1 for the guidance-distilled MiniMax-H3 runtime";
+                return args;
+            }
+#endif
+            args.guidance_scale = *value;
             continue;
         }
         if (arg == "--sde-gamma" && need_value(arg)) {
@@ -765,15 +815,34 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--negative-prompt" && need_value(arg)) {
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+            args.parse_error = true;
+            args.error_message =
+                "--negative-prompt is not supported by the guidance-distilled MiniMax-H3 runtime";
+            return args;
+#else
             args.negative_prompt = argv[++i];
             continue;
+#endif
         }
         if (arg == "--height" && need_value(arg)) {
-            args.diffusion_height = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer > 0");
+            if (!value || *value <= 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer > 0";
+                return args;
+            }
+            args.diffusion_height = *value;
             continue;
         }
         if (arg == "--width" && need_value(arg)) {
-            args.diffusion_width = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer > 0");
+            if (!value || *value <= 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer > 0";
+                return args;
+            }
+            args.diffusion_width = *value;
             continue;
         }
         if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) {
@@ -1085,6 +1154,14 @@ CliArgs parse_args(int argc, char** argv) {
     }
 #endif
 
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+    if (args.command == "generate-video" && args.warmup_provided && args.benchmark == 0) {
+        args.parse_error = true;
+        args.error_message = "--warmup requires --benchmark N with N > 0";
+        return args;
+    }
+#endif
+
     const bool has_key_frames = !args.first_frame_path.empty() || !args.last_frame_path.empty();
     const bool has_references = !args.video_references.empty();
     if (args.command != "generate-video" && (has_key_frames || has_references)) {
@@ -1129,6 +1206,12 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (args.video_references.size() > 12) {
             args.parse_error = true;
             args.error_message = "Ref2VA accepts at most 12 ordered reference files";
+#if defined(TRTMC_LOCKED_H3_RUNTIME)
+        } else if (image_count == 0 && video_count == 0) {
+            args.parse_error = true;
+            args.error_message =
+                "MiniMax-H3 Ref2VA requires at least one reference image or video";
+#endif
         }
     }
 

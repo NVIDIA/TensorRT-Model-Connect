@@ -135,7 +135,7 @@ int main() {
     const ConfigBundle defaults = ConfigBundle::build({}, schemas);
     check(defaults.source_of("minimax_h3", "first_block_cache_threshold") == Layer::SchemaDefault,
           "cache threshold default retains SchemaDefault provenance");
-    check(std::abs(defaults.get<double>("minimax_h3", "first_block_cache_threshold") - 0.025) <
+    check(std::abs(defaults.get<double>("minimax_h3", "first_block_cache_threshold") - 0.08) <
               1.0e-12,
           "cache threshold schema default");
     check(!defaults.get<bool>("minimax_h3", "retain_engines"), "retained engines are opt-in");

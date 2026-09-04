@@ -64,6 +64,7 @@ FASTH3_VSA_MIN_VIDEO_TILES = 360
 RTX_STAGED_WORKSPACE_BYTES = 16 << 30
 RTX_WEIGHT_STREAMING_BUDGET_BYTES = 32 << 30
 RTX_CUDA_MAJOR = 12
+TRT_DEFAULT_WORKSPACE_POLICY = "trt_default_max"
 
 DEFAULT_WORKSPACE_LIMIT_BYTES = {
     "text_encoder.plan": TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
@@ -117,13 +118,19 @@ def native_plan_filenames(
 
 def default_workspace_limit_bytes(
     *, first_block_cache: bool, segmented_vsa: bool = False
-) -> dict[str, int]:
+) -> dict[str, int | str]:
     """Return per-plan tactic workspace limits for one denoiser layout."""
 
     return {
         filename: (
+            TRT_DEFAULT_WORKSPACE_POLICY
+            if first_block_cache
+            and (filename.startswith("denoiser_") or filename.startswith("adaln_"))
+            else
             DENOISER_DEFAULT_WORKSPACE_BYTES
             if filename.startswith("denoiser_") or filename == "denoiser.plan"
+            else ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES
+            if filename.startswith("adaln_")
             else DEFAULT_WORKSPACE_LIMIT_BYTES[filename]
         )
         for filename in native_plan_filenames(

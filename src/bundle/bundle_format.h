@@ -58,6 +58,11 @@ std::vector<char> ReadBundleSection(const std::string& path, const BundleSection
 BundleSectionFileRange ResolveBundleSectionFileRange(const std::string& path,
                                                      const BundleSectionInfo& section);
 
+// Validate section byte ranges against the bundle file without reading any
+// payload bytes. Intended for low-latency staged loading paths.
+void ValidateBundleSectionBounds(const std::string& path,
+                                 const std::vector<BundleSectionInfo>& sections);
+
 // Copy one section to an output stream in bounded-size chunks. This is the
 // preferred path for model-sized payloads that must not be buffered in memory.
 void CopyBundleSection(const std::string& path, const BundleSectionInfo& section,

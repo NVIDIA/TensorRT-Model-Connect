@@ -241,9 +241,9 @@ void test_dynamic_dense_legacy_profile_remains_compatible() {
     module.add_output("video_velocity", trtmc::DType::kFloat32, {106488, 96});
     module.add_output("audio_velocity", trtmc::DType::kFloat32, {1150, 32});
     trtmc::validate_minimax_h3_monolithic_denoiser_plan(module, false, 537);
-    require(rejects(
-                [&] { trtmc::validate_minimax_h3_monolithic_denoiser_plan(module, false, 2641); }),
-            "legacy dense plan accepted mismatched 2641-row bundle metadata");
+    require(
+        rejects([&] { trtmc::validate_minimax_h3_monolithic_denoiser_plan(module, false, 2641); }),
+        "legacy dense plan accepted mismatched 2641-row bundle metadata");
 }
 
 } // namespace

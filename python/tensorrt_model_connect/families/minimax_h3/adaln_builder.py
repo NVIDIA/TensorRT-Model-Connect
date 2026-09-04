@@ -62,11 +62,14 @@ def build_adaln_precompute_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     op.configure_builder(config, weight_streaming=weight_streaming)
-    op.configure_workspace(
-        config,
-        workspace_bytes,
-        default_bytes=ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
-    )
+    # Let TensorRT-RTX use its native maximum pools by default. An explicit
+    # override remains useful for constrained build hosts and unit tests.
+    if workspace_bytes is not None:
+        op.configure_workspace(
+            config,
+            workspace_bytes,
+            default_bytes=ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
+        )
     # Match PyTorch's default FP32 matmul policy used by the reference.
     config.clear_flag(trt.BuilderFlag.TF32)
 

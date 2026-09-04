@@ -683,6 +683,38 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
     validated = validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
     assert validated["workspace_limit_bytes"] == config["workspace_limit_bytes"]
 
+    t2va_only = copy.deepcopy(config)
+    t2va_only["public_workflows"] = ["t2va"]
+    optional_fl2va = {"vision_encoder.plan", "fl2va_keyframe_vae_encoder.plan"}
+    t2va_only["workspace_limit_bytes"] = {
+        name: value
+        for name, value in t2va_only["workspace_limit_bytes"].items()
+        if name not in optional_fl2va
+    }
+    t2va_only["plan_sha256"] = {
+        name: value
+        for name, value in t2va_only["plan_sha256"].items()
+        if name not in optional_fl2va
+    }
+    write_bundle(
+        bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(t2va_only).encode())],
+    )
+    assert validate_native_bundle_config(
+        bundle, source_revision=SOURCE_REVISION
+    )["public_workflows"] == ["t2va"]
+
+    invalid_workflows = copy.deepcopy(t2va_only)
+    invalid_workflows["public_workflows"] = ["fl2va"]
+    write_bundle(
+        bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(invalid_workflows).encode())],
+    )
+    with pytest.raises(ValueError, match="public_workflows"):
+        validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+
     config["workspace_limit_bytes"][PLAN_FILENAMES[0]] = True
     write_bundle(
         bundle,

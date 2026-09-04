@@ -8,7 +8,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -87,6 +87,81 @@ def _write_audio_vae_config(model: Path) -> None:
     )
 
 
+def test_singular_fbc_builders_keep_124_to_345_dynamic_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    components = (
+        "adaln_precompute",
+        "denoiser_head",
+        "denoiser_tail",
+        "denoiser_finish",
+    )
+    assert tuple(item[0] for item in staged_build._MONOLITHIC_FBC_COMPONENTS) == components
+
+    calls = {}
+
+    def builder(name):
+        def build(_weights, profile, **options):
+            payload = name.encode()
+            Path(options["output_path"]).write_bytes(payload)
+            calls[name] = (profile, options)
+            return {
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+
+        return build
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("segmented builder selected for singular FBC production route")
+
+    family = "tensorrt_model_connect.families.minimax_h3"
+    adaln = ModuleType(f"{family}.adaln_builder")
+    adaln.build_adaln_precompute_engine = builder("adaln_precompute")
+    adaln.checkpoint_keys = lambda _profile: ("adaln",)
+    monkeypatch.setitem(sys.modules, adaln.__name__, adaln)
+
+    dit = ModuleType(f"{family}.dit_builder")
+    dit.build_dit_finish_engine = builder("denoiser_finish")
+    dit.build_dit_head_engine = builder("denoiser_head")
+    dit.build_dit_tail_engine = builder("denoiser_tail")
+    dit.build_dit_vsa_entry_engine = unexpected
+    dit.build_dit_vsa_finish_engine = unexpected
+    dit.build_dit_vsa_transition_engine = unexpected
+    dit.finish_checkpoint_keys = lambda _profile: ("finish",)
+    dit.head_checkpoint_keys = lambda _profile: ("head",)
+    dit.tail_checkpoint_keys = lambda _profile: ("tail",)
+    dit.vsa_entry_checkpoint_keys = lambda _profile: ("vsa_entry",)
+    dit.vsa_finish_checkpoint_keys = lambda _profile: ("vsa_finish",)
+    dit.vsa_transition_checkpoint_keys = lambda *_args: ("vsa_transition",)
+    monkeypatch.setitem(sys.modules, dit.__name__, dit)
+
+    monkeypatch.setattr(staged_build.trt_compat, "configure_backend", lambda **_kwargs: None)
+    monkeypatch.setattr(staged_build, "_adapter_target_partitions", lambda _profile: {})
+    monkeypatch.setattr(
+        checkpoint,
+        "load_selected_component_state_dict",
+        lambda _root, keys: {key: object() for key in keys},
+    )
+    monkeypatch.setattr(checkpoint, "numpy_state", dict)
+
+    for component in components:
+        staged_build._build_component(
+            component,
+            tmp_path,
+            tmp_path / f"{component}.plan",
+            verbose=False,
+        )
+
+    assert tuple(calls) == components
+    assert (staged_build.VIDEO_NUM_FRAMES_MIN, staged_build.VIDEO_NUM_FRAMES_MAX) == (124, 345)
+    for profile, options in calls.values():
+        assert profile.first_block_cache is True
+        assert profile.packed_row_profile == (19285, 37838, 112367)
+        assert options["workspace_bytes"] is None
+        assert options["weight_streaming"] is True
+
+
 def test_plan_writer_streams_memoryview_and_cleans_failed_temporary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -142,7 +217,7 @@ def test_plan_writer_streams_memoryview_and_cleans_failed_temporary(
     assert not list(tmp_path.glob(".engine.plan.tmp.*"))
 
 
-def test_staged_build_uses_seven_fresh_children_resumes_and_sanitizes_bundle(
+def test_staged_build_uses_fresh_segment_children_resumes_and_sanitizes_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model = tmp_path / "model"
@@ -188,9 +263,9 @@ def test_staged_build_uses_seven_fresh_children_resumes_and_sanitizes_bundle(
     assert config["source_revision"] == SOURCE_REVISION
     assert len(config["builder_source_sha256"]) == 64
     assert len(config["checkpoint_inventory_sha256"]) == 64
-    assert config["workspace_limit_bytes"] == {
-        filename: 16 << 30 for _component, filename, _section in staged_build._COMPONENTS
-    }
+    assert config["workspace_limit_bytes"] == staged_build._workspace_limits_for_components(
+        staged_build._COMPONENTS, ref2va=False
+    )
     assert (
         config["num_frames_min"],
         config["num_frames_opt"],
@@ -211,6 +286,16 @@ def test_staged_build_uses_seven_fresh_children_resumes_and_sanitizes_bundle(
         config["packed_sequence_length_opt"],
         config["packed_sequence_length_max"],
     ) == (19285, 37838, 112367)
+    assert "adaln_precompute_mode" not in config
+    assert "adaln_segmented" not in config
+    assert "first_block_cache_abi" not in config
+    assert "dense_tail_segment_sections" not in config
+    assert config["bundle_loading"]["lazy_sections"][2:6] == [
+        "adaln_precompute_plan",
+        "denoiser_head_plan",
+        "denoiser_tail_plan",
+        "denoiser_finish_plan",
+    ]
     assert set(config["plan_sha256"]) == {item[1] for item in staged_build._COMPONENTS}
     assert all(
         len(value) == 64 and value == value.lower() for value in config["plan_sha256"].values()
@@ -232,20 +317,22 @@ def test_staged_build_uses_seven_fresh_children_resumes_and_sanitizes_bundle(
     assert calls == []
 
     plans = output.with_name(f"{output.name}.plans")
-    (plans / "denoiser_tail.plan").write_bytes(b"corrupt")
+    target_component = "denoiser_tail"
+    target_filename = f"{target_component}.plan"
+    (plans / target_filename).write_bytes(b"corrupt")
     staged_build.build_staged_bundle(model, output)
     assert calls == []
-    assert (plans / "denoiser_tail.plan").read_bytes() == b"corrupt"
+    assert (plans / target_filename).read_bytes() == b"corrupt"
 
     # With no final or partial assembly, exact surviving sources are reused and
     # only the changed plan is rebuilt.
     output.unlink()
     for component, filename, _section in staged_build._COMPONENTS:
-        if filename != "denoiser_tail.plan":
+        if filename != target_filename:
             (plans / filename).write_bytes(f"plan:{component}".encode())
     calls.clear()
     staged_build.build_staged_bundle(model, output)
-    assert [call[call.index("--component") + 1] for call in calls] == ["denoiser_tail"]
+    assert [call[call.index("--component") + 1] for call in calls] == [target_component]
 
     shard.write_bytes(b"bbbb")
     with pytest.raises(ValueError, match="different checkpoint, builder"):

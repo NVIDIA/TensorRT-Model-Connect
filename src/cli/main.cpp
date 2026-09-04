@@ -182,6 +182,11 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
     options.set_tokens = args.set_tokens;
     options.backend_search_paths = args.backend_search_paths;
     options.model_plugin_search_paths = args.model_plugin_search_paths;
+    // The locked H3 appliance runtime prioritizes immediate staged startup: it
+    // validates plan ranges and stable file identities without re-hashing
+    // multi-GiB payloads. Generic builds retain the complete fail-fast scan.
+    options.validate_bundle_payloads =
+        trtmc::cli::validate_bundle_payloads_for_command(args.command);
     return options;
 }
 

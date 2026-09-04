@@ -255,34 +255,6 @@ function Assert-CompleteMiniMaxH3Bundle {
         [string]$CliPath,
         [string]$BundleFile
     )
-    $expectedSections = [Collections.Generic.List[string]]::new()
-    foreach ($name in @(
-        'text_encoder_plan',
-        'vision_encoder_plan',
-        'adaln_precompute_plan',
-        'denoiser_entry_plan'
-    )) {
-        $expectedSections.Add($name)
-    }
-    for ($index = 0; $index -lt 49; ++$index) {
-        $expectedSections.Add(('denoiser_transition_{0:D2}_plan' -f $index))
-    }
-    foreach ($name in @(
-        'denoiser_finish_plan',
-        'fl2va_keyframe_vae_encoder_plan',
-        'vae_tile_decoder_plan',
-        'audio_vae_decoder_plan',
-        'ref2va_denoiser_plan',
-        'ref2va_adaln_precompute_plan',
-        'ref2va_video_vae_encoder_plan',
-        'ref2va_audio_vae_encoder_plan'
-    )) {
-        $expectedSections.Add($name)
-    }
-    if ($expectedSections.Count -ne 61) {
-        throw "Internal packaging error: expected MiniMax-H3 plan count is not 61"
-    }
-
     $inspectOutput = @(& $CliPath inspect $BundleFile --validate-runtime --list-engines 2>&1)
     if ($LASTEXITCODE -ne 0) {
         throw "ModelConnect rejected the complete MiniMax-H3 bundle:`n$($inspectOutput -join [Environment]::NewLine)"
@@ -298,10 +270,91 @@ function Assert-CompleteMiniMaxH3Bundle {
             ForEach-Object { $Matches[1] } |
             Sort-Object -Unique
     )
-    $missing = @($expectedSections | Where-Object { $_ -notin $actualSections })
-    $unexpected = @($actualSections | Where-Object { $_ -notin $expectedSections })
-    if ($actualSections.Count -ne 61 -or $missing.Count -ne 0 -or $unexpected.Count -ne 0) {
-        throw "MiniMax-H3 bundle plan set is incomplete or unexpected. Missing=[$($missing -join ', ')]; unexpected=[$($unexpected -join ', ')]"
+
+    # The runtime deliberately supports three authenticated denoiser layouts:
+    # the production singular FirstBlockCache path, the legacy segmented
+    # FastH3 VSA path, and legacy monolithic dense bundles.
+    # Keep the package boundary exact for each layout instead of weakening it
+    # to a broad prefix check.
+    $commonSections = @(
+        'text_encoder_plan',
+        'vae_tile_decoder_plan',
+        'audio_vae_decoder_plan'
+    )
+    $singularFirstBlockCache = @(
+        $commonSections
+        'adaln_precompute_plan'
+        'denoiser_head_plan'
+        'denoiser_tail_plan'
+        'denoiser_finish_plan'
+    )
+    $legacyMonolithicDense = @(
+        $commonSections
+        'adaln_precompute_plan'
+        'denoiser_plan'
+    )
+
+    $segmentedVsa = [Collections.Generic.List[string]]::new()
+    foreach ($name in $commonSections) {
+        $segmentedVsa.Add($name)
+    }
+    $segmentedVsa.Add('adaln_precompute_plan')
+    $segmentedVsa.Add('denoiser_entry_plan')
+    for ($index = 0; $index -lt 49; ++$index) {
+        $segmentedVsa.Add(('denoiser_transition_{0:D2}_plan' -f $index))
+    }
+    $segmentedVsa.Add('denoiser_finish_plan')
+
+    $conditioningSections = @(
+        'vision_encoder_plan',
+        'fl2va_keyframe_vae_encoder_plan'
+    )
+    $ref2vaSections = @(
+        'ref2va_denoiser_plan',
+        'ref2va_adaln_precompute_plan',
+        'ref2va_video_vae_encoder_plan',
+        'ref2va_audio_vae_encoder_plan'
+    )
+    $presentConditioning = @(
+        $conditioningSections | Where-Object { $_ -in $actualSections }
+    )
+    if ($presentConditioning.Count -ne 0 -and
+        $presentConditioning.Count -ne $conditioningSections.Count) {
+        throw "MiniMax-H3 FL2VA conditioning plan set must be all-or-none"
+    }
+    $presentRef2va = @($ref2vaSections | Where-Object { $_ -in $actualSections })
+    if ($presentRef2va.Count -ne 0 -and $presentRef2va.Count -ne $ref2vaSections.Count) {
+        throw "MiniMax-H3 Ref2VA plan set must be all-or-none"
+    }
+    if ($presentRef2va.Count -ne 0 -and
+        $presentConditioning.Count -ne $conditioningSections.Count) {
+        throw "MiniMax-H3 Ref2VA requires both shared conditioning plans"
+    }
+
+    $optionalSections = @($presentConditioning) + @($presentRef2va)
+    $baseLayouts = [ordered]@{
+        singular_first_block_cache = @($singularFirstBlockCache)
+        segmented_vsa = @($segmentedVsa)
+        legacy_monolithic_dense = @($legacyMonolithicDense)
+    }
+    $matchedLayout = $null
+    foreach ($layout in $baseLayouts.GetEnumerator()) {
+        $expectedSections = @($layout.Value) + $optionalSections
+        $missing = @($expectedSections | Where-Object { $_ -notin $actualSections })
+        $unexpected = @($actualSections | Where-Object { $_ -notin $expectedSections })
+        if ($actualSections.Count -eq $expectedSections.Count -and
+            $missing.Count -eq 0 -and $unexpected.Count -eq 0) {
+            $matchedLayout = $layout.Key
+            break
+        }
+    }
+    if ($null -eq $matchedLayout) {
+        $accepted = @(
+            $baseLayouts.GetEnumerator() | ForEach-Object {
+                "$($_.Key)=$(@($_.Value).Count + $optionalSections.Count)"
+            }
+        )
+        throw "MiniMax-H3 bundle plan set is incomplete or unexpected. Accepted layouts=[$($accepted -join ', ')]; actual=[$($actualSections -join ', ')]"
     }
 }
 

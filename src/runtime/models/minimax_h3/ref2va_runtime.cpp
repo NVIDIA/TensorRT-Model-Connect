@@ -642,6 +642,9 @@ Ref2vaPreparedRequest prepare_ref2va_request(const VideoGenerationRequest& reque
         result.summary.video_count > kRef2vaMaxVideos ||
         result.summary.explicit_audio_count > kRef2vaMaxExplicitAudios)
         throw std::invalid_argument("MiniMax-H3 Ref2VA reference count exceeds a modality limit");
+    if (result.summary.image_count == 0 && result.summary.video_count == 0)
+        throw std::invalid_argument(
+            "MiniMax-H3 Ref2VA requires at least one reference image or video");
     if (result.summary.total_video_seconds > 15.0)
         throw std::invalid_argument(
             "MiniMax-H3 Ref2VA total reference-video duration exceeds 15 seconds");

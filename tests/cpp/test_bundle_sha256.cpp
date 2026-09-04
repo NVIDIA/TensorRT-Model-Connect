@@ -4,6 +4,7 @@
  */
 
 #include "bundle/bundle_format.h"
+#include "runtime/backend/file_plan_validation.h"
 #include "utils/sha256.h"
 
 #include <chrono>
@@ -105,10 +106,100 @@ void test_streaming_attestation_rejects_tamper_and_truncation() {
     std::filesystem::remove(directory, ignored);
 }
 
+void test_bounds_only_validation_does_not_scan_payload() {
+    const auto directory = make_temp_dir();
+    const auto path = directory / "bounds-only.bundle";
+    const std::vector<char> payload = {'P', 'L', 'A', 'N'};
+    const std::string header =
+        R"({"model_id":"bounds-only","sections":{"denoiser_plan":{"offset":0,"size":4}}})";
+    write_bundle(path, header, payload);
+
+    const auto info = trtmc::ReadBundleHeader(path.string());
+    check(info.sections.size() == 1, "bounds-only section metadata parsed");
+    trtmc::ValidateBundleSectionBounds(path.string(), info.sections);
+
+    // Same-size payload corruption is intentionally not detected by the fast
+    // bounds pass. Full validation remains available and must detect it.
+    {
+        std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+        file.seekp(-1, std::ios::end);
+        file.put('X');
+    }
+    trtmc::ValidateBundleSectionBounds(path.string(), info.sections);
+
+    bool digest_threw = false;
+    trtmc::internal::Sha256 original_digest;
+    original_digest.update(payload.data(), payload.size());
+    try {
+        trtmc::ValidateBundleSectionSha256(path.string(), info.sections.front(),
+                                           original_digest.hex_digest());
+    } catch (const std::runtime_error&) {
+        digest_threw = true;
+    }
+    check(digest_threw, "full validation still rejects same-size payload corruption");
+
+    std::filesystem::resize_file(path, std::filesystem::file_size(path) - 1);
+    bool bounds_threw = false;
+    try {
+        trtmc::ValidateBundleSectionBounds(path.string(), info.sections);
+    } catch (const std::runtime_error&) {
+        bounds_threw = true;
+    }
+    check(bounds_threw, "bounds-only validation rejects truncated payload");
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    std::filesystem::remove(directory, ignored);
+}
+
+void test_backend_skips_plan_preverification_when_disabled() {
+    struct CountingReader {
+        int calls{0};
+        void verify_sha256() { ++calls; }
+    };
+
+    CountingReader fast_reader;
+    trtmc::ModuleCreateOptions fast_options;
+    fast_options.verify_plan_sha256 = false;
+    trtmc::internal::verify_plan_sha256_if_requested(fast_reader, fast_options);
+    check(fast_reader.calls == 0, "fast backend policy skips plan-content SHA-256 attestation");
+
+    CountingReader strict_reader;
+    trtmc::ModuleCreateOptions strict_options;
+    strict_options.verify_plan_sha256 = true;
+    trtmc::internal::verify_plan_sha256_if_requested(strict_reader, strict_options);
+    check(strict_reader.calls == 1, "strict backend policy performs plan SHA-256 attestation");
+}
+
+void test_plan_cache_identity_scopes_retained_engines_to_file_and_section() {
+    const std::string digest_a(64, 'a');
+    const std::string digest_b(64, 'b');
+    const auto identity =
+        trtmc::internal::make_plan_cache_identity("bundle-file-a", 4096, 8192, digest_a);
+
+    check(identity ==
+              trtmc::internal::make_plan_cache_identity("bundle-file-a", 4096, 8192, digest_a),
+          "same file section keeps a stable retained-engine cache identity");
+    check(identity !=
+              trtmc::internal::make_plan_cache_identity("bundle-file-b", 4096, 8192, digest_a),
+          "different bundle file cannot reuse a retained engine");
+    check(identity !=
+              trtmc::internal::make_plan_cache_identity("bundle-file-a", 4097, 8192, digest_a),
+          "different plan offset cannot reuse a retained engine");
+    check(identity !=
+              trtmc::internal::make_plan_cache_identity("bundle-file-a", 4096, 8193, digest_a),
+          "different plan size cannot reuse a retained engine");
+    check(identity !=
+              trtmc::internal::make_plan_cache_identity("bundle-file-a", 4096, 8192, digest_b),
+          "different declared digest cannot reuse a retained engine");
+}
+
 } // namespace
 
 int main() {
     test_streaming_attestation_rejects_tamper_and_truncation();
+    test_bounds_only_validation_does_not_scan_payload();
+    test_backend_skips_plan_preverification_when_disabled();
+    test_plan_cache_identity_scopes_retained_engines_to_file_and_section();
     if (failures != 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;

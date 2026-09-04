@@ -30,6 +30,7 @@ from .config import (
     CANVAS_SHORT_EDGE,
     NATIVE_EXPLICIT_CANVAS_SIZES,
     SOL_ENGINE_1344X768_124_TO_345F,
+    TRT_DEFAULT_WORKSPACE_POLICY,
     native_plan_filenames,
 )
 
@@ -54,6 +55,10 @@ DIFFUSERS_REFERENCE_CONTAINER_ROOT = "/work/reference-private"
 PLAN_FILENAMES = native_plan_filenames(first_block_cache=False)
 FIRST_BLOCK_CACHE_PLAN_FILENAMES = native_plan_filenames(first_block_cache=True)
 FASTH3_SEGMENTED_PLAN_FILENAMES = native_plan_filenames(first_block_cache=False, segmented_vsa=True)
+_FL2VA_CONDITIONING_PLAN_FILENAMES = (
+    "vision_encoder.plan",
+    "fl2va_keyframe_vae_encoder.plan",
+)
 _REQUIRED_SNAPSHOT_FILES = (
     "audio_vae/config.json",
     "audio_vae/diffusion_pytorch_model.safetensors",
@@ -182,7 +187,8 @@ def validate_workspace_limit_bytes(
     first_block_cache: bool | None = None,
     segmented_vsa: bool = False,
     additional_plan_filenames: tuple[str, ...] = (),
-) -> dict[str, int]:
+    excluded_plan_filenames: tuple[str, ...] = (),
+) -> dict[str, int | str]:
     """Validate the exact per-plan TensorRT tactic-workspace provenance."""
 
     if profile is not None and first_block_cache is not None:
@@ -196,8 +202,15 @@ def validate_workspace_limit_bytes(
         not isinstance(filename, str) or not filename for filename in additional_plan_filenames
     ):
         raise ValueError("MiniMax-H3 additional plan filenames must be a tuple of names")
+    if not isinstance(excluded_plan_filenames, tuple) or any(
+        not isinstance(filename, str) or not filename for filename in excluded_plan_filenames
+    ):
+        raise ValueError("MiniMax-H3 excluded plan filenames must be a tuple of names")
+    base = native_plan_filenames(first_block_cache=selected, segmented_vsa=segmented_vsa)
+    if not set(excluded_plan_filenames).issubset(base):
+        raise ValueError("MiniMax-H3 excluded plan filenames are not selected native plans")
     expected = (
-        *native_plan_filenames(first_block_cache=selected, segmented_vsa=segmented_vsa),
+        *(filename for filename in base if filename not in excluded_plan_filenames),
         *additional_plan_filenames,
     )
     if len(set(expected)) != len(expected):
@@ -207,7 +220,10 @@ def validate_workspace_limit_bytes(
             "MiniMax-H3 workspace_limit_bytes must cover exactly the selected native plans"
         )
     for filename, value in record.items():
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        valid_numeric_limit = (
+            isinstance(value, int) and not isinstance(value, bool) and value > 0
+        )
+        if not valid_numeric_limit and value != TRT_DEFAULT_WORKSPACE_POLICY:
             raise ValueError(
                 f"MiniMax-H3 workspace_limit_bytes has an invalid value for {filename}"
             )
@@ -1245,20 +1261,54 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         raise ValueError("MiniMax-H3 bundle config has an invalid denoiser cache mode")
     first_block_cache = cache_mode == "first_block"
     segmented_vsa = cache_mode == "segmented_vsa"
+    plan_sha = config.get("plan_sha256")
+    if not isinstance(plan_sha, dict):
+        raise ValueError("MiniMax-H3 bundle config must identify the selected native plans")
+    public_workflows = config.get("public_workflows")
+    supported_workflows = (
+        ["t2va"],
+        ["t2va", "fl2va"],
+        ["t2va", "fl2va", "ref2va"],
+    )
+    if public_workflows is not None and public_workflows not in supported_workflows:
+        raise ValueError(
+            "MiniMax-H3 bundle public_workflows must be an ordered prefix of "
+            "[t2va, fl2va, ref2va]"
+        )
+    declares_fl2va = public_workflows is not None and "fl2va" in public_workflows
+    declares_ref2va = public_workflows is not None and "ref2va" in public_workflows
+    ref2va_supported = config.get("ref2va_supported", False)
+    if not isinstance(ref2va_supported, bool) or ref2va_supported != declares_ref2va:
+        raise ValueError(
+            "MiniMax-H3 bundle ref2va_supported must match public_workflows"
+        )
+    present_conditioning = set(plan_sha).intersection(_FL2VA_CONDITIONING_PLAN_FILENAMES)
+    if present_conditioning and present_conditioning != set(
+        _FL2VA_CONDITIONING_PLAN_FILENAMES
+    ):
+        raise ValueError("MiniMax-H3 FL2VA conditioning plans must be all-or-none")
+    include_conditioning = (
+        bool(present_conditioning) if public_workflows is None else declares_fl2va
+    )
     selected_plans = native_plan_filenames(
         first_block_cache=first_block_cache,
         segmented_vsa=segmented_vsa,
     )
+    if not include_conditioning:
+        selected_plans = tuple(
+            filename
+            for filename in selected_plans
+            if filename not in _FL2VA_CONDITIONING_PLAN_FILENAMES
+        )
     additional_plan_filenames: tuple[str, ...] = ()
-    if config.get("ref2va_supported") is True:
+    if declares_ref2va:
         from .ref2va_bundle_contract import REF2VA_PLAN_SECTIONS
 
         additional_plan_filenames = tuple(
             filename for _component, filename, _section in REF2VA_PLAN_SECTIONS
         )
         selected_plans = (*selected_plans, *additional_plan_filenames)
-    plan_sha = config.get("plan_sha256")
-    if not isinstance(plan_sha, dict) or set(plan_sha) != set(selected_plans):
+    if set(plan_sha) != set(selected_plans):
         raise ValueError("MiniMax-H3 bundle config must identify exactly the selected native plans")
     if any(
         not isinstance(value, str) or _SHA256.fullmatch(value) is None
@@ -1287,5 +1337,8 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         first_block_cache=first_block_cache,
         segmented_vsa=segmented_vsa,
         additional_plan_filenames=additional_plan_filenames,
+        excluded_plan_filenames=(
+            () if include_conditioning else _FL2VA_CONDITIONING_PLAN_FILENAMES
+        ),
     )
     return config

@@ -142,6 +142,16 @@ def test_builders_apply_default_or_overridden_workspace(
         observed.update(supplied=supplied, default_bytes=default_bytes)
         raise WorkspaceConfigured
 
+    should_configure_workspace = not (
+        builder in (build_adaln_precompute_engine, build_dit_engine) and workspace_bytes is None
+    )
+
+    class FakeConfig:
+        @staticmethod
+        def clear_flag(_flag):
+            if not should_configure_workspace:
+                raise WorkspaceConfigured
+
     class FakeBuilder:
         @staticmethod
         def create_network(_flags):
@@ -149,7 +159,7 @@ def test_builders_apply_default_or_overridden_workspace(
 
         @staticmethod
         def create_builder_config():
-            return object()
+            return FakeConfig()
 
     monkeypatch.setattr(trt, "Builder", lambda _logger: FakeBuilder())
     monkeypatch.setattr(
@@ -163,7 +173,12 @@ def test_builders_apply_default_or_overridden_workspace(
         kwargs["sequence_length"] = 1
     with pytest.raises(WorkspaceConfigured):
         builder(*args, **kwargs)
-    assert observed == {"supplied": workspace_bytes, "default_bytes": default_bytes}
+    expected = (
+        {"supplied": workspace_bytes, "default_bytes": default_bytes}
+        if should_configure_workspace
+        else {}
+    )
+    assert observed == expected
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "8589934592"])
@@ -312,16 +327,14 @@ def test_dynamic_finish_plan_preserves_124_and_345_frame_shapes() -> None:
     engine = runtime.deserialize_cuda_engine(plan)
     assert engine is not None
     assert tuple(
-        tuple(shape)
-        for shape in engine.get_tensor_profile_shape("video_hidden_states", 0)
+        tuple(shape) for shape in engine.get_tensor_profile_shape("video_hidden_states", 0)
     ) == (
         (37296, profile.video_patch_dim),
         (37296, profile.video_patch_dim),
         (102816, profile.video_patch_dim),
     )
     assert tuple(
-        tuple(shape)
-        for shape in engine.get_tensor_profile_shape("audio_hidden_states", 0)
+        tuple(shape) for shape in engine.get_tensor_profile_shape("audio_hidden_states", 0)
     ) == (
         (414, profile.audio_in_channels),
         (414, profile.audio_in_channels),
@@ -336,9 +349,7 @@ def test_dynamic_finish_plan_preserves_124_and_345_frame_shapes() -> None:
         assert finish.set_input_shape("head_hidden", (packed_rows, profile.hidden_size))
         assert finish.set_input_shape("tail_residual", (packed_rows, profile.hidden_size))
         assert finish.set_input_shape("timestep_indices", (packed_rows,))
-        assert finish.set_input_shape(
-            "video_hidden_states", (video_rows, profile.video_patch_dim)
-        )
+        assert finish.set_input_shape("video_hidden_states", (video_rows, profile.video_patch_dim))
         assert finish.set_input_shape(
             "audio_hidden_states", (audio_rows, profile.audio_in_channels)
         )
@@ -393,9 +404,12 @@ def test_dynamic_attention_plans_preserve_media_and_packed_shapes() -> None:
     tail_engine = runtime.deserialize_cuda_engine(tail_plan)
     assert monolithic_engine is not None and head_engine is not None and tail_engine is not None
     assert tuple(
-        tuple(shape)
-        for shape in head_engine.get_tensor_profile_shape("video_hidden_states", 0)
-    ) == ((64, profile.video_patch_dim), (64, profile.video_patch_dim), (128, profile.video_patch_dim))
+        tuple(shape) for shape in head_engine.get_tensor_profile_shape("video_hidden_states", 0)
+    ) == (
+        (64, profile.video_patch_dim),
+        (64, profile.video_patch_dim),
+        (128, profile.video_patch_dim),
+    )
     assert tuple(
         tuple(shape) for shape in tail_engine.get_tensor_profile_shape("head_hidden", 0)
     ) == ((128, profile.hidden_size), (128, profile.hidden_size), (256, profile.hidden_size))
@@ -411,9 +425,7 @@ def test_dynamic_attention_plans_preserve_media_and_packed_shapes() -> None:
         assert monolithic.set_input_shape(
             "audio_hidden_states", (audio_rows, profile.audio_in_channels)
         )
-        assert monolithic.set_input_shape(
-            "encoder_hidden_states", (text_rows, profile.text_dim)
-        )
+        assert monolithic.set_input_shape("encoder_hidden_states", (text_rows, profile.text_dim))
         assert monolithic.set_input_shape("position_ids", (packed_rows, 3))
         assert monolithic.set_input_shape("adaln_indices", (packed_rows,))
         assert monolithic.set_input_shape("timestep_indices", (packed_rows,))
@@ -555,25 +567,19 @@ def test_segmented_vsa_entry_transition_finish_serialize_head_major_abi() -> Non
     )
     weights = _weights(profile)
     for index in range(profile.num_layers):
-        weights[
-            f"transformer_blocks.{index}.attn.to_gate_compress.weight"
-        ] = np.zeros((profile.attention_size, profile.hidden_size), np.float32)
+        weights[f"transformer_blocks.{index}.attn.to_gate_compress.weight"] = np.zeros(
+            (profile.attention_size, profile.hidden_size), np.float32
+        )
 
     plans = {
-        "entry": build_dit_vsa_entry_engine(
-            dict(weights), profile, workspace_bytes=1 << 30
-        ),
+        "entry": build_dit_vsa_entry_engine(dict(weights), profile, workspace_bytes=1 << 30),
         "transition": build_dit_vsa_transition_engine(
             dict(weights), profile, 0, workspace_bytes=1 << 30
         ),
-        "finish": build_dit_vsa_finish_engine(
-            dict(weights), profile, workspace_bytes=1 << 30
-        ),
+        "finish": build_dit_vsa_finish_engine(dict(weights), profile, workspace_bytes=1 << 30),
     }
     runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
-    engines = {
-        name: runtime.deserialize_cuda_engine(plan) for name, plan in plans.items()
-    }
+    engines = {name: runtime.deserialize_cuda_engine(plan) for name, plan in plans.items()}
     assert all(engine is not None for engine in engines.values())
     entry = engines["entry"]
     transition = engines["transition"]
@@ -586,8 +592,7 @@ def test_segmented_vsa_entry_transition_finish_serialize_head_major_abi() -> Non
         "vsa_gate",
     }
     assert tuple(
-        tuple(shape)
-        for shape in transition.get_tensor_profile_shape("vsa_attention_output", 0)
+        tuple(shape) for shape in transition.get_tensor_profile_shape("vsa_attention_output", 0)
     ) == ((2, 128, 128), (2, 128, 128), (2, 256, 128))
 
     for rows in (128, 256):
@@ -658,9 +663,7 @@ def test_fused_qkv_releases_consumed_source_arrays(monkeypatch) -> None:
     weights = {key: np.ones((2, 2), dtype=np.float32) for key in keys}
     monkeypatch.setattr(op, "linear", lambda *_args, **_kwargs: Tensor())
 
-    outputs = op.fused_qkv(
-        Network(), object(), weights, prefix, consume_weights=True
-    )
+    outputs = op.fused_qkv(Network(), object(), weights, prefix, consume_weights=True)
 
     assert len(outputs) == 3
     assert not any(key in weights for key in keys)

@@ -408,7 +408,7 @@ void test_scheduler_and_plugin_fail_closed_contract() {
     const auto rejects_scheduler = [&](const std::string& scheduler) {
         const std::string config =
             "{\"engine_backend\":\"trt_rtx\",\"public_workflows\":[\"t2va\",\"fl2va\",\"ref2va\"],"
-            "\"ref2va_schema_version\":1,\"ref2va_supported\":true,"
+            "\"ref2va_schema_version\":2,\"ref2va_supported\":true,"
             "\"ref2va_context_ir_supported\":false,"
             "\"ref2va_regenerate_2k_supported\":false,"
             "\"ref2va_runtime_language\":\"c++/cuda\","
@@ -444,7 +444,7 @@ void test_scheduler_and_plugin_fail_closed_contract() {
     const std::string extra_workflow_config =
         "{\"engine_backend\":\"trt_rtx\","
         "\"public_workflows\":[\"t2va\",\"fl2va\",\"ref2va\",\"context-ir\"],"
-        "\"ref2va_schema_version\":1,\"ref2va_supported\":true,"
+        "\"ref2va_schema_version\":2,\"ref2va_supported\":true,"
         "\"ref2va_context_ir_supported\":false,"
         "\"ref2va_regenerate_2k_supported\":false,"
         "\"ref2va_runtime_language\":\"c++/cuda\","
@@ -541,11 +541,8 @@ void test_request_boundary_rejects_before_plan_execution() {
     audio.audio.samples.resize(128000);
     audio.audio.num_samples = 128000;
     request.references.push_back(std::move(audio));
-    const auto prepared_audio = trtmc::minimax_h3::prepare_ref2va_request(request, 124);
-    require(prepared_audio.summary.explicit_audio_count == 1 &&
-                prepared_audio.summary.image_count == 0 &&
-                prepared_audio.summary.video_count == 0 && prepared_audio.references.size() == 1,
-            "Ref2VA API rejected audio-only conditioning");
+    require(rejects([&] { (void)trtmc::minimax_h3::prepare_ref2va_request(request, 124); }),
+            "Ref2VA API accepted audio-only conditioning without an image or video");
 
     request.references.clear();
     trtmc::VideoReferenceInput short_video;

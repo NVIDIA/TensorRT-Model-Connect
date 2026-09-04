@@ -9,6 +9,7 @@
 // Uses the RTX-specific NvInfer.h headers which declare IRuntimeCache,
 // CudaGraphStrategy, and DynamicShapesKernelSpecializationStrategy.
 
+#include "runtime/backend/file_plan_validation.h"
 #include "runtime/backend/prebound_backend.h"
 #include "runtime/backend/runtime_cache_persistence.h"
 #include "runtime/backend/trt_logger.h"
@@ -19,6 +20,7 @@
 
 #include <NvInfer.h>
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -42,6 +44,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <sys/stat.h>
 #endif
 
 namespace trtmc {
@@ -110,9 +114,49 @@ class PlanFileMutationGuard final {
             const std::error_code error(static_cast<int>(GetLastError()), std::system_category());
             throw std::runtime_error("[trtmc] Failed to lock RTX plan file: " + error.message());
         }
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(handle_, &info)) {
+            const std::error_code error(static_cast<int>(GetLastError()), std::system_category());
+            (void)CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+            throw std::runtime_error("[trtmc] Failed to identify RTX plan file: " +
+                                     error.message());
+        }
+        const auto path_utf8 = path_.u8string();
+        internal::append_plan_cache_identity_field(file_identity_, path_utf8);
+        internal::append_plan_cache_identity_field(
+            file_identity_, std::to_string(static_cast<std::uint64_t>(info.dwVolumeSerialNumber)));
+        internal::append_plan_cache_identity_field(
+            file_identity_,
+            std::to_string((static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) |
+                           static_cast<std::uint64_t>(info.nFileIndexLow)));
+        internal::append_plan_cache_identity_field(
+            file_identity_,
+            std::to_string((static_cast<std::uint64_t>(info.nFileSizeHigh) << 32U) |
+                           static_cast<std::uint64_t>(info.nFileSizeLow)));
+        internal::append_plan_cache_identity_field(
+            file_identity_,
+            std::to_string(
+                (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32U) |
+                static_cast<std::uint64_t>(info.ftLastWriteTime.dwLowDateTime)));
 #else
+        struct stat info {};
+        if (::stat(path_.c_str(), &info) != 0) {
+            const std::error_code error(errno, std::generic_category());
+            throw std::runtime_error("[trtmc] Failed to identify RTX plan file: " +
+                                     error.message());
+        }
+        initial_device_ = static_cast<std::uintmax_t>(info.st_dev);
+        initial_inode_ = static_cast<std::uintmax_t>(info.st_ino);
         initial_size_ = fs::file_size(path_);
         initial_write_time_ = fs::last_write_time(path_);
+        const auto path_utf8 = path_.u8string();
+        internal::append_plan_cache_identity_field(file_identity_, path_utf8);
+        internal::append_plan_cache_identity_field(file_identity_, std::to_string(initial_device_));
+        internal::append_plan_cache_identity_field(file_identity_, std::to_string(initial_inode_));
+        internal::append_plan_cache_identity_field(file_identity_, std::to_string(initial_size_));
+        internal::append_plan_cache_identity_field(
+            file_identity_, std::to_string(initial_write_time_.time_since_epoch().count()));
 #endif
     }
 
@@ -127,10 +171,17 @@ class PlanFileMutationGuard final {
     PlanFileMutationGuard& operator=(const PlanFileMutationGuard&) = delete;
 
     const fs::path& path() const noexcept { return path_; }
+    const std::string& cache_identity() const noexcept { return file_identity_; }
 
     void verify_unchanged() const {
 #if !defined(_WIN32)
-        if (fs::file_size(path_) != initial_size_ ||
+        struct stat info {};
+        if (::stat(path_.c_str(), &info) != 0) {
+            throw std::runtime_error("[trtmc] RTX plan file disappeared while it was parsed");
+        }
+        if (static_cast<std::uintmax_t>(info.st_dev) != initial_device_ ||
+            static_cast<std::uintmax_t>(info.st_ino) != initial_inode_ ||
+            fs::file_size(path_) != initial_size_ ||
             fs::last_write_time(path_) != initial_write_time_) {
             throw std::runtime_error("[trtmc] RTX plan file changed while it was parsed");
         }
@@ -139,9 +190,12 @@ class PlanFileMutationGuard final {
 
   private:
     fs::path path_;
+    std::string file_identity_;
 #if defined(_WIN32)
     HANDLE handle_{INVALID_HANDLE_VALUE};
 #else
+    std::uintmax_t initial_device_{0};
+    std::uintmax_t initial_inode_{0};
     std::uintmax_t initial_size_{0};
     fs::file_time_type initial_write_time_{};
 #endif
@@ -268,6 +322,11 @@ class BoundedPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
     }
 
     void verify_unchanged() const { mutation_guard_.verify_unchanged(); }
+
+    std::string cache_identity() const {
+        return internal::make_plan_cache_identity(mutation_guard_.cache_identity(), offset_, size_,
+                                                  expected_sha256_);
+    }
 
     int64_t read(void* destination, int64_t nb_bytes, cudaStream_t stream) noexcept override {
         (void)stream;
@@ -730,8 +789,13 @@ class RtxBackend final : public IBackend,
             throw std::invalid_argument(
                 "[trtmc] RTX weight streaming is incompatible with CUDA graph capture");
         }
+        BoundedPlanStreamReader reader(plan_path, plan_offset, plan_size, expected_sha256);
+        internal::verify_plan_sha256_if_requested(reader, options);
+        // File identity prevents retained-engine reuse across bundles or changed
+        // sections in fast mode. It scopes the cache; only SHA-256 verification
+        // above attests the plan contents.
         const std::string cache_key =
-            retain_engine ? retained_engine_key(expected_sha256, weight_streaming_budget_bytes)
+            retain_engine ? retained_engine_key(reader, weight_streaming_budget_bytes)
                           : std::string{};
         std::unique_lock<std::mutex> retained_lock;
         if (retain_engine) {
@@ -741,13 +805,12 @@ class RtxBackend final : public IBackend,
             retained_lock = std::unique_lock<std::mutex>(retained_engines_mutex_);
             const auto hit = retained_engines_.find(cache_key);
             if (hit != retained_engines_.end()) {
+                reader.verify_unchanged();
                 std::cerr << "[trtmc.rtx_engine_cache] hit=1\n";
                 return create_single_module_from_engine(hit->second, options, external_bindings,
                                                         true, serial_execution_context);
             }
         }
-        BoundedPlanStreamReader reader(plan_path, plan_offset, plan_size, expected_sha256);
-        reader.verify_sha256();
         TrtUniquePtr<nvinfer1::ICudaEngine> engine(
             file_backed_runtime().deserializeCudaEngine(reader));
         reader.verify_unchanged();
@@ -776,19 +839,15 @@ class RtxBackend final : public IBackend,
 #endif
     }
 
-    static std::string retained_engine_key(const char* expected_sha256,
+    static std::string retained_engine_key(const BoundedPlanStreamReader& reader,
                                            std::int64_t weight_streaming_budget_bytes) {
-        if (expected_sha256 == nullptr || expected_sha256[0] == '\0') {
-            throw std::invalid_argument(
-                "[trtmc] Retained RTX engines require a verified plan SHA-256");
-        }
         int device = -1;
         const cudaError_t status = cudaGetDevice(&device);
         if (status != cudaSuccess) {
             throw std::runtime_error(std::string("[trtmc] Failed to identify the CUDA device: ") +
                                      cudaGetErrorString(status));
         }
-        return std::to_string(device) + ":" + expected_sha256 + ":" +
+        return std::to_string(device) + ":" + reader.cache_identity() + ":" +
                std::to_string(weight_streaming_budget_bytes);
     }
 

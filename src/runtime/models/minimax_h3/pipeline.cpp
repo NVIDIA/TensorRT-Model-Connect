@@ -1952,9 +1952,9 @@ void MiniMaxH3Pipeline::ResidentState::bind_segmented_vsa_shapes(
 }
 
 bool MiniMaxH3Pipeline::ResidentState::prepare_denoiser(const MiniMaxH3ModuleLoader& loader,
-                                                         cudaStream_t stream, bool first_block_cache,
-                                                         bool native_vsa, int32_t max_text_rows,
-                                                         const MiniMaxH3Geometry& geometry) {
+                                                        cudaStream_t stream, bool first_block_cache,
+                                                        bool native_vsa, int32_t max_text_rows,
+                                                        const MiniMaxH3Geometry& geometry) {
     // The previous request synchronized its VAE before returning. Release it
     // before deserializing the denoiser so the two large stages never overlap.
     release_vae_stage();
@@ -1999,6 +1999,15 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_first_block_cache_denoiser(
             static_cast<std::size_t>(denoiser_geometry.audio_rows) * kAudioChannels)
         throw std::invalid_argument("MiniMax-H3 denoiser latents do not match request geometry");
     const int64_t sequence_rows = static_cast<int64_t>(metadata.adaln_indices.size());
+    const int64_t expected_sequence_rows = static_cast<int64_t>(text_rows) +
+                                           denoiser_geometry.audio_rows +
+                                           denoiser_geometry.video_rows;
+    if (sequence_rows != expected_sequence_rows || sequence_rows < kMinPackedRows ||
+        sequence_rows > kMaxPackedRows ||
+        metadata.positions.size() != static_cast<std::size_t>(sequence_rows) * 3U ||
+        metadata.timestep_indices.size() != static_cast<std::size_t>(sequence_rows)) {
+        throw std::invalid_argument("MiniMax-H3 FirstBlockCache metadata does not match geometry");
+    }
     head.reset_execution_context();
     tail.reset_execution_context();
     finish.reset_execution_context();
@@ -2027,7 +2036,8 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_first_block_cache_denoiser(
         const auto head_outputs = head.forward(head_inputs);
         const float metric =
             copy_float(require_output(head_outputs, "cache_metric"), 1, "cache metric")[0];
-        const bool compute_tail = step == 0 || !std::isfinite(metric) || metric > cache_threshold;
+        const bool compute_tail = should_compute_minimax_h3_tail(
+            step, video_schedule.timesteps.size(), metric, cache_threshold);
 
         if (compute_tail) {
             TensorMap tail_inputs;
@@ -2710,6 +2720,15 @@ MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift) {
     for (std::size_t index = 0; index + 1 < result.sigmas.size(); ++index)
         result.timesteps.push_back(1.0F - result.sigmas[index]);
     return result;
+}
+
+bool should_compute_minimax_h3_tail(std::size_t step, std::size_t transformer_forwards,
+                                    float metric, float cache_threshold) {
+    // The final Euler update takes sigma to zero, so its velocity directly determines the
+    // final latent and must come from a fresh tail evaluation rather than cached tail state.
+    const bool boundary_step =
+        step == 0 || (transformer_forwards != 0 && step == transformer_forwards - 1);
+    return boundary_step || !std::isfinite(metric) || metric > cache_threshold;
 }
 
 void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t count,

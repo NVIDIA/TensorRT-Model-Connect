@@ -5,9 +5,9 @@ description: Build, install, and run the public H3-Base workflows with the nativ
 
 This is the native Windows path for the public MiniMax H3-Base generation
 workflows. Bundle construction is an offline release-engineering step. The
-installed generation path is ModelConnect C++/CUDA plus TensorRT-RTX and
-Windows system media APIs; it does not ship or invoke Python, PyTorch,
-FastVideo, Triton, FFmpeg, or a subprocess.
+installed generation path is ModelConnect C++/CUDA plus TensorRT-RTX and Windows
+system media APIs; it does not ship or invoke Python, PyTorch, FastVideo,
+Triton, FFmpeg, or a subprocess.
 
 ## Supported H3-Base surface
 
@@ -17,10 +17,19 @@ One bundle can expose these workflows:
 - FL2VA: first frame, last frame, or both, plus a prompt; and
 - Ref2VA: an ordered mix of reference images, videos, and audio plus a prompt.
 
+The default bundle uses the official original H3 weights and dense attention.
+It does not require a FastH3 adapter, LoRA, VSA engine, or an external attention
+runtime. T2VA and FL2VA share one dynamic FirstBlockCache-capable dense
+transformer, while Ref2VA uses the official `transformer_ref/` weights and its
+released dense conditioning schedule. All three workflows use one dynamic
+duration profile; there is no separate five-second and fifteen-second
+implementation.
+
 The target is 24 fps with 32 kHz stereo audio. Target frames follow the video
 VAE's `17 * n + 5` alignment. A nominal five-second request uses 120 requested
 frames and produces 124 frames (5.167 seconds); the longest local aligned
-request is 345 frames (14.375 seconds). The finite native TensorRT profile
+request is 345 frames (14.375 seconds). One finite native TensorRT dynamic
+profile covers every aligned duration from 124 through 345 frames. It
 accepts all 95 canvases emitted by the public resolver (multiples of 32, trained
 aspect ratios from 1:4 through 4:1, a 768-pixel short edge where the
 `768x1344` pixel budget permits it), plus the official explicit performance
@@ -39,8 +48,9 @@ Ref2VA preserves argument order and enforces the released limits: at most 9
 images, 3 videos, 3 explicit audio files, and 12 files total. Each video or
 explicit audio reference is 2--15 seconds; total video duration and total
 explicit-audio duration are each at most 15 seconds. An audio reference may be
-the only reference modality. A video's soundtrack remains attached to that
-video reference and does not consume the explicit-audio count or duration quota.
+combined with image/video references but cannot be the only reference modality.
+A video's soundtrack remains attached to that video reference and does not
+consume the explicit-audio count or duration quota.
 The Windows media reader scales video directly onto that aspect ratio's bounded
 H3 resolver canvas and drops source rates above 24 fps before allocating float
 frames; source-rate metadata above 240 fps fails closed. Reference presentation
@@ -70,38 +80,34 @@ Media Foundation provides native MP4 decode and H.264/AAC encode. The NVIDIA
 display driver and Windows system DLLs remain platform prerequisites.
 
 Python is used only on the build machine to translate authorized checkpoints
-and adapters into TensorRT-RTX plans. It is not copied into the installer and
-is not needed to install or generate media.
+into TensorRT-RTX plans. It is not copied into the installer and is not needed
+to install or generate media. Loading engines, executing every forward pass,
+and writing the final MP4 all happen in the native C++ runtime.
 
 The locked runtime never emits an effective-config file or another implicit
 sidecar. `--runtime-cache PATH` is the one explicit exception: when the user
 selects it, TensorRT-RTX may persist its JIT cache at exactly that path. No
 cache file is created by default.
 
-On the qualified SM121 GPU, the MiniMax H3 model plugin uses an embedded native
-VSA specialization. It is part of the DLL rather than a PTX sidecar, and its
-load/configuration/launch path fails closed instead of silently falling back.
-No FastVideo, Triton, Python, or external VSA runtime is installed or invoked.
-The source tree also contains a portable CUDA backend for developer builds
-configured for other supported NVIDIA architectures; that is not the locked
-SM121 installer or performance-qualified binary described here.
+The hot T2VA visual path uses six TensorRT-RTX plans: `text_encoder.plan`,
+`adaln_precompute.plan`, `denoiser_head.plan`, `denoiser_tail.plan`,
+`denoiser_finish.plan`, and `vae_tile_decoder.plan`. The tail is one engine
+covering transformer blocks 1 through 49; it is not split into 49 per-block
+engines. T2VA additionally invokes `audio_vae_decoder.plan`. A complete FL2VA
+bundle also contains `vision_encoder.plan` and
+`fl2va_keyframe_vae_encoder.plan`, which are used when endpoint images are
+supplied. The singular visual route preserves bounded phase residency while
+avoiding per-block engine churn, and every duration follows the same weights,
+scheduler, and dynamic shape profile.
 
 ## Build the runtime
 
 Start in an x64 Visual Studio 2022 developer PowerShell. Supply compatible
 local CUDA 12.9 and TensorRT-RTX SDK roots. The locked distributable helper is
-the SM121 Spark qualification build. With `-BuildTests`, its VSA CUDA test
-requires a live compute-capability 12.1 GPU and refuses to skip the embedded
-specialization. A portable-backend developer build for another supported GPU
+the SM121 Spark qualification build. With `-BuildTests`, GPU tests require a
+live compute-capability 12.1 GPU. A developer build for another supported GPU
 is outside this locked package and performance contract. The helper requires a
 clean Git checkout so the bundle and binaries can record one source revision.
-
-Concretely, this helper emits `120-real` CUDA code and uses the selected CUDA
-12.9 `ptxas` to assemble the checked-in, sanitized VSA PTX into an `sm_121a`
-cubin at build time. That cubin is embedded in the model plugin, so the
-installed runtime does not invoke the driver PTX JIT. The resulting
-distribution is qualified only on the compute-capability 12.1 Spark cohort and
-makes no packaged-hardware support claim for any other compute capability.
 
 ```powershell
 $RepoRoot = (Resolve-Path '<ModelConnect-checkout>').Path
@@ -127,8 +133,7 @@ Prepare a build-only Python environment with this project, the Python binding
 from the selected TensorRT-RTX SDK, and the checkpoint-reading packages. The
 authorized local checkpoint must contain the shared H3 components and
 `transformer/`. Complete Ref2VA additionally requires the released, pinned
-`transformer_ref/` partition. The accelerated T2VA/FL2VA profile requires the
-strictly validated FastH3 adapter file.
+`transformer_ref/` partition. No adapter checkpoint is required.
 
 Use one of two strictly verified pinned checkpoint layouts. A Hugging Face
 cache view is the exact path printed by this pinned download:
@@ -157,30 +162,6 @@ hf download MiniMaxAI/MiniMax-H3 `
     --local-dir $Checkpoint
 if ($LASTEXITCODE -ne 0) { throw 'Pinned checkpoint download failed' }
 ```
-
-The accelerated profile uses the authorized `vsa-datafree` adapter from the
-pinned preview repository. Authenticate with Hugging Face if access is gated,
-then retrieve and verify the exact file:
-
-```powershell
-$FastH3Repository = 'FastVideo/FastVideo-FastH3-4-step-Preview-v1-LoRA'
-$FastH3Revision = 'bcf40ca6f457ed66f8badf13514943e390205fca'
-$FastH3Adapter = (& hf download $FastH3Repository `
-    'vsa-datafree/adapter_model.safetensors' `
-    --revision $FastH3Revision).Trim()
-if ($LASTEXITCODE -ne 0) { throw 'Pinned FastH3 adapter download failed' }
-$FastH3Item = Get-Item -LiteralPath $FastH3Adapter
-$FastH3Hash = (Get-FileHash -Algorithm SHA256 `
-    -LiteralPath $FastH3Adapter).Hash.ToLowerInvariant()
-if ($FastH3Item.Length -ne 5339117712 -or
-    $FastH3Hash -ne '42dc502a2078f166c396a1fa75f29728d1844363652d345d5ef3e2b444ed6470') {
-    throw 'FastH3 vsa-datafree adapter identity mismatch'
-}
-```
-
-Its authenticated metadata pins the originating FastVideo source revision to
-`317ac01648c4d367ec792e960ece12abe38662b0`; the builder verifies that metadata
-and exhaustive tensor accounting in addition to the file hash.
 
 Install the build-only package and prove the source/build revision boundary
 before starting the bundle build:
@@ -217,16 +198,23 @@ python -m tensorrt_model_connect build $Checkpoint `
     --rtx `
     --precision bf16 `
     --output $Bundle `
-    --set "minimax_h3.fast_h3_adapter=$FastH3Adapter" `
     --set "minimax_h3.transformer_ref=$TransformerRef"
 if ($LASTEXITCODE -ne 0) { throw 'MiniMax H3 bundle build failed' }
 ```
 
-The builder validates exact checkpoint/adapter provenance and fails closed.
-It never substitutes `transformer/` when `transformer_ref/` is absent. T2VA
-and FL2VA use the authenticated native VSA 4-forward plan set. Ref2VA uses its
-independent dense `transformer_ref` plans and released 50-point/49-forward
-schedule with video/audio shifts 12 and 3.
+Without an adapter setting, the builder selects the official original-weight
+dense path. T2VA and FL2VA use the singular FirstBlockCache engine set described
+above. Ref2VA uses its independent dense `transformer_ref` plans and released
+50-point/49-forward schedule with video/audio shifts 12 and 3. The builder
+never substitutes `transformer/` when `transformer_ref/` is absent.
+
+The large dense-denoiser and AdaLN engines deliberately do not set an explicit
+TensorRT workspace memory-pool limit. TensorRT-RTX therefore uses its default
+maximum workspace policy and chooses tactics against the memory available on
+the build machine. This is intentional for 128 GiB unified-memory Spark
+systems; setting a smaller manual limit can make otherwise valid Myelin tactics
+fail during engine construction. Smaller auxiliary engines retain their
+recorded per-plan limits.
 
 The plans and bundle are very large. Put the checkpoint, plan-resume directory,
 and output on local storage with enough capacity, and do not build and infer
@@ -237,17 +225,16 @@ After each plan range is copied, flushed, and SHA-256 verified, the journal is
 atomically committed before that exact source plan is removed. Consequently,
 the builder does not retain both a complete plans directory and a complete
 second bundle copy: its assembly peak is approximately the checkpoint plus the
-complete plan set plus the largest single plan. For the released 61-plan
-FastH3+Ref2VA profile, budget roughly 500 GiB of working-set residency when
-checkpoint, plans, and output share one volume. Before downloading a missing
-`transformer_ref`, require at least 350 GiB free; after every source is already
-present, require at least 320 GiB free before starting the build.
+complete plan set plus the largest single plan. The base T2VA/FL2VA inventory
+contains nine plans: the six-plan visual route, the audio decoder, and the two
+FL2VA conditioning plans. Check free space on the selected volume before
+starting; complete Ref2VA adds the dedicated `transformer_ref` plans.
 
 Rerun the exact same command after an interruption to resume. Do not remove the
 `.partial`, `.partial.json`, receipt, or surviving plan files while recovery is
 in progress. Recovery rehashes every committed range, truncates an uncommitted
 tail, and never rebuilds a plan already preserved in the committed bundle
-prefix. A checkpoint, adapter, source, TensorRT-RTX, or workspace-profile
+prefix. A checkpoint, source, TensorRT-RTX, or workspace-profile
 mismatch fails closed instead of reusing incompatible plans. The checked-in
 exact base inventory is part of that resume identity; staged
 receipts created by a builder that predates this inventory cannot be resumed.
@@ -258,7 +245,7 @@ boundary does not attempt to defend against a privileged actor that swaps and
 exactly restores sources around both validation passes.
 
 The bundle and the build-only `.effective_config.json` file contain public
-model identities and content digests, never the local checkpoint, adapter, or
+model identities and content digests, never the local checkpoint or
 `transformer_ref` paths. The package does not install that build record, and
 generation does not re-create it.
 
@@ -278,10 +265,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Native package failed' }
 
 By default, packaging makes an independent copy of the bundle. The package is
 therefore unaffected if the build bundle is later modified, but the packaging
-step needs one additional bundle-sized allocation (about 181 GiB for the
-current 194,569,514,211-byte qualified bundle). On a space-constrained release
-machine, explicitly consume the build artifact with a same-volume atomic
-rename:
+step needs one additional bundle-sized allocation. On a space-constrained
+release machine, explicitly consume the build artifact with a same-volume
+atomic rename:
 
 ```powershell
 & .\scripts\package_windows_h3.ps1 `
@@ -346,6 +332,18 @@ $Bundle = Join-Path $env:LOCALAPPDATA `
     'Programs\ModelConnect\MiniMax-H3\models\MiniMax-H3.bundle'
 ```
 
+`generate-video` is optimized for quick startup on this very large bundle. It
+does not recompute SHA-256 for plan payloads. It validates the bundle header and
+configuration, runtime ABI, section bounds, declared SHA-256 metadata format,
+and the bundle file's identity and immutability across each engine-loading
+window. This fast path trusts a bundle already verified by the native
+installer. Complete payload-content authentication is performed only by the
+following explicit command, whose syntax is also shown by `trtmc --help`:
+
+```powershell
+trtmc inspect $Bundle --validate-runtime
+```
+
 T2VA, nominal five seconds, 16:9:
 
 ```powershell
@@ -372,6 +370,44 @@ trtmc generate-video $Bundle `
     --num-frames 345 --height 768 --width 1344 --seed 0 `
     --output .\t2va-14.375s.mp4
 ```
+
+For the opt-in qualified speed preset, keep the engines resident within one CLI
+process, use a persistent TensorRT-RTX runtime cache, select its calibrated
+`0.30` FirstBlockCache threshold, and include an unmeasured warmup before the
+measured iteration:
+
+```powershell
+$RepoRoot = (Resolve-Path '<ModelConnect-checkout>').Path
+$Prompt = (Get-Content -Raw `
+    (Join-Path $RepoRoot `
+        'tests\e2e\models\minimax_h3\prompts\t2va-example-1.json') |
+    ConvertFrom-Json).prompt
+$RuntimeCache = '.\minimax-h3-trt-rtx.cache'
+trtmc generate-video $Bundle `
+    --prompt $Prompt `
+    --num-frames 120 --height 768 --width 1344 --seed 0 `
+    --num-inference-steps 50 --guidance-scale 1 `
+    --runtime-cache $RuntimeCache `
+    --set "minimax_h3.retain_engines=true" `
+    --set "minimax_h3.retained_tail_weight_budget_gib=24" `
+    --set "minimax_h3.first_block_cache_threshold=0.30" `
+    --warmup 1 --benchmark 1 `
+    --output .\t2va-5s-benchmark.mp4
+```
+
+The `0.30` override above is the explicitly selected qualified speed preset,
+not the bundle or runtime default. The official SOL-Engine FirstBlockCache
+default is `0.08`.
+Thresholds are tuning inputs, not universal quality/performance constants:
+lower values recompute more tail steps, while higher values may skip more work
+but can change output quality. Calibrate non-default values on the target
+machine using representative prompts and both short and long durations.
+
+As a ModelConnect-specific quality guard, the first and final denoiser forwards
+always execute the tail regardless of the cache metric; a non-finite metric also
+forces a full tail evaluation. The threshold applies only to the 47 interior
+opportunities in the 49-forward dense schedule, so at most 47 tails can be
+skipped. The finish plan still executes on every forward.
 
 FL2VA accepts first-only, last-only, or both:
 

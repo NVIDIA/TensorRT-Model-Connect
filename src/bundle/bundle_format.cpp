@@ -410,6 +410,23 @@ BundleSectionFileRange ResolveBundleSectionFileRange(const std::string& path,
     return BundleSectionFileRange{file_offset, section.size};
 }
 
+void ValidateBundleSectionBounds(const std::string& path,
+                                 const std::vector<BundleSectionInfo>& sections) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in)
+        throw std::runtime_error("Failed to open bundle file: " + path);
+
+    const auto file_end = in.tellg();
+    if (file_end < 0)
+        throw std::runtime_error("Failed to determine bundle size: " + path);
+    const auto file_size = static_cast<std::uint64_t>(file_end);
+    in.seekg(0);
+
+    const std::uint64_t data_start = read_bundle_data_start(in, path, file_size);
+    for (const auto& section : sections)
+        (void)checked_section_file_offset(section, data_start, file_size, path);
+}
+
 void CopyBundleSection(const std::string& path, const BundleSectionInfo& section,
                        std::ostream& output) {
     std::uint64_t file_offset = 0;

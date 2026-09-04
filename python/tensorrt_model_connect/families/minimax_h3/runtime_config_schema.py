@@ -42,7 +42,7 @@ SCHEMA = Schema(
         ConfigField(
             name="first_block_cache_threshold",
             type_tag="double",
-            default=0.025,
+            default=0.08,
             allowed_layers=_BUILD,
             validator=lambda value: (
                 isinstance(value, float) and math.isfinite(value) and value > 0.0

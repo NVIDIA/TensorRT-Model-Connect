@@ -489,7 +489,8 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         runtime_cache_path,
                         cuda_graphs,
                         /*kv_cache_size_bytes=*/0,
-                        resolved ? &*resolved : nullptr};
+                        resolved ? &*resolved : nullptr,
+                        /*validate_bundle_payloads=*/true};
     std::unique_ptr<IPipeline> pipeline;
     {
 #if TRTMC_HAS_TVM_FFI
@@ -558,7 +559,8 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         options.runtime_cache_path,
                         options.cuda_graphs,
                         options.kv_cache_size_bytes,
-                        resolved ? &*resolved : nullptr};
+                        resolved ? &*resolved : nullptr,
+                        options.validate_bundle_payloads};
     std::unique_ptr<IPipeline> pipeline;
     {
 #if TRTMC_HAS_TVM_FFI
@@ -630,7 +632,8 @@ PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t po
                         options.runtime_cache_path,
                         options.cuda_graphs,
                         options.kv_cache_size_bytes,
-                        resolved ? &*resolved : nullptr};
+                        resolved ? &*resolved : nullptr,
+                        options.validate_bundle_payloads};
     std::vector<std::unique_ptr<IPipeline>> pipelines;
     {
 #if TRTMC_HAS_TVM_FFI

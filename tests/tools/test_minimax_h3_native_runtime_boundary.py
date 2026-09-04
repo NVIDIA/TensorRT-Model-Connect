@@ -121,7 +121,23 @@ def test_windows_h3_distribution_disables_optional_runtime_frameworks() -> None:
     assert "-WindowStyle Hidden" in package_script
     assert "-Wait" in package_script
     assert "$VerifyProcess.ExitCode" in package_script
-    assert "expectedSections.Count -ne 61" in package_script
+    for supported_layout in (
+        "singular_first_block_cache",
+        "segmented_vsa",
+        "legacy_monolithic_dense",
+    ):
+        assert supported_layout in package_script
+    assert "segmented_dense_first_block_cache" not in package_script
+    assert "FL2VA conditioning plan set must be all-or-none" in package_script
+    assert "Ref2VA plan set must be all-or-none" in package_script
+    assert "Ref2VA requires both shared conditioning plans" in package_script
+    for singular_plan in (
+        "adaln_precompute_plan",
+        "denoiser_head_plan",
+        "denoiser_tail_plan",
+        "denoiser_finish_plan",
+    ):
+        assert singular_plan in package_script
     assert "Assert-RuntimeOnlyCli" in package_script
     assert "trtmc build" in package_script
     assert "--hf-python" in package_script
@@ -312,3 +328,20 @@ def test_windows_h3_hot_benchmark_qualifies_retained_fast_h3_engines() -> None:
     prepare_vae = pipeline[pipeline.index("ResidentState::prepare_vae") :]
     prepare_vae = prepare_vae[: prepare_vae.index("ResidentState::decode_first_block_cache_vae")]
     assert "release_denoiser_stage(/*preserve_video_rows=*/first_block_cache);" in prepare_vae
+
+
+def test_windows_h3_speed_command_pins_dense_runtime_contract() -> None:
+    guide = (
+        ROOT / "website" / "docs" / "getting-started" / "windows-native-h3.md"
+    ).read_text(encoding="utf-8")
+    speed_preset = guide[guide.index("For the opt-in qualified speed preset") :]
+    speed_preset = speed_preset[: speed_preset.index("```", speed_preset.index("```") + 3)]
+    for required in (
+        "tests\\e2e\\models\\minimax_h3\\prompts\\t2va-example-1.json",
+        "--prompt $Prompt",
+        "--num-inference-steps 50",
+        "--guidance-scale 1",
+        '--set "minimax_h3.retain_engines=true"',
+        '--set "minimax_h3.retained_tail_weight_budget_gib=24"',
+    ):
+        assert required in speed_preset
