@@ -7,6 +7,8 @@
 #include "runtime/registry/bundle_materialization.h"
 #include "test_helpers.h"
 
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -27,7 +29,11 @@ void check(bool condition, const char* name) {
 }
 
 std::filesystem::path temporary_directory() {
-    return trtmc_test::make_temp_dir_or_throw("/tmp/bundle_materialization_XXXXXX");
+    char pattern[] = "/tmp/bundle_materialization_XXXXXX";
+    char* directory = mkdtemp(pattern);
+    if (directory == nullptr)
+        throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
+    return directory;
 }
 
 void write_bundle(const std::filesystem::path& path, const std::string& header,

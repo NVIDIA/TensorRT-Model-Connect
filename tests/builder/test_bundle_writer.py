@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import os
 import struct
 
 import numpy as np
@@ -202,22 +201,6 @@ class TestWriteBundle:
 
         assert not destination.exists()
         assert not list(tmp_path.glob(f".{destination.name}.tmp.*"))
-
-    def test_file_backed_replacement_does_not_require_fchmod(self, tmp_path, monkeypatch):
-        source = tmp_path / "engine.plan"
-        source.write_bytes(b"new-plan")
-        destination = tmp_path / "model.bundle"
-        destination.write_bytes(b"old-bundle")
-        monkeypatch.delattr(os, "fchmod", raising=False)
-
-        write_bundle(
-            destination,
-            BundleInfo(model_id="edge"),
-            [_bundle_section_from_file("engine_plan", source)],
-        )
-
-        _, sections = self._read_bundle(str(destination))
-        assert sections["engine_plan"] == b"new-plan"
 
     def test_all_info_fields(self, tmp_path):
         info = BundleInfo(

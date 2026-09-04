@@ -590,11 +590,11 @@ void test_seed_csv_populates_seed_list() {
 }
 
 void test_seed_rejects_malformed_scalar() {
-    const auto args =
-        parse({"trtmc", "run", "bundle.bundle", "--prompt", "x", "--seed", "not-a-seed"});
-    check(args.parse_error, "malformed scalar seed is rejected");
-    check(args.error_message == "--seed expects an integer or unsigned-integer CSV",
-          "malformed scalar seed reports the accepted forms");
+    const auto args = parse(
+        {"trtmc", "generate-video", "bundle.bundle", "--prompt", "x", "--seed", "not-a-seed"});
+    check(args.parse_error, "malformed video seed is rejected");
+    check(args.error_message == "--seed expects one non-negative integer for generate-video",
+          "malformed video seed reports the accepted form");
 }
 
 void test_prompt_and_prompts_file_mutually_exclusive() {

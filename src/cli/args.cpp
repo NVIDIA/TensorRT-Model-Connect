@@ -475,23 +475,31 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--benchmark" && need_value(arg)) {
-            auto value = parse_int_value(arg, "an integer >= 0");
-            if (!value || *value < 0) {
-                args.parse_error = true;
-                args.error_message = arg + " expects an integer >= 0";
-                return args;
+            if (args.command == "generate-video") {
+                auto value = parse_int_value(arg, "an integer >= 0");
+                if (!value || *value < 0) {
+                    args.parse_error = true;
+                    args.error_message = arg + " expects an integer >= 0";
+                    return args;
+                }
+                args.benchmark = *value;
+            } else {
+                args.benchmark = std::atoi(argv[++i]);
             }
-            args.benchmark = *value;
             continue;
         }
         if (arg == "--warmup" && need_value(arg)) {
-            auto value = parse_int_value(arg, "an integer >= 0");
-            if (!value || *value < 0) {
-                args.parse_error = true;
-                args.error_message = arg + " expects an integer >= 0";
-                return args;
+            if (args.command == "generate-video") {
+                auto value = parse_int_value(arg, "an integer >= 0");
+                if (!value || *value < 0) {
+                    args.parse_error = true;
+                    args.error_message = arg + " expects an integer >= 0";
+                    return args;
+                }
+                args.warmup = *value;
+            } else {
+                args.warmup = std::atoi(argv[++i]);
             }
-            args.warmup = *value;
             continue;
         }
         if (arg == "--temperature" && need_value(arg)) {
@@ -561,19 +569,18 @@ CliArgs parse_args(int argc, char** argv) {
                 }
                 args.seed_list = std::move(*parsed);
             } else {
-                int parsed = 0;
-                if (!parse_strict_int(value.c_str(), parsed)) {
-                    args.parse_error = true;
-                    args.error_message = "--seed expects an integer or unsigned-integer CSV";
-                    return args;
+                if (args.command == "generate-video") {
+                    int parsed = 0;
+                    if (!parse_strict_int(value.c_str(), parsed) || parsed < 0) {
+                        args.parse_error = true;
+                        args.error_message =
+                            "--seed expects one non-negative integer for generate-video";
+                        return args;
+                    }
+                    args.seed = parsed;
+                } else {
+                    args.seed = std::atoi(value.c_str());
                 }
-                if (args.command == "generate-video" && parsed < 0) {
-                    args.parse_error = true;
-                    args.error_message =
-                        "--seed expects one non-negative integer for generate-video";
-                    return args;
-                }
-                args.seed = parsed;
             }
             continue;
         }
@@ -720,13 +727,17 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if ((arg == "--num-steps" || arg == "--num-inference-steps") && need_value(arg)) {
-            auto value = parse_int_value(arg, "an integer > 0");
-            if (!value || *value <= 0) {
-                args.parse_error = true;
-                args.error_message = arg + " expects an integer > 0";
-                return args;
+            if (args.command == "generate-video") {
+                auto value = parse_int_value(arg, "an integer > 0");
+                if (!value || *value <= 0) {
+                    args.parse_error = true;
+                    args.error_message = arg + " expects an integer > 0";
+                    return args;
+                }
+                args.num_steps = *value;
+            } else {
+                args.num_steps = std::atoi(argv[++i]);
             }
-            args.num_steps = *value;
             continue;
         }
         if (arg == "--num-frames" && need_value(arg)) {
@@ -740,13 +751,17 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--guidance-scale" && need_value(arg)) {
-            auto value = parse_float_value(arg, "a finite number >= 0");
-            if (!value || *value < 0.0F) {
-                args.parse_error = true;
-                args.error_message = arg + " expects a finite number >= 0";
-                return args;
+            if (args.command == "generate-video") {
+                auto value = parse_float_value(arg, "a finite number >= 0");
+                if (!value || *value < 0.0F) {
+                    args.parse_error = true;
+                    args.error_message = arg + " expects a finite number >= 0";
+                    return args;
+                }
+                args.guidance_scale = *value;
+            } else {
+                args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
             }
-            args.guidance_scale = *value;
             continue;
         }
         if (arg == "--sde-gamma" && need_value(arg)) {
@@ -758,23 +773,31 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--height" && need_value(arg)) {
-            auto value = parse_int_value(arg, "an integer > 0");
-            if (!value || *value <= 0) {
-                args.parse_error = true;
-                args.error_message = arg + " expects an integer > 0";
-                return args;
+            if (args.command == "generate-video") {
+                auto value = parse_int_value(arg, "an integer > 0");
+                if (!value || *value <= 0) {
+                    args.parse_error = true;
+                    args.error_message = arg + " expects an integer > 0";
+                    return args;
+                }
+                args.diffusion_height = *value;
+            } else {
+                args.diffusion_height = std::atoi(argv[++i]);
             }
-            args.diffusion_height = *value;
             continue;
         }
         if (arg == "--width" && need_value(arg)) {
-            auto value = parse_int_value(arg, "an integer > 0");
-            if (!value || *value <= 0) {
-                args.parse_error = true;
-                args.error_message = arg + " expects an integer > 0";
-                return args;
+            if (args.command == "generate-video") {
+                auto value = parse_int_value(arg, "an integer > 0");
+                if (!value || *value <= 0) {
+                    args.parse_error = true;
+                    args.error_message = arg + " expects an integer > 0";
+                    return args;
+                }
+                args.diffusion_width = *value;
+            } else {
+                args.diffusion_width = std::atoi(argv[++i]);
             }
-            args.diffusion_width = *value;
             continue;
         }
         if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) {
@@ -988,21 +1011,15 @@ CliArgs parse_args(int argc, char** argv) {
             args.runtime_cache = argv[++i];
             continue;
         }
-        if (arg == "--kernel-bindings") {
-            if (!need_value(arg))
-                return args;
+        if (arg == "--kernel-bindings" && need_value(arg)) {
             args.kernel_bindings_path = argv[++i];
             continue;
         }
-        if (arg == "--backend-dir") {
-            if (!need_value(arg))
-                return args;
+        if (arg == "--backend-dir" && need_value(arg)) {
             args.backend_search_paths.emplace_back(argv[++i]);
             continue;
         }
-        if (arg == "--model-plugin-dir") {
-            if (!need_value(arg))
-                return args;
+        if (arg == "--model-plugin-dir" && need_value(arg)) {
             args.model_plugin_search_paths.emplace_back(argv[++i]);
             continue;
         }

@@ -108,7 +108,7 @@ std::string format_output_path(const std::string& prefix, int index, int total) 
     if (total <= 1)
         return prefix;
     const auto dot = prefix.find_last_of('.');
-    const auto slash = prefix.find_last_of("/\\");
+    const auto slash = prefix.find_last_of('/');
     const bool has_ext = dot != std::string::npos && (slash == std::string::npos || dot > slash);
     std::ostringstream out;
     if (has_ext)
@@ -206,10 +206,6 @@ std::filesystem::path current_executable_path() {
     return trtmc::internal::current_executable_path();
 }
 #endif
-
-std::string default_temp_output(const char* name) {
-    return (std::filesystem::temp_directory_path() / name).string();
-}
 
 #if !defined(TRTMC_RUNTIME_ONLY_CLI)
 std::string build_python_executable() {
@@ -632,9 +628,8 @@ int cmd_run(const CliArgs& args) {
                 if (!parent.empty())
                     std::filesystem::create_directories(parent);
             } else {
-                const std::string out_dir = args.output_dir.empty()
-                                                ? default_temp_output("trtmc_run_output")
-                                                : args.output_dir;
+                const std::string out_dir =
+                    args.output_dir.empty() ? "/tmp/trtmc_run_output" : args.output_dir;
                 std::filesystem::create_directories(out_dir);
                 out_path = out_dir + "/output.png";
             }
@@ -702,9 +697,8 @@ int cmd_run(const CliArgs& args) {
                 if (!parent.empty())
                     std::filesystem::create_directories(parent);
             } else {
-                const std::string out_dir = args.output_dir.empty()
-                                                ? default_temp_output("trtmc_run_output")
-                                                : args.output_dir;
+                const std::string out_dir =
+                    args.output_dir.empty() ? "/tmp/trtmc_run_output" : args.output_dir;
                 std::filesystem::create_directories(out_dir);
                 out_prefix = out_dir + "/output.png";
             }
@@ -1082,7 +1076,7 @@ int cmd_generate_video(const CliArgs& args) {
     const std::string out_dir = args.output_dir;
 #else
     const std::string out_dir =
-        args.output_dir.empty() ? default_temp_output("trtmc_generate_video") : args.output_dir;
+        args.output_dir.empty() ? "/tmp/trtmc_generate_video" : args.output_dir;
 #endif
 
     const auto total_begin = std::chrono::steady_clock::now();
@@ -1396,8 +1390,7 @@ int cmd_segment(const CliArgs& args) {
     auto result = pipeline->segment(image.pixels.data(), image.height, image.width);
 
     // Save class map as grayscale PNG (pixel value = class index)
-    const std::string out_path =
-        args.output_dir.empty() ? default_temp_output("seg_output.png") : args.output_dir;
+    const std::string out_path = args.output_dir.empty() ? "/tmp/seg_output.png" : args.output_dir;
     const int32_t out_h = result.height > 0 ? result.height : image.height;
     const int32_t out_w = result.width > 0 ? result.width : image.width;
     const auto total_px = static_cast<std::size_t>(out_h) * out_w;
@@ -1434,8 +1427,7 @@ int cmd_disparity(const CliArgs& args) {
     auto pipeline = load_pipeline(args);
     const auto result = pipeline->estimate_disparity(left.pixels.data(), right.pixels.data(),
                                                      left.height, left.width);
-    const std::string out_path =
-        args.output_dir.empty() ? default_temp_output("disparity.f32") : args.output_dir;
+    const std::string out_path = args.output_dir.empty() ? "/tmp/disparity.f32" : args.output_dir;
     std::ofstream output(out_path, std::ios::binary);
     if (!output || result.disparity.empty()) {
         std::cerr << "Error: failed to create disparity output: " << out_path << '\n';
@@ -1719,8 +1711,7 @@ int cmd_segment_prompted(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    const std::string out_dir =
-        args.output_dir.empty() ? default_temp_output("trtmc_masks") : args.output_dir;
+    const std::string out_dir = args.output_dir.empty() ? "/tmp/trtmc_masks" : args.output_dir;
     std::filesystem::create_directories(out_dir);
 
     auto pipeline = load_pipeline(args);
@@ -1874,9 +1865,8 @@ int cmd_generate_audio(const CliArgs& args) {
         // Streaming mode: write raw PCM float32 to output file (or stdout
         // placeholder). Codec runs on chunks during decoding for low latency.
         // Pipe output to: aplay -r 22050 -f FLOAT_LE -c 1 -t raw
-        const std::string out_path = args.output_dir.empty()
-                                         ? default_temp_output("generated_audio_stream.raw")
-                                         : args.output_dir;
+        const std::string out_path =
+            args.output_dir.empty() ? "/tmp/generated_audio_stream.raw" : args.output_dir;
         FILE* fp = std::fopen(out_path.c_str(), "wb");
         if (!fp) {
             std::cerr << "Error: cannot open " << out_path << " for writing\n";
@@ -1899,7 +1889,7 @@ int cmd_generate_audio(const CliArgs& args) {
     auto result = pipeline->generate_audio(args.prompt, cfg);
 
     const std::string out_path =
-        args.output_dir.empty() ? default_temp_output("generated_audio.wav") : args.output_dir;
+        args.output_dir.empty() ? "/tmp/generated_audio.wav" : args.output_dir;
     trtmc::io::write_wav(result, out_path);
 
     std::cout << "Generated " << result.num_samples << " audio samples -> " << out_path << '\n';
@@ -2188,8 +2178,7 @@ int cmd_speak(const CliArgs& args) {
                                  cfg, audio.sample_rate);
     }
 
-    const std::string out_path =
-        args.audio_out.empty() ? default_temp_output("speech_output.wav") : args.audio_out;
+    const std::string out_path = args.audio_out.empty() ? "/tmp/speech_output.wav" : args.audio_out;
     trtmc::io::write_wav(result, out_path);
 
     if (!agent_text.empty())

@@ -362,7 +362,8 @@ void test_try_write_effective_config_reports_unwritable_sidecar() {
         trtmc::config::try_write_effective_config_next_to(bundle, "/dev/null/bundle.bundle");
 
     check(!result.path.has_value(), "try_write_effective: unwritable path is non-fatal");
-    check(!result.error.empty(), "try_write_effective: write error remains observable");
+    check(result.error.find("cannot create directories") != std::string::npos,
+          "try_write_effective: write error remains observable");
 }
 
 void test_runtime_resolution_survives_unwritable_effective_config_sidecar() {
