@@ -6,15 +6,10 @@
 from __future__ import annotations
 
 from .references.hf_transformers import HfTransformersReference
-from .references.invariant_only import InvariantOnlyReference
 
 
 class SmolLM3HfTransformersReference(HfTransformersReference):
     """smollm3 local reference for hf_transformers."""
 
 
-class SmolLM3InvariantOnlyReference(InvariantOnlyReference):
-    """smollm3 local reference for invariant_only."""
-
-
-reference = [SmolLM3HfTransformersReference(), SmolLM3InvariantOnlyReference()]
+reference = [SmolLM3HfTransformersReference()]

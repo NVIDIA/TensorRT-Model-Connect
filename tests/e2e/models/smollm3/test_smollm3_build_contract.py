@@ -9,105 +9,49 @@ import json
 from pathlib import Path
 
 from tests.e2e_harness.manifest_loader import load_manifest
-from tests.e2e_harness.orchestrator import _append_declared_build_cli_args
+
+MANIFEST = Path(__file__).parent / "manifests" / "smollm3-3b.json"
 
 
-def test_falcon3_split_decoder_build_reserves_an_exclusive_gpu() -> None:
-    manifest_path = Path(__file__).parent / "manifests" / "falcon3-1b.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-    assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
+def _manifest() -> dict:
+    return json.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
-def test_native_minitron_regression_uses_family_build_defaults() -> None:
-    for manifest_name in (
-        "minitron-4b-width-regression-native-kv-chunked-prefill.json",
-    ):
-        manifest_path = Path(__file__).parent / "manifests" / manifest_name
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        case = load_manifest(manifest_path)
-
-        assert "precision" not in manifest, manifest_name
-        assert "max_cache_length" not in manifest, manifest_name
-        assert "precision" not in case.metadata, manifest_name
-        assert "max_cache_length" not in case.inputs, manifest_name
-
-
-def test_minitron_width_release_profiles_use_qualified_runtime_contract() -> None:
-    expected_cache_lengths = {
-        "minitron-4b-width.json": None,
-        "minitron-4b-width-l0.json": 256,
-    }
-    for manifest_name, expected_cache_length in expected_cache_lengths.items():
-        manifest_path = Path(__file__).parent / "manifests" / manifest_name
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        case = load_manifest(manifest_path)
-
-        assert manifest["precision"] == "fp16", manifest_name
-        assert (
-            case.hf_revision == "5205ef7d36204947e3b973cb8b147a816ccd7e6a"
-        ), manifest_name
-        assert manifest["build_args"] == {
-            "decoder_engine_layout": "dual_profile"
-        }, manifest_name
-        assert case.metadata["build_cli_args"] == [
-            {"flag": "--dynamic-kv-cache", "value": True},
-            {
-                "flag": "--dynamic-kv-profile-rows",
-                "value": "256,131072",
-            },
-        ], manifest_name
-        build_cli_args: list[str] = []
-        _append_declared_build_cli_args(build_cli_args, case)
-        assert build_cli_args == [
-            "--dynamic-kv-cache",
-            "--dynamic-kv-profile-rows",
-            "256,131072",
-        ], manifest_name
-        if expected_cache_length is None:
-            assert "max_cache_length" not in manifest, manifest_name
-            assert "max_cache_length" not in case.inputs, manifest_name
-        else:
-            assert manifest["max_cache_length"] == expected_cache_length, manifest_name
-            assert case.inputs["max_cache_length"] == expected_cache_length, manifest_name
-        assert case.metadata["precision"] == "fp16", manifest_name
-        assert case.metadata["reference_precision"] == "fp16", manifest_name
-
-
-def test_native_minitron_regression_exceeds_one_prefill_profile() -> None:
-    manifest_path = (
-        Path(__file__).parent
-        / "manifests"
-        / "minitron-4b-width-regression-native-kv-chunked-prefill.json"
+def test_manifest_pins_an_immutable_revision() -> None:
+    assert load_manifest(MANIFEST).hf_revision == (
+        "a07cc9a04f16550a088caea529712d1d335b0ac1"
     )
-    case = load_manifest(manifest_path)
-
-    assert case.hf_revision == "5205ef7d36204947e3b973cb8b147a816ccd7e6a"
-    assert case.metadata["test_category"] == "regression"
-    assert case.metadata["ci_tier"] == "default"
-    assert case.reference_backend == "invariant_only"
-    assert case.oracle_level == "L4_invariants"
-    assert case.reference_family == "smollm3_native_kv_chunked_prefill_regression"
-    assert case.user_contract == "runtime_invariants"
-    assert case.inputs["prompt_repeat"] == {
-        "text": "a",
-        "separator": " ",
-        "count": 32768,
-        "suffix": "\n",
-    }
-    assert case.inputs["expected_prompt_tokens"] == 32769
-    assert case.metadata["expected_kv_cache_rows"] == 131072
-    assert case.metadata["expected_runtime_prefill_tokens"] == 32770
-    assert case.metadata["expected_prefill_chunks"] == 513
-    assert case.metadata["expected_prefill_chunk_limit"] == 64
-    assert case.inputs["max_new_tokens"] == 2
 
 
-def test_tinysmollm3_keeps_legacy_build_contract() -> None:
-    manifest_path = (
-        Path(__file__).parent / "manifests" / "tinysmollm3-1.1b.json"
-    )
-    case = load_manifest(manifest_path)
+def test_manifest_declares_the_family_runtime_contract() -> None:
+    manifest = _manifest()
+    assert manifest["family"] == "smollm3"
+    assert manifest["runtime_strategy"] == "smollm3_decoder_kv_cache"
+    assert manifest["task_strategy"] == "text_generation_causal"
 
-    assert case.metadata["precision"] == "fp16"
-    assert case.inputs["max_cache_length"] == 256
+
+def test_manifest_builds_bf16_for_the_native_kv_path() -> None:
+    # build_routing accepts only BF16 for the native KV decoder, and the
+    # plugin's default_build_precision returns bf16 once the architecture
+    # qualifies, so the declared precision has to agree with both.
+    manifest = _manifest()
+    assert manifest["precision"] == "bf16"
+    assert load_manifest(MANIFEST).metadata["precision"] == "bf16"
+
+
+def test_manifest_reserves_an_exclusive_gpu() -> None:
+    assert _manifest()["e2e_parallel_resource"] == "exclusive_gpu"
+
+
+def test_manifest_uses_the_hf_transformers_oracle() -> None:
+    case = load_manifest(MANIFEST)
+    assert case.reference_backend == "hf_transformers"
+    assert case.oracle_level == "L1_external_reference"
+    assert case.reference_family == "causal_base_continuation"
+    assert case.user_contract == "continuation_parity"
+
+
+def test_manifest_needs_no_remote_code() -> None:
+    # SmolLM3 is native in transformers; the bundle must not depend on
+    # trust_remote_code.
+    assert _manifest()["trust_remote_code"] is False
