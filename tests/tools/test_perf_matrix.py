@@ -37,12 +37,6 @@ def _suite_for_cases(cases, *, exclusions=None):
         cases=tuple(cases),
         excluded_profiles=dict(exclusions or {}),
     )
-
-
-MINIMAX_H3_EXCLUSION_REASON = (
-    "The pinned Diffusers reference for MiniMax-H3 has not yet been integrated "
-    "into the release performance runner."
-)
 LFM2_EXCLUSION_REASON = (
     "Dense LFM2 functional and reference-parity qualification is present, but "
     "this change does not add a matching release-performance workload or receipt."
@@ -62,6 +56,7 @@ TASK_ADAPTERS = {
     "lance.generate": "upstream-lance",
     "locateanything.generate": "hf-transformers-vlm",
     "magpie_tts.generate_audio": "nemo-tts",
+    "minimax_h3.generate_image": "hf-diffusers",
     "nemotron_speech_streaming.transcribe": "nemo-asr",
     "patchtsmixer.solve": "pytorch-timeseries",
     "patchtst.solve": "pytorch-timeseries",
@@ -281,7 +276,6 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "lfm2-350m-bf16-model-card": LFM2_EXCLUSION_REASON,
         "lfm2-350m-fp16": LFM2_EXCLUSION_REASON,
         "lfm2-700m": LFM2_EXCLUSION_REASON,
-        "minimax-h3-768p": MINIMAX_H3_EXCLUSION_REASON,
     }
     assert all(
         set(entry["workload"]) <= {"testcase", "request", "runtime"} for entry in raw_entries
@@ -2199,7 +2193,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
     ]
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
-    rows = {row["id"]: row for row in results["cases"]}
+    result_cases = results["cases"]
+    rows = {row["id"]: row for row in result_cases}
+    assert len(rows) == len(result_cases)
     assert set(rows) == {
         case["id"] for case in performance_catalog.load_suite(SUITE).cases
     }
@@ -2215,8 +2211,8 @@ def test_run_consolidates_results_and_records_replayable_commands(
     expected_catalog_coverage = {
         "total_profiles": len(catalog_entries),
         "ready_profiles": catalog_counts["ready"],
-        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 6,
-        "explicitly_excluded_profiles": 6,
+        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 5,
+        "explicitly_excluded_profiles": 5,
         "explicit_exclusions": [
             {
                 "model": "lfm2-1.2b",
@@ -2237,10 +2233,6 @@ def test_run_consolidates_results_and_records_replayable_commands(
             {
                 "model": "lfm2-700m",
                 "reason": LFM2_EXCLUSION_REASON,
-            },
-            {
-                "model": "minimax-h3-768p",
-                "reason": MINIMAX_H3_EXCLUSION_REASON,
             },
         ],
         "excluded_l0_profiles": excluded_l0_profiles,
@@ -2335,7 +2327,6 @@ def test_run_consolidates_results_and_records_replayable_commands(
         for command in public_row["commands"].values()
     )
     assert "minimax-h3-768p" not in json.dumps(public_report)
-    assert MINIMAX_H3_EXCLUSION_REASON not in json.dumps(public_report)
     log_records = public_row["debug"]["logs"]
     assert {record["label"] for record in log_records} == {
         "TRTMC stdout",
@@ -2610,6 +2601,8 @@ def test_task_reference_commands_record_external_checkout_paths(
 ) -> None:
     monkeypatch.setenv("TRTMC_ELF_REFERENCE_REPO", "/references/ELF")
     monkeypatch.setenv("TRTMC_LANCE_REFERENCE_REPO", "/references/Lance")
+    monkeypatch.setenv("EXAMPLE_DIFFUSERS_REPO", "/references/Diffusers")
+    monkeypatch.setenv("EXAMPLE_TRANSFORMERS_REPO", "/references/Transformers")
     monkeypatch.setenv("TRTMC_SANA_WM_REFERENCE_REPO", "/references/Sana")
     monkeypatch.setenv("PERSONAPLEX_OFFICIAL_REPO", "/references/PersonaPlex")
 
@@ -2621,6 +2614,18 @@ def test_task_reference_commands_record_external_checkout_paths(
     }
     assert perf_matrix._resolved_adapter_options({"adapter": "upstream-sana-wm"}) == {
         "reference_repo": "/references/Sana"
+    }
+    assert perf_matrix._resolved_adapter_options(
+        {
+            "adapter": "hf-diffusers",
+            "adapter_environment": {
+                "diffusers_repo": "EXAMPLE_DIFFUSERS_REPO",
+                "transformers_repo": "EXAMPLE_TRANSFORMERS_REPO",
+            },
+        }
+    ) == {
+        "diffusers_repo": "/references/Diffusers",
+        "transformers_repo": "/references/Transformers",
     }
     assert perf_matrix._resolved_adapter_options({"adapter": "pytorch-personaplex"}) == {
         "official_repo": "/references/PersonaPlex"
@@ -2643,6 +2648,30 @@ def test_external_reference_adapter_rejects_a_missing_checkout(
         match="requires adapter_options.reference_repo or TRTMC_ELF_REFERENCE_REPO",
     ):
         perf_matrix._resolved_adapter_options({"adapter": "upstream-elf"})
+
+
+def test_declared_adapter_environment_rejects_a_missing_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXAMPLE_DIFFUSERS_REPO", "/references/Diffusers")
+    monkeypatch.delenv("EXAMPLE_TRANSFORMERS_REPO", raising=False)
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match=(
+            "requires adapter_options.transformers_repo or "
+            "EXAMPLE_TRANSFORMERS_REPO"
+        ),
+    ):
+        perf_matrix._resolved_adapter_options(
+            {
+                "adapter": "hf-diffusers",
+                "adapter_environment": {
+                    "diffusers_repo": "EXAMPLE_DIFFUSERS_REPO",
+                    "transformers_repo": "EXAMPLE_TRANSFORMERS_REPO",
+                },
+            }
+        )
 
 
 def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
@@ -3850,6 +3879,61 @@ def test_diffusers_local_mode_loads_resolved_snapshot_path(tmp_path: Path, monke
     assert captured["kwargs"]["local_files_only"] is True
 
 
+def test_diffusers_adapter_loads_declared_modular_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        pass
+
+    class FakePipeline:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            captured.update(model=model, from_pretrained=kwargs)
+            return cls()
+
+        def load_components(self, **kwargs):
+            captured["load_components"] = kwargs
+
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        Namespace(ComponentsManager=FakeManager, ModularPipeline=FakePipeline),
+    )
+    arguments = Namespace(
+        family="example_video",
+        local_files_only=False,
+        model="MiniMaxAI/MiniMax-H3",
+        precision="bf16",
+        revision="model-revision",
+        trust_remote_code=False,
+    )
+    torch_module = Namespace(float16="fp16", float32="fp32", bfloat16="bf16")
+
+    runner["_diffusion_pipeline"](
+        arguments, torch_module, {"pipeline_load_mode": "modular_components"}
+    )
+
+    assert captured["model"] == arguments.model
+    from_pretrained = captured["from_pretrained"]
+    assert isinstance(from_pretrained["components_manager"], FakeManager)
+    assert {
+        key: value for key, value in from_pretrained.items() if key != "components_manager"
+    } == {
+        "local_files_only": False,
+        "revision": "model-revision",
+        "trust_remote_code": False,
+    }
+    assert captured["load_components"] == {
+        "dtype": "bf16",
+        "local_files_only": False,
+        "pretrained_model_name_or_path": arguments.model,
+        "revision": "model-revision",
+    }
+
+
 def test_diffusers_adapter_uses_configured_pipeline_classes(monkeypatch) -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     selected = []
@@ -4161,7 +4245,7 @@ def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -
             ],
         },
     )
-    summary = session.invoke()
+    _, summary = runner["_measure"](session, 0, 1)
 
     assert captured["action"] == "w-80,jw-40"
     assert captured["intrinsics"] == "1,2,3,4"
@@ -4210,6 +4294,7 @@ def test_diffusers_adapter_preserves_batched_prompts_and_seeds(
     globals_ = runner["_load_diffusers"].__globals__
     globals_["_diffusion_pipeline"] = lambda *_args: FakePipeline()
     globals_["_resolved_revision"] = lambda *_args: "snapshot"
+    globals_["_synchronize"] = lambda: None
     monkeypatch.setitem(sys.modules, "torch", Namespace(Generator=FakeGenerator))
     arguments = Namespace(
         family="flux",
@@ -4231,8 +4316,8 @@ def test_diffusers_adapter_preserves_batched_prompts_and_seeds(
         {},
     )
 
-    assert session.invoke()["media_count"] == 2
-    assert session.invoke()["media_count"] == 2
+    _, summary = runner["_measure"](session, 1, 1)
+    assert summary["media_count"] == 2
     assert captured == [
         {"prompt": ["red cube", "blue sphere"], "seeds": [41, 42]},
         {"prompt": ["red cube", "blue sphere"], "seeds": [41, 42]},
@@ -4287,8 +4372,111 @@ def test_diffusers_adapter_requests_numeric_output_before_summary(
         {},
     )
 
-    assert session.invoke()["finite"] is True
+    _, summary = runner["_measure"](session, 0, 1)
+    assert summary["finite"] is True
     assert captured == {"prompt": "cat", "output_type": "np"}
+
+
+def test_minimax_h3_diffusers_adapter_times_video_output_only_with_cpu_generator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    captured: dict[str, object] = {}
+
+    class FakeGenerator:
+        def __init__(self, device):
+            captured["generator_device"] = device
+            self.seed = None
+
+        def manual_seed(self, seed):
+            self.seed = seed
+            return self
+
+    class FakePipeline:
+        transformer = Namespace()
+
+        def to(self, device):
+            assert device == "cuda"
+            return self
+
+        def __call__(self, **kwargs):
+            captured["call"] = kwargs
+            return {"videos": np.zeros((1, 2, 4, 6, 3), dtype=np.float32)}
+
+    globals_ = runner["_load_diffusers"].__globals__
+    globals_["_diffusion_pipeline"] = lambda *_args: FakePipeline()
+    globals_["_resolved_revision"] = lambda *_args: "snapshot"
+    globals_["_pinned_checkout_revision"] = lambda _repo, revision, **_kwargs: revision
+    globals_["_synchronize"] = lambda: None
+    monkeypatch.setitem(sys.modules, "torch", Namespace(Generator=FakeGenerator))
+    diffusers_repo = tmp_path / "diffusers"
+    diffusers_package = diffusers_repo / "src/diffusers"
+    diffusers_package.mkdir(parents=True)
+    diffusers_entrypoint = diffusers_package / "__init__.py"
+    diffusers_entrypoint.write_text("", encoding="utf-8")
+    transformers_repo = tmp_path / "transformers"
+    transformers_package = transformers_repo / "src/transformers"
+    transformers_package.mkdir(parents=True)
+    transformers_entrypoint = transformers_package / "__init__.py"
+    transformers_entrypoint.write_text("", encoding="utf-8")
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        Namespace(__file__=str(diffusers_entrypoint)),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        Namespace(__file__=str(transformers_entrypoint)),
+    )
+    arguments = Namespace(
+        family="minimax_h3",
+        precision="bf16",
+        model="MiniMaxAI/MiniMax-H3",
+        revision="model-revision",
+    )
+
+    session = runner["_load_diffusers"](
+        arguments,
+        {
+            "prompt": "A moving subject",
+            "seed": 0,
+            "media_type": "video",
+            "video_height": 4,
+            "video_width": 6,
+            "video_num_frames": 2,
+            "num_inference_steps": 2,
+        },
+        {
+            "diffusers_repo": str(diffusers_repo),
+            "diffusers_revision": "diffusers-revision",
+            "generator_device": "cpu",
+            "output_fields": ["videos"],
+            "require_pinned_diffusers_source": True,
+            "require_pinned_transformers_source": True,
+            "transformers_repo": str(transformers_repo),
+            "transformers_compat_revision": "transformers-revision",
+        },
+    )
+
+    _, summary = runner["_measure"](session, 0, 1)
+    assert summary == {
+        "media_type": "video",
+        "media_count": 2,
+        "height": 4,
+        "width": 6,
+        "channels": 3,
+        "finite": True,
+    }
+    assert captured["generator_device"] == "cpu"
+    assert captured["call"]["output"] == ["videos"]
+    assert captured["call"]["output_type"] == "np"
+    assert captured["call"]["generator"].seed == 0
+    assert session.reference_dependencies == {
+        "https://github.com/huggingface/diffusers.git": "diffusers-revision",
+        "https://github.com/huggingface/transformers.git": "transformers-revision",
+    }
 
 
 def test_diffusers_media_summary_rejects_non_finite_pixels() -> None:
@@ -4308,6 +4496,31 @@ def test_diffusers_media_summary_rejects_non_finite_pixels() -> None:
     invalid[0, 0, 0, 0] = np.nan
     with pytest.raises(RuntimeError, match="non-finite"):
         runner["_media_summary"](invalid, "image")
+
+
+def test_task_reference_summarizes_only_after_all_timed_invocations() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    events: list[str] = []
+
+    def invoke() -> dict[str, str]:
+        events.append("invoke")
+        return {"text": "ok"}
+
+    def summarize(output: dict[str, str]) -> dict[str, str]:
+        events.append("summarize")
+        return output
+
+    session = runner["Session"](
+        invoke,
+        "revision",
+        "framework",
+        summarize=summarize,
+    )
+
+    _, summary = runner["_measure"](session, 1, 2)
+
+    assert events == ["invoke", "invoke", "invoke", "summarize"]
+    assert summary == {"text": "ok"}
 
 
 def test_personaplex_loader_adds_vendored_moshi_package_root() -> None:

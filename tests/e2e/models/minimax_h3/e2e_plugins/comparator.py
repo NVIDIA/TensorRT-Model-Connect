@@ -141,15 +141,15 @@ class MiniMaxH3DecodedVideoComparator:
             status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
             composite_rule=(
-                "exact finite decoded RGB shape AND low-frequency frame structure AND "
-                "brightness profile AND temporal activity/profile AND non-degenerate "
-                "frame contrast; PSNR/MAE are diagnostic only"
+                "exact finite decoded RGB shape AND aligned chroma AND "
+                "low-frequency scene structure AND bounded motion/"
+                "contrast; Pearson profile correlations and PSNR/MAE are diagnostic only"
             ),
             message=(
-                f"{'PASS' if passed else 'FAIL'}: low_frequency_correlation="
+                f"{'PASS' if passed else 'FAIL'}: chroma MAE p95="
+                f"{decoded.chroma_absolute_error_p95:.4f}, low_frequency_correlation="
                 f"{decoded.frame_low_frequency_correlation_minimum:.4f}/"
                 f"{decoded.frame_low_frequency_correlation_mean:.4f} (min/mean), "
-                f"temporal_correlation={decoded.temporal_activity_correlation:.4f}, "
                 f"PSNR={decoded.psnr_db:.4f} dB (diagnostic), "
                 f"MAE={decoded.mean_absolute_error:.8f} (diagnostic)"
             ),

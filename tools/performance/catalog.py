@@ -302,6 +302,18 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
             raise PerformanceSuiteError(
                 f"case {case['id']} task-reference adapter_options must be an object"
             )
+        adapter_environment = baseline.get("adapter_environment", {})
+        if not isinstance(adapter_environment, Mapping) or any(
+            not isinstance(option_name, str)
+            or not option_name
+            or not isinstance(environment_name, str)
+            or not environment_name
+            for option_name, environment_name in adapter_environment.items()
+        ):
+            raise PerformanceSuiteError(
+                f"case {case['id']} task-reference adapter_environment must map "
+                "option names to environment variable names"
+            )
         expected_mode = (
             "pytorch-eager"
             if adapter

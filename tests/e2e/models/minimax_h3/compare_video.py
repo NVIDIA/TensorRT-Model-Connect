@@ -118,7 +118,7 @@ def main() -> int:
     receipt = {
         "source_revision": source_revision,
         **input_records,
-        "quality_contract": "human_visible_low_frequency_structure_and_motion",
+        "quality_contract": "aligned_low_frequency_structure_chroma_and_motion",
         "pixel_metrics_gating": False,
         "shape": list(decoded.shape),
         "expected_shape": expected_shape,

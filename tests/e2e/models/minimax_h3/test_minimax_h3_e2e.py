@@ -80,6 +80,9 @@ def test_minimax_h3_manifest_is_truthful_single_device_contract() -> None:
     assert case.threshold_overrides["low_frequency_block_size"] == 16
     assert case.threshold_overrides["minimum_frame_low_frequency_correlation"] == 0.8
     assert case.threshold_overrides["minimum_mean_low_frequency_correlation"] == 0.9
+    assert case.threshold_overrides["maximum_chroma_absolute_error_p95"] == 0.05
+    assert "minimum_brightness_profile_correlation" not in case.threshold_overrides
+    assert "minimum_temporal_activity_correlation" not in case.threshold_overrides
     assert "minimum_psnr_db" not in case.threshold_overrides
     assert "maximum_mean_absolute_error" not in case.threshold_overrides
 
@@ -208,14 +211,13 @@ def _visual_thresholds(
         "low_frequency_block_size": block_size,
         "minimum_frame_low_frequency_correlation": 0.8,
         "minimum_mean_low_frequency_correlation": 0.9,
-        "minimum_brightness_profile_correlation": 0.95,
         "maximum_frame_brightness_absolute_error": 0.08,
-        "minimum_temporal_activity_correlation": 0.9,
         "maximum_temporal_activity_absolute_error": 0.05,
         "minimum_temporal_activity_ratio": 0.5,
         "maximum_temporal_activity_ratio": 1.5,
         "minimum_frame_std_ratio": 0.7,
         "maximum_frame_std_ratio": 1.4,
+        "maximum_chroma_absolute_error_p95": 0.05,
     }
 
 
@@ -315,6 +317,7 @@ def test_minimax_h3_comparator_accepts_high_frequency_texture_drift(
     assert result.metrics["mean_absolute_error"].operator == "diagnostic"
     assert result.metrics["frame_low_frequency_correlation_minimum"].value == pytest.approx(1.0)
     assert result.metrics["temporal_activity_correlation"].value == pytest.approx(1.0)
+    assert result.metrics["chroma_absolute_error_p95"].passed
 
 
 @pytest.mark.parametrize(
@@ -322,7 +325,7 @@ def test_minimax_h3_comparator_accepts_high_frequency_texture_drift(
     [
         ("collapse", "frame_std_ratio_minimum"),
         ("freeze", "temporal_activity_ratio_minimum"),
-        ("timing_shift", "temporal_activity_correlation"),
+        ("timing_shift", "frame_low_frequency_correlation_minimum"),
     ],
 )
 def test_minimax_h3_comparator_rejects_visible_failure_modes(
@@ -343,6 +346,30 @@ def test_minimax_h3_comparator_rejects_visible_failure_modes(
 
     assert result.status == "failed"
     assert not result.metrics[expected_failed_metric].passed
+
+
+def test_minimax_h3_comparator_rejects_channel_swap_with_chroma_gate(
+    tmp_path: Path,
+) -> None:
+    reference = _synthetic_video()
+    candidate = reference[..., [2, 1, 0]].copy()
+
+    result = _compare_arrays(tmp_path, reference, candidate)
+
+    assert result.status == "failed"
+    assert not result.metrics["chroma_absolute_error_p95"].passed
+
+
+def test_minimax_h3_profile_correlations_are_diagnostic_only(tmp_path: Path) -> None:
+    reference = _synthetic_video()
+    candidate = np.roll(reference, shift=3, axis=0)
+
+    result = _compare_arrays(tmp_path, reference, candidate)
+
+    for name in ("brightness_profile_correlation", "temporal_activity_correlation"):
+        assert result.metrics[name].operator == "diagnostic"
+        assert result.metrics[name].threshold is None
+        assert result.metrics[name].passed
 
 
 def test_minimax_h3_comparator_requires_exact_shape_and_finite_pixels(
@@ -376,15 +403,15 @@ def test_minimax_h3_comparator_requires_exact_shape_and_finite_pixels(
 def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Path) -> None:
     reference_path = tmp_path / "reference.npy"
     candidate_path = tmp_path / "candidate.npy"
-    frames = np.zeros((1, 16, 16, 3), dtype=np.float32)
+    frames = np.zeros((1, 64, 64, 3), dtype=np.float32)
     np.save(reference_path, frames)
     np.save(candidate_path, frames)
     revision = "1" * 40
     workload = {
         "prompt": "test",
         "seed": 0,
-        "height": 16,
-        "width": 16,
+        "height": 64,
+        "width": 64,
         "num_frames": 1,
         "num_inference_steps": 1,
     }
@@ -418,7 +445,7 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
         json.dumps(
             {
                 "threshold_overrides": {
-                    **_visual_thresholds(1, 16, 16),
+                    **_visual_thresholds(1, 64, 64),
                 }
             }
         )
@@ -442,7 +469,12 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
     ]
     environment = os.environ.copy()
     if environment.get("TRTMC_TEST_INSTALLED_WHEEL") != "1":
-        environment["PYTHONPATH"] = str(_PROJECT_DIR / "python")
+        environment["PYTHONPATH"] = os.pathsep.join(
+            filter(
+                None,
+                (str(_PROJECT_DIR / "python"), environment.get("PYTHONPATH", "")),
+            )
+        )
     result = subprocess.run(
         command, cwd=_PROJECT_DIR, env=environment, capture_output=True, text=True
     )

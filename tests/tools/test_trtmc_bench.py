@@ -294,6 +294,11 @@ def test_native_worker_has_a_runner_for_every_advertised_operation() -> None:
     ):
         assert replay_input in worker_source
 
+    image_runner = worker_source.split("Json run_generate_image", 1)[1].split(
+        "std::size_t audio_sample_count", 1
+    )[0]
+    assert image_runner.index("timer.elapsed_ms()") < image_runner.index("generated_pixels")
+
 
 def test_default_catalog_falls_back_to_installed_package_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -495,6 +500,24 @@ def test_future_family_reuses_existing_task_adapter_without_benchmark_changes(
     assert command[command.index("--video-height") + 1] == "256"
     assert command[command.index("--video-width") + 1] == "448"
     assert command[command.index("--video-num-frames") + 1] == "17"
+
+
+def test_minimax_h3_benchmark_extracts_prompt_from_structured_prompt_file(
+    tmp_path: Path,
+) -> None:
+    model = ManifestCatalog().resolve("minimax-h3-768p")
+
+    case = resolve_case(model, tmp_path / "pending.bundle")
+
+    prompt_record = json.loads(
+        (REPOSITORY_ROOT / "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert case.operation == "generate_image"
+    assert case.request["prompt"] == prompt_record["prompt"]
+    assert not case.request["prompt"].lstrip().startswith("{")
+    assert case.request["seed"] == prompt_record["seed"] == 0
 
 
 def test_future_object_detection_family_uses_existing_public_capability(tmp_path: Path) -> None:

@@ -35,7 +35,7 @@ sample_limits:
   nemotron_voicechat_model_card_general_conversation: 1
   mmmu_pro_vision_plugin_parity: 5
   mmmu_pro_vision_square_plugin_parity: 5
-  minimax_h3_official_profile_parity: 1
+  minimax_h3_vbench_reference_parity: 10
   moge_monocular_geometry_fp32_parity: 1
   newstest2019_en_ru_marian_translation_parity: 10
   ocrbench_v2_unified: 5
@@ -171,7 +171,7 @@ models:
   marian-en-ru:
     workloads: [newstest2019_en_ru_marian_translation_parity]
   minimax-h3-768p:
-    workloads: [minimax_h3_official_profile_parity]
+    workloads: [minimax_h3_vbench_reference_parity]
   minitron-4b-depth:
     workloads: [mmlu_continuation_parity]
   minitron-4b-width:

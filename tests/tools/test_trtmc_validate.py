@@ -117,10 +117,12 @@ def test_lerobot_act_catalog_binds_recorded_control_parity() -> None:
     }
 
 
-def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
+def test_minimax_h3_catalog_uses_vbench_profile() -> None:
     catalog = trtmc_validate.load_catalog()
     suites = validation_catalog.load_suites()
-    suite = next(value for value in suites if value["id"] == "minimax_h3_official_profile_parity")
+    suites_by_id = {value["id"]: value for value in suites}
+    vbench_suite = suites_by_id["minimax_h3_vbench_reference_parity"]
+    assert "minimax_h3_official_profile_parity" not in suites_by_id
     model = next(
         value
         for value in validation_catalog.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
@@ -128,37 +130,20 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     )
 
     assert catalog["models"]["minimax-h3-768p"] == {
-        "workloads": ["minimax_h3_official_profile_parity"],
+        "workloads": ["minimax_h3_vbench_reference_parity"],
     }
-    assert validation_catalog.suite_match_reason(suite, model) == (
+    assert catalog["sample_limits"]["minimax_h3_vbench_reference_parity"] == 10
+    assert validation_catalog.suite_match_reason(vbench_suite, model) == (
         True,
         "selected",
     )
-    assert suite["dataset"] == {
+    assert vbench_suite["dataset"] == {
         "kind": "model_plugin_json",
-        "default_path": ("tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"),
+        "default_path": "/mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json",
+        "input_asset_fields": ["prompt_file"],
     }
-    assert suite["scoring"] == {"scorer": "model_plugin_parity"}
-    assert suite["gates"] == {"min_sample_pass_rate": 1.0}
-
-    dataset_path = trtmc_validate.REPO_ROOT / suite["dataset"]["default_path"]
-    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
-    assert dataset["requests"] == [
-        {
-            "sample_id": "minimax-h3-768p-official-profile",
-            "testcase": "minimax-h3-768p",
-            "stage": "end_to_end",
-            "category": "official-profile",
-            "inputs": {},
-        }
-    ]
-    resolved = validation_catalog.resolve_suite_for_model(suite, model)
-    assert resolved["generation"] == {
-        "video_num_frames": 124,
-        "video_height": 768,
-        "video_width": 1344,
-        "num_inference_steps": 50,
-    }
+    assert vbench_suite["scoring"] == {"scorer": "model_plugin_parity"}
+    assert vbench_suite["gates"] == {"min_sample_pass_rate": 1.0}
 
 
 def test_dataset_path_keeps_repository_owned_default_with_dataset_root(
@@ -231,7 +216,6 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         "foundationpose_preprocessed_pose_refinement_fp32_parity",
         "lfm2_model_card_sampling_parity",
         "lerobot_act_recorded_control_fp32_parity",
-        "minimax_h3_official_profile_parity",
         "moge_monocular_geometry_fp32_parity",
         "nemotron_voicechat_model_card_general_conversation",
         "seedtts_en_omni_audio_parity",

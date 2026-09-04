@@ -12714,6 +12714,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("prepare-media")
     p.add_argument("--output-root", type=Path, required=True)
     p.add_argument("--vbench-info", type=Path)
+    p.add_argument("--vbench-model-plugin", action="store_true")
     p.add_argument("--gedit-source", default="")
     p.add_argument("--sana-wm-root", type=Path)
     p.add_argument("--limit", type=int, default=10)
@@ -13202,6 +13203,7 @@ def cmd_prepare_media(args: argparse.Namespace) -> int:
     outputs = prepare_media_datasets(
         output_root=args.output_root,
         vbench_info=args.vbench_info,
+        vbench_model_plugin=args.vbench_model_plugin,
         gedit_source=args.gedit_source,
         sana_wm_root=args.sana_wm_root,
         limit=args.limit,

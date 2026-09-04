@@ -7450,7 +7450,7 @@ def test_eval_resolves_reference_source_revision_before_preparing_cache_inputs(
     revision = "a" * 40
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(),
-        "minimax_h3_official_profile_parity",
+        "minimax_h3_vbench_reference_parity",
     )
     model = {
         "name": "minimax-h3-768p",
@@ -7491,6 +7491,15 @@ def test_eval_resolves_reference_source_revision_before_preparing_cache_inputs(
 
     assert captured["reference_source_revision"] == revision
     assert captured["model_manifest"] == model["manifest"]
+
+
+def test_minimax_h3_reference_parity_accepts_eight_of_ten_samples() -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        "minimax_h3_vbench_reference_parity",
+    )
+
+    assert suite["gates"]["min_sample_pass_rate"] == 0.8
 
 
 def test_flux_validation_build_command_preserves_diffusion_shape(tmp_path: Path) -> None:
@@ -9276,7 +9285,10 @@ def test_public_ci_artifacts_omit_private_runner_paths(tmp_path: Path) -> None:
     assert "/private" not in numeric_public.read_text(encoding="utf-8")
 
 
-def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> None:
+def test_prepare_vbench_selects_ten_unique_review_dimensions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = tmp_path / "VBench_full_info.json"
     source.write_text(
         json.dumps(
@@ -9290,6 +9302,11 @@ def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> 
         ),
         encoding="utf-8",
     )
+    monkeypatch.setattr(
+        prepare_media,
+        "VBENCH_INFO_SHA256",
+        prepare_media._sha256(source),
+    )
 
     output = prepare_media.prepare_vbench(source, tmp_path / "out")
     payload = json.loads(output.read_text(encoding="utf-8"))
@@ -9301,6 +9318,68 @@ def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> 
     assert len({row["prompt"] for row in payload["requests"]}) == 10
     assert payload["source_info_sha256"]
     assert payload["license"] == "Apache-2.0"
+    assert payload["source_revision"] == prepare_media.VBENCH_REVISION
+
+
+def test_prepare_vbench_rejects_source_from_another_revision(tmp_path: Path) -> None:
+    source = tmp_path / "VBench_full_info.json"
+    source.write_text("[]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match the pinned revision"):
+        prepare_media.prepare_vbench(source, tmp_path / "out")
+
+
+def test_prepare_vbench_model_plugin_dataset_is_portable_and_pinned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "VBench_full_info.json"
+    source.write_text(
+        json.dumps(
+            [
+                {
+                    "prompt_en": f"official prompt {index}",
+                    "dimension": [dimension],
+                }
+                for index, dimension in enumerate(prepare_media.VBENCH_DIMENSIONS)
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        prepare_media,
+        "VBENCH_INFO_SHA256",
+        prepare_media._sha256(source),
+    )
+
+    outputs = prepare_media.prepare_media_datasets(
+        output_root=tmp_path / "out",
+        vbench_info=source,
+        vbench_model_plugin=True,
+    )
+    assert len(outputs) == 1
+    dataset = outputs[0]
+    assert not (tmp_path / "out" / "VBench").exists()
+    payload = json.loads(dataset.read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (dataset.parent / "DATASET_MANIFEST.json").read_text(encoding="utf-8")
+    )
+
+    assert payload["request_count"] == 10
+    assert payload["license"] == "Apache-2.0"
+    assert payload["source_revision"] == prepare_media.VBENCH_REVISION
+    assert [row["category"] for row in payload["requests"]] == list(
+        prepare_media.VBENCH_DIMENSIONS
+    )
+    for row in payload["requests"]:
+        prompt_file = dataset.parent / row["inputs"]["prompt_file"]
+        prompt = json.loads(prompt_file.read_text(encoding="utf-8"))
+        assert prompt == {"prompt": row["prompt"], "seed": 0}
+    assert manifest["request_count"] == 10
+    assert manifest["source"]["license"] == "Apache-2.0"
+    assert {record["path"] for record in manifest["files"]} >= {
+        "dataset.json",
+    }
 
 
 def test_prepare_gedit_writes_task_diverse_static_condition_images(tmp_path: Path) -> None:
