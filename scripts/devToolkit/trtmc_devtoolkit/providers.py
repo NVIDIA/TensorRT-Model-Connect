@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         ToolchainCandidate,
     )
     from .runner import Runner
-    from .targets import TargetHandle, TargetPlan, TargetPolicy
+    from .target_contracts import TargetHandle, TargetPlan
 
 
 class ToolchainSource(Protocol):
@@ -128,7 +128,7 @@ class TargetProvider(Protocol):
         self,
         plan: TargetPlan,
         *,
-        policy: TargetPolicy,
+        policy: object | None,
         repository: Path,
         state_dir: Path,
         runner: Runner,
@@ -177,30 +177,6 @@ class ProviderRegistry:
         self._toolchains: dict[str, ToolchainSource] = {}
         self._catalogs: dict[str, ToolchainCatalog] = {}
         self._targets: dict[str, TargetProvider] = {}
-
-    @classmethod
-    def with_builtins(cls) -> ProviderRegistry:
-        from .builtin_providers import (
-            ContainerImageToolchainSource,
-            DockerExecutionContext,
-            LocalExecutionContext,
-            ManagedArtifactToolchainSource,
-            PrefixToolchainSource,
-            SystemToolchainSource,
-        )
-        from .catalogs import NvidiaPackageIndexCatalog
-        from .targets import DockerTargetProvider
-
-        registry = cls()
-        registry.register_context(LocalExecutionContext())
-        registry.register_context(DockerExecutionContext())
-        registry.register_toolchain(SystemToolchainSource())
-        registry.register_toolchain(PrefixToolchainSource())
-        registry.register_toolchain(ContainerImageToolchainSource())
-        registry.register_toolchain(ManagedArtifactToolchainSource())
-        registry.register_catalog(NvidiaPackageIndexCatalog())
-        registry.register_target(DockerTargetProvider())
-        return registry
 
     def register_context(self, provider: ExecutionContext) -> None:
         self._register(self._contexts, provider, "execution context")

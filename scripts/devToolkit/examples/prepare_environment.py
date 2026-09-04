@@ -20,7 +20,7 @@ from trtmc_devtoolkit import (  # noqa: E402
     DockerMount,
     DockerTarget,
     EnvironmentRequest,
-    TargetPolicy,
+    DockerTargetPolicy,
     TrtmcBuildRecipe,
 )
 
@@ -57,7 +57,7 @@ def main() -> None:
             mounts=(DockerMount(REPOSITORY.resolve(), PurePosixPath(arguments.workspace)),),
             workspace=PurePosixPath(arguments.workspace),
         ),
-        policy=TargetPolicy.ENSURE,
+        policy=DockerTargetPolicy.ENSURE,
     )
     lock = toolkit.resolve(
         EnvironmentRequest(

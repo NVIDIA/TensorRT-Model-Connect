@@ -8,10 +8,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+from .builtin_registry import builtin_provider_registry
 from .building import BuildRecipe, BuildResult, Builder
 from .commands import ArtifactInput, CommandArgument, CommandExecutor, CommandResult, CommandSpec
 from .models import DevToolkitError
-from .providers import FrozenProviderRegistry, ProviderRegistry
+from .providers import FrozenProviderRegistry
 from .qualifications import QualificationRegistry, QualificationSource
 from .provisioning import (
     EnvironmentProvisioner,
@@ -20,7 +21,7 @@ from .provisioning import (
 )
 from .resolution import EnvironmentLock, EnvironmentRequest, EnvironmentResolver
 from .runner import CommandRunner, Runner
-from .targets import TargetService
+from .target_service import TargetService
 
 
 class DevToolkit:
@@ -38,7 +39,7 @@ class DevToolkit:
         self.repository = repository.resolve()
         self._capability_state_root = (state_root or self.repository / ".devtoolkit").resolve()
         self._runner = runner
-        self._providers = providers or ProviderRegistry.with_builtins().freeze()
+        self._providers = providers or builtin_provider_registry().freeze()
         self._qualifications = QualificationRegistry(tuple(qualifications))
 
     @classmethod

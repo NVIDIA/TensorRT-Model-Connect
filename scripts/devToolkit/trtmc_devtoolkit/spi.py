@@ -19,7 +19,7 @@ from .qualifications import (
     QualificationSource,
 )
 from .resolution import ContextLock, ProviderDescriptor, ToolchainCandidate
-from .targets import TargetHandle, TargetPlan
+from .target_contracts import TargetHandle, TargetPlan
 
 __all__ = [
     "BuildContext",

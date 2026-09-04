@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Composable execution-target lifecycle capabilities."""
+"""Docker execution-target request types and lifecycle adapter."""
 
 from __future__ import annotations
 
@@ -9,18 +9,24 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
-from .docker_support import docker_environment_file
+from .docker_support import (
+    docker_command,
+    docker_daemon_id,
+    docker_environment_file,
+    inspect_docker_container,
+    inspect_docker_image,
+    require_docker_client_version,
+)
 from .models import DevToolkitError
-from .providers import FrozenProviderRegistry
-from .receipt import exclusive_lock, write_json
 from .resolution import ExecutionTarget, ProviderDescriptor
 from .runner import Runner, command_output
+from .target_contracts import TargetHandle, TargetPlan, _digest, _plain
 
 
 _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
@@ -35,7 +41,7 @@ class PullPolicy(Enum):
     ALWAYS = "always"
 
 
-class TargetPolicy(Enum):
+class DockerTargetPolicy(Enum):
     ADOPT = "adopt"
     START = "start"
     ENSURE = "ensure"
@@ -249,322 +255,6 @@ class DockerTarget:
         object.__setattr__(self, "mounts", mounts)
 
 
-def _plain(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(name): _plain(item) for name, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_plain(item) for item in value]
-    if isinstance(value, (Path, PurePosixPath)):
-        return str(value)
-    if isinstance(value, Enum):
-        return value.value
-    return value
-
-
-def _freeze(value: object) -> object:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, (Path, PurePosixPath, Enum)):
-        return _freeze(_plain(value))
-    if isinstance(value, Mapping):
-        if any(not isinstance(name, str) for name in value):
-            raise DevToolkitError("Target provider state names must be strings")
-        return MappingProxyType({name: _freeze(value[name]) for name in sorted(value)})
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return tuple(_freeze(item) for item in value)
-    raise DevToolkitError(
-        f"Target provider state must be JSON-compatible, got {type(value).__name__}"
-    )
-
-
-def _digest(namespace: bytes, value: object) -> str:
-    encoded = json.dumps(_plain(value), sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(namespace + b"\0" + encoded).hexdigest()
-
-
-@dataclass(frozen=True)
-class TargetPlan:
-    provider: ProviderDescriptor
-    plan_id: str
-    intent: Mapping[str, object]
-    request: object = field(repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if re.fullmatch(r"[0-9a-f]{64}", self.plan_id) is None:
-            raise DevToolkitError("Target plans require a lowercase SHA-256 plan ID")
-        frozen = _freeze(self.intent)
-        if not isinstance(frozen, Mapping):
-            raise DevToolkitError("Target plan intent must be a mapping")
-        object.__setattr__(self, "intent", frozen)
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": 1,
-            "plan_id": self.plan_id,
-            "provider": {
-                "name": self.provider.name,
-                "implementation": self.provider.implementation,
-                "lock_schema": self.provider.lock_schema,
-            },
-            "intent": _plain(self.intent),
-        }
-
-
-@dataclass(frozen=True)
-class TargetHandle:
-    provider: ProviderDescriptor
-    plan_id: str
-    target_id: str
-    action: str
-    identity: Mapping[str, object]
-    observation: Mapping[str, object]
-    execution_target: ExecutionTarget
-    request: object = field(repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if (
-            re.fullmatch(r"[0-9a-f]{64}", self.plan_id) is None
-            or re.fullmatch(r"[0-9a-f]{64}", self.target_id) is None
-        ):
-            raise DevToolkitError("Target handles require lowercase SHA-256 identities")
-        if not self.action:
-            raise DevToolkitError("Target handles require a non-empty action")
-        identity = _freeze(self.identity)
-        observation = _freeze(self.observation)
-        if not isinstance(identity, Mapping) or not isinstance(observation, Mapping):
-            raise DevToolkitError("Target handle identity and observation must be mappings")
-        object.__setattr__(self, "identity", identity)
-        object.__setattr__(self, "observation", observation)
-
-
-@dataclass(frozen=True)
-class ProvisionedTarget:
-    provider: ProviderDescriptor
-    plan_id: str
-    target_id: str
-    action: str
-    identity: Mapping[str, object]
-    observation: Mapping[str, object]
-    execution_target: ExecutionTarget
-    receipt: Path = field(compare=False)
-    request: object = field(repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        identity = _freeze(self.identity)
-        observation = _freeze(self.observation)
-        if not isinstance(identity, Mapping) or not isinstance(observation, Mapping):
-            raise DevToolkitError("Provisioned target evidence must be mappings")
-        object.__setattr__(self, "identity", identity)
-        object.__setattr__(self, "observation", observation)
-
-
-class TargetService:
-    def __init__(
-        self,
-        repository: Path,
-        state_root: Path,
-        providers: FrozenProviderRegistry,
-        runner: Runner,
-    ) -> None:
-        self.repository = repository
-        self.state_root = state_root
-        self.providers = providers
-        self.runner = runner
-
-    def resolve(self, request: object) -> TargetPlan:
-        provider_name = getattr(request, "provider", None)
-        if not isinstance(provider_name, str) or not provider_name:
-            raise DevToolkitError("Target request must declare a provider")
-        provider = self.providers.target(provider_name)
-        plan = provider.resolve(
-            request,
-            repository=self.repository,
-            runner=self.runner,
-        )
-        if not isinstance(plan, TargetPlan) or plan.provider != provider.descriptor:
-            raise DevToolkitError("Target provider returned an incompatible target plan")
-        return plan
-
-    def provision(
-        self,
-        plan: TargetPlan,
-        *,
-        policy: TargetPolicy = TargetPolicy.ENSURE,
-    ) -> ProvisionedTarget:
-        if not isinstance(plan, TargetPlan):
-            raise DevToolkitError("Target provisioning requires a TargetPlan")
-        if not isinstance(policy, TargetPolicy):
-            raise DevToolkitError("Target provisioning policy must be a TargetPolicy")
-        state_dir = self.state_root / "targets" / plan.plan_id
-        state_dir.mkdir(parents=True, exist_ok=True)
-        with exclusive_lock(state_dir / ".provision.lock"):
-            write_json(state_dir / "target-plan.json", plan.as_dict())
-            (state_dir / "provision-receipt.json").unlink(missing_ok=True)
-            (state_dir / "provision-failure.json").unlink(missing_ok=True)
-            try:
-                provider = self.providers.target(plan.provider.name)
-                if provider.descriptor != plan.provider:
-                    raise DevToolkitError("Registered target provider does not match target plan")
-                handle = provider.provision(
-                    plan,
-                    policy=policy,
-                    repository=self.repository,
-                    state_dir=state_dir,
-                    runner=self.runner,
-                )
-                if handle.provider != plan.provider or handle.plan_id != plan.plan_id:
-                    raise DevToolkitError("Target provider returned an incompatible target handle")
-                provider.attest(
-                    handle,
-                    repository=self.repository,
-                    runner=self.runner,
-                )
-                receipt = write_json(
-                    state_dir / "provision-receipt.json",
-                    {
-                        "schema_version": 1,
-                        "status": "ready",
-                        "plan_id": plan.plan_id,
-                        "target_id": handle.target_id,
-                        "action": handle.action,
-                        "policy": policy.value,
-                        "attested": True,
-                        "provider": plan.as_dict()["provider"],
-                        "identity": _plain(handle.identity),
-                        "observation": _plain(handle.observation),
-                    },
-                )
-                return ProvisionedTarget(
-                    provider=handle.provider,
-                    plan_id=handle.plan_id,
-                    target_id=handle.target_id,
-                    action=handle.action,
-                    identity=handle.identity,
-                    observation=handle.observation,
-                    execution_target=handle.execution_target,
-                    receipt=receipt,
-                    request=handle.request,
-                )
-            except Exception as error:
-                write_json(
-                    state_dir / "provision-failure.json",
-                    {
-                        "schema_version": 1,
-                        "status": "failed",
-                        "plan_id": plan.plan_id,
-                        "policy": policy.value,
-                        "error_type": type(error).__name__,
-                    },
-                )
-                raise
-
-    def ensure(
-        self,
-        request: object,
-        *,
-        policy: TargetPolicy = TargetPolicy.ENSURE,
-    ) -> ProvisionedTarget:
-        return self.provision(self.resolve(request), policy=policy)
-
-    def attest(self, target: ProvisionedTarget) -> None:
-        provider = self.providers.target(target.provider.name)
-        if provider.descriptor != target.provider:
-            raise DevToolkitError("Registered target provider does not match provisioned target")
-        provider.attest(
-            TargetHandle(
-                provider=target.provider,
-                plan_id=target.plan_id,
-                target_id=target.target_id,
-                action=target.action,
-                identity=target.identity,
-                observation=target.observation,
-                execution_target=target.execution_target,
-                request=target.request,
-            ),
-            repository=self.repository,
-            runner=self.runner,
-        )
-
-
-def _docker_command(context: str, *arguments: str) -> list[str]:
-    return ["docker", "--context", context, *arguments]
-
-
-def _docker_version(runner: Runner, repository: Path, context: str) -> None:
-    output = command_output(
-        runner,
-        _docker_command(context, "version", "--format", "{{.Client.Version}}"),
-        cwd=repository,
-        timeout=30,
-    )
-    match = re.match(r"([0-9]+)\.([0-9]+)", output)
-    if match is None or tuple(int(value) for value in match.groups()) < (20, 10):
-        raise DevToolkitError(f"Docker CLI 20.10 or newer is required; found {output}")
-
-
-def _docker_daemon(runner: Runner, repository: Path, context: str) -> str:
-    value = command_output(
-        runner,
-        _docker_command(context, "info", "--format", "{{.ID}}"),
-        cwd=repository,
-        timeout=30,
-    )
-    if not value:
-        raise DevToolkitError(f"Docker context {context!r} has no daemon identity")
-    return value
-
-
-def _inspect(
-    runner: Runner,
-    repository: Path,
-    command: Sequence[str],
-    description: str,
-) -> dict[str, object] | None:
-    result = runner.run(
-        command,
-        cwd=repository,
-        check=False,
-        capture_output=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        if any(marker in detail.lower() for marker in ("no such", "not found")):
-            return None
-        raise DevToolkitError(
-            f"Could not inspect {description}: {detail or f'Docker exited {result.returncode}'}"
-        )
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise DevToolkitError(f"Could not inspect {description}: {error}") from error
-    if not isinstance(payload, dict):
-        raise DevToolkitError(f"Docker inspect returned invalid data for {description}")
-    return payload
-
-
-def _inspect_container(
-    runner: Runner, repository: Path, context: str, name: str
-) -> dict[str, object] | None:
-    return _inspect(
-        runner,
-        repository,
-        _docker_command(context, "inspect", "--type", "container", "--format", "{{json .}}", name),
-        f"Docker container {name}",
-    )
-
-
-def _inspect_image(
-    runner: Runner, repository: Path, context: str, reference: str
-) -> dict[str, object] | None:
-    return _inspect(
-        runner,
-        repository,
-        _docker_command(context, "image", "inspect", "--format", "{{json .}}", reference),
-        f"Docker image {reference}",
-    )
-
-
 def _context_digest(context: Path) -> str:
     digest = hashlib.sha256(b"trtmc-devtoolkit-docker-context-v1\0")
     for path in sorted(context.rglob("*")):
@@ -590,6 +280,22 @@ def _environment_identity(environment: Mapping[str, str]) -> dict[str, str]:
         name: hashlib.sha256(b"trtmc-devtoolkit-target-env-v1\0" + value.encode()).hexdigest()
         for name, value in sorted(environment.items())
     }
+
+
+def _environment_values(values: object) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    if not isinstance(values, list):
+        return environment
+    for value in values:
+        if isinstance(value, str) and "=" in value:
+            name, item = value.split("=", 1)
+            environment[name] = item
+    return environment
+
+
+def _image_config(image: Mapping[str, object]) -> Mapping[str, object]:
+    config = image.get("Config")
+    return config if isinstance(config, Mapping) else {}
 
 
 def _docker_size_bytes(value: str) -> int:
@@ -669,7 +375,7 @@ def _mount_identity(mount: DockerMount) -> dict[str, object]:
 
 
 class DockerTargetProvider:
-    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-target==1", 1)
+    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-target==2", 1)
 
     def resolve(
         self,
@@ -685,8 +391,8 @@ class DockerTargetProvider:
             context = command_output(runner, ["docker", "context", "show"], cwd=repository)
         if not context:
             raise DevToolkitError("Docker target requires a non-empty context")
-        _docker_version(runner, repository, context)
-        daemon_id = _docker_daemon(runner, repository, context)
+        require_docker_client_version(runner, repository, context)
+        daemon_id = docker_daemon_id(runner, repository, context)
         mounts = []
         for mount in request.mounts:
             mounts.append(_mount_identity(mount))
@@ -767,11 +473,19 @@ class DockerTargetProvider:
         context: str,
         allow_mutation: bool,
         current: Mapping[str, object] | None,
-    ) -> tuple[str | None, str]:
+    ) -> tuple[dict[str, object], str]:
         if request.image is None:
-            return None, "adopted"
+            inspected = self._current_container_image(
+                current,
+                repository=repository,
+                runner=runner,
+                context=context,
+            )
+            if inspected is None:
+                raise DevToolkitError("Could not inspect the existing Docker container image")
+            return inspected, "adopted"
         if isinstance(request.image, DockerImageRef):
-            inspected = _inspect_image(runner, repository, context, request.image.reference)
+            inspected = inspect_docker_image(runner, repository, context, request.image.reference)
             should_pull = allow_mutation and (
                 request.image.pull is PullPolicy.ALWAYS
                 or (inspected is None and request.image.pull is PullPolicy.IF_MISSING)
@@ -786,12 +500,12 @@ class DockerTargetProvider:
                     context=context,
                 )
             if should_pull:
-                command = _docker_command(context, "pull")
+                command = docker_command(context, "pull")
                 if request.image.platform:
                     command.extend(["--platform", request.image.platform])
                 command.append(request.image.reference)
                 runner.run(command, cwd=repository)
-                inspected = _inspect_image(runner, repository, context, request.image.reference)
+                inspected = inspect_docker_image(runner, repository, context, request.image.reference)
             elif inspected is None:
                 inspected = self._existing_container_image(
                     plan,
@@ -822,7 +536,7 @@ class DockerTargetProvider:
                     raise DevToolkitError(
                         f"Docker image {request.image.reference} digest does not match expectation"
                     )
-            return image_id, "pulled" if should_pull else "adopted"
+            return inspected, "pulled" if should_pull else "adopted"
         assert isinstance(request.image, DockerImageBuild)
         image_intent = plan.intent["container"]["image"]  # type: ignore[index]
         assert isinstance(image_intent, Mapping)
@@ -830,10 +544,10 @@ class DockerTargetProvider:
         if current_digest != image_intent["context_digest"]:
             raise DevToolkitError("Docker build context changed after target resolution")
         tag = request.image.tag or f"trtmc-devtoolkit:{plan.plan_id[:12]}"
-        inspected = _inspect_image(runner, repository, context, tag)
+        inspected = inspect_docker_image(runner, repository, context, tag)
         if self._image_belongs_to_plan(inspected, plan.plan_id):
             assert inspected is not None
-            return _image_id(inspected, f"Docker image {tag}"), "adopted"
+            return inspected, "adopted"
         if not allow_mutation:
             inspected = self._existing_container_image(
                 plan,
@@ -847,8 +561,8 @@ class DockerTargetProvider:
                 raise DevToolkitError(
                     f"Docker image {tag} is not a previously built image for this target plan"
                 )
-            return _image_id(inspected, f"Docker image {tag}"), "adopted"
-        command = _docker_command(
+            return inspected, "adopted"
+        command = docker_command(
             context,
             "build",
             "--file",
@@ -866,10 +580,10 @@ class DockerTargetProvider:
             command.extend(["--build-arg", name])
         command.append(str(request.image.context.resolve()))
         runner.run(command, cwd=repository, env=request.image.build_args)
-        inspected = _inspect_image(runner, repository, context, tag)
+        inspected = inspect_docker_image(runner, repository, context, tag)
         if inspected is None:
             raise DevToolkitError(f"Docker build did not produce image {tag}")
-        return _image_id(inspected, f"Docker image {tag}"), "built"
+        return inspected, "built"
 
     @staticmethod
     def _image_belongs_to_plan(
@@ -911,16 +625,32 @@ class DockerTargetProvider:
         image_id = current.get("Image")
         if not isinstance(image_id, str) or not image_id:
             return None
-        return _inspect_image(runner, repository, context, image_id)
+        return inspect_docker_image(runner, repository, context, image_id)
+
+    @staticmethod
+    def _current_container_image(
+        current: Mapping[str, object] | None,
+        *,
+        repository: Path,
+        runner: Runner,
+        context: str,
+    ) -> dict[str, object] | None:
+        if current is None:
+            return None
+        image_id = current.get("Image")
+        if not isinstance(image_id, str) or not image_id:
+            return None
+        return inspect_docker_image(runner, repository, context, image_id)
 
     @staticmethod
     def _mismatches(
         request: DockerTarget,
         container: Mapping[str, object],
-        image_id: str | None,
+        image: Mapping[str, object],
     ) -> list[str]:
         mismatches: list[str] = []
-        if image_id is not None and container.get("Image") != image_id:
+        image_id = _image_id(image, "Docker target image")
+        if container.get("Image") != image_id:
             mismatches.append("image")
         config = container.get("Config")
         config = config if isinstance(config, Mapping) else {}
@@ -928,29 +658,43 @@ class DockerTargetProvider:
             mismatches.append("working_dir")
         if request.command is not None and tuple(config.get("Cmd") or ()) != request.command:
             mismatches.append("command")
-        actual_environment: dict[str, str] = {}
-        for value in config.get("Env", []):
-            if isinstance(value, str) and "=" in value:
-                name, item = value.split("=", 1)
-                actual_environment[name] = item
-        for name, value in request.environment.items():
-            if actual_environment.get(name) != value:
+        expected_environment = _environment_values(_image_config(image).get("Env"))
+        expected_environment.update(request.environment)
+        actual_environment = _environment_values(config.get("Env"))
+        for name in sorted(expected_environment.keys() | actual_environment.keys()):
+            if actual_environment.get(name) != expected_environment.get(name):
                 mismatches.append(f"environment:{name}")
         actual_mounts = container.get("Mounts")
         actual_mounts = actual_mounts if isinstance(actual_mounts, list) else []
+        mounts_by_target: dict[str, list[Mapping[str, object]]] = {}
+        for item in actual_mounts:
+            destination = item.get("Destination") if isinstance(item, Mapping) else None
+            if isinstance(destination, str):
+                mounts_by_target.setdefault(destination, []).append(item)
+        requested_mounts = {str(mount.target): mount for mount in request.mounts}
         for mount in request.mounts:
             expected_source = str(mount.source)
-            matches = [
-                item
-                for item in actual_mounts
-                if isinstance(item, Mapping) and item.get("Destination") == str(mount.target)
-            ]
+            matches = mounts_by_target.get(str(mount.target), [])
             if (
                 len(matches) != 1
+                or matches[0].get("Type") != "bind"
                 or matches[0].get("Source") != expected_source
                 or (matches[0].get("RW") is not (not mount.read_only))
             ):
                 mismatches.append(f"mount:{mount.target}")
+        image_volumes = _image_config(image).get("Volumes")
+        image_volume_targets = (
+            {str(target) for target in image_volumes}
+            if isinstance(image_volumes, Mapping)
+            else set()
+        )
+        for target in sorted(image_volume_targets - requested_mounts.keys()):
+            matches = mounts_by_target.get(target, [])
+            if len(matches) != 1 or matches[0].get("Type") != "volume":
+                mismatches.append(f"mount:{target}")
+        allowed_targets = requested_mounts.keys() | image_volume_targets
+        for target in sorted(mounts_by_target.keys() - allowed_targets):
+            mismatches.append(f"mount:{target}")
         host = container.get("HostConfig")
         host = host if isinstance(host, Mapping) else {}
         device_requests = host.get("DeviceRequests")
@@ -989,7 +733,7 @@ class DockerTargetProvider:
         runner: Runner,
         context: str,
     ) -> None:
-        command = _docker_command(
+        command = docker_command(
             context,
             "create",
             "--name",
@@ -1025,11 +769,15 @@ class DockerTargetProvider:
         self,
         plan: TargetPlan,
         *,
-        policy: TargetPolicy,
+        policy: object | None,
         repository: Path,
         state_dir: Path,
         runner: Runner,
     ) -> TargetHandle:
+        if policy is None:
+            policy = DockerTargetPolicy.ENSURE
+        if not isinstance(policy, DockerTargetPolicy):
+            raise DevToolkitError("Docker target policy must be a DockerTargetPolicy")
         if not isinstance(plan.request, DockerTarget):
             raise DevToolkitError("Docker target plan lost its typed request")
         request = plan.request
@@ -1038,49 +786,60 @@ class DockerTargetProvider:
         daemon_id = plan.intent.get("daemon_id")
         if not isinstance(container_intent, Mapping) or not isinstance(context, str):
             raise DevToolkitError("Docker target plan is malformed")
-        if _docker_daemon(runner, repository, context) != daemon_id:
+        if docker_daemon_id(runner, repository, context) != daemon_id:
             raise DevToolkitError("Docker daemon changed after target resolution")
-        current = _inspect_container(runner, repository, context, request.name)
-        if current is None and policy in {TargetPolicy.ADOPT, TargetPolicy.START}:
+        current = inspect_docker_container(runner, repository, context, request.name)
+        if current is None and policy in {DockerTargetPolicy.ADOPT, DockerTargetPolicy.START}:
             raise DevToolkitError(f"Docker container {request.name} does not exist")
         if current is None and request.image is None:
             raise DevToolkitError("Creating a Docker container requires an image")
         if current is not None:
-            if policy is TargetPolicy.CREATE and not self._container_belongs_to_plan(
+            if policy is DockerTargetPolicy.CREATE and not self._container_belongs_to_plan(
                 current, plan.plan_id
             ):
                 raise DevToolkitError(
                     f"Docker container {request.name} already exists and is not owned by this plan"
                 )
-            mismatches = self._mismatches(request, current, None)
+            current_image = self._current_container_image(
+                current,
+                repository=repository,
+                runner=runner,
+                context=context,
+            )
+            if current_image is None:
+                raise DevToolkitError(
+                    f"Could not inspect Docker container {request.name} image"
+                )
+            mismatches = self._mismatches(request, current, current_image)
             if mismatches:
                 raise DevToolkitError(
                     f"Docker container {request.name} configuration does not match target: "
                     + ", ".join(mismatches)
                 )
-        image_id, image_action = self._materialize_image(
+        image, image_action = self._materialize_image(
             plan,
             request,
             repository=repository,
             state_dir=state_dir,
             runner=runner,
             context=context,
-            allow_mutation=policy in {TargetPolicy.ENSURE, TargetPolicy.CREATE},
+            allow_mutation=policy in {DockerTargetPolicy.ENSURE, DockerTargetPolicy.CREATE},
             current=current,
         )
+        image_id = _image_id(image, "Docker target image")
         action = "adopted"
         if current is not None:
-            mismatches = self._mismatches(request, current, image_id)
+            mismatches = self._mismatches(request, current, image)
             if mismatches:
                 raise DevToolkitError(
                     f"Docker container {request.name} configuration does not match target: "
                     + ", ".join(mismatches)
                 )
             if not _running(current):
-                if policy is TargetPolicy.ADOPT:
+                if policy is DockerTargetPolicy.ADOPT:
                     raise DevToolkitError(f"Docker container {request.name} is not running")
                 runner.run(
-                    _docker_command(context, "start", _container_id(current, request.name)),
+                    docker_command(context, "start", _container_id(current, request.name)),
                     cwd=repository,
                 )
                 action = "started"
@@ -1097,24 +856,24 @@ class DockerTargetProvider:
                     context=context,
                 )
             except DevToolkitError:
-                raced = _inspect_container(runner, repository, context, request.name)
-                wrong_owner = policy is TargetPolicy.CREATE and not self._container_belongs_to_plan(
+                raced = inspect_docker_container(runner, repository, context, request.name)
+                wrong_owner = policy is DockerTargetPolicy.CREATE and not self._container_belongs_to_plan(
                     raced, plan.plan_id
                 )
-                if raced is None or wrong_owner or self._mismatches(request, raced, image_id):
+                if raced is None or wrong_owner or self._mismatches(request, raced, image):
                     raise
-            current = _inspect_container(runner, repository, context, request.name)
+            current = inspect_docker_container(runner, repository, context, request.name)
             if current is None:
                 raise DevToolkitError(f"Docker container {request.name} was not created")
             runner.run(
-                _docker_command(context, "start", _container_id(current, request.name)),
+                docker_command(context, "start", _container_id(current, request.name)),
                 cwd=repository,
             )
             action = "created"
-        current = _inspect_container(runner, repository, context, request.name)
+        current = inspect_docker_container(runner, repository, context, request.name)
         if current is None or not _running(current):
             raise DevToolkitError(f"Docker container {request.name} is not running")
-        mismatches = self._mismatches(request, current, image_id)
+        mismatches = self._mismatches(request, current, image)
         if mismatches:
             raise DevToolkitError(
                 f"Docker container {request.name} configuration does not match target: "
@@ -1142,6 +901,7 @@ class DockerTargetProvider:
             plan_id=plan.plan_id,
             target_id=target_id,
             action=action,
+            policy=policy.value,
             identity=MappingProxyType(identity),
             observation=MappingProxyType(observation),
             execution_target=ExecutionTarget.docker(
@@ -1179,9 +939,9 @@ class DockerTargetProvider:
         if not isinstance(request, DockerTarget):
             raise DevToolkitError("Docker target attestation lost its typed request")
         context = str(target.execution_target.options["docker_context"])
-        if _docker_daemon(runner, repository, context) != target.identity["daemon_id"]:
+        if docker_daemon_id(runner, repository, context) != target.identity["daemon_id"]:
             raise DevToolkitError("Docker daemon changed after target provisioning")
-        current = _inspect_container(
+        current = inspect_docker_container(
             runner, repository, context, str(target.identity["container_id"])
         )
         if current is None or not _running(current):

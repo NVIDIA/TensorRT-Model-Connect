@@ -26,12 +26,13 @@ from trtmc_devtoolkit import (  # noqa: E402
     DockerImageRef,
     DockerMount,
     DockerTarget,
+    DockerTargetPolicy,
     EnvironmentRequest,
     ExecutionTarget,
     PullPolicy,
     TargetPlan,
-    TargetPolicy,
     ToolchainRuntime,
+    builtin_provider_registry,
 )
 from trtmc_devtoolkit.spi import (  # noqa: E402
     ProviderDescriptor,
@@ -40,6 +41,10 @@ from trtmc_devtoolkit.spi import (  # noqa: E402
     TargetProvider,
     ToolchainCandidate,
 )
+
+
+def _environment_dict(values: list[str]) -> dict[str, str]:
+    return dict(value.split("=", 1) for value in values)
 
 
 class DockerLifecycleRunner:
@@ -58,13 +63,19 @@ class DockerLifecycleRunner:
         self.image_reference = "registry.example/cuda:13.3"
         self.daemon_id = "daemon-123"
         self.image_labels: dict[str, str] = {}
+        self.image_environment = ["TOKEN=super-secret-value"]
+        self.image_volumes: dict[str, dict[str, object]] = {}
         self.inspect_failure = inspect_failure
 
     def _image(self) -> dict[str, object]:
         return {
             "Id": self.image_id,
             "RepoDigests": ["registry.example/cuda@sha256:" + "a" * 64],
-            "Config": {"Labels": self.image_labels},
+            "Config": {
+                "Env": self.image_environment,
+                "Labels": self.image_labels,
+                "Volumes": self.image_volumes,
+            },
         }
 
     def _default_container(self, arguments: list[str]) -> dict[str, object]:
@@ -108,6 +119,22 @@ class DockerLifecycleRunner:
             index += 1
         workdir = arguments[arguments.index("--workdir") + 1]
         image_index = arguments.index(self.image_id)
+        environment = _environment_dict(self.image_environment)
+        if "--env-file" in arguments:
+            environment_file = Path(arguments[arguments.index("--env-file") + 1])
+            environment.update(
+                _environment_dict(environment_file.read_text(encoding="utf-8").splitlines())
+            )
+        mounted_targets = {str(mount["Destination"]) for mount in mounts}
+        for target in self.image_volumes.keys() - mounted_targets:
+            mounts.append(
+                {
+                    "Type": "volume",
+                    "Source": "fixture-volume-" + target.strip("/").replace("/", "-"),
+                    "Destination": target,
+                    "RW": True,
+                }
+            )
         return {
             "Id": "container-123",
             "Image": self.image_id,
@@ -118,7 +145,7 @@ class DockerLifecycleRunner:
                 "Cmd": arguments[image_index + 1 :],
                 "WorkingDir": workdir,
                 "Labels": labels,
-                "Env": ["TOKEN=super-secret-value"],
+                "Env": [f"{name}={value}" for name, value in environment.items()],
             },
             "HostConfig": {
                 "DeviceRequests": device_requests,
@@ -234,18 +261,21 @@ def test_custom_target_provider_composes_without_docker(tmp_path: Path) -> None:
 
         def __init__(self) -> None:
             self.attested = False
+            self.policy = None
 
         def resolve(self, request, *, repository, runner):
             del repository, runner
             return TargetPlan(self.descriptor, "a" * 64, {"name": request.name}, request)
 
         def provision(self, plan, *, policy, repository, state_dir, runner):
-            del policy, repository, state_dir, runner
+            del repository, state_dir, runner
+            self.policy = policy
             return TargetHandle(
                 provider=self.descriptor,
                 plan_id=plan.plan_id,
                 target_id="b" * 64,
                 action="created",
+                policy="custom-policy",
                 identity={"resource": "custom-id"},
                 observation={"ready": True},
                 execution_target=ExecutionTarget.local(),
@@ -257,24 +287,26 @@ def test_custom_target_provider_composes_without_docker(tmp_path: Path) -> None:
             self.attested = True
 
     provider = CustomTargetProvider()
-    registry = ProviderRegistry.with_builtins()
+    registry = ProviderRegistry()
     registry.register_target(provider)
     toolkit = DevToolkit.from_checkout(
         tmp_path,
         state_root=tmp_path / "state",
         providers=registry.freeze(),
-        runner=DockerLifecycleRunner(),
     )
 
+    custom_policy = object()
     provisioned = toolkit.targets.ensure(
-        SimpleNamespace(provider="custom-target", name="custom-resource")
+        SimpleNamespace(provider="custom-target", name="custom-resource"),
+        policy=custom_policy,
     )
 
     receipt = json.loads(provisioned.receipt.read_text(encoding="utf-8"))
     assert provider.attested
+    assert provider.policy is custom_policy
     assert provisioned.execution_target.provider == "local"
+    assert receipt["policy"] == "custom-policy"
     assert receipt["attested"] is True
-    assert receipt["policy"] == "ensure"
 
 
 def test_target_resolution_is_read_only_when_resources_are_missing(tmp_path: Path) -> None:
@@ -321,7 +353,7 @@ def test_ensure_pulls_creates_starts_and_returns_execution_target(tmp_path: Path
     runner = DockerLifecycleRunner()
     toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
 
-    provisioned = toolkit.targets.ensure(target(tmp_path), policy=TargetPolicy.ENSURE)
+    provisioned = toolkit.targets.ensure(target(tmp_path), policy=DockerTargetPolicy.ENSURE)
 
     operations = [command[3] for command in runner.commands if len(command) > 3]
     assert "pull" in operations
@@ -360,7 +392,7 @@ def test_provisioned_docker_target_feeds_environment_resolution(tmp_path: Path) 
             )
 
     runner = DockerLifecycleRunner()
-    registry = ProviderRegistry.with_builtins()
+    registry = builtin_provider_registry()
     registry.register_toolchain(PinnedToolchain())
     toolkit = DevToolkit.from_checkout(
         tmp_path,
@@ -388,8 +420,8 @@ def test_repeated_ensure_is_idempotent(tmp_path: Path) -> None:
     toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
     request = target(tmp_path)
 
-    first = toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
-    second = toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
+    first = toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
+    second = toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
 
     assert first.target_id == second.target_id
     assert second.action == "adopted"
@@ -419,11 +451,70 @@ def test_mount_order_changes_do_not_fail_target_attestation(tmp_path: Path) -> N
     toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
     request = target(tmp_path)
 
-    first = toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
-    second = toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
+    first = toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
+    second = toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
 
     assert first.target_id == second.target_id
     assert second.action == "adopted"
+
+
+def test_undeclared_environment_is_rejected(tmp_path: Path) -> None:
+    runner = DockerLifecycleRunner()
+    toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
+    request = target(tmp_path)
+    toolkit.targets.ensure(request)
+    assert runner.container is not None
+    runner.container["Config"]["Env"].append("UNDECLARED=value")  # type: ignore[index]
+
+    with pytest.raises(DevToolkitError, match="environment:UNDECLARED"):
+        toolkit.targets.ensure(request)
+
+
+def test_requested_environment_may_override_image_default(tmp_path: Path) -> None:
+    runner = DockerLifecycleRunner()
+    runner.image_environment.append("FEATURE=image-default")
+    toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
+    request = target(tmp_path, environment={"FEATURE": "requested"})
+
+    first = toolkit.targets.ensure(request)
+    second = toolkit.targets.ensure(request)
+
+    assert first.target_id == second.target_id
+
+
+def test_undeclared_mount_is_rejected(tmp_path: Path) -> None:
+    runner = DockerLifecycleRunner()
+    toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
+    request = target(tmp_path)
+    toolkit.targets.ensure(request)
+    assert runner.container is not None
+    runner.container["Mounts"].append(  # type: ignore[index]
+        {
+            "Type": "bind",
+            "Source": "/undeclared",
+            "Destination": "/undeclared",
+            "RW": True,
+        }
+    )
+
+    with pytest.raises(DevToolkitError, match="mount:/undeclared"):
+        toolkit.targets.ensure(request)
+
+
+@pytest.mark.parametrize("volume_target", ["/image-cache", "/runs"])
+def test_image_declared_volume_is_allowed_or_overridden(
+    tmp_path: Path,
+    volume_target: str,
+) -> None:
+    runner = DockerLifecycleRunner()
+    runner.image_volumes[volume_target] = {}
+    toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
+    request = target(tmp_path)
+
+    first = toolkit.targets.ensure(request)
+    second = toolkit.targets.ensure(request)
+
+    assert first.target_id == second.target_id
 
 
 def test_adopt_never_pulls_even_when_image_policy_is_always(tmp_path: Path) -> None:
@@ -436,10 +527,10 @@ def test_adopt_never_pulls_even_when_image_policy_is_always(tmp_path: Path) -> N
             pull=PullPolicy.ALWAYS,
         ),
     )
-    toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
+    toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
     runner.commands.clear()
 
-    provisioned = toolkit.targets.ensure(request, policy=TargetPolicy.ADOPT)
+    provisioned = toolkit.targets.ensure(request, policy=DockerTargetPolicy.ADOPT)
 
     assert provisioned.action == "adopted"
     assert not any(command[3] == "pull" for command in runner.commands if len(command) > 3)
@@ -459,7 +550,7 @@ def test_create_rejects_foreign_name_collision_before_image_mutation(tmp_path: P
     )
 
     with pytest.raises(DevToolkitError, match="not owned by this plan"):
-        toolkit.targets.ensure(different_plan, policy=TargetPolicy.CREATE)
+        toolkit.targets.ensure(different_plan, policy=DockerTargetPolicy.CREATE)
 
     assert not any(command[3] == "pull" for command in runner.commands if len(command) > 3)
 
@@ -468,11 +559,11 @@ def test_stopped_matching_container_is_started(tmp_path: Path) -> None:
     runner = DockerLifecycleRunner()
     toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
     request = target(tmp_path)
-    first = toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
+    first = toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
     assert runner.container is not None
     runner.container["State"] = {"Running": False, "Status": "exited"}
 
-    second = toolkit.targets.ensure(request, policy=TargetPolicy.START)
+    second = toolkit.targets.ensure(request, policy=DockerTargetPolicy.START)
 
     assert first.target_id == second.target_id
     assert second.action == "started"
@@ -482,12 +573,12 @@ def test_mismatched_existing_container_fails_without_replacement(tmp_path: Path)
     runner = DockerLifecycleRunner()
     toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
     request = target(tmp_path)
-    toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
+    toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
     assert runner.container is not None
     runner.container["Config"]["WorkingDir"] = "/unexpected"  # type: ignore[index]
 
     with pytest.raises(DevToolkitError, match="configuration does not match"):
-        toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
+        toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
 
     assert not any("rm" in command for command in runner.commands)
 
@@ -503,7 +594,7 @@ def test_dockerfile_image_is_built_before_container_creation(tmp_path: Path) -> 
         image=DockerImageBuild(context, dockerfile=Path("Dockerfile.dev")),
     )
 
-    toolkit.targets.ensure(request, policy=TargetPolicy.CREATE)
+    toolkit.targets.ensure(request, policy=DockerTargetPolicy.CREATE)
 
     operations = [command[3] for command in runner.commands if len(command) > 3]
     assert operations.index("build") < operations.index("create")
@@ -529,7 +620,7 @@ def test_environment_values_are_not_written_to_receipt_or_command_log(tmp_path: 
 
     toolkit.targets.ensure(
         target(tmp_path, environment={"TOKEN": "super-secret-value"}),
-        policy=TargetPolicy.ENSURE,
+        policy=DockerTargetPolicy.ENSURE,
     )
 
     evidence = "".join(
@@ -614,4 +705,4 @@ def test_pull_never_requires_a_local_image(tmp_path: Path) -> None:
     )
 
     with pytest.raises(DevToolkitError, match="not available locally"):
-        toolkit.targets.ensure(request, policy=TargetPolicy.ENSURE)
+        toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)

@@ -9,7 +9,6 @@ import json
 import hashlib
 import os
 import platform
-import re
 import shutil
 import subprocess
 import urllib.error
@@ -21,7 +20,13 @@ from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 
 from .commands import CommandSpec, EnvironmentPath, PathScope, state_path
-from .docker_support import docker_environment_file
+from .docker_support import (
+    docker_command,
+    docker_daemon_id,
+    docker_environment_file,
+    inspect_docker_container,
+    require_docker_client_version,
+)
 from .models import DevToolkitError, ToolchainObservation, ToolchainRuntime
 from .platforms import normalize_architecture
 from .provisioning import ContextHandle, ProvisionPolicy, ToolchainHandle
@@ -242,75 +247,14 @@ def _native_version_script(library: Path) -> str:
     )
 
 
-def _docker_command(docker_context: str, *arguments: str) -> list[str]:
-    return ["docker", "--context", docker_context, *arguments]
-
-
-def _docker_daemon_id(runner: Runner, repository: Path, docker_context: str) -> str:
-    daemon_id = command_output(
-        runner,
-        _docker_command(docker_context, "info", "--format", "{{.ID}}"),
-        cwd=repository,
-        timeout=30,
-    )
-    if not daemon_id:
-        raise DevToolkitError(f"Docker context {docker_context!r} has no daemon identity")
-    return daemon_id
-
-
-def _require_docker_client_version(
-    runner: Runner,
-    repository: Path,
-    docker_context: str,
-) -> None:
-    output = command_output(
-        runner,
-        _docker_command(
-            docker_context,
-            "version",
-            "--format",
-            "{{.Client.Version}}",
-        ),
-        cwd=repository,
-        timeout=30,
-    )
-    match = re.match(r"([0-9]+)\.([0-9]+)", output)
-    if match is None or tuple(int(part) for part in match.groups()) < (20, 10):
-        raise DevToolkitError(
-            f"Docker CLI 20.10 or newer is required for private exec env files; found {output}"
-        )
-
-
-def _docker_inspect(
-    runner: Runner,
-    repository: Path,
-    docker_context: str,
-    container: str,
-) -> dict[str, object]:
-    output = command_output(
-        runner,
-        _docker_command(
-            docker_context,
-            "inspect",
-            "--type",
-            "container",
-            "--format",
-            "{{json .}}",
-            container,
-        ),
-        cwd=repository,
-        timeout=30,
-    )
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise DevToolkitError(f"Could not inspect Docker container {container}: {error}") from error
-    if not isinstance(payload, dict):
-        raise DevToolkitError(f"Docker inspect returned invalid data for {container}")
-    state = payload.get("State")
-    if not isinstance(state, dict) or state.get("Running") is not True:
-        raise DevToolkitError(f"Docker container {container} must already be running")
-    return payload
+def _require_running_docker_container(
+    container: Mapping[str, object] | None,
+    description: str,
+) -> Mapping[str, object]:
+    state = container.get("State") if isinstance(container, Mapping) else None
+    if not isinstance(state, Mapping) or state.get("Running") is not True:
+        raise DevToolkitError(f"Docker container {description} must already be running")
+    return container
 
 
 def _require_docker_binding(
@@ -322,14 +266,17 @@ def _require_docker_binding(
     container_id: str,
     image_id: str,
 ) -> None:
-    _require_docker_client_version(runner, repository, docker_context)
-    observed_daemon = _docker_daemon_id(runner, repository, docker_context)
+    require_docker_client_version(runner, repository, docker_context)
+    observed_daemon = docker_daemon_id(runner, repository, docker_context)
     if observed_daemon != daemon_id:
         raise DevToolkitError(
             f"Docker daemon changed after resolution: expected {daemon_id}, "
             f"observed {observed_daemon}"
         )
-    inspected = _docker_inspect(runner, repository, docker_context, container_id)
+    inspected = _require_running_docker_container(
+        inspect_docker_container(runner, repository, docker_context, container_id),
+        container_id,
+    )
     if inspected.get("Id") != container_id:
         raise DevToolkitError("Docker container identity changed after resolution")
     if inspected.get("Image") != image_id:
@@ -453,7 +400,7 @@ def _container_observation(
     )
     output = command_output(
         runner,
-        _docker_command(
+        docker_command(
             docker_context,
             "exec",
             container_id,
@@ -529,9 +476,12 @@ class DockerExecutionContext:
             )
         if not isinstance(docker_context, str) or not docker_context:
             raise DevToolkitError("Docker resolution requires a non-empty context name")
-        _require_docker_client_version(runner, repository, docker_context)
-        daemon_id = _docker_daemon_id(runner, repository, docker_context)
-        inspected = _docker_inspect(runner, repository, docker_context, container)
+        require_docker_client_version(runner, repository, docker_context)
+        daemon_id = docker_daemon_id(runner, repository, docker_context)
+        inspected = _require_running_docker_container(
+            inspect_docker_container(runner, repository, docker_context, container),
+            container,
+        )
         container_id = inspected.get("Id")
         if not isinstance(container_id, str) or not container_id:
             raise DevToolkitError(f"Docker container {container} has no container identity")
@@ -544,7 +494,7 @@ class DockerExecutionContext:
             else normalize_architecture(
                 command_output(
                     runner,
-                    _docker_command(docker_context, "exec", container_id, "uname", "-m"),
+                    docker_command(docker_context, "exec", container_id, "uname", "-m"),
                     cwd=repository,
                     timeout=30,
                 )
@@ -553,7 +503,7 @@ class DockerExecutionContext:
         release = _parse_os_release(
             command_output(
                 runner,
-                _docker_command(
+                docker_command(
                     docker_context,
                     "exec",
                     container_id,
@@ -692,7 +642,7 @@ class DockerExecutionContext:
         )
         environment = {**dict(context.environment), **dict(command.environment)}
         with docker_environment_file(state_dir, environment) as environment_file:
-            arguments = _docker_command(
+            arguments = docker_command(
                 docker_context,
                 "exec",
                 "--workdir",
@@ -1077,7 +1027,7 @@ def target_python_baseline(
             )
             output = command_output(
                 runner,
-                _docker_command(
+                docker_command(
                     str(context.locator["docker_context"]),
                     "exec",
                     str(context.identity["container_id"]),
@@ -1152,7 +1102,7 @@ def target_runtime_baseline(
         )
         output = command_output(
             runner,
-            _docker_command(
+            docker_command(
                 str(context.locator["docker_context"]),
                 "exec",
                 str(context.identity["container_id"]),

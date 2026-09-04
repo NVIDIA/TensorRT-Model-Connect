@@ -111,7 +111,7 @@ from trtmc_devtoolkit import (
     DockerImageRef,
     DockerMount,
     DockerTarget,
-    TargetPolicy,
+    DockerTargetPolicy,
 )
 
 docker = toolkit.targets.ensure(
@@ -126,7 +126,7 @@ docker = toolkit.targets.ensure(
         state=PurePosixPath("/state/devtoolkit"),
         ipc="host",
     ),
-    policy=TargetPolicy.ENSURE,
+    policy=DockerTargetPolicy.ENSURE,
 )
 
 lock = toolkit.resolve(
@@ -145,6 +145,10 @@ logs or receipts.
 
 Target policies are explicit:
 
+`DockerTargetPolicy` belongs to the Docker adapter. The provider-neutral target
+service forwards each adapter's policy object without interpreting it, so a
+remote-machine or Kubernetes provider can define its own lifecycle semantics.
+
 - `ADOPT` requires an already-running matching container and performs no image
   or container mutation.
 - `START` may start an existing matching container, but never pulls, builds, or
@@ -155,7 +159,9 @@ Target policies are explicit:
 
 No policy deletes or silently replaces an existing container. A name collision
 or configuration drift fails with the mismatched fields so ownership remains
-with the caller.
+with the caller. Matching compares the complete effective environment and mount
+set: image-declared environment defaults and volumes are accepted, request
+values may override them, and undeclared additions fail closed.
 
 After the target is ready, the execution-context provider records its Docker
 daemon ID, immutable container ID, and image ID, and probes its actual Python,
@@ -214,10 +220,9 @@ build, can be supplied through a team JSON catalog. This is still automatic
 installation—the manifest is discovery metadata, not a cohort allowlist:
 
 ```python
-from trtmc_devtoolkit import DevToolkit, JsonToolchainCatalog
-from trtmc_devtoolkit.spi import ProviderRegistry
+from trtmc_devtoolkit import DevToolkit, JsonToolchainCatalog, builtin_provider_registry
 
-registry = ProviderRegistry.with_builtins()
+registry = builtin_provider_registry()
 registry.register_catalog(JsonToolchainCatalog((repo / "private-toolchains.json",)))
 toolkit = DevToolkit.from_checkout(repo, providers=registry.freeze())
 
@@ -357,9 +362,9 @@ provider names. Register adapters explicitly; there is no implicit entry-point
 discovery or workflow DAG.
 
 ```python
-from trtmc_devtoolkit.spi import ProviderRegistry
+from trtmc_devtoolkit import builtin_provider_registry
 
-registry = ProviderRegistry.with_builtins()
+registry = builtin_provider_registry()
 registry.register_target(MyRemoteTargetProvider())
 registry.register_context(MyRemoteContext())
 registry.register_toolchain(MyTensorRTSource())
