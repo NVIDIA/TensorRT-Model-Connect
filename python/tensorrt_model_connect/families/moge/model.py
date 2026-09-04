@@ -1373,10 +1373,9 @@ def _build_native_engine(
         raise RuntimeError("Failed to configure the MoGe dynamic image profile")
     config.add_optimization_profile(profile)
     if hasattr(config, "builder_optimization_level"):
-        # Level 3 enables the static FP16 fused-attention fast path. The broad
-        # dynamic FP32 graph stays at level 1 because level 3 absorbs its
-        # decomposable attention into an unsupported dynamic-BMM ForeignNode.
-        config.builder_optimization_level = 3 if fast_path else 1
+        # Level 3 enables the FP16 fused-attention fast path. Level 0 keeps the
+        # broad dynamic FP32 attention graph decomposed for reliable builds.
+        config.builder_optimization_level = 3 if fast_path else 0
     if hasattr(config, "avg_timing_iterations"):
         config.avg_timing_iterations = 3
     if hasattr(config, "max_aux_streams"):

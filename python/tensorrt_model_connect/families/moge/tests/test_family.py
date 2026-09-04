@@ -141,7 +141,7 @@ def test_production_builder_is_fixed_and_tensor_rt_native_only() -> None:
         'tensor = self.cast(tensor, self.trt.float32, f"{name}.input_fp32")',
         'hidden = self.cast(hidden, self.trt.float16, "vit.residual_fp16")',
         "compute_dtype=self.trt.float16 if self.fast_path else self.trt.float32",
-        "config.builder_optimization_level = 3 if fast_path else 1",
+        "config.builder_optimization_level = 3 if fast_path else 0",
         "config.avg_timing_iterations = 3",
         "ElementWiseOperation.FLOOR_DIV",
         "add_gather",
