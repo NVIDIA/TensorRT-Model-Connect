@@ -576,6 +576,58 @@ def add_active_rope_cache(
     return cos_cache, sin_cache
 
 
+def _yarn_inverse_frequencies(
+    inverse_frequencies: np.ndarray,
+    rotary_ndims: int,
+    rope_theta: float,
+    rope_scaling: Mapping[str, Any],
+) -> tuple[np.ndarray, float]:
+    """YaRN-scaled inverse frequencies and the attention scale that goes with them.
+
+    Mirrors Hugging Face's ``_compute_yarn_parameters``. Frequencies below the
+    ``beta_fast`` correction dimension keep their extrapolated value, those above
+    ``beta_slow`` are interpolated by ``factor``, and the band between the two is
+    ramped linearly. Upstream folds ``attention_factor`` into cos/sin rather than
+    into the attention scores, so it is returned here and applied to the table.
+    """
+    factor = float(rope_scaling["factor"])
+    original_context = float(rope_scaling["original_max_position_embeddings"])
+    beta_fast = float(rope_scaling.get("beta_fast") or 32.0)
+    beta_slow = float(rope_scaling.get("beta_slow") or 1.0)
+    if (
+        factor <= 0.0
+        or original_context <= 0.0
+        or beta_fast <= 0.0
+        or beta_slow <= 0.0
+        or beta_slow >= beta_fast
+    ):
+        raise ValueError(f"Invalid YaRN RoPE scaling: {dict(rope_scaling)}")
+
+    def correction_dim(rotations: float) -> float:
+        return (
+            rotary_ndims
+            * np.log(original_context / (rotations * 2.0 * np.pi))
+            / (2.0 * np.log(rope_theta))
+        )
+
+    half = rotary_ndims // 2
+    low = max(int(np.floor(correction_dim(beta_fast))), 0)
+    high = min(int(np.ceil(correction_dim(beta_slow))), half - 1)
+    ramp = np.clip(
+        (np.arange(half, dtype=np.float64) - low) / max(high - low, 1),
+        0.0,
+        1.0,
+    )
+    scaled = (
+        inverse_frequencies / factor * ramp
+        + inverse_frequencies * (1.0 - ramp)
+    )
+    attention_factor = rope_scaling.get("attention_factor")
+    if attention_factor is None:
+        attention_factor = 0.1 * np.log(factor) + 1.0
+    return scaled, float(attention_factor)
+
+
 def make_rope_table_half_dim(
     max_cache_length: int,
     head_dim: int,
@@ -635,6 +687,18 @@ def make_rope_table_half_dim(
         or rope_scaling.get("type")
         or ""
     ).lower()
+    attention_scaling = 1.0
+    if rope_type == "yarn":
+        inverse_frequencies, attention_scaling = _yarn_inverse_frequencies(
+            inverse_frequencies, rotary_ndims, float(rope_theta), rope_scaling
+        )
+        angles = np.outer(
+            np.arange(max_cache_length, dtype=np.float64),
+            inverse_frequencies,
+        )
+        values = np.cos(angles) if cosine else np.sin(angles)
+        return (values * attention_scaling).astype(np.float32)
+
     if rope_type != "llama3":
         raise NotImplementedError(
             f"Unsupported SmolLM3 RoPE scaling type: {rope_type or '<missing>'}"

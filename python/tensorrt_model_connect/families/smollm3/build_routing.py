@@ -149,7 +149,11 @@ def _validate_rope(raw: dict, reasons: list[str]) -> None:
             reasons.append("default RoPE must not contain scaling parameters")
         return
     if rope_type != "llama3":
-        reasons.append(f"native SmolLM3 does not support rope_type={rope_type!r}")
+        # The family still builds these: they route to the standard decoder,
+        # which applies the scaling through an indexed cos/sin table. Only the
+        # native KV graph is limited to unscaled and llama3 RoPE.
+        reasons.append(
+            f"native SmolLM3 KV does not support rope_type={rope_type!r}")
         return
     required = (
         "factor",
