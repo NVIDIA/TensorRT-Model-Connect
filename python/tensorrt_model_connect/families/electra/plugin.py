@@ -80,7 +80,8 @@ class ElectraPlugin:
         weights = WeightDict()
 
         embedding = _load_tensor(readers, _bpfx(root, "embeddings.word_embeddings.weight"))
-        assert embedding.shape == (vocab, embedding_size)
+        if embedding.shape != (vocab, embedding_size):
+            raise ValueError(f"Embedding shape {embedding.shape} != ({vocab}, {embedding_size})")
 
         if embedding_size != hidden:
             proj_w = _load_tensor(readers, _bpfx(root, "embeddings_project.weight"))
@@ -99,7 +100,8 @@ class ElectraPlugin:
         tt_key = _bpfx(root, "embeddings.token_type_embeddings.weight")
         if _has_tensor(readers, tt_key):
             tt_embed = _load_tensor(readers, tt_key)
-            assert tt_embed.shape[0] == type_vocab_size
+            if tt_embed.shape[0] != type_vocab_size:
+                raise ValueError(f"Token type embedding rows {tt_embed.shape[0]} != {type_vocab_size}")
             if embedding_size != hidden and tt_embed.shape[1] == embedding_size:
                 proj_w = _load_tensor(readers, _bpfx(root, "embeddings_project.weight"))
                 proj_b = _load_tensor(readers, _bpfx(root, "embeddings_project.bias"))

@@ -151,13 +151,13 @@ def test_load_weights_rejects_bad_embedding_shape(
     """Intent: cover the embedding shape-guard failure path.
 
     Preconditions: mocked embedding tensor has wrong first dimension.
-    Postconditions: load_weights raises AssertionError with shape context.
+    Postconditions: load_weights raises ValueError with shape context.
     """
     tensors = _distil_tensors()
     tensors["distilbert.embeddings.word_embeddings.weight"] = np.zeros((9, 4), dtype=np.float32)
     _install_tensor_stubs(monkeypatch, tensors)
 
-    with pytest.raises(AssertionError, match="Embedding shape"):
+    with pytest.raises(ValueError, match="Embedding shape"):
         distilbert_mod.plugin.load_weights("/unused", _cfg())
 
 

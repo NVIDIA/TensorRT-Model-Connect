@@ -154,8 +154,8 @@ class Qwen35Plugin:
         # Parse layer types
         raw_layer_types = text_cfg.get("layer_types", ["linear"] * num_layers)
         layer_types = _parse_layer_types(raw_layer_types)
-        assert len(layer_types) == num_layers, (
-            f"layer_types length {len(layer_types)} != num_hidden_layers {num_layers}")
+        if len(layer_types) != num_layers:
+            raise ValueError(f'layer_types length {len(layer_types)} != num_hidden_layers {num_layers}')
 
         # Full attention dimensions
         num_heads = config.num_attention_heads
@@ -194,8 +194,8 @@ class Qwen35Plugin:
         if not _has_tensor(readers, embed_key):
             embed_key = "model.embed_tokens.weight"
         embedding = _load_tensor(readers, embed_key)
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {hidden})')
         weights["embedding"] = embedding.astype(np.float32)
 
         deltanet_count = 0

@@ -1051,9 +1051,8 @@ def _build_prompt_kernel(weights: WeightDict, *, verbose: bool = False) -> bytes
     pk_output_dim = int(weights["_pk_output_dim"])    # 1024
     encoder_hidden = int(weights["_hidden"])          # 1024
     num_prompts = int(weights["_num_prompts"])        # 128
-    assert pk_input_dim == encoder_hidden + num_prompts, (
-        f"prompt_kernel input dim {pk_input_dim} != enc_hidden {encoder_hidden} "
-        f"+ num_prompts {num_prompts}")
+    if pk_input_dim != encoder_hidden + num_prompts:
+        raise ValueError(f'prompt_kernel input dim {pk_input_dim} != enc_hidden {encoder_hidden} + num_prompts {num_prompts}')
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)

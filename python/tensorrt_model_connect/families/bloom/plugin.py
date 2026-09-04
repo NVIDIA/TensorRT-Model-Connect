@@ -62,8 +62,8 @@ class BloomPlugin:
         if not _has_tensor(readers, embed_key):
             embed_key = "transformer.word_embeddings.weight"
         embedding = _load_tensor(readers, embed_key)
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {hidden})')
         weights["embedding"] = embedding.astype(np.float32)
 
         # Embedding LayerNorm

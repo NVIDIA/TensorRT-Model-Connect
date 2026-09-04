@@ -134,8 +134,8 @@ def _split_fused_qkv(fused_weight, hidden: int):
     Returns (w_q, w_k, w_v) each of shape [hidden, hidden].
     """
     w = _to_np(fused_weight)  # [3H, H]
-    assert w.shape[0] == 3 * hidden and w.shape[1] == hidden, \
-        f"Expected fused QKV [{3*hidden}, {hidden}], got {w.shape}"
+    if not (w.shape[0] == 3 * hidden and w.shape[1] == hidden):
+        raise ValueError(f'Expected fused QKV [{3 * hidden}, {hidden}], got {w.shape}')
     q, k, v = w[:hidden], w[hidden:2*hidden], w[2*hidden:]
     # Transpose each [H, H] -> [H, H] for TRT (rhs constant is [in, out])
     return (np.ascontiguousarray(q.T),
@@ -150,8 +150,8 @@ def _split_fused_kv(fused_weight, d_head: int):
     Returns (w_k, w_v) each of shape [hidden, d_head].
     """
     w = _to_np(fused_weight)  # [2*d_head, hidden]
-    assert w.shape[0] == 2 * d_head, \
-        f"Expected fused KV [{2*d_head}, *], got {w.shape}"
+    if w.shape[0] != 2 * d_head:
+        raise ValueError(f'Expected fused KV [{2 * d_head}, *], got {w.shape}')
     k, v = w[:d_head], w[d_head:]
     # Transpose [d_head, H] -> [H, d_head]
     return (np.ascontiguousarray(k.T),
@@ -164,8 +164,8 @@ def _squeeze_conv1d_to_linear(conv_weight):
     Only valid for kernel_size=1. Result is transposed for TRT convention.
     """
     w = _to_np(conv_weight)
-    assert w.ndim == 3 and w.shape[2] == 1, \
-        f"Expected Conv1d weight [out, in, 1], got shape {w.shape}"
+    if not (w.ndim == 3 and w.shape[2] == 1):
+        raise ValueError(f'Expected Conv1d weight [out, in, 1], got shape {w.shape}')
     # [out, in, 1] -> squeeze -> [out, in] -> transpose -> [in, out]
     return np.ascontiguousarray(w[:, :, 0].T)
 

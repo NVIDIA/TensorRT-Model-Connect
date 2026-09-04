@@ -99,9 +99,8 @@ class NemotronHPlugin:
         # Parse layer types from hybrid_override_pattern
         pattern = raw.get("hybrid_override_pattern", "M" * num_layers)
         layer_types = _parse_layer_types(pattern)
-        assert len(layer_types) == num_layers, (
-            f"Pattern length {len(layer_types)} != num_hidden_layers {num_layers}"
-        )
+        if len(layer_types) != num_layers:
+            raise ValueError(f'Pattern length {len(layer_types)} != num_hidden_layers {num_layers}')
 
         # Mamba-2 dimensions
         mamba_num_heads = raw.get("mamba_num_heads", 64)
@@ -121,9 +120,8 @@ class NemotronHPlugin:
 
         # Embedding
         embedding = _load_tensor(readers, "backbone.embeddings.weight")
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
-        )
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {hidden})')
         weights["embedding"] = embedding.astype(np.float32)
 
         mamba_count = 0

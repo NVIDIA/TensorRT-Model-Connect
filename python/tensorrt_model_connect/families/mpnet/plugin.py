@@ -122,7 +122,8 @@ class MpnetPlugin:
         # Word embedding
         embedding = _load_tensor(
             readers, _pfx(root, "embeddings.word_embeddings.weight"))
-        assert embedding.shape == (vocab, hidden)
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         # Position embedding — MPNet uses padding_idx=1, positions start at 2

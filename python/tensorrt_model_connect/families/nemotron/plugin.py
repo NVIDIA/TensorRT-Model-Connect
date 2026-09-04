@@ -72,9 +72,8 @@ class NemotronPlugin:
 
         # Embedding
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
-        )
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {hidden})')
         weights["embedding"] = embedding.astype(target_dtype)
 
         mlp_size = 0

@@ -57,8 +57,8 @@ class PhiPlugin:
 
         # Embedding
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {hidden})')
         weights["embedding"] = embedding.astype(np.float32)
 
         mlp_size = 0
@@ -82,9 +82,8 @@ class PhiPlugin:
                 readers, f"{hf_prefix}.self_attn.qkv_proj.weight")
             total_qkv = qkv_raw.shape[0]
             expected_qkv = q_dim + 2 * kv_dim
-            assert total_qkv == expected_qkv, (
-                f"Layer {layer_idx} qkv_proj rows {total_qkv} != "
-                f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})")
+            if total_qkv != expected_qkv:
+                raise ValueError(f'Layer {layer_idx} qkv_proj rows {total_qkv} != expected {expected_qkv} (q={q_dim}, kv={kv_dim})')
 
             q_raw = qkv_raw[:q_dim, :]              # [q_dim, hidden]
             k_raw = qkv_raw[q_dim:q_dim+kv_dim, :]  # [kv_dim, hidden]
