@@ -157,6 +157,13 @@ Compilation, unit tests, inference, model parity, target-hardware execution,
 performance, and release qualification are separate evidence levels. Claim only
 what the recorded validation proves.
 
+Repository workflows and ownership policy form a trusted control plane.
+Pull requests authored outside the NVIDIA GitHub organization cannot modify
+`.github/**` or `CODEOWNERS`; open an issue describing the requested change so
+a repository maintainer can evaluate and land it from an organization-owned
+branch. This restriction applies even when the rest of the contribution is
+valid.
+
 ### 8. Run contributor-visible public CPU validation
 
 Opening a pull request or pushing a new commit automatically starts Community

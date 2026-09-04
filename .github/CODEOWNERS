@@ -4,3 +4,7 @@
 # Default owner for the public repository. Replace this entry with project
 # teams once those teams are created in the NVIDIA GitHub organization.
 * @yifeif-nv
+
+# Keep the repository control plane under explicit ownership. When code-owner
+# review is required, this directory rule also covers CODEOWNERS itself.
+/.github/ @yifeif-nv

@@ -51,8 +51,8 @@ jobs:
       policy_sha: ${{ steps.snapshot.outputs.policy_sha }}
 
     steps:
-      # This trusted workflow reads PR metadata only. It never checks out or
-      # executes the pull-request head.
+      # This trusted workflow reads PR metadata and changed-file names only. It
+      # never checks out or executes the pull-request head.
       - name: Capture the exact pull-request snapshot
         id: snapshot
         env:
@@ -90,6 +90,7 @@ jobs:
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
           base_sha="$(jq -er '.base.sha' <<<"$pull")"
           head_sha="$(jq -er '.head.sha' <<<"$pull")"
+          author_association="$(jq -er '.author_association' <<<"$pull")"
 
           test "$state" = "open"
           test "$base_repo" = "$GITHUB_REPOSITORY"
@@ -101,6 +102,39 @@ jobs:
             echo "::error::The CI trigger was superseded by a newer PR head."
             exit 1
           fi
+
+          case "$author_association" in
+            OWNER|MEMBER) ;;
+            *)
+              protected_path_count=0
+              protected_page_counts="$(
+                gh api --paginate --method GET \
+                  "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" \
+                  --jq '[.[] | (.filename, .previous_filename?)
+                    | select(type == "string")
+                    | select(. == "CODEOWNERS" or . == ".github" or startswith(".github/"))]
+                    | length'
+              )"
+              while IFS= read -r page_count; do
+                [[ "$page_count" =~ ^[0-9]+$ ]]
+                ((protected_path_count += page_count)) || true
+              done <<<"$protected_page_counts"
+              scanned_head_sha="$(
+                gh api --method GET \
+                  "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+                  --jq '.head.sha'
+              )"
+              [[ "$scanned_head_sha" =~ ^[0-9a-f]{40}$ ]]
+              if [ "$scanned_head_sha" != "$head_sha" ]; then
+                echo "::error::The PR head changed while protected paths were inspected."
+                exit 1
+              fi
+              if [ "$protected_path_count" -ne 0 ]; then
+                echo "::error::External pull requests cannot modify .github/** or CODEOWNERS. Open an issue for a repository maintainer instead."
+                exit 1
+              fi
+              ;;
+          esac
 
           community_cpu_run="$(
             gh api --method GET \
