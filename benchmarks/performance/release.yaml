@@ -978,6 +978,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: timm_mobilenetv2.classify
+    family: timm_mobilenetv2
+    operation: classify
+    model: mobilenetv2-100-ra-in1k
+    workload:
+      testcase: mobilenetv2-100-ra-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_repvgg.classify
     family: timm_repvgg
     operation: classify
