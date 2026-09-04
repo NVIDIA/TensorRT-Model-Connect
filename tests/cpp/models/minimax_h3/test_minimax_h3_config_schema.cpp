@@ -78,8 +78,16 @@ int main() {
     check(trtmc::minimax_h3::uses_serial_execution_context("denoiser_finish_plan", true),
           "segmented finish opts into the serial execution-context arena");
     check(!trtmc::minimax_h3::uses_serial_execution_context("denoiser_transition_49_plan", true) &&
-              !trtmc::minimax_h3::uses_serial_execution_context("denoiser_finish_plan", false),
-          "serial execution-context arena is limited to authenticated segmented plans");
+              !trtmc::minimax_h3::uses_serial_execution_context("vae_tile_decoder_plan", true),
+          "segmented serial arena is limited to authenticated denoiser plans");
+    for (std::string_view name :
+         {"denoiser_head_plan", "denoiser_tail_plan", "denoiser_finish_plan"}) {
+        check(trtmc::minimax_h3::uses_serial_execution_context(name, false),
+              "singular FirstBlockCache engine opts into the serial activation arena");
+    }
+    check(!trtmc::minimax_h3::uses_serial_execution_context("denoiser_entry_plan", false) &&
+              !trtmc::minimax_h3::uses_serial_execution_context("vae_tile_decoder_plan", false),
+          "singular serial arena is limited to head, tail, and finish");
     for (std::string_view name : {"denoiser_entry_plan", "denoiser_finish_plan",
                                   "vae_tile_decoder_plan", "audio_vae_decoder_plan"}) {
         check(trtmc::minimax_h3::should_retain_hot_engine(name, true),

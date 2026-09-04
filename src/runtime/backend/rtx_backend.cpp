@@ -458,10 +458,11 @@ struct ActivationArenaKeyHash {
 };
 
 // One arena is shared only by explicitly marked contexts on one CUDA stream.
-// Context creation merely records each upper bound. Allocation is deferred to
-// the first enqueue, after a segmented pipeline has loaded all of its modules,
-// so the arena is allocated once at the maximum requirement instead of being
-// repeatedly grown while the 51 engines are deserialized.
+// Context creation records each profile upper bound. Allocation is deferred to
+// the first enqueue, after that context has received its request shapes. Each
+// context is shape-sized once during its lifetime; MiniMax-H3 creates fresh
+// contexts when request geometry changes, so repeated denoiser forwards avoid
+// repartitioning TensorRT's internal activation memory.
 class RtxActivationArena final : public ITrtActivationArena {
   public:
     RtxActivationArena(int device, cudaStream_t stream) : device_(device), stream_(stream) {}
@@ -497,10 +498,6 @@ class RtxActivationArena final : public ITrtActivationArena {
         std::lock_guard<std::mutex> lock(mutex_);
         if (contexts_.count(context) != 0)
             throw std::logic_error("[trtmc] RTX execution context is already attached to an arena");
-        if (memory_ != nullptr && required_bytes > capacity_bytes_) {
-            throw std::runtime_error(
-                "[trtmc] Cannot grow a shared RTX activation arena after execution begins");
-        }
         contexts_.emplace(context, required_bytes);
         required_bytes_ = std::max(required_bytes_, required_bytes);
     }
@@ -509,16 +506,20 @@ class RtxActivationArena final : public ITrtActivationArena {
         mutex_.lock();
         try {
             require_current_device();
-            if (contexts_.count(context) == 0) {
+            const auto found = contexts_.find(context);
+            if (found == contexts_.end()) {
                 throw std::logic_error(
                     "[trtmc] RTX execution context is not attached to its activation arena");
             }
-            ensure_capacity_locked();
+            auto shaped = shaped_requirements_.find(context);
+            if (shaped == shaped_requirements_.end()) {
+                const std::int64_t requested = shaped_requirement(*context, found->second);
+                shaped = shaped_requirements_.emplace(context, requested).first;
+            }
+            ensure_capacity_locked(shaped->second);
             // setDeviceMemoryV2 has no status return. Rebind on every enqueue
-            // so each context receives the final group allocation selected
-            // after all contexts attach. The validated engine/profile upper
-            // bound guarantees the supplied size is sufficient for every
-            // runtime shape.
+            // because a later serial context may have raised the arena's
+            // high-water mark and replaced its allocation.
             context->setDeviceMemoryV2(memory_, capacity_bytes_);
         } catch (...) {
             mutex_.unlock();
@@ -544,6 +545,7 @@ class RtxActivationArena final : public ITrtActivationArena {
                       << cudaGetErrorString(status) << '\n';
         }
         contexts_.erase(found);
+        shaped_requirements_.erase(context);
         if (memory_ == nullptr) {
             required_bytes_ = 0;
             for (const auto& [attached_context, attached_bytes] : contexts_) {
@@ -558,6 +560,7 @@ class RtxActivationArena final : public ITrtActivationArena {
     cudaStream_t stream_{nullptr};
     std::mutex mutex_;
     std::unordered_map<nvinfer1::IExecutionContext*, std::int64_t> contexts_;
+    std::unordered_map<nvinfer1::IExecutionContext*, std::int64_t> shaped_requirements_;
     void* memory_{nullptr};
     std::int64_t capacity_bytes_{0};
     std::int64_t required_bytes_{0};
@@ -573,26 +576,57 @@ class RtxActivationArena final : public ITrtActivationArena {
             throw std::runtime_error("[trtmc] RTX activation arena CUDA device mismatch");
     }
 
-    void ensure_capacity_locked() {
-        if (required_bytes_ <= capacity_bytes_)
+    static std::int64_t shaped_requirement(nvinfer1::IExecutionContext& context,
+                                           std::int64_t profile_upper_bound) {
+        const std::size_t shaped_bytes = context.updateDeviceMemorySizeForShapes();
+        // Zero reports an error (including incomplete shapes). Preserve the
+        // validated profile bound as a correctness-first fallback.
+        if (shaped_bytes == 0)
+            return profile_upper_bound;
+        if (shaped_bytes > static_cast<std::size_t>(profile_upper_bound)) {
+            throw std::runtime_error(
+                "[trtmc] RTX shape-sized activation memory exceeds the profile bound");
+        }
+        return static_cast<std::int64_t>(shaped_bytes);
+    }
+
+    void ensure_capacity_locked(std::int64_t requested_bytes) {
+        if (requested_bytes <= capacity_bytes_)
             return;
         if (memory_ != nullptr) {
-            throw std::logic_error(
-                "[trtmc] Shared RTX activation arena capacity changed after allocation");
+            // Serial work using the old high-water allocation is ordered on
+            // this stream. Synchronize once before replacing it for a larger
+            // context encountered later in the same request.
+            const cudaError_t synchronize_status = cudaStreamSynchronize(stream_);
+            if (synchronize_status != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string("[trtmc] Failed to synchronize before growing the RTX activation "
+                                "arena: ") +
+                    cudaGetErrorString(synchronize_status));
+            }
+            const cudaError_t free_status = cudaFree(memory_);
+            if (free_status != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string("[trtmc] Failed to release the previous RTX activation arena: ") +
+                    cudaGetErrorString(free_status));
+            }
+            memory_ = nullptr;
+            capacity_bytes_ = 0;
         }
 
         const cudaError_t allocation_status =
-            cudaMalloc(&memory_, static_cast<std::size_t>(required_bytes_));
+            cudaMalloc(&memory_, static_cast<std::size_t>(requested_bytes));
         if (allocation_status != cudaSuccess) {
             memory_ = nullptr;
             throw std::runtime_error(
                 std::string("[trtmc] Failed to allocate shared RTX activation memory (") +
-                std::to_string(required_bytes_) +
+                std::to_string(requested_bytes) +
                 " bytes): " + cudaGetErrorString(allocation_status));
         }
-        capacity_bytes_ = required_bytes_;
+        capacity_bytes_ = requested_bytes;
         std::cerr << "[trtmc.rtx_activation_arena] device=" << device_
                   << " contexts=" << contexts_.size() << " capacity_bytes=" << capacity_bytes_
+                  << " profile_capacity_bytes=" << required_bytes_
                   << '\n';
     }
 };

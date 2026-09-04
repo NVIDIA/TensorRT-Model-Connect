@@ -37,9 +37,18 @@ inline bool should_retain_hot_engine(std::string_view name, bool retain_engines)
 }
 
 inline bool uses_serial_execution_context(std::string_view name, bool segmented_vsa_bundle) {
-    return segmented_vsa_bundle &&
-           (name == "denoiser_entry_plan" || is_fast_h3_transition_plan(name) ||
-            name == "denoiser_finish_plan");
+    if (segmented_vsa_bundle) {
+        return name == "denoiser_entry_plan" || is_fast_h3_transition_plan(name) ||
+               name == "denoiser_finish_plan";
+    }
+    // The original-weight FirstBlockCache head, tail, and finish execute
+    // strictly in sequence on one stream. Dynamic profiles otherwise give all
+    // three contexts independent max-shape activation allocations, which
+    // forces unified-memory paging on the 64 GiB Windows profile even for a
+    // five-second request. Reuse the native TRT-RTX user-managed arena so the
+    // three engines reserve only their largest requirement, not their sum.
+    return name == "denoiser_head_plan" || name == "denoiser_tail_plan" ||
+           name == "denoiser_finish_plan";
 }
 
 inline std::int64_t staged_plan_weight_streaming_budget(std::string_view name,
