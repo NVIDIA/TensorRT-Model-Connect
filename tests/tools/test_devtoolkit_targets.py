@@ -232,7 +232,13 @@ class DockerLifecycleRunner:
         return result
 
 
-def target(tmp_path: Path, *, image=None, environment=None) -> DockerTarget:
+def target(
+    tmp_path: Path,
+    *,
+    image=None,
+    environment=None,
+    command: tuple[str, ...] | None = ("sleep", "infinity"),
+) -> DockerTarget:
     workspace = tmp_path / "workspace"
     runs = tmp_path / "runs"
     workspace.mkdir(exist_ok=True)
@@ -247,7 +253,7 @@ def target(tmp_path: Path, *, image=None, environment=None) -> DockerTarget:
         ),
         workspace=PurePosixPath("/workspace/trtmc"),
         state=PurePosixPath("/state/devtoolkit"),
-        command=("sleep", "infinity"),
+        command=command,
         environment=environment or {},
     )
 
@@ -604,6 +610,19 @@ def test_mismatched_existing_container_fails_without_replacement(tmp_path: Path)
         toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
 
     assert not any("rm" in command for command in runner.commands)
+
+
+def test_default_command_rejects_container_running_another_command(tmp_path: Path) -> None:
+    runner = DockerLifecycleRunner()
+    toolkit = DevToolkit.from_checkout(tmp_path, state_root=tmp_path / "state", runner=runner)
+    request = target(tmp_path, command=None)
+    toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
+    assert runner.container is not None
+    assert runner.container["Config"]["Cmd"] == ["sleep", "infinity"]  # type: ignore[index]
+    runner.container["Config"]["Cmd"] = ["tail", "-f", "/dev/null"]  # type: ignore[index]
+
+    with pytest.raises(DevToolkitError, match=r"target: command"):
+        toolkit.targets.ensure(request, policy=DockerTargetPolicy.ENSURE)
 
 
 def test_dockerfile_image_is_built_before_container_creation(tmp_path: Path) -> None:

@@ -33,6 +33,7 @@ _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _DOCKER_SIZE = re.compile(r"([0-9]+)(b|k|kb|m|mb|g|gb)?", re.IGNORECASE)
+_DEFAULT_COMMAND = ("sleep", "infinity")
 
 
 class PullPolicy(Enum):
@@ -255,6 +256,10 @@ class DockerTarget:
         object.__setattr__(self, "mounts", mounts)
 
 
+def _effective_command(request: DockerTarget) -> tuple[str, ...]:
+    return request.command or _DEFAULT_COMMAND
+
+
 def _context_digest(context: Path) -> str:
     digest = hashlib.sha256(b"trtmc-devtoolkit-docker-context-v1\0")
     for path in sorted(context.rglob("*")):
@@ -372,7 +377,7 @@ def _mount_identity(mount: DockerMount) -> dict[str, object]:
 
 
 class DockerTargetProvider:
-    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-target==2", 1)
+    descriptor = ProviderDescriptor("docker", "trtmc-devtoolkit-docker-target==3", 1)
 
     def resolve(
         self,
@@ -440,7 +445,7 @@ class DockerTargetProvider:
                 "workspace": str(request.workspace),
                 "state": str(request.state),
                 "working_dir": str(request.working_dir),
-                "command": request.command,
+                "command": _effective_command(request),
                 "environment": _environment_identity(request.environment),
                 "mounts": sorted(mounts, key=lambda item: str(item["target"])),
                 "gpus": {
@@ -658,7 +663,7 @@ class DockerTargetProvider:
         config = config if isinstance(config, Mapping) else {}
         if config.get("WorkingDir") != str(request.working_dir):
             mismatches.append("working_dir")
-        if request.command is not None and tuple(config.get("Cmd") or ()) != request.command:
+        if tuple(config.get("Cmd") or ()) != _effective_command(request):
             mismatches.append("command")
         expected_environment = _environment_values(_image_config(image).get("Env"))
         expected_environment.update(request.environment)
@@ -764,7 +769,7 @@ class DockerTargetProvider:
             if environment_file is not None:
                 command.extend(["--env-file", str(environment_file)])
             command.append(image_id)
-            command.extend(request.command or ("sleep", "infinity"))
+            command.extend(_effective_command(request))
             runner.run(command, cwd=repository)
 
     def provision(
