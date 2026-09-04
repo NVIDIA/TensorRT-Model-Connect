@@ -92,6 +92,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "HuggingFaceTB/SmolLM3-3B",
+      "revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "smollm3",
+      "architectures": [
+        "SmolLM3ForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "IFM/K2-Horizon-7B",
       "revision": "586b03f0fd1fbbf2f13eeafc33749e95ae34dd10",
       "revision_source": "declared",
