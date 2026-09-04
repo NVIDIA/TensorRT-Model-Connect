@@ -664,7 +664,6 @@ int32_t snap_ref2va_video_frames_down(int32_t frames) {
 
 Ref2vaVideoEncodeSchedule make_ref2va_video_encode_schedule(int32_t normalized_frames) {
     Ref2vaVideoEncodeSchedule result;
-    result.normalized_frames = normalized_frames;
     result.snapped_frames = snap_ref2va_video_frames_down(normalized_frames);
     if (result.snapped_frames > normalized_frames)
         throw std::invalid_argument("MiniMax-H3 Ref2VA video is too short for the 17*n+5 schedule");

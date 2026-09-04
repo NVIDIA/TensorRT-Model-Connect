@@ -20,7 +20,6 @@ from tensorrt_model_connect.families.minimax_h3.ref2va_checkpoint import (
     REF2VA_DENOISER_KEYS,
     SHARDS,
     TOTAL_TENSOR_BYTES,
-    checkpoint_partitions,
     download_command,
     validate_transformer_ref_checkpoint,
 )
@@ -296,11 +295,6 @@ def test_full_public_capacity_is_explicit_not_silently_narrowed() -> None:
 
 
 def test_transformer_ref_partition_is_distinct_exhaustive_and_pinned() -> None:
-    partitions = checkpoint_partitions()
-    assert set(partitions) == {
-        "ref2va_denoiser.plan",
-        "ref2va_adaln_precompute.plan",
-    }
     assert len(REF2VA_DENOISER_KEYS) == 532
     assert len(REF2VA_ADALN_KEYS) == 106
     assert len(REF2VA_ALL_KEYS) == len(set(REF2VA_ALL_KEYS)) == 638
@@ -316,7 +310,7 @@ def test_transformer_ref_partition_is_distinct_exhaustive_and_pinned() -> None:
 def test_missing_transformer_ref_never_falls_back_to_transformer(tmp_path: Path) -> None:
     (tmp_path / "transformer").mkdir()
     with pytest.raises(FileNotFoundError, match="not a valid fallback"):
-        validate_transformer_ref_checkpoint(tmp_path, hash_shards=False)
+        validate_transformer_ref_checkpoint(tmp_path)
 
 
 def test_local_base_index_proves_ref_partition_has_same_schema_not_same_values() -> None:
@@ -334,11 +328,11 @@ def test_local_base_index_proves_ref_partition_has_same_schema_not_same_values()
     # values.  This remains valid if a developer later downloads the required
     # partition into the same snapshot.
     if (snapshot / "transformer_ref").exists():
-        record = validate_transformer_ref_checkpoint(snapshot, hash_shards=False)
+        record = validate_transformer_ref_checkpoint(snapshot)
         assert record.tensor_count == 638
     else:
         with pytest.raises(FileNotFoundError, match="transformer_ref"):
-            validate_transformer_ref_checkpoint(snapshot, hash_shards=False)
+            validate_transformer_ref_checkpoint(snapshot)
 
 
 def test_ref2va_build_tooling_has_no_framework_or_process_runtime_imports() -> None:

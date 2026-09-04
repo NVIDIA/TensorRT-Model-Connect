@@ -13,7 +13,6 @@
 #include <cstring>
 #include <exception>
 #include <iostream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -105,17 +104,12 @@ trtmc::IPipeline* trtmc_create_pipeline_ex(const char* bundle_path,
 
     try {
         const std::string path(bundle_path);
-        const PipelineCreateArgs args = parse_pipeline_options(options);
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-        if (!args.hf_python.empty()) {
-            throw std::invalid_argument(
-                "locked MiniMax-H3 runtime rejects hf_python; Python is not a runtime dependency");
-        }
-#endif
         if (!trtmc::IsBundle(path)) {
             set_last_error("Not a valid .bundle artifact: " + path);
             return nullptr;
         }
+
+        const PipelineCreateArgs args = parse_pipeline_options(options);
 
         auto t0 = std::chrono::steady_clock::now();
 

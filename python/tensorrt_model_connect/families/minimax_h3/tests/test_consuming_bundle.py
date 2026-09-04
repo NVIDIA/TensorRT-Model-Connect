@@ -272,12 +272,12 @@ def test_invalid_existing_final_stays_untouched_when_source_is_missing(
     assert output.read_bytes() == b"invalid-existing-final"
 
 
-def test_complete_fast_h3_ref2va_layout_has_61_plan_sections_and_metadata(
+def test_complete_dense_ref2va_layout_has_13_plan_sections_and_metadata(
     tmp_path: Path,
 ) -> None:
-    output = tmp_path / "h3-61.bundle"
+    output = tmp_path / "h3-13.bundle"
     plan_sections = []
-    for index in range(61):
+    for index in range(13):
         payload = f"plan-{index:02d}".encode()
         plan_sections.append(
             _file_section(
@@ -296,9 +296,9 @@ def test_complete_fast_h3_ref2va_layout_has_61_plan_sections_and_metadata(
 
     consuming_bundle.write_consuming_bundle(output, _info(), sections)
     header, payloads = read_bundle_file(output)
-    assert len(header["sections"]) == 63
-    assert len([name for name in payloads if name.startswith("plan_")]) == 61
-    assert all(not (tmp_path / f"plan-{index:02d}.plan").exists() for index in range(61))
+    assert len(header["sections"]) == 15
+    assert len([name for name in payloads if name.startswith("plan_")]) == 13
+    assert all(not (tmp_path / f"plan-{index:02d}.plan").exists() for index in range(13))
 
 
 def test_partial_and_journal_reject_non_regular_files(tmp_path: Path) -> None:

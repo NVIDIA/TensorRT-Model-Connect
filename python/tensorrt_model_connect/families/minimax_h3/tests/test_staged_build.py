@@ -87,6 +87,14 @@ def _write_audio_vae_config(model: Path) -> None:
     )
 
 
+def _write_plan_record(path: Path, payload: bytes) -> dict[str, int | str]:
+    path.write_bytes(payload)
+    return {
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
 def test_singular_fbc_builders_keep_124_to_345_dynamic_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -96,7 +104,7 @@ def test_singular_fbc_builders_keep_124_to_345_dynamic_profile(
         "denoiser_tail",
         "denoiser_finish",
     )
-    assert tuple(item[0] for item in staged_build._MONOLITHIC_FBC_COMPONENTS) == components
+    assert tuple(item[0] for item in staged_build._DENSE_FBC_COMPONENTS) == components
 
     calls = {}
 
@@ -112,9 +120,6 @@ def test_singular_fbc_builders_keep_124_to_345_dynamic_profile(
 
         return build
 
-    def unexpected(*_args, **_kwargs):
-        raise AssertionError("segmented builder selected for singular FBC production route")
-
     family = "tensorrt_model_connect.families.minimax_h3"
     adaln = ModuleType(f"{family}.adaln_builder")
     adaln.build_adaln_precompute_engine = builder("adaln_precompute")
@@ -125,19 +130,12 @@ def test_singular_fbc_builders_keep_124_to_345_dynamic_profile(
     dit.build_dit_finish_engine = builder("denoiser_finish")
     dit.build_dit_head_engine = builder("denoiser_head")
     dit.build_dit_tail_engine = builder("denoiser_tail")
-    dit.build_dit_vsa_entry_engine = unexpected
-    dit.build_dit_vsa_finish_engine = unexpected
-    dit.build_dit_vsa_transition_engine = unexpected
-    dit.finish_checkpoint_keys = lambda _profile: ("finish",)
+    dit.finish_checkpoint_keys = lambda: ("finish",)
     dit.head_checkpoint_keys = lambda _profile: ("head",)
     dit.tail_checkpoint_keys = lambda _profile: ("tail",)
-    dit.vsa_entry_checkpoint_keys = lambda _profile: ("vsa_entry",)
-    dit.vsa_finish_checkpoint_keys = lambda _profile: ("vsa_finish",)
-    dit.vsa_transition_checkpoint_keys = lambda *_args: ("vsa_transition",)
     monkeypatch.setitem(sys.modules, dit.__name__, dit)
 
     monkeypatch.setattr(staged_build.trt_compat, "configure_backend", lambda **_kwargs: None)
-    monkeypatch.setattr(staged_build, "_adapter_target_partitions", lambda _profile: {})
     monkeypatch.setattr(
         checkpoint,
         "load_selected_component_state_dict",
@@ -145,15 +143,19 @@ def test_singular_fbc_builders_keep_124_to_345_dynamic_profile(
     )
     monkeypatch.setattr(checkpoint, "numpy_state", dict)
 
+    records = []
     for component in components:
-        staged_build._build_component(
-            component,
-            tmp_path,
-            tmp_path / f"{component}.plan",
-            verbose=False,
+        records.append(
+            staged_build._build_component(
+                component,
+                tmp_path,
+                tmp_path / f"{component}.plan",
+                verbose=False,
+            )
         )
 
     assert tuple(calls) == components
+    assert all(staged_build._valid_plan_record(record) for record in records)
     assert (staged_build.VIDEO_NUM_FRAMES_MIN, staged_build.VIDEO_NUM_FRAMES_MAX) == (124, 345)
     for profile, options in calls.values():
         assert profile.first_block_cache is True
@@ -238,7 +240,9 @@ def test_staged_build_uses_fresh_segment_children_resumes_and_sanitizes_bundle(
         assert "--child" in command
         component = command[command.index("--component") + 1]
         plan = Path(command[command.index("--output") + 1])
-        plan.write_bytes(f"plan:{component}".encode())
+        record_output = Path(command[command.index("--record-output") + 1])
+        record = _write_plan_record(plan, f"plan:{component}".encode())
+        record_output.write_text(json.dumps(record), encoding="utf-8")
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(staged_build.subprocess, "run", run)
@@ -249,6 +253,7 @@ def test_staged_build_uses_fresh_segment_children_resumes_and_sanitizes_bundle(
     assert [call[call.index("--component") + 1] for call in calls] == [
         item[0] for item in staged_build._COMPONENTS
     ]
+    assert not list(tmp_path.rglob(".*.plan.record.json"))
 
     header, sections = read_bundle_file(str(output))
     config = json.loads(sections["config.json"])
@@ -260,10 +265,7 @@ def test_staged_build_uses_fresh_segment_children_resumes_and_sanitizes_bundle(
         "weight_streaming_budget_bytes": 32 << 30,
     }
     assert config["denoiser_profile_count"] == 2
-    assert (
-        config["denoiser_profile_layout"]
-        == "five_second_reference_then_public_dynamic"
-    )
+    assert config["denoiser_profile_layout"] == "five_second_reference_then_public_dynamic"
     assert config["checkpoint_revision"] == "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
     assert config["source_revision"] == SOURCE_REVISION
     assert len(config["builder_source_sha256"]) == 64
@@ -292,7 +294,6 @@ def test_staged_build_uses_fresh_segment_children_resumes_and_sanitizes_bundle(
         config["packed_sequence_length_max"],
     ) == (19285, 37838, 112367)
     assert "adaln_precompute_mode" not in config
-    assert "adaln_segmented" not in config
     assert "first_block_cache_abi" not in config
     assert "dense_tail_segment_sections" not in config
     assert config["bundle_loading"]["lazy_sections"][2:6] == [
@@ -358,9 +359,9 @@ def test_staged_receipt_contains_only_settings_and_plan_digests(
     _write_audio_vae_config(model)
     output = tmp_path / "h3.bundle"
 
-    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool):
         assert verbose is False
-        plan.write_bytes(component.encode())
+        return _write_plan_record(plan, component.encode())
 
     monkeypatch.setattr(staged_build, "_run_component", build)
     monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
@@ -375,8 +376,6 @@ def test_staged_receipt_contains_only_settings_and_plan_digests(
         "plans",
     }
     assert set(receipt["build_identity"]) == {
-        "model_metadata_sha256",
-        "checkpoint_shards",
         "checkpoint_revision",
         "checkpoint_inventory_sha256",
         "source_revision",
@@ -416,9 +415,9 @@ def test_documented_staged_route_consumes_one_shared_base_snapshot_record(
         observed.append(value)
         return value
 
-    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool):
         assert verbose is False
-        plan.write_bytes(component.encode())
+        return _write_plan_record(plan, component.encode())
 
     monkeypatch.setattr(staged_build, "checkpoint_snapshot_record", record)
     monkeypatch.setattr(staged_build, "_run_component", build)
@@ -433,13 +432,6 @@ def test_documented_staged_route_consumes_one_shared_base_snapshot_record(
     receipt_path = output.with_name(f"{output.name}.plans") / staged_build._RECEIPT_NAME
     identity = json.loads(receipt_path.read_text(encoding="utf-8"))["build_identity"]
     assert identity["checkpoint_inventory_sha256"] == observed[0]["inventory_sha256"]
-    assert identity["checkpoint_shards"] == [
-        {
-            "name": "transformer/base.safetensors",
-            "bytes": 4,
-            "sha256": hashlib.sha256(b"base").hexdigest(),
-        }
-    ]
     assert "transformer_ref" not in json.dumps(identity)
 
 
@@ -455,14 +447,15 @@ def test_staged_build_rejects_checkpoint_changed_while_plans_were_built(
     mutated = False
     calls: list[str] = []
 
-    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool):
         nonlocal mutated
         assert verbose is False
         calls.append(component)
-        plan.write_bytes(component.encode())
+        record = _write_plan_record(plan, component.encode())
         if not mutated:
             tokenizer.write_text('{"changed":true}', encoding="utf-8")
             mutated = True
+        return record
 
     monkeypatch.setattr(staged_build, "_run_component", build)
     monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
@@ -499,9 +492,9 @@ def test_staged_build_rejects_builder_source_changed_while_plans_were_built(
     output = tmp_path / "h3.bundle"
     source_digests = iter(("1" * 64, "2" * 64))
 
-    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool):
         assert verbose is False
-        plan.write_bytes(component.encode())
+        return _write_plan_record(plan, component.encode())
 
     monkeypatch.setattr(staged_build, "_run_component", build)
     monkeypatch.setattr(staged_build, "builder_source_sha256", lambda: next(source_digests))
@@ -527,9 +520,9 @@ def test_staged_finalizer_consumes_only_pinned_checkpoint_bytes(
     output = tmp_path / "h3.bundle"
     validate_sources = staged_build._validate_staged_sources_unchanged
 
-    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool):
         assert verbose is False
-        plan.write_bytes(component.encode())
+        return _write_plan_record(plan, component.encode())
 
     def validate_then_mutate(*args, **kwargs) -> None:
         validate_sources(*args, **kwargs)
@@ -556,10 +549,10 @@ def test_staged_resume_uses_complete_receipt_before_missing_plan_rebuilds(
     output = tmp_path / "h3.bundle"
     calls: list[str] = []
 
-    def build(component: str, _model: Path, plan: Path, *, verbose: bool) -> None:
+    def build(component: str, _model: Path, plan: Path, *, verbose: bool):
         assert verbose is False
         calls.append(component)
-        plan.write_bytes(f"plan:{component}".encode())
+        return _write_plan_record(plan, f"plan:{component}".encode())
 
     actual_writer = staged_build.write_consuming_bundle
     interrupt = True
@@ -630,133 +623,4 @@ def test_plugin_routes_only_fixed_bf16_single_gpu_profile(
             {},
             precision="bf16",
             parallel_config=SimpleNamespace(mode="tensor_parallel"),
-        )
-
-
-def test_fast_h3_staged_bundle_is_segmented_path_free_and_four_step(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    model = tmp_path / "model"
-    tokenizer = model / "tokenizer" / "tokenizer.json"
-    tokenizer.parent.mkdir(parents=True)
-    tokenizer.write_text("{}", encoding="utf-8")
-    _write_audio_vae_config(model)
-    adapter = tmp_path / "adapter_model.safetensors"
-    adapter.write_bytes(b"adapter")
-    output = tmp_path / "fast-h3.bundle"
-    calls: list[list[str]] = []
-    adapter_metadata = {
-        "schema_version": 1,
-        "adapter_sha256": "a" * 64,
-        "adapter_bytes": 5_339_117_712,
-        "adapter_tensor_count": 856,
-        "adapter_low_rank_tensor_count": 724,
-        "adapter_diff_tensor_count": 82,
-        "adapter_set_weight_tensor_count": 50,
-        "adapter_gate_tensor_count": 50,
-        "adapter_partition_tensor_counts": {"adaln_precompute": 156, "denoiser": 700},
-        "adapter_base_revision": "b" * 40,
-        "adapter_finetuned_revision": "c" * 40,
-    }
-    identity = SimpleNamespace(bundle_metadata=lambda: dict(adapter_metadata))
-
-    def run(command, *, check):
-        assert check is True
-        calls.append(list(command))
-        component = command[command.index("--component") + 1]
-        assert command[command.index("--fast-h3-adapter") + 1] == str(adapter.resolve())
-        assert "--vsa-plugin-library" not in command
-        Path(command[command.index("--output") + 1]).write_bytes(component.encode())
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(staged_build.subprocess, "run", run)
-    monkeypatch.setattr(staged_build, "_adapter_target_partitions", lambda _profile: {"all": ()})
-    monkeypatch.setattr(checkpoint, "validate_fast_h3_adapter", lambda *_args: identity)
-    monkeypatch.setattr(staged_build.trt_compat, "configure_backend", lambda **_kwargs: None)
-    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1.120")
-    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_abi", lambda _version: "1.6")
-
-    assert (
-        staged_build.build_staged_bundle(
-            model,
-            output,
-            fast_h3_adapter=adapter,
-        )
-        == output
-    )
-    assert [call[call.index("--component") + 1] for call in calls] == [
-        item[0] for item in staged_build._FASTH3_COMPONENTS
-    ]
-
-    _header, sections = read_bundle_file(str(output))
-    config = json.loads(sections["config.json"])
-    assert config["num_inference_steps"] == 4
-    assert config["scheduler_grid_points"] == 5
-    assert config["transformer_forwards"] == 4
-    assert config["guidance_scale"] == 1.0
-    assert config["first_block_cache"] is False
-    assert config["denoiser_cache_mode"] == "segmented_vsa"
-    assert config["attention_mode"] == "native_vsa"
-    assert config["bundle_loading"]["lazy_sections"][3] == "denoiser_entry_plan"
-    assert config["bundle_loading"]["lazy_sections"][4] == ("denoiser_transition_00_plan")
-    assert config["vsa"]["implementation"] == "native_cuda_segmented"
-    assert config["vsa"]["segment_count"] == 51
-    assert config["vsa"]["attention_calls_per_forward"] == 50
-    assert config["vsa"]["tensor_abi"]["attention_shape"] == [56, "S", 128]
-    assert config["vsa"]["packed_row_to_tile_slot_profile"] == [19285, 37838, 112367]
-    assert config["explicit_canvas_sizes"] == [[544, 960], [960, 544]]
-    assert config["vsa"]["prefix_valid_sizes_profile"] == [8, 9, 60]
-    assert config["vsa"]["video_valid_sizes_profile"] == [360, 660, 2080]
-    assert config["vsa"]["runtime_metadata_abi"]["packed_row_to_tile_slot"] == {
-        "dtype": "int32",
-        "shape": ["S"],
-        "profile": [19285, 37838, 112367],
-    }
-    assert config["padded_sequence_length"] == 112367
-    assert (
-        config["vae_tile_batch_min"],
-        config["vae_tile_batch_opt"],
-        config["vae_tile_batch_max"],
-    ) == (15, 28, 33)
-    assert str(tmp_path).lower() not in json.dumps(config).lower()
-
-
-def test_plugin_forces_fast_h3_staged_build_to_segmented_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls = []
-    monkeypatch.setattr(
-        staged_build,
-        "build_staged_bundle",
-        lambda *args, **kwargs: calls.append((args, kwargs)) or Path(args[1]),
-    )
-    model = tmp_path / "model"
-    adapter = tmp_path / "adapter.safetensors"
-    adapter.write_bytes(b"adapter")
-    raw = {
-        "fast_h3_adapter": adapter,
-        "num_inference_steps": 4,
-    }
-
-    plugin.build_staged_bundle(
-        str(model),
-        str(tmp_path / "model.bundle"),
-        SimpleNamespace(raw=raw),
-        {"_model_dir": str(model)},
-        precision="bf16",
-        parallel_config=SimpleNamespace(mode="single"),
-    )
-
-    assert calls[0][1] == {
-        "verbose": False,
-        "fast_h3_adapter": adapter.resolve(),
-    }
-    with pytest.raises(ValueError, match="disable FirstBlockCache"):
-        plugin.build_staged_bundle(
-            str(model),
-            str(tmp_path / "invalid.bundle"),
-            SimpleNamespace(raw={**raw, "first_block_cache": True}),
-            {"_model_dir": str(model)},
-            precision="bf16",
-            parallel_config=SimpleNamespace(mode="single"),
         )

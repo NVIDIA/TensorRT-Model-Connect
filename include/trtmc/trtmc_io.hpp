@@ -233,13 +233,17 @@ LoadedImage read_image(const std::string& path);
 // Out-of-range values are clamped to [0, 1] before being quantised to uint8.
 // Uses stb_image_write internally (linked via trtmc_core).
 // Throws std::runtime_error on size mismatch or write failure.
-void save_png(const std::string& path, const std::vector<float>& hwc_pixels, int width, int height);
+void save_png(const std::string& path,
+              const std::vector<float>& hwc_pixels,
+              int width,
+              int height);
 
 // Convenience overload: save an ImageResult (first frame only) directly.
 // For single-frame results (num_frames <= 1) writes result.pixels;
 // for multi-frame results (video) writes only frame 0 — use the
 // generate-video CLI command instead to dump every frame.
-inline void save_png(const ImageResult& image, const std::string& path) {
+inline void save_png(const ImageResult& image, const std::string& path)
+{
     const auto frame_pixels =
         static_cast<std::size_t>(image.height) * static_cast<std::size_t>(image.width) * 3U;
     if (image.pixels.size() < frame_pixels)
@@ -255,7 +259,8 @@ inline void save_png(const ImageResult& image, const std::string& path) {
 }
 
 // Legacy placeholder (prefer read_image).
-inline std::vector<float> decode_image(const std::string& path, int& h, int& w) {
+inline std::vector<float> decode_image(const std::string& path, int& h, int& w)
+{
     auto img = read_image(path);
     h = img.height;
     w = img.width;

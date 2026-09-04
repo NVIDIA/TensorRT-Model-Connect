@@ -11,7 +11,6 @@ from tensorrt_model_connect.families.minimax_h3.ref2va_bundle_contract import (
     REF2VA_PLAN_SECTIONS,
     REF2VA_SHARED_SECTIONS,
     ref2va_bundle_metadata,
-    ref2va_storage_estimate,
 )
 from tensorrt_model_connect.families.minimax_h3.ref2va_checkpoint import (
     CHECKPOINT_REVISION,
@@ -46,25 +45,9 @@ def test_ref2va_sections_share_qwen_and_are_all_lazy_plan_units() -> None:
     assert all("qwen" not in filename for _component, filename, _section in REF2VA_PLAN_SECTIONS)
 
 
-def test_incremental_storage_budget_exposes_packaging_copy_peak() -> None:
-    estimate = ref2va_storage_estimate()
-    assert estimate.transformer_ref_download == 66_280_504_216
-    assert estimate.all_ref2va_plan_budget == 68_027_502_954
-    assert estimate.checkpoint_plus_plans_peak == 134_308_007_170
-    assert estimate.checkpoint_plans_and_bundle_copy_peak == 202_335_510_124
-    assert estimate.denoiser_workspace_limit == 96 << 30
-    assert estimate.adaln_workspace_limit == 64 << 30
-    assert estimate.encoder_workspace_limit == 32 << 30
-    assert estimate.shared_text_encoder_workspace_limit == 96 << 30
-    assert estimate.shared_vision_encoder_workspace_limit == 32 << 30
-    assert estimate.max_profile_hidden_tensor_lower_bound == 6_777_093_120
-
-
 def test_bundle_metadata_requires_strict_transformer_ref_identity() -> None:
     metadata = ref2va_bundle_metadata(_identity())
     assert metadata["ref2va_supported"] is True
-    assert metadata["ref2va_transformer_fallback_allowed"] is False
-    assert metadata["ref2va_runtime_dependencies"] == ["TensorRT-RTX"]
     assert metadata["ref2va_schema_version"] == 2
     assert metadata["ref2va_limits"]["requires_image_or_video"] is True
     assert "audio_can_be_sole_input" not in metadata["ref2va_limits"]

@@ -31,42 +31,21 @@ class IPreboundBackend {
                            const std::vector<ModuleExternalBinding>& external_bindings) = 0;
 };
 
-// Optional TensorRT-RTX capability for large staged plans. This is a sibling
-// interface so extending file-backed behavior never changes IPreboundBackend's
-// established cross-DSO vtable.
+// Optional TensorRT-RTX capability for large staged plans. It remains separate
+// from IPreboundBackend because file-backed deserialization has different
+// lifetime and execution-context requirements.
 class IFileBackedBackend {
   public:
     virtual ~IFileBackedBackend();
     virtual std::unique_ptr<ITrtModule>
     create_module_from_file(const char* plan_path, std::uint64_t plan_offset,
-                            std::uint64_t plan_size, const char* expected_sha256,
-                            const ModuleCreateOptions& options,
+                            std::uint64_t plan_size, const ModuleCreateOptions& options,
                             const std::vector<ModuleExternalBinding>& external_bindings,
-                            std::int64_t weight_streaming_budget_bytes, bool retain_engine) = 0;
-};
-
-// Optional TensorRT-RTX capability for file-backed modules whose execution is
-// serialized on one explicit CUDA stream. Keeping this opt-in separate avoids
-// changing ModuleCreateOptions or IFileBackedBackend's installed cross-DSO ABI.
-class ISerialFileBackedBackend {
-  public:
-    virtual ~ISerialFileBackedBackend();
-    virtual std::unique_ptr<ITrtModule> create_serial_module_from_file(
-        const char* plan_path, std::uint64_t plan_offset, std::uint64_t plan_size,
-        const char* expected_sha256, const ModuleCreateOptions& options,
-        const std::vector<ModuleExternalBinding>& external_bindings,
-        std::int64_t weight_streaming_budget_bytes, bool retain_engine) = 0;
-};
-
-// Optional capability for backends that own a process-shared JIT runtime
-// cache. Windows deliberately keeps backend DSOs alive until process exit, so
-// callers need an explicit, loader-lock-free persistence point.
-class IRuntimeCacheBackend {
-  public:
-    virtual ~IRuntimeCacheBackend();
+                            std::int64_t weight_streaming_budget_bytes, bool retain_engine,
+                            bool serial_execution_context) = 0;
+    // Releasing the final lease persists the process-shared JIT cache. These
+    // explicit calls avoid serializing it from the Windows loader lock.
     virtual std::uint64_t acquire_runtime_cache_lease(const char* path) = 0;
-    // Releasing the final lease persists the cache. It may throw so an
-    // explicit pipeline finalization can report serialization or I/O failure.
     virtual void release_runtime_cache_lease(std::uint64_t lease) = 0;
 };
 

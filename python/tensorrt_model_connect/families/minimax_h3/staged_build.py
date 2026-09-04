@@ -32,11 +32,6 @@ from .config import (
     CANVAS_SHORT_EDGE,
     NATIVE_EXPLICIT_CANVAS_SIZES,
     DENOISER_DEFAULT_WORKSPACE_BYTES,
-    FASTH3_GUIDANCE_SCALE,
-    FASTH3_SCHEDULER_GRID_POINTS,
-    FASTH3_TRANSFORMER_FORWARDS,
-    FASTH3_VSA_MAX_VIDEO_TILES,
-    FASTH3_VSA_TILE_SIZE,
     RTX_CUDA_MAJOR,
     RTX_STAGED_WORKSPACE_BYTES,
     RTX_WEIGHT_STREAMING_BUDGET_BYTES,
@@ -63,7 +58,7 @@ from .ref2va_bundle_contract import REF2VA_PLAN_SECTIONS as _REF2VA_COMPONENTS
 
 _MODULE = "tensorrt_model_connect.families.minimax_h3.staged_build"
 _INVALID_RECEIPT_NAME = "build_receipt.invalid.json"
-_MONOLITHIC_FBC_COMPONENTS = (
+_DENSE_FBC_COMPONENTS = (
     ("adaln_precompute", "adaln_precompute.plan", "adaln_precompute_plan"),
     ("denoiser_head", "denoiser_head.plan", "denoiser_head_plan"),
     ("denoiser_tail", "denoiser_tail.plan", "denoiser_tail_plan"),
@@ -72,32 +67,7 @@ _MONOLITHIC_FBC_COMPONENTS = (
 _COMPONENTS = (
     ("text_encoder", "text_encoder.plan", "text_encoder_plan"),
     ("vision_encoder", "vision_encoder.plan", "vision_encoder_plan"),
-    *_MONOLITHIC_FBC_COMPONENTS,
-    (
-        "fl2va_keyframe_vae_encoder",
-        "fl2va_keyframe_vae_encoder.plan",
-        "fl2va_keyframe_vae_encoder_plan",
-    ),
-    ("vae_tile_decoder", "vae_tile_decoder.plan", "vae_tile_decoder_plan"),
-    ("audio_vae_decoder", "audio_vae_decoder.plan", "audio_vae_decoder_plan"),
-)
-_FASTH3_DENOISER_COMPONENTS = (
-    ("denoiser_entry", "denoiser_entry.plan", "denoiser_entry_plan"),
-    *(
-        (
-            f"denoiser_transition_{index:02d}",
-            f"denoiser_transition_{index:02d}.plan",
-            f"denoiser_transition_{index:02d}_plan",
-        )
-        for index in range(SOL_ENGINE_1344X768_124_TO_345F.num_layers - 1)
-    ),
-    ("denoiser_finish", "denoiser_finish.plan", "denoiser_finish_plan"),
-)
-_FASTH3_COMPONENTS = (
-    ("text_encoder", "text_encoder.plan", "text_encoder_plan"),
-    ("vision_encoder", "vision_encoder.plan", "vision_encoder_plan"),
-    ("adaln_precompute", "adaln_precompute.plan", "adaln_precompute_plan"),
-    *_FASTH3_DENOISER_COMPONENTS,
+    *_DENSE_FBC_COMPONENTS,
     (
         "fl2va_keyframe_vae_encoder",
         "fl2va_keyframe_vae_encoder.plan",
@@ -130,12 +100,12 @@ def _workspace_limits_for_components(
 ) -> dict[str, int | str]:
     """Return the exact per-plan workspace profile used by staged children."""
 
-    default_max_components = {name for name, _filename, _section in _MONOLITHIC_FBC_COMPONENTS}
-    monolithic_dense = all(item in components for item in _MONOLITHIC_FBC_COMPONENTS)
+    default_max_components = {name for name, _filename, _section in _DENSE_FBC_COMPONENTS}
+    dense_fbc = all(item in components for item in _DENSE_FBC_COMPONENTS)
     limits = {
         filename: (
             TRT_DEFAULT_WORKSPACE_POLICY
-            if monolithic_dense and component in default_max_components
+            if dense_fbc and component in default_max_components
             else _component_workspace_bytes(component, ref2va=ref2va)
         )
         for component, filename, _section in components
@@ -145,39 +115,8 @@ def _workspace_limits_for_components(
     return limits
 
 
-def _base_checkpoint_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
-    """Exclude adapter-created gate matrices from base-checkpoint reads."""
-
-    return tuple(key for key in keys if not key.endswith(".attn.to_gate_compress.weight"))
-
-
-def _profile(*, fast_h3: bool = False):
-    return replace(
-        SOL_ENGINE_1344X768_124_TO_345F,
-        first_block_cache=not fast_h3,
-    )
-
-
-def _adapter_target_partitions(profile) -> dict[str, tuple[str, ...]]:
-    from .adaln_builder import checkpoint_keys as adaln_checkpoint_keys
-    from .dit_builder import (
-        finish_checkpoint_keys,
-        head_checkpoint_keys,
-        tail_checkpoint_keys,
-        vsa_segment_checkpoint_partitions,
-    )
-
-    if not profile.first_block_cache:
-        return {
-            "adaln_precompute": adaln_checkpoint_keys(profile),
-            **vsa_segment_checkpoint_partitions(profile),
-        }
-    return {
-        "adaln_precompute": adaln_checkpoint_keys(profile),
-        "denoiser_head": head_checkpoint_keys(profile, include_vsa_gates=True),
-        "denoiser_tail": tail_checkpoint_keys(profile, include_vsa_gates=True),
-        "denoiser_finish": finish_checkpoint_keys(profile),
-    }
+def _profile():
+    return replace(SOL_ENGINE_1344X768_124_TO_345F, first_block_cache=True)
 
 
 def _file_record(path: Path) -> dict[str, int | str]:
@@ -199,30 +138,10 @@ def _build_identity(
     trt_abi: str,
     source_revision: str,
     workspace_limits: dict[str, int | str],
-    adapter_identity=None,
     transformer_ref_identity=None,
 ) -> dict[str, object]:
     snapshot = validate_checkpoint_snapshot_record(checkpoint_snapshot)
-    files = snapshot["files"]
-    metadata = {
-        relative: record["sha256"]
-        for relative, record in files.items()
-        if relative == "tokenizer/tokenizer.json"
-        or Path(relative).name in {"config.json", "model_index.json", "modular_model_index.json"}
-        or Path(relative).name.endswith(".safetensors.index.json")
-    }
-    shards = [
-        {
-            "name": relative,
-            "bytes": record["bytes"],
-            "sha256": record["sha256"],
-        }
-        for relative, record in sorted(files.items())
-        if Path(relative).suffix == ".safetensors"
-    ]
     result = {
-        "model_metadata_sha256": metadata,
-        "checkpoint_shards": shards,
         "checkpoint_revision": snapshot["revision"],
         "checkpoint_inventory_sha256": snapshot["inventory_sha256"],
         "source_revision": source_revision,
@@ -234,9 +153,6 @@ def _build_identity(
         "workspace_limit_bytes": dict(workspace_limits),
         "weight_streaming_budget_bytes": RTX_WEIGHT_STREAMING_BUDGET_BYTES,
     }
-    if adapter_identity is not None:
-        result["fast_h3"] = adapter_identity.bundle_metadata()
-        result["vsa_implementation"] = "native_cuda_segmented"
     if transformer_ref_identity is not None:
         result["transformer_ref"] = transformer_ref_identity.bundle_metadata()
     return result
@@ -247,8 +163,6 @@ def _validate_staged_sources_unchanged(
     checkpoint_snapshot: dict,
     *,
     builder_source_sha256_expected: str,
-    adapter_path: Path | None,
-    adapter_identity,
     transformer_ref_path: Path | None,
     transformer_ref_identity,
 ) -> None:
@@ -256,18 +170,12 @@ def _validate_staged_sources_unchanged(
 
     if checkpoint_snapshot_record(model) != checkpoint_snapshot:
         raise ValueError("MiniMax-H3 base checkpoint changed while staged plans were built")
-    if adapter_path is not None:
-        from .checkpoint import validate_fast_h3_adapter
-
-        current_adapter = validate_fast_h3_adapter(
-            adapter_path, _adapter_target_partitions(_profile(fast_h3=True))
-        )
-        if current_adapter.bundle_metadata() != adapter_identity.bundle_metadata():
-            raise ValueError("MiniMax-H3 FastH3 adapter changed while staged plans were built")
     if transformer_ref_path is not None:
         from .ref2va_checkpoint import validate_transformer_ref_checkpoint
 
-        current_ref = validate_transformer_ref_checkpoint(transformer_ref_path)
+        current_ref = validate_transformer_ref_checkpoint(
+            transformer_ref_path,
+        )
         if current_ref.bundle_metadata() != transformer_ref_identity.bundle_metadata():
             raise ValueError("MiniMax-H3 transformer_ref changed while staged plans were built")
     if builder_source_sha256() != builder_source_sha256_expected:
@@ -398,9 +306,10 @@ def _run_component(
     output: Path,
     *,
     verbose: bool,
-    adapter_path: Path | None = None,
     transformer_ref_path: Path | None = None,
-) -> None:
+) -> dict[str, int | str]:
+    record_output = output.with_name(f".{output.name}.record.json")
+    record_output.unlink(missing_ok=True)
     command = [
         sys.executable,
         "-m",
@@ -412,18 +321,36 @@ def _run_component(
         str(model),
         "--output",
         str(output),
+        "--record-output",
+        str(record_output),
     ]
     if verbose:
         command.append("--verbose")
-    if adapter_path is not None:
-        command.extend(("--fast-h3-adapter", str(adapter_path)))
     if component.startswith("ref2va_") and transformer_ref_path is None:
         raise FileNotFoundError(
             "MiniMax-H3 Ref2VA components require the distinct transformer_ref checkpoint"
         )
     if transformer_ref_path is not None:
         command.extend(("--transformer-ref", str(transformer_ref_path)))
-    subprocess.run(command, check=True)
+    try:
+        subprocess.run(command, check=True)
+        try:
+            record = json.loads(record_output.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f"MiniMax-H3 staged child did not return a plan record: {component}"
+            ) from error
+        if (
+            not _valid_plan_record(record)
+            or not output.is_file()
+            or output.stat().st_size != record["bytes"]
+        ):
+            raise RuntimeError(
+                f"MiniMax-H3 staged child returned an invalid plan record: {component}"
+            )
+        return dict(record)
+    finally:
+        record_output.unlink(missing_ok=True)
 
 
 def _sanitized_config(
@@ -433,11 +360,10 @@ def _sanitized_config(
     build_identity: dict[str, object],
     plan_records: dict[str, dict[str, int | str]],
     audio_vae_config: dict,
-    adapter_identity=None,
     transformer_ref_identity=None,
     components=_COMPONENTS,
 ) -> dict[str, object]:
-    profile = _profile(fast_h3=adapter_identity is not None)
+    profile = _profile()
     rates = audio_vae_config.get("decoder_rates")
     latent_mean = audio_vae_config.get("latents_mean")
     latent_std = audio_vae_config.get("latents_std")
@@ -536,24 +462,12 @@ def _sanitized_config(
         "num_frames_opt": VIDEO_NUM_FRAMES_OPT,
         "num_frames_max": VIDEO_NUM_FRAMES_MAX,
         "fps": 24,
-        "num_inference_steps": (
-            FASTH3_TRANSFORMER_FORWARDS if adapter_identity is not None else 50
-        ),
+        "num_inference_steps": 50,
         "seed": 0,
-        "first_block_cache": profile.first_block_cache,
-        "denoiser_cache_mode": (
-            "segmented_vsa"
-            if adapter_identity is not None
-            else "first_block"
-            if profile.first_block_cache
-            else "monolithic"
-        ),
-        "denoiser_profile_count": 2 if profile.first_block_cache else 1,
-        "denoiser_profile_layout": (
-            "five_second_reference_then_public_dynamic"
-            if profile.first_block_cache
-            else "public_dynamic"
-        ),
+        "first_block_cache": True,
+        "denoiser_cache_mode": "first_block",
+        "denoiser_profile_count": 2,
+        "denoiser_profile_layout": "five_second_reference_then_public_dynamic",
         "first_block_cache_threshold": 0.08,
         "text_rows": profile.text_rows,
         "text_rows_min": profile.min_text_rows,
@@ -590,89 +504,14 @@ def _sanitized_config(
         "vae_tile_batch_max": 33,
         "vae_tile_size": 256,
         "vae_tile_overlap": 64,
+        "guidance_scale": 1.0,
+        "scheduler_grid_points": 50,
+        "transformer_forwards": 49,
+        "attention_mode": "dense",
     }
-    if adapter_identity is not None:
-        config.update(
-            {
-                "guidance_scale": FASTH3_GUIDANCE_SCALE,
-                "scheduler_grid_points": FASTH3_SCHEDULER_GRID_POINTS,
-                "transformer_forwards": FASTH3_TRANSFORMER_FORWARDS,
-                "attention_mode": "native_vsa",
-                "fast_h3": adapter_identity.bundle_metadata(),
-                "vsa": {
-                    "implementation": "native_cuda_segmented",
-                    "tile_size": FASTH3_VSA_TILE_SIZE,
-                    "video_tile_shape": [4, 4, 4],
-                    "video_keep_numerator": 1,
-                    "video_keep_denominator": 10,
-                    "max_video_tiles": FASTH3_VSA_MAX_VIDEO_TILES,
-                    "max_total_tiles": profile.vsa_prefix_tile_profile[2]
-                    + FASTH3_VSA_MAX_VIDEO_TILES,
-                    "packed_row_to_tile_slot_profile": list(profile.packed_row_profile),
-                    "prefix_valid_sizes_profile": list(profile.vsa_prefix_tile_profile),
-                    "video_valid_sizes_profile": list(profile.vsa_video_tile_abi_profile),
-                    "runtime_metadata_abi": {
-                        "producer": "modelconnect_cpp",
-                        "packed_row_to_tile_slot": {
-                            "dtype": "int32",
-                            "shape": ["S"],
-                            "profile": list(profile.packed_row_profile),
-                        },
-                        "prefix_valid_sizes": {
-                            "dtype": "int32",
-                            "shape": ["P"],
-                            "profile": list(profile.vsa_prefix_tile_profile),
-                        },
-                        "video_valid_sizes": {
-                            "dtype": "int32",
-                            "shape": ["Vtiles"],
-                            "profile": list(profile.vsa_video_tile_abi_profile),
-                        },
-                    },
-                    "segment_count": len(_FASTH3_DENOISER_COMPONENTS),
-                    "transition_count": profile.num_layers - 1,
-                    "attention_calls_per_forward": profile.num_layers,
-                    "fbc_composable": False,
-                    "tensor_abi": {
-                        "dtype": "bf16",
-                        "residual_input": "residual_hidden",
-                        "residual_output": "next_residual_hidden",
-                        "attention_input": "vsa_attention_output",
-                        "query_output": "vsa_query",
-                        "key_output": "vsa_key",
-                        "value_output": "vsa_value",
-                        "gate_output": "vsa_gate",
-                        "residual_shape": ["S", profile.hidden_size],
-                        "attention_shape": [
-                            profile.num_heads,
-                            "S",
-                            profile.head_dim,
-                        ],
-                        "packed_rows_profile": list(profile.packed_row_profile),
-                    },
-                    "segments": [
-                        {
-                            "component": component,
-                            "filename": filename,
-                            "section": section,
-                        }
-                        for component, filename, section in _FASTH3_DENOISER_COMPONENTS
-                    ],
-                },
-            }
-        )
-    else:
-        config.update(
-            {
-                "guidance_scale": 1.0,
-                "scheduler_grid_points": 50,
-                "transformer_forwards": 49,
-                "attention_mode": "dense",
-            }
-        )
-        monolithic_dense = all(item in components for item in _MONOLITHIC_FBC_COMPONENTS)
-        if profile.first_block_cache and not monolithic_dense:
-            raise ValueError("MiniMax-H3 staged bundle has an incomplete dense FBC layout")
+    dense_fbc = all(item in components for item in _DENSE_FBC_COMPONENTS)
+    if not dense_fbc:
+        raise ValueError("MiniMax-H3 staged bundle has an incomplete dense FBC layout")
     if transformer_ref_identity is not None:
         from .ref2va_bundle_contract import ref2va_bundle_metadata
 
@@ -692,7 +531,6 @@ def _finalize_staged_bundle(
     build_identity: dict[str, object],
     plan_records: dict[str, dict[str, int | str]],
     components: Sequence[tuple[str, str, str]],
-    adapter_identity=None,
     transformer_ref_identity=None,
 ) -> Path:
     checkpoint_snapshot = validate_checkpoint_snapshot_record(checkpoint_snapshot)
@@ -722,7 +560,6 @@ def _finalize_staged_bundle(
         build_identity=build_identity,
         plan_records=plan_records,
         audio_vae_config=audio_vae_config,
-        adapter_identity=adapter_identity,
         transformer_ref_identity=transformer_ref_identity,
         components=components,
     )
@@ -767,7 +604,6 @@ def build_staged_bundle(
     *,
     plans_dir: str | Path | None = None,
     verbose: bool = False,
-    fast_h3_adapter: str | Path | None = None,
     transformer_ref: str | Path | None = None,
 ) -> Path:
     """Build isolated plans and stream them into one auditable native bundle."""
@@ -782,18 +618,6 @@ def build_staged_bundle(
     tokenizer = model / "tokenizer" / "tokenizer.json"
     if not tokenizer.is_file():
         raise FileNotFoundError(f"MiniMax-H3 tokenizer is missing: {tokenizer}")
-
-    adapter_path = (
-        Path(fast_h3_adapter).resolve(strict=True) if fast_h3_adapter is not None else None
-    )
-    adapter_identity = None
-    if adapter_path is not None:
-        trt_compat.configure_backend(rtx=True)
-        from .checkpoint import validate_fast_h3_adapter
-
-        adapter_identity = validate_fast_h3_adapter(
-            adapter_path, _adapter_target_partitions(_profile(fast_h3=True))
-        )
 
     transformer_ref_path = None
     transformer_ref_identity = None
@@ -814,11 +638,8 @@ def build_staged_bundle(
     abi = trt_compat.tensorrt_abi(version)
     if not version or not abi:
         raise RuntimeError("Cannot determine TensorRT-RTX version and ABI")
-    base_components = _FASTH3_COMPONENTS if adapter_identity is not None else _COMPONENTS
     components = (
-        (*base_components, *_REF2VA_COMPONENTS)
-        if transformer_ref_identity is not None
-        else base_components
+        (*_COMPONENTS, *_REF2VA_COMPONENTS) if transformer_ref_identity is not None else _COMPONENTS
     )
     workspace_limits = _workspace_limits_for_components(
         components, ref2va=transformer_ref_identity is not None
@@ -834,7 +655,6 @@ def build_staged_bundle(
         trt_abi=abi,
         source_revision=_build_source_revision(),
         workspace_limits=workspace_limits,
-        adapter_identity=adapter_identity,
         transformer_ref_identity=transformer_ref_identity,
     )
     plans.mkdir(parents=True, exist_ok=True)
@@ -856,7 +676,6 @@ def build_staged_bundle(
             build_identity=build_identity,
             plan_records=complete_records,
             components=components,
-            adapter_identity=adapter_identity,
             transformer_ref_identity=transformer_ref_identity,
         )
 
@@ -866,13 +685,15 @@ def build_staged_bundle(
         if _matches_record(plan_path, plan_records.get(filename)):
             continue
         child_options = {"verbose": verbose}
-        if adapter_path is not None:
-            child_options["adapter_path"] = adapter_path
         if transformer_ref_path is not None:
             child_options["transformer_ref_path"] = transformer_ref_path
-        _run_component(component, model, plan_path, **child_options)
+        plan_records[filename] = _run_component(
+            component,
+            model,
+            plan_path,
+            **child_options,
+        )
         built_any_plan = True
-        plan_records[filename] = _file_record(plan_path)
         _write_receipt(receipt_path, build_identity, plan_records)
 
     complete_records = _complete_plan_records(plan_records, components)
@@ -889,8 +710,6 @@ def build_staged_bundle(
                 model,
                 checkpoint_snapshot,
                 builder_source_sha256_expected=str(build_identity["builder_source_sha256"]),
-                adapter_path=adapter_path,
-                adapter_identity=adapter_identity,
                 transformer_ref_path=transformer_ref_path,
                 transformer_ref_identity=transformer_ref_identity,
             )
@@ -910,7 +729,6 @@ def build_staged_bundle(
         build_identity=build_identity,
         plan_records=complete_records,
         components=components,
-        adapter_identity=adapter_identity,
         transformer_ref_identity=transformer_ref_identity,
     )
 
@@ -921,15 +739,12 @@ def _build_component(
     output: Path,
     *,
     verbose: bool,
-    adapter_path: Path | None = None,
     transformer_ref_path: Path | None = None,
-) -> None:
+) -> dict[str, int | str]:
     trt_compat.configure_backend(rtx=True)
     from .checkpoint import (
         load_selected_component_state_dict,
-        merge_fast_h3_adapter_state,
         numpy_state,
-        validate_fast_h3_adapter,
     )
 
     if component.startswith("ref2va_") and transformer_ref_path is None:
@@ -939,43 +754,20 @@ def _build_component(
     if transformer_ref_path is not None:
         from .ref2va_checkpoint import validate_transformer_ref_checkpoint
 
-        validate_transformer_ref_checkpoint(transformer_ref_path, hash_shards=False)
+        validate_transformer_ref_checkpoint(transformer_ref_path)
 
-    profile = _profile(fast_h3=adapter_path is not None)
-    adapter_partitions = _adapter_target_partitions(profile)
-    adapter_identity = None
-    if adapter_path is not None and component in adapter_partitions:
-        adapter_identity = validate_fast_h3_adapter(adapter_path, adapter_partitions)
-
-    def merge_adapter(state):
-        if adapter_identity is None or adapter_path is None:
-            return state
-        targets = adapter_partitions[component]
-        counts = merge_fast_h3_adapter_state(state, adapter_path, targets)
-        expected = adapter_identity.partition_tensor_counts[component]
-        if counts["tensors"] != expected:
-            raise ValueError(
-                "FastH3 adapter component accounting mismatch: "
-                f"component={component}, expected={expected}, actual={counts['tensors']}"
-            )
-        return state
+    profile = _profile()
 
     dense_default_workspace_components = {
-        component_name
-        for component_name, _filename, _section in (
-            *_MONOLITHIC_FBC_COMPONENTS,
-        )
+        component_name for component_name, _filename, _section in (*_DENSE_FBC_COMPONENTS,)
     }
     common = {
         "verbose": verbose,
         "consume_weights": True,
         "workspace_bytes": (
             None
-            if profile.first_block_cache
-            and component in dense_default_workspace_components
-            else _component_workspace_bytes(
-                component, ref2va=transformer_ref_path is not None
-            )
+            if profile.first_block_cache and component in dense_default_workspace_components
+            else _component_workspace_bytes(component, ref2va=transformer_ref_path is not None)
         ),
         "weight_streaming": True,
         "output_path": output,
@@ -1014,7 +806,6 @@ def _build_component(
         from .adaln_builder import build_adaln_precompute_engine, checkpoint_keys
 
         state = load_selected_component_state_dict(model / "transformer", checkpoint_keys(profile))
-        merge_adapter(state)
         weights = numpy_state(state)
         del state
         result = build_adaln_precompute_engine(weights, profile, **common)
@@ -1022,51 +813,27 @@ def _build_component(
         "denoiser_head",
         "denoiser_tail",
         "denoiser_finish",
-        "denoiser_entry",
-        *(f"denoiser_transition_{index:02d}" for index in range(profile.num_layers - 1)),
     }:
         from .dit_builder import (
             build_dit_finish_engine,
             build_dit_head_engine,
             build_dit_tail_engine,
-            build_dit_vsa_entry_engine,
-            build_dit_vsa_finish_engine,
-            build_dit_vsa_transition_engine,
             finish_checkpoint_keys,
             head_checkpoint_keys,
             tail_checkpoint_keys,
-            vsa_entry_checkpoint_keys,
-            vsa_finish_checkpoint_keys,
-            vsa_transition_checkpoint_keys,
         )
 
         builders = {
             "denoiser_head": (build_dit_head_engine, head_checkpoint_keys),
             "denoiser_tail": (build_dit_tail_engine, tail_checkpoint_keys),
             "denoiser_finish": (build_dit_finish_engine, finish_checkpoint_keys),
-            "denoiser_entry": (build_dit_vsa_entry_engine, vsa_entry_checkpoint_keys),
         }
-        indexed_component = None
-        if component.startswith("denoiser_transition_"):
-            indexed_component = int(component.rsplit("_", 1)[1])
-            builder = build_dit_vsa_transition_engine
-            keys = vsa_transition_checkpoint_keys(indexed_component, profile)
-        elif component == "denoiser_finish" and adapter_path is not None:
-            builder = build_dit_vsa_finish_engine
-            keys = vsa_finish_checkpoint_keys(profile)
-        else:
-            builder, key_fn = builders[component]
-            keys = key_fn(profile)
-        state = load_selected_component_state_dict(
-            model / "transformer", _base_checkpoint_keys(keys)
-        )
-        merge_adapter(state)
+        builder, key_fn = builders[component]
+        keys = key_fn() if component == "denoiser_finish" else key_fn(profile)
+        state = load_selected_component_state_dict(model / "transformer", keys)
         weights = numpy_state(state)
         del state
-        if indexed_component is None:
-            result = builder(weights, profile, **common)
-        else:
-            result = builder(weights, profile, indexed_component, **common)
+        result = builder(weights, profile, **common)
     elif component == "fl2va_keyframe_vae_encoder":
         from .fl2va_vae_encoder_builder import (
             build_keyframe_vae_encoder_engine,
@@ -1158,18 +925,11 @@ def _build_component(
         raise ValueError(f"Unknown MiniMax-H3 staged component: {component}")
 
     valid_result = (
-        isinstance(result, dict)
-        and set(result) == {"bytes", "sha256"}
-        and isinstance(result.get("bytes"), int)
-        and result["bytes"] > 0
-        and output.is_file()
-        and output.stat().st_size == result["bytes"]
-        and isinstance(result.get("sha256"), str)
-        and len(result["sha256"]) == 64
-        and all(character in "0123456789abcdef" for character in result["sha256"])
+        _valid_plan_record(result) and output.is_file() and output.stat().st_size == result["bytes"]
     )
     if not valid_result:
         raise RuntimeError(f"MiniMax-H3 staged builder returned an invalid record: {component}")
+    return dict(result)
 
 
 def _main(argv: Sequence[str] | None = None) -> int:
@@ -1182,7 +942,6 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 item[0]
                 for item in (
                     *_COMPONENTS,
-                    *_FASTH3_COMPONENTS,
                     *_REF2VA_COMPONENTS,
                 )
             }
@@ -1190,24 +949,28 @@ def _main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--model-dir")
     parser.add_argument("--output")
+    parser.add_argument("--record-output")
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--fast-h3-adapter")
     parser.add_argument("--transformer-ref")
     args = parser.parse_args(argv)
-    if not args.child or not args.component or not args.model_dir or not args.output:
+    if (
+        not args.child
+        or not args.component
+        or not args.model_dir
+        or not args.output
+        or not args.record_output
+    ):
         parser.error("this module is an internal staged-build child")
-    _build_component(
+    record = _build_component(
         args.component,
         Path(args.model_dir),
         Path(args.output),
         verbose=args.verbose,
-        adapter_path=(
-            Path(args.fast_h3_adapter).resolve(strict=True) if args.fast_h3_adapter else None
-        ),
         transformer_ref_path=(
             Path(args.transformer_ref).resolve(strict=True) if args.transformer_ref else None
         ),
     )
+    _atomic_write_json(Path(args.record_output), record)
     return 0
 
 

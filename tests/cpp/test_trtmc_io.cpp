@@ -28,10 +28,10 @@
 //   - test_helpers.h    : TempDirGuard
 //   No TRT, GPU, or CUDA required.
 
+#include "test_helpers.h"
 #include "trtmc/trtmc_io.hpp"
 
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -40,46 +40,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <system_error>
 #include <vector>
-
-namespace trtmc_test {
-
-// This test target also runs on Windows, while the shared integration-test
-// helper intentionally depends on POSIX nftw/mkdtemp. Keep the small IO test
-// self-contained and constrain recursive cleanup to the OS temp directory.
-class TempDirGuard {
-  public:
-    TempDirGuard() {
-        temp_root_ = std::filesystem::temp_directory_path().lexically_normal();
-        const auto nonce = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-        for (int attempt = 0; attempt < 100; ++attempt) {
-            path_ = temp_root_ /
-                    ("trtmc_io_test_" + std::to_string(nonce) + "_" + std::to_string(attempt));
-            std::error_code ec;
-            if (std::filesystem::create_directory(path_, ec))
-                return;
-        }
-        throw std::runtime_error("failed to create a temporary IO test directory");
-    }
-
-    ~TempDirGuard() {
-        if (!path_.empty() && path_.parent_path().lexically_normal() == temp_root_) {
-            std::error_code ec;
-            std::filesystem::remove_all(path_, ec);
-        }
-    }
-
-    std::string path() const { return path_.string(); }
-    TempDirGuard(const TempDirGuard&) = delete;
-    TempDirGuard& operator=(const TempDirGuard&) = delete;
-
-  private:
-    std::filesystem::path temp_root_;
-    std::filesystem::path path_;
-};
-
-} // namespace trtmc_test
 
 static int failures = 0;
 

@@ -15,16 +15,15 @@ from pathlib import Path
 
 from tensorrt_model_connect.families.minimax_h3.checkpoint import (
     load_selected_component_state_dict,
-    merge_fast_h3_adapter_state,
     numpy_state,
     validate_component_key_partition,
-    validate_fast_h3_adapter,
 )
 from tensorrt_model_connect.families.minimax_h3.config import (
     AUDIO_LATENT_FRAMES_MAX,
     AUDIO_LATENT_FRAMES_MIN,
     AUDIO_LATENT_FRAMES_OPT,
     SOL_ENGINE_1344X768_124_TO_345F,
+    TRT_DEFAULT_WORKSPACE_POLICY,
     default_workspace_limit_bytes,
 )
 from tensorrt_model_connect.families.minimax_h3.provenance import (
@@ -51,7 +50,6 @@ _RESUME_IDENTITY_FIELDS = (
     "assets",
     "workspace_limit_bytes",
     "denoiser_mode",
-    "fast_h3",
 )
 
 
@@ -67,14 +65,8 @@ def _positive_workspace_gib(raw: str) -> int:
 
 def _workspace_limits(
     workspace_gib: int | None,
-    *,
-    first_block_cache: bool = False,
-    segmented_vsa: bool = False,
-) -> dict[str, int]:
-    defaults = default_workspace_limit_bytes(
-        first_block_cache=first_block_cache,
-        segmented_vsa=segmented_vsa,
-    )
+) -> dict[str, int | str]:
+    defaults = default_workspace_limit_bytes()
     if workspace_gib is None:
         return defaults
     if not isinstance(workspace_gib, int) or isinstance(workspace_gib, bool) or workspace_gib <= 0:
@@ -83,26 +75,8 @@ def _workspace_limits(
     return {filename: workspace_bytes for filename in defaults}
 
 
-def _base_checkpoint_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
-    """Exclude adapter-created gate matrices from base-checkpoint reads."""
-
-    return tuple(key for key in keys if not key.endswith(".attn.to_gate_compress.weight"))
-
-
-def _adapter_target_partitions(profile) -> dict[str, tuple[str, ...]]:
-    """Return the exact, non-overlapping build partition for all 856 adapter tensors."""
-
-    from tensorrt_model_connect.families.minimax_h3.adaln_builder import (
-        checkpoint_keys as adaln_keys,
-    )
-    from tensorrt_model_connect.families.minimax_h3.dit_builder import (
-        vsa_segment_checkpoint_partitions,
-    )
-
-    return {
-        "adaln_precompute": adaln_keys(profile),
-        **vsa_segment_checkpoint_partitions(profile),
-    }
+def _builder_workspace(value: int | str) -> int | None:
+    return None if value == TRT_DEFAULT_WORKSPACE_POLICY else int(value)
 
 
 def _validate_resume_identity(previous: object, current: dict) -> None:
@@ -130,19 +104,6 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--cp-size", type=int, default=1, choices=(1,))
-    denoiser_group = parser.add_mutually_exclusive_group()
-    denoiser_group.add_argument(
-        "--first-block-cache",
-        action="store_true",
-        help="Build native head/tail/finish denoiser plans for FirstBlockCache.",
-    )
-    denoiser_group.add_argument(
-        "--fast-h3-adapter",
-        help=(
-            "Build the native 51-plan FastH3/VSA denoiser after strictly validating "
-            "and merging this public adapter at build time."
-        ),
-    )
     parser.add_argument(
         "--workspace-gib",
         type=_positive_workspace_gib,
@@ -172,29 +133,15 @@ def main() -> int:
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     source_revision = validate_source_revision(args.source_revision)
-    adapter_path = (
-        Path(args.fast_h3_adapter).resolve(strict=True) if args.fast_h3_adapter else None
-    )
-    segmented_vsa = adapter_path is not None
     profile = replace(
         SOL_ENGINE_1344X768_124_TO_345F,
         context_parallel_size=args.cp_size,
-        first_block_cache=args.first_block_cache,
+        first_block_cache=True,
     )
     profile.validate()
-    adapter_partitions = _adapter_target_partitions(profile) if segmented_vsa else {}
-    adapter_identity = (
-        validate_fast_h3_adapter(adapter_path, adapter_partitions)
-        if adapter_path is not None
-        else None
-    )
     receipt_path = output / "build_receipt.json"
     tokenizer = model / "tokenizer" / "tokenizer.json"
-    workspace_limit_bytes = _workspace_limits(
-        args.workspace_gib,
-        first_block_cache=profile.first_block_cache,
-        segmented_vsa=segmented_vsa,
-    )
+    workspace_limit_bytes = _workspace_limits(args.workspace_gib)
     receipt = {
         "checkpoint_revision": CHECKPOINT_REVISION,
         "checkpoint_snapshot": checkpoint_snapshot_record(model),
@@ -204,14 +151,7 @@ def main() -> int:
         "profile": serialized_profile(profile),
         "assets": {"tokenizer.json": file_record(tokenizer)},
         "workspace_limit_bytes": workspace_limit_bytes,
-        "denoiser_mode": (
-            "segmented_vsa"
-            if segmented_vsa
-            else "first_block" if profile.first_block_cache else "monolithic"
-        ),
-        "fast_h3": (
-            adapter_identity.bundle_metadata() if adapter_identity is not None else None
-        ),
+        "denoiser_mode": "first_block",
         "components": {},
     }
     if args.resume and receipt_path.is_file():
@@ -268,7 +208,7 @@ def main() -> int:
         plan = build_multimodal_text_encoder_engine(
             weights,
             consume_weights=True,
-            workspace_bytes=workspace_limit_bytes["text_encoder.plan"],
+            workspace_bytes=_builder_workspace(workspace_limit_bytes["text_encoder.plan"]),
         )
         _write(output, "text_encoder.plan", plan, time.perf_counter() - started, receipt)
         checkpoint_receipt()
@@ -282,116 +222,52 @@ def main() -> int:
         checkpoint_keys as adaln_keys,
     )
     from tensorrt_model_connect.families.minimax_h3.dit_builder import (
-        build_dit_engine,
         build_dit_finish_engine,
         build_dit_head_engine,
         build_dit_tail_engine,
-        build_dit_vsa_entry_engine,
-        build_dit_vsa_finish_engine,
-        build_dit_vsa_transition_engine,
-        checkpoint_keys as dit_keys,
         finish_checkpoint_keys,
         head_checkpoint_keys,
         tail_checkpoint_keys,
-        vsa_entry_checkpoint_keys,
-        vsa_finish_checkpoint_keys,
-        vsa_transition_checkpoint_keys,
     )
 
     build_adaln = should_build("adaln_precompute", "adaln_precompute.plan")
-    if segmented_vsa:
-        denoiser_specs = (
-            (
-                "denoiser_entry",
-                "denoiser_entry.plan",
-                build_dit_vsa_entry_engine,
-                vsa_entry_checkpoint_keys(profile),
-                None,
-            ),
-            *(
-                (
-                    f"denoiser_transition_{index:02d}",
-                    f"denoiser_transition_{index:02d}.plan",
-                    build_dit_vsa_transition_engine,
-                    vsa_transition_checkpoint_keys(index, profile),
-                    index,
-                )
-                for index in range(profile.num_layers - 1)
-            ),
-            (
-                "denoiser_finish",
-                "denoiser_finish.plan",
-                build_dit_vsa_finish_engine,
-                vsa_finish_checkpoint_keys(profile),
-                None,
-            ),
-        )
-    elif profile.first_block_cache:
-        denoiser_specs = (
-            (
-                "denoiser_head",
-                "denoiser_head.plan",
-                build_dit_head_engine,
-                head_checkpoint_keys(profile),
-                None,
-            ),
-            (
-                "denoiser_tail",
-                "denoiser_tail.plan",
-                build_dit_tail_engine,
-                tail_checkpoint_keys(profile),
-                None,
-            ),
-            (
-                "denoiser_finish",
-                "denoiser_finish.plan",
-                build_dit_finish_engine,
-                finish_checkpoint_keys(profile),
-                None,
-            ),
-        )
-    else:
-        denoiser_specs = (
-            (
-                "denoiser",
-                "denoiser.plan",
-                build_dit_engine,
-                dit_keys(profile),
-                None,
-            ),
-        )
+    denoiser_specs = (
+        (
+            "denoiser_head",
+            "denoiser_head.plan",
+            build_dit_head_engine,
+            head_checkpoint_keys(profile),
+        ),
+        (
+            "denoiser_tail",
+            "denoiser_tail.plan",
+            build_dit_tail_engine,
+            tail_checkpoint_keys(profile),
+        ),
+        (
+            "denoiser_finish",
+            "denoiser_finish.plan",
+            build_dit_finish_engine,
+            finish_checkpoint_keys(),
+        ),
+    )
     build_denoiser = any(
         should_build("denoiser", filename)
-        for _component, filename, _builder, _keys, _index in denoiser_specs
+        for _component, filename, _builder, _keys in denoiser_specs
     )
     if build_adaln or build_denoiser:
         checkpoint_groups = (
-            _base_checkpoint_keys(adaln_keys(profile)),
+            adaln_keys(profile),
             *(
-                _base_checkpoint_keys(keys)
-                for _component, _filename, _builder, keys, _index in denoiser_specs
+                keys for _component, _filename, _builder, keys in denoiser_specs
             ),
         )
         validate_component_key_partition(model / "transformer", checkpoint_groups)
 
-    def merge_adapter(state, component: str) -> None:
-        if adapter_identity is None or adapter_path is None:
-            return
-        targets = adapter_partitions[component]
-        counts = merge_fast_h3_adapter_state(state, adapter_path, targets)
-        expected = adapter_identity.partition_tensor_counts[component]
-        if counts["tensors"] != expected:
-            raise ValueError(
-                "FastH3 adapter component accounting mismatch: "
-                f"component={component}, expected={expected}, actual={counts['tensors']}"
-            )
-
     if build_adaln:
-        adaln_selected_keys = adaln_keys(profile)
         state = load_selected_component_state_dict(
-            model / "transformer", _base_checkpoint_keys(adaln_selected_keys)
+            model / "transformer", adaln_keys(profile)
         )
-        merge_adapter(state, "adaln_precompute")
         weights = numpy_state(state)
         del state
         started = time.perf_counter()
@@ -399,31 +275,29 @@ def main() -> int:
             weights,
             profile,
             consume_weights=True,
-            workspace_bytes=workspace_limit_bytes["adaln_precompute.plan"],
+            workspace_bytes=_builder_workspace(
+                workspace_limit_bytes["adaln_precompute.plan"]
+            ),
         )
         _write(output, "adaln_precompute.plan", plan, time.perf_counter() - started, receipt)
         checkpoint_receipt()
         del weights, plan
         gc.collect()
     if build_denoiser:
-        for component, filename, denoiser_builder, selected_keys, transition_index in denoiser_specs:
+        for _component, filename, denoiser_builder, selected_keys in denoiser_specs:
             if not should_build("denoiser", filename):
                 continue
             state = load_selected_component_state_dict(
-                model / "transformer", _base_checkpoint_keys(selected_keys)
+                model / "transformer", selected_keys
             )
-            merge_adapter(state, component)
             weights = numpy_state(state)
             del state
             started = time.perf_counter()
             common = {
                 "consume_weights": True,
-                "workspace_bytes": workspace_limit_bytes[filename],
+                "workspace_bytes": _builder_workspace(workspace_limit_bytes[filename]),
             }
-            if transition_index is None:
-                plan = denoiser_builder(weights, profile, **common)
-            else:
-                plan = denoiser_builder(weights, profile, transition_index, **common)
+            plan = denoiser_builder(weights, profile, **common)
             _write(output, filename, plan, time.perf_counter() - started, receipt)
             checkpoint_receipt()
             del weights, plan

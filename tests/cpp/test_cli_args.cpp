@@ -54,16 +54,9 @@ void test_help_uses_platform_neutral_library_names() {
           "help does not hard-code Linux backend filenames");
     check(output.str().find("--num-frames N") != std::string::npos,
           "help documents native video frame count");
-#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
     check(output.str().find("--first-frame IMAGE") != std::string::npos &&
               output.str().find("--reference-video VIDEO") != std::string::npos,
-          "help documents native FL2VA and Ref2VA inputs");
-#else
-    check(output.str().find("MiniMax-H3") == std::string::npos &&
-              output.str().find("FL2VA") == std::string::npos &&
-              output.str().find("Ref2VA") == std::string::npos,
-          "non-H3 help does not advertise H3 workflows or branding");
-#endif
+          "help documents native video conditioning inputs");
 }
 
 trtmc::cli::CliArgs parse(std::initializer_list<std::string> args) {
@@ -249,7 +242,7 @@ void test_generate_video_parses_public_multimodal_modes() {
           "Ref2VA command-line media order is preserved exactly");
 }
 
-void test_generate_video_rejects_invalid_public_multimodal_counts() {
+void test_generate_video_rejects_invalid_multimodal_combinations() {
     check(parse({"trtmc", "generate-video", "b.bundle", "--prompt", "x", "--first-frame",
                  "first.png", "--reference-image", "reference.png"})
               .parse_error,
@@ -262,35 +255,6 @@ void test_generate_video_rejects_invalid_public_multimodal_counts() {
                   "voice.wav"})
                .parse_error,
           "Ref2VA accepts audio-only conditioning");
-    check(parse({"trtmc", "generate-video", "b.bundle", "--prompt", "x", "--reference-image",
-                 "i.png", "--reference-video", "v1", "--reference-video", "v2", "--reference-video",
-                 "v3", "--reference-video", "v4"})
-              .parse_error,
-          "Ref2VA rejects more than three videos");
-    check(parse({"trtmc", "generate-video",    "b.bundle", "--prompt",
-                 "x",     "--reference-image", "i1",       "--reference-image",
-                 "i2",    "--reference-image", "i3",       "--reference-image",
-                 "i4",    "--reference-image", "i5",       "--reference-image",
-                 "i6",    "--reference-image", "i7",       "--reference-image",
-                 "i8",    "--reference-image", "i9",       "--reference-image",
-                 "i10"})
-              .parse_error,
-          "Ref2VA rejects more than nine images");
-    check(parse({"trtmc", "generate-video", "b.bundle", "--prompt", "x", "--reference-image",
-                 "i.png", "--reference-audio", "a1.wav", "--reference-audio", "a2.wav",
-                 "--reference-audio", "a3.wav", "--reference-audio", "a4.wav"})
-              .parse_error,
-          "Ref2VA rejects more than three explicit audio files");
-    check(parse({"trtmc", "generate-video",    "b.bundle", "--prompt",
-                 "x",     "--reference-image", "i1",       "--reference-image",
-                 "i2",    "--reference-image", "i3",       "--reference-image",
-                 "i4",    "--reference-image", "i5",       "--reference-image",
-                 "i6",    "--reference-image", "i7",       "--reference-image",
-                 "i8",    "--reference-image", "i9",       "--reference-video",
-                 "v1",    "--reference-video", "v2",       "--reference-video",
-                 "v3",    "--reference-audio", "a1.wav"})
-              .parse_error,
-          "Ref2VA rejects more than twelve ordered files");
     check(parse({"trtmc", "run", "b.bundle", "--prompt", "x", "--reference-image", "i.png"})
               .parse_error,
           "video conditioning flags are scoped to generate-video");
@@ -337,12 +301,11 @@ void test_geometry_parses_image_and_output_directory() {
 }
 
 void test_inspect_and_config_flags() {
-    auto args = parse({"trtmc", "inspect", "bundle.bundle", "--list-engines", "--validate-runtime",
-                       "--config", "profile.json", "--set", "audio.seed=7"});
+    auto args = parse({"trtmc", "inspect", "bundle.bundle", "--list-engines", "--config",
+                       "profile.json", "--set", "audio.seed=7"});
     check(args.command == "inspect", "inspect command");
     check(args.bundle_path == "bundle.bundle", "inspect bundle");
     check(args.list_engines, "inspect list engines");
-    check(args.validate_runtime, "inspect validates runtime plugin contract");
     check(args.config_path == "profile.json", "config path");
     check(args.set_tokens.size() == 1 && args.set_tokens[0] == "audio.seed=7", "set token");
 }
@@ -682,7 +645,7 @@ int main() {
     test_diffusion_flags();
     test_generate_video_parses_native_output_contract();
     test_generate_video_parses_public_multimodal_modes();
-    test_generate_video_rejects_invalid_public_multimodal_counts();
+    test_generate_video_rejects_invalid_multimodal_combinations();
     test_detect_parses_contract_flags();
     test_extract_features_parses_contract_flags();
     test_disparity_parses_stereo_images();

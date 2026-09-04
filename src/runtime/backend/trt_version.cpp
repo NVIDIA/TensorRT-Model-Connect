@@ -484,12 +484,6 @@ bool is_standard_trt_backend_name(const std::string& backend_name) {
 
 std::optional<TrtVersion> detect_installed_trt_version(const std::vector<std::string>& search_dirs,
                                                        std::string* diagnostics) {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    (void)search_dirs;
-    if (diagnostics)
-        diagnostics->clear();
-    throw std::runtime_error("locked MiniMax-H3 runtime disables standard TensorRT discovery");
-#else
     if (diagnostics)
         diagnostics->clear();
 
@@ -519,21 +513,12 @@ std::optional<TrtVersion> detect_installed_trt_version(const std::vector<std::st
     }
 
     return std::nullopt;
-#endif
 }
 
 std::optional<TrtLibraryMatch>
 find_trt_library_for_version(const TrtVersion& required_version,
                              const std::vector<std::string>& search_dirs,
                              std::string* diagnostics) {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    (void)required_version;
-    (void)search_dirs;
-    if (diagnostics)
-        diagnostics->clear();
-    throw std::runtime_error(
-        "locked MiniMax-H3 runtime disables standard TensorRT library loading");
-#else
     if (diagnostics)
         diagnostics->clear();
 
@@ -546,7 +531,6 @@ find_trt_library_for_version(const TrtVersion& required_version,
         return default_scope.match;
 
     return match_candidate_trt_libraries(required_version, search_dirs, diagnostics);
-#endif
 }
 
 std::vector<std::string>

@@ -396,7 +396,7 @@ def fused_qkv(
     )
 
 
-def rows_to_heads(network, tensor, rows: int, heads: int, head_dim: int):
+def rows_to_heads(network, tensor, heads: int, head_dim: int):
     reshape = network.add_shuffle(tensor)
     reshape.reshape_dims = (-1, heads, head_dim)
     reshape.second_transpose = trt.Permutation([1, 0, 2])
@@ -405,7 +405,7 @@ def rows_to_heads(network, tensor, rows: int, heads: int, head_dim: int):
     return batch.get_output(0)
 
 
-def heads_to_rows(network, tensor, rows: int, width: int):
+def heads_to_rows(network, tensor, width: int):
     reshape = network.add_shuffle(tensor)
     reshape.first_transpose = trt.Permutation([0, 2, 1, 3])
     reshape.reshape_dims = (-1, width)
@@ -418,7 +418,6 @@ def partial_rope(
     cos_half,
     sin_half,
     *,
-    rows: int,
     heads: int,
     head_dim: int,
     rotary_dim: int,
@@ -426,7 +425,7 @@ def partial_rope(
 ):
     """Apply H3's 96-channel rotate-half MM-RoPE with native layers."""
 
-    value = rows_to_heads(network, tensor, rows, heads, head_dim)
+    value = rows_to_heads(network, tensor, heads, head_dim)
     if interleaved:
         raise ValueError("MiniMax-H3 uses rotate-half, non-interleaved RoPE")
     rotary = dynamic_slice(network, value, (0, 0, 0, 0), (1, heads, None, rotary_dim))
@@ -457,15 +456,15 @@ def partial_rope(
     rotated = network.add_elementwise(left, right, trt.ElementWiseOperation.SUM).get_output(0)
     result = network.add_concatenation((rotated, passthrough))
     result.axis = 3
-    return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
+    return heads_to_rows(network, result.get_output(0), heads * head_dim)
 
 
-def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, name: str):
+def native_attention(network, q, k, v, *, heads: int, head_dim: int, name: str):
     """Full-sequence single-device fused TensorRT attention."""
 
-    q = rows_to_heads(network, q, rows, heads, head_dim)
-    k = rows_to_heads(network, k, rows, heads, head_dim)
-    v = rows_to_heads(network, v, rows, heads, head_dim)
+    q = rows_to_heads(network, q, heads, head_dim)
+    k = rows_to_heads(network, k, heads, head_dim)
+    v = rows_to_heads(network, v, heads, head_dim)
     # Preserve BF16's exponent range. H3 residuals can exceed FP16's finite
     # limit before a later block normalizes them.
     scale = constant(
@@ -481,4 +480,4 @@ def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, 
     layer.metadata = f"trtmc.native_op=IAttention;source={name}"
     layer.get_output(0).name = f"{name}.output"
     layer.decomposable = False
-    return heads_to_rows(network, layer.get_output(0), rows, heads * head_dim)
+    return heads_to_rows(network, layer.get_output(0), heads * head_dim)

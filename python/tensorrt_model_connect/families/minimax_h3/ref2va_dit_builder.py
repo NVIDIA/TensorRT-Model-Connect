@@ -277,7 +277,7 @@ def build_ref2va_dit_engine(
         profile,
         consume_weights=consume_weights,
     )
-    cos, sin = dense._rope_tables(network, positions, profile, -1)  # noqa: SLF001
+    cos, sin = dense._rope_tables(network, positions, profile)  # noqa: SLF001
     for index in range(profile.num_layers):
         hidden = dense._transformer_block(  # noqa: SLF001
             network,

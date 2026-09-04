@@ -9,7 +9,6 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
-#include <numeric>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -45,12 +44,6 @@ void test_pinned_schedules() {
     check_near(audio.sigmas[48], 0.05882352963089943F, 1.0e-7F,
                "H3 audio penultimate sigma matches Diffusers");
 
-    const auto fast_video = trtmc::make_minimax_h3_schedule(5, 12.0F);
-    const auto fast_audio = trtmc::make_minimax_h3_schedule(5, 3.0F);
-    check(fast_video.sigmas.size() == 5 && fast_video.timesteps.size() == 4,
-          "FastH3 uses exactly four transformer forwards");
-    check(fast_audio.sigmas.size() == 5 && fast_audio.timesteps.size() == 4,
-          "FastH3 audio uses the same four-forward grid");
 }
 
 void test_first_block_cache_tail_schedule() {
@@ -130,7 +123,7 @@ void test_prompt_token_profile_boundaries() {
 void test_denoiser_optimization_profile_selection() {
     const auto five_seconds = trtmc::make_minimax_h3_geometry(124, 768, 1344);
     check(trtmc::select_minimax_h3_denoiser_profile(1, 537, five_seconds) == 0,
-          "H3 legacy single-profile denoiser always selects profile zero");
+          "H3 single dynamic-profile denoiser always selects profile zero");
     check(trtmc::select_minimax_h3_denoiser_profile(2, 537, five_seconds) == 0,
           "H3 exact qualified five-second request selects the static profile");
     check(trtmc::select_minimax_h3_denoiser_profile(2, 536, five_seconds) == 1,
@@ -185,21 +178,16 @@ void test_public_video_geometry() {
 
     for (const auto& canvas : std::array<std::array<int32_t, 2>, 2>{{{544, 960}, {960, 544}}}) {
         const auto short_geometry = trtmc::make_minimax_h3_geometry(124, canvas[0], canvas[1]);
-        check(short_geometry.video_rows == 18870 && short_geometry.vae_tile_count == 15 &&
-                  short_geometry.vsa_video_tiles == 400,
+        check(short_geometry.video_rows == 18870 && short_geometry.vae_tile_count == 15,
               "H3 124f profile accepts the documented 960x544 explicit canvas");
         const auto long_geometry = trtmc::make_minimax_h3_geometry(345, canvas[0], canvas[1]);
-        check(long_geometry.video_rows == 52020 && long_geometry.vae_tile_count == 15 &&
-                  long_geometry.vsa_video_tiles == 1040,
+        check(long_geometry.video_rows == 52020 && long_geometry.vae_tile_count == 15,
               "H3 345f profile accepts the documented 960x544 explicit canvas");
     }
 
     const auto max_rows = trtmc::make_minimax_h3_geometry(345, 576, 1856);
     check(max_rows.video_rows == 106488,
           "H3 dynamic row profile covers the largest rounded public canvas");
-    const auto max_vsa = trtmc::make_minimax_h3_geometry(345, 544, 1952);
-    check(max_vsa.vsa_video_tiles == 2080 && max_vsa.vsa_top_video_tiles == 208,
-          "H3 metadata exposes the worst continuous-ratio VSA extent");
 
     for (const auto invalid_frames : {107, 360, 362}) {
         bool rejected = false;
@@ -252,10 +240,7 @@ void test_public_canvas_resolver_and_vae_tiles() {
 
     const auto continuous_worst = trtmc::resolve_minimax_h3_canvas(3.631201, 1.0);
     check(continuous_worst.height == 544 && continuous_worst.width == 1952,
-          "H3 continuous aspect resolver preserves the VSA worst-case canvas");
-    check(trtmc::make_minimax_h3_geometry(345, continuous_worst.height, continuous_worst.width)
-                  .vsa_video_tiles == 2080,
-          "H3 continuous aspect metadata retains the 2,080 VSA tile maximum");
+          "H3 continuous aspect resolver preserves its worst-case canvas");
 
     const auto default_tiles = trtmc::make_minimax_h3_vae_tile_layout(768, 1344);
     check(default_tiles.y_starts == std::vector<int32_t>({0, 160, 336, 512}) &&
@@ -336,22 +321,20 @@ void test_fl2va_full_public_geometry_and_rotary_contract() {
                               geometry.video_rows ==
                                   geometry.condition_video_rows + geometry.target_video_rows,
                           "H3 FL2VA couples condition and target row geometry");
-                    check(geometry.video_rows <= 108576 && geometry.vsa_video_tiles <= 2080,
-                          "H3 FL2VA stays inside frozen video/VSA maxima");
+                    check(geometry.video_rows <= 108576,
+                          "H3 FL2VA stays inside the frozen video-row maximum");
                     const int32_t text_rows = keyframes == 1 ? 600 : 1200;
                     std::vector<int32_t> tags(static_cast<std::size_t>(text_rows), 1);
                     std::vector<int32_t> anchors = keyframes == 1
                                                        ? std::vector<int32_t>{frames - 1}
                                                        : std::vector<int32_t>{0, frames - 1};
                     const auto metadata = trtmc::make_minimax_h3_fl2va_denoiser_metadata(
-                        tags, anchors, geometry, true);
+                        tags, anchors, geometry);
                     const int32_t sequence_rows =
                         text_rows + geometry.audio_rows + geometry.video_rows;
                     check(sequence_rows <= 112367 &&
                               metadata.positions.size() ==
-                                  static_cast<std::size_t>(sequence_rows) * 3 &&
-                              metadata.vsa.video_valid_sizes.size() ==
-                                  static_cast<std::size_t>(geometry.vsa_video_tiles),
+                                  static_cast<std::size_t>(sequence_rows) * 3,
                           "H3 FL2VA metadata exactly covers the frozen packed ABI");
                     const int32_t condition_begin = text_rows + geometry.audio_rows;
                     check(
@@ -372,84 +355,6 @@ void test_fl2va_full_public_geometry_and_rotary_contract() {
     }
     check(public_canvases == 97,
           "H3 FL2VA validates 95 resolver canvases plus both 960x544 orientations");
-}
-
-void check_vsa_metadata(const trtmc::MiniMaxH3VsaMetadata& metadata, int32_t sequence_rows,
-                        int32_t prefix_tiles, int32_t video_tiles) {
-    check(metadata.packed_row_to_tile_slot.size() == static_cast<std::size_t>(sequence_rows),
-          "H3 VSA row map follows the live packed sequence");
-    check(metadata.prefix_valid_sizes.size() == static_cast<std::size_t>(prefix_tiles),
-          "H3 VSA prefix valid sizes follow the segment-pure tiles");
-    check(metadata.video_valid_sizes.size() == static_cast<std::size_t>(video_tiles),
-          "H3 VSA video valid sizes follow the 3D tiles");
-    check(
-        std::accumulate(metadata.prefix_valid_sizes.begin(), metadata.prefix_valid_sizes.end(), 0) +
-                std::accumulate(metadata.video_valid_sizes.begin(),
-                                metadata.video_valid_sizes.end(), 0) ==
-            sequence_rows,
-        "H3 VSA valid sizes cover every natural packed row");
-    std::vector<int32_t> visits(static_cast<std::size_t>(prefix_tiles + video_tiles) * 64, 0);
-    bool unique_and_invertible = metadata.tiled_slot_to_packed_row.size() == visits.size();
-    for (std::size_t packed = 0; packed < metadata.packed_row_to_tile_slot.size(); ++packed) {
-        const int32_t slot = metadata.packed_row_to_tile_slot[packed];
-        if (slot < 0 || slot >= static_cast<int32_t>(visits.size()) || visits[slot]++ != 0)
-            unique_and_invertible = false;
-        else if (metadata.tiled_slot_to_packed_row[static_cast<std::size_t>(slot)] !=
-                 static_cast<int32_t>(packed))
-            unique_and_invertible = false;
-    }
-    check(unique_and_invertible,
-          "H3 VSA row map is a one-to-one invertible scatter into padded tile slots");
-}
-
-void test_native_vsa_runtime_metadata() {
-    {
-        const auto geometry = trtmc::make_minimax_h3_geometry(124, 544, 960);
-        const auto metadata = trtmc::make_minimax_h3_denoiser_metadata(1, geometry, true);
-        check_vsa_metadata(metadata.vsa, 19285, 8, 400);
-        check(metadata.positions.size() == static_cast<std::size_t>(19285) * 3 &&
-                  metadata.adaln_indices.size() == 19285 &&
-                  metadata.timestep_indices.size() == 19285,
-              "H3 documented 960x544 canvas binds the new packed-row minimum");
-    }
-    {
-        const auto geometry = trtmc::make_minimax_h3_geometry(124, 768, 768);
-        const auto metadata = trtmc::make_minimax_h3_denoiser_metadata(1, geometry, true);
-        check_vsa_metadata(metadata.vsa, 21727, 8, 360);
-        check(metadata.positions.size() == static_cast<std::size_t>(21727) * 3 &&
-                  metadata.adaln_indices.size() == 21727 &&
-                  metadata.timestep_indices.size() == 21727,
-              "H3 native VSA min profile binds dynamic RoPE and AdaLN indices");
-        check(metadata.vsa.prefix_valid_sizes ==
-                  std::vector<int32_t>({1, 64, 64, 64, 64, 64, 64, 30}),
-              "H3 native VSA keeps text and audio in separate prefix tiles");
-    }
-    {
-        const auto geometry = trtmc::make_minimax_h3_geometry(124, 768, 1344);
-        const auto metadata = trtmc::make_minimax_h3_denoiser_metadata(128, geometry, true);
-        check_vsa_metadata(metadata.vsa, 37838, 9, 660);
-        const int32_t video_begin = 128 + geometry.audio_rows;
-        check(metadata.vsa.packed_row_to_tile_slot[static_cast<std::size_t>(video_begin)] == 9 * 64,
-              "H3 native VSA video tiles begin after the segment-pure prefix");
-        check(metadata.vsa.packed_row_to_tile_slot[static_cast<std::size_t>(video_begin + 42)] ==
-                  9 * 64 + 4,
-              "H3 native VSA preserves video H/W raster order inside a tile");
-    }
-    {
-        const auto geometry = trtmc::make_minimax_h3_geometry(345, 544, 1952);
-        const auto metadata = trtmc::make_minimax_h3_denoiser_metadata(537, geometry, true);
-        check_vsa_metadata(metadata.vsa, 537 + geometry.audio_rows + geometry.video_rows, 27, 2080);
-        check(metadata.vsa.video_valid_sizes.back() == 2,
-              "H3 native VSA clips the worst-aspect temporal/spatial edge tile");
-    }
-    {
-        const auto geometry = trtmc::make_minimax_h3_geometry(345, 544, 1952);
-        const auto metadata = trtmc::make_minimax_h3_denoiser_metadata(2641, geometry, true);
-        check_vsa_metadata(metadata.vsa, 2641 + geometry.audio_rows + geometry.video_rows, 60,
-                           2080);
-        check(metadata.vsa.prefix_valid_sizes.back() == 62,
-              "H3 unified FL2VA envelope keeps the final audio prefix tile segment-pure");
-    }
 }
 
 void test_audio_latent_unpack_and_denormalize() {
@@ -516,7 +421,6 @@ int main() {
     test_public_canvas_resolver_and_vae_tiles();
     test_variable_duration_position_layout();
     test_fl2va_full_public_geometry_and_rotary_contract();
-    test_native_vsa_runtime_metadata();
     test_audio_latent_unpack_and_denormalize();
     test_audio_decoder_channel_duplication();
     return failures == 0 ? 0 : 1;

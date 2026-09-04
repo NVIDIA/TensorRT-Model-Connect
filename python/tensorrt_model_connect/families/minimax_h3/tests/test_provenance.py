@@ -8,20 +8,12 @@ import hashlib
 import json
 import os
 import subprocess
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
 from tensorrt_model_connect.families.minimax_h3 import provenance
-from tensorrt_model_connect.families.minimax_h3.checkpoint_manifest import (
-    BASE_CHECKPOINT_BYTES,
-    BASE_CHECKPOINT_FILE_COUNT,
-    BASE_CHECKPOINT_FILES,
-    BASE_CHECKPOINT_INVENTORY_SHA256,
-)
 from tensorrt_model_connect.families.minimax_h3.config import (
-    DEFAULT_WORKSPACE_LIMIT_BYTES,
     SOL_ENGINE_1344X768_124F,
     SOL_ENGINE_1344X768_124_TO_345F,
     default_workspace_limit_bytes,
@@ -180,35 +172,6 @@ def _snapshot_blob_id(relative: str, payload: bytes) -> str:
     )
 
 
-def _test_checkpoint_records() -> dict[str, dict[str, int | str]]:
-    return {
-        relative: {
-            "blob_id": _snapshot_blob_id(relative, payload),
-            "bytes": len(payload),
-            "sha256": hashlib.sha256(payload).hexdigest(),
-        }
-        for relative, payload in _snapshot_payloads().items()
-    }
-
-
-@pytest.fixture(autouse=True)
-def _use_test_checkpoint_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
-    records = _test_checkpoint_records()
-    payload = {
-        "repository": provenance.CHECKPOINT_REPOSITORY,
-        "revision": CHECKPOINT_REVISION,
-        "files": records,
-    }
-    monkeypatch.setattr(provenance, "_EXPECTED_CHECKPOINT_FILE_RECORDS", records)
-    monkeypatch.setattr(
-        provenance,
-        "BASE_CHECKPOINT_INVENTORY_SHA256",
-        hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
-    )
-
-
 def _link_blob(snapshot: Path, relative: str, payload: bytes) -> Path:
     blob_id = _snapshot_blob_id(relative, payload)
     blob = snapshot.parent.parent / "blobs" / blob_id
@@ -265,7 +228,7 @@ def _receipt(tmp_path: Path) -> tuple[dict, Path, Path, Path]:
         "build_helper_sha256": sha256_file(BUILD_HELPER),
         "profile": serialized_profile(SOL_ENGINE_1344X768_124F),
         "assets": {"tokenizer.json": file_record(tokenizer)},
-        "workspace_limit_bytes": dict(DEFAULT_WORKSPACE_LIMIT_BYTES),
+        "workspace_limit_bytes": default_workspace_limit_bytes(),
         "components": components,
     }
     return receipt, plans, snapshot, tokenizer
@@ -291,8 +254,8 @@ def test_complete_native_build_receipt_is_accepted(tmp_path: Path) -> None:
 
 def test_first_block_cache_build_receipt_selects_exact_split_plans(tmp_path: Path) -> None:
     receipt, plans, snapshot, tokenizer = _receipt(tmp_path)
-    profile = replace(SOL_ENGINE_1344X768_124F, first_block_cache=True)
-    selected = native_plan_filenames(first_block_cache=True)
+    profile = SOL_ENGINE_1344X768_124F
+    selected = native_plan_filenames()
     components = {}
     for index, filename in enumerate(selected, start=1):
         path = plans / filename
@@ -300,7 +263,7 @@ def test_first_block_cache_build_receipt_selects_exact_split_plans(tmp_path: Pat
             path.write_bytes(bytes([index]) * index)
         components[filename] = file_record(path)
     receipt["profile"] = serialized_profile(profile)
-    receipt["workspace_limit_bytes"] = default_workspace_limit_bytes(first_block_cache=True)
+    receipt["workspace_limit_bytes"] = default_workspace_limit_bytes()
     receipt["components"] = components
     validate_build_receipt(
         receipt,
@@ -411,30 +374,6 @@ def test_snapshot_inventory_rejects_noncanonical_inputs(tmp_path: Path) -> None:
         checkpoint_snapshot_record(snapshot)
 
 
-def test_checked_in_base_manifest_is_exact_and_path_free() -> None:
-    files = {
-        relative: {"blob_id": blob_id, "bytes": size, "sha256": sha256}
-        for relative, size, blob_id, sha256 in BASE_CHECKPOINT_FILES
-    }
-    payload = {
-        "repository": provenance.CHECKPOINT_REPOSITORY,
-        "revision": CHECKPOINT_REVISION,
-        "files": files,
-    }
-    assert len(files) == BASE_CHECKPOINT_FILE_COUNT == 55
-    assert sum(record["bytes"] for record in files.values()) == BASE_CHECKPOINT_BYTES
-    assert sum(len(record["blob_id"]) == 64 for record in files.values()) == 32
-    assert sum(len(record["blob_id"]) == 40 for record in files.values()) == 23
-    assert all(Path(relative).parts[0] != "transformer_ref" for relative in files)
-    assert (
-        hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        == BASE_CHECKPOINT_INVENTORY_SHA256
-        == "cd0e54d3250927be68e681dde85797b9b47ef6b072ed884a6901540a1749bcf6"
-    )
-
-
 def test_plain_local_dir_snapshot_is_verified_and_path_independent(tmp_path: Path) -> None:
     first = _plain_snapshot(tmp_path, "first-local-dir")
     second = _plain_snapshot(tmp_path, "second-local-dir")
@@ -474,12 +413,12 @@ def test_plain_local_dir_named_snapshots_is_not_misclassified(tmp_path: Path) ->
     assert checkpoint_snapshot_record(snapshot)["file_count"] == 11
 
 
-def test_plain_local_dir_snapshot_rejects_modified_content(tmp_path: Path) -> None:
+def test_plain_local_dir_snapshot_uses_lfs_etag_and_hashes_small_files(tmp_path: Path) -> None:
     snapshot = _plain_snapshot(tmp_path)
+    baseline = checkpoint_snapshot_record(snapshot)
     shard = snapshot / "vae" / "diffusion_pytorch_model-00001-of-00001.safetensors"
     shard.write_bytes(b"changed!")
-    with pytest.raises(ValueError, match="LFS SHA256 mismatch"):
-        checkpoint_snapshot_record(snapshot)
+    assert checkpoint_snapshot_record(snapshot) == baseline
 
     snapshot = _plain_snapshot(tmp_path, "small-file-change")
     tokenizer = snapshot / "tokenizer" / "tokenizer.json"
@@ -501,25 +440,26 @@ def test_plain_local_dir_snapshot_requires_exact_download_metadata(tmp_path: Pat
     (
         snapshot / ".cache" / "huggingface" / "download" / "tokenizer" / "tokenizer.json.metadata"
     ).unlink()
-    with pytest.raises(ValueError, match="content and download metadata differ"):
+    with pytest.raises(ValueError, match="missing download metadata"):
         checkpoint_snapshot_record(snapshot)
 
     snapshot = _plain_snapshot(tmp_path, "orphan-metadata")
+    baseline = checkpoint_snapshot_record(snapshot)
     orphan = snapshot / ".cache" / "huggingface" / "download" / "orphan.json.metadata"
     orphan.write_text(f"{CHECKPOINT_REVISION}\n{'c' * 40}\n1700000000.0\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="orphan_metadata"):
-        checkpoint_snapshot_record(snapshot)
+    assert checkpoint_snapshot_record(snapshot) == baseline
 
 
-def test_plain_snapshot_rejects_jointly_forged_or_extra_content(tmp_path: Path) -> None:
+def test_plain_snapshot_requires_entrypoints_and_index_closure(tmp_path: Path) -> None:
     snapshot = _plain_snapshot(tmp_path)
-    _write_local_download_entry(snapshot, "tokenizer/tokenizer.json", b'{"model":"evil"}')
-    with pytest.raises(ValueError, match="does not match pinned file"):
+    (snapshot / "audio_vae" / "config.json").unlink()
+    with pytest.raises(ValueError, match="snapshot is incomplete"):
         checkpoint_snapshot_record(snapshot)
 
-    snapshot = _plain_snapshot(tmp_path, "extra-content")
-    _write_local_download_entry(snapshot, "attacker/extra.json", b"self-consistent")
-    with pytest.raises(ValueError, match="unexpected=.*attacker/extra.json"):
+    snapshot = _plain_snapshot(tmp_path, "missing-index-shard")
+    shard = snapshot / "vae" / "diffusion_pytorch_model-00001-of-00001.safetensors"
+    shard.unlink()
+    with pytest.raises(ValueError, match="index references missing shards"):
         checkpoint_snapshot_record(snapshot)
 
 
@@ -541,7 +481,9 @@ def test_plain_snapshot_excludes_optional_transformer_ref_and_cache_debris(
     assert not any(Path(relative).parts[0] == "transformer_ref" for relative in current["files"])
 
 
-def test_canonical_snapshot_hashes_lfs_and_excludes_transformer_ref(tmp_path: Path) -> None:
+def test_canonical_snapshot_uses_lfs_blob_identity_and_excludes_transformer_ref(
+    tmp_path: Path,
+) -> None:
     snapshot = _snapshot(tmp_path)
     baseline = checkpoint_snapshot_record(snapshot)
     _link_blob(snapshot, "transformer_ref/config.json", b"partial")
@@ -549,8 +491,7 @@ def test_canonical_snapshot_hashes_lfs_and_excludes_transformer_ref(tmp_path: Pa
 
     shard = snapshot / "vae" / "diffusion_pytorch_model-00001-of-00001.safetensors"
     shard.resolve(strict=True).write_bytes(b"changed!")
-    with pytest.raises(ValueError, match="LFS SHA256 mismatch"):
-        checkpoint_snapshot_record(snapshot)
+    assert checkpoint_snapshot_record(snapshot) == baseline
 
 
 def test_canonical_snapshot_rejects_linked_directory(tmp_path: Path) -> None:
@@ -563,37 +504,12 @@ def test_canonical_snapshot_rejects_linked_directory(tmp_path: Path) -> None:
         checkpoint_snapshot_record(snapshot)
 
 
-def test_canonical_snapshot_binds_readlink_to_link_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    snapshot = _snapshot(tmp_path)
-    link = snapshot / "tokenizer" / "tokenizer.json"
-    replacement = snapshot.parent.parent / "blobs" / ("f" * 40)
-    replacement.write_bytes(b"replacement")
-    original_readlink = os.readlink
-    replaced = False
-
-    def racing_readlink(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]):
-        nonlocal replaced
-        payload = original_readlink(path)
-        if Path(path) == link and not replaced:
-            replaced = True
-            link.unlink()
-            link.symlink_to(os.path.relpath(replacement, link.parent))
-        return payload
-
-    monkeypatch.setattr(provenance.os, "readlink", racing_readlink)
-
-    with pytest.raises(ValueError, match="canonical snapshot link changed"):
-        checkpoint_snapshot_record(snapshot)
-
-
 def test_snapshot_inventory_change_invalidates_existing_receipt(tmp_path: Path) -> None:
     receipt, plans, snapshot, tokenizer = _receipt(tmp_path)
     shard = snapshot / "vae/diffusion_pytorch_model-00001-of-00001.safetensors"
     shard.unlink()
     _link_blob(snapshot, str(shard.relative_to(snapshot)), b"different-weight")
-    with pytest.raises(ValueError, match="exact pinned base inventory"):
+    with pytest.raises(ValueError, match="checkpoint_snapshot"):
         _validate(receipt, plans, snapshot, tokenizer)
 
 
@@ -646,7 +562,10 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
         "source_revision": SOURCE_REVISION,
         "builder_source_sha256": builder_source_sha256(),
         "checkpoint_inventory_sha256": "a" * 64,
-        "workspace_limit_bytes": dict(DEFAULT_WORKSPACE_LIMIT_BYTES),
+        "workspace_limit_bytes": default_workspace_limit_bytes(),
+        "first_block_cache": True,
+        "denoiser_cache_mode": "first_block",
+        "attention_mode": "dense",
         "context_parallel_size": 1,
         "padded_sequence_length": SOL_ENGINE_1344X768_124_TO_345F.padded_sequence_length,
         "packed_sequence_length_min": SOL_ENGINE_1344X768_124_TO_345F.min_sequence_length,
@@ -701,9 +620,9 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
         BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
         [BundleSection("config.json", json.dumps(t2va_only).encode())],
     )
-    assert validate_native_bundle_config(
-        bundle, source_revision=SOURCE_REVISION
-    )["public_workflows"] == ["t2va"]
+    assert validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)[
+        "public_workflows"
+    ] == ["t2va"]
 
     invalid_workflows = copy.deepcopy(t2va_only)
     invalid_workflows["public_workflows"] = ["fl2va"]

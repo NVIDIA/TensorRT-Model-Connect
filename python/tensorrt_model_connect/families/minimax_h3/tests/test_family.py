@@ -16,10 +16,6 @@ import tomllib
 import pytest
 
 from tensorrt_model_connect.families.minimax_h3.config import (
-    DEFAULT_WORKSPACE_LIMIT_BYTES,
-    FASTH3_SCHEDULER_GRID_POINTS,
-    FASTH3_TRANSFORMER_FORWARDS,
-    FASTH3_SEGMENTED_DENOISER_PLAN_FILENAMES,
     FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES,
     MiniMaxH3Config,
     NATIVE_EXPLICIT_CANVAS_SIZES,
@@ -33,7 +29,6 @@ from tensorrt_model_connect.families.minimax_h3.plugin import (
     _build_source_revision,
     _default_num_frames,
     _effective_build_config,
-    _fast_h3_build_inputs,
     _fixed_profile,
     _resolve_canvas_size,
     _reachable_canvas_sizes,
@@ -73,7 +68,7 @@ def test_sol_engine_profile_matches_public_packed_shape() -> None:
     assert profile.padded_sequence_length // profile.context_parallel_size == 38247
     assert profile.attention_size == 7168
     assert profile.video_patch_dim == 96
-    assert profile.first_block_cache is False
+    assert profile.first_block_cache is True
 
 
 def test_fast_fbc_profile_exactly_specializes_qualified_reference_request() -> None:
@@ -94,13 +89,6 @@ def test_dynamic_media_profile_covers_released_5_to_15_second_endpoints() -> Non
     assert profile.text_row_profile == (1, 128, 2641)
     assert profile.packed_row_profile == (19285, 37838, 112367)
     assert profile.padded_sequence_length == 112367
-
-
-def test_fast_h3_dynamic_tile_metadata_profiles_cover_public_aspects() -> None:
-    profile = SOL_ENGINE_1344X768_124_TO_345F
-    assert profile.vsa_prefix_tile_profile == (8, 9, 60)
-    assert profile.vsa_video_tile_abi_profile == (360, 660, 2080)
-    assert profile.vsa_total_tile_profile == (368, 669, 2140)
 
 
 def test_public_canvas_resolver_matches_model_card_aspects() -> None:
@@ -128,7 +116,7 @@ def test_continuous_canvas_resolver_has_exact_finite_95_canvas_image() -> None:
     assert max((height // 16) * (width // 16) for height, width in reachable) == 4176
 
 
-def test_continuous_fl2va_and_vsa_maxima_are_exhaustive() -> None:
+def test_continuous_fl2va_maxima_are_exhaustive() -> None:
     reachable = _reachable_canvas_sizes()
     cases = []
     for height, width in reachable:
@@ -230,10 +218,10 @@ def test_plugin_fails_closed_on_unqualified_profile_or_source(monkeypatch) -> No
     assert _build_source_revision() == "b" * 40
     monkeypatch.setenv("TRTMC_MINIMAX_H3_SOURCE_REVISION", "A" * 40)
     assert _build_source_revision() == "a" * 40
-    assert _fixed_profile({}) is SOL_ENGINE_1344X768_124_TO_345F
+    assert _fixed_profile({}) == SOL_ENGINE_1344X768_124_TO_345F
     assert _fixed_profile({"first_block_cache": True}).first_block_cache is True
     assert _fixed_profile({"denoiser_cache_mode": "first_block"}).first_block_cache is True
-    with pytest.raises(ValueError, match="disagree"):
+    with pytest.raises(ValueError, match="only supports"):
         _fixed_profile({"denoiser_cache_mode": "first_block", "first_block_cache": False})
     with pytest.raises(ValueError, match="packed-row profile"):
         _fixed_profile({"video_rows": 1})
@@ -263,34 +251,27 @@ def test_dynamic_bundle_default_accepts_only_released_frame_geometries() -> None
             _default_num_frames({"video_num_frames": frames})
 
 
-def test_fast_h3_build_input_is_adapter_only_and_rejects_obsolete_plugin(
+def test_transformer_ref_build_input_requires_explicit_directory(
     tmp_path: Path,
 ) -> None:
-    adapter = tmp_path / "adapter.safetensors"
-    library = tmp_path / "trtmc_model_minimax_h3.dll"
-    adapter.write_bytes(b"adapter")
-    library.write_bytes(b"plugin")
-    assert _fast_h3_build_inputs({"fast_h3_adapter": adapter}) == adapter.resolve()
-    assert _fast_h3_build_inputs({}) is None
-    assert _fast_h3_build_inputs({"fast_h3_adapter": ""}) is None
+    transformer_ref = tmp_path / "transformer_ref"
+    transformer_ref.mkdir()
+    assert _transformer_ref_build_input({"transformer_ref": transformer_ref}) == (
+        transformer_ref.resolve()
+    )
     assert _transformer_ref_build_input({"transformer_ref": ""}) is None
-    with pytest.raises(ValueError, match="no longer a supported build input"):
-        _fast_h3_build_inputs({"vsa_plugin_library": library})
+    with pytest.raises(ValueError, match="explicit checkpoint directory"):
+        _transformer_ref_build_input({"transformer_ref": True})
 
 
 def test_plugin_bundle_config_preserves_exact_provenance() -> None:
+    workspaces = default_workspace_limit_bytes()
     provenance = {
         "source_revision": "a" * 40,
         "builder_source_sha256": "b" * 64,
         "checkpoint_inventory_sha256": "c" * 64,
-        "workspace_limit_bytes": dict(DEFAULT_WORKSPACE_LIMIT_BYTES),
-        "plan_sha256": {
-            "text_encoder.plan": "d" * 64,
-            "adaln_precompute.plan": "e" * 64,
-            "denoiser.plan": "f" * 64,
-            "vae_tile_decoder.plan": "0" * 64,
-            "audio_vae_decoder.plan": "1" * 64,
-        },
+        "workspace_limit_bytes": workspaces,
+        "plan_sha256": {filename: "d" * 64 for filename in workspaces},
     }
     config = SimpleNamespace(raw={"seed": 7})
     result = MiniMaxH3Plugin().diffusion_bundle_config(
@@ -305,11 +286,11 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
     assert result | provenance == result
     assert result["seed"] == 7
     assert result["context_parallel_size"] == 1
-    assert result["workspace_limit_bytes"] == DEFAULT_WORKSPACE_LIMIT_BYTES
-    assert result["first_block_cache"] is False
-    assert result["denoiser_cache_mode"] == "monolithic"
-    assert result["denoiser_profile_count"] == 1
-    assert result["denoiser_profile_layout"] == "public_dynamic"
+    assert result["workspace_limit_bytes"] == workspaces
+    assert result["first_block_cache"] is True
+    assert result["denoiser_cache_mode"] == "first_block"
+    assert result["denoiser_profile_count"] == 2
+    assert result["denoiser_profile_layout"] == "five_second_reference_then_public_dynamic"
     assert result["first_block_cache_threshold"] == 0.08
     assert (
         result["vae_tile_batch_min"],
@@ -344,7 +325,9 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
             "text_encoder_plan",
             "vision_encoder_plan",
             "adaln_precompute_plan",
-            "denoiser_plan",
+            "denoiser_head_plan",
+            "denoiser_tail_plan",
+            "denoiser_finish_plan",
             "fl2va_keyframe_vae_encoder_plan",
             "vae_tile_decoder_plan",
             "audio_vae_decoder_plan",
@@ -362,84 +345,9 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         )
 
 
-def test_fast_h3_bundle_contract_is_four_full_segmented_vsa_forwards() -> None:
-    profile = SOL_ENGINE_1344X768_124_TO_345F
-    workspaces = default_workspace_limit_bytes(first_block_cache=False, segmented_vsa=True)
-    provenance = {
-        "source_revision": "a" * 40,
-        "builder_source_sha256": "b" * 64,
-        "checkpoint_inventory_sha256": "c" * 64,
-        "workspace_limit_bytes": workspaces,
-        "plan_sha256": {filename: "d" * 64 for filename in workspaces},
-    }
-    fast_h3 = {
-        "adapter_gate_tensor_count": 50,
-        "adapter_sha256": "e" * 64,
-    }
-    components = {
-        "profile": profile,
-        "provenance": provenance,
-        "fast_h3": fast_h3,
-        "vsa_implementation": "native_cuda_segmented",
-        "audio_vae_config": AUDIO_VAE_CONFIG,
-        "audio_decoder_profile": AUDIO_DECODER_PROFILE,
-    }
-
-    result = MiniMaxH3Plugin().diffusion_bundle_config(
-        SimpleNamespace(raw={"num_inference_steps": 4}), components=components
-    )
-
-    assert result["num_inference_steps"] == FASTH3_TRANSFORMER_FORWARDS == 4
-    assert result["scheduler_grid_points"] == FASTH3_SCHEDULER_GRID_POINTS == 5
-    assert result["transformer_forwards"] == 4
-    assert result["guidance_scale"] == 1.0
-    assert result["first_block_cache"] is False
-    assert result["denoiser_cache_mode"] == "segmented_vsa"
-    assert result["denoiser_profile_count"] == 1
-    assert result["denoiser_profile_layout"] == "public_dynamic"
-    assert result["attention_mode"] == "native_vsa"
-    assert result["bundle_loading"]["lazy_sections"][3] == "denoiser_entry_plan"
-    assert result["bundle_loading"]["lazy_sections"][4] == ("denoiser_transition_00_plan")
-    assert result["vsa"]["implementation"] == "native_cuda_segmented"
-    assert result["vsa"]["segment_count"] == 51
-    assert result["vsa"]["attention_calls_per_forward"] == 50
-    assert result["vsa"]["tensor_abi"]["attention_shape"] == [56, "S", 128]
-    assert [item["filename"] for item in result["vsa"]["segments"]] == list(
-        FASTH3_SEGMENTED_DENOISER_PLAN_FILENAMES
-    )
-    assert result["vsa"]["packed_row_to_tile_slot_profile"] == [19285, 37838, 112367]
-    assert result["vsa"]["prefix_valid_sizes_profile"] == [8, 9, 60]
-    assert result["vsa"]["video_valid_sizes_profile"] == [360, 660, 2080]
-    assert result["vsa"]["max_total_tiles"] == 2140
-    assert result["vsa"]["runtime_metadata_abi"] == {
-        "producer": "modelconnect_cpp",
-        "packed_row_to_tile_slot": {
-            "dtype": "int32",
-            "shape": ["S"],
-            "profile": [19285, 37838, 112367],
-        },
-        "prefix_valid_sizes": {
-            "dtype": "int32",
-            "shape": ["P"],
-            "profile": [8, 9, 60],
-        },
-        "video_valid_sizes": {
-            "dtype": "int32",
-            "shape": ["Vtiles"],
-            "profile": [360, 660, 2080],
-        },
-    }
-    assert result["padded_sequence_length"] == 112367
-
-    invalid = dict(components)
-    invalid["profile"] = replace(profile, first_block_cache=True)
-    with pytest.raises(ValueError, match="segmented native CUDA"):
-        MiniMaxH3Plugin().diffusion_bundle_config(SimpleNamespace(raw={}), components=invalid)
-
-
 def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
     profile = replace(SOL_ENGINE_1344X768_124_TO_345F, first_block_cache=True)
-    workspaces = default_workspace_limit_bytes(first_block_cache=True)
+    workspaces = default_workspace_limit_bytes()
     provenance = {
         "source_revision": "a" * 40,
         "builder_source_sha256": "b" * 64,
@@ -498,7 +406,6 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
         "weight_streaming_budget_bytes": 32 << 30,
     }
     assert "adaln_precompute_mode" not in config
-    assert "adaln_segmented" not in config
     assert "first_block_cache_abi" not in config
     assert "dense_tail_segment_sections" not in config
     assert config["bundle_loading"]["lazy_sections"] == [
@@ -540,7 +447,7 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
         )
 
 
-def test_in_memory_first_block_cache_build_uses_monolithic_native_plans(
+def test_in_memory_build_uses_singular_dense_first_block_cache_plans(
     monkeypatch, tmp_path: Path
 ) -> None:
     root = tmp_path / "model"
@@ -577,22 +484,16 @@ def test_in_memory_first_block_cache_build_uses_monolithic_native_plans(
     module(
         f"{family}.adaln_builder",
         build_adaln_precompute_engine=builder("adaln_precompute"),
-        checkpoint_keys=lambda _profile: ("adaln.monolithic",),
+        checkpoint_keys=lambda _profile: ("adaln",),
     )
     module(
         f"{family}.dit_builder",
-        build_dit_engine=builder("denoiser"),
         build_dit_finish_engine=builder("denoiser_finish"),
         build_dit_head_engine=builder("denoiser_head"),
         build_dit_tail_engine=builder("denoiser_tail"),
-        build_dit_vsa_entry_engine=builder("denoiser_entry"),
-        build_dit_vsa_finish_engine=builder("denoiser_vsa_finish"),
-        build_dit_vsa_transition_engine=builder("denoiser_transition"),
-        checkpoint_keys=lambda _profile, **_kwargs: ("denoiser.monolithic",),
-        finish_checkpoint_keys=lambda _profile: ("denoiser.finish",),
-        head_checkpoint_keys=lambda _profile, **_kwargs: ("denoiser.head",),
-        tail_checkpoint_keys=lambda _profile, **_kwargs: ("denoiser.tail",),
-        vsa_segment_checkpoint_partitions=lambda _profile: {},
+        finish_checkpoint_keys=lambda: ("denoiser.finish",),
+        head_checkpoint_keys=lambda _profile: ("denoiser.head",),
+        tail_checkpoint_keys=lambda _profile: ("denoiser.tail",),
     )
     module(
         f"{family}.multimodal_text_encoder_builder",
@@ -674,7 +575,7 @@ def test_in_memory_first_block_cache_build_uses_monolithic_native_plans(
     assert components["adaln_precompute"] == b"adaln_precompute:None"
     assert components["denoiser_tail"] == b"denoiser_tail:None"
     assert set(components["provenance"]["plan_sha256"]) == set(
-        default_workspace_limit_bytes(first_block_cache=True)
+        default_workspace_limit_bytes()
     )
 
 
@@ -711,10 +612,5 @@ def test_sol_lossless_optimizations_are_structural() -> None:
     assert "build_dit_head_engine" in dit
     assert "build_dit_tail_engine" in dit
     assert "build_dit_finish_engine" in dit
-    assert "build_dit_vsa_entry_engine" in dit
-    assert "build_dit_vsa_transition_engine" in dit
-    assert "build_dit_vsa_finish_engine" in dit
-    assert "vsa_attention_output" in dit
-    assert "next_residual_hidden" in dit
     assert "cache_metric" in dit
     assert "FirstBlockCacheConfig" not in "\n".join((adaln, dit, ops))

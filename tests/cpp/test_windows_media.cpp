@@ -4,6 +4,7 @@
  */
 
 #include "cli/windows_media.h"
+#include "test_helpers.h"
 #include "trtmc/trtmc_io.hpp"
 
 #define WIN32_LEAN_AND_MEAN
@@ -50,17 +51,49 @@ void require_throws_with(Fn&& fn, const char* needle, const char* message) {
 } // namespace
 
 int run_test() {
-    require(trtmc::cli::detail::reference_video_frame_ceiling(30'000, 1'001) == 450,
-            "15-second 30000/1001 video ceiling must round up to 450 frames");
-    require(trtmc::cli::detail::reference_video_decode_size(3840, 2160) ==
+    constexpr trtmc::ReferenceMediaDecodePolicy policy{
+        15,
+        24,
+        240,
+        768,
+        768ULL * 1344,
+        32,
+        0.25,
+        4.0,
+    };
+    constexpr trtmc::ReferenceMediaDecodePolicy compact_policy{
+        2,
+        12,
+        60,
+        256,
+        256ULL * 448,
+        16,
+        0.5,
+        2.0,
+    };
+    require(trtmc::cli::detail::reference_video_frame_ceiling(compact_policy, 30'000, 1'001) ==
+                60,
+            "frame ceiling must follow a non-default duration policy");
+    require(trtmc::cli::detail::reference_video_decode_size(compact_policy, 3840, 2160) ==
+                std::pair<std::uint32_t, std::uint32_t>{448, 256},
+            "decode canvas must follow non-default size and alignment policy values");
+    require_throws_with(
+        [&] {
+            (void)trtmc::cli::detail::reference_video_decode_size(compact_policy, 2560, 1080);
+        },
+        "configured range", "decode aspect bounds must follow the supplied policy");
+    require(trtmc::cli::detail::reference_video_frame_ceiling(policy, 30'000, 1'001) == 450,
+            "configured video ceiling must round up fractional frame rates");
+    require(trtmc::cli::detail::reference_video_decode_size(policy, 3840, 2160) ==
                 std::pair<std::uint32_t, std::uint32_t>{1344, 768},
-            "4K reference video must decode directly onto the bounded H3 resolver canvas");
-    require(trtmc::cli::detail::reference_timeline_within_limit(0, 150'000'000),
-            "an exact 15-second presentation timeline must be accepted");
-    require(!trtmc::cli::detail::reference_timeline_within_limit(150'000'000, 1),
-            "a non-empty sample starting at 15 seconds must be rejected");
-    require(!trtmc::cli::detail::reference_timeline_within_limit(149'000'000, 2'000'000),
-            "a sparse sample crossing 15 seconds must be rejected");
+            "4K reference video must decode onto the policy's bounded canvas");
+    require(trtmc::cli::detail::reference_timeline_within_limit(policy, 0, 150'000'000),
+            "an exact configured presentation timeline must be accepted");
+    require(!trtmc::cli::detail::reference_timeline_within_limit(policy, 150'000'000, 1),
+            "a non-empty sample starting at the duration limit must be rejected");
+    require(
+        !trtmc::cli::detail::reference_timeline_within_limit(policy, 149'000'000, 2'000'000),
+        "a sparse sample crossing the duration limit must be rejected");
 
     constexpr std::uint32_t synthetic_codec_rate = 32'000;
     constexpr std::uint64_t synthetic_mp3_access_unit_frames = 1'152;
@@ -71,56 +104,58 @@ int run_test() {
     constexpr std::uint64_t synthetic_public_audio_frames = 15 * synthetic_codec_rate;
     require(
         trtmc::cli::detail::reference_audio_event_timestamp_within_padding(
-            -static_cast<std::int64_t>(synthetic_mp3_padding_ticks), synthetic_mp3_padding_ticks) &&
+            policy, -static_cast<std::int64_t>(synthetic_mp3_padding_ticks),
+            synthetic_mp3_padding_ticks) &&
             trtmc::cli::detail::reference_audio_event_timestamp_within_padding(
-                150'000'000 + static_cast<std::int64_t>(synthetic_mp3_padding_ticks),
+                policy, 150'000'000 + static_cast<std::int64_t>(synthetic_mp3_padding_ticks),
                 synthetic_mp3_padding_ticks),
         "compressed empty-event timestamps must accept the exact codec-padding window");
     require(!trtmc::cli::detail::reference_audio_event_timestamp_within_padding(
-                -36'000'000'000, synthetic_mp3_padding_ticks) &&
+                policy, -36'000'000'000, synthetic_mp3_padding_ticks) &&
                 !trtmc::cli::detail::reference_audio_event_timestamp_within_padding(
-                    36'000'000'000, synthetic_mp3_padding_ticks),
+                    policy, 36'000'000'000, synthetic_mp3_padding_ticks),
             "compressed empty-event timestamps at negative or positive hours must be rejected");
     trtmc::cli::detail::ReferenceAudioDecodeState boundary_padding_state;
     require(trtmc::cli::detail::account_reference_audio_decode(
-                0, synthetic_public_audio_frames + synthetic_mp3_padding_frames,
+                policy, 0, synthetic_public_audio_frames + synthetic_mp3_padding_frames,
                 synthetic_codec_rate, synthetic_mp3_padding_frames, boundary_padding_state),
             "an exact three-access-unit MP3 decoded tail must be accepted");
     require(boundary_padding_state.decoded_padding_frames == synthetic_mp3_padding_frames,
             "synthetic MP3 tail accounting must reach the codec-padding boundary");
     require(!trtmc::cli::detail::account_reference_audio_decode(
-                150'000'001, 1, synthetic_codec_rate, synthetic_mp3_padding_frames,
+                policy, 150'000'001, 1, synthetic_codec_rate, synthetic_mp3_padding_frames,
                 boundary_padding_state),
             "one decoded frame beyond the MP3 padding boundary must be rejected");
 
     trtmc::cli::detail::ReferenceAudioDecodeState falsified_duration_state;
     require(!trtmc::cli::detail::account_reference_audio_decode(
-                150'000'000, synthetic_mp3_padding_frames + 1, synthetic_codec_rate,
+                policy, 150'000'000, synthetic_mp3_padding_frames + 1, synthetic_codec_rate,
                 synthetic_mp3_padding_frames, falsified_duration_state),
             "a short or falsified presentation duration must not hide a decoded tail over three "
             "MP3 access units");
 
     trtmc::cli::detail::ReferenceAudioDecodeState future_timestamp_state;
     require(!trtmc::cli::detail::account_reference_audio_decode(
-                36'000'000'000, 1, synthetic_codec_rate, synthetic_mp3_padding_frames,
+                policy, 36'000'000'000, 1, synthetic_codec_rate, synthetic_mp3_padding_frames,
                 future_timestamp_state),
             "a tiny decoded sample with a far-future timestamp must not spend only one padding "
             "frame");
     trtmc::cli::detail::ReferenceAudioDecodeState excessive_leading_state;
     require(!trtmc::cli::detail::account_reference_audio_decode(
-                -130'000'000, synthetic_public_audio_frames, synthetic_codec_rate,
+                policy, -130'000'000, synthetic_public_audio_frames, synthetic_codec_rate,
                 synthetic_mp3_padding_frames, excessive_leading_state),
             "excessive negative-timestamp decoded PCM must not be hidden as leading padding");
 
     constexpr std::uint64_t synthetic_aac_padding_frames = 3 * 1'024;
     trtmc::cli::detail::ReferenceAudioDecodeState aac_padding_state;
     require(trtmc::cli::detail::account_reference_audio_decode(
-                0, synthetic_public_audio_frames + synthetic_aac_padding_frames,
+                policy, 0, synthetic_public_audio_frames + synthetic_aac_padding_frames,
                 synthetic_codec_rate, synthetic_aac_padding_frames, aac_padding_state),
             "an exact three-access-unit AAC decoded tail must be accepted");
     require(
         !trtmc::cli::detail::account_reference_audio_decode(
-            150'000'001, 1, synthetic_codec_rate, synthetic_aac_padding_frames, aac_padding_state),
+            policy, 150'000'001, 1, synthetic_codec_rate, synthetic_aac_padding_frames,
+            aac_padding_state),
         "one decoded frame beyond the AAC padding boundary must be rejected");
 
     trtmc::VideoResult result;
@@ -159,50 +194,25 @@ int run_test() {
     }
     result.audio.num_samples = static_cast<int32_t>(result.audio.samples.size());
 
-    const auto path = std::filesystem::temp_directory_path() /
-                      ("trtmc_windows_media_" + std::to_string(GetCurrentProcessId()) + ".mp4");
-    const auto wav_path = std::filesystem::temp_directory_path() /
-                          ("trtmc_windows_media_" + std::to_string(GetCurrentProcessId()) + ".wav");
-    const auto mp3_path = std::filesystem::temp_directory_path() /
-                          ("trtmc_windows_media_" + std::to_string(GetCurrentProcessId()) + ".mp3");
-    const auto aac_path = std::filesystem::temp_directory_path() /
-                          ("trtmc_windows_media_" + std::to_string(GetCurrentProcessId()) + ".m4a");
-    const auto mp3_44k_path =
-        std::filesystem::temp_directory_path() /
-        ("trtmc_windows_media_44k_" + std::to_string(GetCurrentProcessId()) + ".mp3");
-    const auto aac_44k_path =
-        std::filesystem::temp_directory_path() /
-        ("trtmc_windows_media_44k_" + std::to_string(GetCurrentProcessId()) + ".m4a");
-    const auto over_limit_mp3_path =
-        std::filesystem::temp_directory_path() /
-        ("trtmc_windows_media_over_limit_" + std::to_string(GetCurrentProcessId()) + ".mp3");
-    const auto boundary_wav_path =
-        std::filesystem::temp_directory_path() /
-        ("trtmc_windows_media_boundary_" + std::to_string(GetCurrentProcessId()) + ".wav");
-    const auto over_limit_wav_path =
-        std::filesystem::temp_directory_path() /
-        ("trtmc_windows_media_over_limit_" + std::to_string(GetCurrentProcessId()) + ".wav");
-    const auto over_limit_video_path =
-        std::filesystem::temp_directory_path() /
-        ("trtmc_windows_media_over_limit_" + std::to_string(GetCurrentProcessId()) + ".mp4");
-    std::error_code cleanup_error;
-    std::filesystem::remove(path, cleanup_error);
-    std::filesystem::remove(wav_path, cleanup_error);
-    std::filesystem::remove(mp3_path, cleanup_error);
-    std::filesystem::remove(aac_path, cleanup_error);
-    std::filesystem::remove(mp3_44k_path, cleanup_error);
-    std::filesystem::remove(aac_44k_path, cleanup_error);
-    std::filesystem::remove(over_limit_mp3_path, cleanup_error);
-    std::filesystem::remove(boundary_wav_path, cleanup_error);
-    std::filesystem::remove(over_limit_wav_path, cleanup_error);
-    std::filesystem::remove(over_limit_video_path, cleanup_error);
+    trtmc_test::TempDirGuard temporary;
+    const auto temporary_root = std::filesystem::path(temporary.path());
+    const auto path = temporary_root / "video.mp4";
+    const auto wav_path = temporary_root / "audio.wav";
+    const auto mp3_path = temporary_root / "audio.mp3";
+    const auto aac_path = temporary_root / "audio.m4a";
+    const auto mp3_44k_path = temporary_root / "audio-44k.mp3";
+    const auto aac_44k_path = temporary_root / "audio-44k.m4a";
+    const auto over_limit_mp3_path = temporary_root / "over-limit.mp3";
+    const auto boundary_wav_path = temporary_root / "boundary.wav";
+    const auto over_limit_wav_path = temporary_root / "over-limit.wav";
+    const auto over_limit_video_path = temporary_root / "over-limit.mp4";
     trtmc::cli::write_mp4(result, path.string());
     require(std::filesystem::is_regular_file(path), "MP4 output file is missing");
     require(std::filesystem::file_size(path) > 1024, "MP4 output file is empty");
 
-    const auto decoded = trtmc::cli::read_video_file(path.string());
-    require(decoded.width == 768, "decoded MP4 width must use the H3 reference resolver");
-    require(decoded.height == 768, "decoded MP4 height must use the H3 reference resolver");
+    const auto decoded = trtmc::cli::read_video_file(path.string(), policy);
+    require(decoded.width == 768, "decoded MP4 width must use the configured resolver");
+    require(decoded.height == 768, "decoded MP4 height must use the configured resolver");
     require(decoded.channels == 3, "decoded MP4 channel mismatch");
     require(decoded.num_frames == result.frames.num_frames, "decoded MP4 frame-count mismatch");
     require(decoded.fps_numerator == result.fps, "decoded MP4 frame-rate mismatch");
@@ -216,7 +226,14 @@ int run_test() {
             "decoded MP4 audio-channel mismatch");
     require(!decoded.soundtrack.samples.empty(), "decoded MP4 has no soundtrack samples");
 
-    const auto extracted_audio = trtmc::cli::read_audio_file(path.string());
+    const auto compact_decoded = trtmc::cli::read_video_file(path.string(), compact_policy);
+    require(compact_decoded.width == 256 && compact_decoded.height == 256,
+            "decoded MP4 canvas must follow a second policy");
+    require(compact_decoded.num_frames == 12 && compact_decoded.fps_numerator == 12 &&
+                compact_decoded.fps_denominator == 1,
+            "decoded MP4 sampling rate must follow a second policy");
+
+    const auto extracted_audio = trtmc::cli::read_audio_file(path.string(), policy);
     require(extracted_audio.sample_rate == result.audio.sample_rate,
             "standalone media audio-rate mismatch");
     require(extracted_audio.channels == result.audio.channels,
@@ -224,7 +241,7 @@ int run_test() {
     require(!extracted_audio.samples.empty(), "standalone media audio decode is empty");
 
     trtmc::io::write_wav(result.audio, wav_path.string());
-    const auto decoded_wav = trtmc::cli::read_audio_file(wav_path.string());
+    const auto decoded_wav = trtmc::cli::read_audio_file(wav_path.string(), policy);
     require(decoded_wav.sample_rate == result.audio.sample_rate,
             "Media Foundation WAV audio-rate mismatch");
     require(decoded_wav.channels == result.audio.channels,
@@ -239,16 +256,18 @@ int run_test() {
     boundary_audio.samples.resize(static_cast<std::size_t>(boundary_audio.sample_rate) * 15);
     boundary_audio.num_samples = static_cast<int32_t>(boundary_audio.samples.size());
     trtmc::io::write_wav(boundary_audio, boundary_wav_path.string());
-    const auto decoded_boundary_audio = trtmc::cli::read_audio_file(boundary_wav_path.string());
+    const auto decoded_boundary_audio =
+        trtmc::cli::read_audio_file(boundary_wav_path.string(), policy);
     require(decoded_boundary_audio.samples.size() == boundary_audio.samples.size(),
-            "15-second reference audio boundary must decode successfully");
+            "configured reference audio boundary must decode successfully");
 
     boundary_audio.samples.push_back(0.0F);
     boundary_audio.num_samples = static_cast<int32_t>(boundary_audio.samples.size());
     trtmc::io::write_wav(boundary_audio, over_limit_wav_path.string());
-    require_throws_with([&] { (void)trtmc::cli::read_audio_file(over_limit_wav_path.string()); },
-                        "15-second public limit",
-                        "reference audio over 15 seconds must fail during Media Foundation decode");
+    require_throws_with(
+        [&] { (void)trtmc::cli::read_audio_file(over_limit_wav_path.string(), policy); },
+        "configured duration limit",
+        "reference audio over the policy limit must fail during Media Foundation decode");
 
     trtmc::VideoResult over_limit_video;
     over_limit_video.frames.width = 64;
@@ -260,9 +279,10 @@ int run_test() {
         static_cast<std::size_t>(over_limit_video.frames.width) * over_limit_video.frames.height *
         over_limit_video.frames.channels * over_limit_video.frames.num_frames);
     trtmc::cli::write_mp4(over_limit_video, over_limit_video_path.string());
-    require_throws_with([&] { (void)trtmc::cli::read_video_file(over_limit_video_path.string()); },
-                        "15-second public limit",
-                        "reference video over 15 seconds must fail during Media Foundation decode");
+    require_throws_with(
+        [&] { (void)trtmc::cli::read_video_file(over_limit_video_path.string(), policy); },
+        "configured duration limit",
+        "reference video over the policy limit must fail during Media Foundation decode");
 
     const auto decoded_pixel = [&](int frame, int row, int column, int channel) {
         return decoded
@@ -433,7 +453,7 @@ int run_test() {
 
     require(std::filesystem::is_regular_file(mp3_path), "MP3 output file is missing");
     require(std::filesystem::file_size(mp3_path) > 1024, "MP3 output file is empty");
-    const auto decoded_mp3 = trtmc::cli::read_audio_file(mp3_path.string());
+    const auto decoded_mp3 = trtmc::cli::read_audio_file(mp3_path.string(), policy);
     require(decoded_mp3.sample_rate == result.audio.sample_rate,
             "Media Foundation MP3 audio-rate mismatch");
     require(decoded_mp3.channels == result.audio.channels,
@@ -443,55 +463,36 @@ int run_test() {
             "Media Foundation MP3 decode returned invalid samples");
     require(decoded_mp3.samples.size() <= pcm.size() &&
                 decoded_mp3.samples.size() >= pcm.size() - 4096,
-            "15-second MP3 boundary must trim only codec padding");
+            "configured MP3 boundary must trim only codec padding");
 
     require(std::filesystem::is_regular_file(aac_path), "AAC output file is missing");
     require(std::filesystem::file_size(aac_path) > 1024, "AAC output file is empty");
-    const auto decoded_aac = trtmc::cli::read_audio_file(aac_path.string());
+    const auto decoded_aac = trtmc::cli::read_audio_file(aac_path.string(), policy);
     require(decoded_aac.sample_rate == result.audio.sample_rate,
             "Media Foundation AAC audio-rate mismatch");
     require(decoded_aac.channels == result.audio.channels,
             "Media Foundation AAC audio-channel mismatch");
     require(decoded_aac.samples.size() <= pcm.size() &&
                 decoded_aac.samples.size() >= pcm.size() - 4096,
-            "15-second AAC boundary must trim only codec padding");
+            "configured AAC boundary must trim only codec padding");
 
-    const auto decoded_mp3_44k = trtmc::cli::read_audio_file(mp3_44k_path.string());
+    const auto decoded_mp3_44k = trtmc::cli::read_audio_file(mp3_44k_path.string(), policy);
     require(decoded_mp3_44k.sample_rate == static_cast<int32_t>(boundary_44k_rate),
             "44.1 kHz MP3 boundary audio-rate mismatch");
     require(decoded_mp3_44k.samples.size() <= pcm_44k.size() &&
                 decoded_mp3_44k.samples.size() >= pcm_44k.size() - 4096,
-            "15-second 44.1 kHz MP3 boundary must trim only codec padding");
-    const auto decoded_aac_44k = trtmc::cli::read_audio_file(aac_44k_path.string());
+            "configured 44.1 kHz MP3 boundary must trim only codec padding");
+    const auto decoded_aac_44k = trtmc::cli::read_audio_file(aac_44k_path.string(), policy);
     require(decoded_aac_44k.sample_rate == static_cast<int32_t>(boundary_44k_rate),
             "44.1 kHz AAC boundary audio-rate mismatch");
     require(decoded_aac_44k.samples.size() <= pcm_44k.size() &&
                 decoded_aac_44k.samples.size() >= pcm_44k.size() - 4096,
-            "15-second 44.1 kHz AAC boundary must trim only codec padding");
-    require_throws_with([&] { (void)trtmc::cli::read_audio_file(over_limit_mp3_path.string()); },
-                        "15-second public limit",
+            "configured 44.1 kHz AAC boundary must trim only codec padding");
+    require_throws_with(
+        [&] { (void)trtmc::cli::read_audio_file(over_limit_mp3_path.string(), policy); },
+                        "configured duration",
                         "a true 16-second MP3 must not be accepted as codec padding");
 
-    std::filesystem::remove(path, cleanup_error);
-    require(!cleanup_error, "failed to remove temporary MP4 test artifact");
-    std::filesystem::remove(wav_path, cleanup_error);
-    require(!cleanup_error, "failed to remove temporary WAV test artifact");
-    std::filesystem::remove(mp3_path, cleanup_error);
-    require(!cleanup_error, "failed to remove temporary MP3 test artifact");
-    std::filesystem::remove(aac_path, cleanup_error);
-    require(!cleanup_error, "failed to remove temporary AAC test artifact");
-    std::filesystem::remove(mp3_44k_path, cleanup_error);
-    require(!cleanup_error, "failed to remove 44.1 kHz MP3 artifact");
-    std::filesystem::remove(aac_44k_path, cleanup_error);
-    require(!cleanup_error, "failed to remove 44.1 kHz AAC artifact");
-    std::filesystem::remove(over_limit_mp3_path, cleanup_error);
-    require(!cleanup_error, "failed to remove over-limit MP3 artifact");
-    std::filesystem::remove(boundary_wav_path, cleanup_error);
-    require(!cleanup_error, "failed to remove 15-second WAV boundary artifact");
-    std::filesystem::remove(over_limit_wav_path, cleanup_error);
-    require(!cleanup_error, "failed to remove over-limit WAV artifact");
-    std::filesystem::remove(over_limit_video_path, cleanup_error);
-    require(!cleanup_error, "failed to remove over-limit MP4 artifact");
     return 0;
 }
 

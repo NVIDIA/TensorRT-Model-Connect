@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from .conftest import requires_trt
+from tests.builder.conftest import requires_trt
 
 
 @requires_trt
@@ -16,7 +16,9 @@ def test_dynamic_row_slices_build_and_infer_runtime_shapes() -> None:
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    )
     config = builder.create_builder_config()
     value = network.add_input("value", trt.float32, (-1, 8))
     cos = network.add_input("cos", trt.float32, (1, -1, 2))
@@ -28,7 +30,6 @@ def test_dynamic_row_slices_build_and_infer_runtime_shapes() -> None:
         value,
         cos,
         sin,
-        rows=-1,
         heads=1,
         head_dim=8,
         rotary_dim=4,

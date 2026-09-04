@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,23 +28,10 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     CANVAS_MULTIPLE,
     CANVAS_SHORT_EDGE,
     NATIVE_EXPLICIT_CANVAS_SIZES,
-    FASTH3_GUIDANCE_SCALE,
-    FASTH3_SCHEDULER_GRID_POINTS,
-    FASTH3_TRANSFORMER_FORWARDS,
-    FASTH3_VSA_MAX_VIDEO_TILES,
-    FASTH3_VSA_TILE_SIZE,
     SOL_ENGINE_1344X768_124_TO_345F,
     VIDEO_NUM_FRAMES_MAX,
     VIDEO_NUM_FRAMES_MIN,
     VIDEO_NUM_FRAMES_OPT,
-)
-from tensorrt_model_connect.families.minimax_h3.checkpoint import (
-    FASTH3_VSA_ADAPTER_BASE_REVISION,
-    FASTH3_VSA_ADAPTER_BYTES,
-    FASTH3_VSA_ADAPTER_FINETUNED_REVISION,
-    FASTH3_VSA_ADAPTER_MODEL_ID,
-    FASTH3_VSA_ADAPTER_SHA256,
-    FASTH3_VSA_ADAPTER_SOURCE_REVISION,
 )
 from tensorrt_model_connect.families.minimax_h3.provenance import (
     CHECKPOINT_REVISION,
@@ -67,35 +53,9 @@ PLAN_SECTIONS = {
     "text_encoder_plan": "text_encoder.plan",
     "vision_encoder_plan": "vision_encoder.plan",
     "adaln_precompute_plan": "adaln_precompute.plan",
-    "denoiser_plan": "denoiser.plan",
-    "fl2va_keyframe_vae_encoder_plan": "fl2va_keyframe_vae_encoder.plan",
-    "vae_tile_decoder_plan": "vae_tile_decoder.plan",
-    "audio_vae_decoder_plan": "audio_vae_decoder.plan",
-}
-FIRST_BLOCK_CACHE_PLAN_SECTIONS = {
-    "text_encoder_plan": "text_encoder.plan",
-    "vision_encoder_plan": "vision_encoder.plan",
-    "adaln_precompute_plan": "adaln_precompute.plan",
     "denoiser_head_plan": "denoiser_head.plan",
     "denoiser_tail_plan": "denoiser_tail.plan",
     "denoiser_finish_plan": "denoiser_finish.plan",
-    "fl2va_keyframe_vae_encoder_plan": "fl2va_keyframe_vae_encoder.plan",
-    "vae_tile_decoder_plan": "vae_tile_decoder.plan",
-    "audio_vae_decoder_plan": "audio_vae_decoder.plan",
-}
-FASTH3_DENOISER_PLAN_SECTIONS = {
-    "denoiser_entry_plan": "denoiser_entry.plan",
-    **{
-        f"denoiser_transition_{index:02d}_plan": f"denoiser_transition_{index:02d}.plan"
-        for index in range(SOL_ENGINE_1344X768_124_TO_345F.num_layers - 1)
-    },
-    "denoiser_finish_plan": "denoiser_finish.plan",
-}
-FASTH3_PLAN_SECTIONS = {
-    "text_encoder_plan": "text_encoder.plan",
-    "vision_encoder_plan": "vision_encoder.plan",
-    "adaln_precompute_plan": "adaln_precompute.plan",
-    **FASTH3_DENOISER_PLAN_SECTIONS,
     "fl2va_keyframe_vae_encoder_plan": "fl2va_keyframe_vae_encoder.plan",
     "vae_tile_decoder_plan": "vae_tile_decoder.plan",
     "audio_vae_decoder_plan": "audio_vae_decoder.plan",
@@ -167,50 +127,6 @@ def _audio_vae_metadata(model: Path, profile) -> dict[str, object]:
     }
 
 
-def _validated_fast_h3_metadata(value: object, profile) -> dict[str, object]:
-    """Fail closed on the path-free adapter identity stored by the build helper."""
-
-    if not isinstance(value, dict):
-        raise ValueError("FastH3 packaging requires validated adapter metadata")
-    expected = {
-        "schema_version": 1,
-        "adapter_model_id": FASTH3_VSA_ADAPTER_MODEL_ID,
-        "adapter_source_revision": FASTH3_VSA_ADAPTER_SOURCE_REVISION,
-        "adapter_sha256": FASTH3_VSA_ADAPTER_SHA256,
-        "adapter_bytes": FASTH3_VSA_ADAPTER_BYTES,
-        "adapter_tensor_count": 856,
-        "adapter_low_rank_tensor_count": 724,
-        "adapter_diff_tensor_count": 82,
-        "adapter_set_weight_tensor_count": 50,
-        "adapter_gate_tensor_count": 50,
-        "adapter_base_revision": FASTH3_VSA_ADAPTER_BASE_REVISION,
-        "adapter_finetuned_revision": FASTH3_VSA_ADAPTER_FINETUNED_REVISION,
-    }
-    for key, expected_value in expected.items():
-        if value.get(key) != expected_value:
-            raise ValueError(f"FastH3 build receipt has invalid {key}")
-    counts = value.get("adapter_partition_tensor_counts")
-    expected_partitions = {
-        "adaln_precompute",
-        "denoiser_entry",
-        *(f"denoiser_transition_{index:02d}" for index in range(profile.num_layers - 1)),
-        "denoiser_finish",
-    }
-    if (
-        not isinstance(counts, dict)
-        or set(counts) != expected_partitions
-        or any(
-            not isinstance(count, int) or isinstance(count, bool) or count <= 0
-            for count in counts.values()
-        )
-        or sum(counts.values()) != expected["adapter_tensor_count"]
-    ):
-        raise ValueError("FastH3 build receipt has invalid adapter partition accounting")
-    if set(value) != {*expected, "adapter_partition_tensor_counts"}:
-        raise ValueError("FastH3 build receipt has unknown adapter metadata")
-    return dict(value)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plans-dir", required=True)
@@ -221,32 +137,13 @@ def main() -> int:
         "--transformer-ref",
         help="Strict transformer_ref checkpoint used to build all four Ref2VA plans.",
     )
-    denoiser_group = parser.add_mutually_exclusive_group()
-    denoiser_group.add_argument(
-        "--first-block-cache",
-        action="store_true",
-        help="Package split head/tail/finish plans instead of denoiser.plan.",
-    )
-    denoiser_group.add_argument(
-        "--fast-h3",
-        action="store_true",
-        help="Package the adapter-merged 51-plan native CUDA VSA denoiser.",
-    )
     args = parser.parse_args()
     plans = Path(args.plans_dir)
     model = Path(args.model_path)
     output = Path(args.output)
     source_revision = validate_source_revision(args.source_revision)
-    profile = replace(
-        SOL_ENGINE_1344X768_124_TO_345F,
-        first_block_cache=args.first_block_cache,
-    )
-    if args.fast_h3:
-        plan_sections = FASTH3_PLAN_SECTIONS
-    elif profile.first_block_cache:
-        plan_sections = FIRST_BLOCK_CACHE_PLAN_SECTIONS
-    else:
-        plan_sections = PLAN_SECTIONS
+    profile = SOL_ENGINE_1344X768_124_TO_345F
+    plan_sections = PLAN_SECTIONS
     transformer_ref_identity = None
     if args.transformer_ref:
         transformer_ref_identity = validate_transformer_ref_checkpoint(args.transformer_ref)
@@ -267,22 +164,14 @@ def main() -> int:
         source_revision=source_revision,
         profile=profile,
         hash_files=False,
-        segmented_vsa=args.fast_h3,
+        additional_plan_filenames=(
+            tuple(REF2VA_PLAN_SECTIONS.values())
+            if transformer_ref_identity is not None
+            else ()
+        ),
     )
-    fast_h3_metadata = (
-        _validated_fast_h3_metadata(receipt.get("fast_h3"), profile) if args.fast_h3 else None
-    )
-    expected_mode = (
-        "segmented_vsa"
-        if args.fast_h3
-        else "first_block"
-        if profile.first_block_cache
-        else "monolithic"
-    )
-    if receipt.get("denoiser_mode") != expected_mode:
+    if receipt.get("denoiser_mode") != "first_block":
         raise ValueError("MiniMax-H3 build receipt denoiser mode does not match packaging mode")
-    if not args.fast_h3 and receipt.get("fast_h3") is not None:
-        raise ValueError("Dense MiniMax-H3 packaging rejects FastH3 adapter metadata")
     if transformer_ref_identity is not None:
         if receipt.get("transformer_ref") != transformer_ref_identity.bundle_metadata():
             raise ValueError(
@@ -339,8 +228,8 @@ def main() -> int:
         "plan_sha256": {
             filename: recorded[filename]["sha256"] for filename in plan_sections.values()
         },
-        "first_block_cache": profile.first_block_cache,
-        "denoiser_cache_mode": expected_mode,
+        "first_block_cache": True,
+        "denoiser_cache_mode": "first_block",
         "first_block_cache_threshold": 0.08,
         "height": 768,
         "width": 1344,
@@ -377,11 +266,11 @@ def main() -> int:
         "num_frames_opt": VIDEO_NUM_FRAMES_OPT,
         "num_frames_max": VIDEO_NUM_FRAMES_MAX,
         "fps": 24,
-        "num_inference_steps": FASTH3_TRANSFORMER_FORWARDS if args.fast_h3 else 50,
-        "guidance_scale": FASTH3_GUIDANCE_SCALE if args.fast_h3 else 1.0,
-        "scheduler_grid_points": FASTH3_SCHEDULER_GRID_POINTS if args.fast_h3 else 50,
-        "transformer_forwards": FASTH3_TRANSFORMER_FORWARDS if args.fast_h3 else 49,
-        "attention_mode": "native_vsa" if args.fast_h3 else "dense",
+        "num_inference_steps": 50,
+        "guidance_scale": 1.0,
+        "scheduler_grid_points": 50,
+        "transformer_forwards": 49,
+        "attention_mode": "dense",
         "text_rows": profile.text_rows,
         "text_rows_min": profile.min_text_rows,
         "text_rows_opt": profile.opt_text_rows,
@@ -408,63 +297,6 @@ def main() -> int:
         "vae_tile_size": 256,
         "vae_tile_overlap": 64,
     }
-    if fast_h3_metadata is not None:
-        config["fast_h3"] = fast_h3_metadata
-        config["vsa"] = {
-            "implementation": "native_cuda_segmented",
-            "tile_size": FASTH3_VSA_TILE_SIZE,
-            "video_tile_shape": [4, 4, 4],
-            "video_keep_numerator": 1,
-            "video_keep_denominator": 10,
-            "max_video_tiles": FASTH3_VSA_MAX_VIDEO_TILES,
-            "max_total_tiles": (profile.vsa_prefix_tile_profile[2] + FASTH3_VSA_MAX_VIDEO_TILES),
-            "packed_row_to_tile_slot_profile": list(profile.packed_row_profile),
-            "prefix_valid_sizes_profile": list(profile.vsa_prefix_tile_profile),
-            "video_valid_sizes_profile": list(profile.vsa_video_tile_abi_profile),
-            "runtime_metadata_abi": {
-                "producer": "modelconnect_cpp",
-                "packed_row_to_tile_slot": {
-                    "dtype": "int32",
-                    "shape": ["S"],
-                    "profile": list(profile.packed_row_profile),
-                },
-                "prefix_valid_sizes": {
-                    "dtype": "int32",
-                    "shape": ["P"],
-                    "profile": list(profile.vsa_prefix_tile_profile),
-                },
-                "video_valid_sizes": {
-                    "dtype": "int32",
-                    "shape": ["Vtiles"],
-                    "profile": list(profile.vsa_video_tile_abi_profile),
-                },
-            },
-            "segment_count": len(FASTH3_DENOISER_PLAN_SECTIONS),
-            "transition_count": profile.num_layers - 1,
-            "attention_calls_per_forward": profile.num_layers,
-            "fbc_composable": False,
-            "tensor_abi": {
-                "dtype": "bf16",
-                "residual_input": "residual_hidden",
-                "residual_output": "next_residual_hidden",
-                "attention_input": "vsa_attention_output",
-                "query_output": "vsa_query",
-                "key_output": "vsa_key",
-                "value_output": "vsa_value",
-                "gate_output": "vsa_gate",
-                "residual_shape": ["S", profile.hidden_size],
-                "attention_shape": [profile.num_heads, "S", profile.head_dim],
-                "packed_rows_profile": list(profile.packed_row_profile),
-            },
-            "segments": [
-                {
-                    "component": section.removesuffix("_plan"),
-                    "filename": filename,
-                    "section": section,
-                }
-                for section, filename in FASTH3_DENOISER_PLAN_SECTIONS.items()
-            ],
-        }
     if transformer_ref_identity is not None:
         config.update(ref2va_bundle_metadata(transformer_ref_identity))
     sections.append(BundleSection("config.json", json.dumps(config, indent=2).encode()))

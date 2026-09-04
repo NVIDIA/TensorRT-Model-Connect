@@ -11,9 +11,6 @@
 #include "runtime/backend/trt_version.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/providers/optimized_runtime_host.h"
-#if defined(_WIN32) && defined(TRTMC_LOCKED_H3_RUNTIME)
-#include "runtime/platform/windows_process_lockdown.h"
-#endif
 #include "runtime/registry/bundle_materialization.h"
 #include "runtime/registry/runtime_config_resolution.h"
 #include "trtmc/config/cli_support.h"
@@ -65,27 +62,16 @@ void validate_staged_loading_policy(const BundleInfo& info, const std::string& m
         throw std::runtime_error("Invalid staged bundle_loading policy");
     }
 
-    std::unordered_set<std::string> policy_names;
-    for (const auto& name : eager) {
-        if (!policy_names.insert(name).second)
-            throw std::runtime_error(
-                "Staged bundle_loading must partition bundle sections exactly");
-    }
-    for (const auto& name : lazy) {
-        if (!policy_names.insert(name).second)
-            throw std::runtime_error(
-                "Staged bundle_loading must partition bundle sections exactly");
-    }
-
     std::unordered_set<std::string> header_names;
     for (const auto& section : info.sections) {
-        if (!header_names.insert(section.name).second || policy_names.erase(section.name) != 1) {
+        if (!header_names.insert(section.name).second ||
+            std::count(eager.begin(), eager.end(), section.name) +
+                    std::count(lazy.begin(), lazy.end(), section.name) !=
+                1) {
             throw std::runtime_error(
                 "Staged bundle_loading must partition bundle sections exactly");
         }
     }
-    if (!policy_names.empty())
-        throw std::runtime_error("Staged bundle_loading must partition bundle sections exactly");
 }
 
 } // namespace
@@ -109,19 +95,8 @@ PipelineBundleMaterialization materialize_pipeline_bundle(const std::string& bun
     }
 
     const std::string mode = extract_json_string(policy_text, "mode", "");
-    // The generic JSON helper intentionally defaults to small arrays. Bundle
-    // policies, however, contain one entry for every section (61 lazy plans in
-    // the MiniMax-H3 bundle). The exact partition validation below rejects
-    // policies whose parsed names do not match the header one-for-one.
-    const std::size_t policy_section_limit = info.sections.size();
-    std::vector<std::string> eager;
-    std::vector<std::string> lazy;
-    if (!extract_json_string_array_strict(policy_text, "eager_sections", policy_section_limit,
-                                          eager) ||
-        !extract_json_string_array_strict(policy_text, "lazy_sections", policy_section_limit,
-                                          lazy)) {
-        throw std::runtime_error("Invalid staged bundle_loading policy");
-    }
+    const auto eager = extract_json_string_array(policy_text, "eager_sections");
+    const auto lazy = extract_json_string_array(policy_text, "lazy_sections");
     validate_staged_loading_policy(info, mode, eager, lazy);
 
     BundleFile bundle;
@@ -232,29 +207,14 @@ void enforce_trt_compatibility(const std::string& bundle_path,
         throw_trt_mismatch(bundle_path, *required, *actual, actual_label);
 }
 
-IBackend* load_rtx_backend_for_bundle(const BundleFile& bundle, const std::string& config_text,
-                                      const std::string& bundle_path,
-                                      const std::string& logical_backend,
-                                      const std::vector<std::string>& backend_search_paths) {
-    const auto required = required_trt_version_for_bundle(bundle, config_text, logical_backend);
-    std::string loaded_backend_name;
-    BackendLoadMetadata metadata;
-    IBackend* backend = BackendLoader::load_first_available({logical_backend}, backend_search_paths,
-                                                            &loaded_backend_name, &metadata);
-    const auto backend_abi = parse_trt_abi_tag(metadata.trt_abi);
-    const auto runtime_version = parse_trt_version(metadata.trt_runtime_version);
-    if (!backend_abi || !runtime_version)
-        throw std::runtime_error("TensorRT-RTX backend did not report its ABI and runtime version");
-    enforce_trt_compatibility(bundle_path, required, backend_abi,
-                              "selected TensorRT-RTX backend ABI");
-    enforce_trt_compatibility(bundle_path, required, runtime_version,
-                              "selected TensorRT-RTX runtime");
-    return backend;
-}
+IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& config_text,
+                                  const std::string& bundle_path, const std::string& backend_name,
+                                  const std::vector<std::string>& backend_search_paths) {
+    const std::string logical_backend = backend_name.empty() ? "trt" : backend_name;
+    if (!is_standard_trt_backend_name(logical_backend)) {
+        return BackendLoader::load(logical_backend, backend_search_paths);
+    }
 
-IBackend* load_standard_trt_backend_for_bundle(
-    const BundleFile& bundle, const std::string& config_text, const std::string& bundle_path,
-    const std::string& logical_backend, const std::vector<std::string>& backend_search_paths) {
     const auto required = required_trt_version_for_bundle(bundle, config_text, logical_backend);
     std::string detection_diagnostics;
     std::optional<TrtVersion> installed;
@@ -280,11 +240,13 @@ IBackend* load_standard_trt_backend_for_bundle(
     BackendLoadMetadata metadata;
     IBackend* backend = BackendLoader::load_first_available(candidates, backend_search_paths,
                                                             &loaded_backend_name, &metadata);
+
     enforce_trt_compatibility(bundle_path, required, parse_trt_abi_tag(metadata.trt_abi),
                               "selected backend DSO ABI");
     enforce_trt_compatibility(bundle_path, required,
                               parse_trt_version(metadata.trt_runtime_version),
                               "selected backend TensorRT runtime");
+
     if (required) {
         std::cerr << "[trtmc] TensorRT ABI resolved: bundle=" << trt_abi_string(*required)
                   << ", backend=" << loaded_backend_name;
@@ -293,48 +255,6 @@ IBackend* load_standard_trt_backend_for_bundle(
         std::cerr << std::endl;
     }
     return backend;
-}
-
-IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& config_text,
-                                  const std::string& bundle_path, const std::string& backend_name,
-                                  const std::vector<std::string>& backend_search_paths) {
-    const std::string logical_backend = backend_name.empty() ? "trt" : backend_name;
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    if (!backend_search_paths.empty()) {
-        throw std::runtime_error("locked MiniMax-H3 runtime rejects backend search path overrides");
-    }
-    if (logical_backend != "trt_rtx") {
-        throw std::runtime_error(
-            "locked MiniMax-H3 runtime requires engine_backend=trt_rtx before backend discovery");
-    }
-    return load_rtx_backend_for_bundle(bundle, config_text, bundle_path, logical_backend,
-                                       backend_search_paths);
-#else
-    if (logical_backend == "trt_rtx")
-        return load_rtx_backend_for_bundle(bundle, config_text, bundle_path, logical_backend,
-                                           backend_search_paths);
-    if (!is_standard_trt_backend_name(logical_backend))
-        return BackendLoader::load(logical_backend, backend_search_paths);
-    return load_standard_trt_backend_for_bundle(bundle, config_text, bundle_path, logical_backend,
-                                                backend_search_paths);
-#endif
-}
-
-void enforce_locked_h3_process_policy() {
-#if defined(_WIN32) && defined(TRTMC_LOCKED_H3_RUNTIME)
-    internal::enforce_locked_h3_process_policy();
-#endif
-}
-
-void reject_locked_h3_hf_python(const std::string& hf_python) {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    if (!hf_python.empty()) {
-        throw std::invalid_argument(
-            "locked MiniMax-H3 runtime rejects hf_python; Python is not a runtime dependency");
-    }
-#else
-    (void)hf_python;
-#endif
 }
 
 const BundleSectionInfo* find_kernel_slots_section(const BundleInfo& info) {
@@ -398,32 +318,18 @@ detail::resolve_runtime_config(const std::string& config_text, const std::string
                                const std::vector<std::string>& set_tokens) {
     try {
         auto resolution = config::resolve_pipeline_config(config_text, config_path, set_tokens);
-#if !defined(TRTMC_LOCKED_H3_RUNTIME)
         const auto sidecar =
             config::try_write_effective_config_next_to(resolution.bundle, bundle_path);
         if (!sidecar.path) {
             std::cerr << "[trtmc.config] Failed to write effective config sidecar: "
                       << sidecar.error << "\n          Resolved runtime config remains active.\n";
         }
-#else
-        // The locked MiniMax-H3 runtime is an immutable package: resolving
-        // configuration must never create a sibling file next to the bundle.
-        (void)bundle_path;
-#endif
         apply_platform_config(resolution.bundle);
         return std::move(resolution.bundle);
     } catch (const std::exception& e) {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-        // A locked delivery must never turn a malformed --config/--set into a
-        // successful run with different settings.  In particular, silently
-        // dropping minimax_h3.retain_engines would disable the qualified hot
-        // path while leaving the process exit status at zero.
-        throw;
-#else
         std::cerr << "[trtmc.config] Failed to resolve runtime config: " << e.what()
                   << "\n          Proceeding with schema defaults.\n";
         return std::nullopt;
-#endif
     }
 }
 
@@ -431,8 +337,6 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                                                         const std::string& hf_python,
                                                         const std::string& runtime_cache_path,
                                                         bool cuda_graphs) {
-    enforce_locked_h3_process_policy();
-    reject_locked_h3_hf_python(hf_python);
     LoadOptions optimized_options;
     optimized_options.hf_python = hf_python;
     optimized_options.runtime_cache_path = runtime_cache_path;
@@ -489,8 +393,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         runtime_cache_path,
                         cuda_graphs,
                         /*kv_cache_size_bytes=*/0,
-                        resolved ? &*resolved : nullptr,
-                        /*validate_bundle_payloads=*/true};
+                        resolved ? &*resolved : nullptr};
     std::unique_ptr<IPipeline> pipeline;
     {
 #if TRTMC_HAS_TVM_FFI
@@ -517,8 +420,6 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
 std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
                                                         const LoadOptions& options,
                                                         const std::string& kernel_bindings_path) {
-    enforce_locked_h3_process_policy();
-    reject_locked_h3_hf_python(options.hf_python);
     const BundleInfo header = ReadBundleHeader(bundle_path);
     reject_optimized_runtime_kernel_bindings(header, kernel_bindings_path);
     if (auto optimized_runtime_pipeline =
@@ -559,8 +460,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         options.runtime_cache_path,
                         options.cuda_graphs,
                         options.kv_cache_size_bytes,
-                        resolved ? &*resolved : nullptr,
-                        options.validate_bundle_payloads};
+                        resolved ? &*resolved : nullptr};
     std::unique_ptr<IPipeline> pipeline;
     {
 #if TRTMC_HAS_TVM_FFI
@@ -589,8 +489,6 @@ std::unique_ptr<PipelinePool>
 PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t pool_size,
                                   const LoadOptions& options,
                                   const std::string& kernel_bindings_path) {
-    enforce_locked_h3_process_policy();
-    reject_locked_h3_hf_python(options.hf_python);
     if (pool_size == 0)
         throw std::invalid_argument("Pipeline pool size must be positive");
 
@@ -632,8 +530,7 @@ PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t po
                         options.runtime_cache_path,
                         options.cuda_graphs,
                         options.kv_cache_size_bytes,
-                        resolved ? &*resolved : nullptr,
-                        options.validate_bundle_payloads};
+                        resolved ? &*resolved : nullptr};
     std::vector<std::unique_ptr<IPipeline>> pipelines;
     {
 #if TRTMC_HAS_TVM_FFI

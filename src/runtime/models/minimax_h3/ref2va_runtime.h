@@ -47,7 +47,6 @@ Ref2vaPreparedRequest prepare_ref2va_request(const VideoGenerationRequest& reque
                                              int32_t output_frames);
 
 struct Ref2vaVideoEncodeSchedule {
-    int32_t normalized_frames{0};
     int32_t snapped_frames{0};
     int32_t clip_count{0};
     int32_t repeated_tail_frames{0};

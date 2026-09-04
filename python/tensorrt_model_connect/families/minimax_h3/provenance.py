@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import stat
@@ -16,12 +15,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .checkpoint_manifest import (
-    BASE_CHECKPOINT_BYTES,
-    BASE_CHECKPOINT_FILE_COUNT,
-    BASE_CHECKPOINT_FILES,
-    BASE_CHECKPOINT_INVENTORY_SHA256,
-)
 from .config import (
     CANVAS_MAX_ASPECT_RATIO,
     CANVAS_MAX_PIXELS,
@@ -52,9 +45,8 @@ DIFFUSERS_REFERENCE_ARCHIVE_SHA256 = (
     "372c820aece801258bd4cea2458a2b85ad536e9262d7b0bbcdd450eda2d664a9"
 )
 DIFFUSERS_REFERENCE_CONTAINER_ROOT = "/work/reference-private"
-PLAN_FILENAMES = native_plan_filenames(first_block_cache=False)
-FIRST_BLOCK_CACHE_PLAN_FILENAMES = native_plan_filenames(first_block_cache=True)
-FASTH3_SEGMENTED_PLAN_FILENAMES = native_plan_filenames(first_block_cache=False, segmented_vsa=True)
+PLAN_FILENAMES = native_plan_filenames()
+FIRST_BLOCK_CACHE_PLAN_FILENAMES = PLAN_FILENAMES
 _FL2VA_CONDITIONING_PLAN_FILENAMES = (
     "vision_encoder.plan",
     "fl2va_keyframe_vae_encoder.plan",
@@ -80,31 +72,6 @@ _CHECKPOINT_INDEX_FILES = (
     "vae/diffusion_pytorch_model.safetensors.index.json",
 )
 
-_EXPECTED_CHECKPOINT_FILE_RECORDS = {
-    relative: {"blob_id": blob_id, "bytes": size, "sha256": sha256}
-    for relative, size, blob_id, sha256 in BASE_CHECKPOINT_FILES
-}
-if (
-    len(_EXPECTED_CHECKPOINT_FILE_RECORDS) != BASE_CHECKPOINT_FILE_COUNT
-    or sum(record["bytes"] for record in _EXPECTED_CHECKPOINT_FILE_RECORDS.values())
-    != BASE_CHECKPOINT_BYTES
-    or any(
-        not relative
-        or Path(relative).is_absolute()
-        or ".." in Path(relative).parts
-        or Path(relative).parts[0] == "transformer_ref"
-        or not isinstance(record["bytes"], int)
-        or record["bytes"] <= 0
-        or (
-            _GIT_SHA.fullmatch(str(record["blob_id"])) is None
-            and _SHA256.fullmatch(str(record["blob_id"])) is None
-        )
-        or _SHA256.fullmatch(str(record["sha256"])) is None
-        for relative, record in _EXPECTED_CHECKPOINT_FILE_RECORDS.items()
-    )
-):
-    raise RuntimeError("MiniMax-H3 internal base-checkpoint manifest is inconsistent")
-
 
 def sha256_file(path: Path, *, chunk_bytes: int = 16 << 20) -> str:
     digest = hashlib.sha256()
@@ -118,26 +85,6 @@ def file_record(path: Path) -> dict[str, int | str]:
     return {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
 
 
-def _file_identity_from_stat(metadata: os.stat_result) -> dict[str, int]:
-    return {
-        "device": metadata.st_dev,
-        "inode": metadata.st_ino,
-        "bytes": metadata.st_size,
-        "mtime_ns": metadata.st_mtime_ns,
-        "ctime_ns": metadata.st_ctime_ns,
-    }
-
-
-def _same_open_file(path_identity: dict[str, int], handle_identity: dict[str, int]) -> bool:
-    # Windows path stat and handle fstat expose creation/change time with
-    # different precision/semantics. File ID, volume, size, and mtime are the
-    # stable fields needed to prove that the opened handle is the statted file.
-    return all(
-        path_identity[key] == handle_identity[key]
-        for key in ("device", "inode", "bytes", "mtime_ns")
-    )
-
-
 def file_identity(path: Path) -> dict[str, int]:
     try:
         metadata = path.stat()
@@ -145,7 +92,13 @@ def file_identity(path: Path) -> dict[str, int]:
         raise ValueError(f"MiniMax-H3 artifact is unavailable: {path}: {error}") from error
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"MiniMax-H3 artifact is not a regular file: {path}")
-    return _file_identity_from_stat(metadata)
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "bytes": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+    }
 
 
 def stable_file_record(path: Path, label: str) -> tuple[dict[str, int | str], dict[str, int]]:
@@ -174,30 +127,23 @@ def _validate_record_object(record: object, label: str) -> tuple[int, str]:
     return expected_size, expected_sha
 
 
-def plan_filenames_for_profile(profile, *, segmented_vsa: bool = False) -> tuple[str, ...]:
-    return native_plan_filenames(
-        first_block_cache=profile.first_block_cache, segmented_vsa=segmented_vsa
-    )
+def plan_filenames_for_profile(profile) -> tuple[str, ...]:
+    if profile.first_block_cache is not True:
+        raise ValueError("MiniMax-H3 build receipts require the dense FirstBlockCache profile")
+    return native_plan_filenames()
 
 
 def validate_workspace_limit_bytes(
     record: object,
     *,
     profile=None,
-    first_block_cache: bool | None = None,
-    segmented_vsa: bool = False,
     additional_plan_filenames: tuple[str, ...] = (),
     excluded_plan_filenames: tuple[str, ...] = (),
 ) -> dict[str, int | str]:
     """Validate the exact per-plan TensorRT tactic-workspace provenance."""
 
-    if profile is not None and first_block_cache is not None:
-        raise ValueError("MiniMax-H3 workspace validation received two profile selectors")
-    if profile is not None:
-        first_block_cache = profile.first_block_cache
-    selected = False if first_block_cache is None else first_block_cache
-    if not isinstance(selected, bool):
-        raise ValueError("MiniMax-H3 first_block_cache selector must be a boolean")
+    if profile is not None and profile.first_block_cache is not True:
+        raise ValueError("MiniMax-H3 workspace validation requires FirstBlockCache")
     if not isinstance(additional_plan_filenames, tuple) or any(
         not isinstance(filename, str) or not filename for filename in additional_plan_filenames
     ):
@@ -206,7 +152,7 @@ def validate_workspace_limit_bytes(
         not isinstance(filename, str) or not filename for filename in excluded_plan_filenames
     ):
         raise ValueError("MiniMax-H3 excluded plan filenames must be a tuple of names")
-    base = native_plan_filenames(first_block_cache=selected, segmented_vsa=segmented_vsa)
+    base = native_plan_filenames()
     if not set(excluded_plan_filenames).issubset(base):
         raise ValueError("MiniMax-H3 excluded plan filenames are not selected native plans")
     expected = (
@@ -220,9 +166,7 @@ def validate_workspace_limit_bytes(
             "MiniMax-H3 workspace_limit_bytes must cover exactly the selected native plans"
         )
     for filename, value in record.items():
-        valid_numeric_limit = (
-            isinstance(value, int) and not isinstance(value, bool) and value > 0
-        )
+        valid_numeric_limit = isinstance(value, int) and not isinstance(value, bool) and value > 0
         if not valid_numeric_limit and value != TRT_DEFAULT_WORKSPACE_POLICY:
             raise ValueError(
                 f"MiniMax-H3 workspace_limit_bytes has an invalid value for {filename}"
@@ -265,28 +209,13 @@ def _canonical_json_sha256(payload: object) -> str:
 
 
 def _checkpoint_snapshot_payload(files: dict[str, dict[str, int | str]]) -> dict:
-    if files != _EXPECTED_CHECKPOINT_FILE_RECORDS:
-        expected_paths = set(_EXPECTED_CHECKPOINT_FILE_RECORDS)
-        actual_paths = set(files)
-        mismatched = sorted(
-            relative
-            for relative in expected_paths & actual_paths
-            if files[relative] != _EXPECTED_CHECKPOINT_FILE_RECORDS[relative]
-        )
-        raise ValueError(
-            "MiniMax-H3 checkpoint does not match the exact pinned base inventory: "
-            f"missing={sorted(expected_paths - actual_paths)}, "
-            f"unexpected={sorted(actual_paths - expected_paths)}, "
-            f"mismatched={mismatched}"
-        )
+    files = dict(sorted(files.items()))
     payload = {
         "repository": CHECKPOINT_REPOSITORY,
         "revision": CHECKPOINT_REVISION,
         "files": files,
     }
     inventory_sha256 = _canonical_json_sha256(payload)
-    if inventory_sha256 != BASE_CHECKPOINT_INVENTORY_SHA256:
-        raise RuntimeError("MiniMax-H3 internal base-checkpoint inventory digest is inconsistent")
     return {
         **payload,
         "file_count": len(files),
@@ -331,6 +260,46 @@ def _validate_checkpoint_indexes(snapshot: Path, files: dict[str, dict[str, int 
             )
 
 
+def _checkpoint_file_record(path: Path, relative: str, blob_id: str) -> dict[str, int | str]:
+    """Record HF identity without rereading LFS payloads.
+
+    A canonical Hugging Face LFS blob name (or a local-dir ETag) is already the
+    payload SHA-256. Git-backed metadata files are small, so validate their Git
+    blob ID and retain a content SHA-256 in the inventory.
+    """
+
+    try:
+        metadata = path.stat()
+    except OSError as error:
+        raise ValueError(f"MiniMax-H3 checkpoint file is unavailable: {relative}") from error
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0:
+        raise ValueError(f"MiniMax-H3 checkpoint file is invalid: {relative}")
+    if _SHA256.fullmatch(blob_id) is not None:
+        return {"blob_id": blob_id, "bytes": metadata.st_size, "sha256": blob_id}
+    if _GIT_SHA.fullmatch(blob_id) is None:
+        raise ValueError(f"MiniMax-H3 checkpoint file has an invalid HF blob ID: {relative}")
+
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise ValueError(f"MiniMax-H3 checkpoint metadata is unreadable: {relative}") from error
+    if len(payload) != metadata.st_size or path.stat().st_size != metadata.st_size:
+        raise ValueError(f"MiniMax-H3 checkpoint metadata changed while reading: {relative}")
+    try:
+        git_blob = hashlib.sha1(usedforsecurity=False)
+    except TypeError:  # pragma: no cover - for older Python implementations
+        git_blob = hashlib.sha1()
+    git_blob.update(f"blob {len(payload)}\0".encode())
+    git_blob.update(payload)
+    if git_blob.hexdigest() != blob_id:
+        raise ValueError(f"MiniMax-H3 checkpoint Git blob ID mismatch: {relative}")
+    return {
+        "blob_id": blob_id,
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
 def _canonical_snapshot_entries(snapshot: Path) -> tuple[Path, ...]:
     entries: list[Path] = []
 
@@ -362,7 +331,7 @@ def _canonical_snapshot_entries(snapshot: Path) -> tuple[Path, ...]:
 
 
 def _canonical_checkpoint_snapshot_record(snapshot: Path) -> dict:
-    """Hash and describe an exact pinned HF cache snapshot."""
+    """Describe an exact-revision canonical HF cache snapshot."""
 
     if snapshot.name != CHECKPOINT_REVISION or snapshot.parent.name != "snapshots":
         raise ValueError(
@@ -374,21 +343,16 @@ def _canonical_checkpoint_snapshot_record(snapshot: Path) -> dict:
     blob_root = (repository_root / "blobs").resolve(strict=True)
 
     files: dict[str, dict[str, int | str]] = {}
-    link_identities: dict[str, tuple[int, int, int, int, int, int]] = {}
-    target_identities: dict[Path, dict[str, int]] = {}
     for path in _canonical_snapshot_entries(snapshot):
         relative = path.relative_to(snapshot).as_posix()
         if not path.is_symlink():
             raise ValueError(
                 f"MiniMax-H3 canonical snapshot entry is not a cache symlink: {relative}"
             )
-        link_identity = _lstat_identity(path)
         try:
             target = (path.parent / os.readlink(path)).resolve(strict=True)
         except OSError as error:
             raise ValueError(f"MiniMax-H3 snapshot has a broken entry: {relative}") from error
-        if _lstat_identity(path) != link_identity:
-            raise ValueError(f"MiniMax-H3 canonical snapshot link changed: {relative}")
         if target.parent != blob_root or not target.is_file():
             raise ValueError(
                 f"MiniMax-H3 snapshot entry leaves its canonical blob cache: {relative}"
@@ -401,18 +365,9 @@ def _canonical_checkpoint_snapshot_record(snapshot: Path) -> dict:
             raise ValueError(
                 f"MiniMax-H3 weight shard is not backed by an LFS SHA256 blob: {relative}"
             )
-        link_identities[relative] = link_identity
-        files[relative], target_identities[target] = _snapshot_file_record(
-            target, relative, blob_id
-        )
+        files[relative] = _checkpoint_file_record(target, relative, blob_id)
 
     _validate_checkpoint_indexes(snapshot, files)
-    for relative in files:
-        if _lstat_identity(snapshot / relative) != link_identities[relative]:
-            raise ValueError(f"MiniMax-H3 canonical snapshot link changed: {relative}")
-    for target, identity in target_identities.items():
-        if file_identity(target) != identity:
-            raise ValueError("MiniMax-H3 canonical snapshot blob changed while in use")
     return _checkpoint_snapshot_payload(files)
 
 
@@ -470,216 +425,61 @@ def _plain_snapshot_metadata_paths(
     snapshot: Path, content_relative_paths: set[str]
 ) -> dict[str, Path]:
     metadata_root = snapshot / _HF_LOCAL_DOWNLOAD_METADATA
-    try:
-        resolved_snapshot = snapshot.resolve(strict=True)
-        resolved_metadata_root = metadata_root.resolve(strict=True)
-    except OSError as error:
+    if not metadata_root.is_dir() or metadata_root.is_symlink():
         raise ValueError(
             "MiniMax-H3 local-dir checkpoint is missing Hugging Face download metadata"
-        ) from error
-    if not resolved_metadata_root.is_relative_to(resolved_snapshot):
-        raise ValueError("MiniMax-H3 local-dir download metadata leaves the checkpoint")
-    current = metadata_root
-    while current != snapshot:
-        metadata = current.lstat()
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or _is_reparse_point(metadata)
-            or not stat.S_ISDIR(metadata.st_mode)
-        ):
-            raise ValueError("MiniMax-H3 local-dir download metadata is not a regular tree")
-        current = current.parent
-
-    result: dict[str, Path] = {}
-
-    def fail_walk(error: OSError) -> None:
-        raise ValueError(
-            "MiniMax-H3 local-dir download metadata could not be inventoried"
-        ) from error
-
-    for directory, directory_names, filenames in os.walk(
-        metadata_root, topdown=True, onerror=fail_walk, followlinks=False
-    ):
-        root = Path(directory)
-        directory_names.sort()
-        filenames.sort()
-        if root == metadata_root and "transformer_ref" in directory_names:
-            directory_names.remove("transformer_ref")
-        for name in directory_names:
-            path = root / name
-            metadata = path.lstat()
-            if (
-                stat.S_ISLNK(metadata.st_mode)
-                or _is_reparse_point(metadata)
-                or not stat.S_ISDIR(metadata.st_mode)
-            ):
-                raise ValueError(
-                    "MiniMax-H3 local-dir download metadata contains a linked directory"
-                )
-        for name in filenames:
-            if not name.endswith(".metadata"):
-                continue
-            path = root / name
-            metadata = path.lstat()
-            if (
-                stat.S_ISLNK(metadata.st_mode)
-                or _is_reparse_point(metadata)
-                or not stat.S_ISREG(metadata.st_mode)
-            ):
-                raise ValueError("MiniMax-H3 local-dir download metadata is not a regular file")
-            relative_metadata = path.relative_to(metadata_root).as_posix()
-            relative = relative_metadata[: -len(".metadata")]
-            if not relative or relative in result:
-                raise ValueError("MiniMax-H3 local-dir download metadata has an invalid path")
-            result[relative] = path
-
-    missing_metadata = sorted(content_relative_paths - set(result))
-    orphan_metadata = sorted(set(result) - content_relative_paths)
-    if missing_metadata or orphan_metadata:
-        raise ValueError(
-            "MiniMax-H3 local-dir content and download metadata differ: "
-            f"missing_metadata={missing_metadata}, orphan_metadata={orphan_metadata}"
         )
+    result = {
+        relative: metadata_root / f"{relative}.metadata" for relative in content_relative_paths
+    }
+    missing = sorted(
+        relative for relative, path in result.items() if not path.is_file() or path.is_symlink()
+    )
+    if missing:
+        raise ValueError(f"MiniMax-H3 local-dir checkpoint is missing download metadata: {missing}")
     return result
 
 
-def _read_plain_snapshot_metadata(path: Path, relative: str) -> tuple[str, dict[str, int]]:
-    before = file_identity(path)
+def _read_plain_snapshot_metadata(path: Path, relative: str) -> str:
     try:
-        with path.open("r", encoding="utf-8") as stream:
-            handle_before = _file_identity_from_stat(os.fstat(stream.fileno()))
-            if not _same_open_file(before, handle_before):
-                raise ValueError(
-                    f"MiniMax-H3 local-dir download metadata changed before reading: {relative}"
-                )
-            fields = stream.read().splitlines()
-            if _file_identity_from_stat(os.fstat(stream.fileno())) != handle_before:
-                raise ValueError(
-                    f"MiniMax-H3 local-dir download metadata changed while reading: {relative}"
-                )
+        fields = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as error:
         raise ValueError(
             f"MiniMax-H3 local-dir download metadata is unreadable: {relative}"
         ) from error
-    after = file_identity(path)
-    if after != before:
-        raise ValueError(
-            f"MiniMax-H3 local-dir download metadata changed while reading: {relative}"
-        )
-    if len(fields) != 3 or fields[0] != CHECKPOINT_REVISION:
+    if len(fields) < 2 or fields[0] != CHECKPOINT_REVISION:
         raise ValueError(
             f"MiniMax-H3 local-dir metadata does not identify pinned revision: {relative}"
         )
     blob_id = fields[1]
     if _GIT_SHA.fullmatch(blob_id) is None and _SHA256.fullmatch(blob_id) is None:
         raise ValueError(f"MiniMax-H3 local-dir metadata has an invalid ETag: {relative}")
-    try:
-        timestamp = float(fields[2])
-    except ValueError as error:
-        raise ValueError(
-            f"MiniMax-H3 local-dir metadata has an invalid timestamp: {relative}"
-        ) from error
-    if not math.isfinite(timestamp) or timestamp < 0:
-        raise ValueError(f"MiniMax-H3 local-dir metadata has an invalid timestamp: {relative}")
-    return blob_id, before
-
-
-def _snapshot_file_record(
-    path: Path, relative: str, blob_id: str
-) -> tuple[dict[str, int | str], dict[str, int]]:
-    before = file_identity(path)
-    sha256 = hashlib.sha256()
-    git_blob = None
-    if len(blob_id) == 40:
-        try:
-            git_blob = hashlib.sha1(usedforsecurity=False)
-        except TypeError:  # pragma: no cover - for older Python implementations
-            git_blob = hashlib.sha1()
-        git_blob.update(f"blob {before['bytes']}\0".encode())
-    with path.open("rb") as stream:
-        handle_before = _file_identity_from_stat(os.fstat(stream.fileno()))
-        if not _same_open_file(before, handle_before):
-            raise ValueError(f"MiniMax-H3 checkpoint file changed before hashing: {relative}")
-        while chunk := stream.read(16 << 20):
-            sha256.update(chunk)
-            if git_blob is not None:
-                git_blob.update(chunk)
-        if _file_identity_from_stat(os.fstat(stream.fileno())) != handle_before:
-            raise ValueError(f"MiniMax-H3 checkpoint file changed while hashing: {relative}")
-    after = file_identity(path)
-    if after != before:
-        raise ValueError(f"MiniMax-H3 checkpoint file changed while hashing: {relative}")
-    digest = sha256.hexdigest()
-    if len(blob_id) == 64:
-        if digest != blob_id:
-            raise ValueError(f"MiniMax-H3 checkpoint LFS SHA256 mismatch: {relative}")
-    elif git_blob is None or git_blob.hexdigest() != blob_id:
-        raise ValueError(f"MiniMax-H3 checkpoint Git blob ID mismatch: {relative}")
-    return {
-        "blob_id": blob_id,
-        "bytes": before["bytes"],
-        "sha256": digest,
-    }, before
+    return blob_id
 
 
 def _plain_checkpoint_snapshot_record(snapshot: Path) -> dict:
-    """Verify and describe a pinned ``hf download --local-dir`` checkpoint."""
+    """Describe a pinned ``hf download --local-dir`` checkpoint."""
 
     content_paths = _plain_snapshot_content_paths(snapshot)
     content_by_relative = {path.relative_to(snapshot).as_posix(): path for path in content_paths}
-    expected_paths = set(_EXPECTED_CHECKPOINT_FILE_RECORDS)
-    actual_paths = set(content_by_relative)
-    if actual_paths != expected_paths:
-        raise ValueError(
-            "MiniMax-H3 local-dir does not contain the exact pinned base files: "
-            f"missing={sorted(expected_paths - actual_paths)}, "
-            f"unexpected={sorted(actual_paths - expected_paths)}"
-        )
     metadata_paths = _plain_snapshot_metadata_paths(snapshot, set(content_by_relative))
     files: dict[str, dict[str, int | str]] = {}
-    content_identities: dict[str, dict[str, int]] = {}
-    metadata_identities: dict[str, dict[str, int]] = {}
     for relative, path in sorted(content_by_relative.items()):
-        blob_id, metadata_identity = _read_plain_snapshot_metadata(
-            metadata_paths[relative], relative
-        )
-        expected = _EXPECTED_CHECKPOINT_FILE_RECORDS[relative]
-        if blob_id != expected["blob_id"] or path.stat().st_size != expected["bytes"]:
-            raise ValueError(
-                f"MiniMax-H3 local-dir metadata or size does not match pinned file: {relative}"
-            )
+        blob_id = _read_plain_snapshot_metadata(metadata_paths[relative], relative)
         if path.suffix == ".safetensors" and len(blob_id) != 64:
             raise ValueError(f"MiniMax-H3 local-dir weight shard has a non-LFS ETag: {relative}")
-        files[relative], content_identities[relative] = _snapshot_file_record(
-            path, relative, blob_id
-        )
-        metadata_identities[relative] = metadata_identity
+        files[relative] = _checkpoint_file_record(path, relative, blob_id)
 
     _validate_checkpoint_indexes(snapshot, files)
-    current_relative_paths = {
-        path.relative_to(snapshot).as_posix() for path in _plain_snapshot_content_paths(snapshot)
-    }
-    if current_relative_paths != set(content_by_relative):
-        raise ValueError("MiniMax-H3 local-dir checkpoint changed while being inventoried")
-    _plain_snapshot_metadata_paths(snapshot, current_relative_paths)
-    for relative, path in content_by_relative.items():
-        if file_identity(path) != content_identities[relative]:
-            raise ValueError(f"MiniMax-H3 local-dir file changed while in use: {relative}")
-        if file_identity(metadata_paths[relative]) != metadata_identities[relative]:
-            raise ValueError(
-                f"MiniMax-H3 local-dir download metadata changed while in use: {relative}"
-            )
     return _checkpoint_snapshot_payload(files)
 
 
 def checkpoint_snapshot_record(snapshot: Path) -> dict:
-    """Describe an exact pinned HF cache or ``--local-dir`` snapshot.
+    """Describe a pinned HF cache or ``--local-dir`` snapshot.
 
-    Both layouts receive a complete content-hash pass against the checked-in
-    file manifest. Canonical Hugging Face cache snapshots must additionally be
-    direct blob-cache symlinks; plain local-dir downloads must have one pinned
-    download-metadata record per content file. Both layouts produce the same
-    path-free receipt schema.
+    LFS payload identity comes from the canonical blob name or local-dir ETag,
+    while Git-backed metadata is read and hashed. This keeps the receipt stable
+    without rereading the 144-GB checkpoint before and after every staged build.
     """
 
     snapshot = snapshot.absolute()
@@ -722,8 +522,14 @@ def validate_checkpoint_snapshot_record(record: object) -> dict:
     if missing:
         raise ValueError(f"MiniMax-H3 checkpoint snapshot is incomplete; missing: {missing}")
     for relative, entry in files.items():
+        if not isinstance(relative, str) or not relative:
+            raise ValueError("MiniMax-H3 checkpoint snapshot has an invalid relative path")
         relative_path = Path(relative)
-        if relative_path.is_absolute() or ".." in relative_path.parts:
+        if (
+            relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or relative_path.parts[0] in {".cache", "transformer_ref"}
+        ):
             raise ValueError("MiniMax-H3 checkpoint snapshot has an invalid relative path")
         if not isinstance(entry, dict) or set(entry) != {"blob_id", "bytes", "sha256"}:
             raise ValueError(f"MiniMax-H3 checkpoint file has unexpected fields: {relative}")
@@ -735,8 +541,6 @@ def validate_checkpoint_snapshot_record(record: object) -> dict:
             raise ValueError(f"MiniMax-H3 checkpoint file has an invalid blob ID: {relative}")
         if len(blob_id) == 64 and digest != blob_id:
             raise ValueError(f"MiniMax-H3 LFS digest does not match its blob ID: {relative}")
-    if files != _EXPECTED_CHECKPOINT_FILE_RECORDS:
-        raise ValueError("MiniMax-H3 checkpoint snapshot does not match pinned file manifest")
     payload = {
         "repository": record["repository"],
         "revision": record["revision"],
@@ -1090,7 +894,7 @@ def _validate_build_receipt_metadata(
     build_helper: Path,
     source_revision: str,
     profile,
-    segmented_vsa: bool = False,
+    additional_plan_filenames: tuple[str, ...] = (),
 ) -> tuple[str, dict, dict]:
     if not isinstance(receipt, dict):
         raise ValueError("MiniMax-H3 build receipt must be a JSON object")
@@ -1106,11 +910,13 @@ def _validate_build_receipt_metadata(
     for key, value in expected.items():
         if receipt.get(key) != value:
             raise ValueError(f"MiniMax-H3 build receipt does not match current {key}")
-    selected_plans = plan_filenames_for_profile(profile, segmented_vsa=segmented_vsa)
+    selected_plans = (*plan_filenames_for_profile(profile), *additional_plan_filenames)
+    if len(set(selected_plans)) != len(selected_plans):
+        raise ValueError("MiniMax-H3 build receipt plan filenames must be unique")
     validate_workspace_limit_bytes(
         receipt.get("workspace_limit_bytes"),
         profile=profile,
-        segmented_vsa=segmented_vsa,
+        additional_plan_filenames=additional_plan_filenames,
     )
     snapshot_record = validate_checkpoint_snapshot_record(receipt.get("checkpoint_snapshot"))
     components = receipt.get("components")
@@ -1134,19 +940,19 @@ def validate_build_receipt(
     source_revision: str,
     profile,
     hash_files: bool,
-    segmented_vsa: bool = False,
+    additional_plan_filenames: tuple[str, ...] = (),
 ) -> tuple[str, dict, dict, dict]:
     source_sha, components, recorded_snapshot = _validate_build_receipt_metadata(
         receipt,
         build_helper=build_helper,
         source_revision=source_revision,
         profile=profile,
-        segmented_vsa=segmented_vsa,
+        additional_plan_filenames=additional_plan_filenames,
     )
     current_snapshot = checkpoint_snapshot_record(snapshot)
     if recorded_snapshot != current_snapshot:
         raise ValueError("MiniMax-H3 build receipt does not match current checkpoint_snapshot")
-    for filename in plan_filenames_for_profile(profile, segmented_vsa=segmented_vsa):
+    for filename in (*plan_filenames_for_profile(profile), *additional_plan_filenames):
         validate_record(
             plans_dir / filename,
             components.get(filename),
@@ -1167,16 +973,14 @@ def validate_component_build_receipt(
     source_revision: str,
     profile,
     hash_file: bool,
-    segmented_vsa: bool = False,
 ) -> tuple[str, dict, dict]:
-    if component not in plan_filenames_for_profile(profile, segmented_vsa=segmented_vsa):
+    if component not in plan_filenames_for_profile(profile):
         raise ValueError(f"Unknown MiniMax-H3 native component: {component}")
     source_sha, components, snapshot_record = _validate_build_receipt_metadata(
         receipt,
         build_helper=build_helper,
         source_revision=source_revision,
         profile=profile,
-        segmented_vsa=segmented_vsa,
     )
     component_record = components[component]
     validate_record(artifact, component_record, component, hash_file=hash_file)
@@ -1256,11 +1060,8 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
     inventory_sha = config.get("checkpoint_inventory_sha256")
     if not isinstance(inventory_sha, str) or _SHA256.fullmatch(inventory_sha) is None:
         raise ValueError("MiniMax-H3 bundle config has an invalid checkpoint inventory SHA256")
-    cache_mode = config.get("denoiser_cache_mode", "monolithic")
-    if cache_mode not in ("monolithic", "first_block", "segmented_vsa"):
-        raise ValueError("MiniMax-H3 bundle config has an invalid denoiser cache mode")
-    first_block_cache = cache_mode == "first_block"
-    segmented_vsa = cache_mode == "segmented_vsa"
+    if config.get("denoiser_cache_mode") != "first_block":
+        raise ValueError("MiniMax-H3 bundle config must use dense FirstBlockCache")
     plan_sha = config.get("plan_sha256")
     if not isinstance(plan_sha, dict):
         raise ValueError("MiniMax-H3 bundle config must identify the selected native plans")
@@ -1272,28 +1073,20 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
     )
     if public_workflows is not None and public_workflows not in supported_workflows:
         raise ValueError(
-            "MiniMax-H3 bundle public_workflows must be an ordered prefix of "
-            "[t2va, fl2va, ref2va]"
+            "MiniMax-H3 bundle public_workflows must be an ordered prefix of [t2va, fl2va, ref2va]"
         )
     declares_fl2va = public_workflows is not None and "fl2va" in public_workflows
     declares_ref2va = public_workflows is not None and "ref2va" in public_workflows
     ref2va_supported = config.get("ref2va_supported", False)
     if not isinstance(ref2va_supported, bool) or ref2va_supported != declares_ref2va:
-        raise ValueError(
-            "MiniMax-H3 bundle ref2va_supported must match public_workflows"
-        )
+        raise ValueError("MiniMax-H3 bundle ref2va_supported must match public_workflows")
     present_conditioning = set(plan_sha).intersection(_FL2VA_CONDITIONING_PLAN_FILENAMES)
-    if present_conditioning and present_conditioning != set(
-        _FL2VA_CONDITIONING_PLAN_FILENAMES
-    ):
+    if present_conditioning and present_conditioning != set(_FL2VA_CONDITIONING_PLAN_FILENAMES):
         raise ValueError("MiniMax-H3 FL2VA conditioning plans must be all-or-none")
     include_conditioning = (
         bool(present_conditioning) if public_workflows is None else declares_fl2va
     )
-    selected_plans = native_plan_filenames(
-        first_block_cache=first_block_cache,
-        segmented_vsa=segmented_vsa,
-    )
+    selected_plans = native_plan_filenames()
     if not include_conditioning:
         selected_plans = tuple(
             filename
@@ -1315,27 +1108,12 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         for value in plan_sha.values()
     ):
         raise ValueError("MiniMax-H3 bundle config has an invalid native plan SHA256")
-    if not isinstance(config.get("first_block_cache", False), bool):
-        raise ValueError("MiniMax-H3 bundle config has an invalid first_block_cache flag")
-    if config.get("first_block_cache", False) != first_block_cache:
-        raise ValueError("MiniMax-H3 bundle cache mode and profile flag disagree")
-    if segmented_vsa:
-        fast_h3 = config.get("fast_h3")
-        vsa = config.get("vsa")
-        if (
-            config.get("attention_mode") != "native_vsa"
-            or not isinstance(fast_h3, dict)
-            or fast_h3.get("adapter_gate_tensor_count") != 50
-            or not isinstance(vsa, dict)
-            or vsa.get("implementation") != "native_cuda_segmented"
-            or vsa.get("segment_count") != 51
-            or vsa.get("attention_calls_per_forward") != 50
-        ):
-            raise ValueError("MiniMax-H3 segmented VSA bundle contract is incomplete")
+    if config.get("first_block_cache") is not True:
+        raise ValueError("MiniMax-H3 bundle config must enable FirstBlockCache")
+    if config.get("attention_mode") != "dense":
+        raise ValueError("MiniMax-H3 bundle config must use dense attention")
     validate_workspace_limit_bytes(
         config.get("workspace_limit_bytes"),
-        first_block_cache=first_block_cache,
-        segmented_vsa=segmented_vsa,
         additional_plan_filenames=additional_plan_filenames,
         excluded_plan_filenames=(
             () if include_conditioning else _FL2VA_CONDITIONING_PLAN_FILENAMES

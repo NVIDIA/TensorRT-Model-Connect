@@ -269,7 +269,6 @@ def reference_video_latent_frames(num_frames: int) -> int:
 class ReferenceVideoEncodeSchedule:
     """Native clip schedule matching ``AutoencoderKLMiniMaxH3._encode``."""
 
-    normalized_frames: int
     snapped_frames: int
     clip_count: int
     repeated_tail_frames: int
@@ -300,7 +299,6 @@ def reference_video_encode_schedule(num_frames: int) -> ReferenceVideoEncodeSche
     if output != reference_video_latent_frames(num_frames):
         raise RuntimeError("MiniMax-H3 reference video latent schedule mismatch")
     return ReferenceVideoEncodeSchedule(
-        normalized_frames=num_frames,
         snapped_frames=snapped,
         clip_count=clip_count,
         repeated_tail_frames=repeated,

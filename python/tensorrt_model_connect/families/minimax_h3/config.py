@@ -42,22 +42,6 @@ CANVAS_MAX_ASPECT_RATIO = 4.0
 # TensorRT runtime remains a finite allowlist: these two orientations are in
 # addition to, not a replacement for, the 95 resolver-produced canvases.
 NATIVE_EXPLICIT_CANVAS_SIZES = ((544, 960), (960, 544))
-FASTH3_SCHEDULER_GRID_POINTS = 5
-FASTH3_TRANSFORMER_FORWARDS = 4
-FASTH3_GUIDANCE_SCALE = 1.0
-FASTH3_VSA_TILE_SIZE = 64
-FASTH3_VSA_VIDEO_KEEP_NUMERATOR = 1
-FASTH3_VSA_VIDEO_KEEP_DENOMINATOR = 10
-FASTH3_VSA_VIDEO_ROWS_PER_LATENT_FRAME = 24 * 42
-FASTH3_VSA_VIDEO_TILE_ROWS = 4
-FASTH3_VSA_VIDEO_TILE_HEIGHT = 4
-FASTH3_VSA_VIDEO_TILE_WIDTH = 4
-# Maximum across the released 768p canvas resolver (continuous 1:4..4:1
-# aspect range, dimensions rounded to 32) at 345 frames, including one or two
-# FL2VA conditioning frames in the same video-tile segment.
-FASTH3_VSA_MAX_VIDEO_TILES = 2080
-FASTH3_VSA_MIN_VIDEO_TILES = 360
-
 # The RTX path builds each plan in a fresh process, so one conservative
 # workspace and runtime budget cover every stage without coupling the public
 # artifact to a particular workstation identity.
@@ -70,7 +54,6 @@ DEFAULT_WORKSPACE_LIMIT_BYTES = {
     "text_encoder.plan": TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
     "vision_encoder.plan": VISION_ENCODER_DEFAULT_WORKSPACE_BYTES,
     "adaln_precompute.plan": ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
-    "denoiser.plan": DENOISER_DEFAULT_WORKSPACE_BYTES,
     "fl2va_keyframe_vae_encoder.plan": KEYFRAME_VAE_ENCODER_DEFAULT_WORKSPACE_BYTES,
     "vae_tile_decoder.plan": VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
     "audio_vae_decoder.plan": AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES,
@@ -81,61 +64,32 @@ FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES = (
     "denoiser_tail.plan",
     "denoiser_finish.plan",
 )
-FASTH3_SEGMENTED_DENOISER_PLAN_FILENAMES = (
-    "denoiser_entry.plan",
-    *(f"denoiser_transition_{index:02d}.plan" for index in range(49)),
-    "denoiser_finish.plan",
-)
 
 
-def native_plan_filenames(
-    *, first_block_cache: bool, segmented_vsa: bool = False
-) -> tuple[str, ...]:
-    """Return the exact plan set selected by the native denoiser profile."""
+def native_plan_filenames() -> tuple[str, ...]:
+    """Return the singular original-weight dense FirstBlockCache plan set."""
 
-    if not isinstance(first_block_cache, bool):
-        raise ValueError("MiniMax-H3 first_block_cache must be a boolean")
-    if not isinstance(segmented_vsa, bool):
-        raise ValueError("MiniMax-H3 segmented_vsa must be a boolean")
-    if first_block_cache and segmented_vsa:
-        raise ValueError("MiniMax-H3 segmented VSA cannot be combined with FirstBlockCache")
-    if segmented_vsa:
-        denoiser_plans = FASTH3_SEGMENTED_DENOISER_PLAN_FILENAMES
-    elif first_block_cache:
-        denoiser_plans = FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES
-    else:
-        denoiser_plans = ("denoiser.plan",)
     return (
         "text_encoder.plan",
         "vision_encoder.plan",
         "adaln_precompute.plan",
-        *denoiser_plans,
+        *FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES,
         "fl2va_keyframe_vae_encoder.plan",
         "vae_tile_decoder.plan",
         "audio_vae_decoder.plan",
     )
 
 
-def default_workspace_limit_bytes(
-    *, first_block_cache: bool, segmented_vsa: bool = False
-) -> dict[str, int | str]:
-    """Return per-plan tactic workspace limits for one denoiser layout."""
+def default_workspace_limit_bytes() -> dict[str, int | str]:
+    """Return per-plan tactic workspace limits for the dense FBC layout."""
 
     return {
         filename: (
             TRT_DEFAULT_WORKSPACE_POLICY
-            if first_block_cache
-            and (filename.startswith("denoiser_") or filename.startswith("adaln_"))
-            else
-            DENOISER_DEFAULT_WORKSPACE_BYTES
-            if filename.startswith("denoiser_") or filename == "denoiser.plan"
-            else ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES
-            if filename.startswith("adaln_")
+            if filename.startswith("denoiser_") or filename.startswith("adaln_")
             else DEFAULT_WORKSPACE_LIMIT_BYTES[filename]
         )
-        for filename in native_plan_filenames(
-            first_block_cache=first_block_cache, segmented_vsa=segmented_vsa
-        )
+        for filename in native_plan_filenames()
     }
 
 
@@ -177,10 +131,7 @@ class MiniMaxH3Config:
     padded_sequence_length: int = 38247
     max_timestep_count: int = 4
     context_parallel_size: int = 1
-    first_block_cache: bool = False
-    min_vsa_video_tiles: int | None = None
-    opt_vsa_video_tiles: int | None = None
-    max_vsa_video_tiles: int | None = None
+    first_block_cache: bool = True
 
     @property
     def sequence_length(self) -> int:
@@ -206,59 +157,9 @@ class MiniMaxH3Config:
     def packed_row_profile(self) -> tuple[int, int, int]:
         return self.min_sequence_length, self.opt_sequence_length, self.sequence_length
 
-    @staticmethod
-    def _ceil_div(value: int, divisor: int) -> int:
-        return (value + divisor - 1) // divisor
-
-    @property
-    def vsa_prefix_tile_profile(self) -> tuple[int, int, int]:
-        """Segment-pure ``text | audio`` tile counts for the dynamic ABI."""
-
-        return tuple(
-            self._ceil_div(text, FASTH3_VSA_TILE_SIZE) + self._ceil_div(audio, FASTH3_VSA_TILE_SIZE)
-            for text, audio in zip(self.text_row_profile, self.audio_row_profile, strict=True)
-        )
-
     @property
     def text_row_profile(self) -> tuple[int, int, int]:
         return self.min_text_rows, self.opt_text_rows, self.text_rows
-
-    def _vsa_video_tiles(self, video_rows: int) -> int:
-        if video_rows % FASTH3_VSA_VIDEO_ROWS_PER_LATENT_FRAME:
-            raise ValueError("MiniMax-H3 VSA video rows do not encode whole latent frames")
-        latent_frames = video_rows // FASTH3_VSA_VIDEO_ROWS_PER_LATENT_FRAME
-        return (
-            self._ceil_div(latent_frames, FASTH3_VSA_VIDEO_TILE_ROWS)
-            * self._ceil_div(24, FASTH3_VSA_VIDEO_TILE_HEIGHT)
-            * self._ceil_div(42, FASTH3_VSA_VIDEO_TILE_WIDTH)
-        )
-
-    @property
-    def vsa_video_tile_profile(self) -> tuple[int, int, int]:
-        explicit = (
-            self.min_vsa_video_tiles,
-            self.opt_vsa_video_tiles,
-            self.max_vsa_video_tiles,
-        )
-        if any(value is not None for value in explicit):
-            if any(value is None for value in explicit):
-                raise ValueError("MiniMax-H3 VSA tile profile must specify min, opt, and max")
-            return tuple(int(value) for value in explicit)
-        return tuple(self._vsa_video_tiles(rows) for rows in self.video_row_profile)
-
-    @property
-    def vsa_video_tile_abi_profile(self) -> tuple[int, int, int]:
-        active = self.vsa_video_tile_profile
-        return active[0], active[1], max(active[2], FASTH3_VSA_MAX_VIDEO_TILES)
-
-    @property
-    def vsa_total_tile_profile(self) -> tuple[int, int, int]:
-        return tuple(
-            prefix + video
-            for prefix, video in zip(
-                self.vsa_prefix_tile_profile, self.vsa_video_tile_abi_profile, strict=True
-            )
-        )
 
     @property
     def padding_rows(self) -> int:
@@ -290,19 +191,6 @@ class MiniMaxH3Config:
             raise ValueError("MiniMax-H3 video rows must satisfy 0 < min <= opt <= max")
         if not 0 < self.min_audio_rows <= self.opt_audio_rows <= self.audio_rows:
             raise ValueError("MiniMax-H3 audio rows must satisfy 0 < min <= opt <= max")
-        if any(
-            value is not None
-            for value in (
-                self.min_vsa_video_tiles,
-                self.opt_vsa_video_tiles,
-                self.max_vsa_video_tiles,
-            )
-        ):
-            vsa_tiles = self.vsa_video_tile_profile
-            if not 0 < vsa_tiles[0] <= vsa_tiles[1] <= vsa_tiles[2]:
-                raise ValueError("MiniMax-H3 VSA video tiles must satisfy 0 < min <= opt <= max")
-            if vsa_tiles[2] > FASTH3_VSA_MAX_VIDEO_TILES:
-                raise ValueError("MiniMax-H3 VSA video tile profile exceeds the native CUDA ABI")
         if any(rows % 2 for rows in self.audio_row_profile):
             raise ValueError("MiniMax-H3 audio_rows must contain two equal stereo channels")
         if self.sequence_length != self.padded_sequence_length:
@@ -325,7 +213,6 @@ SOL_ENGINE_1344X768_124F = MiniMaxH3Config()
 SOL_ENGINE_1344X768_124F_FAST_FBC = MiniMaxH3Config(
     min_text_rows=537,
     opt_text_rows=537,
-    first_block_cache=True,
 )
 
 # The released local pipeline aligns requested frame counts to ``17 * n + 5``.
@@ -339,7 +226,4 @@ SOL_ENGINE_1344X768_124_TO_345F = MiniMaxH3Config(
     audio_rows=1150,
     text_rows=2641,
     padded_sequence_length=112367,
-    min_vsa_video_tiles=FASTH3_VSA_MIN_VIDEO_TILES,
-    opt_vsa_video_tiles=660,
-    max_vsa_video_tiles=FASTH3_VSA_MAX_VIDEO_TILES,
 )

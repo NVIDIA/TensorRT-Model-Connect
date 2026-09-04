@@ -79,23 +79,6 @@ bool has_mp4_extension(const std::string& path) {
 }
 #endif
 
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-bool is_locked_h3_generate_video_option(const std::string& option) {
-    return option == "--prompt" || option == "-p" || option == "--first-frame" ||
-           option == "--last-frame" || option == "--reference-image" ||
-           option == "--reference-video" || option == "--reference-audio" ||
-           option == "--output" || option == "-o" || option == "--num-steps" ||
-           option == "--num-inference-steps" || option == "--num-frames" ||
-           option == "--guidance-scale" || option == "--height" || option == "--width" ||
-           option == "--seed" || option == "--benchmark" || option == "--warmup" ||
-           option == "--runtime-cache" || option == "--config" || option == "--set" ||
-           // Preserve the more specific fail-closed diagnostics below.
-           option == "--hf-python" || option == "--backend-dir" ||
-           option == "--model-plugin-dir" || option == "--kernel-bindings" ||
-           option == "--initial-latents-raw" || option == "--negative-prompt";
-}
-#endif
-
 } // namespace
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
@@ -224,12 +207,10 @@ void print_usage() {
                  "[--num-inference-steps N] [--guidance-scale 1] "
                  "[--runtime-cache PATH] [--config FILE] [--set KEY=VALUE] ... "
                  "[--warmup N --benchmark N]\n";
-#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
-    std::cerr << "                       FL2VA: [--first-frame IMAGE] [--last-frame IMAGE]\n"
-                 "                       Ref2VA: [--reference-image IMAGE] "
+    std::cerr << "                       Conditioning: [--first-frame IMAGE] [--last-frame IMAGE]\n"
+                 "                       References: [--reference-image IMAGE] "
                  "[--reference-video VIDEO] [--reference-audio AUDIO] ...\n";
-#endif
-    std::cerr << "  trtmc inspect        <bundle.bundle> [--list-engines] [--validate-runtime]\n"
+    std::cerr << "  trtmc inspect        <bundle.bundle> [--list-engines]\n"
                  "  trtmc version\n"
                  "\n"
                  "Output contract:\n"
@@ -238,10 +219,8 @@ void print_usage() {
                  "\n"
                  "Runtime options:\n"
                  "  --runtime-cache PATH   TensorRT-RTX JIT kernel cache file\n";
-#if !defined(TRTMC_LOCKED_H3_RUNTIME)
     std::cerr << "  --backend-dir PATH     Extra backend shared-library directory\n"
                  "  --model-plugin-dir PATH Extra model-plugin shared-library directory\n";
-#endif
 #else
     std::cerr
         << "Usage:\n"
@@ -285,16 +264,11 @@ void print_usage() {
            "  trtmc generate-video  <bundle.bundle> --prompt \"text\" --output DIR [--num-steps N] "
            "[--num-frames N] [--guidance-scale S] [--initial-latents-raw PATH]\n"
            "                        [--negative-prompt \"text\"] [--height N] [--width N]\n"
-#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
-           "                        MiniMax-H3 native canvases: the 768p resolver set, plus\n"
-           "                        --height 544 --width 960 (or its transpose); others fail "
-           "closed.\n"
-           "                        FL2VA: [--first-frame IMAGE] [--last-frame IMAGE]\n"
-           "                        Ref2VA: [--reference-image IMAGE] "
+           "                        Conditioning: [--first-frame IMAGE] [--last-frame IMAGE]\n"
+           "                        References: [--reference-image IMAGE] "
            "[--reference-video VIDEO] [--reference-audio AUDIO] ...\n"
            "                        VIDEO is an MP4/media file or ModelConnect video directory.\n"
            "                        AUDIO is an MP3/WAV/media file decoded natively on Windows.\n"
-#endif
            "  trtmc embed           <bundle.bundle> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.bundle> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
@@ -309,7 +283,7 @@ void print_usage() {
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
            "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
            "  trtmc speak           <bundle.bundle> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
-           "  trtmc inspect         <bundle.bundle> [--list-engines] [--validate-runtime]\n"
+           "  trtmc inspect         <bundle.bundle> [--list-engines]\n"
            "  trtmc version\n"
            "\n"
            "Options:\n"
@@ -355,13 +329,8 @@ CliArgs parse_args(int argc, char** argv) {
     }
     if (args.command != "generate-video" && args.command != "inspect") {
         args.parse_error = true;
-#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
-        args.error_message =
-            "this MiniMax-H3 runtime CLI supports generate-video, inspect, and version only";
-#else
         args.error_message =
             "this runtime-only ModelConnect CLI supports generate-video, inspect, and version only";
-#endif
         return args;
     }
 #endif
@@ -408,16 +377,6 @@ CliArgs parse_args(int argc, char** argv) {
 #endif
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
-
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-        if (args.command == "generate-video" && !arg.empty() && arg.front() == '-' &&
-            !is_locked_h3_generate_video_option(arg)) {
-            args.parse_error = true;
-            args.error_message =
-                arg + " is not supported by the locked MiniMax-H3 generate-video command";
-            return args;
-        }
-#endif
 
         auto need_value = [&](const std::string& name) -> bool {
             if (i + 1 >= argc) {
@@ -533,7 +492,6 @@ CliArgs parse_args(int argc, char** argv) {
                 return args;
             }
             args.warmup = *value;
-            args.warmup_provided = true;
             continue;
         }
         if (arg == "--temperature" && need_value(arg)) {
@@ -626,11 +584,7 @@ CliArgs parse_args(int argc, char** argv) {
         if (arg == "--hf-python" && need_value(arg)) {
 #if defined(TRTMC_RUNTIME_ONLY_CLI)
             args.parse_error = true;
-#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
-            args.error_message = "--hf-python is not present in the native MiniMax-H3 runtime";
-#else
             args.error_message = "--hf-python is not present in the native ModelConnect runtime";
-#endif
             return args;
 #else
             args.hf_python = argv[++i];
@@ -746,15 +700,8 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--initial-latents-raw" && need_value(arg)) {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-            args.parse_error = true;
-            args.error_message =
-                "--initial-latents-raw is not supported by the native MiniMax-H3 runtime";
-            return args;
-#else
             args.initial_latents_raw = argv[++i];
             continue;
-#endif
         }
         if (arg == "--condition-latents-raw" && need_value(arg)) {
             args.condition_latents_raw = argv[++i];
@@ -799,14 +746,6 @@ CliArgs parse_args(int argc, char** argv) {
                 args.error_message = arg + " expects a finite number >= 0";
                 return args;
             }
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-            if (*value != 1.0F) {
-                args.parse_error = true;
-                args.error_message =
-                    "--guidance-scale must be 1 for the guidance-distilled MiniMax-H3 runtime";
-                return args;
-            }
-#endif
             args.guidance_scale = *value;
             continue;
         }
@@ -815,15 +754,8 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--negative-prompt" && need_value(arg)) {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-            args.parse_error = true;
-            args.error_message =
-                "--negative-prompt is not supported by the guidance-distilled MiniMax-H3 runtime";
-            return args;
-#else
             args.negative_prompt = argv[++i];
             continue;
-#endif
         }
         if (arg == "--height" && need_value(arg)) {
             auto value = parse_int_value(arg, "an integer > 0");
@@ -1057,40 +989,22 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--kernel-bindings") {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-            args.parse_error = true;
-            args.error_message = "--kernel-bindings is disabled in the locked MiniMax-H3 runtime";
-            return args;
-#else
             if (!need_value(arg))
                 return args;
             args.kernel_bindings_path = argv[++i];
             continue;
-#endif
         }
         if (arg == "--backend-dir") {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-            args.parse_error = true;
-            args.error_message = "--backend-dir is disabled in the locked MiniMax-H3 runtime";
-            return args;
-#else
             if (!need_value(arg))
                 return args;
             args.backend_search_paths.emplace_back(argv[++i]);
             continue;
-#endif
         }
         if (arg == "--model-plugin-dir") {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-            args.parse_error = true;
-            args.error_message = "--model-plugin-dir is disabled in the locked MiniMax-H3 runtime";
-            return args;
-#else
             if (!need_value(arg))
                 return args;
             args.model_plugin_search_paths.emplace_back(argv[++i]);
             continue;
-#endif
         }
         if (arg == "--cuda-graphs") {
             args.cuda_graphs = true;
@@ -1098,10 +1012,6 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--list-engines") {
             args.list_engines = true;
-            continue;
-        }
-        if (arg == "--validate-runtime") {
-            args.validate_runtime = true;
             continue;
         }
         if (arg == "--config" && need_value(arg)) {
@@ -1154,14 +1064,6 @@ CliArgs parse_args(int argc, char** argv) {
     }
 #endif
 
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    if (args.command == "generate-video" && args.warmup_provided && args.benchmark == 0) {
-        args.parse_error = true;
-        args.error_message = "--warmup requires --benchmark N with N > 0";
-        return args;
-    }
-#endif
-
     const bool has_key_frames = !args.first_frame_path.empty() || !args.last_frame_path.empty();
     const bool has_references = !args.video_references.empty();
     if (args.command != "generate-video" && (has_key_frames || has_references)) {
@@ -1169,50 +1071,9 @@ CliArgs parse_args(int argc, char** argv) {
         args.error_message =
             "video conditioning flags are only valid with the generate-video command";
     }
-    if (args.command != "inspect" && args.validate_runtime) {
-        args.parse_error = true;
-        args.error_message = "--validate-runtime is only valid with inspect";
-    }
     if (args.command == "generate-video" && has_key_frames && has_references) {
         args.parse_error = true;
-        args.error_message = "FL2VA key frames cannot be combined with Ref2VA references";
-    }
-    if (args.command == "generate-video" && has_references) {
-        std::size_t image_count = 0;
-        std::size_t video_count = 0;
-        std::size_t audio_count = 0;
-        for (const auto& reference : args.video_references) {
-            switch (reference.kind) {
-            case VideoReferenceArgKind::kImage:
-                ++image_count;
-                break;
-            case VideoReferenceArgKind::kVideoDirectory:
-                ++video_count;
-                break;
-            case VideoReferenceArgKind::kAudio:
-                ++audio_count;
-                break;
-            }
-        }
-        if (image_count > 9) {
-            args.parse_error = true;
-            args.error_message = "Ref2VA accepts at most 9 reference images";
-        } else if (video_count > 3) {
-            args.parse_error = true;
-            args.error_message = "Ref2VA accepts at most 3 reference videos";
-        } else if (audio_count > 3) {
-            args.parse_error = true;
-            args.error_message = "Ref2VA accepts at most 3 explicit reference audio files";
-        } else if (args.video_references.size() > 12) {
-            args.parse_error = true;
-            args.error_message = "Ref2VA accepts at most 12 ordered reference files";
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-        } else if (image_count == 0 && video_count == 0) {
-            args.parse_error = true;
-            args.error_message =
-                "MiniMax-H3 Ref2VA requires at least one reference image or video";
-#endif
-        }
+        args.error_message = "key frames cannot be combined with media references";
     }
 
     return args;

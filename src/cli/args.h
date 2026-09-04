@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace trtmc::cli {
@@ -36,8 +35,8 @@ struct CliArgs {
     std::string right_image_path;
     std::string first_frame_path;
     std::string last_frame_path;
-    // Ref2VA inputs in exact command-line order. Video inputs are native
-    // Native media files or ModelConnect directories (manifest + PNG/WAV).
+    // Ref2VA inputs in exact command-line order. Video references may be native
+    // media files or ModelConnect directories (manifest + PNG/WAV).
     std::vector<VideoReferenceArg> video_references;
     std::string lora_adapter_path;
     std::string lora_adapter_id{"default"};
@@ -66,7 +65,6 @@ struct CliArgs {
     int num_samples{1};
     int benchmark{0}; // >0: run N timed iterations after warmup
     int warmup{1};    // number of warmup iterations before timing
-    bool warmup_provided{false};
     float temperature{1.0F};
     float top_p{1.0F};
     float min_p{0.0F};
@@ -113,7 +111,6 @@ struct CliArgs {
     std::vector<std::string> model_plugin_search_paths;
     bool cuda_graphs{false};
     bool list_engines{false};
-    bool validate_runtime{false};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -137,15 +134,6 @@ inline bool has_run_input_source(const CliArgs& args) {
 
 inline bool text_stdout_requires_jsonl(const CliArgs& args, int total_samples) {
     return !args.prompts_file.empty() || total_samples > 1;
-}
-
-inline bool validate_bundle_payloads_for_command(std::string_view command) noexcept {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    return command != "generate-video";
-#else
-    (void)command;
-    return true;
-#endif
 }
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text);

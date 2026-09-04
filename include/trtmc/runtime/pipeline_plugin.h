@@ -84,9 +84,6 @@ struct PipelineContext {
     // namespace via ctx.runtime_config->get<T>("ns", "field"). The bundle
     // the pointer refers to is owned by the factory and outlives create().
     const ::trtmc::config::ConfigBundle* runtime_config{nullptr};
-    // When false, plugins validate header metadata and section bounds but do not
-    // attest payload contents against the declared digests.
-    bool validate_bundle_payloads{true};
 };
 
 // Plugin interface. Each plugin registers itself with the PipelineRegistry

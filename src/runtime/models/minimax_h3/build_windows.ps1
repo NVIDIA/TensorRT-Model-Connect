@@ -67,7 +67,7 @@ foreach ($tool in @("cmake", "ninja", "cl.exe", "git")) {
 $CxxCompiler = (Get-Command "cl.exe" -CommandType Application -ErrorAction Stop).Source `
     -replace "\\", "/"
 
-$RepositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+$RepositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\..\..")).Path
 $CudaSdk = Resolve-SdkRoot $CudaRoot "CUDA 12.9 Toolkit" "bin\nvcc.exe"
 $RtxSdk = Resolve-SdkRoot $TensorRtRtxRoot "TensorRT-RTX SDK" "include\NvInfer.h"
 $RtxLibraryDirectory = Resolve-SdkDirectory $RtxSdk @("lib", "lib\x64") `
@@ -118,7 +118,6 @@ $ConfigureArguments = @(
     "-DTRTMC_ENABLE_TRT=OFF",
     "-DTRTMC_BUILD_BACKEND_TRT=OFF",
     "-DTRTMC_BUILD_BACKEND_RTX=ON",
-    "-DTRTMC_RTX_ROOT=$RtxSdk",
     "-DTRTMC_RTX_INCLUDE_DIR=$(Join-Path $RtxSdk 'include')",
     "-DTRTMC_RTX_LIBRARY_DIR=$RtxLibraryDirectory",
     "-DTRTMC_RTX_RUNTIME_DIR=$RtxRuntimeDirectory",
@@ -129,8 +128,7 @@ $ConfigureArguments = @(
     "-DTRTMC_BUILD_BENCHMARKS=$BuildBenchmarksValue",
     "-DTRTMC_SOURCE_REVISION=$SourceRevision",
     "-DTRTMC_DISTRIBUTABLE_BUILD=ON",
-    "-DTRTMC_RUNTIME_ONLY_CLI=ON",
-    "-DTRTMC_LOCKED_H3_RUNTIME=ON"
+    "-DTRTMC_RUNTIME_ONLY_CLI=ON"
 )
 
 & cmake @ConfigureArguments
@@ -142,8 +140,7 @@ $BuildTargets = @(
     "trtmc",
     "trtmc_core",
     "trtmc_backend_rtx",
-    "trtmc_model_minimax_h3",
-    "minimax_h3_setup"
+    "trtmc_model_minimax_h3"
 )
 if ($BuildBenchmarks) {
     $BuildTargets += "trtmc_benchmark_worker"
@@ -160,16 +157,11 @@ if ($BuildTests) {
         "test_runtime_cache_persistence",
         "test_bundle_format",
         "test_bundle_materialization",
-        "test_bundle_sha256",
         "test_cli_args",
-        "test_cli_args_locked_h3_runtime",
         "test_cli_args_runtime_only",
         "test_config_cli_support",
-        "test_minimax_h3_video_contract",
         "test_trt_version",
-        "test_windows_process_lockdown",
         "test_windows_utf8_argv",
-        "test_windows_h3_installer",
         "test_windows_media",
         "test_pipeline_registry",
         "test_model_plugin_loader",
@@ -178,20 +170,17 @@ if ($BuildTests) {
         "test_trtmc_io",
         "test_minimax_h3_config_schema",
         "test_minimax_h3_math",
-        "test_minimax_h3_denoiser_abi",
         "test_minimax_h3_conditioning",
         "test_minimax_h3_fl2va_runtime",
         "test_minimax_h3_ref2va_runtime",
-        "test_minimax_h3_vsa_layout",
-        "test_minimax_h3_vsa_cuda",
         "test_minimax_h3_cuda_rng"
     )
     & cmake --build $BuildPath --parallel --target @TestTargets
     if ($LASTEXITCODE -ne 0) {
         throw "Native Windows test build failed with exit code $LASTEXITCODE"
     }
-    & ctest --test-dir $BuildPath --output-on-failure `
-        -R "^(test_dynamic_library|test_backend_loader|test_runtime_cache_persistence|test_bundle_format|test_bundle_materialization|test_bundle_sha256|test_cli_args|test_cli_args_locked_h3_runtime|test_cli_args_runtime_only|test_config_cli_support|test_minimax_h3_video_contract|test_trt_version|test_windows_process_lockdown|test_windows_utf8_argv|test_windows_h3_installer|test_windows_media|test_pipeline_registry|test_model_plugin_loader|test_pipeline_api|test_c_abi_entry|test_trtmc_io|test_minimax_h3_config_schema|test_minimax_h3_math|test_minimax_h3_denoiser_abi|test_minimax_h3_conditioning|test_minimax_h3_fl2va_runtime|test_minimax_h3_ref2va_runtime|test_minimax_h3_vsa_layout|test_minimax_h3_vsa_cuda|test_minimax_h3_cuda_rng)$"
+    $TestRegex = "^(" + (($TestTargets | ForEach-Object { [Regex]::Escape($_) }) -join "|") + ")$"
+    & ctest --test-dir $BuildPath --output-on-failure -R $TestRegex
     if ($LASTEXITCODE -ne 0) {
         throw "Native Windows tests failed with exit code $LASTEXITCODE"
     }

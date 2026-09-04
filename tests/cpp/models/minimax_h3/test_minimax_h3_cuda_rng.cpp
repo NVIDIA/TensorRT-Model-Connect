@@ -137,7 +137,7 @@ void test_pipeline_destruction_flushes_runtime_cache() {
     {
         trtmc::MiniMaxH3Pipeline pipeline(std::move(unused_loader),
                                           std::make_unique<TestTokenizer>(), "test-minimax-h3",
-                                          false, 0.025F, {}, {}, [&] { flushed = true; });
+                                          0.025F, {}, {}, [&] { flushed = true; });
     }
     if (!flushed)
         throw std::runtime_error("MiniMax-H3 pipeline destruction did not flush runtime cache");
@@ -168,60 +168,6 @@ void test_pipeline_rejects_initial_latents_before_plan_loading() {
     }
     if (!rejected)
         throw std::runtime_error("MiniMax-H3 did not reject caller-supplied initial latents");
-}
-
-void test_pipeline_explicit_cache_finalization_is_once_and_terminal() {
-    int finalizations = 0;
-    {
-        trtmc::MiniMaxH3Pipeline pipeline(make_unused_pipeline_loader(),
-                                          std::make_unique<TestTokenizer>(), "test-minimax-h3",
-                                          false, 0.025F, {}, {}, [&] { ++finalizations; });
-        pipeline.finalize_runtime_cache();
-        pipeline.finalize_runtime_cache();
-        if (finalizations != 1)
-            throw std::runtime_error("explicit runtime-cache finalization was not idempotent");
-
-        bool generation_rejected = false;
-        try {
-            (void)pipeline.generate_video("must-not-run");
-        } catch (const std::runtime_error& error) {
-            generation_rejected =
-                std::string(error.what()).find("after runtime-cache finalization") !=
-                std::string::npos;
-        }
-        if (!generation_rejected) {
-            throw std::runtime_error(
-                "MiniMax-H3 allowed generation after runtime-cache finalization");
-        }
-    }
-    if (finalizations != 1)
-        throw std::runtime_error("pipeline destructor repeated successful cache finalization");
-}
-
-void test_pipeline_cache_finalization_failure_propagates_and_retries() {
-    int attempts = 0;
-    {
-        trtmc::MiniMaxH3Pipeline pipeline(
-            make_unused_pipeline_loader(), std::make_unique<TestTokenizer>(), "test-minimax-h3",
-            false, 0.025F, {}, {}, [&] {
-                ++attempts;
-                if (attempts == 1)
-                    throw std::runtime_error("synthetic runtime-cache persistence failure");
-            });
-        bool propagated = false;
-        try {
-            pipeline.finalize_runtime_cache();
-        } catch (const std::runtime_error& error) {
-            propagated =
-                std::string(error.what()).find("synthetic runtime-cache") != std::string::npos;
-        }
-        if (!propagated)
-            throw std::runtime_error("explicit cache-persistence failure was not propagated");
-    }
-    if (attempts != 2) {
-        throw std::runtime_error(
-            "pipeline destructor did not retry a failed runtime-cache finalization");
-    }
 }
 
 void test_scheduler_rejects_invalid_inputs() {
@@ -539,8 +485,6 @@ int main() {
         test_scheduler_matches_cpu();
         test_pipeline_destruction_flushes_runtime_cache();
         test_pipeline_rejects_initial_latents_before_plan_loading();
-        test_pipeline_explicit_cache_finalization_is_once_and_terminal();
-        test_pipeline_cache_finalization_failure_propagates_and_retries();
         test_scheduler_rejects_invalid_inputs();
         test_cuda_vae_tile_extraction();
         test_cuda_vae_extreme_canvas_extraction_is_bounded();

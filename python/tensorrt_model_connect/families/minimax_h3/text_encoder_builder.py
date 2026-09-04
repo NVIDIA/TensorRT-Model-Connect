@@ -58,7 +58,7 @@ def checkpoint_keys() -> tuple[str, ...]:
     return tuple(names)
 
 
-def _per_head_norm(network, tensor, weight, rows: int, heads: int):
+def _per_head_norm(network, tensor, weight, heads: int):
     reshape = network.add_shuffle(tensor)
     reshape.reshape_dims = (-1, heads, HEAD_DIM)
     normalized = op.rms_norm(network, reshape.get_output(0), weight, HEAD_DIM, NORM_EPS)
@@ -142,18 +142,15 @@ def build_text_encoder_engine(
         q = _linear(network, normalized, weights, f"{prefix}.self_attn.q_proj")
         k = _linear(network, normalized, weights, f"{prefix}.self_attn.k_proj")
         v = _linear(network, normalized, weights, f"{prefix}.self_attn.v_proj")
-        q = _per_head_norm(
-            network, q, weights[f"{prefix}.self_attn.q_norm.weight"], sequence_length, NUM_HEADS
-        )
+        q = _per_head_norm(network, q, weights[f"{prefix}.self_attn.q_norm.weight"], NUM_HEADS)
         k = _per_head_norm(
-            network, k, weights[f"{prefix}.self_attn.k_norm.weight"], sequence_length, NUM_KV_HEADS
+            network, k, weights[f"{prefix}.self_attn.k_norm.weight"], NUM_KV_HEADS
         )
         q = op.partial_rope(
             network,
             q,
             cos,
             sin,
-            rows=sequence_length,
             heads=NUM_HEADS,
             head_dim=HEAD_DIM,
             rotary_dim=HEAD_DIM,
@@ -163,14 +160,13 @@ def build_text_encoder_engine(
             k,
             cos,
             sin,
-            rows=sequence_length,
             heads=NUM_KV_HEADS,
             head_dim=HEAD_DIM,
             rotary_dim=HEAD_DIM,
         )
-        q4 = op.rows_to_heads(network, q, sequence_length, NUM_HEADS, HEAD_DIM)
-        k4 = op.rows_to_heads(network, k, sequence_length, NUM_KV_HEADS, HEAD_DIM)
-        v4 = op.rows_to_heads(network, v, sequence_length, NUM_KV_HEADS, HEAD_DIM)
+        q4 = op.rows_to_heads(network, q, NUM_HEADS, HEAD_DIM)
+        k4 = op.rows_to_heads(network, k, NUM_KV_HEADS, HEAD_DIM)
+        v4 = op.rows_to_heads(network, v, NUM_KV_HEADS, HEAD_DIM)
         k4 = _repeat_kv(network, k4)
         v4 = _repeat_kv(network, v4)
         scale = op.constant(
@@ -186,9 +182,7 @@ def build_text_encoder_engine(
         attention.metadata = f"trtmc.native_op=IAttention;source={attention.name}"
         attention.get_output(0).name = f"{attention.name}.output"
         attention.decomposable = False
-        update = op.heads_to_rows(
-            network, attention.get_output(0), sequence_length, NUM_HEADS * HEAD_DIM
-        )
+        update = op.heads_to_rows(network, attention.get_output(0), NUM_HEADS * HEAD_DIM)
         update = _linear(network, update, weights, f"{prefix}.self_attn.o_proj")
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 

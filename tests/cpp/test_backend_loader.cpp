@@ -4,7 +4,6 @@
  */
 
 #include "runtime/backend/backend_loader.h"
-#include "runtime/backend/prebound_backend.h"
 #include "runtime/platform/dynamic_library.h"
 
 #include <filesystem>
@@ -22,53 +21,6 @@ static void check(bool cond, const char* name) {
 }
 
 int main() {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    bool rejected = false;
-    try {
-        trtmc::BackendLoader::load("trt_rtx", {"C:\\untrusted"});
-    } catch (const std::runtime_error& error) {
-        rejected = true;
-        check(std::string(error.what()).find("rejects backend search path overrides") !=
-                  std::string::npos,
-              "locked backend loader explains rejected search path");
-    }
-    check(rejected, "locked backend loader rejects explicit search paths");
-
-    bool wrong_backend_rejected = false;
-    try {
-        trtmc::BackendLoader::load("trt");
-    } catch (const std::runtime_error& error) {
-        wrong_backend_rejected = true;
-        check(std::string(error.what()).find("only the TensorRT-RTX backend") != std::string::npos,
-              "locked backend loader explains backend allowlist");
-    }
-    check(wrong_backend_rejected, "locked backend loader rejects non-RTX backends");
-
-    auto* backend = trtmc::BackendLoader::load("trt_rtx");
-    check(backend != nullptr, "locked backend loader loads adjacent TensorRT-RTX backend");
-    auto* runtime_cache_backend = dynamic_cast<trtmc::IRuntimeCacheBackend*>(backend);
-    check(runtime_cache_backend != nullptr,
-          "TensorRT-RTX backend exposes explicit runtime-cache persistence");
-    check(dynamic_cast<trtmc::ISerialFileBackedBackend*>(backend) != nullptr,
-          "TensorRT-RTX backend exposes serial file-backed activation arenas");
-    if (runtime_cache_backend != nullptr) {
-        const std::string cache_path =
-            (std::filesystem::temp_directory_path() / "trtmc-runtime-cache-lease-test.bin")
-                .string();
-        const std::uint64_t lease =
-            runtime_cache_backend->acquire_runtime_cache_lease(cache_path.c_str());
-        check(lease != 0, "runtime-cache backend returns a valid lease");
-        runtime_cache_backend->release_runtime_cache_lease(lease);
-
-        bool double_release_rejected = false;
-        try {
-            runtime_cache_backend->release_runtime_cache_lease(lease);
-        } catch (const std::invalid_argument&) {
-            double_release_rejected = true;
-        }
-        check(double_release_rejected, "runtime-cache backend rejects an inactive lease");
-    }
-#else
     const std::string backend_name = "nonexistent_backend_xyz";
     const auto missing_dir = std::filesystem::temp_directory_path() / "trtmc-missing-backends";
     const std::string library_name =
@@ -91,7 +43,6 @@ int main() {
               "error mentions explicit search paths");
     }
     check(threw, "missing backend throws runtime_error");
-#endif
 
     std::cerr << (failures == 0 ? "ALL PASSED" : "SOME FAILED") << std::endl;
     return failures;

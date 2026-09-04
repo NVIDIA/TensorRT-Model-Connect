@@ -61,8 +61,7 @@ def test_external_packer_adds_ref2va_only_with_strict_checkpoint_and_four_plans(
             {
                 "build_helper_sha256": "b" * 64,
                 "workspace_limit_bytes": {filename: 8 << 30 for filename in selected.values()},
-                "denoiser_mode": "monolithic",
-                "fast_h3": None,
+                "denoiser_mode": "first_block",
                 "transformer_ref": identity.bundle_metadata(),
             }
         ),

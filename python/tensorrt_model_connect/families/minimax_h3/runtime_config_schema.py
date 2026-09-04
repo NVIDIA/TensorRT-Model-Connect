@@ -36,7 +36,7 @@ SCHEMA = Schema(
         ConfigField(
             name="first_block_cache",
             type_tag="bool",
-            default=False,
+            default=True,
             allowed_layers=_BUILD,
         ),
         ConfigField(
@@ -47,12 +47,6 @@ SCHEMA = Schema(
             validator=lambda value: (
                 isinstance(value, float) and math.isfinite(value) and value > 0.0
             ),
-        ),
-        ConfigField(
-            name="fast_h3_adapter",
-            type_tag="string",
-            default="",
-            allowed_layers=_BUILD_PATH,
         ),
         ConfigField(
             name="transformer_ref",

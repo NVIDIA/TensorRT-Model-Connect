@@ -177,7 +177,7 @@ def _vision_rope_cache(network, position_ids):
 def _vision_partial_rope(network, tensor, cos_half, sin_half):
     """Qwen3-VL's FP32 vision rotate-half operation."""
 
-    value = op.rows_to_heads(network, tensor, 1, NUM_HEADS, HEAD_DIM)
+    value = op.rows_to_heads(network, tensor, NUM_HEADS, HEAD_DIM)
     source_dtype = value.dtype
     value = op.cast(network, value, trt.float32)
     first = op.dynamic_slice(network, value, (0, 0, 0, 0), (1, NUM_HEADS, None, HEAD_DIM // 2))
@@ -206,7 +206,7 @@ def _vision_partial_rope(network, tensor, cos_half, sin_half):
     ).get_output(0)
     result = network.add_elementwise(left, right, trt.ElementWiseOperation.SUM).get_output(0)
     result = op.cast(network, result, source_dtype)
-    return op.heads_to_rows(network, result, 1, QWEN_VISION_HIDDEN_SIZE)
+    return op.heads_to_rows(network, result, QWEN_VISION_HIDDEN_SIZE)
 
 
 def _attention(network, hidden, weights, prefix: str, cos, sin):
@@ -227,9 +227,9 @@ def _attention(network, hidden, weights, prefix: str, cos, sin):
     )
     query = _vision_partial_rope(network, query, cos, sin)
     key = _vision_partial_rope(network, key, cos, sin)
-    query_heads = op.rows_to_heads(network, query, 1, NUM_HEADS, HEAD_DIM)
-    key_heads = op.rows_to_heads(network, key, 1, NUM_HEADS, HEAD_DIM)
-    value_heads = op.rows_to_heads(network, value, 1, NUM_HEADS, HEAD_DIM)
+    query_heads = op.rows_to_heads(network, query, NUM_HEADS, HEAD_DIM)
+    key_heads = op.rows_to_heads(network, key, NUM_HEADS, HEAD_DIM)
+    value_heads = op.rows_to_heads(network, value, NUM_HEADS, HEAD_DIM)
     scale = op.cast(
         network,
         op.constant(network, np.full((1, 1, 1, 1), 1.0 / math.sqrt(HEAD_DIM), np.float32)),
@@ -251,7 +251,7 @@ def _attention(network, hidden, weights, prefix: str, cos, sin):
     layer.metadata = f"trtmc.native_op=IAttention;source={layer.name}"
     layer.get_output(0).name = f"{layer.name}.output"
     layer.decomposable = False
-    rows = op.heads_to_rows(network, layer.get_output(0), 1, QWEN_VISION_HIDDEN_SIZE)
+    rows = op.heads_to_rows(network, layer.get_output(0), QWEN_VISION_HIDDEN_SIZE)
     return op.linear(
         network,
         rows,

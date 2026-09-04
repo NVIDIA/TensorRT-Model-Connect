@@ -5,7 +5,7 @@
 
 #pragma once
 
-// BackendLoader: loads backend shared libraries and caches them.
+// BackendLoader: loads backend DSOs via dlopen and caches them.
 
 #include "trtmc/runtime/trt_backend.h"
 
@@ -26,7 +26,7 @@ class BackendLoader {
   public:
     // Load backend by name ("trt" or "trt_rtx").
     // Caches: second call with same name returns same IBackend*.
-    // Throws std::runtime_error if the library is not found or its factory is missing.
+    // Throws std::runtime_error if DSO not found or factory missing.
     static IBackend* load(const std::string& backend_name);
     static IBackend* load(const std::string& backend_name,
                           const std::vector<std::string>& search_dirs);

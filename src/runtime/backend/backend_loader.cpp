@@ -6,11 +6,7 @@
 #include "runtime/backend/backend_loader.h"
 
 #include "runtime/backend/prebound_backend.h"
-#include "runtime/backend/runtime_cache_control.h"
 #include "runtime/platform/dynamic_library.h"
-#if defined(_WIN32) && defined(TRTMC_LOCKED_H3_RUNTIME)
-#include "runtime/platform/windows_process_lockdown.h"
-#endif
 
 #include <cstdlib>
 #include <filesystem>
@@ -27,20 +23,13 @@ namespace trtmc {
 
 IPreboundBackend::~IPreboundBackend() = default;
 IFileBackedBackend::~IFileBackedBackend() = default;
-ISerialFileBackedBackend::~ISerialFileBackedBackend() = default;
-IRuntimeCacheBackend::~IRuntimeCacheBackend() = default;
-IRuntimeCacheControl::~IRuntimeCacheControl() = default;
 
 namespace {
 
 namespace fs = std::filesystem;
 
 std::string exe_dir() {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    return internal::current_module_path().parent_path().string();
-#else
     return internal::current_executable_path().parent_path().string();
-#endif
 }
 
 struct CachedBackend {
@@ -149,15 +138,6 @@ std::vector<std::string> installed_package_backend_dirs() {
 void* open_backend_dso(const std::string& dso_name, const std::vector<std::string>& search_dirs,
                        std::string& tried) {
     const std::string exe_path = exe_dir();
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    (void)search_dirs;
-    if (exe_path.empty()) {
-        tried += "  locked executable directory: unavailable\n";
-        return nullptr;
-    }
-    const std::string path = join_path(exe_path, dso_name);
-    return try_open_backend_dso(path, path, tried);
-#else
     if (!exe_path.empty()) {
         const std::string path = join_path(exe_path, dso_name);
         auto handle = try_open_backend_dso(path, path, tried);
@@ -186,7 +166,6 @@ void* open_backend_dso(const std::string& dso_name, const std::vector<std::strin
     }
 
     return try_open_backend_dso(dso_name, dso_name + " (default)", tried);
-#endif
 }
 
 const char* optional_string_symbol(void* handle, const char* symbol) {
@@ -280,12 +259,6 @@ std::string join_backend_names(const std::vector<std::string>& backend_names) {
 
 [[noreturn]] void throw_backend_load_failure(const std::vector<std::string>& backend_names,
                                              const std::string& all_tried) {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    throw std::runtime_error(
-        "Locked MiniMax-H3 runtime could not load its packaged TensorRT-RTX backend next to "
-        "trtmc.exe.\n" +
-        all_tried);
-#else
     if (backend_names.size() == 1) {
         const std::string& backend_name = backend_names.front();
         const std::string dso_name = backend_dso_name(backend_name);
@@ -311,7 +284,6 @@ std::string join_backend_names(const std::vector<std::string>& backend_names) {
                              "package directory, in a LoadOptions::backend_search_paths / "
                              "--backend-dir directory, or in " +
                              internal::dynamic_library_search_path_environment() + ".");
-#endif
 }
 
 } // namespace
@@ -328,10 +300,6 @@ IBackend* BackendLoader::load(const std::string& backend_name,
 void BackendLoader::preload_dependency(const std::string& path) {
     if (path.empty())
         return;
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    throw std::runtime_error(
-        "locked MiniMax-H3 runtime rejects external backend dependency preloading");
-#else
 
     std::lock_guard<std::mutex> lock(g_mu);
     auto it = g_preloaded_dependencies.find(path);
@@ -348,25 +316,12 @@ void BackendLoader::preload_dependency(const std::string& path) {
     }
     g_preloaded_dependencies[path] = handle;
     std::cerr << "[trtmc] Preloaded dependency: " << path << std::endl;
-#endif
 }
 
 IBackend* BackendLoader::load_first_available(const std::vector<std::string>& backend_names,
                                               const std::vector<std::string>& search_dirs,
                                               std::string* loaded_backend_name,
                                               BackendLoadMetadata* metadata) {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    internal::enforce_locked_h3_process_policy();
-    if (!search_dirs.empty()) {
-        throw std::runtime_error("locked MiniMax-H3 runtime rejects backend search path overrides");
-    }
-    for (const auto& backend_name : backend_names) {
-        if (backend_name != "trt_rtx") {
-            throw std::runtime_error(
-                "locked MiniMax-H3 runtime permits only the TensorRT-RTX backend");
-        }
-    }
-#endif
     std::lock_guard<std::mutex> lock(g_mu);
 
     register_cleanup_once();

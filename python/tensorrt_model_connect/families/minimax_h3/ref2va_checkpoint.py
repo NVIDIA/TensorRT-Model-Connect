@@ -196,15 +196,6 @@ REF2VA_ADALN_KEYS = _adaln_checkpoint_keys()
 REF2VA_ALL_KEYS = REF2VA_DENOISER_KEYS + REF2VA_ADALN_KEYS
 
 
-def checkpoint_partitions() -> dict[str, tuple[str, ...]]:
-    """Return the exhaustive, non-overlapping native Ref2VA plan partition."""
-
-    return {
-        "ref2va_denoiser.plan": REF2VA_DENOISER_KEYS,
-        "ref2va_adaln_precompute.plan": REF2VA_ADALN_KEYS,
-    }
-
-
 def download_command(local_dir: str = "MiniMax-H3") -> str:
     """Return the build-time-only command for the missing public partition."""
 
@@ -282,19 +273,13 @@ def _canonical_inventory_sha256(files: Mapping[str, object]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def validate_transformer_ref_checkpoint(
-    component_dir: str | Path,
-    *,
-    hash_shards: bool = True,
-) -> TransformerRefIdentity:
-    """Validate the exact released ``transformer_ref`` and its plan partition.
+def validate_transformer_ref_checkpoint(component_dir: str | Path) -> TransformerRefIdentity:
+    """Validate the released ``transformer_ref`` layout and plan partition.
 
-    ``hash_shards=False`` is intended only for quick preflight.  Bundle build
-    receipts must call the default and therefore hash all fourteen shards.
+    The pinned config and index are hashed; large shards are checked against
+    the exact index names and released sizes without rereading 66 GiB solely
+    for an integrity pass.
     """
-
-    if not isinstance(hash_shards, bool):
-        raise ValueError("MiniMax-H3 Ref2VA hash_shards must be a boolean")
     root = Path(component_dir)
     if root.name != COMPONENT_NAME:
         candidate = root / COMPONENT_NAME
@@ -361,7 +346,7 @@ def validate_transformer_ref_checkpoint(
             root / name,
             size=size,
             sha256=sha256,
-            hash_file=hash_shards,
+            hash_file=False,
         )
     allowed = {"config.json", index_name, *expected_shards}
     unexpected_files = sorted(

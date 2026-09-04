@@ -1062,11 +1062,6 @@ def _family_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
 
 
-def _minimax_h3_models(context: RuleContext, imap: ImpactMap) -> List[str]:
-    del context
-    return sorted(imap.family_to_models.get("minimax_h3", []))
-
-
 def _python_profile_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
 
@@ -1708,20 +1703,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 False,
             ),
             covered_by=("TestNoImpact.test_e2e_schedule_metadata_tools_only",),
-        ),
-        ClassificationRule(
-            priority=399,
-            name="minimax_h3_windows_build_script",
-            matcher=_path_equals("scripts/build_windows_h3.ps1"),
-            resolver=_match_result(
-                "minimax_h3_windows_build_script",
-                _minimax_h3_models,
-                ["builder"],
-                True,
-            ),
-            covered_by=(
-                "TestUnitTiers.test_minimax_h3_windows_build_script",
-            ),
         ),
         ClassificationRule(
             priority=400,

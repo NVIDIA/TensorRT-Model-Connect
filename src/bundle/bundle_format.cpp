@@ -6,7 +6,6 @@
 #include "bundle/bundle_format.h"
 
 #include "utils/json_helpers.h"
-#include "utils/sha256.h"
 
 #include <algorithm>
 #include <array>
@@ -451,43 +450,6 @@ void CopyBundleSection(const std::string& path, const BundleSectionInfo& section
     }
     in.close();
     release_bundle_section_cache(path, file_offset, section.size);
-}
-
-void ValidateBundleSectionSha256(const std::string& path, const BundleSectionInfo& section,
-                                 std::string_view expected_sha256) {
-    std::uint64_t file_offset = 0;
-    std::ifstream in = open_bundle_section(path, section, file_offset);
-    // One MiB bounds the additional resident memory even for model-sized
-    // plans while remaining large enough for efficient sequential I/O.
-    std::vector<char> buffer(1024 * 1024);
-    internal::Sha256 digest;
-    std::uint64_t remaining = section.size;
-    try {
-        while (remaining != 0) {
-            const auto chunk_size =
-                static_cast<std::streamsize>(std::min<std::uint64_t>(remaining, buffer.size()));
-            in.read(buffer.data(), chunk_size);
-            if (in.gcount() != chunk_size) {
-                throw std::runtime_error("Failed to hash bundle section '" + section.name +
-                                         "' from: " + path);
-            }
-            digest.update(buffer.data(), static_cast<std::size_t>(chunk_size));
-            remaining -= static_cast<std::uint64_t>(chunk_size);
-        }
-    } catch (...) {
-        in.close();
-        release_bundle_section_cache(path, file_offset, section.size);
-        throw;
-    }
-    in.close();
-    release_bundle_section_cache(path, file_offset, section.size);
-
-    const std::string actual = digest.hex_digest();
-    if (actual != expected_sha256) {
-        throw std::runtime_error("Bundle section '" + section.name +
-                                 "' failed SHA-256 attestation: expected " +
-                                 std::string(expected_sha256) + ", found " + actual);
-    }
 }
 
 bool HasBundleMagic(const std::string& path) {

@@ -114,26 +114,6 @@ std::vector<std::string> extract_json_string_array(const std::string& text, cons
     }
     return out;
 }
-
-bool extract_json_string_array_strict(const std::string& text, const std::string& key,
-                                      std::size_t max_count, std::vector<std::string>& out) {
-    out.clear();
-    nlohmann::json j = parse_json_prefix(text);
-    auto it = j.find(key);
-    if (it == j.end() || !it->is_array() || it->size() > max_count)
-        return false;
-
-    out.reserve(it->size());
-    for (const auto& elem : *it) {
-        if (!elem.is_string()) {
-            out.clear();
-            return false;
-        }
-        out.push_back(elem.get<std::string>());
-    }
-    return true;
-}
-
 std::vector<float> extract_json_float_array(const std::string& text, const std::string& key,
                                             std::size_t max_count) {
     nlohmann::json j = parse_json_prefix(text);

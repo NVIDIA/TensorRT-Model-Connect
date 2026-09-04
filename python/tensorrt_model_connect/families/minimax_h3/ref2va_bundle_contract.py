@@ -1,31 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail-closed bundle/provenance contract for native MiniMax-H3 Ref2VA.
-
-This module does not package files itself.  It gives the staged bundle writer
-one authoritative list of additional sections and path-free metadata, while
-making the large checkpoint/build storage requirement visible before any
-download or engine build starts.
-"""
+"""Fail-closed bundle/provenance contract for native MiniMax-H3 Ref2VA."""
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-import math
-
-from .config import (
-    ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
-    DENOISER_DEFAULT_WORKSPACE_BYTES,
-    TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
-    VISION_ENCODER_DEFAULT_WORKSPACE_BYTES,
-)
 from .fl2va_contract import PlanAbi, TensorAbi
 from .ref2va_checkpoint import (
     CHECKPOINT_REVISION,
     COMPONENT_NAME,
     MODEL_ID,
-    SHARDS,
     TransformerRefIdentity,
 )
 from .ref2va_contract import (
@@ -73,22 +57,10 @@ REF2VA_SHARED_SECTIONS = {
     "audio_vae_decoder": "audio_vae_decoder_plan",
 }
 
-# Exact checkpoint tensor bytes by exhaustive key partition.  The estimates
-# reserve one percent above parameters for TensorRT serialization metadata and
-# are deliberately budgets, not claimed engine sizes.  The two encoder bases
-# are measured real TRT-RTX 1.6.1.120 builds on this machine (348,786,444 and
-# 724,746,796 bytes respectively), again padded by one percent here.
-REF2VA_DENOISER_PARAMETER_BYTES = 40_138_350_592
-REF2VA_ADALN_PARAMETER_BYTES = 26_142_079_488
-REF2VA_AUDIO_ENCODER_MEASURED_PLAN_BYTES = 348_786_444
-REF2VA_VIDEO_ENCODER_MEASURED_PLAN_BYTES = 724_746_796
-REF2VA_ENCODER_DEFAULT_WORKSPACE_BYTES = 32 << 30
-
 # The public transformer_ref partition is the guidance-distilled 50-point
 # rectified-flow recipe.  ``num_inference_steps`` counts the terminal zero, so
 # the transformer executes once for each of the first 49 grid points.  Keep
-# this mode-local instead of inheriting the optional FastH3 schedule used by
-# the transformer partition for T2VA/FL2VA.
+# this mode-local instead of inheriting the base T2VA/FL2VA transformer schedule.
 REF2VA_SCHEDULER_GRID_POINTS = 50
 REF2VA_TRANSFORMER_FORWARDS = 49
 REF2VA_VIDEO_FLOW_SHIFT = 12.0
@@ -210,67 +182,6 @@ def ref2va_plan_abi_metadata(
     }
 
 
-@dataclass(frozen=True)
-class Ref2VAStorageEstimate:
-    """Conservative incremental storage/workspace budget in bytes."""
-
-    transformer_ref_download: int
-    denoiser_plan_budget: int
-    adaln_plan_budget: int
-    audio_encoder_plan_budget: int
-    video_encoder_plan_budget: int
-    all_ref2va_plan_budget: int
-    checkpoint_plus_plans_peak: int
-    checkpoint_plans_and_bundle_copy_peak: int
-    denoiser_workspace_limit: int
-    adaln_workspace_limit: int
-    encoder_workspace_limit: int
-    shared_text_encoder_workspace_limit: int
-    shared_vision_encoder_workspace_limit: int
-    max_profile_hidden_tensor_lower_bound: int
-
-
-def ref2va_storage_estimate(
-    profile: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
-) -> Ref2VAStorageEstimate:
-    """Return an auditable disk budget before downloading ``transformer_ref``.
-
-    ``checkpoint_plus_plans_peak`` retains checkpoint shards while all four
-    plans exist. ``checkpoint_plans_and_bundle_copy_peak`` additionally keeps
-    a copied bundle during packaging.  Shared Qwen/decoder sections and their
-    bundle copy are outside these *incremental Ref2VA* numbers.
-    """
-
-    profile.validate()
-
-    def plan_budget(value: int) -> int:
-        return math.ceil(value * 1.01)
-
-    checkpoint = sum(size for _name, size, _sha256 in SHARDS)
-    denoiser = plan_budget(REF2VA_DENOISER_PARAMETER_BYTES)
-    adaln = plan_budget(REF2VA_ADALN_PARAMETER_BYTES)
-    audio = plan_budget(REF2VA_AUDIO_ENCODER_MEASURED_PLAN_BYTES)
-    video = plan_budget(REF2VA_VIDEO_ENCODER_MEASURED_PLAN_BYTES)
-    plans = denoiser + adaln + audio + video
-    hidden_lower_bound = profile.max_packed_rows * 5_376 * 2
-    return Ref2VAStorageEstimate(
-        transformer_ref_download=checkpoint,
-        denoiser_plan_budget=denoiser,
-        adaln_plan_budget=adaln,
-        audio_encoder_plan_budget=audio,
-        video_encoder_plan_budget=video,
-        all_ref2va_plan_budget=plans,
-        checkpoint_plus_plans_peak=checkpoint + plans,
-        checkpoint_plans_and_bundle_copy_peak=checkpoint + 2 * plans,
-        denoiser_workspace_limit=DENOISER_DEFAULT_WORKSPACE_BYTES,
-        adaln_workspace_limit=ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
-        encoder_workspace_limit=REF2VA_ENCODER_DEFAULT_WORKSPACE_BYTES,
-        shared_text_encoder_workspace_limit=TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
-        shared_vision_encoder_workspace_limit=VISION_ENCODER_DEFAULT_WORKSPACE_BYTES,
-        max_profile_hidden_tensor_lower_bound=hidden_lower_bound,
-    )
-
-
 def ref2va_bundle_metadata(
     transformer_ref: TransformerRefIdentity,
     profile: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
@@ -287,15 +198,9 @@ def ref2va_bundle_metadata(
         or transformer_ref.tensor_count != 638
     ):
         raise ValueError("MiniMax-H3 Ref2VA transformer_ref provenance is incompatible")
-    estimate = ref2va_storage_estimate(profile)
     return {
         "ref2va_schema_version": 2,
         "ref2va_supported": True,
-        "ref2va_context_ir_supported": False,
-        "ref2va_regenerate_2k_supported": False,
-        "ref2va_runtime_language": "c++/cuda",
-        "ref2va_runtime_dependencies": ["TensorRT-RTX"],
-        "ref2va_transformer_fallback_allowed": False,
         "ref2va_scheduler": {
             "sigma_grid_points": REF2VA_SCHEDULER_GRID_POINTS,
             "transformer_forwards": REF2VA_TRANSFORMER_FORWARDS,
@@ -345,5 +250,4 @@ def ref2va_bundle_metadata(
                 profile.max_packed_rows,
             ],
         },
-        "ref2va_build_storage_estimate": asdict(estimate),
     }

@@ -99,7 +99,6 @@ models/hf/*/.cache/
 !.github/
 !.github/**
 !.gitignore
-!.gitattributes
 !.dockerignore
 !.pre-commit-config.yaml
 !.coderabbit.yaml

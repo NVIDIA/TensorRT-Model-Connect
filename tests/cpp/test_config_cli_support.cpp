@@ -378,40 +378,6 @@ void test_runtime_resolution_survives_unwritable_effective_config_sidecar() {
     }
 }
 
-void test_runtime_resolution_sidecar_policy(std::string tmp_dir) {
-    namespace fs = std::filesystem;
-    register_demo_schema();
-    const fs::path bundle_path = fs::path(tmp_dir) / "locked.bundle";
-    const fs::path sidecar_path = fs::path(tmp_dir) / "locked.effective_config.json";
-    fs::remove(sidecar_path);
-    auto resolved = trtmc::detail::resolve_runtime_config(
-        R"({"defaults":{"triattention":{"kv_budget":4096}}})", bundle_path.string(), "",
-        {"triattention.kv_budget=8192"});
-    check(resolved.has_value(), "runtime sidecar policy: resolution succeeds");
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    check(!fs::exists(sidecar_path), "locked runtime sidecar policy: no file is created");
-#else
-    check(fs::is_regular_file(sidecar_path),
-          "normal runtime sidecar policy: effective config is created");
-#endif
-}
-
-void test_runtime_resolution_failure_policy() {
-    register_demo_schema();
-    const auto resolve_invalid_override = [] {
-        return trtmc::detail::resolve_runtime_config(
-            R"({"defaults":{"triattention":{"kv_budget":4096}}})", "bundle.bundle", "",
-            {"triattention.kv_budget=not_a_number"});
-    };
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    expect_throws([&] { (void)resolve_invalid_override(); }, "triattention.kv_budget",
-                  "locked runtime resolution: invalid override fails closed");
-#else
-    check(!resolve_invalid_override().has_value(),
-          "normal runtime resolution: invalid override retains best-effort fallback");
-#endif
-}
-
 // ---- bundle defaults: block ------------------------------------------------
 
 void test_extract_bundle_defaults_finds_block() {
@@ -565,7 +531,6 @@ int main() {
     test_bundle_to_effective_json_contains_source();
     test_try_write_effective_config_reports_unwritable_sidecar();
     test_runtime_resolution_survives_unwritable_effective_config_sidecar();
-    test_runtime_resolution_failure_policy();
 
     test_extract_bundle_defaults_finds_block();
     test_extract_bundle_defaults_absent_block();
@@ -588,7 +553,6 @@ int main() {
         trtmc_test::remove_all_safe(tmp.string());
         fs::create_directories(tmp);
         test_write_effective_config_next_to_places_file(tmp.string());
-        test_runtime_resolution_sidecar_policy(tmp.string());
     }
 
     SchemaRegistry::instance().clear_for_testing();

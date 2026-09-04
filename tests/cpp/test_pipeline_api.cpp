@@ -30,7 +30,6 @@
 // =============================================================================
 
 #include "trtmc/pipeline.h"
-#include "trtmc/runtime/pipeline_factory.h"
 #include "trtmc/runtime/pipeline_pool.h"
 #include "trtmc/speech_session.h"
 
@@ -310,36 +309,6 @@ static void test_invalid_path_returns_null() {
     check(err != nullptr && std::strlen(err) > 0, "error set after invalid path");
 }
 
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-static void test_locked_factory_rejects_hf_python_before_bundle_access() {
-    auto rejected = [](auto&& call, const char* name) {
-        bool threw = false;
-        try {
-            call();
-        } catch (const std::invalid_argument& error) {
-            threw = std::string(error.what()).find("rejects hf_python") != std::string::npos;
-        }
-        check(threw, name);
-    };
-
-    rejected(
-        [] { (void)trtmc::PipelineFactory::from_bundle("__missing_locked_h3_bundle__", "python"); },
-        "locked positional factory rejects hf_python before bundle access");
-
-    trtmc::LoadOptions options;
-    options.hf_python = "python";
-    rejected(
-        [&] { (void)trtmc::PipelineFactory::from_bundle("__missing_locked_h3_bundle__", options); },
-        "locked options factory rejects hf_python before bundle access");
-    rejected(
-        [&] {
-            (void)trtmc::PipelineFactory::from_bundle_pool("__missing_locked_h3_bundle__", 1,
-                                                           options);
-        },
-        "locked pool factory rejects hf_python before bundle access");
-}
-#endif
-
 static void test_version_available() {
     const char* ver = trtmc_version();
     check(ver != nullptr, "version is non-null");
@@ -368,6 +337,8 @@ static void test_ipipeline_default_virtuals() {
 
     check(std::string(pipeline.model_id()) == "dummy-model", "model_id");
     check(std::string(pipeline.pipeline_type()) == "DummyPipeline", "pipeline_type");
+    check(!pipeline.reference_media_decode_policy().has_value(),
+          "reference-media decode policy is absent by default");
     trtmc::IPipeline* base = &pipeline;
     check(dynamic_cast<trtmc::ISpeechSessionProvider*>(base) == nullptr,
           "speech session capability is absent by default");
@@ -855,9 +826,6 @@ static void test_pipeline_pool_leases_and_adapter_maintenance() {
 int main() {
     test_null_input_returns_null();
     test_invalid_path_returns_null();
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    test_locked_factory_rejects_hf_python_before_bundle_access();
-#endif
     test_version_available();
     test_has_trt_returns_bool();
     test_sizeof_ipipeline_is_vtable();

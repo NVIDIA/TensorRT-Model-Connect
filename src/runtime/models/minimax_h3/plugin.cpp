@@ -34,52 +34,6 @@ namespace trtmc {
 namespace {
 
 using SectionMap = std::unordered_map<std::string, BundleSectionInfo>;
-using PlanSha256Map = std::unordered_map<std::string, std::string>;
-
-std::string plan_filename(std::string_view section) {
-    if (section == "text_encoder_plan")
-        return "text_encoder.plan";
-    if (section == "vision_encoder_plan")
-        return "vision_encoder.plan";
-    if (section == "fl2va_keyframe_vae_encoder_plan")
-        return "fl2va_keyframe_vae_encoder.plan";
-    if (section == "ref2va_denoiser_plan")
-        return "ref2va_denoiser.plan";
-    if (section == "ref2va_adaln_precompute_plan")
-        return "ref2va_adaln_precompute.plan";
-    if (section == "ref2va_video_vae_encoder_plan")
-        return "ref2va_video_vae_encoder.plan";
-    if (section == "ref2va_audio_vae_encoder_plan")
-        return "ref2va_audio_vae_encoder.plan";
-    if (section == "adaln_precompute_plan")
-        return "adaln_precompute.plan";
-    if (section == "denoiser_plan")
-        return "denoiser.plan";
-    if (section == "denoiser_head_plan")
-        return "denoiser_head.plan";
-    if (section == "denoiser_tail_plan")
-        return "denoiser_tail.plan";
-    if (section == "denoiser_finish_plan")
-        return "denoiser_finish.plan";
-    if (section == "denoiser_entry_plan")
-        return "denoiser_entry.plan";
-    if (minimax_h3::is_fast_h3_transition_plan(section))
-        return std::string(minimax_h3::kDenoiserTransitionPrefix) +
-               std::string(section.substr(minimax_h3::kDenoiserTransitionPrefix.size(), 2)) +
-               ".plan";
-    if (section == "vae_tile_decoder_plan")
-        return "vae_tile_decoder.plan";
-    if (section == "audio_vae_decoder_plan")
-        return "audio_vae_decoder.plan";
-    throw std::runtime_error("Unknown MiniMax-H3 plan section: " + std::string(section));
-}
-
-bool is_sha256(std::string_view value) {
-    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char character) {
-               return (character >= '0' && character <= '9') ||
-                      (character >= 'a' && character <= 'f');
-           });
-}
 
 struct RuntimeMemoryConfig {
     bool staged{false};
@@ -134,60 +88,6 @@ RuntimeMemoryConfig load_runtime_memory_config(const PipelineContext& ctx) {
     }
 }
 
-PlanSha256Map load_plan_sha256(const std::string& config_json, const SectionMap& sections) {
-    try {
-        const auto root = nlohmann::json::parse(config_json);
-        if (!root.is_object() || !root.contains("plan_sha256") ||
-            !root.at("plan_sha256").is_object()) {
-            throw std::runtime_error("MiniMax-H3 bundle is missing plan SHA-256 records");
-        }
-        const auto& records = root.at("plan_sha256");
-        if (records.size() != sections.size()) {
-            throw std::runtime_error(
-                "MiniMax-H3 bundle plan SHA-256 records do not exactly cover its plan sections");
-        }
-        PlanSha256Map result;
-        for (const auto& [section, _] : sections) {
-            const std::string filename = plan_filename(section);
-            if (!records.contains(filename) || !records.at(filename).is_string())
-                throw std::runtime_error("MiniMax-H3 bundle is missing plan SHA-256 for " +
-                                         section);
-            const std::string digest = records.at(filename).get<std::string>();
-            if (!is_sha256(digest))
-                throw std::runtime_error("MiniMax-H3 bundle has invalid plan SHA-256 for " +
-                                         section);
-            result.emplace(section, digest);
-        }
-        return result;
-    } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error(std::string("MiniMax-H3 invalid plan SHA-256 JSON: ") +
-                                 error.what());
-    }
-}
-
-void validate_plan_section_attestations(const std::string& bundle_path, const SectionMap& sections,
-                                        const PlanSha256Map& plan_sha256) {
-    std::vector<const BundleSectionInfo*> ordered;
-    ordered.reserve(sections.size());
-    for (const auto& [_, section] : sections)
-        ordered.push_back(&section);
-    std::sort(ordered.begin(), ordered.end(), [](const auto* left, const auto* right) {
-        return left->offset < right->offset ||
-               (left->offset == right->offset && left->name < right->name);
-    });
-    for (const auto* section : ordered) {
-        const auto expected = plan_sha256.find(section->name);
-        if (expected == plan_sha256.end())
-            throw std::runtime_error("MiniMax-H3 plan SHA-256 is missing: " + section->name);
-        try {
-            ValidateBundleSectionSha256(bundle_path, *section, expected->second);
-        } catch (const std::runtime_error& error) {
-            throw std::runtime_error("MiniMax-H3 plan section '" + section->name +
-                                     "' failed runtime validation: " + error.what());
-        }
-    }
-}
-
 void validate_plan_section_bounds(const std::string& bundle_path, const SectionMap& sections) {
     std::vector<BundleSectionInfo> required;
     required.reserve(sections.size());
@@ -197,7 +97,6 @@ void validate_plan_section_bounds(const std::string& bundle_path, const SectionM
 }
 
 struct CacheConfig {
-    bool enabled{false};
     float threshold{0.08F};
 };
 
@@ -206,11 +105,7 @@ struct HotEngineConfig {
     std::int64_t tail_weight_budget_bytes{24LL << 30};
 };
 
-SectionMap index_sections(const BundleInfo& info, bool first_block_cache, bool native_vsa,
-                          bool ref2va) {
-    constexpr std::array<const char*, 5> monolithic_names = {
-        "text_encoder_plan", "adaln_precompute_plan", "denoiser_plan", "vae_tile_decoder_plan",
-        "audio_vae_decoder_plan"};
+SectionMap index_sections(const BundleInfo& info, bool ref2va) {
     constexpr std::array<const char*, 7> first_block_cache_names = {
         "text_encoder_plan",     "adaln_precompute_plan", "denoiser_head_plan",
         "denoiser_tail_plan",    "denoiser_finish_plan",  "vae_tile_decoder_plan",
@@ -231,30 +126,10 @@ SectionMap index_sections(const BundleInfo& info, bool first_block_cache, bool n
         if (it != info.sections.end() && it->size != 0)
             sections.emplace(name, *it);
     };
-    if (native_vsa) {
-        for (const char* name :
-             {"text_encoder_plan", "adaln_precompute_plan", "denoiser_entry_plan",
-              "denoiser_finish_plan", "vae_tile_decoder_plan", "audio_vae_decoder_plan"}) {
-            add_section(name);
-        }
-        for (int32_t index = 0; index < 49; ++index) {
-            std::string name = "denoiser_transition_";
-            if (index < 10)
-                name += '0';
-            name += std::to_string(index);
-            name += "_plan";
-            add_section(name.c_str());
-        }
-    } else if (first_block_cache) {
-        for (const char* name : first_block_cache_names)
-            add_section(name);
-    } else {
-        for (const char* name : monolithic_names)
-            add_section(name);
-    }
-    // Older T2VA-only bundles remain loadable. Complete H3-Base bundles add
-    // these two sections and the structured FL2VA request path fails closed if
-    // either is absent when first/last-frame conditioning is actually used.
+    for (const char* name : first_block_cache_names)
+        add_section(name);
+    // T2VA-only bundles may omit these two sections. Complete H3-Base bundles
+    // add them, and the FL2VA request path fails closed if either is absent.
     add_optional_section("vision_encoder_plan");
     add_optional_section("fl2va_keyframe_vae_encoder_plan");
     if (ref2va) {
@@ -305,16 +180,6 @@ bool json_int_array_equals(const nlohmann::json& value, std::initializer_list<in
     return true;
 }
 
-bool explicit_canvas_sizes_are_exact(const nlohmann::json& root) {
-    if (!root.contains("explicit_canvas_sizes") || !root.at("explicit_canvas_sizes").is_array() ||
-        root.at("explicit_canvas_sizes").size() != 2) {
-        return false;
-    }
-    const auto& sizes = root.at("explicit_canvas_sizes");
-    return json_int_array_equals(sizes.at(0), {544, 960}) &&
-           json_int_array_equals(sizes.at(1), {960, 544});
-}
-
 bool declares_public_workflow(const nlohmann::json& root, std::string_view name) {
     if (!root.contains("public_workflows") || !root.at("public_workflows").is_array())
         return false;
@@ -340,7 +205,7 @@ bool public_workflows_are_exact(const nlohmann::json& root,
 
 bool public_workflows_are_supported_prefix(const nlohmann::json& root) {
     if (!root.contains("public_workflows"))
-        return true; // Legacy T2VA bundles predate the explicit declaration.
+        return false;
     const auto& workflows = root.at("public_workflows");
     constexpr std::array<std::string_view, 3> supported = {"t2va", "fl2va", "ref2va"};
     if (!workflows.is_array() || workflows.empty() || workflows.size() > supported.size())
@@ -560,16 +425,7 @@ MiniMaxH3Ref2VAConfig load_ref2va_config(const PipelineContext& ctx) {
         }
         if (root.value("ref2va_schema_version", 0) != 2 || !root.value("ref2va_supported", false) ||
             !public_workflows_are_exact(root, {"t2va", "fl2va", "ref2va"}) ||
-            root.value("engine_backend", std::string{}) != "trt_rtx" ||
-            root.value("ref2va_context_ir_supported", true) ||
-            root.value("ref2va_regenerate_2k_supported", true) ||
-            root.value("ref2va_runtime_language", std::string{}) != "c++/cuda" ||
-            root.value("ref2va_transformer_fallback_allowed", true) ||
-            !root.contains("ref2va_runtime_dependencies") ||
-            !root.at("ref2va_runtime_dependencies").is_array() ||
-            root.at("ref2va_runtime_dependencies").size() != 1U ||
-            !root.at("ref2va_runtime_dependencies").at(0).is_string() ||
-            root.at("ref2va_runtime_dependencies").at(0).get<std::string>() != "TensorRT-RTX") {
+            root.value("engine_backend", std::string{}) != "trt_rtx") {
             throw std::runtime_error("MiniMax-H3 Ref2VA native runtime declaration is invalid");
         }
         if (!root.contains("ref2va_scheduler") || !root.at("ref2va_scheduler").is_object()) {
@@ -683,70 +539,9 @@ MiniMaxH3Ref2VAConfig load_ref2va_config(const PipelineContext& ctx) {
     }
 }
 
-bool vsa_tensor_abi_is_exact(const nlohmann::json& vsa) {
-    if (!vsa.contains("tensor_abi") || !vsa.at("tensor_abi").is_object())
-        return false;
-    const auto& abi = vsa.at("tensor_abi");
-    const auto exact_shape = [&](const char* name, int32_t first, const char* middle,
-                                 int32_t last) {
-        if (!abi.contains(name) || !abi.at(name).is_array() || abi.at(name).size() != 3U) {
-            return false;
-        }
-        const auto& shape = abi.at(name);
-        return shape.at(0).is_number_integer() && shape.at(0).get<int32_t>() == first &&
-               shape.at(1).is_string() && shape.at(1).get<std::string>() == middle &&
-               shape.at(2).is_number_integer() && shape.at(2).get<int32_t>() == last;
-    };
-    const bool residual_shape =
-        abi.contains("residual_shape") && abi.at("residual_shape").is_array() &&
-        abi.at("residual_shape").size() == 2U && abi.at("residual_shape").at(0).is_string() &&
-        abi.at("residual_shape").at(0).get<std::string>() == "S" &&
-        abi.at("residual_shape").at(1).is_number_integer() &&
-        abi.at("residual_shape").at(1).get<int32_t>() == 5376;
-    return abi.value("dtype", std::string{}) == "bf16" &&
-           abi.value("residual_input", std::string{}) == "residual_hidden" &&
-           abi.value("residual_output", std::string{}) == "next_residual_hidden" &&
-           abi.value("attention_input", std::string{}) == "vsa_attention_output" &&
-           abi.value("query_output", std::string{}) == "vsa_query" &&
-           abi.value("key_output", std::string{}) == "vsa_key" &&
-           abi.value("value_output", std::string{}) == "vsa_value" &&
-           abi.value("gate_output", std::string{}) == "vsa_gate" && residual_shape &&
-           exact_shape("attention_shape", 56, "S", 128) &&
-           int_array_equals(abi, "packed_rows_profile", {19285, 37838, 112367});
-}
-
-bool vsa_segments_are_exact(const nlohmann::json& vsa) {
-    if (!vsa.contains("segments") || !vsa.at("segments").is_array() ||
-        vsa.at("segments").size() != 51U) {
-        return false;
-    }
-    const auto segment_matches = [&](std::size_t offset, const std::string& component,
-                                     const std::string& filename, const std::string& section) {
-        const auto& item = vsa.at("segments").at(offset);
-        return item.is_object() && item.value("component", std::string{}) == component &&
-               item.value("filename", std::string{}) == filename &&
-               item.value("section", std::string{}) == section;
-    };
-    if (!segment_matches(0, "denoiser_entry", "denoiser_entry.plan", "denoiser_entry_plan")) {
-        return false;
-    }
-    for (int32_t index = 0; index < 49; ++index) {
-        std::string suffix = index < 10 ? "0" : "";
-        suffix += std::to_string(index);
-        const std::string component = "denoiser_transition_" + suffix;
-        if (!segment_matches(static_cast<std::size_t>(index + 1), component, component + ".plan",
-                             component + "_plan")) {
-            return false;
-        }
-    }
-    return segment_matches(50, "denoiser_finish", "denoiser_finish.plan", "denoiser_finish_plan");
-}
-
 void validate_fl2va_conditioning_contract(const PipelineContext& ctx, const SectionMap& sections) {
     try {
         const auto root = nlohmann::json::parse(ctx.config_json);
-        if (!root.contains("public_workflows") || !root.at("public_workflows").is_array())
-            return; // Legacy T2VA-only bundle.
         const bool declares_fl2va = declares_public_workflow(root, "fl2va");
         const bool declares_ref2va = declares_public_workflow(root, "ref2va");
         if (!declares_fl2va)
@@ -797,53 +592,18 @@ void validate_profile(const PipelineContext& ctx, const MiniMaxH3DenoiserConfig&
         throw std::runtime_error("MiniMax-H3 requires context_parallel_size=1");
     if (extract_json_int(ctx.config_json, "vae_tile_batch", 28) != 28)
         throw std::runtime_error("MiniMax-H3 requires vae_tile_batch=28");
-    const int32_t packed = extract_json_int(ctx.config_json, "padded_sequence_length", 38247);
-    if (!denoiser.native_vsa) {
-        if (packed != 38247 && packed != 108175 && packed != 112367)
-            throw std::runtime_error("MiniMax-H3 dense bundle has an invalid sequence profile");
-        const int32_t expected_max_text_rows = packed == 112367 ? 2641 : 537;
-        if (denoiser.max_text_rows != expected_max_text_rows)
-            throw std::runtime_error("MiniMax-H3 dense bundle has an invalid text profile");
-        return;
-    }
-
-    try {
-        const auto root = nlohmann::json::parse(ctx.config_json);
-        const bool exact =
-            packed == 112367 && root.value("canvas_multiple", 0) == 32 &&
-            root.value("canvas_short_edge", 0) == 768 &&
-            root.value("canvas_max_pixels", 0) == 768 * 1344 &&
-            explicit_canvas_sizes_are_exact(root) && root.value("num_frames_min", 0) == 124 &&
-            root.value("num_frames_opt", 0) == 124 && root.value("num_frames_max", 0) == 345 &&
-            denoiser.max_text_rows == 2641 &&
-            root.value("text_rows_min", 0) == 1 && root.value("text_rows_opt", 0) == 128 &&
-            root.value("text_rows_max", 0) == 2641 && root.value("audio_rows_min", 0) == 414 &&
-            root.value("audio_rows_opt", 0) == 414 && root.value("audio_rows_max", 0) == 1150 &&
-            root.value("video_rows_min", 0) == 18870 && root.value("video_rows_opt", 0) == 37296 &&
-            root.value("video_rows_max", 0) == 108576 &&
-            root.value("packed_sequence_length_min", 0) == 19285 &&
-            root.value("packed_sequence_length_opt", 0) == 37838 &&
-            root.value("packed_sequence_length_max", 0) == 112367 &&
-            root.value("vae_tile_batch_min", 0) == 15 &&
-            root.value("vae_tile_batch_opt", 0) == 28 && root.value("vae_tile_batch_max", 0) == 33;
-        if (!exact)
-            throw std::runtime_error(
-                "MiniMax-H3 native VSA bundle does not declare the public dynamic profile");
-    } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error(std::string("MiniMax-H3 invalid native VSA profile JSON: ") +
-                                 error.what());
-    }
+    const int32_t packed = extract_json_int(ctx.config_json, "padded_sequence_length", 112367);
+    if (packed != 112367 || denoiser.max_text_rows != 2641)
+        throw std::runtime_error("MiniMax-H3 dense bundle has an invalid text profile");
 }
 
 CacheConfig load_cache_config(const PipelineContext& ctx) {
     CacheConfig result;
     const std::string mode =
-        extract_json_string(ctx.config_json, "denoiser_cache_mode", "monolithic");
-    if (mode != "monolithic" && mode != "first_block" && mode != "segmented_vsa")
-        throw std::runtime_error("MiniMax-H3 bundle has an invalid denoiser_cache_mode");
-    result.enabled = extract_json_bool(ctx.config_json, "first_block_cache", false);
-    if (result.enabled != (mode == "first_block"))
-        throw std::runtime_error("MiniMax-H3 bundle cache mode and profile flag disagree");
+        extract_json_string(ctx.config_json, "denoiser_cache_mode", "first_block");
+    if (mode != "first_block" || !extract_json_bool(ctx.config_json, "first_block_cache", false))
+        throw std::runtime_error(
+            "MiniMax-H3 bundle requires the singular FirstBlockCache denoiser");
     result.threshold =
         extract_json_float(ctx.config_json, "first_block_cache_threshold", result.threshold);
     if (ctx.runtime_config != nullptr &&
@@ -858,69 +618,38 @@ CacheConfig load_cache_config(const PipelineContext& ctx) {
     return result;
 }
 
-MiniMaxH3DenoiserConfig load_denoiser_config(const PipelineContext& ctx, const CacheConfig& cache) {
+MiniMaxH3DenoiserConfig load_denoiser_config(const PipelineContext& ctx) {
     try {
         const auto root = nlohmann::json::parse(ctx.config_json);
         if (!root.is_object())
             throw std::runtime_error("MiniMax-H3 bundle config must be a JSON object");
         const std::string attention = root.value("attention_mode", std::string("dense"));
         MiniMaxH3DenoiserConfig result;
-        result.native_vsa = attention == "native_vsa";
-        if (!result.native_vsa && attention != "dense")
+        if (attention != "dense")
             throw std::runtime_error("MiniMax-H3 bundle has an invalid attention_mode");
         result.scheduler_grid_points = root.value("scheduler_grid_points", 50);
         result.transformer_forwards = root.value("transformer_forwards", 49);
         result.guidance_scale = root.value("guidance_scale", 1.0F);
-        const int32_t packed = root.value("padded_sequence_length", 38247);
-        result.max_text_rows =
-            root.value("text_rows_max", packed == 112367 ? 2641 : 537);
+        result.max_text_rows = root.value("text_rows_max", 2641);
         result.optimization_profile_count = root.value("denoiser_profile_count", 1);
         const std::string profile_layout =
             root.value("denoiser_profile_layout", std::string("public_dynamic"));
         if (result.optimization_profile_count != 1 && result.optimization_profile_count != 2)
             throw std::runtime_error(
                 "MiniMax-H3 bundle has an invalid denoiser optimization-profile count");
-        if (result.optimization_profile_count == 2 &&
-            (!cache.enabled || profile_layout != "five_second_reference_then_public_dynamic")) {
+        const bool valid_profile_layout =
+            (result.optimization_profile_count == 1 && profile_layout == "public_dynamic") ||
+            (result.optimization_profile_count == 2 &&
+             profile_layout == "five_second_reference_then_public_dynamic");
+        if (!valid_profile_layout) {
             throw std::runtime_error(
-                "MiniMax-H3 dual-profile denoiser requires the native FirstBlockCache layout");
+                "MiniMax-H3 denoiser requires the native dynamic FirstBlockCache layout");
         }
 
-        if (!result.native_vsa) {
-            if (result.scheduler_grid_points != 50 || result.transformer_forwards != 49 ||
-                result.guidance_scale != 1.0F) {
-                throw std::runtime_error(
-                    "MiniMax-H3 dense bundle has an invalid scheduler contract");
-            }
-            return result;
+        if (result.scheduler_grid_points != 50 || result.transformer_forwards != 49 ||
+            result.guidance_scale != 1.0F) {
+            throw std::runtime_error("MiniMax-H3 dense bundle has an invalid scheduler contract");
         }
-
-        if (cache.enabled || root.value("denoiser_cache_mode", std::string{}) != "segmented_vsa" ||
-            result.optimization_profile_count != 1 ||
-            root.value("num_inference_steps", 0) != 4 || result.scheduler_grid_points != 5 ||
-            result.transformer_forwards != 4 || result.guidance_scale != 1.0F ||
-            !root.contains("fast_h3") || !root.at("fast_h3").is_object() || !root.contains("vsa") ||
-            !root.at("vsa").is_object()) {
-            throw std::runtime_error(
-                "MiniMax-H3 native VSA requires the authenticated segmented four-forward "
-                "FastH3 contract");
-        }
-        const auto& vsa = root.at("vsa");
-        const bool exact_vsa =
-            vsa.value("implementation", std::string{}) == "native_cuda_segmented" &&
-            vsa.value("segment_count", 0) == 51 && vsa.value("transition_count", 0) == 49 &&
-            vsa.value("attention_calls_per_forward", 0) == 50 &&
-            !vsa.value("fbc_composable", true) && vsa.value("tile_size", 0) == 64 &&
-            int_array_equals(vsa, "video_tile_shape", {4, 4, 4}) &&
-            vsa.value("video_keep_numerator", 0) == 1 &&
-            vsa.value("video_keep_denominator", 0) == 10 &&
-            vsa.value("max_video_tiles", 0) == 2080 && vsa.value("max_total_tiles", 0) == 2140 &&
-            int_array_equals(vsa, "packed_row_to_tile_slot_profile", {19285, 37838, 112367}) &&
-            int_array_equals(vsa, "prefix_valid_sizes_profile", {8, 9, 60}) &&
-            int_array_equals(vsa, "video_valid_sizes_profile", {360, 660, 2080}) &&
-            vsa_tensor_abi_is_exact(vsa) && vsa_segments_are_exact(vsa);
-        if (!exact_vsa)
-            throw std::runtime_error("MiniMax-H3 bundle has an invalid native VSA tensor ABI");
         return result;
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("MiniMax-H3 invalid denoiser JSON: ") + error.what());
@@ -953,13 +682,11 @@ bool retain_hot_engine(std::string_view name, const HotEngineConfig& hot) {
 }
 
 ModuleCreateOptions module_options(cudaStream_t stream, const std::string& runtime_cache,
-                                   bool cuda_graphs, bool verify_plan_sha256,
-                                   int32_t optimization_profile) {
+                                   bool cuda_graphs, int32_t optimization_profile) {
     ModuleCreateOptions options;
     options.stream = stream;
     options.runtime_cache_path = runtime_cache.c_str();
     options.cuda_graphs = cuda_graphs;
-    options.verify_plan_sha256 = verify_plan_sha256;
     options.optimization_profile = optimization_profile;
     return options;
 }
@@ -973,30 +700,16 @@ std::int64_t staged_plan_budget(const std::string& name, const RuntimeMemoryConf
 
 std::unique_ptr<ITrtModule> load_staged_module(
     const std::string& name, const BundleSectionInfo& section, const std::string& bundle_path,
-    const PlanSha256Map& plan_sha256, IFileBackedBackend* file_backed_backend,
-    const ModuleCreateOptions& options, const std::vector<ModuleExternalBinding>& external_bindings,
+    IFileBackedBackend* file_backed_backend, const ModuleCreateOptions& options,
+    const std::vector<ModuleExternalBinding>& external_bindings,
     const RuntimeMemoryConfig& memory, const HotEngineConfig& hot, bool serial_execution_context) {
     if (file_backed_backend == nullptr)
         throw std::runtime_error("MiniMax-H3 TensorRT-RTX backend lacks file-backed plan support");
-    const auto digest = plan_sha256.find(name);
-    if (digest == plan_sha256.end())
-        throw std::runtime_error("MiniMax-H3 plan SHA-256 is missing: " + name);
     const auto range = ResolveBundleSectionFileRange(bundle_path, section);
-    std::unique_ptr<ITrtModule> module;
-    if (serial_execution_context) {
-        auto* serial_backend = dynamic_cast<ISerialFileBackedBackend*>(file_backed_backend);
-        if (serial_backend == nullptr) {
-            throw std::runtime_error(
-                "MiniMax-H3 TensorRT-RTX backend lacks serial activation arena support");
-        }
-        module = serial_backend->create_serial_module_from_file(
-            bundle_path.c_str(), range.offset, range.size, digest->second.c_str(), options,
-            external_bindings, staged_plan_budget(name, memory, hot), retain_hot_engine(name, hot));
-    } else {
-        module = file_backed_backend->create_module_from_file(
-            bundle_path.c_str(), range.offset, range.size, digest->second.c_str(), options,
-            external_bindings, staged_plan_budget(name, memory, hot), retain_hot_engine(name, hot));
-    }
+    auto module = file_backed_backend->create_module_from_file(
+        bundle_path.c_str(), range.offset, range.size, options, external_bindings,
+        staged_plan_budget(name, memory, hot), retain_hot_engine(name, hot),
+        serial_execution_context);
     if (!module)
         throw std::runtime_error("MiniMax-H3 backend rejected file-backed plan deserialization");
     return module;
@@ -1020,30 +733,26 @@ std::unique_ptr<ITrtModule> load_module(const std::string& name, cudaStream_t st
                                         const std::vector<ModuleExternalBinding>& external_bindings,
                                         const SectionMap& sections, const std::string& bundle_path,
                                         const std::string& runtime_cache, IBackend* backend,
+                                        IFileBackedBackend* file_backed_backend,
                                         bool cuda_graphs, const RuntimeMemoryConfig& memory,
-                                        const PlanSha256Map& plan_sha256,
-                                        const HotEngineConfig& hot, bool verify_plan_sha256,
+                                        const HotEngineConfig& hot,
                                         int32_t optimization_profile) {
     const auto& section = require_plan_section(sections, name);
-    const auto options = module_options(stream, runtime_cache, cuda_graphs, verify_plan_sha256,
-                                        optimization_profile);
-    auto* prebound_backend = dynamic_cast<IPreboundBackend*>(backend);
+    const auto options =
+        module_options(stream, runtime_cache, cuda_graphs, optimization_profile);
     if (memory.staged) {
-        auto* file_backed_backend = dynamic_cast<IFileBackedBackend*>(backend);
-        const bool segmented_bundle = sections.count("denoiser_entry_plan") != 0;
-        const bool serial_execution_context =
-            minimax_h3::uses_serial_execution_context(name, segmented_bundle);
-        return load_staged_module(name, section, bundle_path, plan_sha256, file_backed_backend,
-                                  options, external_bindings, memory, hot,
-                                  serial_execution_context);
+        const bool serial_execution_context = minimax_h3::uses_serial_execution_context(name);
+        return load_staged_module(name, section, bundle_path, file_backed_backend, options,
+                                  external_bindings, memory, hot, serial_execution_context);
     }
+    auto* prebound_backend = dynamic_cast<IPreboundBackend*>(backend);
     return load_in_memory_module(section, bundle_path, backend, prebound_backend, options,
                                  external_bindings);
 }
 
 class RuntimeCacheLeaseState final {
   public:
-    RuntimeCacheLeaseState(IRuntimeCacheBackend& backend, const std::string& path)
+    RuntimeCacheLeaseState(IFileBackedBackend& backend, const std::string& path)
         : backend_(&backend), lease_(backend.acquire_runtime_cache_lease(path.c_str())) {}
 
     ~RuntimeCacheLeaseState() {
@@ -1075,23 +784,25 @@ class RuntimeCacheLeaseState final {
     }
 
   private:
-    IRuntimeCacheBackend* backend_;
+    IFileBackedBackend* backend_;
     std::uint64_t lease_;
 };
 
-std::shared_ptr<RuntimeCacheLeaseState> make_runtime_cache_lease(const PipelineContext& ctx) {
+std::shared_ptr<RuntimeCacheLeaseState>
+make_runtime_cache_lease(const PipelineContext& ctx, IFileBackedBackend* file_backed_backend) {
     if (ctx.runtime_cache_path.empty())
         return {};
-    auto* cache_backend = dynamic_cast<IRuntimeCacheBackend*>(ctx.backend);
-    if (cache_backend == nullptr) {
+    if (file_backed_backend == nullptr) {
         throw std::runtime_error(
             "MiniMax-H3 runtime cache requires a backend with explicit persistence support");
     }
-    return std::make_shared<RuntimeCacheLeaseState>(*cache_backend, ctx.runtime_cache_path);
+    return std::make_shared<RuntimeCacheLeaseState>(*file_backed_backend,
+                                                    ctx.runtime_cache_path);
 }
 
 MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap sections,
                                          RuntimeMemoryConfig memory, HotEngineConfig hot,
+                                         IFileBackedBackend* file_backed_backend,
                                          std::shared_ptr<RuntimeCacheLeaseState> cache_lease) {
     if (hot.retain_engines && !memory.staged) {
         throw std::runtime_error(
@@ -1101,19 +812,10 @@ MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap 
     const std::string runtime_cache = ctx.runtime_cache_path;
     IBackend* const backend = ctx.backend;
     const bool cuda_graphs = ctx.cuda_graphs;
-    const bool verify_plan_sha256 = ctx.validate_bundle_payloads;
-    PlanSha256Map plan_sha256;
-    // Segmented plans are always indexed, even if a forged config tries to
-    // suppress the staged-runtime flag. Full digests can be deferred until
-    // TensorRT opens each section so large video bundles start promptly.
-    if (memory.staged || sections.count("denoiser_entry_plan") != 0) {
-        plan_sha256 = load_plan_sha256(ctx.config_json, sections);
+    if (memory.staged)
         validate_plan_section_bounds(ctx.bundle_path, sections);
-        if (ctx.validate_bundle_payloads)
-            validate_plan_section_attestations(ctx.bundle_path, sections, plan_sha256);
-    }
-    return [sections = std::move(sections), bundle_path, runtime_cache, backend, cuda_graphs,
-            memory, hot, verify_plan_sha256, plan_sha256 = std::move(plan_sha256),
+    return [sections = std::move(sections), bundle_path, runtime_cache, backend,
+            file_backed_backend, cuda_graphs, memory, hot,
             cache_lease = std::move(cache_lease)](
             const std::string& name, cudaStream_t stream,
             const std::vector<ModuleExternalBinding>& external_bindings,
@@ -1121,7 +823,7 @@ MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap 
         if (cache_lease)
             cache_lease->require_active();
         return load_module(name, stream, external_bindings, sections, bundle_path, runtime_cache,
-                           backend, cuda_graphs, memory, plan_sha256, hot, verify_plan_sha256,
+                           backend, file_backed_backend, cuda_graphs, memory, hot,
                            optimization_profile);
     };
 }
@@ -1131,16 +833,18 @@ MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap 
 class MiniMaxH3Plugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        const CacheConfig cache = load_cache_config(ctx);
-        const MiniMaxH3DenoiserConfig denoiser = load_denoiser_config(ctx, cache);
         const MiniMaxH3Ref2VAConfig ref2va = load_ref2va_config(ctx);
+        const CacheConfig cache = load_cache_config(ctx);
+        const MiniMaxH3DenoiserConfig denoiser = load_denoiser_config(ctx);
         validate_profile(ctx, denoiser);
-        auto sections =
-            index_sections(ctx.bundle.info, cache.enabled, denoiser.native_vsa, ref2va.enabled);
+        auto sections = index_sections(ctx.bundle.info, ref2va.enabled);
         validate_fl2va_conditioning_contract(ctx, sections);
-        auto runtime_cache_lease = make_runtime_cache_lease(ctx);
-        auto loader = make_module_loader(ctx, std::move(sections), load_runtime_memory_config(ctx),
-                                         load_hot_engine_config(ctx), runtime_cache_lease);
+        const auto memory = load_runtime_memory_config(ctx);
+        auto* file_backed_backend = dynamic_cast<IFileBackedBackend*>(ctx.backend);
+        auto runtime_cache_lease = make_runtime_cache_lease(ctx, file_backed_backend);
+        auto loader = make_module_loader(ctx, std::move(sections), memory,
+                                         load_hot_engine_config(ctx), file_backed_backend,
+                                         runtime_cache_lease);
         std::function<void()> runtime_cache_finalizer;
         if (runtime_cache_lease) {
             runtime_cache_finalizer = [runtime_cache_lease = std::move(runtime_cache_lease)] {
@@ -1148,7 +852,7 @@ class MiniMaxH3Plugin final : public IPipelinePlugin {
             };
         }
         return std::make_unique<MiniMaxH3Pipeline>(
-            std::move(loader), load_tokenizer(ctx.bundle), ctx.bundle.info.model_id, cache.enabled,
+            std::move(loader), load_tokenizer(ctx.bundle), ctx.bundle.info.model_id,
             cache.threshold, denoiser, ref2va, std::move(runtime_cache_finalizer));
     }
 };

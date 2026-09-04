@@ -44,7 +44,30 @@ std::string lowercase_extension(std::string_view path) {
 }
 
 constexpr std::uint64_t kAudioMediaTicksPerSecond = 10'000'000;
-constexpr std::uint64_t kAudioReferenceLimitTicks = 15ULL * kAudioMediaTicksPerSecond;
+
+bool reference_limit_ticks(const ReferenceMediaDecodePolicy& policy,
+                           std::uint64_t& ticks) noexcept {
+    if (policy.maximum_duration_seconds == 0 ||
+        policy.maximum_duration_seconds >
+            std::numeric_limits<std::uint64_t>::max() / kAudioMediaTicksPerSecond) {
+        return false;
+    }
+    ticks = static_cast<std::uint64_t>(policy.maximum_duration_seconds) *
+            kAudioMediaTicksPerSecond;
+    return true;
+}
+
+void validate_reference_media_decode_policy(const ReferenceMediaDecodePolicy& policy) {
+    std::uint64_t ignored_ticks = 0;
+    if (!reference_limit_ticks(policy, ignored_ticks) || policy.target_video_fps == 0 ||
+        policy.maximum_source_video_fps == 0 || policy.canvas_short_edge == 0 ||
+        policy.canvas_max_pixels == 0 || policy.canvas_multiple == 0 ||
+        !std::isfinite(policy.minimum_aspect_ratio) ||
+        !std::isfinite(policy.maximum_aspect_ratio) || policy.minimum_aspect_ratio <= 0.0 ||
+        policy.maximum_aspect_ratio < policy.minimum_aspect_ratio) {
+        throw std::invalid_argument("reference-media decode policy values must be positive");
+    }
+}
 
 struct ReferenceAudioFrameWindow {
     std::uint64_t first_frame{0};
@@ -87,11 +110,13 @@ bool account_reference_audio_decode_impl(std::int64_t timestamp, std::uint64_t f
                                          std::uint32_t sample_rate,
                                          std::uint64_t maximum_padding_frames,
                                          detail::ReferenceAudioDecodeState& state,
-                                         ReferenceAudioFrameWindow* retained_window) noexcept {
+                                         ReferenceAudioFrameWindow* retained_window,
+                                         const ReferenceMediaDecodePolicy& policy) noexcept {
     if (sample_rate == 0 || frame_count == 0)
         return false;
 
-    const std::uint64_t public_decoded_frames = 15ULL * sample_rate;
+    const std::uint64_t public_decoded_frames =
+        static_cast<std::uint64_t>(policy.maximum_duration_seconds) * sample_rate;
     if (maximum_padding_frames >
         std::numeric_limits<std::uint64_t>::max() - public_decoded_frames) {
         return false;
@@ -105,11 +130,15 @@ bool account_reference_audio_decode_impl(std::int64_t timestamp, std::uint64_t f
     std::uint64_t padding_ticks = 0;
     std::uint64_t sample_duration_ticks = 0;
     if (!frames_to_ticks_rounded_up(maximum_padding_frames, sample_rate, padding_ticks) ||
-        !frames_to_ticks_rounded_up(frame_count, sample_rate, sample_duration_ticks) ||
-        padding_ticks > std::numeric_limits<std::uint64_t>::max() - kAudioReferenceLimitTicks) {
+        !frames_to_ticks_rounded_up(frame_count, sample_rate, sample_duration_ticks)) {
         return false;
     }
-    const std::uint64_t latest_end_tick = kAudioReferenceLimitTicks + padding_ticks;
+    std::uint64_t reference_limit = 0;
+    if (!reference_limit_ticks(policy, reference_limit) ||
+        padding_ticks > std::numeric_limits<std::uint64_t>::max() - reference_limit) {
+        return false;
+    }
+    const std::uint64_t latest_end_tick = reference_limit + padding_ticks;
 
     std::uint64_t leading_ticks = 0;
     if (timestamp < 0) {
@@ -130,10 +159,10 @@ bool account_reference_audio_decode_impl(std::int64_t timestamp, std::uint64_t f
     const std::uint64_t first_frame =
         std::min(frame_count, ticks_to_frames(leading_ticks, sample_rate, true));
     std::uint64_t end_frame = first_frame;
-    if (timestamp < static_cast<std::int64_t>(kAudioReferenceLimitTicks)) {
+    if (timestamp < static_cast<std::int64_t>(reference_limit)) {
         const std::uint64_t remaining_ticks =
-            timestamp < 0 ? kAudioReferenceLimitTicks + leading_ticks
-                          : kAudioReferenceLimitTicks - static_cast<std::uint64_t>(timestamp);
+            timestamp < 0 ? reference_limit + leading_ticks
+                          : reference_limit - static_cast<std::uint64_t>(timestamp);
         end_frame = std::min(frame_count, ticks_to_frames(remaining_ticks, sample_rate, false));
         end_frame = std::max(end_frame, first_frame);
     }
@@ -154,16 +183,9 @@ bool account_reference_audio_decode_impl(std::int64_t timestamp, std::uint64_t f
 
 using Microsoft::WRL::ComPtr;
 
-constexpr std::uint64_t kReferenceLimitSeconds = 15;
 constexpr LONGLONG kMediaTicksPerSecond = 10'000'000;
 constexpr std::size_t kMaxConsecutiveEmptyReads = 256;
 constexpr std::size_t kMaxTotalEmptyReads = 16'384;
-constexpr std::uint32_t kReferenceFps = 24;
-constexpr std::uint32_t kMaximumReferenceSourceFps = 240;
-constexpr std::uint32_t kReferenceCanvasMultiple = 32;
-constexpr std::uint32_t kReferenceCanvasShortEdge = 768;
-constexpr std::uint64_t kReferenceCanvasMaxPixels = 768ULL * 1344;
-constexpr std::uint64_t kReferenceDecodedMaxPixels = 576ULL * 1856;
 
 [[noreturn]] void throw_hresult(const char* operation, HRESULT result) {
     std::ostringstream message;
@@ -407,50 +429,51 @@ struct ReferenceVideoSize {
     std::uint32_t height{0};
 };
 
-std::uint32_t round_canvas_axis(double value) {
-    const double scaled = value / kReferenceCanvasMultiple;
+std::uint32_t round_canvas_axis(double value, const ReferenceMediaDecodePolicy& policy) {
+    const double scaled = value / policy.canvas_multiple;
     const double lower = std::floor(scaled);
     const double fraction = scaled - lower;
     double rounded = lower;
     if (fraction > 0.5 || (fraction == 0.5 && static_cast<std::uint64_t>(lower) % 2 != 0))
         rounded += 1.0;
-    if (rounded > std::numeric_limits<std::uint32_t>::max() / kReferenceCanvasMultiple)
+    if (rounded > std::numeric_limits<std::uint32_t>::max() / policy.canvas_multiple)
         throw std::runtime_error("reference video canvas rounding overflow");
-    return std::max(kReferenceCanvasMultiple,
-                    static_cast<std::uint32_t>(rounded) * kReferenceCanvasMultiple);
+    return std::max(policy.canvas_multiple,
+                    static_cast<std::uint32_t>(rounded) * policy.canvas_multiple);
 }
 
 ReferenceVideoSize resolve_reference_video_size(std::uint32_t source_width,
-                                                std::uint32_t source_height) {
+                                                std::uint32_t source_height,
+                                                const ReferenceMediaDecodePolicy& policy) {
     if (source_width == 0 || source_height == 0)
         throw std::runtime_error("reference video has invalid source dimensions");
     const double ratio = static_cast<double>(source_width) / source_height;
-    if (!std::isfinite(ratio) || ratio < 0.25 || ratio > 4.0)
-        throw std::runtime_error("reference video aspect must be within 1:4 through 4:1");
-    double width = ratio >= 1.0 ? kReferenceCanvasShortEdge * ratio
-                                : static_cast<double>(kReferenceCanvasShortEdge);
-    double height = ratio >= 1.0 ? static_cast<double>(kReferenceCanvasShortEdge)
-                                 : kReferenceCanvasShortEdge / ratio;
+    if (!std::isfinite(ratio) || ratio < policy.minimum_aspect_ratio ||
+        ratio > policy.maximum_aspect_ratio) {
+        throw std::runtime_error("reference video aspect is outside the configured range");
+    }
+    double width = ratio >= 1.0 ? policy.canvas_short_edge * ratio
+                                : static_cast<double>(policy.canvas_short_edge);
+    double height = ratio >= 1.0 ? static_cast<double>(policy.canvas_short_edge)
+                                 : policy.canvas_short_edge / ratio;
     const double area = width * height;
-    if (area > static_cast<double>(kReferenceCanvasMaxPixels)) {
-        const double scale = std::sqrt(static_cast<double>(kReferenceCanvasMaxPixels) / area);
+    if (area > static_cast<double>(policy.canvas_max_pixels)) {
+        const double scale = std::sqrt(static_cast<double>(policy.canvas_max_pixels) / area);
         width *= scale;
         height *= scale;
     }
-    ReferenceVideoSize result{round_canvas_axis(width), round_canvas_axis(height)};
-    if (static_cast<std::uint64_t>(result.width) * result.height > kReferenceDecodedMaxPixels) {
-        throw std::runtime_error("reference video resolver exceeded its decoded-pixel limit");
-    }
-    return result;
+    return {round_canvas_axis(width, policy), round_canvas_axis(height, policy)};
 }
 
 std::uint64_t rounded_reference_frame_slot(std::uint64_t frame, std::uint32_t fps_numerator,
-                                           std::uint32_t fps_denominator) {
+                                           std::uint32_t fps_denominator,
+                                           const ReferenceMediaDecodePolicy& policy) {
     if (fps_numerator == 0 || fps_denominator == 0 ||
-        frame > std::numeric_limits<std::uint64_t>::max() / kReferenceFps / fps_denominator) {
+        frame > std::numeric_limits<std::uint64_t>::max() / policy.target_video_fps /
+                    fps_denominator) {
         throw std::runtime_error("reference video frame-slot arithmetic overflow");
     }
-    const std::uint64_t numerator = frame * kReferenceFps * fps_denominator;
+    const std::uint64_t numerator = frame * policy.target_video_fps * fps_denominator;
     if (numerator > (std::numeric_limits<std::uint64_t>::max() - fps_numerator) / 2)
         throw std::runtime_error("reference video frame-slot rounding overflow");
     return (2 * numerator + fps_numerator) / (2ULL * fps_numerator);
@@ -541,7 +564,8 @@ void append_rgb32_frame(IMFSample* sample, std::uint32_t width, std::uint32_t he
 void append_float_audio(IMFSample* sample, std::uint32_t sample_rate, std::uint32_t channels,
                         LONGLONG timestamp, std::uint64_t maximum_codec_padding_frames,
                         detail::ReferenceAudioDecodeState& decode_state,
-                        std::vector<float>& samples, std::size_t maximum_scalars) {
+                        std::vector<float>& samples, std::size_t maximum_scalars,
+                        const ReferenceMediaDecodePolicy& policy) {
     if (sample == nullptr)
         throw std::runtime_error("Media Foundation returned a null audio sample");
     ComPtr<IMFMediaBuffer> buffer;
@@ -567,10 +591,10 @@ void append_float_audio(IMFSample* sample, std::uint32_t sample_rate, std::uint3
     if (trim_codec_padding) {
         if (!account_reference_audio_decode_impl(timestamp, frame_count, sample_rate,
                                                  maximum_codec_padding_frames, decode_state,
-                                                 &retained_window)) {
+                                                 &retained_window, policy)) {
             (void)buffer->Unlock();
             throw std::runtime_error(
-                "decoded reference audio exceeds the 15-second public limit plus codec padding");
+                "decoded reference audio exceeds the configured duration plus codec padding");
         }
     }
     if (!trim_codec_padding) {
@@ -583,10 +607,10 @@ void append_float_audio(IMFSample* sample, std::uint32_t sample_rate, std::uint3
             (static_cast<std::uint64_t>(frame_count) * kMediaTicksPerSecond + sample_rate - 1) /
             sample_rate);
         const LONGLONG timeline_duration = std::max(declared_sample_duration, inferred_duration);
-        if (!detail::reference_timeline_within_limit(timestamp, timeline_duration)) {
+        if (!detail::reference_timeline_within_limit(policy, timestamp, timeline_duration)) {
             (void)buffer->Unlock();
             throw std::runtime_error(
-                "decoded reference audio sample crosses the 15-second public timeline");
+                "decoded reference audio sample crosses the configured reference timeline");
         }
     }
     const std::size_t first_frame = static_cast<std::size_t>(retained_window.first_frame);
@@ -595,7 +619,7 @@ void append_float_audio(IMFSample* sample, std::uint32_t sample_rate, std::uint3
     const auto old_size = samples.size();
     if (retained_scalars > maximum_scalars || old_size > maximum_scalars - retained_scalars) {
         (void)buffer->Unlock();
-        throw std::runtime_error("decoded reference audio exceeds the 15-second public limit");
+        throw std::runtime_error("decoded reference audio exceeds the configured duration limit");
     }
     if (retained_scalars > std::numeric_limits<std::size_t>::max() - old_size) {
         (void)buffer->Unlock();
@@ -654,9 +678,10 @@ CodecPaddingAllowance codec_padding_allowance(IMFMediaType* native_audio) {
                                   sample_rate)};
 }
 
-std::size_t maximum_reference_audio_scalars(std::uint32_t sample_rate, std::uint32_t channels) {
-    const std::uint64_t public_limit =
-        static_cast<std::uint64_t>(sample_rate) * channels * kReferenceLimitSeconds;
+std::size_t maximum_reference_audio_scalars(std::uint32_t sample_rate, std::uint32_t channels,
+                                            const ReferenceMediaDecodePolicy& policy) {
+    const std::uint64_t public_limit = static_cast<std::uint64_t>(sample_rate) * channels *
+                                       policy.maximum_duration_seconds;
     return static_cast<std::size_t>(std::min<std::uint64_t>(
         public_limit, static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max())));
 }
@@ -674,14 +699,18 @@ void reject_empty_decoded_sample(IMFSample* sample, std::string_view media_kind)
     detail::require_nonempty_decoded_buffer(total_length, media_kind);
 }
 
-void reject_reference_timestamp(LONGLONG timestamp, const char* label) {
-    if (timestamp >= kReferenceLimitSeconds * kMediaTicksPerSecond)
+void reject_reference_timestamp(LONGLONG timestamp, const char* label,
+                                const ReferenceMediaDecodePolicy& policy) {
+    const auto limit = static_cast<std::uint64_t>(policy.maximum_duration_seconds) *
+                       kMediaTicksPerSecond;
+    if (timestamp >= static_cast<LONGLONG>(limit))
         throw std::runtime_error(std::string(label) +
-                                 " timestamp exceeds the 15-second public limit");
+                                 " timestamp exceeds the configured reference duration");
 }
 
 void reject_video_sample_timeline(IMFSample* sample, LONGLONG timestamp,
-                                  std::uint32_t fps_numerator, std::uint32_t fps_denominator) {
+                                  std::uint32_t fps_numerator, std::uint32_t fps_denominator,
+                                  const ReferenceMediaDecodePolicy& policy) {
     LONGLONG duration = 0;
     if (sample == nullptr || FAILED(sample->GetSampleDuration(&duration)) || duration <= 0) {
         duration = static_cast<LONGLONG>(
@@ -689,30 +718,32 @@ void reject_video_sample_timeline(IMFSample* sample, LONGLONG timestamp,
              1) /
             fps_numerator);
     }
-    if (!detail::reference_timeline_within_limit(timestamp, duration))
+    if (!detail::reference_timeline_within_limit(policy, timestamp, duration))
         throw std::runtime_error(
-            "decoded reference video sample crosses the 15-second public timeline");
+            "decoded reference video sample crosses the configured reference timeline");
 }
 
 void note_empty_source_reader_event(DWORD flags, LONGLONG timestamp, LONGLONG& last_tick_timestamp,
                                     std::size_t& consecutive_empty_reads,
                                     std::size_t& total_empty_reads,
-                                    std::uint64_t maximum_codec_padding_ticks, const char* label) {
+                                    std::uint64_t maximum_codec_padding_ticks, const char* label,
+                                    const ReferenceMediaDecodePolicy& policy) {
     // A stream tick deliberately carries no sample. Treat an advancing tick as
     // progress, but bound its timestamp to the public reference duration. All
     // other empty reads (including repeated/non-advancing ticks) are bounded so
     // a malformed source cannot spin forever.
     if (++total_empty_reads > kMaxTotalEmptyReads)
         throw std::runtime_error(std::string(label) + " returned too many empty stream events");
-    if (maximum_codec_padding_ticks > 0 && !detail::reference_audio_event_timestamp_within_padding(
-                                               timestamp, maximum_codec_padding_ticks)) {
+    if (maximum_codec_padding_ticks > 0 &&
+        !detail::reference_audio_event_timestamp_within_padding(
+            policy, timestamp, maximum_codec_padding_ticks)) {
         throw std::runtime_error(std::string(label) +
-                                 " event timestamp exceeds the 15-second public limit plus codec "
+                                 " event timestamp exceeds the configured duration plus codec "
                                  "padding");
     }
     if ((flags & MF_SOURCE_READERF_STREAMTICK) != 0) {
         if (maximum_codec_padding_ticks == 0)
-            reject_reference_timestamp(timestamp, label);
+            reject_reference_timestamp(timestamp, label, policy);
         if (timestamp > last_tick_timestamp) {
             last_tick_timestamp = timestamp;
             consecutive_empty_reads = 0;
@@ -727,28 +758,35 @@ void note_empty_source_reader_event(DWORD flags, LONGLONG timestamp, LONGLONG& l
 
 } // namespace
 
-std::uint64_t detail::reference_video_frame_ceiling(std::uint32_t fps_numerator,
+std::uint64_t detail::reference_video_frame_ceiling(const ReferenceMediaDecodePolicy& policy,
+                                                    std::uint32_t fps_numerator,
                                                     std::uint32_t fps_denominator) {
-    if (fps_numerator == 0 || fps_denominator == 0)
+    if (policy.maximum_duration_seconds == 0 || fps_numerator == 0 || fps_denominator == 0)
         throw std::invalid_argument("reference video frame rate must be positive");
-    constexpr std::uint64_t seconds = 15;
-    const std::uint64_t numerator = seconds * fps_numerator;
+    const std::uint64_t numerator =
+        static_cast<std::uint64_t>(policy.maximum_duration_seconds) * fps_numerator;
+    if (numerator > std::numeric_limits<std::uint64_t>::max() - (fps_denominator - 1ULL))
+        throw std::invalid_argument("reference video frame ceiling overflow");
     return (numerator + fps_denominator - 1) / fps_denominator;
 }
 
 std::pair<std::uint32_t, std::uint32_t>
-detail::reference_video_decode_size(std::uint32_t source_width, std::uint32_t source_height) {
+detail::reference_video_decode_size(const ReferenceMediaDecodePolicy& policy,
+                                    std::uint32_t source_width, std::uint32_t source_height) {
+    validate_reference_media_decode_policy(policy);
 #if defined(_WIN32)
-    const auto size = resolve_reference_video_size(source_width, source_height);
+    const auto size = resolve_reference_video_size(source_width, source_height, policy);
     return {size.width, size.height};
 #else
     if (source_width == 0 || source_height == 0)
         throw std::invalid_argument("reference video has invalid source dimensions");
-    constexpr double short_edge = 768.0;
-    constexpr double max_pixels = 768.0 * 1344.0;
+    const double short_edge = policy.canvas_short_edge;
+    const double max_pixels = static_cast<double>(policy.canvas_max_pixels);
     const double ratio = static_cast<double>(source_width) / source_height;
-    if (!std::isfinite(ratio) || ratio < 0.25 || ratio > 4.0)
-        throw std::invalid_argument("reference video aspect must be within 1:4 through 4:1");
+    if (!std::isfinite(ratio) || ratio < policy.minimum_aspect_ratio ||
+        ratio > policy.maximum_aspect_ratio) {
+        throw std::invalid_argument("reference video aspect is outside the configured range");
+    }
     double width = ratio >= 1.0 ? short_edge * ratio : short_edge;
     double height = ratio >= 1.0 ? short_edge : short_edge / ratio;
     if (width * height > max_pixels) {
@@ -756,23 +794,32 @@ detail::reference_video_decode_size(std::uint32_t source_width, std::uint32_t so
         width *= scale;
         height *= scale;
     }
-    const auto round_axis = [](double value) {
-        return static_cast<std::uint32_t>(std::nearbyint(value / 32.0)) * 32U;
+    const auto round_axis = [&](double value) {
+        return static_cast<std::uint32_t>(std::nearbyint(value / policy.canvas_multiple)) *
+               policy.canvas_multiple;
     };
     return {round_axis(width), round_axis(height)};
 #endif
 }
 
-bool detail::reference_timeline_within_limit(std::int64_t timestamp,
+bool detail::reference_timeline_within_limit(const ReferenceMediaDecodePolicy& policy,
+                                             std::int64_t timestamp,
                                              std::int64_t duration) noexcept {
-    constexpr std::int64_t limit = 15LL * 10'000'000;
+    std::uint64_t unsigned_limit = 0;
+    if (!reference_limit_ticks(policy, unsigned_limit) ||
+        unsigned_limit > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+        return false;
+    }
+    const auto limit = static_cast<std::int64_t>(unsigned_limit);
     return timestamp >= 0 && duration >= 0 && timestamp <= limit && duration <= limit - timestamp;
 }
 
 bool detail::reference_audio_event_timestamp_within_padding(
-    std::int64_t timestamp, std::uint64_t maximum_padding_ticks) noexcept {
-    if (maximum_padding_ticks >
-        std::numeric_limits<std::uint64_t>::max() - kAudioReferenceLimitTicks) {
+    const ReferenceMediaDecodePolicy& policy, std::int64_t timestamp,
+    std::uint64_t maximum_padding_ticks) noexcept {
+    std::uint64_t reference_limit = 0;
+    if (!reference_limit_ticks(policy, reference_limit) ||
+        maximum_padding_ticks > std::numeric_limits<std::uint64_t>::max() - reference_limit) {
         return false;
     }
     if (timestamp < 0) {
@@ -780,15 +827,16 @@ bool detail::reference_audio_event_timestamp_within_padding(
         return leading_ticks <= maximum_padding_ticks;
     }
     return static_cast<std::uint64_t>(timestamp) <=
-           kAudioReferenceLimitTicks + maximum_padding_ticks;
+           reference_limit + maximum_padding_ticks;
 }
 
-bool detail::account_reference_audio_decode(std::int64_t timestamp, std::uint64_t frame_count,
+bool detail::account_reference_audio_decode(const ReferenceMediaDecodePolicy& policy,
+                                            std::int64_t timestamp, std::uint64_t frame_count,
                                             std::uint32_t sample_rate,
                                             std::uint64_t maximum_padding_frames,
                                             ReferenceAudioDecodeState& state) noexcept {
     return account_reference_audio_decode_impl(timestamp, frame_count, sample_rate,
-                                               maximum_padding_frames, state, nullptr);
+                                               maximum_padding_frames, state, nullptr, policy);
 }
 
 void detail::require_nonempty_decoded_buffer(std::uint32_t current_length,
@@ -907,8 +955,10 @@ void write_mp4(const VideoResult& result, const std::string& path) {
 #endif
 }
 
-VideoClipInput read_video_file(const std::string& path) {
+VideoClipInput read_video_file(const std::string& path,
+                               const ReferenceMediaDecodePolicy& policy) {
 #if defined(_WIN32)
+    validate_reference_media_decode_policy(policy);
     if (path.empty() || std::filesystem::is_directory(path))
         throw std::runtime_error("read_video_file requires a media file path");
     MediaFoundationSession session;
@@ -953,8 +1003,11 @@ VideoClipInput read_video_file(const std::string& path) {
         throw std::runtime_error("reference media contains no video stream");
     const CodecPaddingAllowance padding = codec_padding_allowance(native_audio.Get());
     if (declared_duration &&
-        *declared_duration > kReferenceLimitSeconds * kMediaTicksPerSecond + padding.duration) {
-        throw std::runtime_error("reference media presentation exceeds the 15-second public limit");
+        *declared_duration > static_cast<LONGLONG>(policy.maximum_duration_seconds) *
+                                 kMediaTicksPerSecond +
+                                 padding.duration) {
+        throw std::runtime_error(
+            "reference media presentation exceeds the configured duration limit");
     }
     const bool trim_codec_padding = padding.frames > 0;
     UINT32 fps_numerator = 0;
@@ -964,9 +1017,9 @@ VideoClipInput read_video_file(const std::string& path) {
         "read source frame rate");
     if (fps_numerator == 0 || fps_denominator == 0 ||
         static_cast<std::uint64_t>(fps_numerator) >
-            static_cast<std::uint64_t>(kMaximumReferenceSourceFps) * fps_denominator) {
+            static_cast<std::uint64_t>(policy.maximum_source_video_fps) * fps_denominator) {
         throw std::runtime_error(
-            "reference video source frame rate must be positive and no greater than 240 fps");
+            "reference video source frame rate exceeds the configured limit");
     }
     UINT32 source_width = 0;
     UINT32 source_height = 0;
@@ -974,7 +1027,7 @@ VideoClipInput read_video_file(const std::string& path) {
         MFGetAttributeSize(native_video.Get(), MF_MT_FRAME_SIZE, &source_width, &source_height),
         "read source frame size");
     const auto [requested_width, requested_height] =
-        detail::reference_video_decode_size(source_width, source_height);
+        detail::reference_video_decode_size(policy, source_width, source_height);
     const ReferenceVideoSize requested_size{requested_width, requested_height};
     check_hresult(reader->SetStreamSelection(video_stream_index, TRUE), "select source video");
     const auto requested_video =
@@ -988,8 +1041,7 @@ VideoClipInput read_video_file(const std::string& path) {
     UINT32 height = 0;
     check_hresult(MFGetAttributeSize(decoded_video.Get(), MF_MT_FRAME_SIZE, &width, &height),
                   "read decoded frame size");
-    if (width != requested_size.width || height != requested_size.height ||
-        static_cast<std::uint64_t>(width) * height > kReferenceDecodedMaxPixels) {
+    if (width != requested_size.width || height != requested_size.height) {
         throw std::runtime_error(
             "Media Foundation did not honor the bounded reference-video decode canvas");
     }
@@ -1043,18 +1095,23 @@ VideoClipInput read_video_file(const std::string& path) {
     result.width = static_cast<int32_t>(width);
     result.height = static_cast<int32_t>(height);
     result.channels = 3;
-    const bool downsample_video = static_cast<std::uint64_t>(fps_numerator) >
-                                  static_cast<std::uint64_t>(kReferenceFps) * fps_denominator;
-    result.fps_numerator = static_cast<int32_t>(downsample_video ? kReferenceFps : fps_numerator);
+    const bool downsample_video =
+        static_cast<std::uint64_t>(fps_numerator) >
+        static_cast<std::uint64_t>(policy.target_video_fps) * fps_denominator;
+    result.fps_numerator =
+        static_cast<int32_t>(downsample_video ? policy.target_video_fps : fps_numerator);
     result.fps_denominator = static_cast<int32_t>(downsample_video ? 1 : fps_denominator);
     result.soundtrack.sample_rate = static_cast<int32_t>(audio_rate);
     result.soundtrack.channels = static_cast<int32_t>(audio_channels);
 
     const std::uint64_t maximum_source_video_frames = std::min<std::uint64_t>(
-        detail::reference_video_frame_ceiling(fps_numerator, fps_denominator),
+        detail::reference_video_frame_ceiling(policy, fps_numerator, fps_denominator),
         static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max()));
     const std::uint64_t maximum_video_frames =
-        downsample_video ? kReferenceLimitSeconds * kReferenceFps : maximum_source_video_frames;
+        downsample_video
+            ? static_cast<std::uint64_t>(policy.maximum_duration_seconds) *
+                  policy.target_video_fps
+            : maximum_source_video_frames;
     const std::uint64_t frame_scalars = static_cast<std::uint64_t>(width) * height * 3;
     if (maximum_video_frames >
         static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) / frame_scalars)
@@ -1062,7 +1119,7 @@ VideoClipInput read_video_file(const std::string& path) {
     const std::size_t maximum_rgb_scalars =
         static_cast<std::size_t>(maximum_video_frames * frame_scalars);
     const std::size_t maximum_soundtrack_scalars =
-        has_audio ? maximum_reference_audio_scalars(audio_rate, audio_channels) : 0;
+        has_audio ? maximum_reference_audio_scalars(audio_rate, audio_channels, policy) : 0;
 
     bool video_done = false;
     bool audio_done = !has_audio;
@@ -1100,7 +1157,7 @@ VideoClipInput read_video_file(const std::string& path) {
         const std::uint64_t event_padding_ticks =
             audio_padding_event ? static_cast<std::uint64_t>(padding.duration) : 0;
         if (!audio_padding_event)
-            reject_reference_timestamp(timestamp, "reference media source reader");
+            reject_reference_timestamp(timestamp, "reference media source reader", policy);
         if ((flags & MF_SOURCE_READERF_STREAMTICK) != 0) {
             if (sample)
                 throw std::runtime_error(
@@ -1109,7 +1166,7 @@ VideoClipInput read_video_file(const std::string& path) {
                 stream_index == video_stream_index ? last_video_tick : last_audio_tick;
             note_empty_source_reader_event(flags, timestamp, last_tick, consecutive_empty_reads,
                                            total_empty_reads, event_padding_ticks,
-                                           "reference media source reader");
+                                           "reference media source reader", policy);
             continue;
         }
         if (!sample) {
@@ -1117,7 +1174,7 @@ VideoClipInput read_video_file(const std::string& path) {
                 stream_index == video_stream_index ? last_video_tick : last_audio_tick;
             note_empty_source_reader_event(flags, timestamp, last_tick, consecutive_empty_reads,
                                            total_empty_reads, event_padding_ticks,
-                                           "reference media source reader");
+                                           "reference media source reader", policy);
             continue;
         }
         reject_empty_decoded_sample(sample.Get(),
@@ -1125,21 +1182,23 @@ VideoClipInput read_video_file(const std::string& path) {
         if (stream_index == video_stream_index) {
             if (source_video_frames >= maximum_source_video_frames)
                 throw std::runtime_error(
-                    "decoded reference video exceeds the 15-second public limit");
-            reject_video_sample_timeline(sample.Get(), timestamp, fps_numerator, fps_denominator);
+                    "decoded reference video exceeds the configured duration limit");
+            reject_video_sample_timeline(sample.Get(), timestamp, fps_numerator, fps_denominator,
+                                         policy);
             bool retain = true;
             if (downsample_video) {
                 const auto begin = rounded_reference_frame_slot(source_video_frames, fps_numerator,
-                                                                fps_denominator);
+                                                                fps_denominator, policy);
                 const auto end = rounded_reference_frame_slot(source_video_frames + 1,
-                                                              fps_numerator, fps_denominator);
+                                                              fps_numerator, fps_denominator,
+                                                              policy);
                 retain = end > begin;
             }
             ++source_video_frames;
             if (retain) {
                 if (static_cast<std::uint64_t>(result.num_frames) >= maximum_video_frames)
                     throw std::runtime_error(
-                        "decoded reference video exceeds the bounded 24-fps frame count");
+                        "decoded reference video exceeds the bounded target frame count");
                 append_rgb32_frame(sample.Get(), width, height, stride, result.pixels,
                                    maximum_rgb_scalars);
                 ++result.num_frames;
@@ -1147,7 +1206,7 @@ VideoClipInput read_video_file(const std::string& path) {
         } else if (stream_index == audio_stream_index) {
             append_float_audio(sample.Get(), audio_rate, audio_channels, timestamp, padding.frames,
                                audio_decode_state, result.soundtrack.samples,
-                               maximum_soundtrack_scalars);
+                               maximum_soundtrack_scalars, policy);
         }
         consecutive_empty_reads = 0;
     }
@@ -1163,13 +1222,16 @@ VideoClipInput read_video_file(const std::string& path) {
     return result;
 #else
     (void)path;
+    (void)policy;
     throw std::runtime_error(
         "native media-file input is available on Windows through Media Foundation");
 #endif
 }
 
-AudioResult read_audio_file(const std::string& path) {
+AudioResult read_audio_file(const std::string& path,
+                            const ReferenceMediaDecodePolicy& policy) {
 #if defined(_WIN32)
+    validate_reference_media_decode_policy(policy);
     if (path.empty() || std::filesystem::is_directory(path))
         throw std::runtime_error("read_audio_file requires a media file path");
     MediaFoundationSession session;
@@ -1219,8 +1281,11 @@ AudioResult read_audio_file(const std::string& path) {
             "reference audio metadata is outside the supported mono/stereo C++ value range");
     const CodecPaddingAllowance padding = codec_padding_allowance(native_audio.Get());
     if (declared_duration &&
-        *declared_duration > kReferenceLimitSeconds * kMediaTicksPerSecond + padding.duration) {
-        throw std::runtime_error("reference audio presentation exceeds the 15-second public limit");
+        *declared_duration > static_cast<LONGLONG>(policy.maximum_duration_seconds) *
+                                 kMediaTicksPerSecond +
+                                 padding.duration) {
+        throw std::runtime_error(
+            "reference audio presentation exceeds the configured duration limit");
     }
     const bool trim_codec_padding = padding.frames > 0;
 
@@ -1250,7 +1315,7 @@ AudioResult read_audio_file(const std::string& path) {
     result.sample_rate = static_cast<int32_t>(decoded_rate);
     result.channels = static_cast<int32_t>(decoded_channels);
     const std::size_t maximum_scalars =
-        maximum_reference_audio_scalars(decoded_rate, decoded_channels);
+        maximum_reference_audio_scalars(decoded_rate, decoded_channels, policy);
     LONGLONG last_tick_timestamp = std::numeric_limits<LONGLONG>::min();
     std::size_t consecutive_empty_reads = 0;
     std::size_t total_empty_reads = 0;
@@ -1270,7 +1335,7 @@ AudioResult read_audio_file(const std::string& path) {
         if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0)
             break;
         if (!trim_codec_padding)
-            reject_reference_timestamp(timestamp, "reference audio source reader");
+            reject_reference_timestamp(timestamp, "reference audio source reader", policy);
         if (stream_index != audio_stream_index)
             throw std::runtime_error("reference audio returned an unexpected source-reader stream");
         if ((flags & MF_SOURCE_READERF_STREAMTICK) != 0) {
@@ -1279,18 +1344,20 @@ AudioResult read_audio_file(const std::string& path) {
                     "reference audio returned a sample for an empty stream tick");
             note_empty_source_reader_event(
                 flags, timestamp, last_tick_timestamp, consecutive_empty_reads, total_empty_reads,
-                static_cast<std::uint64_t>(padding.duration), "reference audio source reader");
+                static_cast<std::uint64_t>(padding.duration), "reference audio source reader",
+                policy);
             continue;
         }
         if (!sample) {
             note_empty_source_reader_event(
                 flags, timestamp, last_tick_timestamp, consecutive_empty_reads, total_empty_reads,
-                static_cast<std::uint64_t>(padding.duration), "reference audio source reader");
+                static_cast<std::uint64_t>(padding.duration), "reference audio source reader",
+                policy);
             continue;
         }
         reject_empty_decoded_sample(sample.Get(), "audio");
         append_float_audio(sample.Get(), decoded_rate, decoded_channels, timestamp, padding.frames,
-                           decode_state, result.samples, maximum_scalars);
+                           decode_state, result.samples, maximum_scalars, policy);
         consecutive_empty_reads = 0;
     }
     if (result.samples.empty())
@@ -1300,6 +1367,7 @@ AudioResult read_audio_file(const std::string& path) {
     result.num_samples = static_cast<int32_t>(result.samples.size());
     return result;
 #else
+    (void)policy;
     if (lowercase_extension(path) == ".wav")
         return trtmc::io::read_wav_interleaved(path);
     throw std::runtime_error(

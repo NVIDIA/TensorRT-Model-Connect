@@ -6,24 +6,6 @@ notices are provided for attribution and do not modify the license terms of
 the TensorRT-Model-Connect project.
 
 -------------------------------------------------------------------------------
-FastVideo block-sparse attention
--------------------------------------------------------------------------------
-
-The MiniMax-H3 SM121 block-sparse attention specialization in
-src/runtime/models/minimax_h3/vsa_attention_sm121.ptx is a generated and
-modified derivative of the FastVideo Triton kernel:
-
-  Upstream: https://github.com/hao-ai-lab/FastVideo
-  Revision: 3d8ac9d14bd697a89ede8f170cbfbca012a9edcc
-  Source: fastvideo-kernel/python/fastvideo_kernel/triton_kernels/block_sparse_attn_triton.py
-  License: Apache License 2.0
-
-The upstream source describes the implementation as based on FlashAttention-2
-by Tri Dao (https://tridao.me/publications/flash2/flash2.pdf) and credits the
-OpenAI kernel team. The generated PTX was modified by NVIDIA in 2026 for the
-SM121 MiniMax-H3 runtime integration.
-
--------------------------------------------------------------------------------
 stb
 -------------------------------------------------------------------------------
 

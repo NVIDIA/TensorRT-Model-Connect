@@ -38,14 +38,9 @@ void test_help_matches_projected_runtime_models() {
     const auto help = output.str();
     check(help.find("generate-video") != std::string::npos,
           "runtime help exposes native video generation");
-#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
-    check(help.find("FL2VA") != std::string::npos && help.find("Ref2VA") != std::string::npos,
-          "runtime help exposes all public H3 workflows");
-#else
-    check(help.find("MiniMax-H3") == std::string::npos && help.find("FL2VA") == std::string::npos &&
-              help.find("Ref2VA") == std::string::npos,
-          "non-H3 runtime help does not advertise H3 workflows or branding");
-#endif
+    check(help.find("--first-frame IMAGE") != std::string::npos &&
+              help.find("--reference-video VIDEO") != std::string::npos,
+          "runtime help exposes video conditioning inputs");
     check(help.find("--warmup") != std::string::npos &&
               help.find("--benchmark") != std::string::npos,
           "runtime help exposes same-process video timing");
@@ -90,8 +85,6 @@ void test_runtime_command_allowlist() {
     check(!parse({"trtmc", "version"}).parse_error, "runtime accepts version");
     check(!parse({"trtmc", "inspect", "model.bundle"}).parse_error,
           "runtime accepts bundle inspection");
-    check(!parse({"trtmc", "inspect", "model.bundle", "--validate-runtime"}).parse_error,
-          "runtime accepts native bundle and plugin validation");
     check(!parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output",
                   "out.mp4", "--warmup", "1", "--benchmark", "2"})
                .parse_error,
@@ -102,18 +95,8 @@ void test_runtime_command_allowlist() {
           "runtime rejects Python-backed graph tools");
     const auto unrelated = parse({"trtmc", "run", "model.bundle", "--prompt", "hello"});
     check(unrelated.parse_error, "runtime rejects unrelated generic commands");
-#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
-    check(unrelated.error_message.find("MiniMax-H3 runtime CLI") != std::string::npos,
-          "H3 runtime command error retains H3 branding");
-#else
-    check(unrelated.error_message.find("runtime-only ModelConnect CLI") != std::string::npos &&
-              unrelated.error_message.find("MiniMax-H3") == std::string::npos,
-          "non-H3 runtime command error uses generic branding");
-#endif
-    check(parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello",
-                 "--validate-runtime"})
-              .parse_error,
-          "runtime restricts plugin validation to inspect");
+    check(unrelated.error_message.find("runtime-only ModelConnect CLI") != std::string::npos,
+          "runtime command error uses generic branding");
 }
 
 void test_runtime_rejects_python_escape_hatch() {
@@ -123,14 +106,14 @@ void test_runtime_rejects_python_escape_hatch() {
           "runtime rejects --hf-python");
 }
 
-void test_nonlocked_runtime_keeps_development_loader_overrides() {
+void test_runtime_keeps_development_loader_overrides() {
     const auto args =
         parse({"trtmc", "inspect", "model.bundle", "--backend-dir", "C:\\backends",
                "--model-plugin-dir", "C:\\models", "--kernel-bindings", "bindings.json"});
-    check(!args.parse_error, "nonlocked runtime accepts development loader overrides");
+    check(!args.parse_error, "runtime accepts development loader overrides");
     check(args.backend_search_paths.size() == 1 && args.model_plugin_search_paths.size() == 1 &&
               args.kernel_bindings_path == "bindings.json",
-          "nonlocked runtime records development loader overrides");
+          "runtime records development loader overrides");
 }
 
 void test_runtime_rejects_malformed_timing_counts() {
@@ -153,14 +136,13 @@ void test_runtime_rejects_malformed_timing_counts() {
           "runtime rejects a negative benchmark count");
 }
 
-void test_nonlocked_runtime_keeps_bundle_specific_generation_inputs() {
+void test_runtime_keeps_bundle_specific_generation_inputs() {
     const auto args =
         parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output",
                "out.mp4", "--seed", "2", "--initial-latents-raw", "latents.raw"});
-    check(!args.parse_error,
-          "nonlocked runtime does not apply the locked H3 contract to every video bundle");
+    check(!args.parse_error, "runtime accepts bundle-specific video generation inputs");
     check(args.seed == 2 && args.initial_latents_raw == "latents.raw",
-          "nonlocked runtime preserves bundle-specific seed and latent inputs");
+          "runtime preserves bundle-specific seed and latent inputs");
 
     const auto csv =
         parse({"trtmc", "generate-video", "model.bundle", "--prompt", "hello", "--output",
@@ -176,8 +158,8 @@ int main() {
     test_runtime_command_allowlist();
     test_runtime_requires_one_explicit_mp4_output();
     test_runtime_rejects_python_escape_hatch();
-    test_nonlocked_runtime_keeps_development_loader_overrides();
+    test_runtime_keeps_development_loader_overrides();
     test_runtime_rejects_malformed_timing_counts();
-    test_nonlocked_runtime_keeps_bundle_specific_generation_inputs();
+    test_runtime_keeps_bundle_specific_generation_inputs();
     return failures == 0 ? 0 : 1;
 }

@@ -9,14 +9,12 @@
 // Uses the RTX-specific NvInfer.h headers which declare IRuntimeCache,
 // CudaGraphStrategy, and DynamicShapesKernelSpecializationStrategy.
 
-#include "runtime/backend/file_plan_validation.h"
 #include "runtime/backend/prebound_backend.h"
 #include "runtime/backend/runtime_cache_persistence.h"
 #include "runtime/backend/trt_logger.h"
 #include "runtime/core/cuda_common.h"
 #include "trt_module_impl.h"
 #include "trtmc/runtime/trt_backend.h"
-#include "utils/sha256.h"
 
 #include <NvInfer.h>
 #include <algorithm>
@@ -95,6 +93,12 @@ StreamSetup resolve_stream(cudaStream_t requested_stream) {
     return StreamSetup{owned->get(), owned};
 }
 
+void append_plan_cache_identity_field(std::string& identity, const std::string& value) {
+    identity += std::to_string(value.size());
+    identity.push_back(':');
+    identity += value;
+}
+
 class PlanFileMutationGuard final {
   public:
     explicit PlanFileMutationGuard(const char* path) {
@@ -107,7 +111,7 @@ class PlanFileMutationGuard final {
                                      error.what());
         }
 #if defined(_WIN32)
-        // Deny write/delete sharing while the exact file is hashed and parsed.
+        // Deny write/delete sharing while the exact file is streamed and deserialized.
         handle_ = CreateFileW(path_.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         if (handle_ == INVALID_HANDLE_VALUE) {
@@ -123,24 +127,23 @@ class PlanFileMutationGuard final {
                                      error.message());
         }
         const auto path_utf8 = path_.u8string();
-        internal::append_plan_cache_identity_field(file_identity_, path_utf8);
-        internal::append_plan_cache_identity_field(
+        append_plan_cache_identity_field(file_identity_, path_utf8);
+        append_plan_cache_identity_field(
             file_identity_, std::to_string(static_cast<std::uint64_t>(info.dwVolumeSerialNumber)));
-        internal::append_plan_cache_identity_field(
+        append_plan_cache_identity_field(
             file_identity_,
             std::to_string((static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) |
                            static_cast<std::uint64_t>(info.nFileIndexLow)));
-        internal::append_plan_cache_identity_field(
-            file_identity_,
-            std::to_string((static_cast<std::uint64_t>(info.nFileSizeHigh) << 32U) |
-                           static_cast<std::uint64_t>(info.nFileSizeLow)));
-        internal::append_plan_cache_identity_field(
+        append_plan_cache_identity_field(
+            file_identity_, std::to_string((static_cast<std::uint64_t>(info.nFileSizeHigh) << 32U) |
+                                           static_cast<std::uint64_t>(info.nFileSizeLow)));
+        append_plan_cache_identity_field(
             file_identity_,
             std::to_string(
                 (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32U) |
                 static_cast<std::uint64_t>(info.ftLastWriteTime.dwLowDateTime)));
 #else
-        struct stat info {};
+        struct stat info{};
         if (::stat(path_.c_str(), &info) != 0) {
             const std::error_code error(errno, std::generic_category());
             throw std::runtime_error("[trtmc] Failed to identify RTX plan file: " +
@@ -151,11 +154,11 @@ class PlanFileMutationGuard final {
         initial_size_ = fs::file_size(path_);
         initial_write_time_ = fs::last_write_time(path_);
         const auto path_utf8 = path_.u8string();
-        internal::append_plan_cache_identity_field(file_identity_, path_utf8);
-        internal::append_plan_cache_identity_field(file_identity_, std::to_string(initial_device_));
-        internal::append_plan_cache_identity_field(file_identity_, std::to_string(initial_inode_));
-        internal::append_plan_cache_identity_field(file_identity_, std::to_string(initial_size_));
-        internal::append_plan_cache_identity_field(
+        append_plan_cache_identity_field(file_identity_, path_utf8);
+        append_plan_cache_identity_field(file_identity_, std::to_string(initial_device_));
+        append_plan_cache_identity_field(file_identity_, std::to_string(initial_inode_));
+        append_plan_cache_identity_field(file_identity_, std::to_string(initial_size_));
+        append_plan_cache_identity_field(
             file_identity_, std::to_string(initial_write_time_.time_since_epoch().count()));
 #endif
     }
@@ -175,7 +178,7 @@ class PlanFileMutationGuard final {
 
     void verify_unchanged() const {
 #if !defined(_WIN32)
-        struct stat info {};
+        struct stat info{};
         if (::stat(path_.c_str(), &info) != 0) {
             throw std::runtime_error("[trtmc] RTX plan file disappeared while it was parsed");
         }
@@ -201,18 +204,9 @@ class PlanFileMutationGuard final {
 #endif
 };
 
-bool is_lower_hexadecimal(char value) {
-    return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
-}
-
-void validate_plan_description(std::uint64_t size, const std::string& expected_sha256) {
+void validate_plan_description(std::uint64_t size) {
     if (size == 0 || size > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
         throw std::invalid_argument("[trtmc] RTX plan file range is invalid");
-    }
-    if (expected_sha256.size() != 64 ||
-        !std::all_of(expected_sha256.begin(), expected_sha256.end(), is_lower_hexadecimal)) {
-        throw std::invalid_argument(
-            "[trtmc] Expected RTX plan SHA-256 must be lowercase hexadecimal");
     }
 }
 
@@ -286,11 +280,9 @@ void read_destination_bytes(std::ifstream& file, std::vector<char>& staging, voi
 // within the stream. Restrict every operation to the validated bundle section.
 class BoundedPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
   public:
-    BoundedPlanStreamReader(const char* path, std::uint64_t offset, std::uint64_t size,
-                            const char* expected_sha256)
-        : mutation_guard_(path), offset_(offset), size_(size), staging_(4U << 20),
-          expected_sha256_(expected_sha256 == nullptr ? "" : expected_sha256) {
-        validate_plan_description(size_, expected_sha256_);
+    BoundedPlanStreamReader(const char* path, std::uint64_t offset, std::uint64_t size)
+        : mutation_guard_(path), offset_(offset), size_(size), staging_(4U << 20) {
+        validate_plan_description(size_);
         file_.open(mutation_guard_.path(), std::ios::binary | std::ios::ate);
         if (!file_)
             throw std::runtime_error("[trtmc] Failed to open RTX plan file");
@@ -301,31 +293,13 @@ class BoundedPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
         validate_plan_file_range(offset_, size_, file_size);
     }
 
-    void verify_sha256() {
-        internal::Sha256 digest;
-        file_.clear();
-        file_.seekg(static_cast<std::streamoff>(offset_), std::ios::beg);
-        if (!file_)
-            throw std::runtime_error("[trtmc] Failed to seek to RTX plan section");
-        std::uint64_t remaining = size_;
-        while (remaining != 0) {
-            const auto chunk = std::min<std::uint64_t>(staging_.size(), remaining);
-            file_.read(staging_.data(), static_cast<std::streamsize>(chunk));
-            if (file_.gcount() != static_cast<std::streamsize>(chunk))
-                throw std::runtime_error("[trtmc] Failed to hash RTX plan section");
-            digest.update(staging_.data(), static_cast<std::size_t>(chunk));
-            remaining -= chunk;
-        }
-        if (digest.hex_digest() != expected_sha256_)
-            throw std::runtime_error("[trtmc] RTX plan SHA-256 mismatch");
-        cursor_ = 0;
-    }
-
     void verify_unchanged() const { mutation_guard_.verify_unchanged(); }
 
     std::string cache_identity() const {
-        return internal::make_plan_cache_identity(mutation_guard_.cache_identity(), offset_, size_,
-                                                  expected_sha256_);
+        std::string identity = mutation_guard_.cache_identity();
+        append_plan_cache_identity_field(identity, std::to_string(offset_));
+        append_plan_cache_identity_field(identity, std::to_string(size_));
+        return identity;
     }
 
     int64_t read(void* destination, int64_t nb_bytes, cudaStream_t stream) noexcept override {
@@ -390,7 +364,6 @@ class BoundedPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
     std::uint64_t size_{0};
     std::uint64_t cursor_{0};
     std::vector<char> staging_;
-    std::string expected_sha256_;
 };
 
 void apply_weight_streaming_budget(nvinfer1::ICudaEngine& engine, std::int64_t budget,
@@ -460,9 +433,8 @@ struct ActivationArenaKeyHash {
 // One arena is shared only by explicitly marked contexts on one CUDA stream.
 // Context creation records each profile upper bound. Allocation is deferred to
 // the first enqueue, after that context has received its request shapes. Each
-// context is shape-sized once during its lifetime; MiniMax-H3 creates fresh
-// contexts when request geometry changes, so repeated denoiser forwards avoid
-// repartitioning TensorRT's internal activation memory.
+// serial context is shape-sized once during its lifetime so repeated forwards
+// avoid repartitioning TensorRT's internal activation memory.
 class RtxActivationArena final : public ITrtActivationArena {
   public:
     RtxActivationArena(int device, cudaStream_t stream) : device_(device), stream_(stream) {}
@@ -626,18 +598,13 @@ class RtxActivationArena final : public ITrtActivationArena {
         capacity_bytes_ = requested_bytes;
         std::cerr << "[trtmc.rtx_activation_arena] device=" << device_
                   << " contexts=" << contexts_.size() << " capacity_bytes=" << capacity_bytes_
-                  << " profile_capacity_bytes=" << required_bytes_
-                  << '\n';
+                  << " profile_capacity_bytes=" << required_bytes_ << '\n';
     }
 };
 
 } // namespace
 
-class RtxBackend final : public IBackend,
-                         public IPreboundBackend,
-                         public IFileBackedBackend,
-                         public ISerialFileBackedBackend,
-                         public IRuntimeCacheBackend {
+class RtxBackend final : public IBackend, public IPreboundBackend, public IFileBackedBackend {
   public:
     RtxBackend()
         : runtime_(create_trt_runtime())
@@ -685,24 +652,15 @@ class RtxBackend final : public IBackend,
         return create_single_module(engine, options, external_bindings, -1);
     }
 
-    std::unique_ptr<ITrtModule> create_module_from_file(
-        const char* plan_path, std::uint64_t plan_offset, std::uint64_t plan_size,
-        const char* expected_sha256, const ModuleCreateOptions& options,
-        const std::vector<ModuleExternalBinding>& external_bindings,
-        std::int64_t weight_streaming_budget_bytes, bool retain_engine) override {
-        return create_module_from_file_impl(plan_path, plan_offset, plan_size, expected_sha256,
-                                            options, external_bindings,
-                                            weight_streaming_budget_bytes, retain_engine, false);
-    }
-
-    std::unique_ptr<ITrtModule> create_serial_module_from_file(
-        const char* plan_path, std::uint64_t plan_offset, std::uint64_t plan_size,
-        const char* expected_sha256, const ModuleCreateOptions& options,
-        const std::vector<ModuleExternalBinding>& external_bindings,
-        std::int64_t weight_streaming_budget_bytes, bool retain_engine) override {
-        return create_module_from_file_impl(plan_path, plan_offset, plan_size, expected_sha256,
-                                            options, external_bindings,
-                                            weight_streaming_budget_bytes, retain_engine, true);
+    std::unique_ptr<ITrtModule>
+    create_module_from_file(const char* plan_path, std::uint64_t plan_offset,
+                            std::uint64_t plan_size, const ModuleCreateOptions& options,
+                            const std::vector<ModuleExternalBinding>& external_bindings,
+                            std::int64_t weight_streaming_budget_bytes,
+                            bool retain_engine, bool serial_execution_context) override {
+        return create_module_from_file_impl(plan_path, plan_offset, plan_size, options,
+                                            external_bindings, weight_streaming_budget_bytes,
+                                            retain_engine, serial_execution_context);
     }
 
     BackendDualProfileModules
@@ -813,8 +771,7 @@ class RtxBackend final : public IBackend,
 
     std::unique_ptr<ITrtModule>
     create_module_from_file_impl(const char* plan_path, std::uint64_t plan_offset,
-                                 std::uint64_t plan_size, const char* expected_sha256,
-                                 const ModuleCreateOptions& options,
+                                 std::uint64_t plan_size, const ModuleCreateOptions& options,
                                  const std::vector<ModuleExternalBinding>& external_bindings,
                                  std::int64_t weight_streaming_budget_bytes, bool retain_engine,
                                  bool serial_execution_context) {
@@ -823,11 +780,9 @@ class RtxBackend final : public IBackend,
             throw std::invalid_argument(
                 "[trtmc] RTX weight streaming is incompatible with CUDA graph capture");
         }
-        BoundedPlanStreamReader reader(plan_path, plan_offset, plan_size, expected_sha256);
-        internal::verify_plan_sha256_if_requested(reader, options);
-        // File identity prevents retained-engine reuse across bundles or changed
-        // sections in fast mode. It scopes the cache; only SHA-256 verification
-        // above attests the plan contents.
+        BoundedPlanStreamReader reader(plan_path, plan_offset, plan_size);
+        // Stable file and section identity prevents retained-engine reuse across
+        // bundle files or after an in-place plan replacement.
         const std::string cache_key =
             retain_engine ? retained_engine_key(reader, weight_streaming_budget_bytes)
                           : std::string{};

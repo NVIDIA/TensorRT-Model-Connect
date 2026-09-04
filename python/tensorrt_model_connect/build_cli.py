@@ -418,18 +418,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
     # supplied --config/--set. The ConfigBundle was already resolved above
     # (so build() could consume namespaced kwargs); here we just serialize.
     if resolved_bundle is not None:
-        if build_family == "minimax_h3":
-            from .families.minimax_h3.plugin import (
-                write_path_free_effective_build_config,
-            )
+        from .families import load_plugin_by_id
 
-            path = write_path_free_effective_build_config(
-                resolved_bundle, args.output
-            )
-        else:
+        family_plugin = load_plugin_by_id(build_family)
+        writer = getattr(family_plugin, "write_effective_build_config", None)
+        if not callable(writer):
             from .runtime_config import write_effective_config_next_to
 
-            path = write_effective_config_next_to(resolved_bundle, args.output)
+            writer = write_effective_config_next_to
+        path = writer(resolved_bundle, args.output)
         print(f"[trtmc build] Wrote effective config: {path}", file=sys.stderr)
     return 0
 

@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 
 from tensorrt_model_connect.families.minimax_h3 import (
-    checkpoint,
     ref2va_checkpoint,
     staged_build,
 )
@@ -84,28 +83,6 @@ def _identity() -> TransformerRefIdentity:
     )
 
 
-def _adapter_identity():
-    metadata = {
-        "schema_version": 1,
-        "adapter_model_id": "FastVideo/FastVideo-FastH3-4-step-v1",
-        "adapter_source_revision": "2" * 40,
-        "adapter_sha256": "3" * 64,
-        "adapter_bytes": 5_339_117_712,
-        "adapter_tensor_count": 856,
-        "adapter_low_rank_tensor_count": 724,
-        "adapter_diff_tensor_count": 82,
-        "adapter_set_weight_tensor_count": 50,
-        "adapter_gate_tensor_count": 50,
-        "adapter_partition_tensor_counts": {
-            "adaln_precompute": 156,
-            "denoiser": 700,
-        },
-        "adapter_base_revision": "4" * 40,
-        "adapter_finetuned_revision": "5" * 40,
-    }
-    return SimpleNamespace(bundle_metadata=lambda: dict(metadata))
-
-
 def _model(root: Path) -> Path:
     model = root / "model"
     tokenizer = model / "tokenizer" / "tokenizer.json"
@@ -127,6 +104,14 @@ def _model(root: Path) -> Path:
     return model
 
 
+def _write_plan_record(path: Path, payload: bytes) -> dict[str, int | str]:
+    path.write_bytes(payload)
+    return {
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
 def test_staged_ref2va_is_opt_in_strict_and_adds_all_sections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -136,15 +121,14 @@ def test_staged_ref2va_is_opt_in_strict_and_adds_all_sections(
     output = tmp_path / "h3-ref.bundle"
     calls = []
 
-    monkeypatch.setattr(
-        ref2va_checkpoint,
-        "validate_transformer_ref_checkpoint",
-        lambda *_args, **_kwargs: _identity(),
-    )
+    def validate_ref(*_args, **_kwargs):
+        return _identity()
+
+    monkeypatch.setattr(ref2va_checkpoint, "validate_transformer_ref_checkpoint", validate_ref)
 
     def build(component, _model_path, plan, **kwargs):
         calls.append((component, kwargs))
-        plan.write_bytes(component.encode())
+        return _write_plan_record(plan, component.encode())
 
     monkeypatch.setattr(staged_build, "_run_component", build)
     monkeypatch.setattr(staged_build.trt_compat, "configure_backend", lambda **_kwargs: None)
@@ -164,12 +148,10 @@ def test_staged_ref2va_is_opt_in_strict_and_adds_all_sections(
     assert all(
         kwargs["transformer_ref_path"] == transformer_ref.resolve() for _component, kwargs in calls
     )
-
     _header, sections = read_bundle_file(str(output))
     config = json.loads(sections["config.json"])
     assert config["public_workflows"] == ["t2va", "fl2va", "ref2va"]
     assert config["ref2va_supported"] is True
-    assert config["ref2va_transformer_fallback_allowed"] is False
     assert config["ref2va_scheduler"]["sigma_grid_points"] == 50
     assert config["ref2va_scheduler"]["transformer_forwards"] == 49
     assert config["ref2va_scheduler"]["video_shift"] == 12.0
@@ -221,14 +203,12 @@ def test_plugin_passes_only_explicit_transformer_ref_to_staged_builder(
         )
 
 
-def test_fast_h3_ref2va_build_is_exact_61_plan_resumable_and_path_free(
+def test_dense_ref2va_build_is_exact_13_plan_resumable_and_path_free(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model = _model(tmp_path)
     transformer_ref = model / COMPONENT_NAME
     transformer_ref.mkdir()
-    adapter = tmp_path / "adapter_model.safetensors"
-    adapter.write_bytes(b"adapter")
     output = tmp_path / "h3-complete.bundle"
     calls: list[tuple[str, dict]] = []
 
@@ -237,16 +217,10 @@ def test_fast_h3_ref2va_build_is_exact_61_plan_resumable_and_path_free(
         "validate_transformer_ref_checkpoint",
         lambda *_args, **_kwargs: _identity(),
     )
-    monkeypatch.setattr(
-        checkpoint,
-        "validate_fast_h3_adapter",
-        lambda *_args, **_kwargs: _adapter_identity(),
-    )
-    monkeypatch.setattr(staged_build, "_adapter_target_partitions", lambda _profile: {"all": ()})
 
     def build(component, _model_path, plan, **kwargs):
         calls.append((component, kwargs))
-        plan.write_bytes(component.encode())
+        return _write_plan_record(plan, component.encode())
 
     monkeypatch.setattr(staged_build, "_run_component", build)
     monkeypatch.setattr(staged_build.trt_compat, "configure_backend", lambda **_kwargs: None)
@@ -257,35 +231,32 @@ def test_fast_h3_ref2va_build_is_exact_61_plan_resumable_and_path_free(
         staged_build.build_staged_bundle(
             model,
             output,
-            fast_h3_adapter=adapter,
             transformer_ref=transformer_ref,
         )
         == output
     )
-    expected = (*staged_build._FASTH3_COMPONENTS, *staged_build._REF2VA_COMPONENTS)
-    assert len(expected) == 61
+    expected = (*staged_build._COMPONENTS, *staged_build._REF2VA_COMPONENTS)
+    assert len(expected) == 13
     assert [component for component, _kwargs in calls] == [item[0] for item in expected]
-    assert all(kwargs["adapter_path"] == adapter.resolve() for _component, kwargs in calls)
     assert all(
         kwargs["transformer_ref_path"] == transformer_ref.resolve() for _component, kwargs in calls
     )
 
     header, sections = read_bundle_file(str(output))
-    assert len(header["sections"]) == len(sections) == 63
+    assert len(header["sections"]) == len(sections) == 15
     config = json.loads(sections["config.json"])
     expected_plan_sections = {section for _component, _filename, section in expected}
     assert set(config["bundle_loading"]["lazy_sections"]) == expected_plan_sections
-    assert len(config["bundle_loading"]["lazy_sections"]) == 61
+    assert len(config["bundle_loading"]["lazy_sections"]) == 13
     assert set(config["plan_sha256"]) == {filename for _component, filename, _section in expected}
     assert config["source_revision"] == SOURCE_REVISION
     assert config["public_workflows"] == ["t2va", "fl2va", "ref2va"]
-    assert config["transformer_forwards"] == 4
+    assert config["transformer_forwards"] == 49
     assert config["ref2va_scheduler"]["transformer_forwards"] == 49
     assert config["ref2va_limits"]["requires_image_or_video"] is True
-    assert config["workspace_limit_bytes"] == {
-        filename: staged_build._component_workspace_bytes(component, ref2va=True)
-        for component, filename, _section in expected
-    }
+    assert config["workspace_limit_bytes"] == staged_build._workspace_limits_for_components(
+        expected, ref2va=True
+    )
     serialized = json.dumps(config).lower()
     assert str(tmp_path).lower() not in serialized
     assert (
@@ -297,7 +268,6 @@ def test_fast_h3_ref2va_build_is_exact_61_plan_resumable_and_path_free(
     staged_build.build_staged_bundle(
         model,
         output,
-        fast_h3_adapter=adapter,
         transformer_ref=transformer_ref,
     )
     assert calls == []
@@ -305,10 +275,6 @@ def test_fast_h3_ref2va_build_is_exact_61_plan_resumable_and_path_free(
     effective = SimpleNamespace(
         to_effective_dict=lambda: {
             "minimax_h3": {
-                "fast_h3_adapter": {
-                    "value": str(adapter.resolve()),
-                    "source": "session_request",
-                },
                 "transformer_ref": {
                     "value": str(transformer_ref.resolve()),
                     "source": "session_request",
@@ -319,9 +285,7 @@ def test_fast_h3_ref2va_build_is_exact_61_plan_resumable_and_path_free(
     sidecar = write_path_free_effective_build_config(effective, output)
     sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
     sidecar_text = json.dumps(sidecar_payload).lower()
-    assert str(adapter.resolve()).lower() not in sidecar_text
     assert str(transformer_ref.resolve()).lower() not in sidecar_text
     namespace = sidecar_payload["minimax_h3"]
-    assert namespace["fast_h3_adapter"]["value"]["logical_role"] == "fast_h3_adapter"
     assert namespace["transformer_ref"]["value"]["logical_role"] == "transformer_ref"
     assert namespace["build_provenance"]["value"]["source_revision"] == SOURCE_REVISION

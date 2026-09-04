@@ -32,17 +32,10 @@
 
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
-#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
-#include "cli/minimax_h3_video_contract.h"
-#endif
 #include "cli/speech_session_helpers.h"
 #include "cli/windows_media.h"
-#include "runtime/backend/runtime_cache_control.h"
 #if defined(_WIN32)
 #include "cli/windows_utf8_argv.h"
-#endif
-#if defined(_WIN32) && defined(TRTMC_LOCKED_H3_RUNTIME)
-#include "runtime/platform/windows_process_lockdown.h"
 #endif
 #include "runtime/platform/dynamic_library.h"
 #if __has_include("runtime/models/moge/geometry.h")
@@ -71,7 +64,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -182,21 +174,11 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
     options.set_tokens = args.set_tokens;
     options.backend_search_paths = args.backend_search_paths;
     options.model_plugin_search_paths = args.model_plugin_search_paths;
-    // The locked H3 appliance runtime prioritizes immediate staged startup: it
-    // validates plan ranges and stable file identities without re-hashing
-    // multi-GiB payloads. Generic builds retain the complete fail-fast scan.
-    options.validate_bundle_payloads =
-        trtmc::cli::validate_bundle_payloads_for_command(args.command);
     return options;
 }
 
 std::unique_ptr<trtmc::IPipeline> load_pipeline(const CliArgs& args) {
     return trtmc::load(args.bundle_path, make_load_options(args), args.kernel_bindings_path);
-}
-
-void finalize_runtime_cache(trtmc::IPipeline& pipeline) {
-    if (auto* control = dynamic_cast<trtmc::IRuntimeCacheControl*>(&pipeline))
-        control->finalize_runtime_cache();
 }
 
 void preload_cli_config_schema_owner(const CliArgs& args) {
@@ -935,29 +917,11 @@ trtmc::VideoClipInput load_native_video_directory(const std::string& directory) 
     }
 }
 
-double audio_duration_seconds(const trtmc::AudioResult& audio, const std::string& label) {
-    if (audio.samples.empty() || audio.sample_rate <= 0 || audio.channels <= 0 ||
-        audio.samples.size() % static_cast<std::size_t>(audio.channels) != 0) {
-        throw std::runtime_error(label + " has invalid interleaved audio metadata");
-    }
-    return static_cast<double>(audio.samples.size()) /
-           (static_cast<double>(audio.sample_rate) * static_cast<double>(audio.channels));
-}
-
-void validate_reference_duration(double seconds, const std::string& label) {
-    constexpr double kMinReferenceSeconds = 2.0;
-    constexpr double kMaxReferenceSeconds = 15.0;
-    if (!std::isfinite(seconds) || seconds < kMinReferenceSeconds ||
-        seconds > kMaxReferenceSeconds) {
-        std::ostringstream message;
-        message << label << " duration must be in [2, 15] seconds; got " << std::fixed
-                << std::setprecision(3) << seconds;
-        throw std::runtime_error(message.str());
-    }
-}
-
 trtmc::VideoGenerationRequest make_video_generation_request(const CliArgs& args,
-                                                            trtmc::GenerateConfig config) {
+                                                            trtmc::GenerateConfig config,
+                                                            const std::optional<
+                                                                trtmc::ReferenceMediaDecodePolicy>&
+                                                                media_decode_policy) {
     trtmc::VideoGenerationRequest request;
     request.prompt = args.prompt;
     request.config = std::move(config);
@@ -977,64 +941,38 @@ trtmc::VideoGenerationRequest make_video_generation_request(const CliArgs& args,
 
     request.mode = trtmc::VideoGenerationMode::kReferenceToVideoAudio;
     request.references.reserve(args.video_references.size());
-    std::size_t image_count = 0;
-    std::size_t video_count = 0;
-    std::size_t explicit_audio_count = 0;
-    double total_video_seconds = 0.0;
-    double total_explicit_audio_seconds = 0.0;
+    const auto require_media_decode_policy = [&]()
+        -> const trtmc::ReferenceMediaDecodePolicy& {
+        if (!media_decode_policy) {
+            throw std::runtime_error(
+                "the loaded pipeline does not provide a reference-media decode policy");
+        }
+        return *media_decode_policy;
+    };
     for (const auto& argument : args.video_references) {
         trtmc::VideoReferenceInput reference;
         switch (argument.kind) {
         case trtmc::cli::VideoReferenceArgKind::kImage:
             reference.kind = trtmc::VideoReferenceKind::kImage;
             reference.image = load_video_image_input(argument.path);
-            ++image_count;
             break;
         case trtmc::cli::VideoReferenceArgKind::kVideoDirectory: {
             reference.kind = trtmc::VideoReferenceKind::kVideo;
             reference.video = std::filesystem::is_directory(argument.path)
                                   ? load_native_video_directory(argument.path)
-                                  : trtmc::cli::read_video_file(argument.path);
-            ++video_count;
-            const double seconds = static_cast<double>(reference.video.num_frames) *
-                                   static_cast<double>(reference.video.fps_denominator) /
-                                   static_cast<double>(reference.video.fps_numerator);
-            validate_reference_duration(seconds, "reference video " + argument.path);
-            total_video_seconds += seconds;
-            if (!reference.video.soundtrack.samples.empty()) {
-                // A soundtrack is attached metadata of this video reference,
-                // not a separate public audio reference. Validate its decoded
-                // shape/rate, but do not apply the explicit-audio 2..15 second
-                // range or its aggregate/count limits.
-                (void)audio_duration_seconds(reference.video.soundtrack,
-                                             "reference video soundtrack " + argument.path);
-            }
+                                  : trtmc::cli::read_video_file(
+                                        argument.path, require_media_decode_policy());
             break;
         }
         case trtmc::cli::VideoReferenceArgKind::kAudio: {
             reference.kind = trtmc::VideoReferenceKind::kAudio;
-            reference.audio = trtmc::cli::read_audio_file(argument.path);
-            const double seconds =
-                audio_duration_seconds(reference.audio, "reference audio " + argument.path);
-            validate_reference_duration(seconds, "reference audio " + argument.path);
-            total_explicit_audio_seconds += seconds;
-            ++explicit_audio_count;
+            reference.audio =
+                trtmc::cli::read_audio_file(argument.path, require_media_decode_policy());
             break;
         }
         }
         request.references.push_back(std::move(reference));
     }
-
-    if (image_count > 9 || video_count > 3 || request.references.size() > 12)
-        throw std::runtime_error("Ref2VA reference count exceeds the public H3-Base limits");
-    if (explicit_audio_count > 3)
-        throw std::runtime_error("Ref2VA accepts at most 3 explicit reference audio files");
-    if (total_video_seconds > 15.0)
-        throw std::runtime_error(
-            "Ref2VA total reference-video duration must not exceed 15 seconds");
-    if (total_explicit_audio_seconds > 15.0)
-        throw std::runtime_error(
-            "Ref2VA total explicit reference-audio duration must not exceed 15 seconds");
     return request;
 }
 
@@ -1042,38 +980,20 @@ struct VideoResultValidation {
     std::size_t num_frames{0};
     std::size_t frame_pixels{0};
     std::size_t required_pixels{0};
-    std::size_t nonfinite_rgb{0};
-    std::size_t nonfinite_audio{0};
     double video_seconds{0.0};
     double audio_seconds{0.0};
     bool has_audio{false};
 };
 
-bool validate_generated_video_result(const trtmc::VideoResult& result, bool require_h3_contract,
-                                     int32_t expected_frames, int32_t expected_height,
-                                     int32_t expected_width, VideoResultValidation& validation,
-                                     std::string& error) {
+bool validate_generated_video_result(const trtmc::VideoResult& result,
+                                     VideoResultValidation& validation, std::string& error) {
     const auto& frames = result.frames;
     if (frames.height <= 0 || frames.width <= 0 || frames.num_frames <= 0 || frames.channels != 3) {
         error = "invalid frame metadata";
         return false;
     }
-    if (result.fps < 0) {
-        error = "negative frame rate";
-        return false;
-    }
-    if (require_h3_contract && result.fps != 24) {
-        error = "MiniMax-H3 output is not 24 fps";
-        return false;
-    }
-    if (require_h3_contract &&
-        (frames.num_frames != expected_frames || frames.height != expected_height ||
-         frames.width != expected_width)) {
-        std::ostringstream message;
-        message << "MiniMax-H3 output geometry " << frames.width << 'x' << frames.height << 'x'
-                << frames.num_frames << " does not match requested aligned geometry "
-                << expected_width << 'x' << expected_height << 'x' << expected_frames;
-        error = message.str();
+    if (result.fps <= 0) {
+        error = "non-positive frame rate";
         return false;
     }
 
@@ -1098,10 +1018,6 @@ bool validate_generated_video_result(const trtmc::VideoResult& result, bool requ
     }
 
     validation.has_audio = !result.audio.samples.empty();
-    if (require_h3_contract && !validation.has_audio) {
-        error = "MiniMax-H3 output is missing its synchronized audio track";
-        return false;
-    }
     if (validation.has_audio &&
         (result.audio.sample_rate <= 0 || result.audio.channels <= 0 ||
          result.audio.samples.size() % static_cast<std::size_t>(result.audio.channels) != 0 ||
@@ -1109,10 +1025,6 @@ bool validate_generated_video_result(const trtmc::VideoResult& result, bool requ
              static_cast<std::size_t>(std::numeric_limits<int32_t>::max()) ||
          result.audio.num_samples != static_cast<int32_t>(result.audio.samples.size()))) {
         error = "invalid interleaved audio metadata";
-        return false;
-    }
-    if (require_h3_contract && (result.audio.sample_rate != 32000 || result.audio.channels != 2)) {
-        error = "MiniMax-H3 output is not stereo 32 kHz audio";
         return false;
     }
     if (result.fps > 0)
@@ -1124,22 +1036,13 @@ bool validate_generated_video_result(const trtmc::VideoResult& result, bool requ
         validation.audio_seconds =
             static_cast<double>(audio_frames) / static_cast<double>(result.audio.sample_rate);
     }
-    if (require_h3_contract &&
-        std::abs(validation.video_seconds - validation.audio_seconds) > (1.0 / 24.0)) {
-        error = "MiniMax-H3 video and audio durations differ by more than one video frame";
+    if (validation.has_audio &&
+        std::abs(validation.video_seconds - validation.audio_seconds) >
+            (1.0 / static_cast<double>(result.fps))) {
+        error = "video and audio durations differ by more than one video frame";
         return false;
     }
 
-    validation.nonfinite_rgb =
-        static_cast<std::size_t>(std::count_if(frames.pixels.begin(), frames.pixels.end(),
-                                               [](float value) { return !std::isfinite(value); }));
-    validation.nonfinite_audio = static_cast<std::size_t>(
-        std::count_if(result.audio.samples.begin(), result.audio.samples.end(),
-                      [](float value) { return !std::isfinite(value); }));
-    if (validation.nonfinite_rgb != 0 || validation.nonfinite_audio != 0) {
-        error = "non-finite RGB or audio values";
-        return false;
-    }
     return true;
 }
 
@@ -1185,6 +1088,7 @@ int cmd_generate_video(const CliArgs& args) {
     const auto total_begin = std::chrono::steady_clock::now();
     const auto load_begin = total_begin;
     auto pipeline = load_pipeline(args);
+    const auto media_decode_policy = pipeline->reference_media_decode_policy();
     const auto load_end = std::chrono::steady_clock::now();
 
     trtmc::GenerateConfig cfg;
@@ -1206,37 +1110,17 @@ int cmd_generate_video(const CliArgs& args) {
     }
 
     const auto input_decode_begin = std::chrono::steady_clock::now();
-    auto request = make_video_generation_request(args, std::move(cfg));
+    auto request = make_video_generation_request(args, std::move(cfg), media_decode_policy);
     const auto input_decode_end = std::chrono::steady_clock::now();
     trtmc::VideoResult result;
     VideoResultValidation final_validation;
-    const bool require_h3_contract =
-        std::strcmp(pipeline->pipeline_type(), "MiniMaxH3Pipeline") == 0;
-    int32_t expected_h3_frames = 0;
-    int32_t expected_h3_height = 0;
-    int32_t expected_h3_width = 0;
-    if (require_h3_contract) {
-#if defined(TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT)
-        const auto contract = trtmc::cli::resolve_minimax_h3_video_contract(request);
-        expected_h3_frames = contract.num_frames;
-        expected_h3_height = contract.height;
-        expected_h3_width = contract.width;
-#else
-        std::cerr << "Error: this CLI was not built with the MiniMax-H3 video contract\n";
-        return EXIT_FAILURE;
-#endif
-    }
     const auto validate_iteration = [&](const char* phase, int index) {
         VideoResultValidation checked;
         std::string error;
-        const bool valid =
-            validate_generated_video_result(result, require_h3_contract, expected_h3_frames,
-                                            expected_h3_height, expected_h3_width, checked, error);
+        const bool valid = validate_generated_video_result(result, checked, error);
         std::cerr << "[trtmc.video_validation] phase=" << phase << " iteration=" << index
                   << " rgb_values=" << checked.required_pixels
                   << " audio_values=" << result.audio.samples.size()
-                  << " nonfinite_rgb=" << checked.nonfinite_rgb
-                  << " nonfinite_audio=" << checked.nonfinite_audio
                   << " video_seconds=" << std::fixed << std::setprecision(6)
                   << checked.video_seconds << " audio_seconds=" << checked.audio_seconds
                   << " status=" << (valid ? "passed" : "failed") << '\n';
@@ -1296,11 +1180,9 @@ int cmd_generate_video(const CliArgs& args) {
         if (!validate_iteration("generation", 0))
             return EXIT_FAILURE;
     }
-    // The cache is process-shared and can still be updated by resident RTX
-    // contexts. Finalization synchronizes and releases those contexts before
-    // serializing; any failure reaches run_cli's exception boundary and makes
-    // the command return non-zero instead of silently claiming success.
-    finalize_runtime_cache(*pipeline);
+    // Release resident engines before media encoding; pipeline teardown also
+    // persists any backend runtime cache while its contexts are still valid.
+    pipeline.reset();
     const auto& frames = result.frames;
 #if !defined(TRTMC_RUNTIME_ONLY_CLI)
     const auto num_frames = final_validation.num_frames;
@@ -2377,12 +2259,6 @@ int cmd_inspect(const CliArgs& args) {
 
     try {
         const auto info = trtmc::InspectBundle(args.bundle_path);
-        if (args.validate_runtime) {
-            auto pipeline = load_pipeline(args);
-            if (pipeline == nullptr)
-                throw std::runtime_error("runtime validation returned a null pipeline");
-            std::cout << "Runtime validation:  passed (" << pipeline->pipeline_type() << ")\n";
-        }
         if (args.list_engines)
             return cmd_inspect_list_engines(info);
 
@@ -2447,12 +2323,6 @@ int apply_cli_config(const CliArgs& args) {
     }
     try {
         auto bundle = trtmc::config::resolve_cli_config(args.config_path, args.set_tokens);
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-        // The locked runtime validates CLI configuration here, while the
-        // pipeline applies it later. It must not emit effective-config
-        // sidecars into the attested package or beside a user bundle.
-        (void)bundle;
-#else
         if (!args.bundle_path.empty()) {
             const auto sidecar =
                 trtmc::config::try_write_effective_config_next_to(bundle, args.bundle_path);
@@ -2465,7 +2335,6 @@ int apply_cli_config(const CliArgs& args) {
                              "runtime config.\n";
             }
         }
-#endif
     } catch (const std::exception& e) {
         std::cerr << "Error resolving config: " << e.what() << '\n';
         return EXIT_FAILURE;
@@ -2542,15 +2411,6 @@ static int run_cli(int argc, char** argv) {
 
 #if defined(_WIN32)
 int wmain(int argc, wchar_t** argv) {
-#if defined(TRTMC_LOCKED_H3_RUNTIME)
-    try {
-        trtmc::internal::enforce_locked_h3_process_policy();
-    } catch (const std::exception& error) {
-        std::cerr << "Error: unable to enforce the locked MiniMax-H3 process policy: "
-                  << error.what() << '\n';
-        return EXIT_FAILURE;
-    }
-#endif
     try {
         trtmc::cli::Utf8CommandLine command_line(argc, argv);
         return run_cli(command_line.argc(), command_line.argv());

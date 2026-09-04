@@ -324,7 +324,6 @@ def build_multimodal_text_encoder_engine(
             query,
             cos,
             sin,
-            rows=profile.max_sequence_length,
             heads=NUM_HEADS,
             head_dim=HEAD_DIM,
             rotary_dim=HEAD_DIM,
@@ -334,20 +333,13 @@ def build_multimodal_text_encoder_engine(
             key,
             cos,
             sin,
-            rows=profile.max_sequence_length,
             heads=NUM_KV_HEADS,
             head_dim=HEAD_DIM,
             rotary_dim=HEAD_DIM,
         )
-        query_heads = op.rows_to_heads(
-            network, query, profile.max_sequence_length, NUM_HEADS, HEAD_DIM
-        )
-        key_heads = op.rows_to_heads(
-            network, key, profile.max_sequence_length, NUM_KV_HEADS, HEAD_DIM
-        )
-        value_heads = op.rows_to_heads(
-            network, value, profile.max_sequence_length, NUM_KV_HEADS, HEAD_DIM
-        )
+        query_heads = op.rows_to_heads(network, query, NUM_HEADS, HEAD_DIM)
+        key_heads = op.rows_to_heads(network, key, NUM_KV_HEADS, HEAD_DIM)
+        value_heads = op.rows_to_heads(network, value, NUM_KV_HEADS, HEAD_DIM)
         key_heads = _repeat_kv(network, key_heads)
         value_heads = _repeat_kv(network, value_heads)
         scale = op.constant(
@@ -374,7 +366,6 @@ def build_multimodal_text_encoder_engine(
         update = op.heads_to_rows(
             network,
             attention.get_output(0),
-            profile.max_sequence_length,
             NUM_HEADS * HEAD_DIM,
         )
         update = _linear(network, update, weights, f"{prefix}.self_attn.o_proj")

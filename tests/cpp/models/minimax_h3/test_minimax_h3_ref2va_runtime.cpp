@@ -409,11 +409,6 @@ void test_scheduler_and_plugin_fail_closed_contract() {
         const std::string config =
             "{\"engine_backend\":\"trt_rtx\",\"public_workflows\":[\"t2va\",\"fl2va\",\"ref2va\"],"
             "\"ref2va_schema_version\":2,\"ref2va_supported\":true,"
-            "\"ref2va_context_ir_supported\":false,"
-            "\"ref2va_regenerate_2k_supported\":false,"
-            "\"ref2va_runtime_language\":\"c++/cuda\","
-            "\"ref2va_runtime_dependencies\":[\"TensorRT-RTX\"],"
-            "\"ref2va_transformer_fallback_allowed\":false,"
             "\"ref2va_scheduler\":" +
             scheduler + "}";
         trtmc::PipelineContext context{bundle, base, config, empty, empty, nullptr, empty, false};
@@ -445,11 +440,6 @@ void test_scheduler_and_plugin_fail_closed_contract() {
         "{\"engine_backend\":\"trt_rtx\","
         "\"public_workflows\":[\"t2va\",\"fl2va\",\"ref2va\",\"context-ir\"],"
         "\"ref2va_schema_version\":2,\"ref2va_supported\":true,"
-        "\"ref2va_context_ir_supported\":false,"
-        "\"ref2va_regenerate_2k_supported\":false,"
-        "\"ref2va_runtime_language\":\"c++/cuda\","
-        "\"ref2va_runtime_dependencies\":[\"TensorRT-RTX\"],"
-        "\"ref2va_transformer_fallback_allowed\":false,"
         "\"ref2va_scheduler\":{\"sigma_grid_points\":50,"
         "\"transformer_forwards\":49,\"video_shift\":12.0,"
         "\"audio_shift\":3.0,\"guidance_scale\":1.0,"

@@ -14,20 +14,13 @@ the native C++ request packer and by bundle metadata.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from .fl2va_contract import (
     MultimodalTextProfile,
-    PlanAbi,
     VisionEncoderProfile,
-    text_encoder_abi,
-    vision_encoder_abi,
 )
 from .ref2va_contract import (
-    PresentationPiece,
     QWEN_MAX_POSITION_EMBEDDINGS,
     QWEN_VISION_PATCH_SIZE,
-    qwen_patch_grid,
 )
 
 
@@ -57,71 +50,6 @@ REF2VA_SHARED_TEXT_PROFILE = MultimodalTextProfile(
     opt_vision_rows=1_008,
     max_vision_rows=REF2VA_MAX_COMPACT_VISION_ROWS,
 )
-
-
-@dataclass(frozen=True)
-class QwenVisionInvocation:
-    """One exact call of the shared Qwen vision plan.
-
-    Images duplicate their only frame to fill Qwen's temporal patch of two.
-    Ref2VA videos are sampled at 2 fps, padded to an even sampled-frame count,
-    and invoked once for every consecutive pair.  ``PresentationPiece`` has
-    already expanded a video into those timestamped temporal blocks.
-    """
-
-    modality: str
-    height: int
-    width: int
-    patch_rows: int
-    merged_rows: int
-    source_frames: int
-
-
-def ref2va_qwen_vision_invocations(
-    pieces: tuple[PresentationPiece, ...] | list[PresentationPiece],
-) -> tuple[QwenVisionInvocation, ...]:
-    """Return ordered, non-chunkable vision-plan calls for a presentation.
-
-    Calling the plan once per video temporal block is mathematically identical
-    to the released packed Qwen call: ``get_vision_cu_seqlens`` creates one
-    independent ``H*W`` attention segment for every temporal grid row; patch
-    embedding, 2-D position/rotary data, mergers, and DeepStack are likewise
-    block-local.  The four plan outputs are concatenated in this order.
-    """
-
-    invocations: list[QwenVisionInvocation] = []
-    profile = REF2VA_SHARED_VISION_PROFILE
-    profile.validate()
-    for piece in pieces:
-        if piece.modality == "text":
-            continue
-        grid_h, grid_w = qwen_patch_grid(piece.height, piece.width)
-        patch_rows = grid_h * grid_w
-        if not profile.min_patches <= patch_rows <= profile.max_patches:
-            raise ValueError(
-                "MiniMax-H3 Ref2VA Qwen vision block is outside the shared plan profile: "
-                f"{patch_rows} not in {profile.min_patches}..{profile.max_patches}"
-            )
-        invocations.append(
-            QwenVisionInvocation(
-                modality=piece.modality,
-                height=piece.height,
-                width=piece.width,
-                patch_rows=patch_rows,
-                merged_rows=patch_rows // 4,
-                source_frames=2,
-            )
-        )
-    return tuple(invocations)
-
-
-def ref2va_shared_qwen_abis() -> tuple[PlanAbi, PlanAbi]:
-    """Return the required superset ABIs for the two existing shared sections."""
-
-    return (
-        vision_encoder_abi(REF2VA_SHARED_VISION_PROFILE),
-        text_encoder_abi(REF2VA_SHARED_TEXT_PROFILE),
-    )
 
 
 def ref2va_shared_qwen_profile_metadata() -> dict[str, object]:

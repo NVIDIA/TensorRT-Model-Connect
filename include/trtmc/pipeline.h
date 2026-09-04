@@ -278,6 +278,20 @@ struct VideoClipInput {
     AudioResult soundtrack;
 };
 
+// Model-owned bounds for decoding reference media in a frontend. A pipeline
+// returns this policy when it accepts encoded video or audio references; the
+// frontend decodes them before constructing VideoGenerationRequest.
+struct ReferenceMediaDecodePolicy {
+    std::uint32_t maximum_duration_seconds{0};
+    std::uint32_t target_video_fps{0};
+    std::uint32_t maximum_source_video_fps{0};
+    std::uint32_t canvas_short_edge{0};
+    std::uint64_t canvas_max_pixels{0};
+    std::uint32_t canvas_multiple{0};
+    double minimum_aspect_ratio{0.0};
+    double maximum_aspect_ratio{0.0};
+};
+
 enum class VideoReferenceKind {
     kImage,
     kVideo,
@@ -301,8 +315,8 @@ enum class VideoGenerationMode {
     kReferenceToVideoAudio,      // Ref2VA
 };
 
-// Structured native video request shared by the public H3-Base modes. Media is
-// already decoded into standard C++ value types, so a model plugin never needs
+// Structured native video request. Media is already decoded into standard C++
+// value types, so a model plugin never needs
 // Python, FFmpeg, a subprocess, or a framework tensor at runtime.
 //
 // Mode contract:
@@ -796,6 +810,13 @@ class IPipeline {
         }
         return generate_video(request.prompt, request.config);
     }
+
+    // Appended after the video-generation overloads to preserve every existing
+    // virtual slot. nullopt means the pipeline does not accept encoded reference
+    // media through a frontend-owned decoder.
+    virtual std::optional<ReferenceMediaDecodePolicy> reference_media_decode_policy() const {
+        return std::nullopt;
+    }
 };
 
 // --- Factory ---
@@ -810,11 +831,6 @@ struct LoadOptions {
     std::vector<std::string> set_tokens;                // --set ns.field=value (repeatable)
     std::vector<std::string> backend_search_paths;      // Extra directories for backend DSOs
     std::vector<std::string> model_plugin_search_paths; // Extra dirs for libtrtmc_model_*.so
-    // Preserve the historical fail-fast behavior by default. Latency-sensitive
-    // callers may disable plan-content hashing. That fast path still validates
-    // section bounds and keys retained engines by stable file and section identity,
-    // but does not attest payload contents against the declared digest.
-    bool validate_bundle_payloads{true};
 };
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python = "",

@@ -4,10 +4,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(tensorrt_model_connect VERSION 0.1.0 LANGUAGES CXX)
 
-if(MSVC AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
-  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-endif()
-
 # Release wheels package build outputs directly. Keep CMake's automatically
 # generated build-tree RPATH entries relative to each ELF file.
 if(NOT WIN32)
@@ -62,28 +58,18 @@ option(TRTMC_DISTRIBUTABLE_BUILD
        "Build distributable artifacts without embedding source/build paths" OFF)
 option(TRTMC_RUNTIME_ONLY_CLI
        "Build the CLI without Python-backed build/graph commands or subprocess code" OFF)
-option(TRTMC_LOCKED_H3_RUNTIME
-       "Lock the native Windows MiniMax-H3 runtime to its attested package layout" OFF)
 set(TRTMC_RUNTIME_MODELS "" CACHE STRING
   "Semicolon-separated runtime model plugins to build; empty builds every model.")
 set(TRTMC_MODEL_PROOF_MODEL "" CACHE STRING
   "Require the source tree to contain exactly this runtime model (CI isolation proof mode).")
 set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
   "TensorRT ABI suffix for the standard backend DSO, e.g. 10_15. Empty means auto-detect from headers.")
-set(TRTMC_RTX_ROOT "" CACHE PATH
-  "TensorRT-RTX SDK root containing include, lib, and bin directories.")
 set(TRTMC_RTX_INCLUDE_DIR "" CACHE PATH
-  "TensorRT-RTX SDK include directory; overrides TRTMC_RTX_ROOT/include.")
+  "TensorRT-RTX SDK include directory.")
 set(TRTMC_RTX_LIBRARY_DIR "" CACHE PATH
-  "TensorRT-RTX SDK library directory; overrides TRTMC_RTX_ROOT/lib.")
+  "TensorRT-RTX SDK library directory.")
 set(TRTMC_RTX_RUNTIME_DIR "" CACHE PATH
-  "TensorRT-RTX runtime DLL directory; overrides TRTMC_RTX_ROOT/bin.")
-set(TRTMC_RTX_LIBRARY_FILE "" CACHE FILEPATH
-  "Exact TensorRT-RTX import or shared library.")
-set(TRTMC_RTX_RUNTIME_DLL "" CACHE FILEPATH
-  "Exact TensorRT-RTX runtime DLL on Windows.")
-set(TRTMC_NLOHMANN_JSON_INCLUDE_DIR "" CACHE PATH
-  "Local include root containing nlohmann/json.hpp.")
+  "TensorRT-RTX runtime DLL directory on Windows.")
 set(TRTMC_SOURCE_REVISION "" CACHE STRING
   "Source revision embedded in release benchmark worker provenance.")
 if(NOT TRTMC_SOURCE_REVISION)
@@ -236,32 +222,22 @@ if(TRTMC_ENABLE_TRT AND TRTMC_TRT_INCLUDE_DIR AND TRTMC_TRT_LIBRARY)
 endif()
 
 # --- nlohmann/json for BPE tokenizer JSON parsing ---
-if(TRTMC_NLOHMANN_JSON_INCLUDE_DIR)
-  if(NOT EXISTS "${TRTMC_NLOHMANN_JSON_INCLUDE_DIR}/nlohmann/json.hpp")
-    message(FATAL_ERROR
-      "TRTMC_NLOHMANN_JSON_INCLUDE_DIR must contain nlohmann/json.hpp: "
-      "${TRTMC_NLOHMANN_JSON_INCLUDE_DIR}")
-  endif()
-  set(_trtmc_nlohmann_json_include "${TRTMC_NLOHMANN_JSON_INCLUDE_DIR}")
-  message(STATUS "nlohmann/json: using local include directory")
+find_package(nlohmann_json CONFIG QUIET)
+if(TARGET nlohmann_json::nlohmann_json)
+  get_target_property(_trtmc_nlohmann_json_include
+    nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+  message(STATUS "nlohmann/json: using package config")
 else()
-  find_package(nlohmann_json CONFIG QUIET)
-  if(TARGET nlohmann_json::nlohmann_json)
-    get_target_property(_trtmc_nlohmann_json_include
-      nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
-    message(STATUS "nlohmann/json: using package config")
-  else()
-    include(FetchContent)
-    set(JSON_Install OFF CACHE INTERNAL "")
-    FetchContent_Declare(
-      nlohmann_json
-      GIT_REPOSITORY https://github.com/nlohmann/json.git
-      GIT_TAG v3.11.3
-      GIT_SHALLOW TRUE
-    )
-    FetchContent_MakeAvailable(nlohmann_json)
-    set(_trtmc_nlohmann_json_include "${nlohmann_json_SOURCE_DIR}/include")
-  endif()
+  include(FetchContent)
+  set(JSON_Install OFF CACHE INTERNAL "")
+  FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_MakeAvailable(nlohmann_json)
+  set(_trtmc_nlohmann_json_include "${nlohmann_json_SOURCE_DIR}/include")
 endif()
 
 # --- Bundle-only runtime library ---
@@ -269,47 +245,6 @@ endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(cmake/trtmc_config_schemas.cmake)
 include(cmake/trtmc_pipeline_plugins.cmake)
-if(TRTMC_LOCKED_H3_RUNTIME)
-  if(NOT WIN32)
-    message(FATAL_ERROR "TRTMC_LOCKED_H3_RUNTIME is supported only on Windows")
-  endif()
-  if(NOT TRTMC_RUNTIME_ONLY_CLI OR NOT TRTMC_DISTRIBUTABLE_BUILD)
-    message(FATAL_ERROR
-      "TRTMC_LOCKED_H3_RUNTIME requires TRTMC_RUNTIME_ONLY_CLI=ON and "
-      "TRTMC_DISTRIBUTABLE_BUILD=ON")
-  endif()
-  list(LENGTH TRTMC_RUNTIME_MODEL_IDS _trtmc_locked_runtime_model_count)
-  if(NOT _trtmc_locked_runtime_model_count EQUAL 1 OR
-     NOT TRTMC_RUNTIME_MODEL_IDS STREQUAL "minimax_h3")
-    message(FATAL_ERROR
-      "TRTMC_LOCKED_H3_RUNTIME requires exactly TRTMC_RUNTIME_MODELS=minimax_h3")
-  endif()
-  if(NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
-    message(FATAL_ERROR
-      "TRTMC_LOCKED_H3_RUNTIME requires CMAKE_CUDA_RUNTIME_LIBRARY=Static")
-  endif()
-  if(NOT CMAKE_MSVC_RUNTIME_LIBRARY STREQUAL "MultiThreaded")
-    message(FATAL_ERROR
-      "TRTMC_LOCKED_H3_RUNTIME requires CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded")
-  endif()
-  if(NOT CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA" OR
-     CMAKE_CUDA_COMPILER_VERSION VERSION_LESS "12.9")
-    message(FATAL_ERROR
-      "TRTMC_LOCKED_H3_RUNTIME requires NVIDIA CUDA compiler 12.9 or newer")
-  endif()
-  get_filename_component(_trtmc_locked_cudart_name "${TRTMC_CUDART_LIBRARY}" NAME)
-  string(TOLOWER "${_trtmc_locked_cudart_name}" _trtmc_locked_cudart_name)
-  if(NOT _trtmc_locked_cudart_name STREQUAL "cudart_static.lib")
-    message(FATAL_ERROR
-      "TRTMC_LOCKED_H3_RUNTIME requires the explicit CUDA cudart_static.lib")
-  endif()
-  string(LENGTH "${TRTMC_SOURCE_REVISION}" _trtmc_locked_source_revision_length)
-  if(NOT _trtmc_locked_source_revision_length EQUAL 40 OR
-     NOT TRTMC_SOURCE_REVISION MATCHES "^[0-9a-f]+$")
-    message(FATAL_ERROR
-      "TRTMC_LOCKED_H3_RUNTIME requires an exact 40-character source revision")
-  endif()
-endif()
 if(WIN32)
   set(_trtmc_optimized_runtime_host_source
     src/runtime/providers/optimized_runtime_host_windows.cpp)
@@ -391,10 +326,6 @@ target_include_directories(trtmc_core SYSTEM PRIVATE
 )
 
 target_compile_definitions(trtmc_core PUBLIC TRTMC_VERSION_STRING=\"${PROJECT_VERSION}\")
-if(TRTMC_LOCKED_H3_RUNTIME)
-  target_sources(trtmc_core PRIVATE src/runtime/platform/windows_process_lockdown.cpp)
-  target_compile_definitions(trtmc_core PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
-endif()
 if(NOT TRTMC_DISTRIBUTABLE_BUILD)
   target_compile_definitions(trtmc_core
     PUBLIC TRTMC_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\"
@@ -589,70 +520,6 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
     ${_trtmc_model_cuda_sources}
     ${TRTMC_MODEL_${_trtmc_model_var}_REGISTRATION_SOURCE}
   )
-  if(_trtmc_model STREQUAL "minimax_h3")
-    if(CMAKE_CUDA_COMPILER AND CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA" AND
-       CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.9")
-      get_filename_component(_trtmc_cuda_compiler_realpath
-        "${CMAKE_CUDA_COMPILER}" REALPATH)
-      get_filename_component(_trtmc_cuda_compiler_directory
-        "${_trtmc_cuda_compiler_realpath}" DIRECTORY)
-      set(_trtmc_h3_ptxas_hints "${_trtmc_cuda_compiler_directory}")
-      if(CMAKE_CUDA_COMPILER_TOOLKIT_ROOT)
-        list(APPEND _trtmc_h3_ptxas_hints
-          "${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}/bin")
-      endif()
-      # Do not retain a ptxas path if a build tree switches CUDA toolchains.
-      unset(_trtmc_h3_ptxas CACHE)
-      unset(_trtmc_h3_ptxas)
-      find_program(_trtmc_h3_ptxas
-        NAMES ptxas
-        HINTS ${_trtmc_h3_ptxas_hints}
-        NO_DEFAULT_PATH)
-      if(NOT _trtmc_h3_ptxas)
-        message(FATAL_ERROR
-          "MiniMax-H3 SM121 specialization requires ptxas from the selected "
-          "CUDA 12.9 or newer compiler toolchain")
-      endif()
-      set(_trtmc_h3_sm121_ptx
-        "${PROJECT_SOURCE_DIR}/src/runtime/models/minimax_h3/vsa_attention_sm121.ptx")
-      set(_trtmc_h3_sm121_cubin
-        "${PROJECT_BINARY_DIR}/generated/models/minimax_h3/vsa_attention_sm121.cubin")
-      set(_trtmc_h3_sm121_header
-        "${PROJECT_BINARY_DIR}/generated/models/minimax_h3/vsa_attention_sm121_cubin.h")
-      add_custom_command(
-        OUTPUT
-          "${_trtmc_h3_sm121_cubin}"
-          "${_trtmc_h3_sm121_header}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-          "${PROJECT_BINARY_DIR}/generated/models/minimax_h3"
-        COMMAND "${_trtmc_h3_ptxas}"
-          -arch=sm_121a
-          -O3
-          "${_trtmc_h3_sm121_ptx}"
-          -o "${_trtmc_h3_sm121_cubin}"
-        COMMAND ${CMAKE_COMMAND}
-          "-DINPUT_FILE=${_trtmc_h3_sm121_cubin}"
-          "-DOUTPUT_FILE=${_trtmc_h3_sm121_header}"
-          "-DSYMBOL=kMiniMaxH3VsaSm121Cubin"
-          -P "${PROJECT_SOURCE_DIR}/cmake/embed_binary.cmake"
-        DEPENDS
-          "${_trtmc_h3_sm121_ptx}"
-          "${_trtmc_h3_ptxas}"
-          "${PROJECT_SOURCE_DIR}/cmake/embed_binary.cmake"
-        COMMENT "Assembling and embedding MiniMax-H3 SM121 VSA cubin"
-        VERBATIM
-      )
-      target_sources(trtmc_model_${_trtmc_model} PRIVATE
-        "${_trtmc_h3_sm121_header}")
-      target_include_directories(trtmc_model_${_trtmc_model} PRIVATE
-        "${PROJECT_BINARY_DIR}/generated/models/minimax_h3")
-      target_compile_definitions(trtmc_model_${_trtmc_model}
-        PRIVATE TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION=1)
-    else()
-      target_compile_definitions(trtmc_model_${_trtmc_model}
-        PRIVATE TRTMC_MINIMAX_H3_HAS_SM121_SPECIALIZATION=0)
-    endif()
-  endif()
   add_dependencies(trtmc_model_plugins trtmc_model_${_trtmc_model})
   target_include_directories(trtmc_model_${_trtmc_model}
     PRIVATE
@@ -688,13 +555,8 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
       "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic>"
       "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<PLATFORM_ID:Windows>>>:-Wall;-Wextra>"
   )
-  if(TRTMC_LOCKED_H3_RUNTIME)
-    set(_trtmc_model_output_directory
-      "${CMAKE_BINARY_DIR}/trtmc/models/${_trtmc_model}/$<0:>")
-  else()
-    set(_trtmc_model_output_directory
-      "${CMAKE_BINARY_DIR}/models/${_trtmc_model}/$<0:>")
-  endif()
+  set(_trtmc_model_output_directory
+    "${CMAKE_BINARY_DIR}/models/${_trtmc_model}/$<0:>")
   set_target_properties(trtmc_model_${_trtmc_model} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${_trtmc_model_output_directory}"
     RUNTIME_OUTPUT_DIRECTORY "${_trtmc_model_output_directory}"
@@ -843,58 +705,17 @@ endif()
 # --- Backend DSO: TRT-RTX (optional) ---
 option(TRTMC_BUILD_BACKEND_RTX "Build TRT-RTX backend DSO" OFF)
 if(TRTMC_BUILD_BACKEND_RTX)
-  set(_trtmc_rtx_roots)
-  if(TRTMC_RTX_ROOT)
-    list(APPEND _trtmc_rtx_roots "${TRTMC_RTX_ROOT}")
-  endif()
-  if(DEFINED ENV{TRTMC_RTX_ROOT})
-    list(APPEND _trtmc_rtx_roots "$ENV{TRTMC_RTX_ROOT}")
-  endif()
-
-  if(TRTMC_RTX_LIBRARY_FILE)
-    if(NOT EXISTS "${TRTMC_RTX_LIBRARY_FILE}")
-      message(FATAL_ERROR "TRTMC_RTX_LIBRARY_FILE does not exist: ${TRTMC_RTX_LIBRARY_FILE}")
-    endif()
-    set(TENSORRT_RTX_LIB "${TRTMC_RTX_LIBRARY_FILE}")
-  else()
-    unset(TENSORRT_RTX_LIB CACHE)
-    find_library(TENSORRT_RTX_LIB
-      NAMES tensorrt_rtx tensorrt_rtx_1_6
-      HINTS "${TRTMC_RTX_LIBRARY_DIR}" ${_trtmc_rtx_roots}
-      PATH_SUFFIXES "" lib lib/x64
-      NO_DEFAULT_PATH
-    )
-  endif()
-
-  if(TRTMC_RTX_INCLUDE_DIR)
-    if(NOT EXISTS "${TRTMC_RTX_INCLUDE_DIR}/NvInfer.h")
-      message(FATAL_ERROR "TRTMC_RTX_INCLUDE_DIR must contain NvInfer.h")
-    endif()
-    set(TRT_RTX_INCLUDE_DIR "${TRTMC_RTX_INCLUDE_DIR}")
-  else()
-    unset(TRT_RTX_INCLUDE_DIR CACHE)
-    find_path(TRT_RTX_INCLUDE_DIR NvInfer.h
-      HINTS ${_trtmc_rtx_roots}
-      PATH_SUFFIXES include
-      NO_DEFAULT_PATH
-    )
-  endif()
+  find_library(TENSORRT_RTX_LIB
+    NAMES tensorrt_rtx tensorrt_rtx_1_6
+    HINTS "${TRTMC_RTX_LIBRARY_DIR}"
+    NO_DEFAULT_PATH)
+  set(TRT_RTX_INCLUDE_DIR "${TRTMC_RTX_INCLUDE_DIR}")
 
   if(WIN32)
-    if(TRTMC_RTX_RUNTIME_DLL)
-      if(NOT EXISTS "${TRTMC_RTX_RUNTIME_DLL}")
-        message(FATAL_ERROR "TRTMC_RTX_RUNTIME_DLL does not exist: ${TRTMC_RTX_RUNTIME_DLL}")
-      endif()
-      set(TENSORRT_RTX_RUNTIME_DLL "${TRTMC_RTX_RUNTIME_DLL}")
-    else()
-      unset(TENSORRT_RTX_RUNTIME_DLL CACHE)
-      find_file(TENSORRT_RTX_RUNTIME_DLL
-        NAMES tensorrt_rtx_1_6.dll tensorrt_rtx.dll
-        HINTS "${TRTMC_RTX_RUNTIME_DIR}" ${_trtmc_rtx_roots}
-        PATH_SUFFIXES "" bin lib
-        NO_DEFAULT_PATH
-      )
-    endif()
+    find_file(TENSORRT_RTX_RUNTIME_DLL
+      NAMES tensorrt_rtx_1_6.dll tensorrt_rtx.dll
+      HINTS "${TRTMC_RTX_RUNTIME_DIR}"
+      NO_DEFAULT_PATH)
     if(NOT TENSORRT_RTX_RUNTIME_DLL)
       message(FATAL_ERROR
         "TRTMC_BUILD_BACKEND_RTX requires a matching TensorRT-RTX runtime DLL on Windows")
@@ -962,30 +783,11 @@ if(TRTMC_BUILD_BACKEND_RTX)
   endif()
 endif()
 
-if(TRTMC_LOCKED_H3_RUNTIME)
-  if(NOT TRTMC_BUILD_BACKEND_RTX)
-    message(FATAL_ERROR "TRTMC_LOCKED_H3_RUNTIME requires TRTMC_BUILD_BACKEND_RTX=ON")
-  endif()
-  if(TRTMC_BUILD_BACKEND_TRT OR TRTMC_ENABLE_TRT OR
-     TRTMC_ENABLE_LIBTORCH_MULTINOMIAL OR _trtmc_has_tvm_ffi)
-    message(FATAL_ERROR
-      "TRTMC_LOCKED_H3_RUNTIME permits only the TensorRT-RTX native runtime")
-  endif()
-endif()
-
 add_executable(trtmc
   src/cli/args.cpp
   src/cli/main.cpp
   src/cli/windows_media.cpp
 )
-list(FIND TRTMC_RUNTIME_MODEL_IDS "minimax_h3" _trtmc_cli_minimax_h3_index)
-if(NOT _trtmc_cli_minimax_h3_index EQUAL -1)
-  target_sources(trtmc PRIVATE src/cli/minimax_h3_video_contract.cpp)
-  target_compile_definitions(trtmc PRIVATE TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT=1)
-endif()
-if(WIN32 AND TRTMC_LOCKED_H3_RUNTIME)
-  target_compile_definitions(trtmc PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
-endif()
 if(TRTMC_RUNTIME_ONLY_CLI)
   target_compile_definitions(trtmc PRIVATE TRTMC_RUNTIME_ONLY_CLI=1)
 endif()
@@ -1013,32 +815,6 @@ if(NOT WIN32)
     BUILD_RPATH_USE_ORIGIN TRUE
     INSTALL_RPATH "\$ORIGIN"
   )
-endif()
-
-if(WIN32)
-  add_library(trtmc_windows_h3_installer_support STATIC
-    src/installer/windows_h3_installer.cpp
-  )
-  target_include_directories(trtmc_windows_h3_installer_support
-    PUBLIC ${PROJECT_SOURCE_DIR}/src
-  )
-  set_target_properties(trtmc_windows_h3_installer_support PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
-  )
-  target_link_libraries(trtmc_windows_h3_installer_support PRIVATE advapi32 bcrypt)
-  target_compile_options(trtmc_windows_h3_installer_support PRIVATE /W4 /WX)
-
-  add_executable(minimax_h3_setup WIN32
-    src/installer/windows_h3_setup_main.cpp
-  )
-  set_target_properties(minimax_h3_setup PROPERTIES OUTPUT_NAME MiniMaxH3Setup)
-  set_target_properties(minimax_h3_setup PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
-  )
-  target_link_libraries(minimax_h3_setup PRIVATE
-    trtmc_windows_h3_installer_support advapi32 ole32 shell32 user32
-  )
-  target_compile_options(minimax_h3_setup PRIVATE /W4 /WX)
 endif()
 
 if(TRTMC_BUILD_BENCHMARKS)
@@ -1258,16 +1034,18 @@ function(trtmc_add_model_manifest_tests)
         # Model DSOs intentionally live in per-model subdirectories. Make
         # CTest apply their search paths to every child independently; relying
         # on a parent shell's PATH makes multi-test Windows runs order-sensitive.
-        set(_trtmc_test_path_modifications
-          "PATH=path_list_prepend:${CMAKE_BINARY_DIR}")
+        set(_trtmc_test_path_entries "${CMAKE_BINARY_DIR}")
         foreach(_trtmc_link_target IN LISTS _trtmc_link_targets)
           if(TARGET ${_trtmc_link_target})
-            list(APPEND _trtmc_test_path_modifications
-              "PATH=path_list_prepend:$<TARGET_FILE_DIR:${_trtmc_link_target}>")
+            list(PREPEND _trtmc_test_path_entries
+              "$<TARGET_FILE_DIR:${_trtmc_link_target}>")
           endif()
         endforeach()
+        cmake_path(CONVERT "$ENV{PATH}" TO_CMAKE_PATH_LIST _trtmc_inherited_test_path NORMALIZE)
+        list(APPEND _trtmc_test_path_entries ${_trtmc_inherited_test_path})
+        list(JOIN _trtmc_test_path_entries "$<SEMICOLON>" _trtmc_test_path)
         set_tests_properties(${_trtmc_test_name} PROPERTIES
-          ENVIRONMENT_MODIFICATION "${_trtmc_test_path_modifications}")
+          ENVIRONMENT "PATH=${_trtmc_test_path}")
       endif()
 
       _trtmc_manifest_csv_to_list("${_trtmc_extra_sources_csv}" _trtmc_extra_sources)
@@ -1285,7 +1063,6 @@ endfunction()
 
 # Bundle / format
 trtmc_add_test(test_bundle_format)
-trtmc_add_test(test_bundle_sha256)
 trtmc_add_test(test_bundle_materialization)
 trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
@@ -1297,19 +1074,11 @@ trtmc_add_test(test_runtime_cache_persistence)
 target_sources(test_runtime_cache_persistence PRIVATE
   src/runtime/backend/runtime_cache_persistence.cpp
 )
-if(TRTMC_LOCKED_H3_RUNTIME)
-  target_compile_definitions(test_pipeline_registry PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
-  target_compile_definitions(test_model_plugin_loader PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
-  target_compile_definitions(test_backend_loader PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
-endif()
 trtmc_add_test(test_dynamic_library)
 target_compile_definitions(test_dynamic_library PRIVATE
   TRTMC_TEST_CORE_LIBRARY="$<TARGET_FILE:trtmc_core>"
 )
 trtmc_add_test(test_trt_version)
-if(TRTMC_LOCKED_H3_RUNTIME)
-  target_compile_definitions(test_trt_version PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
-endif()
 trtmc_add_test(test_runtime_measurement)
 trtmc_add_test(test_distributed_runtime)
 
@@ -1347,9 +1116,6 @@ endif()
 # C ABI
 trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
 trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
-if(TRTMC_LOCKED_H3_RUNTIME)
-  target_compile_definitions(test_c_abi_entry PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
-endif()
 
 # Config / parsing
 trtmc_add_test(test_text_parsers)
@@ -1357,32 +1123,12 @@ trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
-if(NOT _trtmc_cli_minimax_h3_index EQUAL -1)
-  target_compile_definitions(test_cli_args PRIVATE
-    TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT=1
-  )
-endif()
 if(TRTMC_RUNTIME_ONLY_CLI)
   trtmc_add_test(test_cli_args_runtime_only)
   target_sources(test_cli_args_runtime_only PRIVATE src/cli/args.cpp)
   target_compile_definitions(test_cli_args_runtime_only PRIVATE TRTMC_RUNTIME_ONLY_CLI=1)
-  if(NOT _trtmc_cli_minimax_h3_index EQUAL -1)
-    target_compile_definitions(test_cli_args_runtime_only PRIVATE
-      TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT=1
-    )
-  endif()
 endif()
 if(WIN32)
-  trtmc_add_test(test_cli_args_locked_h3_runtime)
-  target_sources(test_cli_args_locked_h3_runtime PRIVATE src/cli/args.cpp)
-  target_compile_definitions(test_cli_args_locked_h3_runtime PRIVATE
-    TRTMC_RUNTIME_ONLY_CLI=1
-    TRTMC_LOCKED_H3_RUNTIME=1
-    TRTMC_CLI_HAS_MINIMAX_H3_VIDEO_CONTRACT=1
-  )
-  if(TRTMC_LOCKED_H3_RUNTIME)
-    trtmc_add_test(test_windows_process_lockdown)
-  endif()
   trtmc_add_test(test_windows_utf8_argv)
   target_sources(test_windows_utf8_argv PRIVATE
     src/cli/windows_utf8_argv.cpp
@@ -1391,13 +1137,6 @@ if(WIN32)
   trtmc_add_test(test_windows_media)
   target_sources(test_windows_media PRIVATE src/cli/windows_media.cpp)
   target_link_libraries(test_windows_media PRIVATE mfplat mfreadwrite mfuuid ole32)
-  trtmc_add_test(test_windows_h3_installer)
-  set_target_properties(test_windows_h3_installer PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
-  )
-  target_link_libraries(test_windows_h3_installer PRIVATE
-    trtmc_windows_h3_installer_support
-  )
 endif()
 trtmc_add_test(test_jsonl_dataset_and_output
   EXTRA_INCLUDES ${_trtmc_nlohmann_json_include}
@@ -1405,15 +1144,6 @@ trtmc_add_test(test_jsonl_dataset_and_output
 trtmc_add_test(test_speech_session_cli_helpers)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
-if(TRTMC_LOCKED_H3_RUNTIME)
-  target_compile_definitions(test_config_cli_support PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
-endif()
-if(NOT _trtmc_cli_minimax_h3_index EQUAL -1)
-  trtmc_add_test(test_minimax_h3_video_contract)
-  target_sources(test_minimax_h3_video_contract PRIVATE
-    src/cli/minimax_h3_video_contract.cpp
-  )
-endif()
 trtmc_add_test(test_config_schemas_triattention)
 
 # TRT runtime core
@@ -1441,16 +1171,7 @@ trtmc_add_test(test_device_tensor REQUIRES_GPU)
 
 # Pipelines (public API)
 trtmc_add_test(test_pipeline_api                NO_SRC_INCLUDE)
-if(TRTMC_LOCKED_H3_RUNTIME)
-  target_compile_definitions(test_pipeline_api PRIVATE TRTMC_LOCKED_H3_RUNTIME=1)
-endif()
 trtmc_add_model_manifest_tests()
-if(TARGET test_minimax_h3_vsa_cuda AND TRTMC_LOCKED_H3_RUNTIME)
-  target_compile_definitions(test_minimax_h3_vsa_cuda PRIVATE
-    TRTMC_MINIMAX_H3_EXPECT_SM121_SPECIALIZATION=1)
-  set_tests_properties(test_minimax_h3_vsa_cuda PROPERTIES
-    ENVIRONMENT "CUDA_DISABLE_PTX_JIT=1")
-endif()
 
 # Tokenizers
 trtmc_add_test(test_vocab_tokenizer     NO_SRC_INCLUDE)
@@ -1578,12 +1299,6 @@ install(DIRECTORY include/trtmc/
 install(TARGETS trtmc
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-
-if(TARGET minimax_h3_setup)
-  install(TARGETS minimax_h3_setup
-    RUNTIME DESTINATION .
-  )
-endif()
 
 if(TARGET trtmc_benchmark_worker)
   install(TARGETS trtmc_benchmark_worker
