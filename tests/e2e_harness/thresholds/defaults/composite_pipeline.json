@@ -1,8 +1,0 @@
-{
-  "description": "Default thresholds for composite pipeline models",
-  "metrics": {
-    "stage_parity_cosine": 0.95,
-    "e2e_output_quality": 0.7,
-    "crossover_consistency": 0.8
-  }
-}

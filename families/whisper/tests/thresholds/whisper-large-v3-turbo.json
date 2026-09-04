@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "wer": 0.1,
+    "cer": 0.05
+  }
+}

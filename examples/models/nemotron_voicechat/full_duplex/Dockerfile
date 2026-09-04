@@ -24,23 +24,16 @@ WORKDIR /src
 COPY . /src
 
 # Dockerfile.dockerignore projects the native source tree while excluding every
-# other model family. TRTMC_MODEL_PROOF_MODEL makes that model isolation a
-# configure-time invariant instead of relying on the build target alone.
+# other model family.
 RUN cmake \
       -S /src/examples/models/nemotron_voicechat/full_duplex \
       -B /build \
       -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CUDA_ARCHITECTURES="${TRTMC_CUDA_ARCHITECTURES}" \
-      -DTRTMC_BUILD_BACKEND_TRT=ON \
-      -DTRTMC_BUILD_BACKEND_RTX=OFF \
       -DTRTMC_BUILD_TESTS=OFF \
-      -DTRTMC_BUILD_BENCHMARKS=OFF \
-      -DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF \
-      -DTRTMC_ENABLE_TVM_FFI=OFF \
-      -DTRTMC_BUILD_DIFFUSION_KERNELS=OFF \
-      -DTRTMC_DISTRIBUTABLE_BUILD=ON \
-      -DTRTMC_MODEL_PROOF_MODEL=nemotron_voicechat && \
+      -DTRTMC_BUILD_EXAMPLES=OFF \
+      -DTRTMC_ENABLE_BYOK=OFF && \
     cmake --build /build --parallel --target \
       trtmc_voicechat_full_duplex \
       test_trtmc_voicechat_playback_queue \
@@ -59,25 +52,19 @@ RUN apt-get update && \
       libasound2-data \
       libasound2t64 && \
     rm -rf /var/lib/apt/lists/* && \
-    mkdir -p /opt/trtmc/bin /opt/trtmc/licenses
+    mkdir -p /opt/trtmc/bin /opt/trtmc/lib /opt/trtmc/licenses
 
 # The repository-wide install target includes every model DSO. Stage only the
-# application and the three native runtime layers this example actually uses.
+# application and the four native runtime layers this example actually uses.
 COPY --from=builder /build/trtmc_voicechat_full_duplex /opt/trtmc/bin/
-COPY --from=builder /build/trtmc/libtrtmc_core.so /opt/trtmc/bin/
-COPY --from=builder /build/libtrtmc_backend_trt.so /opt/trtmc/bin/
-COPY --from=builder /build/libtrtmc_backend_trt_11_1.so /opt/trtmc/bin/
-COPY --from=builder /build/models/nemotron_voicechat/libtrtmc_model_nemotron_voicechat.so /opt/trtmc/bin/
+COPY --from=builder /build/trtmc/libtrtmc_core.so /opt/trtmc/lib/
+COPY --from=builder /build/trtmc/libtrtmc_runtime.so /opt/trtmc/lib/
+COPY --from=builder /build/trtmc/libtrtmc_backend_trt.so /opt/trtmc/lib/
+COPY --from=builder /build/libtrtmc_model_nemotron_voicechat.so /opt/trtmc/lib/
 COPY --from=builder /src/LICENSE /src/NOTICE /opt/trtmc/licenses/
 
 ENV PATH="/opt/trtmc/bin:${PATH}" \
-    LD_LIBRARY_PATH="/opt/trtmc/bin:${LD_LIBRARY_PATH}" \
-    TRTMC_MODEL_PLUGIN_DIR=/opt/trtmc/bin \
-    TRTMC_MODEL_PLUGIN_STRICT=1
-
-ARG TRTMC_SOURCE_REVISION=unknown
-LABEL org.opencontainers.image.source="https://github.com/NVIDIA/TensorRT-Model-Connect" \
-      org.opencontainers.image.revision="${TRTMC_SOURCE_REVISION}"
+    LD_LIBRARY_PATH="/opt/trtmc/lib:${LD_LIBRARY_PATH}"
 
 WORKDIR /models
 

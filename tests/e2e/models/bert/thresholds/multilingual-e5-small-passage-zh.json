@@ -1,9 +1,0 @@
-{
-  "threshold_overrides": {
-    "cosine_similarity": 0.999,
-    "l2_distance": 0.1,
-    "trt_unit_norm_error": 0.001,
-    "reference_unit_norm_error": 0.001,
-    "contract_cosine_threshold": 0.999
-  }
-}

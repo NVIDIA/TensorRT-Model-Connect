@@ -8,61 +8,38 @@ source. Start at the repository root.
 
 ## Automated environment preparation
 
-The repository-local `scripts/devToolkit` Python API exposes independent
-resolution, provisioning, source-build, and command capabilities. TensorRT is
-an arbitrary exact four-part request; qualification evidence is optional
-provenance, not an allowlist. This example adopts an existing development
-container and verifies its actual CUDA/TensorRT toolchain before building:
+The repository-local `apps/devtoolkit` Python API builds the root pinned-base
+Dockerfile through `tools.ci`, starts a persistent container for the current
+checkout, and optionally installs one family's declared dependencies:
 
 ```python
 from pathlib import Path
 import sys
 
 repo = Path.cwd()
-sys.path.insert(0, str(repo / "scripts" / "devToolkit"))
+sys.path.insert(0, str(repo / "apps" / "devtoolkit"))
 
-from trtmc_devtoolkit import (
-    DevToolkit,
-    EnvironmentRequest,
-    ExecutionTarget,
-    TrtmcBuildRecipe,
-)
+from trtmc_devtoolkit import DevToolkit, DockerTargetPolicy
 
 toolkit = DevToolkit.from_checkout(repo)
-lock = toolkit.resolve(
-    EnvironmentRequest(
-        tensorrt="11.2.0.113",
-        target=ExecutionTarget.docker(
-            container="trtmc-dev-gb300",
-            docker_context="default",
-            workspace="/workspace/TensorRT-Model-Connect",
-        ),
-    )
+environment = toolkit.prepare_docker(
+    family="qwen",
+    gpu="0",
+    policy=DockerTargetPolicy.ENSURE,
 )
-environment = toolkit.provision(lock)
-build = toolkit.build(
-    environment,
-    TrtmcBuildRecipe(targets=("trtmc", "trtmc_backend_trt", "trtmc_model_qwen")),
-)
-print(environment.receipt)
-print(build.receipt)
+print(" ".join(environment.command("bash")))
 ```
 
-The Docker environment lock records the daemon, immutable container, and image
-identities and rechecks them before later execution. A reused container name or
-changed Docker context therefore fails closed instead of silently selecting a
-different environment. Docker CLI 20.10 or newer is required.
-
-`resolve()` is read-only. With CUDA omitted, it prefers a complete target CUDA
-toolkit and otherwise selects the managed CUDA 13.3 policy. Managed provisioning
-requires digest-pinned artifacts; it never downloads an unverified version.
-`provision()` attests Python, CUDA, TensorRT Python/native/header versions and
-writes the evidence under `.devtoolkit/`. See `scripts/devToolkit/README.md` for
-local targets, explicit CUDA policies, generic TRTMC CLI calls, extension
-providers, and receipt identity semantics.
+The toolkit reuses a container only when its checkout-owned configuration still
+matches. A foreign name collision or configuration drift fails without removing
+or replacing the container. The toolkit has no environment catalog or secondary
+artifact identity. The root Dockerfile's first `FROM` is the shared image pin;
+optional Python dependencies remain in `families/<family>/requirements.txt`.
+See `apps/devtoolkit/README.md` for lifecycle policies and the explicit
+existing-interpreter local path.
 
 The manual commands below remain the direct source-build path and show the
-operations represented by the sample recipe.
+operations performed by development mode.
 
 ## 1. Select the GPU and start the container
 
@@ -129,8 +106,8 @@ export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
 ```
 
 This path skips CI-only Python profiles and unrelated model DSOs. Continue to
-[Quick Start](quick-start.md) in the same container shell. Full-repository and
-advanced backend options belong in the
-[Build System](../architecture/build-system.md) reference.
+[Quick Start](quick-start.md) in the same container shell. Full-repository
+ownership and backend boundaries are documented in the
+[AI-Native Horizontal Scaling Architecture](../architecture/ai-native-horizontal-scaling.md).
 
 {/* Collaborative review anchor: batch 2. */}

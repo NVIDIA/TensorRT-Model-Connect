@@ -1,0 +1,16 @@
+{
+  "threshold_overrides": {
+    "duration_ratio_max": 1.5,
+    "duration_ratio_min": 0.3,
+    "log_spectral_distance": 10.0,
+    "mel_spectrogram_distance": 8.0,
+    "rms_max": 1.0,
+    "rms_min": 0.01,
+    "min_semantic_tokens": 50,
+    "golden_semantic_tokens": [41, 215, 548, 6961, 602, 602, 2586, 8385, 1311, 602, 5109, 3051, 1136, 8343, 8909, 292, 3318, 6362, 6362, 4401],
+    "golden_coarse_tokens": [10062, 11937, 10062, 11448, 10408, 11568, 10062, 11448, 10062, 11448, 10408, 11568, 10408, 11542, 10408, 11937, 10408, 11568, 10062, 11448],
+    "duration_s_min": 0.1,
+    "duration_s_max": 30.0,
+    "asr_ned_max": 0.15
+  }
+}

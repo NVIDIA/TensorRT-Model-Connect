@@ -1,9 +1,0 @@
-{
-  "threshold_overrides": {
-    "iou_per_prompt": 0.7,
-    "logit_atol": 0.5,
-    "mask_rank_consistency": 0.8,
-    "num_expected_masks": 3,
-    "num_masks_consistency": true
-  }
-}

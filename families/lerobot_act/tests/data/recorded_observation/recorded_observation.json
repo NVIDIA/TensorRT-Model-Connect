@@ -1,0 +1,19 @@
+{
+  "data_file": "data/chunk-000/file-000.parquet",
+  "dataset_codebase_version": "v3.0",
+  "dataset_id": "lerobot/aloha_sim_transfer_cube_human",
+  "dataset_revision": "6a43d500f101255823a9d2b9dc244eeb01a2cd31",
+  "episode_index": 0,
+  "fps": 50,
+  "frame_index": 0,
+  "global_index": 0,
+  "image_shape_hwc": [
+    480,
+    640,
+    3
+  ],
+  "state_shape": [
+    14
+  ],
+  "video_file": "videos/observation.images.top/chunk-000/file-000.mp4"
+}

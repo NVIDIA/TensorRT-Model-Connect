@@ -1,0 +1,21 @@
+{
+  "name": "whisper-tiny-fp16-tp2",
+  "hf_id": "openai/whisper-tiny",
+  "bundle": "whisper-tiny-fp16-tp2.bundle",
+  "family": "whisper",
+  "task": "transcription",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "whisper-tiny-fp16-tp2",
+      "reference_precision": "fp32",
+      "max_new_tokens": 10,
+      "test_input_audio": "data/Recording.wav"
+    }
+  ],
+  "tensor_parallel_size": 2,
+  "max_sequence_length": 128,
+  "fp32_layers": [
+    0
+  ]
+}

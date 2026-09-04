@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "trtmc/pipeline.h"
+#include "trtmc/runtime/family_loader.h"
+#include "trtmc/task.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -32,18 +33,22 @@ std::vector<float> read_floats(const std::filesystem::path& path, std::size_t ex
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 4) {
-            std::cerr << "Usage: " << argv[0] << " MODEL.bundle INPUT_DIR OUTPUT_POSES.f32\n";
+        if (argc != 5) {
+            std::cerr << "Usage: " << argv[0]
+                      << " MODEL.bundle RUNTIME_ROOT INPUT_DIR OUTPUT_POSES.f32\n";
             return 2;
         }
         constexpr int32_t hypotheses = 3;
         constexpr std::size_t crop_values = hypotheses * 160U * 160U * 6U;
-        const std::filesystem::path input_dir = argv[2];
+        const std::filesystem::path input_dir = argv[3];
         auto poses = read_floats(input_dir / "candidate_poses.f32", hypotheses * 16U);
         auto rendered = read_floats(input_dir / "rendered_features.f32", crop_values);
         auto observed = read_floats(input_dir / "observed_features.f32", crop_values);
 
-        auto pipeline = trtmc::load(argv[1]);
+        auto task = trtmc::load_task(argv[1], argv[2]);
+        auto* refinement = dynamic_cast<trtmc::IPoseHypothesisRefinement*>(task.get());
+        if (refinement == nullptr)
+            throw std::runtime_error("bundle does not implement pose_hypothesis_refinement");
         trtmc::PoseEstimationRequest request;
         request.candidate_poses = poses;
         request.num_hypotheses = hypotheses;
@@ -52,8 +57,8 @@ int main(int argc, char** argv) {
         request.crop_provider = [&](const std::vector<float>&, trtmc::PoseCropStage, int32_t) {
             return trtmc::PoseCropBatch{rendered, observed, hypotheses, 160, 160, 6};
         };
-        const auto result = pipeline->estimate_pose_hypotheses(request);
-        std::ofstream output(argv[3], std::ios::binary | std::ios::trunc);
+        const auto result = refinement->estimate_pose_hypotheses(request);
+        std::ofstream output(argv[4], std::ios::binary | std::ios::trunc);
         output.write(reinterpret_cast<const char*>(result.refined_poses.data()),
                      static_cast<std::streamsize>(result.refined_poses.size() * sizeof(float)));
         if (!output)

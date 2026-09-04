@@ -1,8 +1,0 @@
-{
-  "description": "Default thresholds for prompted segmentation",
-  "metrics": {
-    "iou_per_prompt": 0.7,
-    "mask_rank_consistency": 0.8,
-    "num_masks_consistency": true
-  }
-}

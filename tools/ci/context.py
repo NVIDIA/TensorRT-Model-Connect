@@ -26,18 +26,6 @@ class CiContext:
         self.commands = CommandRunner(cwd=self.repository, env=self.env)
         self.state_dir = self.repository / self.env.get("TRTMC_CI_STATE_DIR", ".ci")
 
-    def prepare_shared_directories(self) -> None:
-        for name in (
-            "ENGINE_DIR",
-            "HF_HOME",
-            "HF_HUB_CACHE",
-            "HUGGINGFACE_HUB_CACHE",
-            "HF_MODULES_CACHE",
-        ):
-            value = self.env.get(name, "")
-            if value:
-                Path(value).mkdir(parents=True, exist_ok=True)
-
     def run(
         self,
         command: Sequence[str | Path],

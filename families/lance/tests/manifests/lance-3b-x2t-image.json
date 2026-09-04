@@ -1,0 +1,20 @@
+{
+  "name": "lance-3b-x2t-image",
+  "hf_id": "bytedance-research/Lance",
+  "hf_revision": "7395315758865e6f56ab87ad06a88c7ac172f056",
+  "bundle": "lance-3b-x2t-image.bundle",
+  "family": "lance",
+  "task": "vision_language_generation",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "lance-3b-x2t-image",
+      "premerge": true,
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 384
+}

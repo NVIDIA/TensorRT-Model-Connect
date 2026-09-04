@@ -1,0 +1,46 @@
+{
+  "name": "patchtsmixer-granite-official-tp4",
+  "hf_id": "ibm-granite/granite-timeseries-patchtsmixer",
+  "bundle": "patchtsmixer-granite-official-tp4.bundle",
+  "family": "patchtsmixer",
+  "task": "time_series_forecast",
+  "precision": "fp32",
+  "tensor_parallel_size": 4,
+  "testcases": [
+    {
+      "name": "patchtsmixer-granite-official-tp4",
+      "inputs": {
+        "past_values": [
+          0.1,
+          -0.2,
+          0.05,
+          0.3,
+          -0.15,
+          0.25,
+          0.4,
+          0.2,
+          -0.1,
+          0.1,
+          0.35,
+          -0.05,
+          0.2,
+          0.5,
+          0.3,
+          0.0,
+          0.15,
+          0.4,
+          0.05,
+          0.15,
+          0.6,
+          0.4,
+          0.1,
+          0.2,
+          0.45,
+          0.1,
+          0.1,
+          0.7
+        ]
+      }
+    }
+  ]
+}

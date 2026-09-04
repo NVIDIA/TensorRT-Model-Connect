@@ -1,0 +1,20 @@
+{
+  "name": "act-aloha-sim-transfer-cube",
+  "hf_id": "lerobot/act_aloha_sim_transfer_cube_human",
+  "hf_revision": "ba73b2766f1371cdc133ca4efb97eb090d744625",
+  "bundle": "act-aloha-sim-transfer-cube.bundle",
+  "family": "lerobot_act",
+  "task": "robot_control",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "act-aloha-sim-transfer-cube-recorded-episode-0-frame-0",
+      "premerge": true,
+      "inputs": {
+        "image": "data/recorded_observation/observation.images.top.png",
+        "state": "data/recorded_observation/observation.state.f32"
+      }
+    }
+  ]
+}

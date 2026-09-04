@@ -1,0 +1,18 @@
+{
+  "name": "olmo2-1b-tp4",
+  "hf_id": "allenai/OLMo-2-0425-1B",
+  "bundle": "olmo2-1b-tp4.bundle",
+  "family": "olmo2",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "olmo2-1b-tp4",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20
+    }
+  ],
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 4
+}

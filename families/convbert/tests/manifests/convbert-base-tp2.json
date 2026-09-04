@@ -1,0 +1,17 @@
+{
+  "name": "convbert-base-tp2",
+  "hf_id": "YituTech/conv-bert-base",
+  "bundle": "convbert-base-tp2.bundle",
+  "family": "convbert",
+  "task": "encoding",
+  "testcases": [
+    {
+      "name": "convbert-base-tp2",
+      "prompt": "The capital of France is Paris.",
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 2,
+  "precision": "fp16",
+  "max_sequence_length": 256
+}

@@ -1,8 +1,0 @@
-{
-  "threshold_overrides": {
-    "num_masks_consistency": 1.0,
-    "iou_per_prompt": 0.7,
-    "box_iou_mean": 0.95,
-    "score_abs_error_mean": 0.05
-  }
-}

@@ -1,0 +1,21 @@
+{
+  "name": "olmo2-1b",
+  "hf_id": "allenai/OLMo-2-0425-1B",
+  "hf_revision": "a1847dff35000b4271fa70afc5db10fd29fedbdf",
+  "bundle": "olmo2-1b.bundle",
+  "family": "olmo2",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "olmo2-1b",
+      "premerge": true,
+      "prompt": "The following are multiple choice questions (with answers) about abstract algebra.\n\nFind all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.\nA. 0\nB. 1\nC. 2\nD. 3\nAnswer: B\n\nStatement 1 | If aH is an element of a factor group, then |aH| divides |a|. Statement 2 | If H and K are subgroups of G then HK is a subgroup of G.\nA. True, True\nB. False, False\nC. True, False\nD. False, True\nAnswer: B\n\nStatement 1 | Every element of a group generates a cyclic subgroup of the group. Statement 2 | The symmetric group S_10 has 10 elements.\nA. True, True\nB. False, False\nC. True, False\nD. False, True\nAnswer: C\n\nStatement 1| Every function from a finite set onto itself must be one to one. Statement 2 | Every subgroup of an abelian group is abelian.\nA. True, True\nB. False, False\nC. True, False\nD. False, True\nAnswer: A\n\nFind the characteristic of the ring 2Z.\nA. 0\nB. 3\nC. 12\nD. 30\nAnswer: A\n\nFind the degree for the given field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.\nA. 0\nB. 4\nC. 2\nD. 6\nAnswer:",
+      "max_new_tokens": 8,
+      "reference_precision": "fp32"
+    }
+  ],
+  "max_sequence_length": 352,
+  "tensor_parallel_size": 1
+}

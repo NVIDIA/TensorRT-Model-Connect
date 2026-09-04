@@ -1,0 +1,17 @@
+{
+  "name": "efficientnet-b0-ra-in1k",
+  "hf_id": "timm/efficientnet_b0.ra_in1k",
+  "bundle": "efficientnet-b0-ra-in1k.bundle",
+  "family": "timm_efficientnet",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "efficientnet-b0-ra-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

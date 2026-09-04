@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "min_pixel_agreement": 0.85,
+    "mIoU": 0.6,
+    "boundary_f_score": 0.6
+  }
+}

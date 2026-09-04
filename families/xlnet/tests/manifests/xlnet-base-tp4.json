@@ -1,0 +1,17 @@
+{
+  "name": "xlnet-base-tp4",
+  "hf_id": "xlnet/xlnet-base-cased",
+  "bundle": "xlnet-base-tp4.bundle",
+  "family": "xlnet",
+  "task": "encoding",
+  "testcases": [
+    {
+      "name": "xlnet-base-tp4",
+      "prompt": "The capital of France is Paris",
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp16",
+  "max_sequence_length": 256
+}

@@ -1,0 +1,18 @@
+{
+  "name": "repvgg-a2-rvgg-in1k",
+  "hf_id": "timm/repvgg_a2.rvgg_in1k",
+  "hf_revision": "87d4d383cb45031cb9fa2fc8ddca73fd6649240f",
+  "bundle": "repvgg-a2-rvgg-in1k.bundle",
+  "family": "timm_repvgg",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "repvgg-a2-rvgg-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

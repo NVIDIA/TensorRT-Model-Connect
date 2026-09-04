@@ -13,26 +13,20 @@
     "precision": "fp32",
     "tf32_enabled": false
   },
-  "pins": {
+  "dependencies": {
     "policy_id": "lerobot/act_aloha_sim_transfer_cube_human",
     "policy_revision": "ba73b2766f1371cdc133ca4efb97eb090d744625",
-    "checkpoint_sha256": "42772891cb6eba1e7bc36ad8e12c0fa0723c61f036fa235c725ce6026e6e81df",
     "lerobot_revision": "3c0a209f9fac4d2a57617e686a7f2a2309144ba2",
     "dataset_id": "lerobot/aloha_sim_transfer_cube_human",
     "dataset_revision": "6a43d500f101255823a9d2b9dc244eeb01a2cd31",
-    "dataset_parquet_sha256": "8d02ba269356ed960741c3169e8106383b960583e9cd1e5960a0495580a9d6c2",
-    "dataset_video_sha256": "e16528b7da7dd433a60cb0e17c59689fc834be43fc0f0b24586377c833fcd0de",
     "episode_index": 0,
-    "frame_index": 0,
-    "observation_image_sha256": "a53369bda31c6563548bd834e88f6640eb28e3233807c499a56d012de992799c",
-    "observation_state_sha256": "40cd79b41ce45e9ffc35f6dc70f74a980d8760857326a9482e109b1d763f54c0"
+    "frame_index": 0
   },
   "build": {
     "total_seconds": 77.2,
     "engine_seconds": 72.4,
     "engine_size_mib": 151.1,
-    "builder_peak_gpu_allocator_mib": 150.0,
-    "bundle_sha256": "d792e0bab1650d8670504e4e91c4ef0bde6380ab95b9dce3cbefa30ce38f6f3b"
+    "builder_peak_gpu_allocator_mib": 150.0
   },
   "native_runtime": {
     "warmup_chunks": 2,

@@ -1,0 +1,17 @@
+{
+  "name": "all-minilm-l6-v2",
+  "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
+  "bundle": "all-minilm-l6-v2.bundle",
+  "family": "bert",
+  "task": "embedding",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "all-minilm-l6-v2",
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512
+}

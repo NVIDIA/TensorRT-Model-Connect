@@ -1,9 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-id = "mixtral"
-runtime_library = "libtrtmc_model_mixtral.so"
-runtime_plugins = ["plugin.cpp|register_mixtral_plugin"]
-runtime_strategies = ["mixtral_decoder_moe"]
-[validation_profiles]
-decoder_debug = ["mixtral_decoder_moe"]

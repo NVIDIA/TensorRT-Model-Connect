@@ -1,0 +1,30 @@
+{
+  "name": "chronos-bolt-tiny-official-tp4",
+  "hf_id": "amazon/chronos-bolt-tiny",
+  "bundle": "chronos-bolt-tiny-official-tp4.bundle",
+  "family": "chronos_bolt",
+  "task": "time_series_forecast",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "chronos-bolt-tiny-official-tp4",
+      "inputs": {
+        "past_values": [
+          100.1,
+          100.15,
+          100.18,
+          100.22,
+          100.21,
+          100.27,
+          100.31,
+          100.35,
+          100.37,
+          100.4,
+          100.44,
+          100.5
+        ]
+      }
+    }
+  ],
+  "tensor_parallel_size": 4
+}

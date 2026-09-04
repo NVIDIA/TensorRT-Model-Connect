@@ -1,7 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-id = "bart"
-runtime_library = "libtrtmc_model_bart.so"
-runtime_plugins = ["plugin.cpp|register_bart_plugin"]
-runtime_strategies = ["bart_seq2seq_encoder_decoder"]

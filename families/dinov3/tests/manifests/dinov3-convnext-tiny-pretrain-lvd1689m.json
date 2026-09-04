@@ -1,0 +1,17 @@
+{
+  "name": "dinov3-convnext-tiny-pretrain-lvd1689m",
+  "hf_id": "facebook/dinov3-convnext-tiny-pretrain-lvd1689m",
+  "hf_revision": "10d30274b4d445111e2d5bf75ac93bbd94db274b",
+  "bundle": "dinov3-convnext-tiny-pretrain-lvd1689m.bundle",
+  "family": "dinov3",
+  "task": "image_features",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "dinov3-convnext-tiny-pretrain-lvd1689m",
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

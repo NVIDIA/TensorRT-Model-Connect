@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "normalized_text_edit_distance": 1.0,
+    "wer": 0.1,
+    "cer": 0.05
+  }
+}

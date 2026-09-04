@@ -1,0 +1,48 @@
+{
+  "name": "nemotron-voicechat-11b",
+  "hf_id": "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
+  "hf_revision": "359ada7b1c60851e40ff08065f9b0340244f27e0",
+  "bundle": "nemotron-voicechat-11b.bundle",
+  "family": "nemotron_voicechat",
+  "task": "speech_session",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "nemotron-voicechat-11b",
+      "premerge": true,
+      "inputs": {
+        "reference_audio": "assets/sample_general_reference.flac",
+        "speech_source_relative_path": "examples/speechlm2/sample_audio/sample_general.wav",
+        "runtime_timeout_s": 1800,
+        "transcribe_timeout_s": 1800,
+        "tail_frames": 0
+      },
+      "max_new_tokens": 256,
+      "speech_source_sample_rate": 16000,
+      "speech_source_num_samples": 249734,
+      "expected_output_sample_rate": 22050,
+      "expected_output_num_samples": 345744,
+      "expected_output_samples_per_frame": 1764,
+      "expected_output_codec_frames": 196,
+      "required_response_terms": [
+        "rayleigh",
+        "scattering"
+      ],
+      "expected_response_text": "Hi there! How can you? How can I help you today? The sky is blue. That blue color is because of something called Rayleigh scattering."
+    },
+    {
+      "name": "nemotron-voicechat-11b-full-duplex-lifecycle",
+      "premerge": true,
+      "inputs": {
+        "reference_audio": "assets/sample_general_reference.flac",
+        "speech_source_relative_path": "examples/speechlm2/sample_audio/sample_general.wav",
+        "function_speech_source_relative_path": "examples/speechlm2/sample_audio/sample_fc.wav",
+        "lifecycle_build_timeout_s": 600,
+        "lifecycle_runtime_timeout_s": 1800
+      },
+      "expected_response_text": "Hi there! How can you? How can I help you today? The sky is blue. That blue color is because of something called Rayleigh scattering."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 8192
+}

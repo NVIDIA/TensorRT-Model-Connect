@@ -1,0 +1,23 @@
+{
+  "name": "magpie-tts-357m-tp4",
+  "hf_id": "nvidia/magpie_tts_multilingual_357m",
+  "hf_dependencies": [
+    {
+      "repo_id": "openai/whisper-large-v3-turbo"
+    }
+  ],
+  "bundle": "magpie-tts-357m-tp4.bundle",
+  "family": "magpie_tts",
+  "task": "audio_generation",
+  "testcases": [
+    {
+      "name": "magpie-tts-357m-tp4",
+      "prompt": "Ladies and gentlemen, welcome to the annual conference on artificial intelligence and machine learning. Today we will explore the latest advances in natural language processing, computer vision, and reinforcement learning.",
+      "max_new_tokens": 750,
+      "seed": 42
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp16",
+  "max_sequence_length": 512
+}

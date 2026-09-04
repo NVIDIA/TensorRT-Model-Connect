@@ -1,0 +1,20 @@
+{
+  "name": "minitron-4b-width",
+  "hf_id": "nvidia/Llama-3.1-Minitron-4B-Width-Base",
+  "hf_revision": "5205ef7d36204947e3b973cb8b147a816ccd7e6a",
+  "bundle": "minitron-4b-width.bundle",
+  "family": "llama",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "minitron-4b-width",
+      "reference_precision": "fp16",
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 20
+    }
+  ],
+  "max_sequence_length": 131072,
+  "tensor_parallel_size": 1
+}

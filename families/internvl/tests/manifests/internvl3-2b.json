@@ -1,0 +1,20 @@
+{
+  "name": "internvl3-2b",
+  "hf_id": "OpenGVLab/InternVL3-2B-hf",
+  "bundle": "internvl3-2b-vl.bundle",
+  "family": "internvl",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "internvl3-2b",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 384
+}

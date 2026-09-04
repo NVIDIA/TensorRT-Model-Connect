@@ -1,0 +1,13 @@
+{
+  "text": "DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder. Unlike\n\nthe full DeepSeek-V2 which uses Multi-head Latent Attention (MLA), OCR-2 uses\n\nstandard Llama-style multi-head attention (use_mla=False). The MLP layers use\n\nDeepSeek-V2 MoE with shared experts for layers >= first_k_dense_replace, and\n\ndense SwiGLU for earlier layers.\n\nArchitecture:\n\nAttention:Standard Q/K/V/O no biases, no GQA - heads == kv_heads)\n\nRoPE:Standard rotary position embeddings\n\nLayer 0:Dense SwiGLU MLP (intermediate_size=6848)\n\nLayers 1-11:MoE 64 experts, top-6, intermediate=896) + shared experts 2\n\nNorm: RMSNorm\n\nVision: SAM ViT-B + Qwen2 encoder (not supported in TRT yet, text-only)",
+  "required_substrings": [
+    "Architecture:",
+    "Attention: Standard Q/K/V/O",
+    "RoPE: Standard rotary position embeddings",
+    "Layer 0: Dense SwiGLU MLP",
+    "Layers 1-11: MoE",
+    "Norm: RMS"
+  ],
+  "source_image": "data/orc_test_img.jpeg",
+  "contract_scope": "L0 validates the complete visible OCR transcript through the Architecture and Vision sections."
+}

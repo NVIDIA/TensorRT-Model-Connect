@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+chronos-forecasting==2.2.2
+numpy==1.26.4
+scikit-learn==1.7.2
+scipy==1.15.3
+transformers==4.57.6

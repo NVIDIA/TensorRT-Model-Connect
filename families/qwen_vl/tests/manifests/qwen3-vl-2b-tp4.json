@@ -1,0 +1,19 @@
+{
+  "name": "qwen3-vl-2b-tp4",
+  "hf_id": "Qwen/Qwen3-VL-2B-Instruct",
+  "bundle": "qwen3-vl-2b-tp4.bundle",
+  "family": "qwen_vl",
+  "task": "vision_language_generation",
+  "testcases": [
+    {
+      "name": "qwen3-vl-2b-tp4",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg",
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp16",
+  "max_sequence_length": 256
+}

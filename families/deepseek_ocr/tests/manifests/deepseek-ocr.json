@@ -1,0 +1,28 @@
+{
+  "name": "deepseek-ocr",
+  "hf_id": "deepseek-ai/DeepSeek-OCR-2",
+  "bundle": "deepseek-ocr.bundle",
+  "family": "deepseek_ocr",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "deepseek-ocr",
+      "reference_precision": "bf16",
+      "prompt": "Extract the text from this image.",
+      "max_new_tokens": 300,
+      "test_image": "data/orc_test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 4096,
+  "fp32_layers": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+  ]
+}

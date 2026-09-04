@@ -1,0 +1,26 @@
+{
+  "name": "pixart-sigma-1024-l0",
+  "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+  "bundle": "pixart-sigma-1024-l0.bundle",
+  "family": "pixart",
+  "task": "image_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "pixart-sigma-1024-l0",
+      "premerge": true,
+      "test_prompt": "A playful collection of 2x2 emoji icons, each resembling a vibrant macaron with a distinct facial expression. The top left macaron is a sunny yellow with a beaming smile, while the top right is a fiery red with furrowed brows and an angry scowl. Below them, the bottom left is a bright blue with wide, surprised eyes, and the bottom right is a soft lavender with a tearful, sobbing face. Each of the macaron emojis is whimsically topped with a miniature brown cowboy hat, adding a touch of whimsy to their appearance.",
+      "test_type": "diffusion",
+      "num_inference_steps": 20,
+      "reference_precision": "fp16",
+      "seed": 42
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "fp32_layers": [
+    0
+  ],
+  "image_height": 512,
+  "image_width": 512,
+  "video_num_frames": 1
+}

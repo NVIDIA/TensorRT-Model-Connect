@@ -1,0 +1,356 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Shared DiT (Diffusion Transformer) engine builder.
+
+Builds a TensorRT engine for a DiT-style denoiser. Parameterized for
+variant selection, mirroring how standard_decoder_builder.py works.
+
+Reusable by: Wan2.1, Hunyuan Video, CogVideoX, FLUX (with conditioning_type).
+
+Engine I/O:
+    Inputs:
+        hidden_states [1, num_patches, dim] float32 (patchified latent)
+        timestep_embedding [1, dim * 6] float32 (from external timestep MLP)
+        encoder_hidden_states [1, text_seq_len, context_dim] float32
+        rotary_cos [1, num_patches, 1, head_dim] float32 (precomputed)
+        rotary_sin [1, num_patches, 1, head_dim] float32 (precomputed)
+    Outputs:
+        output [1, num_patches, dim] float32
+
+The timestep embedding, patch embedding, and RoPE are computed externally
+(in the DiffusionRunner / C++ backend) and passed as inputs. This keeps
+the TRT engine focused on the core transformer computation.
+"""
+
+from __future__ import annotations
+
+import sys
+from typing import TYPE_CHECKING
+
+import numpy as np
+import tensorrt as trt
+
+from . import graph_ops
+
+if TYPE_CHECKING:
+    from .checkpoint_mapper import WeightDict
+
+
+def build_standard_dit_engine(
+    weights: WeightDict,
+    *,
+    dim: int,
+    num_heads: int,
+    num_layers: int,
+    ffn_dim: int,
+    context_dim: int,
+    num_patches: int,
+    text_seq_len: int = 512,
+    eps: float = 1e-06,
+    precision: str = "fp32",
+    verbose: bool = False,
+) -> bytes:
+    """Build DiT denoiser TRT engine plan.
+
+    Args:
+        weights: Weight dict with DiT weights. Expected keys per layer:
+            - blocks.{i}.attn1.to_q/to_k/to_v.weight/bias (self-attn)
+            - blocks.{i}.attn1.to_out.0.weight/bias
+            - blocks.{i}.attn1.norm_q/norm_k.weight (QK norm)
+            - blocks.{i}.norm1 (no weight — elementwise_affine=False)
+            - blocks.{i}.attn2.to_q/to_k/to_v.weight/bias (cross-attn)
+            - blocks.{i}.attn2.to_out.0.weight/bias
+            - blocks.{i}.attn2.norm_q/norm_k.weight
+            - blocks.{i}.attn2.add_k_proj/add_v_proj.weight/bias (if context needs projection)
+            - blocks.{i}.norm2.weight/bias (cross-attn norm, if enabled)
+            - blocks.{i}.ffn.net.0.proj.weight/bias (GELU)
+            - blocks.{i}.ffn.net.2.weight/bias (output proj)
+            - blocks.{i}.norm3 (no weight — elementwise_affine=False)
+            - blocks.{i}.scale_shift_table [1, 6, dim]
+            Global:
+            - norm_out (no weight — elementwise_affine=False)
+            - proj_out.weight/bias
+            - scale_shift_table [1, 2, dim]
+        dim: Hidden dimension of the DiT.
+        num_heads: Number of attention heads.
+        num_layers: Number of DiT blocks.
+        ffn_dim: Feed-forward inner dimension.
+        context_dim: Text encoder output dimension (before projection).
+        num_patches: Total number of patches (T/pt * H/ph * W/pw).
+        text_seq_len: Maximum text sequence length.
+        qk_norm: Apply RMSNorm to Q and K.
+        cross_attn_norm: Apply LayerNorm before cross-attention.
+        ffn_activation: Activation for FFN.
+        use_rope: Apply RoPE to self-attention Q/K. When False, the engine
+            omits rotary_cos/rotary_sin inputs (suitable for models that use
+            fixed position embeddings, e.g. PixArt).
+        eps: LayerNorm epsilon.
+        verbose: Enable TRT builder verbose logging.
+
+    Returns:
+        Serialized TRT engine plan bytes.
+    """
+    head_dim = dim // num_heads
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = (np.float16, trt.float16)
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = (np.float32, trt.float32)
+    else:
+        raise ValueError(f"Unsupported DiT precision {precision!r}; expected fp32 or fp16")
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    hidden_inp = network.add_input("hidden_states", trt.float32, (num_patches, dim))
+    temb_inp = network.add_input("timestep_embedding", trt.float32, (1, 6 * dim))
+    time_embed_inp = network.add_input("time_embed", trt.float32, (1, dim))
+    encoder_hidden = network.add_input(
+        "encoder_hidden_states", trt.float32, (text_seq_len, context_dim)
+    )
+    cross_attn_mask = None
+    cross_attn_mask = network.add_input("encoder_attention_mask", trt.float32, (1, 1, text_seq_len))
+    if work_trt_dtype != trt.float32:
+        hidden_inp = network.add_cast(hidden_inp, work_trt_dtype).get_output(0)
+        temb_inp = network.add_cast(temb_inp, work_trt_dtype).get_output(0)
+        time_embed_inp = network.add_cast(time_embed_inp, work_trt_dtype).get_output(0)
+        encoder_hidden = network.add_cast(encoder_hidden, work_trt_dtype).get_output(0)
+        if cross_attn_mask is not None:
+            cross_attn_mask = network.add_cast(cross_attn_mask, work_trt_dtype).get_output(0)
+    graph_ops.add_constant(
+        network, (1, 1), np.array([eps], dtype=work_np_dtype), dtype=work_np_dtype
+    )
+    hidden = hidden_inp
+    for layer_idx in range(num_layers):
+        prefix = f"blocks.{layer_idx}"
+        sst = weights[f"{prefix}.scale_shift_table"]
+        sst_const = graph_ops.add_constant(
+            network, (1, 6 * dim), sst.reshape(1, 6 * dim), dtype=work_np_dtype
+        )
+        modulation = network.add_elementwise(sst_const, temb_inp, trt.ElementWiseOperation.SUM)
+        chunks = []
+        for i in range(6):
+            s = network.add_slice(
+                modulation.get_output(0), start=(0, i * dim), shape=(1, dim), stride=(1, 1)
+            )
+            chunks.append(s.get_output(0))
+        shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff = chunks
+        normed = graph_ops.add_adaptive_layernorm(
+            network, hidden, scale_sa, shift_sa, dim, eps, dtype=work_np_dtype
+        )
+        q = graph_ops.add_matmul_rhs_constant(
+            network, normed, dim, dim, weights[f"{prefix}.attn1.to_q.weight"], dtype=work_np_dtype
+        )
+        k = graph_ops.add_matmul_rhs_constant(
+            network, normed, dim, dim, weights[f"{prefix}.attn1.to_k.weight"], dtype=work_np_dtype
+        )
+        v = graph_ops.add_matmul_rhs_constant(
+            network, normed, dim, dim, weights[f"{prefix}.attn1.to_v.weight"], dtype=work_np_dtype
+        )
+        q_bias = weights.get(f"{prefix}.attn1.to_q.bias")
+        if q_bias is not None:
+            q = graph_ops.add_bias_sum(network, q, dim, q_bias, dtype=work_np_dtype)
+        k_bias = weights.get(f"{prefix}.attn1.to_k.bias")
+        if k_bias is not None:
+            k = graph_ops.add_bias_sum(network, k, dim, k_bias, dtype=work_np_dtype)
+        v_bias = weights.get(f"{prefix}.attn1.to_v.bias")
+        if v_bias is not None:
+            v = graph_ops.add_bias_sum(network, v, dim, v_bias, dtype=work_np_dtype)
+        context_flat = graph_ops.add_attention_from_rows(
+            network,
+            q,
+            k,
+            v,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            q_seq=num_patches,
+            kv_seq=num_patches,
+            tag=f"{prefix}.attn1",
+        )
+        attn_out = graph_ops.add_matmul_rhs_constant(
+            network,
+            context_flat,
+            dim,
+            dim,
+            weights[f"{prefix}.attn1.to_out.0.weight"],
+            dtype=work_np_dtype,
+        )
+        o_bias = weights.get(f"{prefix}.attn1.to_out.0.bias")
+        if o_bias is not None:
+            attn_out = graph_ops.add_bias_sum(network, attn_out, dim, o_bias, dtype=work_np_dtype)
+        gated = network.add_elementwise(attn_out, gate_sa, trt.ElementWiseOperation.PROD)
+        hidden = network.add_elementwise(
+            hidden, gated.get_output(0), trt.ElementWiseOperation.SUM
+        ).get_output(0)
+        cross_normed = hidden
+        cross_q = graph_ops.add_matmul_rhs_constant(
+            network,
+            cross_normed,
+            dim,
+            dim,
+            weights[f"{prefix}.attn2.to_q.weight"],
+            dtype=work_np_dtype,
+        )
+        cq_bias = weights.get(f"{prefix}.attn2.to_q.bias")
+        if cq_bias is not None:
+            cross_q = graph_ops.add_bias_sum(network, cross_q, dim, cq_bias, dtype=work_np_dtype)
+        add_k_proj_w = weights.get(f"{prefix}.attn2.add_k_proj.weight")
+        if add_k_proj_w is not None:
+            cross_k = graph_ops.add_matmul_rhs_constant(
+                network, encoder_hidden, context_dim, dim, add_k_proj_w, dtype=work_np_dtype
+            )
+            add_k_bias = weights.get(f"{prefix}.attn2.add_k_proj.bias")
+            if add_k_bias is not None:
+                cross_k = graph_ops.add_bias_sum(
+                    network, cross_k, dim, add_k_bias, dtype=work_np_dtype
+                )
+            cross_v = graph_ops.add_matmul_rhs_constant(
+                network,
+                encoder_hidden,
+                context_dim,
+                dim,
+                weights[f"{prefix}.attn2.add_v_proj.weight"],
+                dtype=work_np_dtype,
+            )
+            add_v_bias = weights.get(f"{prefix}.attn2.add_v_proj.bias")
+            if add_v_bias is not None:
+                cross_v = graph_ops.add_bias_sum(
+                    network, cross_v, dim, add_v_bias, dtype=work_np_dtype
+                )
+        else:
+            cross_k = graph_ops.add_matmul_rhs_constant(
+                network,
+                encoder_hidden,
+                context_dim,
+                dim,
+                weights[f"{prefix}.attn2.to_k.weight"],
+                dtype=work_np_dtype,
+            )
+            ck_bias = weights.get(f"{prefix}.attn2.to_k.bias")
+            if ck_bias is not None:
+                cross_k = graph_ops.add_bias_sum(
+                    network, cross_k, dim, ck_bias, dtype=work_np_dtype
+                )
+            cross_v = graph_ops.add_matmul_rhs_constant(
+                network,
+                encoder_hidden,
+                context_dim,
+                dim,
+                weights[f"{prefix}.attn2.to_v.weight"],
+                dtype=work_np_dtype,
+            )
+            cv_bias = weights.get(f"{prefix}.attn2.to_v.bias")
+            if cv_bias is not None:
+                cross_v = graph_ops.add_bias_sum(
+                    network, cross_v, dim, cv_bias, dtype=work_np_dtype
+                )
+        cross_mask_4d = None
+        if cross_attn_mask is not None:
+            cross_mask = network.add_shuffle(cross_attn_mask)
+            cross_mask.reshape_dims = (1, 1, 1, text_seq_len)
+            cross_mask_4d = cross_mask.get_output(0)
+        c_context_flat = graph_ops.add_attention_from_rows(
+            network,
+            cross_q,
+            cross_k,
+            cross_v,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            q_seq=num_patches,
+            kv_seq=text_seq_len,
+            mask=cross_mask_4d,
+            tag=f"{prefix}.attn2",
+        )
+        cross_out = graph_ops.add_matmul_rhs_constant(
+            network,
+            c_context_flat,
+            dim,
+            dim,
+            weights[f"{prefix}.attn2.to_out.0.weight"],
+            dtype=work_np_dtype,
+        )
+        co_bias = weights.get(f"{prefix}.attn2.to_out.0.bias")
+        if co_bias is not None:
+            cross_out = graph_ops.add_bias_sum(
+                network, cross_out, dim, co_bias, dtype=work_np_dtype
+            )
+        hidden = network.add_elementwise(
+            hidden, cross_out, trt.ElementWiseOperation.SUM
+        ).get_output(0)
+        ffn_normed = graph_ops.add_adaptive_layernorm(
+            network, hidden, scale_ff, shift_ff, dim, eps, dtype=work_np_dtype
+        )
+        ffn_fc1 = graph_ops.add_matmul_rhs_constant(
+            network,
+            ffn_normed,
+            dim,
+            ffn_dim,
+            weights[f"{prefix}.ffn.net.0.proj.weight"],
+            dtype=work_np_dtype,
+        )
+        fc1_bias = weights.get(f"{prefix}.ffn.net.0.proj.bias")
+        if fc1_bias is not None:
+            ffn_fc1 = graph_ops.add_bias_sum(
+                network, ffn_fc1, ffn_dim, fc1_bias, dtype=work_np_dtype
+            )
+        ffn_act = graph_ops.add_gelu_new(network, ffn_fc1, dtype=work_np_dtype)
+        ffn_fc2 = graph_ops.add_matmul_rhs_constant(
+            network,
+            ffn_act,
+            ffn_dim,
+            dim,
+            weights[f"{prefix}.ffn.net.2.weight"],
+            dtype=work_np_dtype,
+        )
+        fc2_bias = weights.get(f"{prefix}.ffn.net.2.bias")
+        if fc2_bias is not None:
+            ffn_fc2 = graph_ops.add_bias_sum(network, ffn_fc2, dim, fc2_bias, dtype=work_np_dtype)
+        gated_ff = network.add_elementwise(ffn_fc2, gate_ff, trt.ElementWiseOperation.PROD)
+        hidden = network.add_elementwise(
+            hidden, gated_ff.get_output(0), trt.ElementWiseOperation.SUM
+        ).get_output(0)
+    final_sst = weights["scale_shift_table"]
+    final_sst_const = graph_ops.add_constant(
+        network, (1, 2 * dim), final_sst.reshape(1, 2 * dim), dtype=work_np_dtype
+    )
+    time_embed_tiled = network.add_concatenation([time_embed_inp, time_embed_inp])
+    time_embed_tiled.axis = 1
+    final_modulation = network.add_elementwise(
+        final_sst_const, time_embed_tiled.get_output(0), trt.ElementWiseOperation.SUM
+    )
+    final_shift = network.add_slice(
+        final_modulation.get_output(0), start=(0, 0), shape=(1, dim), stride=(1, 1)
+    )
+    final_scale = network.add_slice(
+        final_modulation.get_output(0), start=(0, dim), shape=(1, dim), stride=(1, 1)
+    )
+    hidden = graph_ops.add_adaptive_layernorm(
+        network,
+        hidden,
+        final_scale.get_output(0),
+        final_shift.get_output(0),
+        dim,
+        eps,
+        dtype=work_np_dtype,
+    )
+    proj_out_w = weights["proj_out.weight"]
+    out_dim = proj_out_w.shape[1]
+    output = graph_ops.add_matmul_rhs_constant(
+        network, hidden, dim, out_dim, proj_out_w, dtype=work_np_dtype
+    )
+    proj_out_b = weights.get("proj_out.bias")
+    if proj_out_b is not None:
+        output = graph_ops.add_bias_sum(network, output, out_dim, proj_out_b, dtype=work_np_dtype)
+    cast_output = network.add_cast(output, trt.float32)
+    output_final = cast_output.get_output(0)
+    output_final.name = "output"
+    network.mark_output(output_final)
+    print(
+        f"[dit-builder] Building TRT engine (dim={dim}, layers={num_layers}, patches={num_patches}) ...",
+        file=sys.stderr,
+    )
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("TRT engine serialization failed for DiT")
+    return bytes(plan)

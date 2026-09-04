@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "cls_embedding_cosine": 0.99
+  }
+}

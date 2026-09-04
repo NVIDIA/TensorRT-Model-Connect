@@ -1,9 +1,0 @@
-{
-  "description": "Default thresholds for semantic segmentation (SegFormer-style)",
-  "metrics": {
-    "mIoU": 0.6,
-    "pixel_accuracy": 0.85,
-    "boundary_f_score": 0.6,
-    "min_pixel_agreement": 0.85
-  }
-}

@@ -1,0 +1,22 @@
+{
+  "name": "internlm2-1.8b",
+  "hf_id": "internlm/internlm2-math-plus-1_8b",
+  "bundle": "internlm2-1.8b.bundle",
+  "family": "internlm",
+  "task": "text_generation",
+  "trust_remote_code": true,
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "internlm2-1.8b",
+      "premerge": true,
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20,
+      "reference_precision": "fp32",
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

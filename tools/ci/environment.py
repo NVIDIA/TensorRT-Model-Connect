@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Declare the environment variables intentionally forwarded into CI containers.
+"""The small host-to-container environment contract used by active CI."""
 
-Boundary: this allowlist is the host-to-container configuration contract.
-"""
+from __future__ import annotations
+
 
 COMMON_ENVIRONMENT = (
     "CI_BASE_REF",
@@ -12,86 +12,27 @@ COMMON_ENVIRONMENT = (
     "GITHUB_REF_NAME",
     "GITHUB_RUN_ID",
     "GITHUB_RUN_ATTEMPT",
-    "PYTHONHASHSEED",
-    "BUILD_ALL_TIMEOUT",
-    "CPP_UNIT_TIMEOUT",
-    "PYTHON_BUILDER_TIMEOUT",
-    "TRTMC_UNIT_BUILD_JOBS",
-    "TRTMC_UNIT_TEST_JOBS",
     "TRTMC_PREMERGE_UNIT_SCOPE",
-    "TRTMC_PREMERGE_PYTHON_TEST_TARGETS",
-    "TRTMC_SELECTED_WHEEL_DIR",
-    "TRTMC_SELECTED_WHEEL_PYTHON_TAG",
-    "TRTMC_SELECTED_WHEEL_TENSORRT_VERSION",
-    "TRTMC_PACKAGE_PYTHON_TAGS",
-    "TRTMC_PACKAGE_WHEEL_ARCH",
-    "TRTMC_PACKAGE_TENSORRT_VERSION",
+    "SOURCE_QUALITY_TIMEOUT",
+    "PYTHON_UNIT_TIMEOUT",
+    "CPP_BUILD_TIMEOUT",
+    "CPP_UNIT_TIMEOUT",
 )
-
-OPTIONAL_TUNING_ENVIRONMENT = (
-    "TRTMC_BUILDER_OPTIMIZATION_LEVEL",
-    "TRTMC_MAX_NUM_TACTICS",
-    "TRTMC_AVG_TIMING_ITERATIONS",
-)
-
-
-def forwarded_environment(
-    names: tuple[str, ...], env: dict[str, str]
-) -> tuple[str, ...]:
-    """Omit optional tuning controls that do not carry an effective value."""
-    return tuple(
-        name
-        for name in names
-        if name not in OPTIONAL_TUNING_ENVIRONMENT or env.get(name, "").strip()
-    )
-
 
 TRUSTED_ENVIRONMENT = COMMON_ENVIRONMENT + (
-    "ENGINE_DIR",
-    "TRTMC_STORAGE_ROOT",
+    "TRTMC_BINARY",
+    "TRTMC_RUNTIME_ROOT",
+    "TRTMC_NATIVE_BUILD_DIR",
+    "TRTMC_E2E_TIMEOUT",
+    "TRTMC_CI_STATE_DIR",
+    "TRT_ROOT",
+    "CMAKE_CUDA_ARCHITECTURES",
     "HF_HOME",
     "HF_HUB_CACHE",
     "HUGGINGFACE_HUB_CACHE",
     "HF_MODULES_CACHE",
-    "FULL_E2E",
-    "RUN_COVERAGE_MAP",
-    "REBUILD_ENGINES",
-    "TRTMC_CI_STATE_DIR",
-    "TRTMC_E2E_EXCLUDE_GPU0",
-    "TRTMC_E2E_DEPRIORITIZE_GPU0",
-    "TRTMC_TRT_TIMING_CACHE_PATH",
-    "TRTMC_TRT_TIMING_CACHE_DIR",
-    *OPTIONAL_TUNING_ENVIRONMENT,
-    "TRTMC_ENABLE_LIBTORCH_MULTINOMIAL",
-    "PYTHON_COVERAGE_MIN_LINE",
-    "PYTHON_COVERAGE_MIN_BRANCH",
-    "CPP_COVERAGE_MIN_LINE",
-    "CPP_COVERAGE_MIN_FUNCTION",
-    "CPP_COVERAGE_MIN_BRANCH",
-    "CPP_COVERAGE_SCOPE",
-    "CPP_COVERAGE_TIMEOUT",
-    "CPP_COVERAGE_BUILD_DIR",
-    "GRAPH_OP_TIMEOUT",
-    "SELECTIVE_E2E_TIMEOUT",
-    "SELECTIVE_E2E_STANDARD_TIMEOUT",
-    "FULL_E2E_TIMEOUT",
-    "COVERAGE_MAP_TIMEOUT",
-    "TRTMC_PACKAGE_BUILD_ROOT",
-    "TRTMC_WHEEL_SMOKE_CONFIG",
-    "TRTMC_WHEEL_SMOKE_MODEL_ID",
-    "TRTMC_WHEEL_SMOKE_MAX_CACHE",
-    "TRTMC_WHEEL_SMOKE_MAX_NEW_TOKENS",
-    "TRTMC_WHEEL_SMOKE_OPTIMIZATION_LEVEL",
-    "TRTMC_WHEEL_SMOKE_BUILD_TIMEOUT",
-    "TRTMC_WHEEL_SMOKE_RUN_TIMEOUT",
-    "DIFFUSION_VLM_ASSESSMENT",
-    "DIFFUSION_VLM_CONFIG",
-    "DIFFUSION_VLM_MODEL_ID",
-    "DIFFUSION_VLM_MAX_SIDE",
-    "DIFFUSION_VLM_MAX_NEW_TOKENS",
-    "DIFFUSION_VLM_TIMEOUT",
-    "HF_TOKEN",
-    "HUGGING_FACE_HUB_TOKEN",
+    "HF_HUB_OFFLINE",
+    "TRANSFORMERS_OFFLINE",
 )
 
 OPTIONAL_HUGGING_FACE_ENVIRONMENT = (
@@ -99,3 +40,12 @@ OPTIONAL_HUGGING_FACE_ENVIRONMENT = (
     "HF_HUB_DOWNLOAD_TIMEOUT",
     "HF_HUB_ETAG_TIMEOUT",
 )
+
+
+def forwarded_environment(names: tuple[str, ...], env: dict[str, str]) -> tuple[str, ...]:
+    model_directories = sorted(
+        name
+        for name, value in env.items()
+        if name.startswith("TRTMC_") and name.endswith("_MODEL_DIR") and value
+    )
+    return tuple(dict.fromkeys((*names, *model_directories)))

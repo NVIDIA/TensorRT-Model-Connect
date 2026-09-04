@@ -1,0 +1,17 @@
+{
+  "name": "roberta-large",
+  "hf_id": "FacebookAI/roberta-large",
+  "bundle": "roberta-large.bundle",
+  "family": "roberta",
+  "task": "encoding",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "roberta-large",
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512
+}

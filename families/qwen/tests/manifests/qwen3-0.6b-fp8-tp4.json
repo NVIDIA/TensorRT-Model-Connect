@@ -1,0 +1,23 @@
+{
+  "name": "qwen3-0.6b-fp8-tp4",
+  "hf_id": "Qwen/Qwen3-0.6B",
+  "bundle": "qwen3-0.6b-fp8-bf16base-tp4.bundle",
+  "family": "qwen",
+  "task": "text_generation",
+  "precision": "bf16",
+  "quantization": "fp8",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "qwen3-0.6b-fp8-tp4",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "expected_answers": [
+        "Paris"
+      ],
+      "max_new_tokens": 10,
+      "reference_precision": "bf16"
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 4
+}

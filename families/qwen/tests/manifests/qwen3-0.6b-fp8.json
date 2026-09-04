@@ -1,0 +1,25 @@
+{
+  "name": "qwen3-0.6b-fp8",
+  "hf_id": "Qwen/Qwen3-0.6B",
+  "bundle": "qwen3-0.6b-fp8-fp16base.bundle",
+  "family": "qwen",
+  "task": "text_generation",
+  "precision": "fp16",
+  "quantization": "fp8",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "qwen3-0.6b-fp8",
+      "prompt": "The following are multiple choice questions (with answers) about miscellaneous.\n\nHow many axles does a standard automobile have?\nA. one\nB. two\nC. four\nD. eight\nAnswer: B\n\nWhat place is named in the title of the 1979 live album by rock legends Cheap Trick?\nA. Budapest\nB. Budokan\nC. Bhutan\nD. Britain\nAnswer: B\n\nWho led the 1831 slave insurrection in SouthamptonVirginia?\nA. John Brown\nB. Dred Scott\nC. Nat Turner\nD. Harriet Tubman\nAnswer:",
+      "expected_answers": [
+        "C"
+      ],
+      "max_new_tokens": 1,
+      "use_chat_template": false,
+      "enable_thinking": false,
+      "reference_precision": "fp16"
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

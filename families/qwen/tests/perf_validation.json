@@ -1,0 +1,28 @@
+{
+  "models": [
+    {
+      "model": "Qwen/Qwen3-0.6B",
+      "family": "qwen",
+      "task": "text_generation",
+      "label": "A1-decode-small",
+      "benchmark": {
+        "label": "CPU argmax",
+        "gpu_argmax_label": "GPU argmax",
+        "metric": "tok/s",
+        "command": ["{binary}", "run", "{bundle}", "--runtime-root", "{runtime_root}", "--prompt", "{prompt}", "--max-new-tokens", "{max_tokens}"]
+      }
+    },
+    {
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "family": "qwen",
+      "task": "text_generation",
+      "label": "A3-decode-large",
+      "benchmark": {
+        "label": "CPU argmax",
+        "gpu_argmax_label": "GPU argmax",
+        "metric": "tok/s",
+        "command": ["{binary}", "run", "{bundle}", "--runtime-root", "{runtime_root}", "--prompt", "{prompt}", "--max-new-tokens", "{max_tokens}"]
+      }
+    }
+  ]
+}

@@ -80,7 +80,7 @@ scripts/agents/prompts/
 *.swo
 
 # Downloaded HF model directories (heavyweight, not committed)
-# Checked-in family fixtures live under tests/e2e/models/<family>/data/.
+# Checked-in family fixtures live under families/<family>/tests/data/.
 models/hf/TinyLlama__*/
 models/hf/tiny-random-*/
 models/hf/01-ai__*/
@@ -113,15 +113,6 @@ HEAD
 hooks
 objects
 refs
-!include/trtmc/config/
-!include/trtmc/config/**
-!python/tensorrt_model_connect/config/
-!python/tensorrt_model_connect/config/**
-!tests/config/
-!tests/config/**
-!src/runtime/config/
-!src/runtime/config/**
-# Re-ignore transient build artifacts inside the un-ignored config dirs.
 **/__pycache__/
 **/*.pyc
 # Ambient leftovers from recovery/benchmark work — not part of source.
@@ -136,5 +127,5 @@ engines
 *.ttrtb
 results.json
 !**/Recording.wav
-!tests/e2e/models/whisper/data/librispeech-test-clean-6930-75918-0003.wav
+!families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav
 worktrees/

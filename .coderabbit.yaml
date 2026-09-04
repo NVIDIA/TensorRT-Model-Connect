@@ -109,9 +109,6 @@ reviews:
     - "!third_party/**"
 
   path_instructions:
-    # Keep both the current split ownership roots and the consolidated family
-    # root used by the horizontal-scaling layout. This makes the review policy
-    # continuous across the repository migration.
     - path: "families/**"
       instructions: |
         Treat each direct child as an independently owned model-family vertical
@@ -123,32 +120,6 @@ reviews:
         inheritance, file reads, fixtures, validation reuse, or required edits.
         A new shared contract requires a concrete model-agnostic need; reduced
         line count is not evidence.
-
-    - path: "python/tensorrt_model_connect/families/**"
-      instructions: |
-        Treat each direct child as an independently owned model-family slice.
-        Similar or duplicated model-specific code is intentional isolation; do
-        not suggest extracting, deduplicating, or importing sibling-family
-        implementation solely because code looks alike. Flag new cross-family
-        imports, file reads, inheritance, fixtures, reference behavior, or
-        validation reuse. A new shared contract requires a concrete
-        model-agnostic need; reduced line count is not evidence.
-
-    - path: "src/runtime/models/**"
-      instructions: |
-        Treat each direct child as an independently owned runtime model DSO.
-        Similar or duplicated implementation is intentional isolation; do not
-        suggest sharing model-specific helpers solely because code looks alike.
-        Flag cross-family includes, links, loads, source references, symlinks,
-        or runtime dependencies between model-owner directories.
-
-    - path: "tests/e2e/models/**"
-      instructions: |
-        Treat each direct child as family-owned validation. Similar fixtures,
-        runners, references, comparators, thresholds, and probes may remain
-        duplicated as intentional isolation that preserves independent evidence
-        and rollback. Flag reuse across sibling families or movement of
-        model-specific validation semantics into the shared E2E harness.
 
     - path: "core/**"
       instructions: |
@@ -182,26 +153,11 @@ reviews:
         thresholds, probes, reference behavior, aggregation policy, or runtime
         strategies. Require a concrete model-agnostic need for shared changes.
 
-    - path: "benchmarks/**"
-      instructions: |
-        Check semantic equivalence of timed regions, synchronization, warmup,
-        preprocessing, transfer, execution, postprocessing, validation, and
-        serialization. Keep shards, batches, requests, queries, samples, tokens,
-        and generated artifacts as distinct accounting units. Flag family
-        behavior embedded in shared benchmark code.
-
     - path: "examples/**"
       instructions: |
         Examples must consume public build, load, task, and runtime APIs. Flag
         family-specific orchestration or output interpretation added to a shared
         executable or worker, and any reverse dependency into example code.
-
-    - path: "tests/validation/**"
-      instructions: |
-        Flag model-specific datasets, metrics, gates, thresholds, tensor
-        semantics, reference behavior, or runtime strategies stored in central
-        catalogs or implemented by shared validation code. Do not weaken
-        validation evidence or acceptance criteria.
 
     - path: ".github/**"
       instructions: |
@@ -211,29 +167,6 @@ reviews:
         an untrusted pull-request head in a privileged workflow. Require
         least-privilege permissions and full-SHA pinning for third-party
         actions.
-
-    - path: "tests/**"
-      instructions: |
-        Do not suggest weakening assertions, expected values, validation
-        criteria, comparison oracles, or acceptance thresholds merely to make
-        tests pass.
-
-    - path: "src/**"
-      instructions: |
-        Check ownership boundaries, public API compatibility, runtime safety,
-        TensorRT lifetime rules, error propagation, and cross-platform
-        behavior.
-
-    - path: "include/**"
-      instructions: |
-        Treat public header and ABI changes as high risk. Check lifetime,
-        ownership, compatibility, and documentation implications.
-
-    - path: "python/**"
-      instructions: |
-        Check model-family ownership, configuration isolation, error
-        propagation, deterministic behavior, and parity between Python and
-        native runtime paths.
 
 chat:
   auto_reply: true

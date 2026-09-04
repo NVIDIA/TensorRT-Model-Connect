@@ -1,0 +1,9 @@
+{
+  "threshold_overrides": {
+    "semantic_similarity": 0.8,
+    "normalized_text_edit_distance": 0.5,
+    "token_agreement_rate": 0.3,
+    "localization_box_iou": 0.9,
+    "localization_point_distance": 10.0
+  }
+}

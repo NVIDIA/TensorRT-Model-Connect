@@ -1,0 +1,127 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#pragma once
+
+// LlamaKvCache: autoregressive KV cache state manager.
+// HF equivalent: DynamicCache / past_key_values.
+//
+// Manages per-layer K/V device tensors and position tracking. Native TensorRT
+// KV engines update these buffers in place; standard engines use present rows
+// plus an attention mask.
+
+#include "families/llama/runtime/inference_state.h"
+#include "trtmc/runtime/device_tensor.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace trtmc {
+
+class ITrtModule;
+
+// Explicit tensor names for KV cache I/O binding.
+// Per-layer vectors hold expanded names; scalar names are for single inputs.
+struct LlamaKvCacheNames {
+    std::vector<std::string> cache_k;
+    std::vector<std::string> cache_v;
+    std::vector<std::string> present_k;
+    std::vector<std::string> present_v;
+    std::string cache_write_indices{"cache_write_indices"};
+    std::string key_value_lengths{"key_value_lengths"};
+    std::string position_id{"position_id"};
+    std::string attention_mask{"attention_mask"};
+};
+
+class LlamaKvCache : public LlamaInferenceState {
+  public:
+    // Allocate cache buffers for the given configuration.
+    // kv_dim = num_kv_heads * head_dim (size of one K or V row per layer).
+    // cache_dtype controls the element type for K/V cache buffers (default FP32).
+    // names provides explicit tensor names for engine I/O binding.
+    LlamaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
+                 DType cache_dtype = DType::kFloat32, LlamaKvCacheNames names = {});
+
+    // --- LlamaInferenceState overrides ---
+    void reset() override;
+    void bind_to(ITrtModule& module) override;
+    void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
+    void advance(int32_t n_tokens = 1) override;
+    int32_t position() const override { return position_; }
+    int32_t max_length() const override { return max_length_; }
+    int32_t num_layers() const override { return num_layers_; }
+    bool needs_attention_mask() const override { return !native_kv_update_enabled_; }
+    std::size_t device_memory_bytes() const override;
+    const char* state_type() const override { return "dense_kv_cache"; }
+    bool ok() const override;
+
+    // --- LlamaKvCache-specific methods (not on the interface) ---
+
+    // Direct access for advanced use (cross-attention, VL embedding).
+    DeviceTensor& cache_k(int32_t layer) { return cache_k_[static_cast<std::size_t>(layer)]; }
+    DeviceTensor& cache_v(int32_t layer) { return cache_v_[static_cast<std::size_t>(layer)]; }
+
+    // Complete a batched prefill and advance position_ to seq_len. Native
+    // TensorRT KV engines have already updated the aliased cache in place;
+    // standard engines copy their per-layer outputs into the cache.
+    void write_prefill_kv(const std::vector<const void*>& prefill_k,
+                          const std::vector<const void*>& prefill_v, int32_t seq_len);
+
+    // Prepare a multi-token block whose new tokens may attend bidirectionally
+    // to one another while still seeing the valid prefix cache.
+    void prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len);
+
+    // Append batched present K/V at the current position. Used after causal
+    // block verification in diffusion-style text decoders.
+    void append_prefill_kv(const std::vector<const void*>& prefill_k,
+                           const std::vector<const void*>& prefill_v, int32_t seq_len);
+
+    // Move the logical cache length without touching device memory. Stale rows
+    // remain masked out by subsequent prepare_step calls.
+    void set_position(int32_t position);
+
+    // Bind prefill KV tensors. Native TensorRT engines bind cache and present
+    // to the same full-capacity storage; standard engines bind cache inputs only.
+    void bind_cache_inputs(ITrtModule& module);
+
+  private:
+    bool configure_binding_mode(ITrtModule& module);
+    void validate_native_kv_contract(ITrtModule& module) const;
+    void validate_native_aliases(const std::vector<const void*>& present_k,
+                                 const std::vector<const void*>& present_v) const;
+    void ensure_standard_present_buffers();
+    void bind_native_cache(ITrtModule& module);
+    void write_native_kv_inputs(TensorMap& inputs, int32_t seq_len);
+    void write_position_input(TensorMap& inputs, int32_t seq_len);
+    void write_batched_mask(TensorMap& inputs, int32_t seq_len);
+    void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
+    void write_decode_mask(TensorMap& inputs);
+
+    std::vector<DeviceTensor> cache_k_; // [num_layers], shape [max_length, kv_dim]
+    std::vector<DeviceTensor> cache_v_; // [num_layers]
+    // Standard-only single-step outputs, allocated lazily when a standard engine is bound.
+    std::vector<DeviceTensor> present_k_;
+    std::vector<DeviceTensor> present_v_;
+    int32_t num_layers_{0};
+    int32_t max_length_{0};
+    int32_t kv_dim_{0};
+    int32_t position_{0};
+    cudaStream_t stream_{nullptr};
+    // Buffers owned by this object — Tensor.data in prepare_step() points here.
+    std::vector<float> mask_buf_;
+    std::vector<int32_t> pos_buf_vec_;
+    int32_t cache_write_index_{0};
+    int32_t key_value_length_{0};
+    bool has_position_input_{false};
+    bool binding_mode_initialized_{false};
+    bool native_kv_update_enabled_{false};
+    DType cache_dtype_{DType::kFloat32};
+    std::size_t cache_element_size_{sizeof(float)};
+    LlamaKvCacheNames names_;
+    ITrtModule* bound_module_{nullptr};
+};
+
+} // namespace trtmc

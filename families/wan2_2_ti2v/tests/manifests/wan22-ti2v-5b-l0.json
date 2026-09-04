@@ -1,0 +1,26 @@
+{
+  "name": "wan22-ti2v-5b-l0",
+  "hf_id": "Wan-AI/Wan2.2-TI2V-5B",
+  "hf_revision": "921dbaf3f1674a56f47e83fb80a34bac8a8f203e",
+  "bundle": "wan22-ti2v-5b-l0.bundle",
+  "family": "wan2_2_ti2v",
+  "task": "image_generation",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "wan22-ti2v-5b-l0",
+      "premerge": true,
+      "runtime_timeout_s": 14400,
+      "test_type": "diffusion",
+      "test_prompt": "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage",
+      "num_inference_steps": 15,
+      "guidance_scale": 5.0,
+      "seed": 42,
+      "reference_precision": "bf16"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "image_height": 384,
+  "image_width": 672,
+  "video_num_frames": 5
+}

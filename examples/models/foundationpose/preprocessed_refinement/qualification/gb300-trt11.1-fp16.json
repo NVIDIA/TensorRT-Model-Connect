@@ -13,20 +13,17 @@
     "precision": "fp16",
     "precision_notes": "FP16 graph with FP32 normalization accumulation, external I/O, scorer cross-hypothesis attention, and score projection."
   },
-  "pins": {
+  "sources": {
     "source_repository": "https://github.com/NVlabs/FoundationPose.git",
     "source_revision": "a1b694b83e633c2cb6115b9063d940a687759392",
     "ngc_model": "nvidia/isaac/foundationpose",
-    "ngc_version": "1.0.1_onnx",
-    "refiner_sha256": "dcc695a19c4bcfe5e1d909a22d8f652d8ec8bab1e19bd1544c6b45f2d3595cf7",
-    "scorer_sha256": "0bf1026c0db7320ebf9a548ecf0d3c810c8dbd377948630bd3e5af1d49440503"
+    "ngc_version": "1.0.1_onnx"
   },
   "build": {
     "total_seconds": 189.6,
     "refiner_seconds": 97.7,
     "scorer_seconds": 88.2,
-    "bundle_size_mib": 66.44,
-    "bundle_sha256": "a6e11bca226a8c532c6db60c6c6c8fb3e997e191a248f61b08c9dfc407568579"
+    "bundle_size_mib": 66.44
   },
   "native_runtime": {
     "registration_hypotheses": 3,

@@ -1,9 +1,0 @@
-{
-  "description": "Default thresholds for reranking models",
-  "metrics": {
-    "pairwise_ordering_agreement": 0.9,
-    "kendall_tau": 0.8,
-    "spearman_rho": 0.85,
-    "score_correlation": 0.95
-  }
-}

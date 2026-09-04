@@ -1,0 +1,23 @@
+{
+  "name": "flux-schnell",
+  "hf_id": "black-forest-labs/FLUX.1-schnell",
+  "bundle": "flux-schnell.bundle",
+  "family": "flux",
+  "task": "image_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "flux-schnell",
+      "semantic_assessment": true,
+      "reference_precision": "fp16",
+      "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
+      "test_type": "diffusion",
+      "num_inference_steps": 4,
+      "seed": 42
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "image_height": 1024,
+  "image_width": 1024,
+  "video_num_frames": 1
+}

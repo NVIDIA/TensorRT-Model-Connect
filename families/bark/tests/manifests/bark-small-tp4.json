@@ -1,0 +1,23 @@
+{
+  "name": "bark-small-tp4",
+  "hf_id": "suno/bark-small",
+  "hf_dependencies": [
+    {
+      "repo_id": "openai/whisper-large-v3-turbo"
+    }
+  ],
+  "bundle": "bark-small-tp4.bundle",
+  "family": "bark",
+  "task": "audio_generation",
+  "testcases": [
+    {
+      "name": "bark-small-tp4",
+      "prompt": "Hello, this is a test of the audio generation system.",
+      "max_new_tokens": 768,
+      "seed": 0
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp16",
+  "max_sequence_length": 1024
+}

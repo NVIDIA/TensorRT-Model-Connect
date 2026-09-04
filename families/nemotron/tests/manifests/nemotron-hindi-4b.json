@@ -1,0 +1,19 @@
+{
+  "name": "nemotron-hindi-4b",
+  "hf_id": "nvidia/Nemotron-4-Mini-Hindi-4B-Base",
+  "bundle": "nemotron-hindi-4b.bundle",
+  "family": "nemotron",
+  "task": "text_generation",
+  "precision": "bf16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "nemotron-hindi-4b",
+      "reference_precision": "bf16",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

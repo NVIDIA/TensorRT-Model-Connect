@@ -7,9 +7,6 @@
 *
 
 !CMakeLists.txt
-!pyproject.toml
-!_pyproject_backend.py
-!README.md
 !LICENSE
 !NOTICE
 !ASSET_LICENSES.md
@@ -17,37 +14,19 @@
 !cmake/
 !cmake/**
 
-!include/
-!include/**
+!core/
+!core/**
 
-!python/
-!python/**
-python/tensorrt_model_connect/families/**
-!python/tensorrt_model_connect/families/__init__.py
-!python/tensorrt_model_connect/families/cosmos3/
-!python/tensorrt_model_connect/families/cosmos3/**
-
-!src/
-!src/**
-src/runtime/models/**
-!src/runtime/models/cosmos3/
-!src/runtime/models/cosmos3/**
+!families/
+families/**
+!families/__init__.py
+!families/cosmos3/
+!families/cosmos3/**
 
 !third_party/
 third_party/**
 !third_party/stb/
 !third_party/stb/**
-
-# Runtime manifests validate their declared C++ test source paths during CMake
-# configuration even when test targets are disabled.
-!tests/
-tests/**
-!tests/cpp/
-tests/cpp/**
-!tests/cpp/models/
-tests/cpp/models/**
-!tests/cpp/models/cosmos3/
-!tests/cpp/models/cosmos3/**
 
 # Guard against basename negations above matching similarly named directories
 # below unrelated source trees.
@@ -60,7 +39,6 @@ website/**
 **/*.bundle
 **/*.engine
 **/*.plan
-**/*.trtfb
 **/build/
 **/build-*/
 **/hf-cache/

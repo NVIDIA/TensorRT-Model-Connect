@@ -1,0 +1,24 @@
+{
+  "name": "fast-foundation-stereo",
+  "hf_id": "nvidia/c-fast-foundationstereo",
+  "hf_revision": "9b446878c81ddb27593036767b29b2859d46103e",
+  "bundle": "fast-foundation-stereo.bundle",
+  "family": "fast_foundation_stereo",
+  "task": "stereo_disparity",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "fast-foundation-stereo",
+      "premerge": true,
+      "inputs": {
+        "left_image": "data/office_left.png",
+        "right_image": "data/office_right.png"
+      }
+    },
+    {
+      "name": "fast-foundation-stereo-middlebury-q",
+      "premerge": true
+    }
+  ],
+  "tensor_parallel_size": 1
+}

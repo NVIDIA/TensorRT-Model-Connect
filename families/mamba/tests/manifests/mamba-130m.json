@@ -1,0 +1,19 @@
+{
+  "name": "mamba-130m",
+  "hf_id": "state-spaces/mamba-130m-hf",
+  "bundle": "mamba-130m.bundle",
+  "family": "mamba",
+  "task": "text_generation",
+  "precision": "fp32",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "mamba-130m",
+      "premerge": true,
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

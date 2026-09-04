@@ -1,0 +1,22 @@
+{
+  "name": "nemotron-mini-4b",
+  "hf_id": "nvidia/Nemotron-Mini-4B-Instruct",
+  "bundle": "nemotron-mini-4b.bundle",
+  "family": "nemotron",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "nemotron-mini-4b",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

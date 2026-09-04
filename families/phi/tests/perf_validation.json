@@ -1,0 +1,16 @@
+{
+  "models": [
+    {
+      "model": "microsoft/Phi-3-mini-4k-instruct",
+      "family": "phi",
+      "task": "text_generation",
+      "label": "A2-decode-medium",
+      "benchmark": {
+        "label": "CPU argmax",
+        "gpu_argmax_label": "GPU argmax",
+        "metric": "tok/s",
+        "command": ["{binary}", "run", "{bundle}", "--runtime-root", "{runtime_root}", "--prompt", "{prompt}", "--max-new-tokens", "{max_tokens}"]
+      }
+    }
+  ]
+}

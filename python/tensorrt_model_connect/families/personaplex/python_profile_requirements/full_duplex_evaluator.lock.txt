@@ -1,6 +1,0 @@
-huggingface-hub==1.22.0
-nemo_toolkit[asr]==2.7.3
-numpy==1.26.4
-scipy==1.15.3
-silero-vad==6.2.1
-soundfile==0.14.0

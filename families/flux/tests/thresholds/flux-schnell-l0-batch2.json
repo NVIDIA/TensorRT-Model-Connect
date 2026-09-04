@@ -1,0 +1,14 @@
+{
+  "threshold_overrides": {
+    "batch_min_pairwise_pixel_mae": 0.01,
+    "min_frame_cosine_uint8": 0.95,
+    "reference_min_pixel_std_for_ratio": 0.08,
+    "min_reference_std_ratio": 0.35,
+    "temporal_consistency": 0.6,
+    "max_pixel_mean": 0.85,
+    "min_pixel_mean": 0.15,
+    "min_pixel_std": 0.05,
+    "psnr": 5.0,
+    "ssim": 0.1
+  }
+}

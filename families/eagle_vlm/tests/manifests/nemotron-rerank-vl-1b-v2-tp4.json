@@ -1,0 +1,23 @@
+{
+  "name": "nemotron-rerank-vl-1b-v2-tp4",
+  "hf_id": "nvidia/llama-nemotron-rerank-vl-1b-v2",
+  "bundle": "nemotron-rerank-vl-1b-v2-tp4.bundle",
+  "family": "eagle_vlm",
+  "task": "reranking",
+  "testcases": [
+    {
+      "name": "nemotron-rerank-vl-1b-v2-tp4",
+      "inputs": {
+        "prompt": "0-dimensional biomaterials show inductive properties.",
+        "documents": [
+          "New opportunities: the use of nanotechnologies to manipulate and track stem cells.\n\nNanotechnologies are emerging platforms that could be useful in measuring, understanding, and manipulating stem cells. Examples include magnetic nanoparticles and quantum dots for stem cell labeling and in vivo tracking; nanoparticles, carbon nanotubes, and polyplexes for the intracellular delivery of genes/oligonucleotides and protein/peptides; and engineered nanometer-scale scaffolds for stem cell differentiation and transplantation. This review examines the use of nanotechnologies for stem cell tracking, differentiation, and transplantation. We further discuss their utility and the potential concerns regarding their cytotoxicity.",
+          "Immune dysregulation in major depression: a critical review of existing evidence.\n\nIt is now well established that depression is associated with immune dysregulation. It is not, however, known whether this immune dysregulation plays a role in the pathophysiology of major depression or whether it increases the susceptibility of the depressed patient to immune-related disorders. This article presents a critical review of existing evidence for immune dysregulation in major depression, including changes in leucocyte trafficking, lymphocyte function, and markers of immune activation. Possible mediators of immune dysregulation in major depression are briefly discussed. Finally, the relationship between major depression and several medical conditions such as infection, allergy and autoimmune disorders, cardiovascular diseases, cancer and AIDS is critically reviewed."
+        ]
+      },
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp16",
+  "max_sequence_length": 256
+}

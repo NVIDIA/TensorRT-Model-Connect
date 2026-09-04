@@ -1,0 +1,49 @@
+{
+  "name": "magpie-tts-357m",
+  "hf_id": "nvidia/magpie_tts_multilingual_357m",
+  "hf_dependencies": [
+    {
+      "repo_id": "openai/whisper-large-v3-turbo"
+    }
+  ],
+  "hf_revision": "34d7e40da85cabc97f92198889b65cea27bc7fd1",
+  "bundle": "magpie-tts-357m.bundle",
+  "family": "magpie_tts",
+  "task": "audio_generation",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "magpie-tts-357m",
+      "premerge": true,
+      "prompt": "Ladies and gentlemen, welcome to the annual conference on artificial intelligence and machine learning. Today we will explore the latest advances in natural language processing, computer vision, and reinforcement learning.",
+      "max_new_tokens": 750,
+      "seed": 42
+    },
+    {
+      "name": "magpie-tts-357m-tts-probe01",
+      "prompt": "Please say this sentence clearly.",
+      "max_new_tokens": 260,
+      "seed": 42
+    },
+    {
+      "name": "magpie-tts-357m-tts-probe02",
+      "prompt": "Hello, welcome to this audio test.",
+      "max_new_tokens": 220,
+      "seed": 42
+    },
+    {
+      "name": "magpie-tts-357m-tts-probe03",
+      "prompt": "Can you read this question clearly?",
+      "max_new_tokens": 220,
+      "seed": 42
+    },
+    {
+      "name": "magpie-tts-357m-tts-probe04",
+      "prompt": "First we test the audio. Then we check the transcript.",
+      "max_new_tokens": 320,
+      "seed": 42
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512
+}

@@ -1,0 +1,20 @@
+{
+  "name": "gpt2-125m",
+  "hf_id": "openai-community/gpt2",
+  "bundle": "gpt2-125m.bundle",
+  "family": "gpt2",
+  "task": "text_generation",
+  "precision": "fp32",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "gpt2-125m",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

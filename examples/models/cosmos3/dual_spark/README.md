@@ -7,13 +7,13 @@ SPDX-License-Identifier: Apache-2.0
 
 This example generates one native 1280x720 Cosmos3-Nano video with context
 parallelism across two one-GPU DGX Sparks. A host-side Python launcher prepares
-the hardware-specific TensorRT bundle, synchronizes the exact image and bundle
+the hardware-specific TensorRT bundle, synchronizes the image and bundle
 to the peer, and starts rank 0 on the primary Spark and rank 1 on the peer.
 It does not start a server, open an application port, or require a browser.
 
 On top of the repository-pinned TensorRT base, the image adds the TRTMC CLI,
-`trtmc_core`, the TensorRT backend, the Cosmos3 model DSO, the Python builder
-environment, FFmpeg, and RDMA runtime packages. It does not contain a model
+the core and explicit runtime loader, the TensorRT backend, the Cosmos3 model
+DSO, the Python builder environment, FFmpeg, and RDMA runtime packages. It does not contain a model
 checkpoint, TensorRT bundle, generated video, SSH key, or Hugging Face token.
 
 ## Requirements
@@ -35,20 +35,12 @@ The default base is the repository-pinned aarch64 TensorRT 26.07 image and the
 default CUDA target is the GB10 GPU's SM 12.1:
 
 ```bash
-COSMOS3_SOURCE_REVISION="$(git rev-parse HEAD)"
-
 docker build \
   --platform linux/arm64 \
   --file examples/models/cosmos3/dual_spark/Dockerfile \
-  --build-arg TRTMC_SOURCE_REVISION="${COSMOS3_SOURCE_REVISION}" \
   --tag trtmc-cosmos3-dual-spark:local \
   .
 ```
-
-The Dockerfile uses its adjacent `Dockerfile.dockerignore` to project the
-shared native and Python sources while admitting only the Cosmos3 model family.
-Docker's retired legacy builder does not support Dockerfile-specific ignore
-files; enable BuildKit or use a current Docker release.
 
 Build natively on the primary Spark. TensorRT bundles are specific to the model
 revision, precision, context-parallel topology, TensorRT build, and GPU
@@ -66,7 +58,7 @@ python3 examples/models/cosmos3/dual_spark/run_dual_spark.py all \
 ```
 
 The first run downloads the public `nvidia/Cosmos3-Nano` checkpoint, builds a
-CP=2 TensorRT bundle on the primary Spark, and copies the exact image and bundle
+CP=2 TensorRT bundle on the primary Spark, and copies the image and bundle
 to the peer. That preparation can take hours. Later runs reuse the checkpoint
 cache, image, and hardware-specific bundle.
 
@@ -112,6 +104,7 @@ complete CLI surface.
   MP4 files, rank logs, container records, and `run.json`. Use `--work-root`
   to select another primary location; the peer defaults to
   `/var/tmp/cosmos3-physics-dual-spark`.
-- The public checkpoint is downloaded at preparation time into the mounted
-  Hugging Face cache. No credentials are required. Generated motion can still
-  contain physical or visual errors; review outputs before sharing them.
+- The public checkpoint is downloaded at preparation time into the reusable
+  model directory under the work root. No credentials are required. Generated
+  motion can still contain physical or visual errors; review outputs before
+  sharing them.

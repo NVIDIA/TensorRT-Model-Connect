@@ -1,9 +1,0 @@
-{
-  "description": "Default thresholds for encoder-only NLP models (BERT-style)",
-  "metrics": {
-    "logit_atol": 0.001,
-    "hidden_state_cosine": 0.99,
-    "hidden_state_l2": 0.1,
-    "cls_embedding_cosine": 0.999
-  }
-}

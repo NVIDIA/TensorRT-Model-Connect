@@ -1,0 +1,32 @@
+{
+  "name": "minitron-4b-width-regression-native-kv-chunked-prefill",
+  "hf_id": "nvidia/Llama-3.1-Minitron-4B-Width-Base",
+  "hf_revision": "5205ef7d36204947e3b973cb8b147a816ccd7e6a",
+  "bundle": "minitron-4b-width-regression-native-kv-chunked-prefill.bundle",
+  "family": "llama",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "minitron-4b-width-regression-native-kv-chunked-prefill",
+      "premerge": true,
+      "prompt_repeat": {
+        "text": "a",
+        "separator": " ",
+        "count": 32768,
+        "suffix": "\n"
+      },
+      "expected_prompt_tokens": 32769,
+      "expected_runtime_prefill_tokens": 32770,
+      "expected_kv_cache_rows": 131072,
+      "expected_prefill_chunks": 513,
+      "expected_prefill_chunk_limit": 64,
+      "max_new_tokens": 2,
+      "temperature": 0.0,
+      "top_k": 1
+    }
+  ],
+  "precision": "fp16",
+  "max_sequence_length": 131072,
+  "tensor_parallel_size": 1
+}

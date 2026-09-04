@@ -1,66 +1,69 @@
 ---
-title: Your First NLP Inference
+title: Quick Start
 ---
 
-Complete [System Requirements](environment-and-repro.md), then use either
-[Installation](installation.md) or [Build from Source](source-build.md).
-
-## 1. Check the CLI
+Install the wheel produced by the release or local package stage:
 
 ```bash
-trtmc version
+python -m pip install /path/to/tensorrt_model_connect-0.1.0-*.whl
 ```
 
-Expected signals include:
-
-```text
-trtmc 0.1.0
-TRT support: yes
-```
-
-## 2. Build Qwen
+If the selected family owns extra build or reference dependencies, install its
+plain requirements file. From a checkout or unpacked source release:
 
 ```bash
-trtmc build Qwen/Qwen3-0.6B \
-  --precision bf16 \
-  --max-cache-length 16384 \
-  --output qwen3-0.6b.bundle
+python -m pip install -r families/sana_wm/requirements.txt
 ```
 
-The bounded cache profile is intended for the first portable native-attention
-build. The first build may download model files and compile TensorRT engines.
-`qwen3-0.6b.bundle` is the runnable output.
-
-## 3. Inspect the bundle
+The wheel carries the same owner file. After installing the wheel, locate it
+from the installed `families` package:
 
 ```bash
-trtmc inspect ./qwen3-0.6b.bundle
-trtmc inspect ./qwen3-0.6b.bundle --list-engines
+FAMILY_REQUIREMENTS="$(python -c 'from pathlib import Path; import families; print(Path(families.__file__).parent / "sana_wm" / "requirements.txt")')"
+python -m pip install -r "$FAMILY_REQUIREMENTS"
 ```
 
-For this journey, confirm only the `qwen` family, `qwen_decoder_kv_cache`
-runtime strategy, BF16 precision, the configured cache length, and two listed
-engine plans. Generic fields are not used by this text-generation path.
+There is no central family extra or dependency registry. A family without a
+`requirements.txt` needs only the pinned base environment and the wheel.
 
-## 4. Run Qwen
+Build a bundle directly from a Hugging Face model ID:
 
 ```bash
-trtmc run ./qwen3-0.6b.bundle \
-  --prompt "What is the capital of France? Answer in one word." \
-  --chat-template \
-  --no-thinking \
-  --max-new-tokens 64 \
-  --temperature 0.7 \
-  --top-k 20 \
-  --top-p 0.8 \
-  --seed 42
+python -m tensorrt_model_connect build openai-community/gpt2 \
+  --precision fp16 \
+  --output gpt2.bundle
 ```
 
-Success returns `Paris` and stops without a fatal build, load, or inference
-error. If it does not, keep the first error and use
-[First-run Troubleshooting](troubleshooting.md).
+The CLI downloads the snapshot, reads `config.json` or `model_index.json`, and
+asks every dependency-free family `support.py`. Exactly one family must claim
+the checkpoint. That family supplies the default task; pass `--task` only when
+selecting another task supported by the same family. The build then imports
+only the selected `families.gpt2.model` and calls `build(request, writer)` once.
+A prepared local snapshot can be passed in place of the model ID.
 
-Continue with [Learning Path](../learning-path.md) or choose another model from
-[Model Support](../models-recipes/overview.md).
+For a wheel install, resolve its native runtime directory directly from the
+installed package:
 
-{/* Collaborative review anchor: batch 2. */}
+```bash
+TRTMC_RUNTIME_ROOT="$(python -c 'import pathlib, tensorrt_model_connect as m; print(pathlib.Path(m.__file__).parent / "bin")')"
+trtmc run gpt2.bundle \
+  --runtime-root "$TRTMC_RUNTIME_ROOT" \
+  --prompt "Hello" \
+  --max-new-tokens 32
+```
+
+For a native CMake install, point the loader at the directory containing the matching
+`libtrtmc_core.so`, `libtrtmc_runtime.so`, `libtrtmc_backend_trt.so`, and
+`libtrtmc_model_gpt2.so`. The loader reads the bundle header, loads exactly
+those DSOs, and returns the abstract task interface declared by the bundle.
+
+```bash
+trtmc run gpt2.bundle \
+  --runtime-root /opt/trtmc/lib \
+  --prompt "Hello" \
+  --max-new-tokens 32
+```
+
+The shell variable above is only a convenient explicit argument. The CLI never
+searches environment variables, the current directory, or an installed
+fallback runtime.

@@ -1,0 +1,39 @@
+{
+  "name": "elf-b-de-en-l0",
+  "hf_id": "embedded-language-flows/ELF-B-de-en",
+  "bundle": "elf-b-de-en-l0.bundle",
+  "family": "elf_flow",
+  "task": "text_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "elf-b-de-en-l0",
+      "max_new_tokens": 64,
+      "inputs": {
+        "generation_mode": "conditional",
+        "dataset_task": "wmt14_de_en_translation",
+        "source_text": "Ein kurzer deutscher Satz.",
+        "condition_api": "prompt-conditioned runs may pass --prompt/--source_text when the bundle includes elf_text_encoder_plan; replay runs may instead provide condition_latents_raw/condition_latents_path and condition_mask_raw/condition_mask_path",
+        "expected_output_kind": "English translation",
+        "sampling_method": "ode",
+        "num_sampling_steps": 64,
+        "cfg_scale": 2.0,
+        "self_cond_cfg_scale": 1.0,
+        "elf_replay_artifact": "data/elf-b-de-en-replay/artifact.json",
+        "output_schema": "jsonl lines with id, generated, and token_ids"
+      },
+      "prompt": "Ein kurzer deutscher Satz."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 128,
+  "fp32_layers": [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ]
+}

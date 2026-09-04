@@ -1,7 +1,0 @@
-{
-  "threshold_overrides": {
-    "max_pointwise_error": 8e-06,
-    "pde_residual": 0.05,
-    "relative_l2": 2e-08
-  }
-}

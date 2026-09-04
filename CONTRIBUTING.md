@@ -79,8 +79,8 @@ pull request after the branch is pushed.
 Start with repository consistency checks:
 
 ```bash
-PYTHONPATH=python:. python3 tools/model_ci.py validate
-PYTHONPATH=python:. python3 tools/test_impact.py --validate
+PYTHONPATH=core/builder:apps/benchmark:. python3 tools/model_ci.py validate
+PYTHONPATH=core/builder:apps/benchmark:. python3 tools/test_impact.py --validate
 git diff --check
 ```
 
@@ -89,8 +89,8 @@ needs the declared model, runtime, hardware, and comparison evidence. For
 documentation changes, run:
 
 ```bash
-python3 tools/check_doc_file_references.py --strict website/docs
 npm --prefix website ci
+npm --prefix website run test:model-support
 npm --prefix website run build
 ```
 

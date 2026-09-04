@@ -1,0 +1,20 @@
+{
+  "name": "qwen35-9b",
+  "hf_id": "Qwen/Qwen3.5-9B",
+  "bundle": "qwen35-9b.bundle",
+  "family": "qwen3_5",
+  "task": "text_generation",
+  "trust_remote_code": true,
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "qwen35-9b",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "reference_precision": "fp32"
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

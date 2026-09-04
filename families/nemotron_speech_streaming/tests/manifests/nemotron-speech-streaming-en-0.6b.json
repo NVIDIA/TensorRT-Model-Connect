@@ -1,0 +1,61 @@
+{
+  "name": "nemotron-speech-streaming-en-0.6b",
+  "hf_id": "nvidia/nemotron-speech-streaming-en-0.6b",
+  "bundle": "nemotron-speech-streaming-en-0.6b.bundle",
+  "family": "nemotron_speech_streaming",
+  "task": "transcription_streaming",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "nemotron-speech-streaming-en-0.6b",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "test_input_audio": "data/Recording.wav",
+      "chunk_ms": 1120
+    },
+    {
+      "name": "nemotron-speech-streaming-en-0.6b-asr-probe01",
+      "test_input_audio": "data/asr_probes/probe_01_clean_48k_stereo_baseline.wav",
+      "reference_precision": "fp16",
+      "chunk_ms": 1120
+    },
+    {
+      "name": "nemotron-speech-streaming-en-0.6b-asr-probe02",
+      "test_input_audio": "data/asr_probes/probe_02_clean_16k_mono_no_resample.wav",
+      "reference_precision": "fp16",
+      "chunk_ms": 1120
+    },
+    {
+      "name": "nemotron-speech-streaming-en-0.6b-asr-probe03",
+      "test_input_audio": "data/asr_probes/probe_03_clean_48k_mono_resample.wav",
+      "reference_precision": "fp16",
+      "chunk_ms": 1120
+    },
+    {
+      "name": "nemotron-speech-streaming-en-0.6b-asr-probe04",
+      "test_input_audio": "data/asr_probes/probe_04_clean_48k_stereo_gain_skew.wav",
+      "reference_precision": "fp16",
+      "chunk_ms": 1120
+    },
+    {
+      "name": "nemotron-speech-streaming-en-0.6b-asr-probe05",
+      "test_input_audio": "data/asr_probes/probe_05_low_volume_48k_stereo.wav",
+      "reference_precision": "fp16",
+      "chunk_ms": 1120
+    },
+    {
+      "name": "nemotron-speech-streaming-en-0.6b-asr-probe06",
+      "test_input_audio": "data/asr_probes/probe_06_leading_trailing_silence_48k_stereo.wav",
+      "reference_precision": "fp16",
+      "chunk_ms": 1120
+    },
+    {
+      "name": "nemotron-speech-streaming-en-0.6b-asr-probe08",
+      "test_input_audio": "data/asr_probes/probe_08_noisy_48k_stereo_snr20.wav",
+      "reference_precision": "fp16",
+      "chunk_ms": 1120
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 128
+}

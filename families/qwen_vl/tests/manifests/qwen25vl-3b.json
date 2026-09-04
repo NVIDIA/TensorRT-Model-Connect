@@ -1,0 +1,19 @@
+{
+  "name": "qwen25vl-3b",
+  "hf_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "bundle": "qwen25vl-3b-vl.bundle",
+  "family": "qwen_vl",
+  "task": "vision_language_generation",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "qwen25vl-3b",
+      "reference_precision": "fp32",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 384
+}

@@ -1,0 +1,100 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace trtmc {
+
+struct ZImageDiffusionConfig {
+    std::string scheduler{"flow_match_euler"};
+    int32_t num_inference_steps{50};
+    float guidance_scale{5.0F};
+    float flow_shift{1.0F};
+    bool use_dynamic_shifting{false};
+    float base_shift{0.5F};
+    float max_shift{1.15F};
+    int32_t base_image_seq_len{256};
+    int32_t max_image_seq_len{4096};
+    float shift_terminal{0.0F};
+
+    int32_t video_height{0};
+    int32_t video_width{0};
+    int32_t video_num_frames{0};
+
+    int32_t z_dim{0};
+    int32_t scale_factor_temporal{0};
+    int32_t scale_factor_spatial{0};
+    int32_t dit_dim{0};
+    int32_t dit_num_heads{0};
+    int32_t freq_dim{0};
+    int32_t text_seq_len{0};
+    int32_t text_encoder_dim{0};
+
+    int32_t num_vae_caches{0};
+    std::vector<float> latents_mean;
+    std::vector<float> latents_std;
+    std::vector<int32_t> patch_size;
+    std::vector<int32_t> axes_dims_rope;
+    float rope_theta{10000.0F};
+    std::string vae_model_id;
+
+    bool guidance_embeds{false};
+    bool use_rope{true};
+    float vae_scaling_factor{0.0F};
+
+    std::string diffusion_backend_type;
+
+    int32_t batch_size{1};
+
+    struct {
+        int32_t dit{1};
+        int32_t text_encoder{1};
+        int32_t vae{1};
+    } max_batch_size;
+};
+
+inline bool validate_z_image_initial_latents(std::size_t expected_size, std::size_t prompt_count,
+                                             const std::vector<float>& supplied,
+                                             std::string& error) {
+    if (supplied.empty()) {
+        return true;
+    }
+    if (prompt_count != 1U) {
+        error = "Z-Image caller initial latents require exactly one prompt";
+        return false;
+    }
+    if (supplied.size() != expected_size) {
+        error = "Z-Image initial latents contain " + std::to_string(supplied.size()) +
+                " floats; expected " + std::to_string(expected_size);
+        return false;
+    }
+    return true;
+}
+
+inline std::vector<int64_t> z_image_text_encoder_input_shape(int32_t input_rank, int32_t seq_len) {
+    if (input_rank == 2) {
+        return {1, static_cast<int64_t>(seq_len)};
+    }
+    return {static_cast<int64_t>(seq_len)};
+}
+
+inline std::vector<float> make_z_image_attention_mask(int32_t num_patches, int32_t text_seq_len,
+                                                      int32_t cap_padded_len) {
+    const int32_t clamped_caption_len =
+        cap_padded_len < 0 ? 0 : (cap_padded_len > text_seq_len ? text_seq_len : cap_padded_len);
+    std::vector<float> mask(static_cast<std::size_t>(num_patches + text_seq_len), -1.0e9F);
+    const auto valid_tokens = static_cast<std::size_t>(num_patches + clamped_caption_len);
+    for (std::size_t index = 0; index < valid_tokens; ++index) {
+        mask[index] = 0.0F;
+    }
+    return mask;
+}
+
+} // namespace trtmc

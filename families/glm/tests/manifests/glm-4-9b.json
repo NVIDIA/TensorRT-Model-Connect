@@ -1,0 +1,19 @@
+{
+  "name": "glm-4-9b",
+  "hf_id": "THUDM/glm-4-9b-hf",
+  "bundle": "glm-4-9b.bundle",
+  "family": "glm",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "glm-4-9b",
+      "reference_precision": "fp32",
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 20
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

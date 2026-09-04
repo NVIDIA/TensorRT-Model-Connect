@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "contract_max_upstream_text_ned": 0.0,
+    "contract_min_upstream_token_agreement_rate": 1.0
+  }
+}

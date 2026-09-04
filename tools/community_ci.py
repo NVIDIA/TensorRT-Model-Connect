@@ -11,9 +11,9 @@ units run in the same hardened, GPU-free container boundary used by premerge.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -23,10 +23,10 @@ from tools.ci.context import CiContext
 from tools.ci.process import CiError, CommandRunner, GitHubFiles
 from tools.ci.quality import SourceQualityChecks
 from tools.ci.stage import ContainerStageRunner
-from tools.model_ci import ModelCIError, calculate_impact, discover_catalog
+from tools import test_impact
 
 
-UNIT_SCOPES = ("none", "builder", "cli", "all")
+UNIT_SCOPES = ("all",)
 
 
 class CommunityCI:
@@ -49,97 +49,38 @@ class CommunityCI:
             env={**self.env, "CI_BASE_REF": resolved_base},
         )
         quality = SourceQualityChecks(context)
-        failures = self._collect(
-            (
-                ("Cyclomatic complexity", quality.complexity),
-                ("Changed-file lint and formatting", quality.lint_changed_files),
-                ("Model architecture contracts", quality.architecture_contracts),
-            )
-        )
+        failures = self._collect((("New-architecture source quality", quality.run),))
         self._raise_failures("Source quality", failures)
 
     def impact(self, base: str | None) -> dict[str, object]:
         resolved_base = self.resolve_base(base)
-        discover_catalog(self.repository, "HEAD")
-        result = calculate_impact(
-            self.repository,
-            resolved_base,
-            "HEAD",
-            platform_change_policy="all",
-        )
-        scope = str(result["unit_scope"])
-        if scope not in UNIT_SCOPES:
-            raise CiError(f"Impact analysis returned an invalid unit scope: {scope}")
-        python_test_targets = self._python_test_targets(resolved_base)
-
-        paths = sorted(
-            {
-                str(classification["path"])
-                for change in result.get("changes", [])
-                for classification in change.get("classifications", [])
-            }
-        )
-        kinds = sorted(
-            {
-                str(classification["kind"])
-                for change in result.get("changes", [])
-                for classification in change.get("classifications", [])
-            }
-        )
+        try:
+            test_impact.validate(self.repository)
+            paths = test_impact.changed_files(self.repository, resolved_base, "HEAD")
+            result = test_impact.classify(self.repository, paths)
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            raise CiError(f"Impact analysis failed: {error}") from error
         summary = {
-            "mode": result["mode"],
-            "run_unit_tests": bool(result["run_unit_tests"]),
-            "unit_scope": scope,
-            "changed_paths": paths,
-            "classifications": kinds,
+            "scope": result.scope,
+            "families": list(result.families),
+            "changed_paths": list(result.changed_files),
         }
         print(json.dumps(summary, indent=2, sort_keys=True))
-        self.github.output("run_unit_tests", str(summary["run_unit_tests"]).lower())
-        self.github.output("unit_scope", scope)
         self.github.output(
-            "python_test_targets",
-            json.dumps(python_test_targets, separators=(",", ":")),
+            "families",
+            json.dumps(summary["families"], separators=(",", ":")),
         )
         self.github.summary("### Community CPU ownership and impact")
-        self.github.summary(f"- Unit scope: `{scope}`")
-        self.github.summary(f"- Additional Python test targets: `{len(python_test_targets)}`")
+        self.github.summary(f"- Families: `{len(result.families)}`")
         self.github.summary(
-            "- Changed paths: " + (", ".join(f"`{path}`" for path in paths) or "none")
+            "- Changed paths: "
+            + (", ".join(f"`{path}`" for path in result.changed_files) or "none")
         )
-        return result
-
-    def _python_test_targets(self, base: str) -> list[str]:
-        selection = self.commands.run(
-            [
-                "python3",
-                "tools/test_impact.py",
-                "--base",
-                base,
-                "--head",
-                "HEAD",
-                "--json",
-            ],
-            capture_output=True,
-        )
-        try:
-            payload = json.loads(selection.stdout)
-        except json.JSONDecodeError as error:
-            raise CiError(f"Test impact analysis returned invalid JSON: {error}") from error
-        targets: list[str] = []
-        for key in ("builder_tests", "tools_tests"):
-            values = payload.get(key, [])
-            if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
-                raise CiError(f"Test impact analysis returned invalid {key}")
-            targets.extend(values)
-        return sorted(set(targets))
+        return summary
 
     def unit(self, scope: str) -> None:
         if scope not in UNIT_SCOPES:
             raise CiError(f"Unit scope must be one of: {', '.join(UNIT_SCOPES)}")
-        if scope == "none":
-            print("No source-only C++ or Python unit tests are required for this change.")
-            return
-
         image = self._ensure_cpu_image()
         runner_temp = Path(self.env.get("RUNNER_TEMP", tempfile.gettempdir())).resolve()
         runner_temp.mkdir(parents=True, exist_ok=True)
@@ -155,9 +96,7 @@ class CommunityCI:
                 "TRTMC_CI_CONTAINER_NAME": container_name,
                 "TRTMC_CI_HARDENED": "true",
                 "TRTMC_CI_SCRATCH_HOST": scratch,
-                "TRTMC_PREMERGE_UNIT_SCOPE": (
-                    "community-all" if scope == "all" else scope
-                ),
+                "TRTMC_PREMERGE_UNIT_SCOPE": (scope),
                 "GITHUB_RUN_ID": self.env.get("GITHUB_RUN_ID", f"local-{os.getpid()}"),
                 "GITHUB_RUN_ATTEMPT": self.env.get("GITHUB_RUN_ATTEMPT", "1"),
             }
@@ -175,61 +114,32 @@ class CommunityCI:
 
     def resolve_base(self, explicit: str | None) -> str:
         configured = explicit or self.env.get("TRTMC_COMMUNITY_BASE_REF", "")
-        candidates = [configured] if configured else []
-        candidates.extend(("upstream/main", "github/main", "origin/main"))
-
-        seen: set[str] = set()
-        for candidate in candidates:
-            if not candidate or candidate in seen:
-                continue
-            seen.add(candidate)
-            result = self.commands.run(
-                ["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"],
-                check=False,
-                capture_output=True,
-            )
-            if result.returncode == 0:
-                revision = result.stdout.strip()
-                print(f"Community CPU base: {candidate} ({revision})")
-                return revision
-        raise CiError(
-            "Could not resolve the contribution base. Fetch upstream/main or set "
-            "TRTMC_COMMUNITY_BASE_REF to the target branch revision."
-        )
-
-    def _ensure_cpu_image(self) -> str:
-        inputs = (
-            self.repository / "Dockerfile.community-cpu",
-            self.repository / "requirements" / "community-ci.txt",
-        )
-        digest = hashlib.sha256()
-        digest.update(b"trtmc-community-cpu-v1\0")
-        for path in inputs:
-            if not path.is_file():
-                raise CiError(f"Community CPU image input is missing: {path}")
-            digest.update(path.name.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(path.read_bytes())
-        image = f"trtmc-community-cpu:{digest.hexdigest()[:12]}"
-        inspect = self.commands.run(
-            ["docker", "image", "inspect", image],
+        if not configured:
+            raise CiError("--base or TRTMC_COMMUNITY_BASE_REF is required")
+        result = self.commands.run(
+            ["git", "rev-parse", "--verify", f"{configured}^{{commit}}"],
             check=False,
             capture_output=True,
         )
-        if inspect.returncode:
-            self.commands.run(
-                [
-                    "docker",
-                    "build",
-                    "--file",
-                    "Dockerfile.community-cpu",
-                    "--tag",
-                    image,
-                    "requirements",
-                ]
-            )
-        else:
-            print(f"Reusing Community CPU image: {image}")
+        if result.returncode:
+            raise CiError(f"Community CPU base does not resolve: {configured}")
+        revision = result.stdout.strip()
+        print(f"Community CPU base: {configured} ({revision})")
+        return revision
+
+    def _ensure_cpu_image(self) -> str:
+        image = "trtmc-community-cpu:local"
+        self.commands.run(
+            [
+                "docker",
+                "build",
+                "--file",
+                "Dockerfile.community-cpu",
+                "--tag",
+                image,
+                "requirements",
+            ]
+        )
         return image
 
     @staticmethod
@@ -276,7 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             runner.impact(arguments.base)
         elif arguments.command == "unit":
             runner.unit(arguments.scope)
-    except (CiError, ModelCIError) as error:
+    except CiError as error:
         print(f"ERROR: {error}")
         return 1
     return 0
