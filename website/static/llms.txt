@@ -8,31 +8,20 @@ Repository: https://github.com/NVIDIA/TensorRT-Model-Connect
 ## Start here
 
 - [Overview](https://nvidia.github.io/TensorRT-Model-Connect/)
-- [Get Started](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/overview)
+- [Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start)
 - [Supported Models](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)
-- [User Guides](https://nvidia.github.io/TensorRT-Model-Connect/user-guides/overview)
-- [Tutorials](https://nvidia.github.io/TensorRT-Model-Connect/learning-path)
-- [Blog](https://nvidia.github.io/TensorRT-Model-Connect/blog)
-- [Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview)
-- [Developer Guide](https://nvidia.github.io/TensorRT-Model-Connect/developer-guide/overview)
-- [Release and Support](https://nvidia.github.io/TensorRT-Model-Connect/release-support/overview)
-- [AI and Agent Guide](https://nvidia.github.io/TensorRT-Model-Connect/agent-guide)
-
-## Agent contract
-
-- Read all applicable AGENTS.md files before acting; the closest scoped file wins.
-- Preserve user changes and inspect branch, status, and remotes before editing.
-- Do not weaken tests or thresholds to make CI pass.
-- Do not commit, push, publish, merge, delete, reset, or rebase without authorization.
-- Use exact hf_id, revision, manifest profile, task, precision, topology, and runtime path.
-- Keep native support and platform-specialized provider claims separate.
-- Report source/static, GPU execution, model parity, performance, and publication evidence separately.
-- Never expose credentials, gated assets, private URLs, or internal artifacts.
+- [Architecture](https://nvidia.github.io/TensorRT-Model-Connect/architecture/ai-native-horizontal-scaling)
+- [Python Build API](https://nvidia.github.io/TensorRT-Model-Connect/api/python-builder)
+- [C++ Task API](https://nvidia.github.io/TensorRT-Model-Connect/api/cpp-api)
+- [Add a Model Family](https://nvidia.github.io/TensorRT-Model-Connect/extend/add-model-family)
+- [Source Layout](https://nvidia.github.io/TensorRT-Model-Connect/reference/source-layout)
 
 ## Sources of truth
 
-- Python family ownership: python/tensorrt_model_connect/families/<family>/MODEL.toml
-- Native runtime ownership: src/runtime/models/<owner>/MODEL.toml
-- Exact native model contracts: tests/e2e/models/<family>/manifests/*.json
-- CLI: website/docs/api/cli-reference.md and trtmc --help
-- Repository agent rules: AGENTS.md
+- Complete family ownership: families/<family>/
+- Python build entry: families/<family>/model.py
+- Native runtime target: families/<family>/runtime/CMakeLists.txt
+- Direct E2E contracts: families/<family>/tests/manifests/*.json
+- Public task interfaces: core/runtime/include/trtmc/task.h
+- Build and runtime loader contracts: core/builder/tensorrt_model_connect/ and core/runtime/include/trtmc/runtime/
+- CLI: trtmc help

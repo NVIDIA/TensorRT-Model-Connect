@@ -1,0 +1,19 @@
+{
+  "name": "fnet-base",
+  "hf_id": "google/fnet-base",
+  "bundle": "fnet-base.bundle",
+  "family": "fnet",
+  "task": "encoding",
+  "precision": "fp16",
+  "reference_precision": "fp32",
+  "testcases": [
+    {
+      "name": "fnet-base",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

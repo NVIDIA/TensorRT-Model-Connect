@@ -87,10 +87,6 @@ jobs:
       contents: read
     env:
       CI_BASE_REF: ${{ github.sha }}^1
-    outputs:
-      run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
-      unit_scope: ${{ steps.impact.outputs.unit_scope }}
-      python_test_targets: ${{ steps.impact.outputs.python_test_targets }}
     steps:
       - name: Check out the exact PR merge
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803

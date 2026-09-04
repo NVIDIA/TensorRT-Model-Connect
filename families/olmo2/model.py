@@ -1,0 +1,585 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""OLMo-2 family plugin -- post-norm decoder with QK normalization.
+
+OLMo-2 (allenai/OLMo-2-0425-1B) uses:
+  - Post-norm residual layout: norm is applied to attn/MLP output BEFORE
+    the residual addition (unlike LLaMA pre-norm).
+  - QK normalization (RMSNorm on Q and K per-head before RoPE)
+  - SwiGLU MLP (gate_proj / up_proj / down_proj)
+  - RoPE position embeddings
+  - Untied word embeddings (has separate lm_head)
+  - No input_layernorm; uses post_attention_layernorm + post_feedforward_layernorm
+
+Layer pattern:
+  attn_out = self_attn(hidden)            # QK norm inside
+  normed_attn = post_attention_layernorm(attn_out)
+  residual1 = hidden + normed_attn
+  mlp_out = mlp(residual1)
+  normed_mlp = post_feedforward_layernorm(mlp_out)
+  hidden = residual1 + normed_mlp
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from typing import TYPE_CHECKING
+
+from pathlib import Path
+
+import numpy as np
+import tensorrt as trt
+
+from . import graph_blocks, graph_ops
+from .config import ModelConfig
+from .parallel import ParallelConfig
+from .checkpoint_mapper import (
+    WeightDict,
+    _open_safetensors,
+    _load_tensor,
+    _has_tensor,
+    _transpose_2d,
+)
+from .parallel import normalize_parallel_config
+
+
+_BUILDER_WORKSPACE_BYTES = 256 << 20
+
+
+if TYPE_CHECKING:
+    from tensorrt_model_connect.build import BuildRequest
+    from tensorrt_model_connect.bundle_writer import BundleWriter
+
+
+class _Olmo2Model:
+    def load_weights(
+        self,
+        model_dir: str,
+        config: ModelConfig,
+    ) -> WeightDict:
+        model_dir_path = Path(model_dir)
+        readers = _open_safetensors(model_dir_path)
+
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        num_layers = config.num_hidden_layers
+        weights = WeightDict()
+
+        # Embedding
+        embedding = _load_tensor(readers, "model.embed_tokens.weight")
+        assert embedding.shape == (vocab, hidden), (
+            f"Embedding shape {embedding.shape} !== ({vocab}, {hidden})"
+        )
+        weights["embedding"] = embedding.astype(np.float32)
+
+        mlp_size = 0
+        attention_size = 0
+        kv_attention_size = 0
+
+        for layer_idx in range(num_layers):
+            prefix = f"layer.{layer_idx}"
+            hf_prefix = f"model.layers.{layer_idx}"
+
+            # OLMo-2 norms: post_attention_layernorm and post_feedforward_layernorm
+            post_attn_norm = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.weight")
+            weights[f"{prefix}.post_attn_norm"] = post_attn_norm.astype(np.float32)
+
+            post_ff_norm = _load_tensor(readers, f"{hf_prefix}.post_feedforward_layernorm.weight")
+            weights[f"{prefix}.post_ff_norm"] = post_ff_norm.astype(np.float32)
+
+            # Q/K/V/O projections
+            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
+            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
+            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
+            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+
+            q_hidden = q_raw.shape[0]
+            if attention_size == 0:
+                attention_size = q_hidden
+
+            q_t = _transpose_2d(q_raw, "q_proj")
+            k_t = _transpose_2d(k_raw, "k_proj")
+            v_t = _transpose_2d(v_raw, "v_proj")
+            o_t = _transpose_2d(o_raw, "o_proj")
+
+            # Compact GQA/MQA K/V
+
+            weights[f"{prefix}.w_q"] = q_t
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
+            weights[f"{prefix}.w_o"] = o_t
+            if kv_attention_size == 0:
+                kv_attention_size = k_t.shape[1]
+
+            # QK normalization -- OLMo-2 q_norm/k_norm are already
+            # full-size (num_heads * head_dim), NOT per-head like Qwen3.
+            # Load directly without _repeat_head_norm.
+            q_norm_key = f"{hf_prefix}.self_attn.q_norm.weight"
+            k_norm_key = f"{hf_prefix}.self_attn.k_norm.weight"
+            if _has_tensor(readers, q_norm_key):
+                weights[f"{prefix}.q_norm"] = _load_tensor(readers, q_norm_key).astype(np.float32)
+            if _has_tensor(readers, k_norm_key):
+                weights[f"{prefix}.k_norm"] = _load_tensor(readers, k_norm_key).astype(np.float32)
+
+            # MLP
+            gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
+            up_raw = _load_tensor(readers, f"{hf_prefix}.mlp.up_proj.weight")
+            down_raw = _load_tensor(readers, f"{hf_prefix}.mlp.down_proj.weight")
+            if mlp_size == 0:
+                mlp_size = gate_raw.shape[0]
+
+            weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj")
+            weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
+            weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
+
+        # Final norm
+        weights["final_norm"] = _load_tensor(readers, "model.norm.weight").astype(np.float32)
+
+        # LM head (untied)
+        weights["w_out"] = _transpose_2d(_load_tensor(readers, "lm_head.weight"), "lm_head")
+
+        weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_kv_attention_size"] = kv_attention_size  # type: ignore[assignment]
+        weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
+
+        return weights
+
+    def build_engine(
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
+        debug_layer_outputs: bool = False,
+        parallel_config=None,
+    ) -> bytes:
+        """Build TRT engine with OLMo-2 post-norm residual layout."""
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            parallel.validate()
+            from .tp_builder import build_olmo2_tp_engine
+
+            return build_olmo2_tp_engine(
+                config, weights, max_cache_length, verbose=verbose, parallel_config=parallel
+            )
+
+        if config.raw.get("_decoder_engine_role") == "prefill":
+            from .prefill_builder import build_olmo2_prefill_engine
+
+            return build_olmo2_prefill_engine(
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                verbose=verbose,
+                workspace_bytes=_BUILDER_WORKSPACE_BYTES,
+            )
+
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported OLMo2 precision: {precision}")
+
+        attention_size: int = weights.get("_attention_size", config.attention_size)
+        mlp_size: int = weights.get("_mlp_size", config.intermediate_size)
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        num_layers = config.num_hidden_layers
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+        head_dim = attention_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim
+        )
+        attention_window = max_cache_length + 1
+
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        trt_config = builder.create_builder_config()
+        trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, _BUILDER_WORKSPACE_BYTES)
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
+
+        # Inputs
+        token_id = network.add_input("token_id", trt.int32, (1,))
+        position_id = network.add_input("position_id", trt.int32, (1,))
+        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+        attention_mask_work = attention_mask
+        if work_trt_dtype != trt.float32:
+            attention_mask_work = network.add_cast(attention_mask, work_trt_dtype).get_output(0)
+
+        cache_k_inputs = []
+        cache_v_inputs = []
+        for i in range(num_layers):
+            ck = network.add_input(
+                graph_ops.layer_tensor_name("cache_k", i),
+                work_trt_dtype,
+                (max_cache_length, kv_attention_size),
+            )
+            cv = network.add_input(
+                graph_ops.layer_tensor_name("cache_v", i),
+                work_trt_dtype,
+                (max_cache_length, kv_attention_size),
+            )
+            cache_k_inputs.append(ck)
+            cache_v_inputs.append(cv)
+
+        # Constants
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype
+        )
+
+        cos_table_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, True
+        )
+        sin_table_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, False
+        )
+
+        cos_tensor = graph_ops.add_constant(
+            network, cos_table_np.shape, cos_table_np, dtype=work_np_dtype
+        )
+        sin_tensor = graph_ops.add_constant(
+            network, sin_table_np.shape, sin_table_np, dtype=work_np_dtype
+        )
+
+        eps_tensor = graph_ops.add_constant(
+            network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32)
+        )
+
+        # Embedding lookup
+        gather = network.add_gather(embedding_table, token_id, 0)
+        hidden_state = gather.get_output(0)
+
+        # Decoder layers
+        present_k_outputs = []
+        present_v_outputs = []
+
+        for layer_idx in range(num_layers):
+            prefix = f"layer.{layer_idx}"
+
+            # ---- Attention (no pre-norm, QK norm inside) ----
+            q = graph_ops.add_matmul_rhs_constant(
+                network,
+                hidden_state,
+                hidden,
+                attention_size,
+                weights[f"{prefix}.w_q"],
+                dtype=work_np_dtype,
+            )
+            k = graph_ops.add_matmul_rhs_constant(
+                network,
+                hidden_state,
+                hidden,
+                kv_attention_size,
+                weights[f"{prefix}.w_k"],
+                dtype=work_np_dtype,
+            )
+            v = graph_ops.add_matmul_rhs_constant(
+                network,
+                hidden_state,
+                hidden,
+                kv_attention_size,
+                weights[f"{prefix}.w_v"],
+                dtype=work_np_dtype,
+            )
+
+            # QK RMSNorm (full-dim, NOT per-head -- OLMo-2 applies norm
+            # over the entire num_heads*head_dim dimension before reshape)
+            q_norm_w = weights.get(f"{prefix}.q_norm")
+            if q_norm_w is not None:
+                q = graph_ops.add_rms_norm(
+                    network, q, attention_size, q_norm_w, eps_tensor, dtype=work_np_dtype
+                )
+            k_norm_w = weights.get(f"{prefix}.k_norm")
+            if k_norm_w is not None:
+                k = graph_ops.add_rms_norm(
+                    network, k, kv_attention_size, k_norm_w, eps_tensor, dtype=work_np_dtype
+                )
+
+            # RoPE
+            q = graph_ops.add_apply_rope_native(
+                network, q, num_heads, head_dim, cos_tensor, sin_tensor, position_id, head_dim
+            )
+            k = graph_ops.add_apply_rope_native(
+                network, k, num_kv_heads, head_dim, cos_tensor, sin_tensor, position_id, head_dim
+            )
+
+            # Save present K/V
+            present_k = k
+            present_v = v
+
+            # Cache concat
+            k_reshape = network.add_shuffle(k)
+            k_reshape.reshape_dims = (1, kv_attention_size)
+            v_reshape = network.add_shuffle(v)
+            v_reshape.reshape_dims = (1, kv_attention_size)
+
+            all_k = network.add_concatenation([cache_k_inputs[layer_idx], k_reshape.get_output(0)])
+            all_k.axis = 0
+            all_v = network.add_concatenation([cache_v_inputs[layer_idx], v_reshape.get_output(0)])
+            all_v.axis = 0
+
+            mask_reshape = network.add_shuffle(attention_mask_work)
+            mask_reshape.reshape_dims = (1, 1, 1, attention_window)
+
+            context_flat = graph_ops.add_attention_from_rows(
+                network,
+                q,
+                all_k.get_output(0),
+                all_v.get_output(0),
+                num_heads=num_heads,
+                head_dim=head_dim,
+                num_kv_heads=num_kv_heads,
+                q_seq=1,
+                kv_seq=attention_window,
+                mask=mask_reshape.get_output(0),
+            )
+
+            # Output projection
+            attn_out = graph_ops.add_matmul_rhs_constant(
+                network,
+                context_flat,
+                attention_size,
+                hidden,
+                weights[f"{prefix}.w_o"],
+                dtype=work_np_dtype,
+            )
+
+            # ---- Post-attention norm ----
+            normed_attn = graph_ops.add_rms_norm(
+                network,
+                attn_out,
+                hidden,
+                weights[f"{prefix}.post_attn_norm"],
+                eps_tensor,
+                dtype=work_np_dtype,
+            )
+            residual1 = network.add_elementwise(
+                hidden_state, normed_attn, trt.ElementWiseOperation.SUM
+            )
+            post_attn_state = residual1.get_output(0)
+
+            # ---- MLP (SwiGLU, no pre-norm) ----
+            mlp_out = graph_blocks.add_swiglu_mlp(
+                network,
+                post_attn_state,
+                weights=weights,
+                prefix=prefix,
+                hidden_size=hidden,
+                mlp_size=mlp_size,
+                dtype=work_np_dtype,
+            )
+
+            # ---- Post-feedforward norm ----
+            normed_mlp = graph_ops.add_rms_norm(
+                network,
+                mlp_out,
+                hidden,
+                weights[f"{prefix}.post_ff_norm"],
+                eps_tensor,
+                dtype=work_np_dtype,
+            )
+            residual2 = network.add_elementwise(
+                post_attn_state, normed_mlp, trt.ElementWiseOperation.SUM
+            )
+            hidden_state = residual2.get_output(0)
+
+            present_k_outputs.append(present_k)
+            present_v_outputs.append(present_v)
+
+        # Final norm
+        hidden_state = graph_ops.add_rms_norm(
+            network, hidden_state, hidden, weights["final_norm"], eps_tensor, dtype=work_np_dtype
+        )
+
+        # LM head
+        out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
+        logits = graph_ops.add_matmul_rhs_constant(
+            network, hidden_state, hidden, out_vocab, weights["w_out"], dtype=work_np_dtype
+        )
+        b_out = np.zeros(out_vocab, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out, dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
+
+        logits.name = "logits"
+        network.mark_output(logits)
+
+        # Present K/V outputs
+        for i in range(num_layers):
+            pk = present_k_outputs[i]
+            pv = present_v_outputs[i]
+            pk.name = graph_ops.layer_tensor_name("present_k", i)
+            pv.name = graph_ops.layer_tensor_name("present_v", i)
+            network.mark_output(pk)
+            network.mark_output(pv)
+
+        # Build engine
+        if verbose:
+            print(
+                f"[trtmc build] Building TRT engine ({num_layers} layers, "
+                f"hidden={hidden}, attn={attention_size}, mlp={mlp_size}, "
+                f"cache={max_cache_length}, precision={precision}) ...",
+                file=sys.stderr,
+            )
+
+        plan = builder.build_serialized_network(network, trt_config)
+        if plan is None:
+            raise RuntimeError("TensorRT engine build failed")
+
+        return bytes(plan)
+
+
+_BUNDLE_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenizer.model",
+)
+
+
+def _positive_int(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if result < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _runtime_config(model_dir: Path, config: ModelConfig, model: _Olmo2Model, **updates) -> dict:
+    runtime = {
+        "vocab_size": config.vocab_size,
+        "hidden_size": config.hidden_size,
+        "num_hidden_layers": config.num_hidden_layers,
+        "num_attention_heads": config.num_attention_heads,
+        "num_key_value_heads": config.num_key_value_heads,
+        "head_dim": config.head_dim,
+        "bos_token_id": config.bos_token_id,
+        "eos_token_id": config.eos_token_id,
+        "pad_token_id": config.pad_token_id,
+    }
+    generation_path = model_dir / "generation_config.json"
+    if generation_path.is_file():
+        generation = json.loads(generation_path.read_text(encoding="utf-8"))
+        if not isinstance(generation, dict):
+            raise ValueError("generation_config.json must contain one JSON object")
+        if "eos_token_id" in generation:
+            runtime["eos_token_id"] = generation["eos_token_id"]
+    runtime.update(updates)
+    return runtime
+
+
+def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+    """Build one OLMo2 bundle."""
+    if request.image_height is not None:
+        raise NotImplementedError("olmo2 does not support image_height")
+
+    if request.image_width is not None:
+        raise NotImplementedError("olmo2 does not support image_width")
+
+    if request.video_num_frames is not None:
+        raise NotImplementedError("olmo2 does not support video_num_frames")
+
+    if request.max_batch_size != 1:
+        raise NotImplementedError("olmo2 does not support max_batch_size")
+
+    if request.context_parallel_size != 1:
+        raise ValueError("this family does not support context parallelism")
+
+    if request.task != "text_generation":
+        raise ValueError("olmo2 supports only task=text_generation")
+
+    model_dir = Path(request.model_dir)
+    config = ModelConfig.from_dir(model_dir)
+    if str(config.model_type).lower() != "olmo2":
+        raise ValueError(f"OLMo2 does not support model_type={config.model_type!r}")
+    precision = str(request.precision).lower()
+    if precision not in {"fp32", "fp16", "bf16"}:
+        raise ValueError("OLMo2 precision must be fp32, fp16, or bf16")
+    max_sequence_length = _positive_int(
+        request.max_sequence_length or min(config.max_position_embeddings, 256),
+        "max_sequence_length",
+    )
+    if max_sequence_length > config.max_position_embeddings:
+        raise ValueError("OLMo2 max_sequence_length exceeds checkpoint context capacity")
+    if request.quantization not in {None, "none"}:
+        raise NotImplementedError("OLMo2 has no qualified family-owned quantized build")
+    if request.fp32_layers:
+        raise NotImplementedError("OLMo2 does not expose mixed-precision layers")
+    parallel = ParallelConfig(
+        tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
+    )
+    parallel.validate()
+    model = _Olmo2Model()
+    config.raw["_model_dir"] = str(model_dir)
+    weights = model.load_weights(str(model_dir), config)
+    writer.set_header(family="olmo2", task=request.task, backend="trt")
+    if parallel.enabled:
+        for rank in range(parallel.tp_size):
+            plan = model.build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                verbose=bool(request.verbose),
+                debug_layer_outputs=False,
+                parallel_config=parallel.for_rank(rank),
+            )
+            writer.add_bytes(f"engine.rank{rank}.plan", plan)
+        layout = "dual_profile"
+    else:
+        config.raw["_decoder_engine_role"] = "prefill"
+        prefill = model.build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            verbose=bool(request.verbose),
+            debug_layer_outputs=False,
+            parallel_config=parallel,
+        )
+        config.raw["_decoder_engine_role"] = "decode"
+        decode = model.build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            verbose=bool(request.verbose),
+            debug_layer_outputs=False,
+            parallel_config=parallel,
+        )
+        config.raw.pop("_decoder_engine_role", None)
+        writer.add_bytes("engine.plan", decode)
+        writer.add_bytes("prefill.plan", prefill)
+        layout = "split"
+    writer.add_json(
+        "runtime.json",
+        _runtime_config(
+            model_dir,
+            config,
+            model,
+            precision=precision,
+            max_cache_length=max_sequence_length,
+            decoder_engine_layout=layout,
+            tensor_parallel_size=parallel.tp_size,
+            tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
+        ),
+    )
+    for filename in _BUNDLE_FILES:
+        path = model_dir / filename
+        if path.is_file():
+            writer.add_bytes(filename, path.read_bytes())

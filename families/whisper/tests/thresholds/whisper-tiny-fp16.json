@@ -1,0 +1,8 @@
+{
+  "threshold_overrides": {
+    "contract_ned_threshold": 0.0,
+    "normalized_text_edit_distance": 0.0,
+    "wer": 0.0,
+    "cer": 0.0
+  }
+}

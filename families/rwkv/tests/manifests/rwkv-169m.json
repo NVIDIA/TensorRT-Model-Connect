@@ -1,0 +1,20 @@
+{
+  "name": "rwkv-169m",
+  "hf_id": "RWKV/rwkv-4-169m-pile",
+  "bundle": "rwkv-169m.bundle",
+  "family": "rwkv",
+  "task": "text_generation",
+  "precision": "fp32",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "rwkv-169m",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 10
+    }
+  ],
+  "max_sequence_length": 32,
+  "tensor_parallel_size": 1
+}

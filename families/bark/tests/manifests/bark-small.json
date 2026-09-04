@@ -1,0 +1,35 @@
+{
+  "name": "bark-small",
+  "hf_id": "suno/bark-small",
+  "hf_dependencies": [
+    {
+      "repo_id": "openai/whisper-large-v3-turbo"
+    }
+  ],
+  "bundle": "bark-small.bundle",
+  "family": "bark",
+  "task": "audio_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "bark-small",
+      "prompt": "Hello, this is a test of the audio generation system.",
+      "max_new_tokens": 768,
+      "seed": 0
+    },
+    {
+      "name": "bark-small-tts-probe01",
+      "prompt": "Model Connect generates a clear audio sample for this test.",
+      "max_new_tokens": 768,
+      "seed": 42
+    },
+    {
+      "name": "bark-small-tts-probe02",
+      "prompt": "Please pause, then continue speaking clearly.",
+      "max_new_tokens": 768,
+      "seed": 42
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1024
+}

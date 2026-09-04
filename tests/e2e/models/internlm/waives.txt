@@ -1,1 +1,0 @@
-# Model-local E2E waives. Format: [platform/]model-name SKIP|XFAIL (reason)

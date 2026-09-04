@@ -1,0 +1,16 @@
+{
+  "threshold_overrides": {
+    "contract_max_pixel_mean": 0.98,
+    "contract_min_pixel_mean": 0.08,
+    "contract_min_pixel_std": 0.04,
+    "min_frame_cosine_uint8": 0.95,
+    "reference_min_pixel_std_for_ratio": 0.08,
+    "min_reference_std_ratio": 0.35,
+    "temporal_consistency": 0.6,
+    "max_pixel_mean": 0.98,
+    "min_pixel_mean": 0.08,
+    "min_pixel_std": 0.04,
+    "psnr": 12.0,
+    "ssim": 0.75
+  }
+}

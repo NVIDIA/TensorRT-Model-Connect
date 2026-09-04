@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "contract_ned_threshold": 0.15,
+    "normalized_text_edit_distance": 0.2,
+    "token_agreement_rate": 0.8
+  }
+}

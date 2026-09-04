@@ -1,0 +1,19 @@
+{
+  "name": "qwen3-moe-30b-a3b",
+  "hf_id": "Qwen/Qwen3-30B-A3B",
+  "bundle": "qwen3-moe-30b-a3b.bundle",
+  "family": "qwen_moe",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "qwen3-moe-30b-a3b",
+      "reference_precision": "fp32",
+      "prompt": "What is the largest planet in our solar system? Answer in one word.",
+      "max_new_tokens": 10
+    }
+  ],
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1
+}

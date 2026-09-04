@@ -115,7 +115,6 @@ details summary {
   border-radius: 2px;
 }
 
-.markdown img[src*="/img/diagrams/"],
 .markdown p > img[src^="data:image/svg+xml"] {
   display: block;
   max-width: 100%;
@@ -144,8 +143,7 @@ details summary {
   outline-offset: 2px;
 }
 
-.trtmc-diagram img,
-.trtmc-diagram img[src*="/img/diagrams/"] {
+.trtmc-diagram img {
   display: block;
   width: auto;
   max-width: none;

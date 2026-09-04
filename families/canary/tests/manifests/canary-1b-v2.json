@@ -1,0 +1,61 @@
+{
+  "name": "canary-1b-v2",
+  "hf_id": "nvidia/canary-1b-v2",
+  "bundle": "canary-1b-v2.bundle",
+  "family": "canary",
+  "task": "transcription",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "canary-1b-v2",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/Recording.wav"
+    },
+    {
+      "name": "canary-1b-v2-asr-probe01",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_01_clean_48k_stereo_baseline.wav",
+      "reference_precision": "fp16"
+    },
+    {
+      "name": "canary-1b-v2-asr-probe02",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_02_clean_16k_mono_no_resample.wav",
+      "reference_precision": "fp16"
+    },
+    {
+      "name": "canary-1b-v2-asr-probe03",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_03_clean_48k_mono_resample.wav",
+      "reference_precision": "fp16"
+    },
+    {
+      "name": "canary-1b-v2-asr-probe04",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_04_clean_48k_stereo_gain_skew.wav",
+      "reference_precision": "fp16"
+    },
+    {
+      "name": "canary-1b-v2-asr-probe05",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_05_low_volume_48k_stereo.wav",
+      "reference_precision": "fp16"
+    },
+    {
+      "name": "canary-1b-v2-asr-probe06",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_06_leading_trailing_silence_48k_stereo.wav",
+      "reference_precision": "fp16"
+    },
+    {
+      "name": "canary-1b-v2-asr-probe08",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_08_noisy_48k_stereo_snr20.wav",
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 128
+}

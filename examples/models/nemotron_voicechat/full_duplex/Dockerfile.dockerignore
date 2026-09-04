@@ -13,30 +13,26 @@
 !cmake/
 !cmake/**
 
-!include/
-!include/**
+!core/
+core/**
+!core/runtime/
+!core/runtime/**
 
-!src/
-!src/**
-src/runtime/models/**
-!src/runtime/models/nemotron_voicechat/
-!src/runtime/models/nemotron_voicechat/**
+!apps/
+apps/**
+!apps/cli/
+!apps/cli/**
+
+!families/
+families/**
+!families/nemotron_voicechat/
+!families/nemotron_voicechat/runtime/
+!families/nemotron_voicechat/runtime/**
 
 !third_party/
 third_party/**
 !third_party/stb/
 !third_party/stb/**
-
-# Runtime manifests validate their declared C++ test source paths during CMake
-# configuration even when test targets are disabled.
-!tests/
-tests/**
-!tests/cpp/
-tests/cpp/**
-!tests/cpp/models/
-tests/cpp/models/**
-!tests/cpp/models/nemotron_voicechat/
-!tests/cpp/models/nemotron_voicechat/**
 
 !examples/
 examples/**
@@ -47,5 +43,5 @@ examples/**
 
 # Guard against basename negations above matching similarly named directories
 # below unrelated source trees.
-python/**
+core/builder/**
 website/**

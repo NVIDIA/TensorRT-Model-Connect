@@ -1,0 +1,21 @@
+{
+  "name": "lfm2-700m",
+  "hf_id": "LiquidAI/LFM2-700M",
+  "hf_revision": "86f49fc9a3800c3a325b7320bde179c318062583",
+  "bundle": "lfm2-700m-fp16.bundle",
+  "family": "lfm2",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "lfm2-700m-greedy",
+      "reference_precision": "bf16",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 8,
+      "do_sample": false
+    }
+  ],
+  "max_sequence_length": 512,
+  "tensor_parallel_size": 1
+}

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Minimal x86_64 development image for the Qwen Quick Start. Repository CI uses
-# the root Dockerfile; source is mounted and native CUDA targets build here.
+# Minimal x86_64 development image. Repository CI uses the root Dockerfile;
+# source is mounted and native CUDA targets build here.
 ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a
 FROM ${TENSORRT_IMAGE}
 
@@ -34,13 +34,11 @@ COPY community-ci.txt /tmp/trtmc-community-ci.txt
 
 RUN pip install -U pip && \
     pip install \
-      "apache-tvm-ffi==0.1.12" \
       "cuda-python>=13.0.3,<14" \
       "huggingface_hub>=0.23" \
       "ml_dtypes>=0.4" \
       "numpy>=1.24,<2.5" \
       "onnx>=1.16" \
-      "onnxscript>=0.2" \
       "PyYAML>=6.0" \
       "safetensors>=0.4" \
       "sentencepiece>=0.1.99" \
@@ -52,13 +50,15 @@ RUN pip install -U pip && \
 
 ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu
 ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu
-ENV LD_LIBRARY_PATH="${TRT_LIB_DIR}:/usr/local/cuda/lib64"
+ENV TVM_FFI_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tvm_ffi/lib
+ENV LD_LIBRARY_PATH="${TRT_LIB_DIR}:${TVM_FFI_LIB_DIR}:/usr/local/cuda/lib64"
 
 RUN cmake --version && \
     python3.12 -c \
-      "import onnx, onnxscript, tensorrt, torch, tvm_ffi; assert tensorrt.__version__ == '11.1.0.106'; assert hasattr(tensorrt, 'CausalMaskKind'); assert torch.__version__ == '2.12.0+cpu'; assert torch.version.cuda is None" && \
+      "import onnx, tensorrt, torch; assert tensorrt.__version__ == '11.1.0.106'; assert hasattr(tensorrt, 'CausalMaskKind'); assert torch.__version__ == '2.12.0+cpu'; assert torch.version.cuda is None" && \
     test -f "${TRT_INC_DIR}/NvInferVersion.h" && \
-    test -f "${TRT_LIB_DIR}/libnvinfer.so.11"
+    test -f "${TRT_LIB_DIR}/libnvinfer.so.11" && \
+    test -f "${TVM_FFI_LIB_DIR}/libtvm_ffi.so"
 
 WORKDIR /workspace/tensorrt-model-connect
 

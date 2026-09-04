@@ -1,290 +1,277 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Choose and run the selective or nightly E2E phases.
-
-Boundary: high-level E2E policy; worker scheduling and model isolation are delegated.
-"""
+"""Run family-owned E2E tests directly, without a central harness."""
 
 from __future__ import annotations
 
+import json
 import re
+import tempfile
+import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
 
+from tools import test_impact
+
 from .context import CiContext
-from .e2e_scheduler import E2EParallelConfig, E2EParallelRunner
-from .isolation import IsolatedModelRunner
-from .package import WheelPackageManager
 from .process import CiError
 
 
-class E2ERunner:
-    """Own the cache warm, standard model proof, strict isolation, and VLM check."""
+def _require_passing_junit(path: Path, label: str, *, allow_empty: bool = False) -> int:
+    if not path.is_file():
+        raise CiError(f"{label} report is missing")
+    try:
+        testcases = ET.parse(path).getroot().findall(".//testcase")
+    except (OSError, ET.ParseError) as error:
+        raise CiError(f"{label} report is invalid: {error}") from error
+    if not testcases and not allow_empty:
+        raise CiError(f"{label} report has no test cases")
+    for element, outcome in (
+        ("skipped", "skipped"),
+        ("error", "errors"),
+        ("failure", "failures"),
+    ):
+        affected = [
+            test.get("name", "<unnamed>")
+            for test in testcases
+            if test.find(element) is not None
+        ]
+        if affected:
+            raise CiError(f"{label} {outcome}: " + ", ".join(affected))
+    return len(testcases)
 
+
+class E2ERunner:
     def __init__(self, context: CiContext):
         self.context = context
-        self.package = WheelPackageManager(context)
 
     def selective(self) -> None:
-        if self.context.env.get("GITHUB_EVENT_NAME") != "pull_request" or self._full_requested():
-            print("Skipping: selective E2E only runs for pull_request events without full_e2e")
-            return
-        impact = self.context.read_json("impact.json")
-        models = {str(model) for model in impact.get("e2e_models", [])}
-        test_ids = [str(item) for item in impact.get("e2e_test_ids", [])]
-        for test_id in test_ids:
-            match = re.search(r"::test_model_e2e\[([^]]+)\]", test_id)
-            if match:
-                models.add(match.group(1))
-        models = sorted(model for model in models if model)
-        self._write_lines("e2e_models.txt", models)
-        self._write_lines("e2e_test_ids.txt", test_ids)
-        print(f"Selective E2E: {len(models)} models")
-        for model in models[:10]:
-            print(f"  {model}")
-        isolation_models = self.context.output(
-            [
-                "python3",
-                "tools/model_plugin_isolation.py",
-                "impact-models",
-                "--impact-json",
-                "impact.json",
-                "--exclude-ci-tier",
-                "multi_device",
-                "--exclude-ci-tier",
-                "nightly_only",
-            ]
-        ).splitlines()
-        self._write_lines("e2e_isolation_models.txt", isolation_models)
-        print(f"Model-owned isolation E2E: {len(isolation_models)} models")
-        if not models:
-            print("No E2E models affected by this change -- skipping E2E tests")
-            (self.context.repository / "e2e_artifacts/artifacts").mkdir(parents=True, exist_ok=True)
-            return
-
-        self.context.env.setdefault("TRTMC_BUILDER_OPTIMIZATION_LEVEL", "1")
-        self._configure_timing_cache()
-        print("=== Phase 1: warming HF cache (online, sequential) ===")
-        self.context.run(
-            [
-                "python",
-                "scripts/warm_hf_cache.py",
-                "--models-file",
-                "e2e_models.txt",
-                "--exclude-ci-tier",
-                "multi_device",
-                "--exclude-ci-tier",
-                "nightly_only",
-            ],
-            unset=("HF_HUB_OFFLINE",),
+        impact_path = self.context.repository / "impact.json"
+        if not impact_path.is_file():
+            raise CiError("selective E2E requires impact.json")
+        payload = json.loads(impact_path.read_text(encoding="utf-8"))
+        self._run(
+            tuple(str(value) for value in payload["families"]),
+            tuple(str(value) for value in payload.get("testcases", ())),
         )
-        print("=== Phase 2: standard selective E2E for the full conservative impact set ===")
-        result_dir = self.context.repository / "e2e_artifacts"
-        self.context.remove(result_dir)
-        (result_dir / "artifacts").mkdir(parents=True)
-        plugins = result_dir / "model_plugins"
-        self._prepare_plugins(plugins, ["--models-file", "e2e_models.txt"])
-        arguments = [
-            "--engine-dir",
-            self.context.env["ENGINE_DIR"],
-            "--result-dir",
-            str(result_dir),
-            "--trtmc-binary",
-            self.context.executable("trtmc"),
-            "--workers-per-gpu",
-            "4",
-            "--models-file",
-            "e2e_models.txt",
-            "--exclude-ci-tier",
-            "nightly_only",
-            "--model-plugin-dir",
-            str(plugins),
-            "--timeout",
-            self.context.env.get(
-                "SELECTIVE_E2E_STANDARD_TIMEOUT",
-                self.context.env.get("SELECTIVE_E2E_TIMEOUT", "4h"),
-            ),
-        ]
-        if test_ids:
-            arguments.extend(["--tests-file", "e2e_test_ids.txt"])
-        if self.context.env.get("REBUILD_ENGINES", "true") == "true":
-            arguments.append("--rebuild-engines")
-        config = E2EParallelConfig.parse(arguments, self.context.env)
-        standard_rc = E2EParallelRunner(self.context, config).run()
-        if standard_rc:
-            raise CiError(f"standard selective E2E failed with code {standard_rc}")
-        if isolation_models:
-            print("=== Phase 3: strict model-owned isolation E2E ===")
-            IsolatedModelRunner(self.context).run(
-                self.context.repository / "e2e_isolation_models.txt", result_dir
+
+    def _run(self, families: tuple[str, ...], testcases: tuple[str, ...] = ()) -> None:
+        selected_families = tuple(sorted(set(families)))
+        if not selected_families:
+            print("No family E2E tests selected")
+            return
+        if len(selected_families) != 1:
+            raise CiError("one E2E job must select exactly one family")
+        binary = self._required_path("TRTMC_BINARY")
+        runtime_root = self._required_path("TRTMC_RUNTIME_ROOT")
+        native_build = self._required_path("TRTMC_NATIVE_BUILD_DIR")
+        if not binary.is_file():
+            raise CiError(f"TRTMC_BINARY is not a file: {binary}")
+        if not runtime_root.is_dir():
+            raise CiError(f"TRTMC_RUNTIME_ROOT is not a directory: {runtime_root}")
+        if not native_build.is_dir() or not (native_build / "CTestTestfile.cmake").is_file():
+            raise CiError("TRTMC_NATIVE_BUILD_DIR is not a configured CTest build tree")
+        if not (runtime_root / "libtrtmc_backend_trt.so").is_file():
+            raise CiError("TRTMC_RUNTIME_ROOT has no libtrtmc_backend_trt.so")
+        known = set(test_impact.inventory(self.context.repository))
+        unknown = sorted(set(selected_families) - known)
+        if unknown:
+            raise CiError("unknown E2E families: " + ", ".join(unknown))
+        self._run_family_ctests(native_build, selected_families)
+        for family in selected_families:
+            family_tests = self.context.repository / "families" / family / "tests"
+            ordinary_paths = [
+                path
+                for path in sorted(family_tests.glob("test_*.py"))
+                if path.name != "test_e2e.py"
+            ]
+            ordinary_tests = [
+                str(path.relative_to(self.context.repository)) for path in ordinary_paths
+            ]
+            if ordinary_tests:
+                unit_junit = native_build / f"trtmc-{family}-unit-junit.xml"
+                completed = self.context.run(
+                    [
+                        "python",
+                        "-m",
+                        "pytest",
+                        *ordinary_tests,
+                        "-m",
+                        "not gpu and not trt",
+                        "-q",
+                        "-x",
+                        "-p",
+                        "no:cacheprovider",
+                        "--junitxml",
+                        unit_junit,
+                    ],
+                    updates={"PYTHONDONTWRITEBYTECODE": "1"},
+                    unset=("PYTEST_ADDOPTS",),
+                    check=False,
+                    limit=self.context.env.get("PYTHON_UNIT_TIMEOUT", "20m"),
+                )
+                test_count = _require_passing_junit(
+                    unit_junit,
+                    "family Python unit tests",
+                    allow_empty=completed.returncode == 5,
+                )
+                if completed.returncode == 5:
+                    if test_count:
+                        raise CiError(
+                            "family Python unit tests reported no tests collected "
+                            f"but wrote {test_count} test cases"
+                        )
+                    print("No CPU family Python tests selected")
+                elif completed.returncode:
+                    raise CiError(
+                        "family Python unit tests failed with exit code "
+                        f"{completed.returncode}"
+                    )
+            hardware_tests = [
+                str(path.relative_to(self.context.repository))
+                for path in ordinary_paths
+                if any(
+                    marker in path.read_text(encoding="utf-8")
+                    for marker in ("pytest.mark.gpu", "pytest.mark.trt")
+                )
+            ]
+            if hardware_tests:
+                hardware_junit = native_build / f"trtmc-{family}-hardware-junit.xml"
+                self.context.run(
+                    [
+                        "python",
+                        "-m",
+                        "pytest",
+                        *hardware_tests,
+                        "-m",
+                        "gpu or trt",
+                        "-q",
+                        "-x",
+                        "-p",
+                        "no:cacheprovider",
+                        "--junitxml",
+                        hardware_junit,
+                    ],
+                    updates={"PYTHONDONTWRITEBYTECODE": "1"},
+                    unset=("PYTEST_ADDOPTS",),
+                    limit=self.context.env.get("TRTMC_E2E_TIMEOUT", "12h"),
+                )
+                _require_passing_junit(hardware_junit, "family hardware tests")
+            test = f"families/{family}/tests/test_e2e.py"
+            with self._isolated_runtime_root(runtime_root, family) as isolated:
+                command = [
+                    "python",
+                    "-m",
+                    "pytest",
+                    test,
+                ]
+                if testcases:
+                    command.extend(("--e2e-testcase", ",".join(sorted(set(testcases)))))
+                else:
+                    command.extend(("--e2e-model", family))
+                command.extend(("-q", "-x", "-p", "no:cacheprovider"))
+                self.context.run(
+                    command,
+                    updates={
+                        "TRTMC_BINARY": str(binary),
+                        "TRTMC_RUNTIME_ROOT": str(isolated),
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    },
+                    limit=self.context.env.get("TRTMC_E2E_TIMEOUT", "12h"),
+                )
+
+    @contextmanager
+    def _isolated_runtime_root(self, runtime_root: Path, family: str):
+        required = (
+            "libtrtmc_core.so",
+            "libtrtmc_backend_trt.so",
+            f"libtrtmc_model_{family}.so",
+        )
+        for name in required:
+            if not (runtime_root / name).is_file():
+                raise CiError(f"TRTMC_RUNTIME_ROOT has no {name}")
+
+        with tempfile.TemporaryDirectory(prefix=f"trtmc-{family}-runtime-") as directory:
+            root = Path(directory)
+            isolated = root / "tensorrt_model_connect/bin"
+            isolated.mkdir(parents=True)
+            for name in required:
+                (isolated / name).symlink_to((runtime_root / name).resolve())
+
+            # Preserve only non-family wheel dependencies expected by RUNPATH.
+            site_packages = runtime_root.parent.parent
+            for package in ("tensorrt_libs", "torch"):
+                source = site_packages / package
+                if source.is_dir():
+                    (root / package).symlink_to(source.resolve(), target_is_directory=True)
+            yield isolated
+
+    def _run_family_ctests(self, build: Path, families: tuple[str, ...]) -> None:
+        listing = self.context.run(
+            ["ctest", "--test-dir", build, "--show-only=json-v1"],
+            capture_output=True,
+        )
+        tests = json.loads(listing.stdout).get("tests", [])
+        selected = []
+        targets = []
+        owners = {f"/families/{family}" for family in families}
+        for test in tests:
+            command = test.get("command") or []
+            properties = {
+                str(item["name"]): str(item["value"])
+                for item in test.get("properties", [])
+                if "name" in item and "value" in item
+            }
+            location = properties.get("WORKING_DIRECTORY", "")
+            if not any(location.endswith(owner) or f"{owner}/" in location for owner in owners):
+                continue
+            name = str(test["name"])
+            selected.append(name)
+            targets.append(
+                Path(str(command[0])).name
+                if command
+                else name
+                if name.startswith("test_")
+                else f"test_{name}"
             )
-        else:
-            print("No model-owned E2E cases changed -- strict isolation rerun not required")
-        self.diffusion_vlm_assessment()
-
-    def full(self) -> None:
-        if not self._full_requested():
-            print("Skipping: full E2E was not requested")
+        if not selected:
+            print("No family-owned C++ tests selected")
             return
-        print("=== Nightly Full E2E: all models ===")
-        self.context.run(["nvidia-smi"])
-        self._configure_timing_cache()
-        plugins = self.context.repository / "e2e_artifacts/model_plugins"
-        self._prepare_plugins(plugins, ["--all"])
-        print("=== Phase 1: warming HF cache (online, sequential) ===")
         self.context.run(
             [
-                "python",
-                "scripts/warm_hf_cache.py",
-                "--exclude-ci-tier",
-                "l0_only",
-                "--exclude-ci-tier",
-                "multi_device",
-            ]
-        )
-        arguments = [
-            "--engine-dir",
-            self.context.env["ENGINE_DIR"],
-            "--result-dir",
-            "e2e_artifacts",
-            "--trtmc-binary",
-            self.context.executable("trtmc"),
-            "--workers-per-gpu",
-            "4",
-            "--exclude-ci-tier",
-            "l0_only",
-            "--exclude-ci-tier",
-            "multi_device",
-            "--model-plugin-dir",
-            str(plugins),
-            "--timeout",
-            self.context.env.get("FULL_E2E_TIMEOUT", "6h"),
-        ]
-        if self.context.env.get("REBUILD_ENGINES", "true") == "true":
-            arguments.append("--rebuild-engines")
-        standard_error: CiError | None = None
-        try:
-            standard_rc = E2EParallelRunner(
-                self.context, E2EParallelConfig.parse(arguments, self.context.env)
-            ).run()
-        except CiError as error:
-            standard_error = error
-            standard_rc = 1
-        try:
-            self.diffusion_vlm_assessment()
-        except Exception:
-            if not standard_rc:
-                raise
-        if standard_error is not None:
-            raise standard_error
-        if standard_rc:
-            raise CiError(f"E2E exited with code {standard_rc}")
-
-    def diffusion_vlm_assessment(self) -> None:
-        if self.context.env.get("DIFFUSION_VLM_ASSESSMENT", "true") != "true":
-            print("Skipping: diffusion VLM assessment disabled")
-            return
-        artifacts = self.context.repository / "e2e_artifacts/artifacts"
-        if not artifacts.is_dir():
-            print("Skipping: no E2E artifacts directory for diffusion VLM assessment")
-            return
-        pair_count = int(
-            self.context.output(["python3", "tools/count_diffusion_frame_pairs.py", artifacts])
-            or "0"
-        )
-        if pair_count == 0:
-            print("Skipping: no TRT/HF diffusion frame pairs for VLM assessment")
-            return
-        config_path, config = self._default_config(
-            "DIFFUSION_VLM_CONFIG", "diffusion_vlm_assessment.json"
-        )
-        required = ("model_id", "max_side", "max_new_tokens", "timeout")
-        missing = [key for key in required if not config.get(key)]
-        if missing:
-            raise CiError(f"{config_path} missing required diffusion VLM fields: {missing}")
-        print(f"=== Phase 3: diffusion VLM semantic assessment ({pair_count} pairs) ===")
-        print(f"Using diffusion VLM assessment config {config_path}")
-        self.context.run(
-            [
-                "python",
-                "tools/evaluate_diffusion_vlm_similarity.py",
-                "--artifacts-dir",
-                artifacts,
-                "--output",
-                "e2e_artifacts/diffusion_vlm_assessment.json",
-                "--config",
-                config_path,
-                "--model-id",
-                self.context.env.get("DIFFUSION_VLM_MODEL_ID", str(config["model_id"])),
-                "--max-side",
-                self.context.env.get("DIFFUSION_VLM_MAX_SIDE", str(config["max_side"])),
-                "--max-new-tokens",
-                self.context.env.get("DIFFUSION_VLM_MAX_NEW_TOKENS", str(config["max_new_tokens"])),
+                "cmake",
+                "--build",
+                build,
+                "--parallel",
+                "8",
+                "--target",
+                *sorted(set(targets)),
             ],
-            limit=self.context.env.get("DIFFUSION_VLM_TIMEOUT", str(config["timeout"])),
-            unset=("HF_HUB_OFFLINE",),
+            limit=self.context.env.get("CPP_BUILD_TIMEOUT", "30m"),
         )
-
-    def _prepare_plugins(self, output: Path, arguments: list[str]) -> None:
-        metadata = self.package.build_metadata()
-        self.context.remove(output)
-        output.mkdir(parents=True)
+        expression = "^(" + "|".join(re.escape(name) for name in sorted(selected)) + ")$"
+        junit = build / "trtmc-family-ctest.xml"
         self.context.run(
             [
-                "python3",
-                "tools/model_plugin_isolation.py",
-                "prepare",
-                "--build-dir",
-                metadata["cmake_build_dir"],
-                "--output-dir",
-                output,
-                *arguments,
-            ]
+                "ctest",
+                "--test-dir",
+                build,
+                "--output-on-failure",
+                "--output-junit",
+                junit,
+                "-R",
+                expression,
+            ],
+            limit=self.context.env.get("CPP_UNIT_TIMEOUT", "20m"),
         )
+        _require_passing_junit(junit, "family C++ tests")
 
-    def _configure_timing_cache(self) -> None:
-        root = self.context.env.get("TRTMC_STORAGE_ROOT", self.context.env.get("ENGINE_DIR", "."))
-        tensorrt_version = self.context.output(
-            ["python", "-c", "import tensorrt; print(tensorrt.__version__)"]
-        )
-        version = re.sub(r"[^0-9A-Za-z_.-]+", "-", tensorrt_version).strip("-")
-        if not version:
-            raise CiError("TensorRT reported an empty version for timing-cache isolation")
-        suffix = (
-            f"trt{version}-"
-            f"opt{self.context.env.get('TRTMC_BUILDER_OPTIMIZATION_LEVEL', 'default')}"
-        )
-        if self.context.env.get("TRTMC_MAX_NUM_TACTICS"):
-            suffix += f"-tactics{self.context.env['TRTMC_MAX_NUM_TACTICS']}"
-        if self.context.env.get("TRTMC_AVG_TIMING_ITERATIONS"):
-            suffix += f"-avg{self.context.env['TRTMC_AVG_TIMING_ITERATIONS']}"
-        cache = self.context.env.setdefault(
-            "TRTMC_TRT_TIMING_CACHE_PATH",
-            f"{root.rstrip('/')}/trt-timing-cache/tensorrt-{suffix}.cache",
-        )
-        Path(cache).parent.mkdir(parents=True, exist_ok=True)
-        print(f"TRTMC_TRT_TIMING_CACHE_PATH={cache}")
-
-    def _default_config(self, variable: str, filename: str) -> tuple[Path, dict[str, object]]:
-        requested = self.context.env.get(variable)
-        if requested:
-            path = Path(requested)
-            if not path.is_file():
-                raise CiError(f"{variable} does not exist: {path}")
-        else:
-            configs = sorted((self.context.repository / "tests/e2e/models").glob(f"*/{filename}"))
-            defaults = [
-                path for path in configs if self.context.read_json(path).get("default") is True
-            ]
-            if len(defaults) != 1:
-                raise CiError(f"Expected exactly one default {filename}; found {defaults}")
-            path = defaults[0]
-        return path, self.context.read_json(path)
-
-    def _write_lines(self, path: str, lines: list[str]) -> None:
-        (self.context.repository / path).write_text(
-            "".join(f"{line}\n" for line in lines), encoding="utf-8"
-        )
-
-    def _full_requested(self) -> bool:
-        return self.context.env.get("FULL_E2E", "false") == "true"
+    def _required_path(self, name: str) -> Path:
+        value = self.context.env.get(name, "")
+        if not value:
+            raise CiError(f"{name} is required")
+        path = Path(value)
+        if not path.exists():
+            raise CiError(f"{name} does not exist: {path}")
+        return path

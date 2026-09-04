@@ -1,0 +1,17 @@
+{
+  "name": "paraphrase-multilingual-minilm-l12-v2",
+  "hf_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "bundle": "paraphrase-multilingual-minilm-l12-v2.bundle",
+  "family": "bert",
+  "task": "embedding",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "paraphrase-multilingual-minilm-l12-v2",
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512
+}

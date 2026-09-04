@@ -1,0 +1,20 @@
+{
+  "name": "phi4-multimodal",
+  "hf_id": "microsoft/Phi-4-multimodal-instruct",
+  "bundle": "phi4-multimodal.bundle",
+  "family": "phi4_multimodal",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "phi4-multimodal",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "Describe this image.",
+      "max_new_tokens": 30,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 768
+}

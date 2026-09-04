@@ -1,0 +1,27 @@
+{
+  "name": "ltx-video-l0",
+  "hf_id": "Lightricks/LTX-Video",
+  "bundle": "ltx-video-l0.bundle",
+  "family": "ltx_video",
+  "task": "image_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "ltx-video-l0",
+      "premerge": true,
+      "test_prompt": "A cheerful small red robot with glossy metal panels walks through a sunlit botanical garden filled with colorful flowers, butterflies, and soft golden light. Smooth cinematic camera movement, detailed textures, vibrant colors, shallow depth of field, high quality.",
+      "test_type": "diffusion",
+      "num_inference_steps": 30,
+      "guidance_scale": 3.0,
+      "seed": 42,
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "fp32_layers": [
+    24
+  ],
+  "image_height": 256,
+  "image_width": 256,
+  "video_num_frames": 9
+}

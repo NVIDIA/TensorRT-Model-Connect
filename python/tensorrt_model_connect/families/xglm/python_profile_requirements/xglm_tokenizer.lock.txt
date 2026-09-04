@@ -1,7 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-transformers==5.2.0
-huggingface-hub==1.22.0
-tokenizers==0.22.2
-sentencepiece==0.2.2

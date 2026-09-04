@@ -1,0 +1,17 @@
+{
+  "name": "xlm-roberta-base-tp4",
+  "hf_id": "FacebookAI/xlm-roberta-base",
+  "bundle": "xlm-roberta-base-tp4.bundle",
+  "family": "roberta",
+  "task": "encoding",
+  "testcases": [
+    {
+      "name": "xlm-roberta-base-tp4",
+      "prompt": "The capital of France is Paris.",
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp16",
+  "max_sequence_length": 512
+}

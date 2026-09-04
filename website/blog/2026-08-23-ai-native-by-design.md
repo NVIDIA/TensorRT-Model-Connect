@@ -78,18 +78,18 @@ often be investigated independently. Work on one model family does not always
 need to block work on another.
 
 That problem geometry is central to Model Connect. The project provides
-family-owned reference implementations that turn supported Hugging Face or
-local checkpoints into versioned `.bundle` artifacts, then expose task-oriented
+family-owned implementations that turn supported Hugging Face or local
+checkpoints into format-1 `.bundle` artifacts, then expose task-oriented
 native C++ APIs for text, vision, audio, diffusion, segmentation, embedding,
 forecasting, and other workloads. The build and runtime boundary is documented
 in the
-[Project Overview](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/project-overview).
+[architecture guide](https://nvidia.github.io/TensorRT-Model-Connect/architecture/ai-native-horizontal-scaling).
 
-As of the public July 29, 2026 release comparison, the project covered 105
-unique single-process release profiles across 76 model families on NVIDIA
-GB300. That number is not, by itself, a measure of agent productivity. It does
-show why the problem benefits from an architecture that can grow by adding
-independent units rather than extending one serial integration path.
+The current model inventory is generated directly from family-owned manifests,
+so it grows by adding independent directories rather than updating a second
+central support list. The inventory is not, by itself, a measure of agent
+productivity. It does show why the problem benefits from an architecture that
+adds independent units rather than extending one serial integration path.
 
 The first lesson is therefore simple:
 
@@ -144,11 +144,11 @@ contain some duplication because independence is itself a scaling feature. A
 shared abstraction can reduce lines of code, but it can also couple unrelated
 work, increase merge conflicts, and enlarge the blast radius of a mistake.
 
-We therefore promote behavior into shared infrastructure only when multiple
-independent owners need the same assumption-free contract. Everything else
-stays close to the model family that owns it. The public
-[Units and Ownership](https://nvidia.github.io/TensorRT-Model-Connect/architecture/units-and-ownership)
-documentation makes those boundaries explicit.
+Shared infrastructure is therefore restricted to the small contracts needed
+to discover a family, read a bundle, implement a task, and execute a TensorRT
+engine. Everything else stays inside its owner family. The public
+[architecture guide](https://nvidia.github.io/TensorRT-Model-Connect/architecture/ai-native-horizontal-scaling)
+makes those boundaries explicit.
 
 <Diagram
   src="/img/blog/ai-native-by-design/isolation-architecture.svg"
@@ -253,14 +253,15 @@ developer experience that the system can make possible.
 Model developers should not need to become inference experts before they can
 evaluate and deploy a supported model efficiently on NVIDIA hardware. Model
 Connect aims to provide a clear path from a Hugging Face or local checkpoint
-to a versioned bundle and native task API, while keeping the model-family
+to a format-1 bundle and native task API, while keeping the model-family
 implementation visible enough to inspect, extend, and customize.
 
 Our longer-term aspiration is straightforward: connect a model through a
-stable boundary, then continue benefiting as TensorRT, CUDA, kernels,
-compilers, and supported NVIDIA platforms improve underneath it. This is an
-aspiration, not a promise that every model or target is supported today. Exact
-support and qualification evidence remain the source of truth.
+narrow boundary, then continue benefiting as TensorRT, CUDA, kernels,
+compilers, and supported NVIDIA platforms improve underneath it. The current
+repository intentionally makes no cross-release ABI or bundle compatibility
+promise. Exact family manifests and their direct tests remain the source of
+truth.
 
 TensorRT-Model-Connect will succeed only if it lowers the expertise barrier
 while preserving the accuracy, performance, reliability, and maintainability
@@ -281,7 +282,7 @@ TensorRT-Model-Connect is open source and evolving rapidly. You can:
   [Supported Models](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)
   and their qualification evidence;
 - read the
-  [AI and Agent Guide](https://nvidia.github.io/TensorRT-Model-Connect/agent-guide);
+  [architecture guide](https://nvidia.github.io/TensorRT-Model-Connect/architecture/ai-native-horizontal-scaling);
   or
 - open an issue or contribute through the
   [GitHub repository](https://github.com/NVIDIA/TensorRT-Model-Connect).

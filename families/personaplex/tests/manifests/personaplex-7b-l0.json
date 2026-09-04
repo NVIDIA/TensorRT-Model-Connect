@@ -1,0 +1,25 @@
+{
+  "name": "personaplex-7b-l0",
+  "hf_id": "nvidia/personaplex-7b-v1",
+  "bundle": "personaplex-7b-l0.bundle",
+  "family": "personaplex",
+  "task": "speech_to_speech",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "personaplex-7b-l0",
+      "premerge": true,
+      "test_input_audio": "data/Recording.wav",
+      "speech_reference_tokens": "data/personaplex_recording_official_tokens_greedy.npy",
+      "speech_test_max_frames": 100,
+      "max_new_tokens": 300,
+      "seed": 0
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512,
+  "fp32_layers": [
+    0,
+    1
+  ]
+}

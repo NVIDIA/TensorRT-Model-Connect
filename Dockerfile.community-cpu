@@ -10,8 +10,8 @@ FROM ${CUDA_IMAGE}
 
 ARG TENSORRT_VERSION
 ARG TENSORRT_APT_VERSION
-ARG PYTORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
-ARG TORCH_VERSION=2.12.0+cpu
+ARG PYTORCH_INDEX=https://download.pytorch.org/whl/cu130
+ARG TORCH_VERSION=2.12.0+cu130
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
@@ -22,6 +22,7 @@ RUN apt-get update && \
       cmake \
       cuda-cudart-dev-13-3 \
       cuda-nvcc-13-3 \
+      cuda-nvrtc-dev-13-3 \
       git \
       ninja-build \
       nlohmann-json3-dev \
@@ -34,8 +35,8 @@ RUN apt-get update && \
       "libnvinfer-dev=${TENSORRT_APT_VERSION}" \
       "libnvinfer-headers-dev=${TENSORRT_APT_VERSION}" \
       "libnvinfer-headers-plugin-dev=${TENSORRT_APT_VERSION}" \
-      "libnvinfer-plugin11=${TENSORRT_APT_VERSION}" \
       "libnvinfer-safe-headers-dev=${TENSORRT_APT_VERSION}" \
+      "libnvinfer-plugin11=${TENSORRT_APT_VERSION}" \
       "libnvinfer11=${TENSORRT_APT_VERSION}" \
       "libnvonnxparsers-dev=${TENSORRT_APT_VERSION}" \
       "libnvonnxparsers11=${TENSORRT_APT_VERSION}" && \
@@ -47,21 +48,18 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 RUN pip install --upgrade pip && \
     pip install \
-      "apache-tvm-ffi==0.1.12" \
       "cuda-python>=13.0.3,<14" \
       "huggingface_hub>=0.23" \
       "ml_dtypes>=0.4" \
       "numpy>=1.24,<2.5" \
       "onnx>=1.16" \
-      "onnxscript>=0.2" \
-      "PyYAML>=6.0" \
       "safetensors>=0.4" \
       "sentencepiece>=0.1.99" \
       "transformers==5.2.0" && \
     pip install --no-deps \
       "tensorrt_cu13==${TENSORRT_VERSION}" \
       "tensorrt_cu13_bindings==${TENSORRT_VERSION}" && \
-    pip install "torch==${TORCH_VERSION}" --index-url "${PYTORCH_CPU_INDEX}" && \
+    pip install "torch==${TORCH_VERSION}" --index-url "${PYTORCH_INDEX}" && \
     pip install "setuptools>=80,<82"
 
 COPY community-ci.txt /tmp/trtmc-community-ci.txt
@@ -76,12 +74,15 @@ RUN multiarch="$(gcc -dumpmachine)" && \
 
 ENV TRT_LIB_DIR=/opt/trtmc-tensorrt-lib
 ENV TRT_INC_DIR=/opt/trtmc-tensorrt-include
-ENV LD_LIBRARY_PATH="${TRT_LIB_DIR}:/usr/local/cuda/lib64"
+ENV TVM_FFI_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tvm_ffi/lib
+ENV LD_LIBRARY_PATH="${TRT_LIB_DIR}:${TVM_FFI_LIB_DIR}:/usr/local/cuda/lib64"
+ENV TORCH_CUDA_ARCH_LIST=10.0
 
 RUN python3.12 -c \
-      "import tensorrt, torch, transformers; assert tensorrt.__version__ == '${TENSORRT_VERSION}'; assert torch.__version__ == '${TORCH_VERSION}'; assert torch.version.cuda is None; assert transformers.__version__ == '5.2.0'" && \
+      "import tensorrt, torch, transformers, tvm_ffi; assert tensorrt.__version__ == '${TENSORRT_VERSION}'; assert torch.__version__ == '${TORCH_VERSION}'; assert torch.version.cuda == '13.0'; assert transformers.__version__ == '5.2.0'" && \
     test -f "${TRT_INC_DIR}/NvInferVersion.h" && \
-    test -f "${TRT_LIB_DIR}/libnvinfer.so.11"
+    test -f "${TRT_LIB_DIR}/libnvinfer.so.11" && \
+    test -f "${TVM_FFI_LIB_DIR}/libtvm_ffi.so"
 
 WORKDIR /workspace/tensorrt-model-connect
 CMD ["bash"]

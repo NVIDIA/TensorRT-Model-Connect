@@ -8,29 +8,23 @@ filesystem walk.  This keeps generated build products out of the audit and
 makes filenames containing whitespace (or other non-newline characters) safe.
 
 ``--fix`` only changes a managed header preamble.  It does not re-encode files,
-normalize line endings, or change file modes.  An audit record proves that the
-bytes below the managed preamble are identical before and after each rewrite.
+normalize line endings, or change file modes.  A direct byte comparison ensures
+that the source body is identical before and after each rewrite.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import stat
 import subprocess
 import sys
+import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
-    import tomli as tomllib  # type: ignore[no-redef]
-
 
 MANAGED_YEAR = 2026
 COPYRIGHT_TEXT = (
@@ -176,7 +170,6 @@ NON_SOURCE_NAMES = frozenset(
 
 _CODING_COOKIE_RE = re.compile(rb"^[ \t\f]*\#.*?coding[:=][ \t]*[-_.a-zA-Z0-9]+")
 _PLACEHOLDER_RE = re.compile(rb"(?:<|\[)(?:year|yyyy)(?:>|\])", re.IGNORECASE)
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHEBANG_RE = re.compile(
     rb"^#![^\r\n]*(?:python(?:[0-9.]*)?|(?:ba|z|k|da)?sh)(?:[ \t\r\n]|$)",
     re.IGNORECASE,
@@ -197,7 +190,6 @@ class HeaderException:
     reason: str
     license: str
     source: str
-    sha256: str
 
 
 @dataclass(frozen=True)
@@ -210,13 +202,6 @@ class Finding:
         return f"[{self.code}] {self.path}: {self.detail}"
 
 
-@dataclass(frozen=True)
-class BodyAudit:
-    path: str
-    before_sha256: str
-    after_sha256: str
-
-
 @dataclass
 class AuditReport:
     tracked_files: int = 0
@@ -225,7 +210,6 @@ class AuditReport:
     ignored_files: int = 0
     changed_files: list[str] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
-    body_audits: list[BodyAudit] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -239,7 +223,6 @@ class AuditReport:
             "ignored_files": self.ignored_files,
             "changed_files": self.changed_files,
             "findings": [asdict(item) for item in self.findings],
-            "body_audits": [asdict(item) for item in self.body_audits],
             "ok": self.ok,
         }
 
@@ -279,7 +262,7 @@ def load_exceptions(manifest_path: Path) -> dict[str, HeaderException]:
     if not isinstance(entries, list):
         raise ManifestError("exception manifest must contain [[exceptions]] entries")
 
-    required = {"path", "reason", "license", "source", "sha256"}
+    required = {"path", "reason", "license", "source"}
     result: dict[str, HeaderException] = {}
     for index, entry in enumerate(entries, start=1):
         if not isinstance(entry, dict):
@@ -293,9 +276,6 @@ def load_exceptions(manifest_path: Path) -> dict[str, HeaderException]:
             raise ManifestError(f"exceptions entry {index} has an empty/non-string field")
 
         path = _canonical_repo_path(entry["path"])
-        digest = entry["sha256"]
-        if not _SHA256_RE.fullmatch(digest):
-            raise ManifestError(f"exception {path} has an invalid lowercase SHA-256")
         if path in result:
             raise ManifestError(f"duplicate exception path: {path}")
         result[path] = HeaderException(
@@ -303,7 +283,6 @@ def load_exceptions(manifest_path: Path) -> dict[str, HeaderException]:
             reason=entry["reason"],
             license=entry["license"],
             source=entry["source"],
-            sha256=digest,
         )
     return result
 
@@ -565,26 +544,19 @@ def strip_managed_header(data: bytes, style: HeaderStyle) -> bytes:
     return data[:offset] + data[end:]
 
 
-def fix_header(data: bytes, style: HeaderStyle) -> tuple[bytes, str, str]:
-    """Return normalized bytes plus before/after body SHA-256 values."""
+def fix_header(data: bytes, style: HeaderStyle) -> bytes:
+    """Return normalized bytes and assert that source-body bytes are unchanged."""
 
     finding = inspect_header(data, style)
     if finding is None:
-        digest = hashlib.sha256(strip_managed_header(data, style)).hexdigest()
-        return data, digest, digest
+        return data
 
     core = _strip_leading_managed_fragments(data)
-    before = hashlib.sha256(core).hexdigest()
     fixed = _install_header(core, style)
     after_core = strip_managed_header(fixed, style)
-    after = hashlib.sha256(after_core).hexdigest()
-    if before != after:
+    if core != after_core:
         raise AssertionError("managed-header rewrite changed source-body bytes")
-    return fixed, before, after
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    return fixed
 
 
 def audit_repository(repo_root: Path, manifest_path: Path, *, fix: bool = False) -> AuditReport:
@@ -616,15 +588,6 @@ def audit_repository(repo_root: Path, manifest_path: Path, *, fix: bool = False)
         exception = exceptions.get(relative_path)
         if exception is not None:
             report.excepted_files += 1
-            actual = _sha256(data)
-            if actual != exception.sha256:
-                report.findings.append(
-                    Finding(
-                        "exception-hash-mismatch",
-                        relative_path,
-                        f"expected {exception.sha256}, found {actual}",
-                    )
-                )
             continue
 
         style = style_for_path(relative_path, data)
@@ -655,7 +618,7 @@ def audit_repository(repo_root: Path, manifest_path: Path, *, fix: bool = False)
             continue
 
         try:
-            fixed, before_body, after_body = fix_header(data, style)
+            fixed = fix_header(data, style)
         except (UnsafeFixError, ValueError) as exc:
             report.findings.append(Finding("unsafe-fix", relative_path, str(exc)))
             continue
@@ -666,7 +629,6 @@ def audit_repository(repo_root: Path, manifest_path: Path, *, fix: bool = False)
             if stat.S_IMODE(full_path.stat().st_mode) != mode:
                 os.chmod(full_path, mode)
             report.changed_files.append(relative_path)
-            report.body_audits.append(BodyAudit(relative_path, before_body, after_body))
 
         remaining = inspect_header(fixed, style, relative_path)
         if remaining is not None:

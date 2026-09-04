@@ -57,48 +57,33 @@ RUN pip install -U pip && \
 
 ENV TRT_LIB_DIR=/opt/trtmc/platform/lib \
     TRT_INC_DIR=/opt/trtmc/platform/include \
-    LD_LIBRARY_PATH=/opt/trtmc/platform/lib:/usr/local/cuda/lib64
+    LD_LIBRARY_PATH=/opt/trtmc/platform/lib:/usr/local/cuda/lib64 \
+    PYTHONPATH=/src/core/builder:/src
 
 WORKDIR /src
 COPY . /src
 
 # Dockerfile.dockerignore excludes every other model family.
-# TRTMC_MODEL_PROOF_MODEL makes that isolation a configure-time invariant.
-RUN pip install --no-deps -e . -C py-only=true && \
-    cmake -S . -B build -G Ninja \
+RUN cmake -S . -B build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CUDA_ARCHITECTURES="${TRTMC_CUDA_ARCHITECTURES}" \
-      -DTRTMC_BUILD_BACKEND_TRT=ON \
-      -DTRTMC_BUILD_BACKEND_RTX=OFF \
       -DTRTMC_BUILD_TESTS=OFF \
-      -DTRTMC_BUILD_BENCHMARKS=OFF \
-      -DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF \
-      -DTRTMC_ENABLE_TVM_FFI=OFF \
-      -DTRTMC_MODEL_PROOF_MODEL=cosmos3 && \
+      -DTRTMC_BUILD_EXAMPLES=OFF \
+      -DTRTMC_ENABLE_BYOK=OFF && \
     cmake --build build --parallel "$(nproc)" --target \
       trtmc \
       trtmc_backend_trt \
       trtmc_model_cosmos3 && \
-    install -d /opt/trtmc/bin/models/cosmos3 && \
-    install -m 0755 build/trtmc /opt/trtmc/bin/trtmc && \
-    install -m 0755 build/libtrtmc_core.so /opt/trtmc/bin/libtrtmc_core.so && \
-    install -m 0755 build/libtrtmc_backend_trt.so /opt/trtmc/bin/libtrtmc_backend_trt.so && \
-    find build -maxdepth 1 -type f -name 'libtrtmc_backend_trt_*.so' \
-      -exec install -m 0755 '{}' /opt/trtmc/bin/ \; && \
-    install -m 0755 \
-      build/models/cosmos3/libtrtmc_model_cosmos3.so \
-      /opt/trtmc/bin/models/cosmos3/libtrtmc_model_cosmos3.so && \
-    /opt/trtmc/bin/trtmc --version
+    cmake --install build --prefix /opt/trtmc && \
+    /opt/trtmc/bin/trtmc version
 
 FROM ${TENSORRT_IMAGE} AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/trtmc/bin:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    LD_LIBRARY_PATH=/opt/trtmc/bin:/opt/trtmc/platform/lib:/usr/local/cuda/lib64 \
-    TRTMC_BIN=/opt/trtmc/bin/trtmc \
-    TRTMC_MODEL_PLUGIN_DIR=/opt/trtmc/bin/models \
-    TRTMC_TRT_LIBRARY_DIR=/opt/trtmc/platform/lib \
+    LD_LIBRARY_PATH=/opt/trtmc/lib:/opt/trtmc/platform/lib:/usr/local/cuda/lib64 \
+    PYTHONPATH=/opt/trtmc/core/builder:/opt/trtmc \
     HF_HOME=/root/.cache/huggingface \
     HF_HUB_CACHE=/root/.cache/huggingface/hub \
     HF_HUB_DISABLE_TELEMETRY=1
@@ -119,17 +104,15 @@ RUN apt-get update && \
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/trtmc /opt/trtmc
-# Preserve the source target recorded by the Python-only editable install.
-COPY --from=builder /src/python /src/python
+COPY --from=builder /src/core/builder /opt/trtmc/core/builder
+COPY --from=builder /src/families /opt/trtmc/families
 COPY --from=builder /src/LICENSE /src/NOTICE /opt/trtmc/licenses/
 
 RUN test -x /opt/trtmc/bin/trtmc && \
-    test -f /opt/trtmc/bin/models/cosmos3/libtrtmc_model_cosmos3.so && \
+    test -f /opt/trtmc/lib/libtrtmc_runtime.so && \
+    test -f /opt/trtmc/lib/libtrtmc_backend_trt.so && \
+    test -f /opt/trtmc/lib/libtrtmc_model_cosmos3.so && \
     ffmpeg -version >/dev/null
-
-ARG TRTMC_SOURCE_REVISION=unknown
-LABEL org.opencontainers.image.source="https://github.com/NVIDIA/TensorRT-Model-Connect" \
-      org.opencontainers.image.revision="${TRTMC_SOURCE_REVISION}"
 
 WORKDIR /work
 

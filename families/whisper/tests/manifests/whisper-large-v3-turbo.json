@@ -1,0 +1,60 @@
+{
+  "name": "whisper-large-v3-turbo",
+  "hf_id": "openai/whisper-large-v3-turbo",
+  "bundle": "whisper-large-v3-turbo.bundle",
+  "family": "whisper",
+  "task": "transcription",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "whisper-large-v3-turbo",
+      "reference_precision": "fp32",
+      "max_new_tokens": 20,
+      "test_input_audio": "data/Recording.wav"
+    },
+    {
+      "name": "whisper-large-v3-turbo-asr-probe01",
+      "reference_precision": "fp32",
+      "max_new_tokens": 100,
+      "test_input_audio": "data/asr_probes/probe_01_clean_48k_stereo_baseline.wav"
+    },
+    {
+      "name": "whisper-large-v3-turbo-asr-probe02",
+      "reference_precision": "fp32",
+      "max_new_tokens": 100,
+      "test_input_audio": "data/asr_probes/probe_02_clean_16k_mono_no_resample.wav"
+    },
+    {
+      "name": "whisper-large-v3-turbo-asr-probe03",
+      "reference_precision": "fp32",
+      "max_new_tokens": 100,
+      "test_input_audio": "data/asr_probes/probe_03_clean_48k_mono_resample.wav"
+    },
+    {
+      "name": "whisper-large-v3-turbo-asr-probe04",
+      "reference_precision": "fp32",
+      "max_new_tokens": 100,
+      "test_input_audio": "data/asr_probes/probe_04_clean_48k_stereo_gain_skew.wav"
+    },
+    {
+      "name": "whisper-large-v3-turbo-asr-probe05",
+      "reference_precision": "fp32",
+      "max_new_tokens": 100,
+      "test_input_audio": "data/asr_probes/probe_05_low_volume_48k_stereo.wav"
+    },
+    {
+      "name": "whisper-large-v3-turbo-asr-probe06",
+      "reference_precision": "fp32",
+      "max_new_tokens": 100,
+      "test_input_audio": "data/asr_probes/probe_06_leading_trailing_silence_48k_stereo.wav"
+    },
+    {
+      "name": "whisper-large-v3-turbo-asr-probe08",
+      "reference_precision": "fp32",
+      "max_new_tokens": 100,
+      "test_input_audio": "data/asr_probes/probe_08_noisy_48k_stereo_snr20.wav"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 128
+}

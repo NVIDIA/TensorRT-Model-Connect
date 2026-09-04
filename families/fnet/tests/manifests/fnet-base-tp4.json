@@ -1,0 +1,17 @@
+{
+  "name": "fnet-base-tp4",
+  "hf_id": "google/fnet-base",
+  "bundle": "fnet-base-tp4.bundle",
+  "family": "fnet",
+  "task": "encoding",
+  "testcases": [
+    {
+      "name": "fnet-base-tp4",
+      "prompt": "The capital of France is Paris.",
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp16",
+  "max_sequence_length": 256
+}

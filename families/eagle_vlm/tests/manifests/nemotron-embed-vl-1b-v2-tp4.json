@@ -1,0 +1,17 @@
+{
+  "name": "nemotron-embed-vl-1b-v2-tp4",
+  "hf_id": "nvidia/llama-nemotron-embed-vl-1b-v2",
+  "bundle": "nemotron-embed-vl-1b-v2-tp4.bundle",
+  "family": "eagle_vlm",
+  "task": "embedding",
+  "testcases": [
+    {
+      "name": "nemotron-embed-vl-1b-v2-tp4",
+      "prompt": "What is machine learning?",
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp16",
+  "max_sequence_length": 512
+}

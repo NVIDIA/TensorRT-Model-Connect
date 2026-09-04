@@ -1,0 +1,18 @@
+{
+  "name": "bart-base-tp4",
+  "hf_id": "facebook/bart-base",
+  "bundle": "bart-base-tp4.bundle",
+  "family": "bart",
+  "task": "text_generation",
+  "testcases": [
+    {
+      "name": "bart-base-tp4",
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "max_new_tokens": 20,
+      "reference_precision": "fp32"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp32",
+  "max_sequence_length": 256
+}

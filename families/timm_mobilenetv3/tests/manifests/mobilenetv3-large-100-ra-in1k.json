@@ -1,0 +1,17 @@
+{
+  "name": "mobilenetv3-large-100-ra-in1k",
+  "hf_id": "timm/mobilenetv3_large_100.ra_in1k",
+  "bundle": "mobilenetv3-large-100-ra-in1k.bundle",
+  "family": "timm_mobilenetv3",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "mobilenetv3-large-100-ra-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

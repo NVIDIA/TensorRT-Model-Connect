@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "sam2-l4-local",
+  "family": "sam2",
+  "task": "video_segmentation",
+  "qualification": "local_only",
+  "bundle": "sam2-l4-local.bundle",
+  "fixture": {
+    "frame_directory": "rgb8",
+    "frame_count": 5,
+    "height": 1280,
+    "width": 1088,
+    "golden_manifest": "golden/manifest.json",
+    "golden_masks": "golden/masks.bitpack",
+    "mask_bit_order": "least_significant_bit_first"
+  }
+}

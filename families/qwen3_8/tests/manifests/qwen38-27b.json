@@ -1,0 +1,21 @@
+{
+  "name": "qwen38-27b",
+  "hf_id": "Qwen/Qwen3.8-27B",
+  "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "bundle": "qwen38-27b.bundle",
+  "family": "qwen3_8",
+  "task": "text_generation",
+  "trust_remote_code": true,
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "qwen38-27b",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "reference_precision": "fp32"
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

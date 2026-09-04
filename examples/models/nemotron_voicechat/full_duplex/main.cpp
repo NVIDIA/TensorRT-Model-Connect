@@ -4,7 +4,8 @@
  */
 
 #include "playback_queue.h"
-#include "trtmc/speech_session.h"
+#include "trtmc/runtime/family_loader.h"
+#include "trtmc/task.h"
 
 #include <algorithm>
 #include <alsa/asoundlib.h>
@@ -49,6 +50,7 @@ struct Options {
     std::string bundle_path;
     std::string capture_device{"default"};
     std::string playback_device{"default"};
+    std::string runtime_root{"/opt/trtmc/lib"};
     std::string system_prompt;
     int input_rate{16000};
     int output_rate{48000};
@@ -69,6 +71,8 @@ void print_usage(std::ostream& output, const char* program) {
            << "Options:\n"
            << "  --capture-device NAME   ALSA capture PCM (default: default)\n"
            << "  --playback-device NAME  ALSA playback PCM (default: default)\n"
+           << "  --runtime-root DIR      Directory containing runtime DSOs "
+              "(default: /opt/trtmc/lib)\n"
            << "  --input-rate HZ         Capture/session rate (default: 16000)\n"
            << "  --output-rate HZ        Session/playback rate (default: 48000)\n"
            << "  --latency-ms MS         ALSA target latency (default: 80)\n"
@@ -106,6 +110,10 @@ bool parse_value_option(const std::string& argument, int& index, int argc, char*
     }
     if (argument == "--playback-device") {
         options.playback_device = take_option_value(index, argc, argv, "--playback-device");
+        return true;
+    }
+    if (argument == "--runtime-root") {
+        options.runtime_root = take_option_value(index, argc, argv, "--runtime-root");
         return true;
     }
     if (argument == "--input-rate") {
@@ -525,8 +533,8 @@ int run(const Options& options) {
                      static_cast<unsigned int>(options.output_rate),
                      static_cast<unsigned int>(options.latency_ms));
 
-    auto pipeline = trtmc::load(options.bundle_path);
-    auto* provider = dynamic_cast<trtmc::ISpeechSessionProvider*>(pipeline.get());
+    auto task = trtmc::load_task(options.bundle_path, options.runtime_root);
+    auto* provider = dynamic_cast<trtmc::ISpeechSessionProvider*>(task.get());
     if (provider == nullptr)
         throw std::runtime_error("bundle does not support persistent speech sessions");
 

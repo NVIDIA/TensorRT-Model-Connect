@@ -1,0 +1,17 @@
+{
+  "name": "segformer-b0-ade",
+  "hf_id": "nvidia/segformer-b0-finetuned-ade-512-512",
+  "bundle": "segformer-b0-ade.bundle",
+  "family": "segformer",
+  "task": "segmentation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "segformer-b0-ade",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

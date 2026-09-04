@@ -1,0 +1,19 @@
+{
+  "name": "nemotron-3.5-asr-streaming-0.6b",
+  "hf_id": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+  "bundle": "nemotron-3.5-asr-streaming-0.6b.bundle",
+  "family": "nemotron_speech_streaming",
+  "task": "transcription_streaming",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "nemotron-3.5-asr-streaming-0.6b",
+      "test_input_audio": "data/Recording.wav",
+      "reference_precision": "fp16",
+      "language": "en-US",
+      "chunk_ms": 1120
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 128
+}

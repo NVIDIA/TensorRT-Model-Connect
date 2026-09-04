@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The repository Dockerfile installs the stable base toolchain and copies only
-# its model-agnostic package downloader. Family profiles are prepared per proof.
+# The development image consumes only its thin shared dependency delta.
+# Keep every other workspace artifact out of the Docker build context.
 *
-!tools/
-!tools/ci/
-!tools/ci/profile_downloader.py
+!requirements/
+requirements/*
+!requirements/base.txt

@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "canonical_token_agreement_rate": 1.0,
+    "contract_ned_threshold": 0.05
+  }
+}

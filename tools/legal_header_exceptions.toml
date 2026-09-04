@@ -8,25 +8,15 @@ path = "third_party/stb/stb_image.h"
 reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
 license = "MIT OR Public Domain"
 source = "https://github.com/nothings/stb/blob/cf79a4819767b5c136712221be78c83e28c54a6a/stb_image.h"
-sha256 = "594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3"
 
 [[exceptions]]
 path = "third_party/stb/stb_image_write.h"
 reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
 license = "MIT OR Public Domain"
 source = "https://github.com/nothings/stb/blob/cf79a4819767b5c136712221be78c83e28c54a6a/stb_image_write.h"
-sha256 = "cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05"
 
 [[exceptions]]
 path = "third_party/stb/stb_image_resize2.h"
 reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
 license = "MIT OR Public Domain"
 source = "https://github.com/nothings/stb/blob/cf79a4819767b5c136712221be78c83e28c54a6a/stb_image_resize2.h"
-sha256 = "dfedfff91c3de652969fc0a5919ada367c2f3709f435c6c0275044b2c39d9f2e"
-
-[[exceptions]]
-path = "tests/runtime_strategy_matrix.yaml"
-reason = "JSON-formatted test data is consumed by strict JSON parsers; comments would change parse behavior."
-license = "Apache-2.0"
-source = "https://github.com/NVIDIA/TensorRT-Model-Connect/blob/76c8164d97e645a996a210219ba635c8ec9a3453/tests/runtime_strategy_matrix.yaml"
-sha256 = "da68bd18fb0b93a30a486055d3b026c4cbe5bd16df54bfc4dd39c63658f1e497"

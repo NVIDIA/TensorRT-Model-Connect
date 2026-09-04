@@ -1,0 +1,12 @@
+{
+  "text": "Architecture:\n\nAttention:Standard Q/K/V/O (no biases,no GQA-heads == kv heads)\n\nRoPE:Standard rotary position embeddings\n\nLayer 0:Dense SwiGLU MLP (intermediate_size=6848)\n\nLayers 1-11:MoE (64 experts,top-6,intermediate=896)+ shared experts (2,\n\nNorm:RMSNorm\n\nVision: SAM ViT-B + Qwen2 encoder (not supported in TRT yet, text-only)",
+  "required_substrings": [
+    "Architecture",
+    "Attention:Standard Q/K/V/O",
+    "RoPE:Standard rotary position embeddings",
+    "Layer 0:Dense SwiGLU MLP",
+    "Layers 1-11:MoE",
+    "Vision: SAM ViT-B + Qwen2 encoder"
+  ],
+  "source_image": "data/orc_test_img.jpeg"
+}

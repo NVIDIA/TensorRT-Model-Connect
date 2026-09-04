@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Export a fixed-shape FP16 residual add as a TVM-FFI DSO."""
+"""Compile a fixed-shape FP16 residual add into a TVM-FFI kernel DSO."""
 
 import argparse
 from importlib import metadata
-import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,50 +15,6 @@ import tempfile
 ROWS = 256
 COLS = 768
 THREADS = 256
-SUM_OP = "LayerType.ELEMENTWISE/ElementWiseOperation.SUM"
-
-
-def _verify_contract(snapshot_path: Path, selection_path: Path) -> dict:
-    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    selection = json.loads(selection_path.read_text(encoding="utf-8"))
-    if selection.get("graph_fingerprint") != snapshot.get("fingerprint"):
-        raise SystemExit("selection and graph snapshot fingerprints differ")
-    if selection.get("workspace_bytes") != 0 or selection.get("extra_args") != []:
-        raise SystemExit("this kernel requires zero workspace and no extra arguments")
-    if selection.get("output_shape_input") is not None:
-        raise SystemExit("this fixed-shape kernel does not accept a dynamic output")
-
-    input_ids = selection.get("input_tensor_ids")
-    output_ids = selection.get("output_tensor_ids")
-    node_ids = selection.get("node_ids")
-    if not isinstance(input_ids, list) or len(input_ids) != 2:
-        raise SystemExit("this kernel requires exactly two inputs")
-    if not isinstance(output_ids, list) or len(output_ids) != 1:
-        raise SystemExit("this kernel requires exactly one output")
-    if not isinstance(node_ids, list) or len(node_ids) != 1:
-        raise SystemExit("this example replaces exactly one TensorRT node")
-
-    nodes = {node["id"]: node for node in snapshot["nodes"]}
-    node = nodes.get(node_ids[0])
-    if node is None or node.get("op") != SUM_OP:
-        raise SystemExit(f"selected node must be {SUM_OP}")
-    if node.get("inputs") != input_ids or node.get("outputs") != output_ids:
-        raise SystemExit("selection boundary does not match the selected node")
-
-    tensors = {tensor["id"]: tensor for tensor in snapshot["tensors"]}
-    for tensor_id in [*input_ids, *output_ids]:
-        tensor = tensors.get(tensor_id)
-        if tensor is None:
-            raise SystemExit(f"snapshot does not contain {tensor_id}")
-        if tensor.get("dtype") != "DataType.HALF":
-            raise SystemExit(f"{tensor_id} must use FP16")
-        if tensor.get("shape") != [ROWS, COLS]:
-            raise SystemExit(f"{tensor_id} must have shape [{ROWS}, {COLS}]")
-        if tensor.get("location") != "TensorLocation.DEVICE":
-            raise SystemExit(f"{tensor_id} must be a device tensor")
-        if tensor.get("is_shape_tensor"):
-            raise SystemExit(f"{tensor_id} must not be a shape tensor")
-    return selection
 
 
 def _compile():
@@ -113,9 +68,11 @@ def _compile():
 
 
 def _runtime_archive() -> Path:
-    distribution = metadata.distribution("nvidia-cutlass-dsl-libs-base")
+    distribution = metadata.distribution("nvidia-cutlass-dsl-libs-cu12")
     archive = Path(
-        distribution.locate_file("nvidia_cutlass_dsl/lib/libcuda_dialect_runtime_static.a")
+        distribution.locate_file(
+            "nvidia_cutlass_dsl/cu12/lib/libcuda_dialect_runtime_static.a"
+        )
     ).resolve()
     if not archive.is_file():
         raise SystemExit(f"CuTe DSL runtime archive not found: {archive}")
@@ -156,20 +113,15 @@ def _link(compiled, output: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--snapshot", required=True, type=Path)
-    parser.add_argument("--selection", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     arguments = parser.parse_args()
 
-    import tvm_ffi  # noqa: F401 - required by the generated ABI
+    import tvm_ffi  # noqa: F401
 
-    selection = _verify_contract(arguments.snapshot, arguments.selection)
     if arguments.output.exists():
         raise SystemExit(f"refusing to overwrite {arguments.output}")
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     _link(_compile(), arguments.output)
-    print(f"binding_id={selection['binding_id']}")
-    print(f"abi_sha256={selection['abi_sha256']}")
     print(arguments.output.resolve())
 
 

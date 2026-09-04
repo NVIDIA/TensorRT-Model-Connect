@@ -15,11 +15,13 @@ const config = {
   projectName: repositoryName,
   onBrokenLinks: 'throw',
   markdown: {
+    mermaid: true,
     hooks: {
       onBrokenMarkdownLinks: 'warn'
     }
   },
   plugins: [require.resolve('./plugins/model-support-inventory')],
+  themes: ['@docusaurus/theme-mermaid'],
   presets: [
     [
       'classic',
@@ -52,13 +54,11 @@ const config = {
         src: 'img/trtmc-mark.svg'
       },
       items: [
-        { to: '/getting-started/overview', label: 'Get Started', position: 'left' },
+        { to: '/getting-started/quick-start', label: 'Get Started', position: 'left' },
         { to: '/models-recipes/overview', label: 'Models', position: 'left' },
-        { to: '/user-guides/overview', label: 'User Guides', position: 'left' },
-        { to: '/learning-path', label: 'Tutorials', position: 'left' },
+        { to: '/architecture/ai-native-horizontal-scaling', label: 'Architecture', position: 'left' },
+        { to: '/extend/add-model-family', label: 'Add a Family', position: 'left' },
         { to: '/blog', label: 'Blog', position: 'left' },
-        { to: '/developer-guide/overview', label: 'Developer', position: 'left' },
-        { to: '/api/overview', label: 'Reference', position: 'left' },
         { href: `https://github.com/${repository}`, label: 'GitHub', position: 'right' }
       ]
     },
@@ -68,25 +68,24 @@ const config = {
         {
           title: 'Use',
           items: [
-            { label: 'Getting Started', to: '/getting-started/overview' },
+            { label: 'Getting Started', to: '/getting-started/quick-start' },
             { label: 'Supported Models', to: '/models-recipes/overview' },
-            { label: 'User Guides', to: '/user-guides/overview' }
+            { label: 'Python API', to: '/api/python-builder' }
           ]
         },
         {
           title: 'Learn',
           items: [
-            { label: 'Tutorial Curriculum', to: '/learning-path' },
             { label: 'Blog', to: '/blog' },
-            { label: 'Reference', to: '/api/overview' },
-            { label: 'Developer Guide', to: '/developer-guide/overview' }
+            { label: 'Architecture', to: '/architecture/ai-native-horizontal-scaling' },
+            { label: 'C++ API', to: '/api/cpp-api' }
           ]
         },
         {
           title: 'Project',
           items: [
-            { label: 'AI and Agent Guide', to: '/agent-guide' },
-            { label: 'Release & Support', to: '/release-support/overview' },
+            { label: 'Contributing', to: '/extend/contributing' },
+            { label: 'Add a Family', to: '/extend/add-model-family' },
             { label: 'GitHub', href: `https://github.com/${repository}` }
           ]
         }

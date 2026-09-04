@@ -1,0 +1,22 @@
+{
+  "name": "deepseek-v2-tiny",
+  "hf_id": "katuni4ka/tiny-random-deepseek-v3",
+  "hf_revision": "ba144b0d3331a5892aa588d82722d382be2b6e6b",
+  "bundle": "deepseek-v2-tiny.bundle",
+  "family": "deepseek_v2",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "deepseek-v2-tiny",
+      "premerge": true,
+      "reference_precision": "fp16",
+      "reference_experts_implementation": "eager",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 10
+    }
+  ],
+  "max_sequence_length": 64,
+  "tensor_parallel_size": 1
+}

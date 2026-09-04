@@ -1,0 +1,19 @@
+{
+  "name": "t5-small",
+  "hf_id": "google-t5/t5-small",
+  "bundle": "t5-small.bundle",
+  "family": "t5",
+  "task": "text_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "t5-small",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "translate English to German: The house is wonderful.",
+      "max_new_tokens": 20
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

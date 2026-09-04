@@ -1,0 +1,18 @@
+{
+  "name": "canary-1b-v2-tp4",
+  "hf_id": "nvidia/canary-1b-v2",
+  "bundle": "canary-1b-v2-tp4.bundle",
+  "family": "canary",
+  "task": "transcription",
+  "testcases": [
+    {
+      "name": "canary-1b-v2-tp4",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/Recording.wav",
+      "reference_precision": "fp16"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp16",
+  "max_sequence_length": 128
+}

@@ -1,8 +1,0 @@
-{
-  "description": "Default thresholds for neural operator models",
-  "metrics": {
-    "relative_l2": 0.01,
-    "max_pointwise_error": 0.1,
-    "pde_residual": 0.05
-  }
-}

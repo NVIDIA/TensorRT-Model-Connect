@@ -1,0 +1,1083 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""NemotronH family plugin -- Hybrid Mamba-2 + MLP + Attention decoder.
+
+NemotronH (NVIDIA) uses a heterogeneous layer stack with three layer types
+defined by hybrid_override_pattern (e.g. "M-M-M-MM-M-M-M*-..."):
+  M = Mamba-2 SSM layer
+  - = MLP layer (up_proj -> relu2 -> down_proj)
+  * = Attention layer (GQA, no RoPE, no bias)
+
+Key differences from Mamba-1 (existing mamba.py):
+  Mamba-2 uses State Space Duality (SSD):
+    - in_proj -> split into [gate, hidden_B_C, dt]
+    - conv1d over hidden_B_C (d_inner + 2*n_groups*d_state channels)
+    - After conv+SiLU, split hidden_B_C -> [hidden, B, C]
+    - Multi-head SSM (nheads * headdim = d_inner)
+    - A is a scalar per head (not per d_inner like Mamba-1)
+    - dt from in_proj directly (no separate x_proj/dt_proj)
+    - Gated RMSNorm on SSM output: norm(y) * silu(gate)
+    - SSM state: [nheads, headdim, d_state] (headdim-aware)
+
+NemotronH Nano 9B: 56 layers (27 mamba2 + 25 mlp + 4 attention)
+  - MLP layers: up_proj -> relu2 -> down_proj (NO gate_proj)
+  - Attention layers: q/k/v/o_proj (GQA, no RoPE, no bias)
+
+Weight key mapping (HF -> engine):
+  backbone.embeddings.weight                           -> embedding
+  backbone.layers.{i}.norm.weight                      -> layer.{i}.norm
+  backbone.layers.{i}.mixer.in_proj.weight             -> Mamba-2 in_proj
+  backbone.layers.{i}.mixer.conv1d.weight/bias         -> Mamba-2 conv state
+  backbone.layers.{i}.mixer.dt_bias                    -> Mamba-2 timestep bias
+  backbone.layers.{i}.mixer.A_log                      -> Mamba-2 SSM A
+  backbone.layers.{i}.mixer.D                          -> Mamba-2 skip connection
+  backbone.layers.{i}.mixer.norm.weight                -> Mamba-2 gated RMSNorm
+  backbone.layers.{i}.mixer.out_proj.weight            -> Mamba-2 output proj
+  backbone.layers.{i}.mixer.up_proj.weight             -> MLP up
+  backbone.layers.{i}.mixer.down_proj.weight           -> MLP down
+  backbone.layers.{i}.mixer.q/k/v/o_proj.weight        -> Attention QKV + out
+  backbone.norm_f.weight                               -> final_norm
+  lm_head.weight                                       -> w_lm_head
+"""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import tensorrt as trt
+
+from .config import ModelConfig
+from .parallel import ParallelConfig
+from .checkpoint_mapper import (
+    WeightDict,
+    _open_safetensors,
+    _load_tensor,
+    _has_tensor,
+    _transpose_2d,
+)
+from . import graph_ops
+from . import graph_blocks
+from .parallel import normalize_parallel_config
+
+
+def _parse_layer_types(pattern: str) -> list[str]:
+    """Parse hybrid_override_pattern: M=mamba2, -=mlp, *=attention."""
+    mapping = {"M": "mamba2", "-": "mlp", "*": "attention"}
+    return [mapping[ch] for ch in pattern if ch in mapping]
+
+
+if TYPE_CHECKING:
+    from tensorrt_model_connect.build import BuildRequest
+    from tensorrt_model_connect.bundle_writer import BundleWriter
+
+
+class _NemotronHModel:
+    def load_weights(
+        self,
+        model_dir: str,
+        config: ModelConfig,
+    ) -> WeightDict:
+        model_dir_path = Path(model_dir)
+        readers = _open_safetensors(model_dir_path)
+
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        num_layers = config.num_hidden_layers
+        num_heads = config.num_attention_heads
+        head_dim = config.head_dim
+        raw = config.raw
+
+        # Parse layer types from hybrid_override_pattern
+        pattern = raw.get("hybrid_override_pattern", "M" * num_layers)
+        layer_types = _parse_layer_types(pattern)
+        assert len(layer_types) == num_layers, (
+            f"Pattern length {len(layer_types)} != num_hidden_layers {num_layers}"
+        )
+
+        # Mamba-2 dimensions
+        mamba_num_heads = raw.get("mamba_num_heads", 64)
+        mamba_head_dim = raw.get("mamba_head_dim", 64)
+        d_inner = mamba_num_heads * mamba_head_dim
+        n_groups = raw.get("n_groups", 8)
+        d_state = raw.get("ssm_state_size", raw.get("mamba_state_dim", 128))
+        d_conv = raw.get("conv_kernel", 4)
+        conv_dim = d_inner + 2 * n_groups * d_state
+
+        # MLP dimensions
+        mlp_intermediate = config.intermediate_size
+
+        # Attention dimensions
+        q_dim = num_heads * head_dim
+        weights = WeightDict()
+
+        # Embedding
+        embedding = _load_tensor(readers, "backbone.embeddings.weight")
+        assert embedding.shape == (vocab, hidden), (
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
+        weights["embedding"] = embedding.astype(np.float32)
+
+        mamba_count = 0
+        attn_count = 0
+
+        for layer_idx in range(num_layers):
+            lt = layer_types[layer_idx]
+            prefix = f"layer.{layer_idx}"
+            hf_prefix = f"backbone.layers.{layer_idx}"
+
+            # RMSNorm (all layer types)
+            norm = _load_tensor(readers, f"{hf_prefix}.norm.weight")
+            weights[f"{prefix}.input_norm"] = norm.astype(np.float32)
+
+            if lt == "mamba2":
+                # in_proj: [proj_size, hidden] where proj_size = d_inner + conv_dim + mamba_num_heads
+                in_proj_raw = _load_tensor(readers, f"{hf_prefix}.mixer.in_proj.weight")
+                weights[f"{prefix}.mamba_in_proj"] = _transpose_2d(in_proj_raw, "mamba_in_proj")
+
+                # conv1d: [conv_dim, 1, d_conv] -> [conv_dim, d_conv]
+                conv1d_w = _load_tensor(readers, f"{hf_prefix}.mixer.conv1d.weight")
+                weights[f"{prefix}.conv1d_weight"] = conv1d_w.reshape(conv_dim, d_conv).astype(
+                    np.float32
+                )
+
+                conv1d_b = _load_tensor(readers, f"{hf_prefix}.mixer.conv1d.bias")
+                weights[f"{prefix}.conv1d_bias"] = conv1d_b.astype(np.float32)
+
+                # out_proj: [hidden, d_inner]
+                out_proj_raw = _load_tensor(readers, f"{hf_prefix}.mixer.out_proj.weight")
+                weights[f"{prefix}.mamba_out_proj"] = _transpose_2d(out_proj_raw, "mamba_out_proj")
+
+                # A_log: [mamba_num_heads]
+                A_log = _load_tensor(readers, f"{hf_prefix}.mixer.A_log")
+                A = -np.exp(A_log.astype(np.float32))
+                weights[f"{prefix}.A"] = A
+
+                # D: [mamba_num_heads]
+                D = _load_tensor(readers, f"{hf_prefix}.mixer.D")
+                weights[f"{prefix}.D"] = D.astype(np.float32)
+
+                # dt_bias: [mamba_num_heads]
+                dt_bias = _load_tensor(readers, f"{hf_prefix}.mixer.dt_bias")
+                weights[f"{prefix}.dt_bias"] = dt_bias.astype(np.float32)
+
+                # Gated RMSNorm: [d_inner]
+                norm_key = f"{hf_prefix}.mixer.norm.weight"
+                if _has_tensor(readers, norm_key):
+                    weights[f"{prefix}.mamba_norm"] = _load_tensor(readers, norm_key).astype(
+                        np.float32
+                    )
+                else:
+                    weights[f"{prefix}.mamba_norm"] = np.ones(d_inner, dtype=np.float32)
+
+                mamba_count += 1
+
+            elif lt == "mlp":
+                # MLP: up_proj -> relu2 -> down_proj (NO gate_proj)
+                up_raw = _load_tensor(readers, f"{hf_prefix}.mixer.up_proj.weight")
+                down_raw = _load_tensor(readers, f"{hf_prefix}.mixer.down_proj.weight")
+                weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
+                weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
+
+            elif lt == "attention":
+                # Attention: q/k/v/o projections (no bias, no RoPE)
+                q_raw = _load_tensor(readers, f"{hf_prefix}.mixer.q_proj.weight")
+                k_raw = _load_tensor(readers, f"{hf_prefix}.mixer.k_proj.weight")
+                v_raw = _load_tensor(readers, f"{hf_prefix}.mixer.v_proj.weight")
+                o_raw = _load_tensor(readers, f"{hf_prefix}.mixer.o_proj.weight")
+
+                q_t = _transpose_2d(q_raw, "q_proj")
+                k_t = _transpose_2d(k_raw, "k_proj")
+                v_t = _transpose_2d(v_raw, "v_proj")
+                o_t = _transpose_2d(o_raw, "o_proj")
+
+                # Compact GQA/MQA K/V
+
+                weights[f"{prefix}.w_q"] = q_t
+                weights[f"{prefix}.w_k"] = k_t
+                weights[f"{prefix}.w_v"] = v_t
+                weights[f"{prefix}.w_o"] = o_t
+
+                attn_count += 1
+
+        # Final norm
+        final_norm_key = "backbone.norm_f.weight"
+        if _has_tensor(readers, final_norm_key):
+            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
+        else:
+            weights["final_norm"] = np.ones(hidden, dtype=np.float32)
+
+        # LM head
+        lm_head_key = "lm_head.weight"
+        if _has_tensor(readers, lm_head_key):
+            weights["w_lm_head"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
+        else:
+            weights["w_lm_head"] = _transpose_2d(embedding.copy(), "embedding_tied")
+
+        # Metadata for engine builder
+        weights["_layer_types"] = layer_types
+        weights["_d_inner"] = d_inner
+        weights["_d_state"] = d_state
+        weights["_d_conv"] = d_conv
+        weights["_conv_dim"] = conv_dim
+        weights["_mamba_num_heads"] = mamba_num_heads
+        weights["_mamba_head_dim"] = mamba_head_dim
+        weights["_n_groups"] = n_groups
+        weights["_num_mamba_layers"] = mamba_count
+        weights["_num_attention_layers"] = attn_count
+        weights["_attention_size"] = q_dim
+        weights["_mlp_size"] = mlp_intermediate
+
+        return weights
+
+    def build_engine(
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
+        debug_layer_outputs: bool = False,
+        parallel_config=None,
+    ) -> bytes:
+        """Build hybrid TRT engine with heterogeneous layer stack."""
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            parallel.validate()
+            from .tp_builder import build_nemotron_h_tp_engine
+
+            return build_nemotron_h_tp_engine(
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel,
+            )
+
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        num_layers = config.num_hidden_layers
+        requested_fp32_layers = frozenset(
+            int(layer) for layer in config.raw.get("_fp32_layers", ())
+        )
+        invalid_fp32_layers = sorted(
+            layer for layer in requested_fp32_layers if layer < 0 or layer > num_layers
+        )
+        if invalid_fp32_layers:
+            raise ValueError(f"fp32_layers contains out-of-range indices: {invalid_fp32_layers}")
+
+        layer_types: list[str] = weights["_layer_types"]
+        d_inner: int = weights["_d_inner"]
+        d_state: int = weights["_d_state"]
+        d_conv: int = weights["_d_conv"]
+        conv_dim: int = weights["_conv_dim"]
+        mamba_num_heads: int = weights["_mamba_num_heads"]
+        mamba_head_dim: int = weights["_mamba_head_dim"]
+        n_groups: int = weights["_n_groups"]
+        num_mamba: int = weights["_num_mamba_layers"]
+        num_attn: int = weights["_num_attention_layers"]
+        attention_size: int = weights["_attention_size"]
+        mlp_size: int = weights["_mlp_size"]
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"Unsupported Nemotron-H precision {precision!r}; expected fp32 or fp16"
+            )
+        use_fp32_io = precision == "fp16" and num_layers in requested_fp32_layers
+        io_np_dtype = np.float32 if use_fp32_io else work_np_dtype
+        io_trt_dtype = trt.float32 if use_fp32_io else work_trt_dtype
+
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+        head_dim = attention_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim
+        )
+        attention_window = max_cache_length + 1
+
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        trt_config = builder.create_builder_config()
+
+        # --- Inputs ---
+        token_id = network.add_input("token_id", trt.int32, (1,))
+        position_id = network.add_input("position_id", trt.int32, (1,))
+        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+
+        conv_state_inputs = []
+        ssm_state_inputs = []
+        for mi in range(num_mamba):
+            cs = network.add_input(
+                graph_ops.layer_tensor_name("conv_state", mi), trt.float32, (conv_dim, d_conv)
+            )
+            ss = network.add_input(
+                graph_ops.layer_tensor_name("ssm_state", mi),
+                trt.float32,
+                (mamba_num_heads, mamba_head_dim, d_state),
+            )
+            conv_state_inputs.append(cs)
+            ssm_state_inputs.append(ss)
+
+        cache_k_inputs = []
+        cache_v_inputs = []
+        for ai in range(num_attn):
+            ck = network.add_input(
+                graph_ops.layer_tensor_name("cache_k", ai),
+                work_trt_dtype,
+                (max_cache_length, kv_attention_size),
+            )
+            cv = network.add_input(
+                graph_ops.layer_tensor_name("cache_v", ai),
+                work_trt_dtype,
+                (max_cache_length, kv_attention_size),
+            )
+            cache_k_inputs.append(ck)
+            cache_v_inputs.append(cv)
+
+        # --- Shared constants ---
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["embedding"], dtype=io_np_dtype
+        )
+        eps_tensor = graph_ops.add_constant(
+            network,
+            (1, 1),
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype,
+        )
+        io_eps_tensor = (
+            graph_ops.add_constant(
+                network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32), dtype=np.float32
+            )
+            if use_fp32_io
+            else eps_tensor
+        )
+
+        # --- Embedding ---
+        gather = network.add_gather(embedding_table, token_id, 0)
+        hidden_state = gather.get_output(0)
+
+        if debug_layer_outputs:
+            _mark_debug_output(network, hidden_state, "debug_embed")
+
+        # --- Layer stack ---
+        present_conv_outputs = []
+        present_ssm_outputs = []
+        present_k_outputs = []
+        present_v_outputs = []
+        mamba_counter = 0
+        attn_counter = 0
+
+        for layer_idx in range(num_layers):
+            prefix = f"layer.{layer_idx}"
+            lt = layer_types[layer_idx]
+            use_fp32_layer = precision == "fp16" and layer_idx in requested_fp32_layers
+            layer_np_dtype = np.float32 if use_fp32_layer else work_np_dtype
+            layer_trt_dtype = trt.float32 if use_fp32_layer else work_trt_dtype
+            layer_hidden = hidden_state
+            layer_eps = eps_tensor
+            if layer_hidden.dtype != layer_trt_dtype:
+                layer_hidden = network.add_cast(layer_hidden, layer_trt_dtype).get_output(0)
+            if layer_eps.dtype != layer_trt_dtype:
+                layer_eps = network.add_cast(layer_eps, layer_trt_dtype).get_output(0)
+
+            if lt == "mamba2":
+                conv_state = conv_state_inputs[mamba_counter]
+                ssm_state = ssm_state_inputs[mamba_counter]
+                if conv_state.dtype != layer_trt_dtype:
+                    conv_state = network.add_cast(conv_state, layer_trt_dtype).get_output(0)
+                result = _add_mamba2_layer(
+                    network=network,
+                    hidden=layer_hidden,
+                    conv_state_in=conv_state,
+                    ssm_state_in=ssm_state,
+                    eps_tensor=layer_eps,
+                    weights=weights,
+                    prefix=prefix,
+                    hidden_size=hidden,
+                    d_inner=d_inner,
+                    d_state=d_state,
+                    d_conv=d_conv,
+                    conv_dim=conv_dim,
+                    mamba_num_heads=mamba_num_heads,
+                    mamba_head_dim=mamba_head_dim,
+                    n_groups=n_groups,
+                    dtype=layer_np_dtype,
+                )
+                hidden_state = result["hidden"]
+                present_conv_outputs.append(result["present_conv"])
+                present_ssm_outputs.append(result["present_ssm"])
+                mamba_counter += 1
+
+            elif lt == "mlp":
+                result = _add_mlp_layer(
+                    network=network,
+                    hidden=layer_hidden,
+                    eps_tensor=layer_eps,
+                    weights=weights,
+                    prefix=prefix,
+                    hidden_size=hidden,
+                    mlp_size=mlp_size,
+                    dtype=layer_np_dtype,
+                )
+                hidden_state = result["hidden"]
+
+            elif lt == "attention":
+                cache_k = cache_k_inputs[attn_counter]
+                cache_v = cache_v_inputs[attn_counter]
+                layer_mask = attention_mask
+                if cache_k.dtype != layer_trt_dtype:
+                    cache_k = network.add_cast(cache_k, layer_trt_dtype).get_output(0)
+                if cache_v.dtype != layer_trt_dtype:
+                    cache_v = network.add_cast(cache_v, layer_trt_dtype).get_output(0)
+                if layer_mask.dtype != layer_trt_dtype:
+                    layer_mask = network.add_cast(layer_mask, layer_trt_dtype).get_output(0)
+                result = graph_blocks.add_attention_block(
+                    network,
+                    layer_hidden,
+                    cache_k,
+                    cache_v,
+                    layer_mask,
+                    position_id,
+                    weights=weights,
+                    prefix=prefix,
+                    hidden_size=hidden,
+                    attention_size=attention_size,
+                    kv_attention_size=kv_attention_size,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    max_cache_length=max_cache_length,
+                    eps_tensor=layer_eps,
+                    dtype=layer_np_dtype,
+                )
+                # add_attention_block does NOT apply residual
+                residual = network.add_elementwise(
+                    layer_hidden, result["attn_out"], trt.ElementWiseOperation.SUM
+                )
+                hidden_state = residual.get_output(0)
+                present_k_outputs.append(result["present_k"])
+                present_v_outputs.append(result["present_v"])
+                attn_counter += 1
+
+            if debug_layer_outputs:
+                _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
+
+        # --- Final norm ---
+        if hidden_state.dtype != io_trt_dtype:
+            hidden_state = network.add_cast(hidden_state, io_trt_dtype).get_output(0)
+        final_norm = weights.get("final_norm")
+        if final_norm is not None and len(final_norm) > 0:
+            hidden_state = graph_ops.add_rms_norm(
+                network, hidden_state, hidden, final_norm, io_eps_tensor, dtype=io_np_dtype
+            )
+
+        # --- LM head ---
+        logits = graph_ops.add_matmul_rhs_constant(
+            network, hidden_state, hidden, vocab, weights["w_lm_head"], dtype=io_np_dtype
+        )
+        b_out = np.zeros(vocab, dtype=io_np_dtype)
+        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out, dtype=io_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
+        logits.name = "logits"
+        network.mark_output(logits)
+
+        # --- Present state outputs ---
+        for mi in range(num_mamba):
+            pc = present_conv_outputs[mi]
+            ps = present_ssm_outputs[mi]
+            if pc.dtype != trt.float32:
+                pc = network.add_cast(pc, trt.float32).get_output(0)
+            if ps.dtype != trt.float32:
+                ps = network.add_cast(ps, trt.float32).get_output(0)
+            pc.name = graph_ops.layer_tensor_name("present_conv", mi)
+            ps.name = graph_ops.layer_tensor_name("present_ssm", mi)
+            network.mark_output(pc)
+            network.mark_output(ps)
+
+        for ai in range(num_attn):
+            pk = present_k_outputs[ai]
+            pv = present_v_outputs[ai]
+            if pk.dtype != work_trt_dtype:
+                pk = network.add_cast(pk, work_trt_dtype).get_output(0)
+            if pv.dtype != work_trt_dtype:
+                pv = network.add_cast(pv, work_trt_dtype).get_output(0)
+            pk.name = graph_ops.layer_tensor_name("present_k", ai)
+            pv.name = graph_ops.layer_tensor_name("present_v", ai)
+            network.mark_output(pk)
+            network.mark_output(pv)
+
+        # --- Build ---
+        if verbose:
+            print(
+                f"[trtmc build] Building NemotronH hybrid TRT engine "
+                f"({num_layers} layers: {num_mamba} mamba2 + "
+                f"{sum(1 for t in layer_types if t == 'mlp')} mlp + "
+                f"{num_attn} attention, "
+                f"hidden={hidden}, d_inner={d_inner}, "
+                f"d_state={d_state}, nheads={mamba_num_heads}, "
+                f"cache={max_cache_length}) ...",
+                file=sys.stderr,
+            )
+
+        plan = builder.build_serialized_network(network, trt_config)
+        if plan is None:
+            raise RuntimeError("TensorRT engine build failed")
+
+        return bytes(plan)
+
+    def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
+        """Inject hybrid-specific config fields into the bundle."""
+        raw = config.raw
+        pattern = raw.get("hybrid_override_pattern", "")
+        layer_types = _parse_layer_types(pattern)
+
+        mamba_num_heads = raw.get("mamba_num_heads", 64)
+        mamba_head_dim = raw.get("mamba_head_dim", 64)
+        d_inner = mamba_num_heads * mamba_head_dim
+        n_groups = raw.get("n_groups", 8)
+        d_state = raw.get("ssm_state_size", raw.get("mamba_state_dim", 128))
+        d_conv = raw.get("conv_kernel", 4)
+
+        num_mamba = sum(1 for lt in layer_types if lt == "mamba2")
+        num_attn = sum(1 for lt in layer_types if lt == "attention")
+
+        conv_dim = d_inner + 2 * n_groups * d_state
+
+        return {
+            "layer_types": layer_types,
+            "num_mamba_layers": num_mamba,
+            "num_attention_layers": num_attn,
+            "d_inner": d_inner,
+            "mamba_d_state": d_state,
+            "mamba_d_conv": d_conv,
+            "mamba_nheads": mamba_num_heads,
+            "mamba_head_dim": mamba_head_dim,
+            "conv_dim": conv_dim,
+            "n_groups": n_groups,
+        }
+
+
+def _mark_debug_output(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    name: str,
+) -> None:
+    identity = network.add_identity(tensor)
+    cast = network.add_cast(identity.get_output(0), trt.float32)
+    out = cast.get_output(0)
+    out.name = name
+    network.mark_output(out)
+
+
+def _add_mamba2_layer(
+    *,
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    conv_state_in: trt.ITensor,
+    ssm_state_in: trt.ITensor,
+    eps_tensor: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    d_inner: int,
+    d_state: int,
+    d_conv: int,
+    conv_dim: int,
+    mamba_num_heads: int,
+    mamba_head_dim: int,
+    n_groups: int,
+    dtype: np.dtype = np.float32,
+) -> dict[str, trt.ITensor]:
+    """Add one Mamba-2 SSD layer (single-step decode).
+
+    Mamba-2 in_proj splits: [gate(d_inner), hidden_B_C(conv_dim), dt(nheads)]
+    Conv1d operates on hidden_B_C (d_inner + 2*n_groups*d_state channels).
+    After conv+SiLU, split: hidden[d_inner], B[n_groups*d_state], C[n_groups*d_state].
+    SSM state shape: [nheads, headdim, d_state] for full headdim-aware state.
+
+    Returns: {hidden, present_conv, present_ssm}
+    """
+    groups_state_size = n_groups * d_state
+
+    # ===== 1. RMSNorm =====
+    normed = graph_ops.add_rms_norm(
+        network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
+    )
+
+    # ===== 2. Input projection =====
+    proj_dim = d_inner + conv_dim + mamba_num_heads
+    projected = graph_ops.add_matmul_rhs_constant(
+        network, normed, hidden_size, proj_dim, weights[f"{prefix}.mamba_in_proj"], dtype=dtype
+    )  # [1, proj_dim]
+
+    # Split: gate [d_inner], hidden_B_C [conv_dim], dt [nheads]
+    offset = 0
+    gate_slice = network.add_slice(projected, start=(0, offset), shape=(1, d_inner), stride=(1, 1))
+    gate = gate_slice.get_output(0)
+    offset += d_inner
+
+    hbc_slice = network.add_slice(projected, start=(0, offset), shape=(1, conv_dim), stride=(1, 1))
+    hidden_B_C = hbc_slice.get_output(0)
+    offset += conv_dim
+
+    dt_slice = network.add_slice(
+        projected, start=(0, offset), shape=(1, mamba_num_heads), stride=(1, 1)
+    )
+    dt_raw = dt_slice.get_output(0)
+
+    # ===== 3. Conv1d step on hidden_B_C =====
+    # conv_state_in: [conv_dim, d_conv]
+    # hidden_B_C: [1, conv_dim] -> [conv_dim, 1]
+    hbc_col = network.add_shuffle(hidden_B_C)
+    hbc_col.reshape_dims = (conv_dim, 1)
+
+    if d_conv > 1:
+        slice_layer = network.add_slice(
+            conv_state_in, start=(0, 1), shape=(conv_dim, d_conv - 1), stride=(1, 1)
+        )
+        new_conv_state = network.add_concatenation(
+            [slice_layer.get_output(0), hbc_col.get_output(0)]
+        )
+        new_conv_state.axis = 1
+        present_conv = new_conv_state.get_output(0)
+    else:
+        present_conv = hbc_col.get_output(0)
+
+    conv_w = graph_ops.add_constant(
+        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype
+    )
+    conv_prod = network.add_elementwise(present_conv, conv_w, trt.ElementWiseOperation.PROD)
+    conv_sum = network.add_reduce(
+        conv_prod.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True
+    )
+    conv_flat = network.add_shuffle(conv_sum.get_output(0))
+    conv_flat.reshape_dims = (1, conv_dim)
+    conv_out = graph_ops.add_bias_sum(
+        network, conv_flat.get_output(0), conv_dim, weights[f"{prefix}.conv1d_bias"], dtype=dtype
+    )
+    hbc_activated = graph_ops.add_activation(network, conv_out, "silu", dtype=dtype)
+
+    # ===== 4. Split hidden, B, C from activated output =====
+    hidden_x_slice = network.add_slice(
+        hbc_activated, start=(0, 0), shape=(1, d_inner), stride=(1, 1)
+    )
+    hidden_x = hidden_x_slice.get_output(0)
+
+    B_raw_slice = network.add_slice(
+        hbc_activated, start=(0, d_inner), shape=(1, groups_state_size), stride=(1, 1)
+    )
+    B_raw = B_raw_slice.get_output(0)
+
+    C_raw_slice = network.add_slice(
+        hbc_activated,
+        start=(0, d_inner + groups_state_size),
+        shape=(1, groups_state_size),
+        stride=(1, 1),
+    )
+    C_raw = C_raw_slice.get_output(0)
+
+    # ===== 5. dt: add bias + softplus =====
+    dt_bias_const = graph_ops.add_constant(
+        network, (1, mamba_num_heads), weights[f"{prefix}.dt_bias"], dtype=dtype
+    )
+    dt_biased = network.add_elementwise(dt_raw, dt_bias_const, trt.ElementWiseOperation.SUM)
+    # The checkpoint contains dt_bias values as large as 33.5. A naive FP16
+    # exp overflows above ~11, while the original Mamba kernel evaluates this
+    # softplus stably. Keep this scalar recurrence boundary in FP32.
+    dt_for_state = dt_biased.get_output(0)
+    if dt_for_state.dtype != trt.float32:
+        dt_for_state = network.add_cast(dt_for_state, trt.float32).get_output(0)
+    dt_exp = network.add_unary(dt_for_state, trt.UnaryOperation.EXP)
+    one = graph_ops.add_constant(
+        network, (1, 1), np.array([1.0], dtype=np.float32), dtype=np.float32
+    )
+    dt_exp_p1 = network.add_elementwise(dt_exp.get_output(0), one, trt.ElementWiseOperation.SUM)
+    dt_softplus = network.add_unary(dt_exp_p1.get_output(0), trt.UnaryOperation.LOG)
+    dt = dt_softplus.get_output(0)  # [1, mamba_num_heads]
+
+    # ===== 6. Multi-head SSM step =====
+    # A: [nheads] -> [nheads, 1, 1] for broadcast
+    A_const = graph_ops.add_constant(
+        network,
+        (mamba_num_heads, 1, 1),
+        weights[f"{prefix}.A"].reshape(mamba_num_heads, 1, 1),
+        dtype=np.float32,
+    )
+
+    # dt: [1, nheads] -> [nheads, 1, 1]
+    dt_col = network.add_shuffle(dt)
+    dt_col.reshape_dims = (mamba_num_heads, 1, 1)
+
+    # dA = exp(dt * A): broadcast to [nheads, headdim, d_state]
+    dtA = network.add_elementwise(dt_col.get_output(0), A_const, trt.ElementWiseOperation.PROD)
+    dA = network.add_unary(dtA.get_output(0), trt.UnaryOperation.EXP)
+
+    # B: [1, n_groups*d_state] -> [n_groups, d_state] -> expand to [nheads, d_state]
+    B_grouped = network.add_shuffle(B_raw)
+    B_grouped.reshape_dims = (n_groups, d_state)
+    heads_per_group = mamba_num_heads // n_groups
+
+    if heads_per_group > 1:
+        B_3d = network.add_shuffle(B_grouped.get_output(0))
+        B_3d.reshape_dims = (n_groups, 1, d_state)
+        tile_ones = graph_ops.add_constant(
+            network,
+            (1, heads_per_group, 1),
+            np.ones((1, heads_per_group, 1), dtype=dtype),
+            dtype=dtype,
+        )
+        B_tiled = network.add_elementwise(
+            B_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD
+        )
+        B_heads_s = network.add_shuffle(B_tiled.get_output(0))
+        B_heads_s.reshape_dims = (mamba_num_heads, d_state)
+        B_heads = B_heads_s.get_output(0)
+    else:
+        B_heads = B_grouped.get_output(0)
+
+    # C: same group expansion
+    C_grouped = network.add_shuffle(C_raw)
+    C_grouped.reshape_dims = (n_groups, d_state)
+
+    if heads_per_group > 1:
+        C_3d = network.add_shuffle(C_grouped.get_output(0))
+        C_3d.reshape_dims = (n_groups, 1, d_state)
+        C_tiled = network.add_elementwise(
+            C_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD
+        )
+        C_heads_s = network.add_shuffle(C_tiled.get_output(0))
+        C_heads_s.reshape_dims = (mamba_num_heads, d_state)
+        C_heads = C_heads_s.get_output(0)
+    else:
+        C_heads = C_grouped.get_output(0)
+
+    # x: [1, d_inner] -> [nheads, headdim]
+    x_heads = network.add_shuffle(hidden_x)
+    x_heads.reshape_dims = (mamba_num_heads, mamba_head_dim)
+
+    # dBx[h,d,s] = dt[h] * B[h,s] * x[h,d]
+    # dt_B: [nheads, 1, 1] * [nheads, 1, d_state] -> [nheads, 1, d_state]
+    B_3d_expand = network.add_shuffle(B_heads)
+    B_3d_expand.reshape_dims = (mamba_num_heads, 1, d_state)
+    B_for_state = B_3d_expand.get_output(0)
+    if B_for_state.dtype != trt.float32:
+        B_for_state = network.add_cast(B_for_state, trt.float32).get_output(0)
+    dt_B = network.add_elementwise(dt_col.get_output(0), B_for_state, trt.ElementWiseOperation.PROD)
+
+    # x: [nheads, headdim] -> [nheads, headdim, 1]
+    x_3d = network.add_shuffle(x_heads.get_output(0))
+    x_3d.reshape_dims = (mamba_num_heads, mamba_head_dim, 1)
+    x_for_state = x_3d.get_output(0)
+    if x_for_state.dtype != trt.float32:
+        x_for_state = network.add_cast(x_for_state, trt.float32).get_output(0)
+
+    # dBx: [nheads, headdim, 1] * [nheads, 1, d_state] -> [nheads, headdim, d_state]
+    dBx = network.add_elementwise(x_for_state, dt_B.get_output(0), trt.ElementWiseOperation.PROD)
+
+    # SSM update: new_ssm = dA * ssm_state + dBx
+    # ssm_state_in: [nheads, headdim, d_state]
+    decay = network.add_elementwise(dA.get_output(0), ssm_state_in, trt.ElementWiseOperation.PROD)
+    new_ssm = network.add_elementwise(
+        decay.get_output(0), dBx.get_output(0), trt.ElementWiseOperation.SUM
+    )
+    present_ssm = new_ssm.get_output(0)  # [nheads, headdim, d_state]
+
+    # y[h,d] = sum_s(ssm_state[h,d,s] * C[h,s])
+    # C: [nheads, d_state] -> [nheads, d_state, 1]
+    C_col = network.add_shuffle(C_heads)
+    C_col.reshape_dims = (mamba_num_heads, d_state, 1)
+    C_for_state = C_col.get_output(0)
+    if C_for_state.dtype != trt.float32:
+        C_for_state = network.add_cast(C_for_state, trt.float32).get_output(0)
+    # batch matmul: [nheads, headdim, d_state] @ [nheads, d_state, 1] -> [nheads, headdim, 1]
+    y_matmul = network.add_matrix_multiply(
+        present_ssm, trt.MatrixOperation.NONE, C_for_state, trt.MatrixOperation.NONE
+    )
+    y_squeeze = network.add_shuffle(y_matmul.get_output(0))
+    y_squeeze.reshape_dims = (mamba_num_heads, mamba_head_dim)
+
+    # D skip: D[h] * x[h,d]
+    D_const = graph_ops.add_constant(
+        network,
+        (mamba_num_heads, 1),
+        weights[f"{prefix}.D"].reshape(mamba_num_heads, 1),
+        dtype=np.float32,
+    )
+    x_for_skip = x_heads.get_output(0)
+    if x_for_skip.dtype != trt.float32:
+        x_for_skip = network.add_cast(x_for_skip, trt.float32).get_output(0)
+    Dx = network.add_elementwise(D_const, x_for_skip, trt.ElementWiseOperation.PROD)
+
+    y_plus_D = network.add_elementwise(
+        y_squeeze.get_output(0), Dx.get_output(0), trt.ElementWiseOperation.SUM
+    )
+    # [nheads, headdim] -> [1, d_inner]
+    y_flat = network.add_shuffle(y_plus_D.get_output(0))
+    y_flat.reshape_dims = (1, d_inner)
+    y_for_gate = y_flat.get_output(0)
+    if y_for_gate.dtype != gate.dtype:
+        y_for_gate = network.add_cast(y_for_gate, gate.dtype).get_output(0)
+
+    # ===== 7. Gated Group RMSNorm (norm_before_gate=False) =====
+    # HF: output = weight * group_rms_norm(y * silu(gate))
+    # Gate is applied BEFORE normalization. RMSNorm is per-group,
+    # with group_size = d_inner // n_groups.
+    mamba_norm_w = weights[f"{prefix}.mamba_norm"]
+    eps_small = graph_ops.add_constant(
+        network, (1, 1), np.array([1e-5], dtype=np.float32), dtype=np.float32
+    )
+
+    # Step 1: Apply silu(gate) to y BEFORE norm
+    gate_activated = graph_ops.add_activation(network, gate, "silu", dtype=dtype)
+    y_gated = network.add_elementwise(y_for_gate, gate_activated, trt.ElementWiseOperation.PROD)
+
+    # Step 2: Group RMSNorm — reshape to [n_groups, group_size], norm per group
+    group_size = d_inner // n_groups
+    y_grouped = network.add_shuffle(y_gated.get_output(0))
+    y_grouped.reshape_dims = (n_groups, group_size)
+    norm_input = y_grouped.get_output(0)
+    norm_output_dtype = norm_input.dtype
+    if dtype != np.float32:
+        norm_input = network.add_cast(norm_input, trt.float32).get_output(0)
+
+    sq = network.add_elementwise(norm_input, norm_input, trt.ElementWiseOperation.PROD)
+    mean = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    denom_in = network.add_elementwise(mean.get_output(0), eps_small, trt.ElementWiseOperation.SUM)
+    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
+    normalized = network.add_elementwise(
+        norm_input, recip.get_output(0), trt.ElementWiseOperation.PROD
+    )
+
+    # Reshape back to [1, d_inner] and apply weight
+    y_flat_normed = network.add_shuffle(normalized.get_output(0))
+    y_flat_normed.reshape_dims = (1, d_inner)
+    gamma_t = graph_ops.add_constant(network, (1, d_inner), mamba_norm_w, dtype=np.float32)
+    gated = network.add_elementwise(
+        y_flat_normed.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
+    )
+    gated_tensor = gated.get_output(0)
+    if gated_tensor.dtype != norm_output_dtype:
+        gated_tensor = network.add_cast(gated_tensor, norm_output_dtype).get_output(0)
+
+    # ===== 8. Output projection + residual =====
+    out = graph_ops.add_matmul_rhs_constant(
+        network,
+        gated_tensor,
+        d_inner,
+        hidden_size,
+        weights[f"{prefix}.mamba_out_proj"],
+        dtype=dtype,
+    )
+
+    residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
+
+    return {
+        "hidden": residual.get_output(0),
+        "present_conv": present_conv,
+        "present_ssm": present_ssm,
+    }
+
+
+def _add_mlp_layer(
+    *,
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    eps_tensor: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    mlp_size: int,
+    dtype: np.dtype = np.float32,
+) -> dict[str, trt.ITensor]:
+    """Add MLP layer: RMSNorm -> up -> relu2 -> down -> residual."""
+    normed = graph_ops.add_rms_norm(
+        network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
+    )
+
+    up = graph_ops.add_matmul_rhs_constant(
+        network, normed, hidden_size, mlp_size, weights[f"{prefix}.w_up"], dtype=dtype
+    )
+    activated = graph_ops.add_activation(network, up, "relu2", dtype=dtype)
+    down = graph_ops.add_matmul_rhs_constant(
+        network, activated, mlp_size, hidden_size, weights[f"{prefix}.w_down"], dtype=dtype
+    )
+
+    residual = network.add_elementwise(hidden, down, trt.ElementWiseOperation.SUM)
+
+    return {"hidden": residual.get_output(0)}
+
+
+_BUNDLE_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenizer.model",
+)
+
+
+def _positive_int(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if result < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _stop_token_ids(value: object, vocab_size: int) -> list[int]:
+    values = value if isinstance(value, list) else [value]
+    if not values:
+        raise ValueError("eos_token_id must contain at least one token")
+    result: list[int] = []
+    for item in values:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError("eos_token_id must be an integer or a list of integers")
+        if item < 0 or item >= vocab_size:
+            raise ValueError("eos_token_id is outside the checkpoint vocabulary")
+        if item in result:
+            raise ValueError("eos_token_id must not contain duplicate tokens")
+        result.append(item)
+    return result
+
+
+def _runtime_config(
+    model_dir: Path, config: ModelConfig, model: _NemotronHModel, **updates
+) -> dict:
+    stop_token_ids = _stop_token_ids(config.eos_token_id, config.vocab_size)
+    runtime = {
+        "vocab_size": config.vocab_size,
+        "hidden_size": config.hidden_size,
+        "num_hidden_layers": config.num_hidden_layers,
+        "num_attention_heads": config.num_attention_heads,
+        "num_key_value_heads": config.num_key_value_heads,
+        "head_dim": config.head_dim,
+        "bos_token_id": config.bos_token_id,
+        "eos_token_id": stop_token_ids[0],
+        "stop_token_ids": stop_token_ids,
+        "pad_token_id": config.pad_token_id,
+    }
+    runtime.update(model.get_bundle_config_overrides(config) or {})
+    generation_path = model_dir / "generation_config.json"
+    if generation_path.is_file():
+        generation = json.loads(generation_path.read_text(encoding="utf-8"))
+        if not isinstance(generation, dict):
+            raise ValueError("generation_config.json must contain one JSON object")
+        if "eos_token_id" in generation:
+            stop_token_ids = _stop_token_ids(generation["eos_token_id"], config.vocab_size)
+            runtime["eos_token_id"] = stop_token_ids[0]
+            runtime["stop_token_ids"] = stop_token_ids
+    runtime.update(updates)
+    return runtime
+
+
+def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+    """Build one Nemotron-H bundle."""
+    if request.image_height is not None:
+        raise NotImplementedError("nemotron_h does not support image_height")
+
+    if request.image_width is not None:
+        raise NotImplementedError("nemotron_h does not support image_width")
+
+    if request.video_num_frames is not None:
+        raise NotImplementedError("nemotron_h does not support video_num_frames")
+
+    if request.max_batch_size != 1:
+        raise NotImplementedError("nemotron_h does not support max_batch_size")
+
+    if request.context_parallel_size != 1:
+        raise ValueError("this family does not support context parallelism")
+
+    if request.task != "text_generation":
+        raise ValueError("nemotron_h supports only task=text_generation")
+
+    model_dir = Path(request.model_dir)
+    config = ModelConfig.from_dir(model_dir)
+    if str(config.model_type).lower() not in {"nemotron_h", "nemotron_hybrid"}:
+        raise ValueError(f"Nemotron-H does not support model_type={config.model_type!r}")
+    precision = str(request.precision).lower()
+    if precision not in {"fp32", "fp16", "bf16"}:
+        raise ValueError("Nemotron-H precision must be fp32, fp16, or bf16")
+    max_sequence_length = _positive_int(
+        request.max_sequence_length or min(config.max_position_embeddings, 256),
+        "max_sequence_length",
+    )
+    if max_sequence_length > config.max_position_embeddings:
+        raise ValueError("Nemotron-H max_sequence_length exceeds checkpoint context capacity")
+    if request.quantization not in {None, "none"}:
+        raise NotImplementedError("Nemotron-H has no qualified family-owned quantized build")
+    if request.fp32_layers:
+        raise NotImplementedError("Nemotron-H does not expose mixed-precision layers")
+    parallel = ParallelConfig(
+        tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
+    )
+    parallel.validate()
+    model = _NemotronHModel()
+    config.raw["_model_dir"] = str(model_dir)
+    weights = model.load_weights(str(model_dir), config)
+    writer.set_header(family="nemotron_h", task=request.task, backend="trt")
+    if parallel.enabled:
+        for rank in range(parallel.tp_size):
+            plan = model.build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                quant_ctx=None,
+                verbose=bool(request.verbose),
+                debug_layer_outputs=False,
+                parallel_config=parallel.for_rank(rank),
+            )
+            writer.add_bytes(f"engine.rank{rank}.plan", plan)
+        layout = "dual_profile"
+    else:
+        plan = model.build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            quant_ctx=None,
+            verbose=bool(request.verbose),
+            debug_layer_outputs=False,
+            parallel_config=parallel,
+        )
+        writer.add_bytes("engine.plan", plan)
+        layout = "single"
+    writer.add_json(
+        "runtime.json",
+        _runtime_config(
+            model_dir,
+            config,
+            model,
+            precision=precision,
+            max_cache_length=max_sequence_length,
+            decoder_engine_layout=layout,
+            tensor_parallel_size=parallel.tp_size,
+            tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
+        ),
+    )
+    for filename in _BUNDLE_FILES:
+        path = model_dir / filename
+        if path.is_file():
+            writer.add_bytes(filename, path.read_bytes())

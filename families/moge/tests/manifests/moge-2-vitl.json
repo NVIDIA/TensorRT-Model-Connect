@@ -1,0 +1,18 @@
+{
+  "name": "moge-2-vitl",
+  "hf_id": "Ruicheng/moge-2-vitl",
+  "hf_revision": "39c4d5e957afe587e04eec59dc2bcc3be5ecd968",
+  "bundle": "moge-2-vitl.bundle",
+  "family": "moge",
+  "task": "monocular_geometry",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "moge-2-vitl",
+      "premerge": true,
+      "image": "data/test_img.jpeg",
+      "num_tokens": 1800
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+Pillow
+# Imported by the official image reference checkout.
+flash-attn==2.8.3
+imageio==2.34.0
+numpy==1.26.4
+opencv-python-headless==4.7.0.72
+scikit-learn==1.4.2
+scipy==1.12.0
+transformers==4.49.0

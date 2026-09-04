@@ -1,0 +1,59 @@
+{
+  "name": "lfm2-350m-fp16",
+  "hf_id": "LiquidAI/LFM2-350M",
+  "hf_revision": "f37d3f5c8c5484bc01dad379a595cf4c68c4e70e",
+  "bundle": "lfm2-350m-fp16.bundle",
+  "family": "lfm2",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "lfm2-350m-fp16",
+      "premerge": true,
+      "reference_precision": "bf16",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 12,
+      "use_chat_template": false,
+      "do_sample": false
+    },
+    {
+      "name": "lfm2-350m-chat",
+      "reference_precision": "bf16",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 2,
+      "expected_prompt_token_ids": [
+        1,
+        6,
+        6423,
+        708,
+        3493,
+        856,
+        779,
+        5706,
+        803,
+        4481,
+        540,
+        42275,
+        797,
+        1235,
+        2359,
+        523,
+        7,
+        708,
+        6,
+        64015,
+        708
+      ],
+      "expected_continuation_token_ids": [
+        41677,
+        7
+      ],
+      "expected_continuation_text": "Paris",
+      "use_chat_template": true,
+      "do_sample": false
+    }
+  ],
+  "max_sequence_length": 512,
+  "tensor_parallel_size": 1
+}

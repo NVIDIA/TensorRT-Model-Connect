@@ -7,24 +7,24 @@ project(trtmc_lerobot_act_recorded_control LANGUAGES CXX)
 get_filename_component(_trtmc_default_source_dir "${CMAKE_CURRENT_LIST_DIR}/../../../.." ABSOLUTE)
 set(TRTMC_SOURCE_DIR "${_trtmc_default_source_dir}" CACHE PATH
     "TensorRT-Model-Connect source directory")
-if(NOT EXISTS "${TRTMC_SOURCE_DIR}/include/trtmc/pipeline.h")
+if(NOT EXISTS "${TRTMC_SOURCE_DIR}/core/runtime/include/trtmc/task.h")
   message(FATAL_ERROR "TRTMC_SOURCE_DIR is not a TensorRT-Model-Connect source tree")
 endif()
 
 set(TRTMC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(TRTMC_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-set(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL OFF CACHE BOOL "" FORCE)
-set(TRTMC_ENABLE_TVM_FFI OFF CACHE BOOL "" FORCE)
-set(TRTMC_BUILD_BACKEND_RTX OFF CACHE BOOL "" FORCE)
-set(TRTMC_BUILD_DIFFUSION_KERNELS OFF CACHE BOOL "" FORCE)
-set(TRTMC_BUILD_BACKEND_TRT ON CACHE BOOL "" FORCE)
+set(TRTMC_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(TRTMC_ENABLE_BYOK OFF CACHE BOOL "" FORCE)
 
 add_subdirectory("${TRTMC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/trtmc")
 
 add_executable(trtmc_lerobot_act_recorded_control main.cpp)
 target_compile_features(trtmc_lerobot_act_recorded_control PRIVATE cxx_std_17)
 target_compile_options(trtmc_lerobot_act_recorded_control PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(trtmc_lerobot_act_recorded_control PRIVATE trtmc_core)
+target_include_directories(trtmc_lerobot_act_recorded_control PRIVATE
+  "${TRTMC_SOURCE_DIR}/core/runtime/include"
+  "${TRTMC_SOURCE_DIR}/third_party/stb"
+)
+target_link_libraries(trtmc_lerobot_act_recorded_control PRIVATE trtmc_runtime)
 add_dependencies(trtmc_lerobot_act_recorded_control trtmc_model_lerobot_act trtmc_backend_trt)
 set_target_properties(trtmc_lerobot_act_recorded_control PROPERTIES
   BUILD_RPATH "\$ORIGIN;\$ORIGIN/trtmc"
