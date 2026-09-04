@@ -164,7 +164,7 @@ is excluded from the base inventory and validated independently against its
 fixed 14-shard SHA-256 manifest.
 
 ```powershell
-$Checkpoint = 'D:\checkpoints\MiniMax-H3\48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc'
+$Checkpoint = '<path-to-MiniMax-H3-checkpoint>'
 hf download MiniMaxAI/MiniMax-H3 `
     --revision $H3Revision `
     --local-dir $Checkpoint

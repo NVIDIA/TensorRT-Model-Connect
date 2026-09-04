@@ -111,11 +111,10 @@ different prompt or profile may produce a different cache-decision sequence.
 
 ## Current original-weight dense result
 
-The qualification candidate was built from
-`3226b4060f985652e7b7833a0c33b7b14f4f35e6` (tree
-`8a503ab82c9b26cca79719bb85639fc868836871`). The bundle metadata records the
-same source revision. The run used an NVIDIA RTX Spark N1X with a 63,424 MiB
-CUDA aperture, driver 616.67, CUDA 12.9.1, and TensorRT-RTX 1.6.1.
+The qualification candidate uses the exact source tree published by signed
+revision `6e5285d81e596d5fe7064fafd125e10475a2e512`. The run used an NVIDIA RTX
+Spark N1X with a 63,424 MiB CUDA aperture, driver 616.67, CUDA 12.9.1, and
+TensorRT-RTX 1.6.1.
 
 | Request | Profile | Independent measured samples | Dense schedule | Output |
 | --- | --- | ---: | --- | --- |
