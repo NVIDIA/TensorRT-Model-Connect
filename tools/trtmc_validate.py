@@ -3211,13 +3211,12 @@ def _shadow_gate_metrics(
                     metrics[key] = metric
     task_accuracy = raw_result.get("task_accuracy", {})
     if isinstance(task_accuracy, Mapping):
-        metrics.update(
-            {
-                str(name): metric
-                for name, metric in task_accuracy.items()
-                if isinstance(metric, (int, float)) and not isinstance(metric, bool)
-            }
-        )
+        aggregate_metrics = {
+            str(name): metric
+            for name, metric in task_accuracy.items()
+            if isinstance(metric, (int, float)) and not isinstance(metric, bool)
+        }
+        metrics.update(aggregate_metrics)
     return metrics
 
 
@@ -3318,6 +3317,11 @@ def _public_accuracy_result(
             metric_kinds=(
                 raw_result.get("gate_metric_kinds")
                 if isinstance(raw_result.get("gate_metric_kinds"), Mapping)
+                else {}
+            ),
+            sample_count_metrics=(
+                raw_result.get("gate_sample_count_metrics")
+                if isinstance(raw_result.get("gate_sample_count_metrics"), Mapping)
                 else {}
             ),
         )

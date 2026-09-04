@@ -1138,22 +1138,23 @@ suites:
         GB300-only sampled validation. Run with --limit 10; the full official
         961-frame benchmark and its pose evaluator are intentionally excluded.
 
-  - id: dinov3_image_feature_extraction_parity
+  - id: dinov3_beans_knn_task_accuracy
     description: >
-      Full-tensor semantic parity for the official DINOv3 ViT-S/16 and
-      ConvNeXt-Tiny image backbones. The HF reference and TRTMC runtime consume
-      the same source image through independent decode and model-owned preprocessing paths;
-      the model-owned comparator gates both the spatial last-hidden-state and
-      pooled-image representations without introducing a second oracle here.
-    user_contract: representation_parity
-    task_type: Image → Features
+      Frozen-backbone weighted k-NN image classification on the complete
+      MIT-licensed Beans test split. Each backend independently builds an
+      L2-normalized feature bank from all 1034 train images, then evaluates all
+      128 test images with the pinned DINOv3 20-NN, temperature-0.07 contract.
+      The eight dataset rows are fixed 16-query execution shards, not samples.
+    user_contract: image_classification
+    task_type: Image → Features → Class
     default_model_names:
       - dinov3-convnext-tiny-pretrain-lvd1689m
       - dinov3-vits16-pretrain-lvd1689m
     dataset:
       kind: model_plugin_json
-      default_path: tests/e2e/models/dinov3/data/validation.json
-      input_asset_fields: [image]
+      name: Beans complete train/test frozen-backbone k-NN
+      default_path: /mnt/data/dinov3-beans-knn-v1/dataset.json
+      input_asset_fields: [bank_manifest, query_manifest]
     selectors:
       model_names:
         - dinov3-convnext-tiny-pretrain-lvd1689m
@@ -1164,14 +1165,36 @@ suites:
       families: [dinov3]
     scoring:
       scorer: model_plugin_parity
+      task_metric: weighted_20nn_top1_accuracy
     gates:
       min_sample_pass_rate: 1.0
+      exact_task_query_count: 128
+      min_reference_20nn_top1_accuracy: 0.5
+      max_candidate_20nn_top1_accuracy_drop_from_reference: 0.01
+      min_candidate_reference_20nn_top1_agreement: 0.98
+      min_task_query_pooler_cosine: 0.999
+      max_task_query_pooler_relative_l2: 0.01
+    gate_metric_kinds:
+      max_candidate_20nn_top1_accuracy_drop_from_reference: proportion_drop
+      min_candidate_reference_20nn_top1_agreement: proportion
+      min_task_query_pooler_cosine: continuous
+      max_task_query_pooler_relative_l2: continuous
+      min_reference_20nn_top1_accuracy: proportion
+    gate_sample_count_metrics:
+      exact_task_query_count: task_query_count
+      min_reference_20nn_top1_accuracy: task_query_count
+      max_candidate_20nn_top1_accuracy_drop_from_reference: task_query_count
+      min_candidate_reference_20nn_top1_agreement: task_query_count
+      min_task_query_pooler_cosine: task_query_count
+      max_task_query_pooler_relative_l2: task_query_count
     ci:
       eligible: false
       lane: local_only
       notes: >
-        GB300-only native-reference consistency. Numeric thresholds remain
-        owned by the DINOv3 comparator and are not overridden by this suite.
+        Managed NAS dataset prepared by
+        tests/e2e/models/dinov3/prepare_beans_knn.py. This workload is the
+        ground-truth Accuracy gate; per-query feature parity is evaluated
+        inside the same public-dataset task contract.
 
   - id: moge_monocular_geometry_fp32_parity
     description: >

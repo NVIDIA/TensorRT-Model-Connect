@@ -29,6 +29,9 @@ _DEFAULT_THRESHOLDS = {
     "pooler_token_invariant": 1.0,
     "finite_tensors": 1.0,
 }
+_KNN_K_VALUES = (10, 20, 100, 200)
+_KNN_QUERY_COSINE_MIN = 0.999
+_KNN_QUERY_RELATIVE_L2_MAX = 0.01
 
 
 def _threshold(profile: ThresholdProfile, name: str) -> float:
@@ -74,6 +77,26 @@ def _exact_metric(value: bool, threshold: float = 1.0) -> MetricResult:
     return MetricResult(value=float(value), threshold=threshold, operator="==", passed=value)
 
 
+def _informational_metric(value: float, note: str) -> MetricResult:
+    return MetricResult(
+        value=value,
+        threshold=None,
+        operator="informational",
+        passed=True,
+        note=note,
+    )
+
+
+def _prediction_vector(data: dict, k: int, query_count: int) -> np.ndarray:
+    predictions = data.get("predictions")
+    if not isinstance(predictions, dict):
+        raise ValueError("missing weighted k-NN predictions")
+    values = np.asarray(predictions.get(str(k)), dtype=np.int64)
+    if values.ndim != 1 or len(values) != query_count:
+        raise ValueError(f"invalid {k}-NN predictions")
+    return values
+
+
 class ImageFeatureExtractionComparator:
     @property
     def task_strategy(self) -> str:
@@ -86,6 +109,8 @@ class ImageFeatureExtractionComparator:
         threshold: ThresholdProfile,
         stage: StageSpec,
     ) -> CompareResult:
+        if trt.data.get("knn_task_accuracy") or ref.data.get("knn_task_accuracy"):
+            return self._compare_knn(trt, ref, stage)
         metrics: dict[str, MetricResult] = {}
         try:
             trt_hidden = _tensor(trt.data, "last_hidden_state")
@@ -218,6 +243,252 @@ class ImageFeatureExtractionComparator:
                 f"p01_patch_cos={p01_patch_cosine:.8f}, rel_frob={relative_frobenius:.8f}"
             ),
         )
+
+
+    def _compare_knn(
+        self,
+        trt: StageOutput,
+        ref: StageOutput,
+        stage: StageSpec,
+    ) -> CompareResult:
+        metrics: dict[str, MetricResult] = {}
+        try:
+            if not trt.data.get("knn_task_accuracy") or not ref.data.get(
+                "knn_task_accuracy"
+            ):
+                raise ValueError("candidate/reference k-NN task markers differ")
+            query_count = int(trt.data.get("query_count", 0))
+            reference_query_count = int(ref.data.get("query_count", 0))
+            bank_size = int(trt.data.get("bank_size", 0))
+            reference_bank_size = int(ref.data.get("bank_size", 0))
+            if query_count <= 0 or query_count != reference_query_count:
+                raise ValueError("candidate/reference query counts differ")
+            if bank_size <= 0 or bank_size != reference_bank_size:
+                raise ValueError("candidate/reference bank sizes differ")
+            if trt.data.get("class_names") != ref.data.get("class_names"):
+                raise ValueError("candidate/reference class maps differ")
+            labels = np.asarray(trt.data.get("labels"), dtype=np.int64)
+            reference_labels = np.asarray(ref.data.get("labels"), dtype=np.int64)
+            if (
+                labels.ndim != 1
+                or len(labels) != query_count
+                or not np.array_equal(labels, reference_labels)
+            ):
+                raise ValueError("candidate/reference ground-truth labels differ")
+            trt_pooler = _tensor(trt.data, "query_pooler_output")
+            ref_pooler = _tensor(ref.data, "query_pooler_output")
+            if (
+                trt_pooler.shape != ref_pooler.shape
+                or trt_pooler.shape[0] != query_count
+            ):
+                raise ValueError("candidate/reference query pooler shapes differ")
+            if not np.isfinite(trt_pooler).all() or not np.isfinite(ref_pooler).all():
+                raise ValueError("candidate/reference query poolers are non-finite")
+        except (TypeError, ValueError) as error:
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                metrics=metrics,
+                message=f"Invalid DINOv3 k-NN task payload: {error}",
+            )
+
+        denominators = np.linalg.norm(trt_pooler, axis=1) * np.linalg.norm(
+            ref_pooler, axis=1
+        )
+        cosines = np.divide(
+            np.sum(trt_pooler * ref_pooler, axis=1),
+            denominators,
+            out=np.zeros_like(denominators),
+            where=denominators != 0.0,
+        )
+        zero_norm = denominators == 0.0
+        cosines[zero_norm] = np.all(
+            trt_pooler[zero_norm] == ref_pooler[zero_norm], axis=1
+        )
+        relative_l2 = np.linalg.norm(trt_pooler - ref_pooler, axis=1) / np.maximum(
+            np.linalg.norm(ref_pooler, axis=1), 1e-12
+        )
+        minimum_cosine = float(np.min(cosines))
+        maximum_relative_l2 = float(np.max(relative_l2))
+        metrics.update(
+            {
+                "query_count": _informational_metric(
+                    float(query_count),
+                    "Number of ground-truth test images in this shard",
+                ),
+                "bank_size": _informational_metric(
+                    float(bank_size),
+                    "Number of train images in the independent feature bank",
+                ),
+                "query_pooler_cosine_min": _minimum_metric(
+                    minimum_cosine, _KNN_QUERY_COSINE_MIN
+                ),
+                "query_pooler_relative_l2_max": _maximum_metric(
+                    maximum_relative_l2, _KNN_QUERY_RELATIVE_L2_MAX
+                ),
+            }
+        )
+        try:
+            for k in _KNN_K_VALUES:
+                candidate = _prediction_vector(trt.data, k, query_count)
+                reference = _prediction_vector(ref.data, k, query_count)
+                metrics[f"candidate_correct_{k}nn"] = _informational_metric(
+                    float(np.sum(candidate == labels)),
+                    "Ground-truth correct predictions",
+                )
+                metrics[f"reference_correct_{k}nn"] = _informational_metric(
+                    float(np.sum(reference == labels)),
+                    "Ground-truth correct predictions",
+                )
+                metrics[f"prediction_agreement_{k}nn"] = _informational_metric(
+                    float(np.sum(candidate == reference)),
+                    "Candidate/reference identical predictions",
+                )
+        except ValueError as error:
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                metrics=metrics,
+                message=f"Invalid DINOv3 k-NN predictions: {error}",
+            )
+
+        passed = all(metric.passed for metric in metrics.values())
+        return CompareResult(
+            stage_name=stage.name,
+            status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
+            metrics=metrics,
+            composite_rule=(
+                "all query poolers must preserve cosine >= 0.999 and relative L2 <= 0.01; "
+                "ground-truth k-NN task gates are evaluated over the complete test split"
+            ),
+            message=(
+                f"DINOv3 Beans shard: queries={query_count}, bank={bank_size}, "
+                f"min_pooler_cos={minimum_cosine:.8f}, max_pooler_rel_l2={maximum_relative_l2:.8f}"
+            ),
+        )
+
+    def aggregate(self, cases: list[dict], gates: dict) -> dict:
+        task_gate = "max_candidate_20nn_top1_accuracy_drop_from_reference"
+        if task_gate not in gates:
+            return {"evaluated": False, "passed": True}
+        required_gates = (
+            "exact_task_query_count",
+            "min_reference_20nn_top1_accuracy",
+            task_gate,
+            "min_candidate_reference_20nn_top1_agreement",
+            "min_task_query_pooler_cosine",
+            "max_task_query_pooler_relative_l2",
+        )
+        missing_gates = [name for name in required_gates if name not in gates]
+        if missing_gates:
+            return {
+                "evaluated": True,
+                "passed": False,
+                "gate_failures": [
+                    "missing DINOv3 task gates: " + ", ".join(missing_gates)
+                ],
+            }
+        required_metrics = [
+            "query_count",
+            "query_pooler_cosine_min",
+            "query_pooler_relative_l2_max",
+        ]
+        for k in _KNN_K_VALUES:
+            required_metrics.extend(
+                (
+                    f"candidate_correct_{k}nn",
+                    f"reference_correct_{k}nn",
+                    f"prediction_agreement_{k}nn",
+                )
+            )
+        missing_cases = [
+            str(case.get("sample_id", ""))
+            for case in cases
+            if any(name not in case.get("metrics", {}) for name in required_metrics)
+        ]
+        if missing_cases:
+            return {
+                "evaluated": True,
+                "passed": False,
+                "gate_failures": [
+                    "DINOv3 task sufficient statistics are missing for: "
+                    + ", ".join(missing_cases)
+                ],
+            }
+        query_count = int(
+            sum(float(case["metrics"]["query_count"]["value"]) for case in cases)
+        )
+        expected_query_count = int(gates["exact_task_query_count"])
+        task_accuracy: dict[str, float | int] = {"task_query_count": query_count}
+        for k in _KNN_K_VALUES:
+            for side in ("candidate", "reference"):
+                correct = sum(
+                    float(case["metrics"][f"{side}_correct_{k}nn"]["value"])
+                    for case in cases
+                )
+                task_accuracy[f"{side}_{k}nn_top1_accuracy"] = (
+                    correct / query_count if query_count else 0.0
+                )
+            agreement = sum(
+                float(case["metrics"][f"prediction_agreement_{k}nn"]["value"])
+                for case in cases
+            )
+            task_accuracy[f"candidate_reference_{k}nn_top1_agreement"] = (
+                agreement / query_count if query_count else 0.0
+            )
+        task_accuracy["candidate_20nn_top1_accuracy_drop_from_reference"] = max(
+            0.0,
+            task_accuracy["reference_20nn_top1_accuracy"]
+            - task_accuracy["candidate_20nn_top1_accuracy"],
+        )
+        task_accuracy["task_query_pooler_cosine"] = min(
+            float(case["metrics"]["query_pooler_cosine_min"]["value"]) for case in cases
+        )
+        task_accuracy["task_query_pooler_relative_l2"] = max(
+            float(case["metrics"]["query_pooler_relative_l2_max"]["value"])
+            for case in cases
+        )
+
+        reference_floor = float(gates["min_reference_20nn_top1_accuracy"])
+        drop_allowance = float(gates[task_gate])
+        agreement_floor = float(gates["min_candidate_reference_20nn_top1_agreement"])
+        cosine_floor = float(gates["min_task_query_pooler_cosine"])
+        relative_l2_limit = float(gates["max_task_query_pooler_relative_l2"])
+        gate_results = {
+            "complete_test_split": query_count == expected_query_count,
+            "reference_20nn_top1_accuracy": (
+                task_accuracy["reference_20nn_top1_accuracy"] >= reference_floor
+            ),
+            "candidate_20nn_top1_accuracy": (
+                task_accuracy["candidate_20nn_top1_accuracy_drop_from_reference"]
+                <= drop_allowance
+            ),
+            "candidate_reference_20nn_top1_agreement": (
+                task_accuracy["candidate_reference_20nn_top1_agreement"]
+                >= agreement_floor
+            ),
+            "query_pooler_cosine": task_accuracy["task_query_pooler_cosine"]
+            >= cosine_floor,
+            "query_pooler_relative_l2": (
+                task_accuracy["task_query_pooler_relative_l2"] <= relative_l2_limit
+            ),
+        }
+        failures = [name for name, passed in gate_results.items() if not passed]
+        return {
+            "evaluated": True,
+            "passed": not failures,
+            "task_accuracy": task_accuracy,
+            "gates": {
+                "exact_task_query_count": expected_query_count,
+                "min_reference_20nn_top1_accuracy": reference_floor,
+                task_gate: drop_allowance,
+                "min_candidate_reference_20nn_top1_agreement": agreement_floor,
+                "min_task_query_pooler_cosine": cosine_floor,
+                "max_task_query_pooler_relative_l2": relative_l2_limit,
+            },
+            "gate_results": gate_results,
+            "gate_failures": failures,
+        }
 
 
 comparator = ImageFeatureExtractionComparator()

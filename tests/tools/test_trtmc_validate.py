@@ -117,6 +117,19 @@ def test_lerobot_act_catalog_binds_recorded_control_parity() -> None:
     }
 
 
+def test_dinov3_catalog_binds_only_public_task_accuracy() -> None:
+    catalog = trtmc_validate.load_catalog()
+
+    for model in (
+        "dinov3-convnext-tiny-pretrain-lvd1689m",
+        "dinov3-vits16-pretrain-lvd1689m",
+    ):
+        assert catalog["models"][model]["workloads"] == [
+            "dinov3_beans_knn_task_accuracy"
+        ]
+    assert "dinov3_image_feature_extraction_parity" not in catalog["sample_limits"]
+
+
 def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     catalog = trtmc_validate.load_catalog()
     suites = validation_catalog.load_suites()
@@ -226,7 +239,6 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     }
     assert min(catalog["sample_limits"].values()) >= 1
     assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
-        "dinov3_image_feature_extraction_parity",
         "fast_foundation_stereo_synthetic_parity",
         "foundationpose_preprocessed_pose_refinement_fp32_parity",
         "lfm2_model_card_sampling_parity",
@@ -286,6 +298,25 @@ def test_shadow_gate_metrics_include_plugin_task_accuracy() -> None:
         "sample_pass_rate": 1.0,
         "candidate_nonocc_epe_px": 0.44,
         "reference_nonocc_epe_px": 0.43,
+    }
+
+
+def test_shadow_gate_metrics_preserve_sample_range_with_task_aggregate() -> None:
+    metrics = trtmc_validate._shadow_gate_metrics(
+        {"metrics": {"sample_pass_rate": 1.0}},
+        {
+            "metrics": {
+                "query_count": {"mean": 16.0, "min": 16.0, "max": 16.0},
+            },
+            "task_accuracy": {"query_count": 128},
+        },
+    )
+
+    assert metrics == {
+        "sample_pass_rate": 1.0,
+        "query_count": 128,
+        "min_query_count": 16.0,
+        "max_query_count": 16.0,
     }
 
 
@@ -1447,6 +1478,62 @@ def test_accuracy_shadow_gate_preserves_worst_nested_metric(tmp_path):
     assert evaluation["status"] == "fail"
     assert evaluation["checks"][0]["metric"] == "max_pixel_mean"
     assert evaluation["checks"][0]["actual"] == 0.9
+
+
+def test_accuracy_shadow_gate_uses_query_count_as_its_evidence_count(tmp_path):
+    case_dir = tmp_path / "model-a" / "suite-a"
+    case_dir.mkdir(parents=True)
+    result_path = case_dir / "comparison.json"
+    result_path.write_text("{}", encoding="utf-8")
+    result = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "suite-a",
+            "execution": {"status": "completed", "exit_code": 0},
+            "comparison": {
+                "status": "agreement",
+                "metrics": {"sample_pass_rate": 1.0, "valid_count": 8},
+                "failures": [],
+            },
+            "validation": {"status": "passed"},
+            "raw_result": {
+                "status": "passed",
+                "valid_count": 8,
+                "metrics": {
+                    "query_count": {"mean": 16.0, "min": 16.0, "max": 16.0},
+                },
+                "task_accuracy": {"task_query_count": 128},
+                "configured_gates": {"exact_task_query_count": 128},
+                "gate_sample_count_metrics": {
+                    "exact_task_query_count": "task_query_count"
+                },
+                "gate_policy": "blocking",
+            },
+            "reproduce": {
+                "dataset": {"sample_limit": 8, "prepared_input_count": 8},
+            },
+        }
+    )
+
+    public = trtmc_validate._public_accuracy_result(tmp_path, result_path, result)
+
+    evaluation = public["comparison"]["gate_evaluation"]
+    assert evaluation["status"] == "pass"
+    assert evaluation["checks"] == [
+        {
+            "gate": "exact_task_query_count",
+            "metric": "task_query_count",
+            "operator": "==",
+            "actual": 128.0,
+            "required": 128.0,
+            "verdict": "pass",
+            "effective": {
+                "kind": "exact",
+                "sample_count": 128,
+                "sample_count_metric": "task_query_count",
+            },
+        }
+    ]
 
 
 def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(tmp_path, monkeypatch):

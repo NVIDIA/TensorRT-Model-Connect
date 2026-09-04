@@ -95,6 +95,7 @@ class Session:
     asset_loading_included: bool = False
     reference_dependencies: Mapping[str, str] | None = None
     reference_source: Mapping[str, str] | None = None
+    probe: Callable[[], Mapping[str, Any]] | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1876,12 +1877,20 @@ def _load_vision(
             with torch.inference_mode():
                 outputs = model(**inputs)
             return {
-                "last_hidden_state_shape": _tensor_summary(
-                    outputs.last_hidden_state
-                )["shape"],
-                "pooler_output_shape": _tensor_summary(outputs.pooler_output)[
-                    "shape"
-                ],
+                "last_hidden_state_shape": list(outputs.last_hidden_state.shape),
+                "pooler_output_shape": list(outputs.pooler_output.shape),
+            }
+
+        def probe() -> Mapping[str, Any]:
+            with torch.inference_mode():
+                outputs = model(**inputs)
+            hidden = outputs.last_hidden_state.detach().float().cpu().contiguous()
+            pooled = outputs.pooler_output.detach().float().cpu().contiguous()
+            return {
+                "last_hidden_state_shape": list(hidden.shape),
+                "last_hidden_state": hidden.reshape(-1).tolist(),
+                "pooler_output_shape": list(pooled.shape),
+                "pooler_output": pooled.reshape(-1).tolist(),
             }
 
     elif arguments.family == "segformer":
@@ -1974,7 +1983,12 @@ def _load_vision(
                 "width": width,
             }
 
-    return Session(invoke, _resolved_revision(arguments, model), "transformers")
+    return Session(
+        invoke,
+        _resolved_revision(arguments, model),
+        "transformers",
+        probe=probe if arguments.family == "dinov3" else None,
+    )
 
 
 def _qwen3_omni_chat_inputs(
@@ -2316,6 +2330,9 @@ def _measure(session: Session, warmup: int, iterations: int) -> tuple[list[float
         output = session.invoke()
         _synchronize()
         samples.append((time.perf_counter() - started) * 1000.0)
+    if session.probe is not None:
+        output = session.probe()
+        _synchronize()
     return samples, dict(output)
 
 

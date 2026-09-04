@@ -1628,6 +1628,33 @@ def test_image_feature_contract_compares_both_public_output_shapes() -> None:
     )
 
 
+def test_image_feature_parity_contract_compares_complete_outputs() -> None:
+    case = {
+        "operation": "extract_features",
+        "baseline": {
+            "output_contract": "image-features-parity",
+            "min_image_feature_full_cosine": 0.999,
+            "min_image_feature_pooler_cosine": 0.999,
+            "max_image_feature_relative_frobenius": 0.01,
+        },
+    }
+    candidate = {
+        "output_summary": {
+            "last_hidden_state_shape": [1, 2, 2],
+            "last_hidden_state": [1.0, 2.0, 3.0, 4.0],
+            "pooler_output_shape": [1, 2],
+            "pooler_output": [1.0, 2.0],
+        }
+    }
+    reference = {"output_summary": dict(candidate["output_summary"])}
+
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
+    reference["output_summary"]["last_hidden_state"] = [1.0, 2.0, 3.0, -4.0]
+    matched, reason = perf_matrix._output_contract(case, candidate, reference)
+    assert matched is False
+    assert reason == "image feature numeric parity is outside the configured contract"
+
+
 @pytest.mark.parametrize("configuration", ["", "Debug", "RelWithDebInfo"])
 def test_worker_preflight_rejects_non_release_builds(configuration: str) -> None:
     metadata = {
@@ -3372,6 +3399,110 @@ def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:
 
     assert runner["_load_vlm"](Namespace(family="deepseek_ocr"), {}, {}) is deepseek
     assert runner["_load_vlm"](Namespace(family="locateanything"), {}, {}) is locateanything
+
+
+def test_dinov3_timed_reference_does_not_reduce_outputs_for_shape_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PIL import Image
+
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    image = tmp_path / "input.png"
+    Image.new("RGB", (6, 4)).save(image)
+
+    class FakeTensor:
+        def __init__(self, shape, values):
+            self.shape = shape
+            self.values = values
+
+        def is_floating_point(self):
+            return True
+
+        def to(self, *_args, **_kwargs):
+            return self
+
+        def isfinite(self):
+            raise AssertionError("timed invoke must not reduce feature tensors")
+
+        def detach(self):
+            return self
+
+        def float(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def contiguous(self):
+            return self
+
+        def reshape(self, *_shape):
+            return self
+
+        def tolist(self):
+            return self.values
+
+    class FakeProcessor:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def __call__(self, **_kwargs):
+            return {"pixel_values": FakeTensor((1, 3, 4, 6), [])}
+
+    class FakeModel:
+        config = Namespace(_commit_hash="model-revision")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def eval(self):
+            return self
+
+        def to(self, *_args, **_kwargs):
+            return self
+
+        def parameters(self):
+            return iter([Namespace(dtype="fp32")])
+
+        def __call__(self, **_kwargs):
+            return Namespace(
+                last_hidden_state=FakeTensor((1, 3, 2), [1.0] * 6),
+                pooler_output=FakeTensor((1, 2), [1.0] * 2),
+            )
+
+    fake_torch = ModuleType("torch")
+    fake_torch.device = lambda value: value
+    fake_torch.float16 = "fp16"
+    fake_torch.float32 = "fp32"
+    fake_torch.bfloat16 = "bf16"
+    fake_torch.inference_mode = nullcontext
+    fake_transformers = ModuleType("transformers")
+    fake_transformers.AutoImageProcessor = FakeProcessor
+    fake_transformers.AutoModel = FakeModel
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    arguments = Namespace(
+        family="dinov3",
+        model="facebook/dinov3-vits16-pretrain-lvd1689m",
+        precision="fp32",
+        trust_remote_code=False,
+        local_files_only=True,
+        revision=None,
+        manifest=tmp_path / "manifest.json",
+    )
+
+    session = runner["_load_vision"](
+        arguments,
+        {"image_path": str(image)},
+        {},
+    )
+
+    assert session.invoke() == {
+        "last_hidden_state_shape": [1, 3, 2],
+        "pooler_output_shape": [1, 2],
+    }
 
 
 def test_sam3_reference_reports_source_image_dimensions(

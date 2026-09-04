@@ -351,6 +351,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "exact-token-ids",
         "exact-text",
         "generated-token-count",
+        "image-features-parity",
         "image-features-shape",
         "localization",
         "media-shape",
@@ -400,6 +401,32 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
             raise PerformanceSuiteError(
                 f"case {case['id']} disparity contract has invalid "
                 "max_disparity_mean_abs_error"
+            )
+    if output_contract == "image-features-parity":
+        bounded = {
+            "min_image_feature_full_cosine": (0.0, 1.0),
+            "min_image_feature_pooler_cosine": (0.0, 1.0),
+        }
+        for name, (minimum, maximum) in bounded.items():
+            value = baseline.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not minimum <= float(value) <= maximum
+            ):
+                raise PerformanceSuiteError(
+                    f"case {case['id']} image-feature contract has invalid {name}"
+                )
+        relative_limit = baseline.get("max_image_feature_relative_frobenius")
+        if (
+            isinstance(relative_limit, bool)
+            or not isinstance(relative_limit, (int, float))
+            or not math.isfinite(float(relative_limit))
+            or float(relative_limit) < 0.0
+        ):
+            raise PerformanceSuiteError(
+                f"case {case['id']} image-feature contract has invalid "
+                "max_image_feature_relative_frobenius"
             )
     if output_contract == "localization":
         bounded = {

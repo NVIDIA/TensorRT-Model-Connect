@@ -1758,6 +1758,9 @@ def _output_contract(
         matched = all(isinstance(value, list) and value for value in left_shape + right_shape)
         matched = matched and left_shape == right_shape
         return matched, "image feature output shape differs" if not matched else ""
+    if contract == "image-features-parity":
+        evidence = _image_feature_contract_evidence(case, left, right)
+        return bool(evidence["passed"]), str(evidence.get("reason", ""))
     if contract == "reranking-order":
         left_scores = left.get("scores")
         right_scores = right.get("scores")
@@ -1907,6 +1910,119 @@ def _disparity_values(summary: Mapping[str, Any]) -> tuple[array[float], Path]:
     return values, path
 
 
+def _image_feature_values(
+    summary: Mapping[str, Any], shape_name: str, values_name: str
+) -> tuple[tuple[int, ...], list[float]]:
+    shape = summary.get(shape_name)
+    values = summary.get(values_name)
+    if (
+        not isinstance(shape, list)
+        or not shape
+        or any(
+            isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0
+            for dim in shape
+        )
+    ):
+        raise PerfMatrixError(f"image feature output has invalid {shape_name}")
+    if not isinstance(values, list):
+        raise PerfMatrixError(f"image feature output is missing {values_name}")
+    expected = math.prod(shape)
+    if len(values) != expected or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        for value in values
+    ):
+        raise PerfMatrixError(f"image feature output has invalid {values_name}")
+    return tuple(shape), [float(value) for value in values]
+
+
+def _image_feature_contract_evidence(
+    case: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        left_hidden_shape, left_hidden = _image_feature_values(
+            candidate, "last_hidden_state_shape", "last_hidden_state"
+        )
+        right_hidden_shape, right_hidden = _image_feature_values(
+            reference, "last_hidden_state_shape", "last_hidden_state"
+        )
+        left_pooler_shape, left_pooler = _image_feature_values(
+            candidate, "pooler_output_shape", "pooler_output"
+        )
+        right_pooler_shape, right_pooler = _image_feature_values(
+            reference, "pooler_output_shape", "pooler_output"
+        )
+    except PerfMatrixError as error:
+        return {"passed": False, "reason": str(error)}
+    shapes_match = (
+        left_hidden_shape == right_hidden_shape
+        and left_pooler_shape == right_pooler_shape
+    )
+    if not shapes_match:
+        return {
+            "passed": False,
+            "reason": "image feature output shape differs",
+            "candidate_shapes": [list(left_hidden_shape), list(left_pooler_shape)],
+            "reference_shapes": [list(right_hidden_shape), list(right_pooler_shape)],
+        }
+
+    def cosine(left: Sequence[float], right: Sequence[float]) -> float:
+        dot = math.fsum(a * b for a, b in zip(left, right, strict=True))
+        left_norm = math.sqrt(math.fsum(value * value for value in left))
+        right_norm = math.sqrt(math.fsum(value * value for value in right))
+        if left_norm == 0.0 or right_norm == 0.0:
+            return 1.0 if left == right else 0.0
+        return dot / (left_norm * right_norm)
+
+    hidden_cosine = cosine(left_hidden, right_hidden)
+    pooler_cosine = cosine(left_pooler, right_pooler)
+    reference_norm = math.sqrt(math.fsum(value * value for value in right_hidden))
+    difference_norm = math.sqrt(
+        math.fsum(
+            (left - right) ** 2
+            for left, right in zip(left_hidden, right_hidden, strict=True)
+        )
+    )
+    relative_frobenius = difference_norm / max(reference_norm, 1e-12)
+    thresholds = {
+        "full_hidden_state_cosine_min": float(
+            case["baseline"]["min_image_feature_full_cosine"]
+        ),
+        "pooler_output_cosine_min": float(
+            case["baseline"]["min_image_feature_pooler_cosine"]
+        ),
+        "full_hidden_state_relative_frobenius_max": float(
+            case["baseline"]["max_image_feature_relative_frobenius"]
+        ),
+    }
+    metrics = {
+        "full_hidden_state_cosine": hidden_cosine,
+        "pooler_output_cosine": pooler_cosine,
+        "full_hidden_state_relative_frobenius": relative_frobenius,
+    }
+    passed = (
+        hidden_cosine >= thresholds["full_hidden_state_cosine_min"]
+        and pooler_cosine >= thresholds["pooler_output_cosine_min"]
+        and relative_frobenius
+        <= thresholds["full_hidden_state_relative_frobenius_max"]
+    )
+    return {
+        "passed": passed,
+        "reason": (
+            ""
+            if passed
+            else "image feature numeric parity is outside the configured contract"
+        ),
+        "metrics": metrics,
+        "thresholds": thresholds,
+        "candidate_shapes": [list(left_hidden_shape), list(left_pooler_shape)],
+        "reference_shapes": [list(right_hidden_shape), list(right_pooler_shape)],
+    }
+
+
 def _disparity_contract_evidence(
     case: Mapping[str, Any],
     candidate: Mapping[str, Any],
@@ -2013,8 +2129,15 @@ def _classify(
         request=request,
     )
     output_evidence = None
-    if _effective_output_contract(case, request) == "disparity-parity":
+    output_contract = _effective_output_contract(case, request)
+    if output_contract == "disparity-parity":
         output_evidence = _disparity_contract_evidence(
+            case,
+            candidate.get("output_summary", {}),
+            baseline.get("output_summary", {}),
+        )
+    elif output_contract == "image-features-parity":
+        output_evidence = _image_feature_contract_evidence(
             case,
             candidate.get("output_summary", {}),
             baseline.get("output_summary", {}),

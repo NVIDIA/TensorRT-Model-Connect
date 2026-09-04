@@ -14,9 +14,12 @@ import textwrap
 import time
 from pathlib import Path
 
+import numpy as np
+
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 from . import case_artifact_dir, resolve_image_path, save_full_stderr
+from .knn import load_image_manifest, tensor_payload, weighted_knn_predictions
 
 PROJECT_DIR = Path(__file__).resolve().parents[5]
 _TIMM_VIT_LAYOUT = "timm_dinov3_vit"
@@ -146,6 +149,10 @@ def _reference_script(
 class Dinov3Reference:
     def __init__(self, backend_name: str) -> None:
         self._backend_name = backend_name
+        self._knn_sessions: dict[
+            tuple[str, str, bool], tuple[object, object, object]
+        ] = {}
+        self._knn_banks: dict[tuple[str, str, bool, str], np.ndarray] = {}
 
     @property
     def backend_name(self) -> str:
@@ -161,6 +168,9 @@ class Dinov3Reference:
             raise ValueError(f"Unsupported DINOv3 reference stage: {stage.name!r}")
         if not case.hf_revision:
             raise ValueError("DINOv3 reference requires an immutable hf_revision")
+
+        if case.inputs.get("bank_manifest") or case.inputs.get("query_manifest"):
+            return self._run_knn_stage(case, stage, ctx)
 
         is_timm = self.backend_name == "timm_dinov3"
         layout = str(case.metadata.get("checkpoint_layout", ""))
@@ -240,6 +250,118 @@ class Dinov3Reference:
             data=data,
             timing_s=elapsed,
             metadata=metadata,
+        )
+
+
+    def _knn_session(self, case: E2ECase, ctx: RunContext):
+        if self.backend_name != "hf_transformers":
+            raise ValueError("DINOv3 k-NN Accuracy requires the pinned HF backend")
+        key = (case.hf_id, case.hf_revision, bool(ctx.local_files_only))
+        if key not in self._knn_sessions:
+            import torch
+            from transformers import AutoImageProcessor, AutoModel
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            kwargs = {
+                "revision": case.hf_revision,
+                "local_files_only": ctx.local_files_only,
+                "trust_remote_code": bool(
+                    case.metadata.get("trust_remote_code", False)
+                ),
+            }
+            processor = AutoImageProcessor.from_pretrained(case.hf_id, **kwargs)
+            model = (
+                AutoModel.from_pretrained(
+                    case.hf_id, torch_dtype=torch.float32, **kwargs
+                )
+                .eval()
+                .to(device)
+            )
+            self._knn_sessions[key] = (processor, model, device)
+        return self._knn_sessions[key]
+
+    @staticmethod
+    def _extract_hf_poolers(
+        session, images: list[Path], *, batch_size: int = 32
+    ) -> np.ndarray:
+        import torch
+        from PIL import Image
+
+        processor, model, device = session
+        rows = []
+        for start in range(0, len(images), batch_size):
+            batch = []
+            for path in images[start : start + batch_size]:
+                with Image.open(path) as source:
+                    batch.append(source.convert("RGB"))
+            inputs = processor(images=batch, return_tensors="pt")
+            inputs = {name: value.to(device) for name, value in inputs.items()}
+            with torch.inference_mode():
+                pooled = model(**inputs).pooler_output
+            rows.append(pooled.detach().float().cpu().numpy())
+        features = np.concatenate(rows, axis=0)
+        if features.shape[0] != len(images) or not np.isfinite(features).all():
+            raise RuntimeError(
+                "DINOv3 HF k-NN feature extraction returned invalid output"
+            )
+        return features
+
+    def _run_knn_stage(
+        self,
+        case: E2ECase,
+        stage: StageSpec,
+        ctx: RunContext,
+    ) -> StageOutput:
+        bank_manifest = str(case.inputs.get("bank_manifest", "") or "")
+        query_manifest = str(case.inputs.get("query_manifest", "") or "")
+        if not bank_manifest or not query_manifest:
+            raise ValueError(
+                "DINOv3 k-NN Accuracy requires bank_manifest and query_manifest"
+            )
+        bank_images, bank_labels, bank_classes = load_image_manifest(bank_manifest)
+        query_images, query_labels, query_classes = load_image_manifest(query_manifest)
+        if bank_classes != query_classes:
+            raise ValueError("DINOv3 k-NN bank and query class maps differ")
+        started = time.monotonic()
+        session = self._knn_session(case, ctx)
+        bank_key = (
+            case.hf_id,
+            case.hf_revision,
+            bool(ctx.local_files_only),
+            str(Path(bank_manifest).resolve()),
+        )
+        if bank_key not in self._knn_banks:
+            self._knn_banks[bank_key] = self._extract_hf_poolers(session, bank_images)
+        query_features = self._extract_hf_poolers(session, query_images)
+        predictions = weighted_knn_predictions(
+            self._knn_banks[bank_key],
+            bank_labels,
+            query_features,
+            num_classes=len(bank_classes),
+        )
+        return StageOutput(
+            stage_name=stage.name,
+            data={
+                "knn_task_accuracy": True,
+                "bank_size": len(bank_images),
+                "query_count": len(query_images),
+                "class_names": list(bank_classes),
+                "labels": query_labels.astype(int).tolist(),
+                "predictions": predictions,
+                "query_pooler_output": tensor_payload(query_features),
+            },
+            timing_s=time.monotonic() - started,
+            metadata={
+                "command": [
+                    ctx.reference_python_path() or sys.executable,
+                    "-c",
+                    "<pinned DINOv3 HF FP32 full-bank weighted-kNN reference>",
+                ],
+                "returncode": 0,
+                "hf_id": case.hf_id,
+                "hf_revision": case.hf_revision,
+                "reference_backend": case.reference_backend,
+            },
         )
 
 
