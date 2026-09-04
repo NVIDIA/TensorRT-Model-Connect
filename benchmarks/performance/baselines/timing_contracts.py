@@ -26,6 +26,7 @@ MODEL_CALL_FAMILIES = {
     "segformer",
     "timesfm",
     "timm_mobilenetv3",
+    "timm_efficientnet",
     "timm_resnet",
     "timm_vgg",
     "timm_vit",
