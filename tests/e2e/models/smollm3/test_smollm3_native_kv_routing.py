@@ -506,3 +506,173 @@ def test_routing_rejects_a_malformed_schedule_on_the_shared_build_config():
 
 def test_routing_still_accepts_a_well_formed_schedule():
     assert native_kv_architecture_capability(_shared_build_config()).eligible
+
+
+class _FakeTensor:
+    """Stand-in for an ITensor; the graph is never realized in this test."""
+
+    def __init__(self, name="t", shape=(1, 1, 64)):
+        self.name = name
+        self.shape = shape
+        self.dtype = None
+
+    def __getattr__(self, _name):
+        return None
+
+
+class _FakeLayer:
+    def get_output(self, _index):
+        return _FakeTensor("out")
+
+    def __getattr__(self, _name):
+        return lambda *args, **kwargs: None
+
+    def __setattr__(self, _name, _value):
+        pass
+
+
+class _FakeNetwork:
+    """Accepts any add_* call and returns a layer with one output."""
+
+    def __getattr__(self, name):
+        if name.startswith("add_"):
+            return lambda *args, **kwargs: _FakeLayer()
+        raise AttributeError(name)
+
+
+def _nope_block_weights(prefix, hidden, attention):
+    import numpy as np
+
+    return {
+        f"{prefix}.input_norm": np.ones(hidden, dtype=np.float32),
+        f"{prefix}.w_q": np.zeros((hidden, attention), dtype=np.float32),
+        f"{prefix}.w_k": np.zeros((hidden, attention), dtype=np.float32),
+        f"{prefix}.w_v": np.zeros((hidden, attention), dtype=np.float32),
+        f"{prefix}.w_o": np.zeros((attention, hidden), dtype=np.float32),
+    }
+
+
+def _count_rope_insertions(monkeypatch, *, apply_rope):
+    """Drive the attention block and count RoPE layer insertions.
+
+    Spies on ``add_apply_rope_native``, which is what actually puts an
+    IRotaryEmbeddingLayer into the graph, so this observes the gate rather than
+    the source that contains it.
+    """
+    from tensorrt_model_connect.families.smollm3 import graph_blocks, graph_ops
+
+    hidden = attention = 64
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        graph_ops,
+        "add_apply_rope_native",
+        lambda *args, **kwargs: calls.append(args) or _FakeTensor("roped"),
+    )
+    graph_blocks.add_attention_block(
+        _FakeNetwork(),
+        _FakeTensor("hidden"),
+        _FakeTensor("cache_k"),
+        _FakeTensor("cache_v"),
+        _FakeTensor("mask"),
+        _FakeTensor("position"),
+        weights=_nope_block_weights("layer.0", hidden, attention),
+        prefix="layer.0",
+        hidden_size=hidden,
+        attention_size=attention,
+        num_heads=2,
+        head_dim=32,
+        max_cache_length=16,
+        eps_tensor=_FakeTensor("eps"),
+        num_kv_heads=2,
+        kv_attention_size=attention,
+        apply_rope=apply_rope,
+        cos_half_tensor=_FakeTensor("cos"),
+        sin_half_tensor=_FakeTensor("sin"),
+    )
+    return calls
+
+
+def test_rope_layer_inserts_rotary_embedding_for_query_and_key(monkeypatch):
+    assert len(_count_rope_insertions(monkeypatch, apply_rope=True)) == 2
+
+
+def test_nope_layer_inserts_no_rotary_embedding_at_all(monkeypatch):
+    assert _count_rope_insertions(monkeypatch, apply_rope=False) == []
+
+
+def _rope_guard_sources():
+    """Return, per builder, the schedule subscripts guarding RoPE insertion.
+
+    The builders need TensorRT to run, so this reads their parsed source rather
+    than driving them. It checks the wiring the block-level tests above cannot
+    reach: that each builder selects the flag with its own layer loop variable
+    instead of a constant or the wrong index.
+    """
+    import ast
+    import pathlib
+
+    family = pathlib.Path(
+        "python/tensorrt_model_connect/families/smollm3"
+    )
+    if not family.is_dir():
+        import tensorrt_model_connect.families.smollm3 as package
+
+        family = pathlib.Path(package.__file__).parent
+
+    found = {}
+    for name in ("standard_decoder_builder.py", "dual_profile_decoder_builder.py"):
+        tree = ast.parse((family / name).read_text(encoding="utf-8"))
+        subscripts = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "rope_schedule"
+        ]
+        found[name] = [
+            node.slice.id
+            for node in subscripts
+            if isinstance(node.slice, ast.Name)
+        ]
+    return found
+
+
+def test_both_builders_select_the_flag_with_their_layer_index():
+    guards = _rope_guard_sources()
+
+    for name, indices in guards.items():
+        assert indices, f"{name} does not subscript rope_schedule at all"
+        assert set(indices) == {"layer_idx"}, (
+            f"{name} indexes rope_schedule with {sorted(set(indices))}, "
+            "which is not the layer loop variable"
+        )
+
+
+def test_standard_builder_forwards_the_flag_to_the_attention_block():
+    """The standard builder reaches RoPE through ``apply_rope=``.
+
+    A dropped keyword would silently restore RoPE on every NoPE layer, which
+    the block-level tests cannot see because they pass the flag directly.
+    """
+    import ast
+    import pathlib
+
+    import tensorrt_model_connect.families.smollm3 as package
+
+    path = pathlib.Path(package.__file__).parent / "standard_decoder_builder.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    forwarded = [
+        keyword
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "apply_rope"
+    ]
+
+    assert forwarded, "standard builder never passes apply_rope"
+    assert any(
+        isinstance(keyword.value, ast.Subscript)
+        and isinstance(keyword.value.value, ast.Name)
+        and keyword.value.value.id == "rope_schedule"
+        for keyword in forwarded
+    ), "apply_rope is passed but not from the resolved schedule"
