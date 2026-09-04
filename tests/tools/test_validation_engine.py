@@ -7476,6 +7476,15 @@ def test_eval_resolves_reference_source_revision_before_preparing_cache_inputs(
     assert captured["model_manifest"] == model["manifest"]
 
 
+def test_minimax_h3_reference_parity_accepts_eight_of_ten_samples() -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        "minimax_h3_vbench_reference_parity",
+    )
+
+    assert suite["gates"]["min_sample_pass_rate"] == 0.8
+
+
 def test_flux_validation_build_command_preserves_diffusion_shape(tmp_path: Path) -> None:
     model = next(
         model

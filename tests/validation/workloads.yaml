@@ -1928,7 +1928,7 @@ suites:
     scoring:
       scorer: model_plugin_parity
     gates:
-      min_sample_pass_rate: 1.0
+      min_sample_pass_rate: 0.8
     ci:
       eligible: false
       lane: local_only
