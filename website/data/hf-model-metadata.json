@@ -1334,6 +1334,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/efficientnet_b0.ra_in1k",
+      "revision": "1b5383e5f79cc0f7fc067e372f8f26a5fa73f26a",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "efficientnet_b0"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",

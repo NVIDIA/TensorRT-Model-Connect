@@ -978,6 +978,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: timm_efficientnet.classify
+    family: timm_efficientnet
+    operation: classify
+    model: efficientnet-b0-ra-in1k
+    workload:
+      testcase: efficientnet-b0-ra-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_mobilenetv3.classify
     family: timm_mobilenetv3
     operation: classify

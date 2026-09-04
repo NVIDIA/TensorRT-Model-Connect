@@ -81,6 +81,7 @@ TASK_ADAPTERS = {
     "segformer.segment": "hf-transformers-vision",
     "timesfm.solve": "pytorch-timeseries",
     "timm_mobilenetv3.classify": "hf-transformers-vision",
+    "timm_efficientnet.classify": "hf-transformers-vision",
     "timm_resnet.classify": "hf-transformers-vision",
     "timm_vgg.classify": "hf-transformers-vision",
     "timm_vit.classify": "hf-transformers-vision",

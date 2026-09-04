@@ -108,6 +108,8 @@ models:
     workloads: [wikitext103_distilgpt2_continuation_parity]
   dpr-ctx-encoder:
     workloads: [stsbenchmark_encoder_embedding_parity]
+  efficientnet-b0-ra-in1k:
+    workloads: [imagenette_image_classification]
   electra-base-discriminator:
     workloads: [stsbenchmark_encoder_embedding_parity]
   elf-b-de-en-l0:
