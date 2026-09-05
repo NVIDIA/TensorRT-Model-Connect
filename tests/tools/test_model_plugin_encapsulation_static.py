@@ -7875,7 +7875,7 @@ def test_hf_transformers_model_plugins_do_not_name_sibling_families() -> None:
             ),
         ),
         (
-            {"timm_vit", "timm_resnet", "timm_vgg", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg"},
+            {"timm_vit", "timm_resnet", "timm_vgg", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg", "timm_hrnet"},
             (
                 "import timm",
                 "timm.create_model",
@@ -7987,7 +7987,7 @@ def test_single_family_e2e_task_sidecars_are_model_owned() -> None:
     """
     cases = {
         "image_classification": {
-            "owners": {"timm_vit", "timm_resnet", "timm_vgg", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg"},
+            "owners": {"timm_vit", "timm_resnet", "timm_vgg", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg", "timm_hrnet"},
             "paths": (
                 "e2e_plugins/runners/image_classification.py",
                 "e2e_plugins/comparators/image_classification.py",
@@ -9197,14 +9197,14 @@ def test_generated_e2e_task_sidecars_are_task_owned() -> None:
         (
             "runners",
             "image_classification.py",
-            {"timm_vit", "timm_resnet", "timm_vgg", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg"},
+            {"timm_vit", "timm_resnet", "timm_vgg", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg", "timm_hrnet"},
             "ImageClassificationRunner",
             "image_classification",
         ),
         (
             "comparators",
             "image_classification.py",
-            {"timm_vit", "timm_resnet", "timm_vgg", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg"},
+            {"timm_vit", "timm_resnet", "timm_vgg", "timm_mobilenetv3", "timm_efficientnet", "timm_densenet", "timm_mnasnet", "timm_inception", "timm_repvgg", "timm_hrnet"},
             "ImageClassificationComparator",
             "image_classification",
         ),
