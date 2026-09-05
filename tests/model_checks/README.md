@@ -76,11 +76,12 @@ model in `tests/validation/model_workloads.yaml`.
 ## Run
 
 By default, `run` is a formal qualification run. Each execution attempt freezes source identity,
-prepares missing dependencies, runs preflight, and then switches measurement to
-prebuilt-only mode. During development, add `--debug` to allow a dirty worktree
-and on-demand dependency creation. Every run still resolves the active worktree
-HEAD to a 40-character commit SHA and places the current repository Python paths
-first in each child process.
+prepares missing Python profiles and reference sources, and runs preflight. Perf
+then builds, measures, records, and cleans up one case before moving to the next.
+During development, add `--debug` to allow a dirty worktree and on-demand
+dependency creation. Every run still resolves the active worktree HEAD to a
+40-character commit SHA and places the current repository Python paths first in
+each child process.
 
 Run one model through formal Accuracy and then Perf qualification:
 
@@ -111,13 +112,15 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
 ```
 
 The controller first writes `native-build-identity.json`, then creates missing
-Python profiles, pinned reference-source checkouts, and Perf bundles before
-measurement. Measurement then runs with
-dependency creation and Perf bundle builds disabled. Qualification also rejects
-a dirty worktree, imports outside the active worktree, and a requested revision
-different from HEAD. It rechecks that identity after preparation and before and
-after every task, so evidence from an attempt cannot silently cross a mid-run
-edit. Accuracy and Perf receipts record the exact SHA tested; native workers and
+Python profiles and pinned reference-source checkouts before measurement. It
+does not eagerly materialize the full Perf bundle matrix: each Perf case builds
+its source-bound bundle on demand, measures it, records the durable result, and
+applies the configured bundle cleanup policy before the next case. Qualification
+also rejects a dirty worktree, imports outside the active worktree, and a
+requested revision different from HEAD. It rechecks that identity after
+preparation and before and after every task, so evidence from an attempt cannot
+silently cross a mid-run edit. Accuracy and Perf receipts record the exact SHA
+tested; native workers and
 bundles must report that SHA. A campaign may be resumed on a later commit, but
 all final Accuracy and Perf receipts for one model must agree on one SHA. Other
 models may complete on different SHAs.

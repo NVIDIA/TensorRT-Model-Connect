@@ -1769,7 +1769,7 @@ def test_qualification_rechecks_source_identity_after_preparation(tmp_path, monk
     assert calls == 2
 
 
-def test_qualification_prepare_phase_runs_accuracy_and_perf_bundle_preparation(
+def test_qualification_prepare_phase_checks_perf_without_building_bundles(
     tmp_path, monkeypatch
 ):
     events = []
@@ -1809,12 +1809,14 @@ def test_qualification_prepare_phase_runs_accuracy_and_perf_bundle_preparation(
     )
     monkeypatch.setattr(
         model_checks,
-        "_perf_prepare_command",
-        lambda *_args, **_kwargs: [sys.executable, "perf_matrix.py", "prepare"],
+        "_perf_check_command",
+        lambda *_args, **_kwargs: [sys.executable, "perf_matrix.py", "check"],
     )
 
-    def run(*_args, **_kwargs):
-        events.append("perf-prepare")
+    def run(command, **_kwargs):
+        assert "prepare" not in command
+        assert "--prepare-only" not in command
+        events.append("perf-check")
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(model_checks.subprocess, "run", run)
@@ -1825,15 +1827,14 @@ def test_qualification_prepare_phase_runs_accuracy_and_perf_bundle_preparation(
         arguments,
         task_bindings=task_bindings,
         perf_environment=tmp_path / "perf-environment.yaml",
-        perf_preparation_receipt=tmp_path / "perf-preparation.json",
         model_reference_cache_root=tmp_path / "references",
     )
 
     assert result == {}
-    assert events == ["accuracy", "references", "perf-prepare"]
+    assert events == ["accuracy", "references", "perf-check"]
 
 
-def test_qualification_perf_commands_require_prebuilt_bundles(tmp_path):
+def test_qualification_perf_commands_build_each_case_on_demand(tmp_path):
     plan = {"models": []}
     environment = {"tasks": {"perf": {"runner_python": sys.executable, "suite": tmp_path}}}
     run = tmp_path / "results" / "run-a"
@@ -1845,16 +1846,14 @@ def test_qualification_perf_commands_require_prebuilt_bundles(tmp_path):
         environment,
         tmp_path / "environment.yaml",
         bindings=[{"entry": "entry-a"}],
-        require_prebuilt=True,
     )
     resume = model_checks._perf_resume_command(
         environment,
         tmp_path / "results",
-        require_prebuilt=True,
     )
 
-    assert command is not None and "--no-build" in command
-    assert resume is not None and "--no-build" in resume
+    assert command is not None and "--no-build" not in command
+    assert resume is not None and "--no-build" not in resume
 
 
 def test_source_identity_rejects_import_from_another_checkout(monkeypatch):
