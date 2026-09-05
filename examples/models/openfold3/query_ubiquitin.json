@@ -1,0 +1,17 @@
+{
+  "seeds": [42],
+  "queries": {
+    "ubiquitin": {
+      "chains": [
+        {
+          "molecule_type": "PROTEIN",
+          "chain_ids": ["A"],
+          "sequence": "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG"
+        }
+      ],
+      "use_msas": false,
+      "use_main_msas": false,
+      "use_paired_msas": false
+    }
+  }
+}

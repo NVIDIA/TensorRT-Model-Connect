@@ -191,6 +191,25 @@ void test_extract_features_parses_contract_flags() {
     check(args.output_json == "features.json", "extract-features output json");
 }
 
+void test_predict_structure_parses_native_contract() {
+    auto args = parse({"trtmc", "predict-structure", "openfold3.bundle", "--input", "query.json",
+                       "--output", "prediction.cif", "--output-json", "confidence.json",
+                       "--benchmark", "3", "--warmup", "1"});
+    check(!args.parse_error, "predict-structure parses cleanly");
+    check(args.command == "predict-structure", "predict-structure command");
+    check(args.bundle_path == "openfold3.bundle", "predict-structure bundle");
+    check(args.input_path == "query.json", "predict-structure request");
+    check(args.output_dir == "prediction.cif", "predict-structure output");
+    check(args.output_json == "confidence.json", "predict-structure metadata");
+    check(args.benchmark == 3 && args.warmup == 1, "predict-structure benchmark controls");
+
+    auto missing =
+        parse({"trtmc", "predict-structure", "openfold3.bundle", "--input", "query.json"});
+    check(missing.parse_error, "predict-structure incomplete contract rejected");
+    check_message_contains(missing.error_message, "--output",
+                           "predict-structure missing output message");
+}
+
 void test_disparity_parses_stereo_images() {
     auto args = parse({"trtmc", "disparity", "bundle.bundle", "--image", "left.png",
                        "--right-image", "right.png", "--output", "disparity.f32"});
@@ -574,6 +593,7 @@ int main() {
     test_diffusion_flags();
     test_detect_parses_contract_flags();
     test_extract_features_parses_contract_flags();
+    test_predict_structure_parses_native_contract();
     test_disparity_parses_stereo_images();
     test_geometry_parses_image_and_output_directory();
     test_act_parses_recorded_control_contract();

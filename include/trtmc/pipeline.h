@@ -164,6 +164,37 @@ struct StereoDisparityResult {
     int32_t width{0};
 };
 
+enum class StructureFormat {
+    kMmcif,
+    kPdb,
+};
+
+struct StructurePredictionConfig {
+    int32_t recycling_steps{3};
+    int32_t sampling_steps{200};
+    int32_t diffusion_samples{1};
+    int32_t seed{42};
+    StructureFormat output_format{StructureFormat::kMmcif};
+};
+
+struct StructureConfidence {
+    float confidence_score{0.0F};
+    float ptm{0.0F};
+    float iptm{0.0F};
+    float ligand_iptm{0.0F};
+    float protein_iptm{0.0F};
+    float complex_plddt{0.0F};
+    float complex_iplddt{0.0F};
+    std::vector<float> plddt;
+};
+
+struct StructurePredictionResult {
+    std::string structure;
+    StructureFormat format{StructureFormat::kMmcif};
+    StructureConfidence confidence;
+    std::string metadata_json;
+};
+
 struct PromptedSegmentationResult {
     std::vector<float> masks;      // [num_masks, H, W], logits after postprocess
     std::vector<float> iou_scores; // [num_masks]
@@ -806,6 +837,22 @@ class IPipeline {
         (void)request;
         throw std::runtime_error(std::string(pipeline_type()) +
                                  " does not support estimate_pose_hypotheses()");
+    }
+
+    // -- Biomolecular structure prediction --
+    // Append-only to preserve virtual slots used by older model plugins.
+    virtual StructurePredictionResult predict_structure(const std::string& input,
+                                                        const StructurePredictionConfig& cfg = {}) {
+        (void)input;
+        (void)cfg;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support predict_structure()");
+    }
+
+    virtual std::string prepare_structure_input(const std::string& input,
+                                                const std::string& input_path) {
+        (void)input_path;
+        return input;
     }
 };
 
