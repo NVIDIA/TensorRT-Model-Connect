@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_xception"
+plugin = "timm_xception"
+module = "plugin"
+python_profile_specs = [
+  "timm_xception_reference|families/timm_xception/python_profile_requirements/timm_xception_reference.lock.txt|families/timm_xception/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_xception_reference",
+]
+aliases = [
+  "timm_xception",
+  "xception",
+  "xception41",
+]
+prefixes = [
+  "timm_xception",
+  "xception",
+]

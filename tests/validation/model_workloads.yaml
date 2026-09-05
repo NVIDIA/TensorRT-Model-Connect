@@ -321,6 +321,8 @@ models:
     workloads: [librispeech_clean_asr]
   xglm-564m:
     workloads: [mmlu_continuation_parity]
+  xception41-tf-in1k:
+    workloads: [imagenette_image_classification]
   xlm-roberta-base:
     workloads: [stsbenchmark_encoder_embedding_parity]
   xlnet-base:
