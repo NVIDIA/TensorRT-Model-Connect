@@ -1378,6 +1378,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/repvgg_a2.rvgg_in1k",
+      "revision": "87d4d383cb45031cb9fa2fc8ddca73fd6649240f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "repvgg_a2"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",
