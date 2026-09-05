@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -42,6 +44,10 @@ from tensorrt_model_connect.families.openfold3.random_samples import (
     deserialize_random_samples,
     serialize_random_arrays,
 )
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[5]
+_PREPARED_FIXTURES = _REPO_ROOT / "tests/e2e/models/openfold3/data"
 
 
 def _query(sequence: str = "ACDE") -> str:
@@ -228,6 +234,23 @@ def test_preprocessed_feature_archive_is_byte_reproducible(tmp_path) -> None:
     assert first.read_bytes() == second.read_bytes()
     restored = load_npz_features(first)
     assert tuple(restored) == FEATURE_NAMES
+
+
+def test_pinned_ubiquitin_build_inputs_have_expected_identity() -> None:
+    features_path = _PREPARED_FIXTURES / "openfold3_features.npz"
+    structure_path = _PREPARED_FIXTURES / "openfold3_structure.json"
+    assert hashlib.sha256(features_path.read_bytes()).hexdigest() == (
+        "60a28fa84b8088849b96e67c16d537a6f79858229907736f381fdd5b100766c4"
+    )
+    assert hashlib.sha256(structure_path.read_bytes()).hexdigest() == (
+        "23dab4813f744c3ff8b922d665359cbd830abf168fa4a2c2e8bb917cf4d219f2"
+    )
+    features = load_npz_features(features_path)
+    assert features["token_mask"].shape == (1, 76)
+    assert features["atom_mask"].shape == (1, 608)
+    assert int(features["atom_mask"].sum()) == 601
+    metadata = json.loads(structure_path.read_text(encoding="utf-8"))
+    assert metadata["atom_count"] == 601
 
 
 def test_confidence_contract_checks_complete_output_extents() -> None:
