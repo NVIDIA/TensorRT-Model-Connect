@@ -978,6 +978,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: timm_swin.classify
+    family: timm_swin
+    operation: classify
+    model: swin-tiny-patch4-window7-224-ms-in1k
+    workload:
+      testcase: swin-tiny-patch4-window7-224-ms-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_repvgg.classify
     family: timm_repvgg
     operation: classify

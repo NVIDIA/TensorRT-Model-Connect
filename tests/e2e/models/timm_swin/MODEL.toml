@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_swin"
+plugin = "timm_swin"
+test_manifests = [
+  "manifests/swin-tiny-patch4-window7-224-ms-in1k.json",
+]
+
+[e2e_defaults.image_classification]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = ["test_image"]

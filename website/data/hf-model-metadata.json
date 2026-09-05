@@ -1389,6 +1389,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/swin_tiny_patch4_window7_224.ms_in1k",
+      "revision": "4cc3a7275b50b53a7bec45f32c236ebe64227cff",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "swin_tiny_patch4_window7_224"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",
