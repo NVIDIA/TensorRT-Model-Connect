@@ -224,6 +224,8 @@ models:
     workloads: [mmlu_continuation_parity]
   olmo2-1b:
     workloads: [mmlu_continuation_parity]
+  hrnet-w18-ms-aug-in1k:
+    workloads: [imagenette_image_classification]
   opt-125m:
     workloads: [mmlu_continuation_parity]
   paraphrase-multilingual-minilm-l12-v2:

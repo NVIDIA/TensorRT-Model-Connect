@@ -1389,6 +1389,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/hrnet_w18.ms_aug_in1k",
+      "revision": "7e2c5583769f54514fd87e3ba9de408e33eaba0f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "hrnet_w18"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",
