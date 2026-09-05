@@ -154,6 +154,8 @@ models:
     workloads: [mmlu_continuation_parity]
   inception-v3-tv-in1k:
     workloads: [imagenette_image_classification]
+  inception-v4-tf-in1k:
+    workloads: [imagenette_image_classification]
   internlm2-1.8b:
     workloads: [mmlu_five_shot_mcq]
   internvl3-8b:
