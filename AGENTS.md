@@ -69,10 +69,25 @@
   `.agents/plugins/marketplace.json`.
 - The `trtmc-agent-skills` plugin is marked `INSTALLED_BY_DEFAULT` and exposes
   repo-local skills from `plugins/trtmc-agent-skills/skills/`.
-- Use `$write-git-messages` when drafting or reviewing commit messages, PR
-  titles, PR descriptions, squash merge messages, or rebase message text.
-- If `$write-git-messages` is not listed in the active runtime skills, load
-  `plugins/trtmc-agent-skills/skills/write-git-messages/SKILL.md` directly and
-  follow it.
+- **If a skill below is not listed in the active runtime skills, load
+  `plugins/trtmc-agent-skills/skills/<name>/SKILL.md` directly and follow it.**
+  Registration is through the Codex plugin path, so other agent runtimes do not
+  list these; an empty runtime skill list is not evidence that no skill covers
+  the task.
+- Consult the skill that matches the task before starting it:
+
+| Task | Skill |
+| --- | --- |
+| Onboard a Hugging Face model, or extend a family, to produce a bundle | `transform-model` |
+| TensorRT output disagrees with the reference, or validation fails numerically | `debug-trt-mismatch` |
+| FP16/BF16 dtype threading and explicit FP32 boundaries | `fp16-trt-network` |
+| Evaluate a precision or quantization format for a model | `optimize-model-precision` |
+| Diagnose runtime cost, or produce performance evidence | `profile-model` |
+| Prepare a build or validation environment on an unfamiliar host | `setup-trtmc-environment` |
+| Publish a change as a pull request | `submit-github-pr` |
+| Monitor PR CI, diagnose failed checks, rebase onto `github/main` | `pr-babysitter` |
+| Turn a finding into a GitHub issue | `submit-github-bug-issue` |
+| Draft or review commit messages, PR titles, PR descriptions, merge messages | `write-git-messages` |
+| Keep the website, skills, commands, and architecture docs aligned | `doc-sync` |
 
 <!-- Collaborative review anchor: batch 2. -->

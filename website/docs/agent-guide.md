@@ -24,6 +24,20 @@ Before changing or running anything, an agent must:
    publication evidence in its report; and
 5. state which meaningful validations were not run.
 
+## Repository skills
+
+The repository ships task-specific skills under
+`plugins/trtmc-agent-skills/skills/`. They are registered through the Codex
+plugin path, so another agent runtime will not list them: read
+`plugins/trtmc-agent-skills/skills/<name>/SKILL.md` directly. An empty runtime
+skill list is not evidence that no skill covers the task.
+
+Start from the routing table in
+[`AGENTS.md`](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/AGENTS.md).
+The two that cover the most common contributions are `transform-model`, for
+onboarding a Hugging Face model or extending a family, and
+`debug-trt-mismatch`, for output that disagrees with the reference.
+
 ## Safety boundaries
 
 An agent must not:
