@@ -1623,6 +1623,96 @@ int cmd_rerank(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+int cmd_predict_structure(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.input_path.empty() || args.output_dir.empty()) {
+        std::cerr << "Error: predict-structure requires bundle + --input + --output\n";
+        return EXIT_FAILURE;
+    }
+    std::ifstream request_stream(args.input_path, std::ios::binary);
+    if (!request_stream) {
+        std::cerr << "Error: failed to open structure request: " << args.input_path << '\n';
+        return EXIT_FAILURE;
+    }
+    const std::string request_document((std::istreambuf_iterator<char>(request_stream)),
+                                       std::istreambuf_iterator<char>());
+    auto pipeline = load_pipeline(args);
+    const auto request = pipeline->prepare_structure_input(request_document, args.input_path);
+    trtmc::StructurePredictionConfig config;
+    if (args.seed >= 0)
+        config.seed = args.seed;
+    if (args.num_steps >= 0)
+        config.sampling_steps = args.num_steps;
+    config.diffusion_samples = args.num_samples;
+    if (args.benchmark < 0) {
+        std::cerr << "Error: --benchmark must be non-negative\n";
+        return EXIT_FAILURE;
+    }
+    const int warmup_runs = args.benchmark > 0 ? std::max(0, args.warmup) : 0;
+    for (int run = 0; run < warmup_runs; ++run)
+        (void)pipeline->predict_structure(request, config);
+    const int measured_runs = args.benchmark > 0 ? args.benchmark : 1;
+    trtmc::StructurePredictionResult result;
+    std::vector<double> latencies_ms;
+    latencies_ms.reserve(static_cast<std::size_t>(measured_runs));
+    for (int run = 0; run < measured_runs; ++run) {
+        const auto begin = std::chrono::steady_clock::now();
+        result = pipeline->predict_structure(request, config);
+        const auto end = std::chrono::steady_clock::now();
+        latencies_ms.push_back(std::chrono::duration<double, std::milli>(end - begin).count());
+    }
+
+    const auto structure_path = std::filesystem::path(args.output_dir);
+    if (!structure_path.parent_path().empty())
+        std::filesystem::create_directories(structure_path.parent_path());
+    std::ofstream structure_stream(structure_path, std::ios::binary);
+    structure_stream.write(result.structure.data(),
+                           static_cast<std::streamsize>(result.structure.size()));
+    if (!structure_stream)
+        throw std::runtime_error("failed to write structure output: " + args.output_dir);
+    const std::string metadata_path =
+        args.output_json.empty() ? args.output_dir + ".metadata.json" : args.output_json;
+    const auto metadata_parent = std::filesystem::path(metadata_path).parent_path();
+    if (!metadata_parent.empty())
+        std::filesystem::create_directories(metadata_parent);
+    std::ofstream metadata_stream(metadata_path, std::ios::binary);
+    metadata_stream.write(result.metadata_json.data(),
+                          static_cast<std::streamsize>(result.metadata_json.size()));
+    if (!metadata_stream)
+        throw std::runtime_error("failed to write structure metadata: " + metadata_path);
+
+    const double elapsed_ms = std::accumulate(latencies_ms.begin(), latencies_ms.end(), 0.0);
+    const double mean_latency_ms = elapsed_ms / static_cast<double>(measured_runs);
+    auto ordered_latencies = latencies_ms;
+    std::sort(ordered_latencies.begin(), ordered_latencies.end());
+    const std::size_t middle = ordered_latencies.size() / 2U;
+    const double p50_latency_ms =
+        ordered_latencies.size() % 2U == 0
+            ? (ordered_latencies[middle - 1U] + ordered_latencies[middle]) / 2.0
+            : ordered_latencies[middle];
+    double squared_deviation = 0.0;
+    for (const double latency : latencies_ms)
+        squared_deviation += (latency - mean_latency_ms) * (latency - mean_latency_ms);
+    const nlohmann::json summary = {
+        {"structure_path", structure_path.string()},
+        {"metadata_path", metadata_path},
+        {"warmup_runs", warmup_runs},
+        {"measured_runs", measured_runs},
+        {"latency_ms", latencies_ms},
+        {"mean_latency_ms", mean_latency_ms},
+        {"p50_latency_ms", p50_latency_ms},
+        {"min_latency_ms", ordered_latencies.front()},
+        {"max_latency_ms", ordered_latencies.back()},
+        {"stddev_latency_ms", std::sqrt(squared_deviation / static_cast<double>(measured_runs))},
+        {"throughput_samples_per_second", 1000.0 * static_cast<double>(measured_runs) / elapsed_ms},
+        {"confidence_score", result.confidence.confidence_score},
+        {"complex_plddt", result.confidence.complex_plddt},
+        {"ptm", result.confidence.ptm},
+        {"plddt_count", result.confidence.plddt.size()},
+    };
+    std::cout << summary.dump() << '\n';
+    return EXIT_SUCCESS;
+}
+
 std::vector<float> parse_numeric_csv(const std::string& csv) {
     std::vector<float> values;
     std::string token;
@@ -2056,6 +2146,8 @@ int main(int argc, char** argv) {
             return cmd_embed(args);
         if (args.command == "rerank")
             return cmd_rerank(args);
+        if (args.command == "predict-structure")
+            return cmd_predict_structure(args);
         if (args.command == "solve")
             return cmd_solve(args);
         if (args.command == "speak")

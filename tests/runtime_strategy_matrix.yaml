@@ -60,6 +60,7 @@
     "dinov3_image_feature_extraction",
     "moge_monocular_geometry",
     "lerobot_act_action_chunk",
+    "openfold3_structure_prediction",
     "timm_vit_image_classification",
     "timm_resnet_image_classification",
     "timm_repvgg_image_classification",
@@ -95,6 +96,17 @@
         "RunnerParityTest"
       ],
       "performance_mode": "decode"
+    },
+    "openfold3_structure_prediction": {
+      "task_strategy": "structure_prediction",
+      "cli_commands": [
+        "predict-structure"
+      ],
+      "runner_class": "runner.OpenFold3StructureRunner",
+      "comparator_class": "comparator.OpenFold3InvariantComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['openfold3_structure_prediction'].",
+      "performance_mode": "single_pass"
     },
     "qwen_decoder_kv_cache": {
       "task_strategy": "text_generation_causal",

@@ -23,6 +23,7 @@ struct CliArgs {
     std::string image_path;
     std::string right_image_path;
     std::string state_path;
+    std::string input_path;
     std::string lora_adapter_path;
     std::string lora_adapter_id{"default"};
     std::string output_dir;

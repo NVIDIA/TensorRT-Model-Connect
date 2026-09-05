@@ -13,6 +13,7 @@ const CATEGORY_ORDER = [
   'Computer Vision',
   'Audio',
   'Time Series',
+  'Biology',
 ];
 
 export default function ModelRecipeTaskIndex() {

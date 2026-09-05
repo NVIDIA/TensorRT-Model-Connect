@@ -24,8 +24,19 @@ import urllib.request
 from .context import CiContext
 from .process import CiError
 
-_MAX_FILE_BYTES = 512 << 20
-_ALLOWED_ORIGINS = {"api.ngc.nvidia.com"}
+_MAX_FILE_BYTES = 3 << 30
+_MAX_CONTRACT_BYTES = 3 << 30
+_ALLOWED_ORIGINS = {
+    "api.ngc.nvidia.com",
+    "raw.githubusercontent.com",
+}
+_S3_ORIGIN = re.compile(r"[a-z0-9][a-z0-9-]{2,62}\.s3\.amazonaws\.com")
+
+
+def _allowed_origin(hostname: str | None) -> bool:
+    return hostname in _ALLOWED_ORIGINS or bool(
+        isinstance(hostname, str) and _S3_ORIGIN.fullmatch(hostname)
+    )
 
 
 @dataclass(frozen=True)
@@ -58,8 +69,10 @@ def _relative(value: object, field: str) -> str:
     if not isinstance(value, str) or not value or "\\" in value:
         raise CiError(f"{field} must be a non-empty POSIX path")
     path = PurePosixPath(value)
-    if path.is_absolute() or path.as_posix() != value or any(
-        part in {"", ".", ".."} for part in path.parts
+    if (
+        path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
     ):
         raise CiError(f"{field} must be a canonical relative path")
     return value
@@ -87,9 +100,7 @@ def parse_model_artifact_contract(
     if PurePosixPath(relative_path).parts[0] != family:
         raise CiError("model_artifact_cache.relative_path must be owned by its E2E family")
     environment = raw.get("environment_variable")
-    if not isinstance(environment, str) or not re.fullmatch(
-        r"[A-Za-z_][A-Za-z0-9_]*", environment
-    ):
+    if not isinstance(environment, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment):
         raise CiError("model_artifact_cache.environment_variable is invalid")
     file_values = raw.get("files")
     if not isinstance(file_values, list) or not file_values or len(file_values) > 8:
@@ -107,7 +118,7 @@ def parse_model_artifact_contract(
         if (
             parsed is None
             or parsed.scheme != "https"
-            or parsed.hostname not in _ALLOWED_ORIGINS
+            or not _allowed_origin(parsed.hostname)
             or parsed.username is not None
             or parsed.password is not None
             or parsed.fragment
@@ -117,14 +128,19 @@ def parse_model_artifact_contract(
         size = value.get("size")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise CiError(f"model_artifact_cache.files[{index}].sha256 is invalid")
-        if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > _MAX_FILE_BYTES:
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 0
+            or size > _MAX_FILE_BYTES
+        ):
             raise CiError(f"model_artifact_cache.files[{index}].size is invalid")
         if path in seen:
             raise CiError(f"duplicate model artifact path: {path}")
         seen.add(path)
         files.append(ModelArtifactFile(path, url, digest, size))
-    if sum(item.size for item in files) > _MAX_FILE_BYTES:
-        raise CiError("model_artifact_cache exceeds the 512 MiB total limit")
+    if sum(item.size for item in files) > _MAX_CONTRACT_BYTES:
+        raise CiError("model_artifact_cache exceeds the 3 GiB total limit")
     return ModelArtifactContract(family, relative_path, environment, tuple(files))
 
 
@@ -148,9 +164,9 @@ class ModelArtifactCacheWarmer:
         self.context = context
 
     def warm_contract(self, contract: ModelArtifactContract) -> Path:
-        configured = self.context.env.get("TRTMC_MODEL_ARTIFACT_CACHE_ROOT") or self.context.env.get(
-            "TRTMC_MODEL_REFERENCE_CACHE_ROOT", ""
-        )
+        configured = self.context.env.get(
+            "TRTMC_MODEL_ARTIFACT_CACHE_ROOT"
+        ) or self.context.env.get("TRTMC_MODEL_REFERENCE_CACHE_ROOT", "")
         if not configured:
             raise CiError("TRTMC_MODEL_ARTIFACT_CACHE_ROOT is required")
         repository = self.context.repository.resolve(strict=True)
@@ -171,7 +187,9 @@ class ModelArtifactCacheWarmer:
         if lock_dir.is_symlink():
             raise CiError("model artifact cache lock directory must not be a symlink")
         lock_dir.mkdir(exist_ok=True)
-        lock_path = lock_dir / (hashlib.sha256(contract.relative_path.encode()).hexdigest() + ".lock")
+        lock_path = lock_dir / (
+            hashlib.sha256(contract.relative_path.encode()).hexdigest() + ".lock"
+        )
         with lock_path.open("a+", encoding="utf-8") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             destination.mkdir(parents=True, exist_ok=True)
@@ -183,18 +201,27 @@ class ModelArtifactCacheWarmer:
                 if target.exists():
                     validate_artifact(target, item)
                     continue
-                handle, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+                handle, temporary_name = tempfile.mkstemp(
+                    prefix=f".{target.name}.", dir=target.parent
+                )
                 os.close(handle)
                 temporary = Path(temporary_name)
                 try:
                     digest = hashlib.sha256()
                     size = 0
-                    request = urllib.request.Request(item.url, headers={"User-Agent": "trtmc-model-proof/1"})
-                    with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+                    request = urllib.request.Request(
+                        item.url, headers={"User-Agent": "trtmc-model-proof/1"}
+                    )
+                    with (
+                        urllib.request.urlopen(request, timeout=60) as response,
+                        temporary.open("wb") as output,
+                    ):
                         while block := response.read(1 << 20):
                             size += len(block)
                             if size > item.size:
-                                raise CiError(f"model artifact exceeds its declared size: {item.path}")
+                                raise CiError(
+                                    f"model artifact exceeds its declared size: {item.path}"
+                                )
                             digest.update(block)
                             output.write(block)
                     if size != item.size or digest.hexdigest() != item.sha256:

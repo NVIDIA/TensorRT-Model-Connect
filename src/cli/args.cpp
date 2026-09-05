@@ -215,6 +215,8 @@ void print_usage() {
            "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\n"
            "  trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]\n"
            "  trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]\n"
+           "  trtmc predict-structure <bundle.bundle> --input REQUEST --output STRUCTURE.cif "
+           "[--output-json METADATA.json] [--benchmark N] [--warmup N]\n"
            "  trtmc detect          <bundle.bundle> --image PATH [--output-json PATH] "
            "[--score-threshold F]\n"
            "  trtmc generate-audio  <bundle.bundle> --prompt \"text\" --output PATH "
@@ -292,6 +294,7 @@ CliArgs parse_args(int argc, char** argv) {
                                        "classify",
                                        "detect",
                                        "extract-features",
+                                       "predict-structure",
                                        "generate-audio",
                                        "serve-audio",
                                        "encode",
@@ -538,6 +541,10 @@ CliArgs parse_args(int argc, char** argv) {
                 return args;
             }
             args.control_frequency_hz = *value;
+            continue;
+        }
+        if (arg == "--input" && need_value(arg)) {
+            args.input_path = argv[++i];
             continue;
         }
         if (arg == "--lora-adapter" && need_value(arg)) {
@@ -877,6 +884,11 @@ CliArgs parse_args(int argc, char** argv) {
          args.output_dir.empty() || args.control_frequency_hz <= 0.0F)) {
         args.parse_error = true;
         args.error_message = "act requires bundle + --image + --state + --output + --control-hz";
+    }
+    if (args.command == "predict-structure" &&
+        (args.bundle_path.empty() || args.input_path.empty() || args.output_dir.empty())) {
+        args.parse_error = true;
+        args.error_message = "predict-structure requires bundle + --input + --output";
     }
 
     return args;

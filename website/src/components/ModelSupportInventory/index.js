@@ -23,6 +23,7 @@ const TASK_LABELS = {
   segmentation: 'Segmentation',
   speech_to_speech: 'Speech to speech',
   speech_to_text: 'Speech to text',
+  structure_prediction: 'Structure prediction',
   text_generation_causal: 'Text generation',
   text_to_audio: 'Text to audio',
   vision_language_generation: 'Vision-language generation',
@@ -39,6 +40,7 @@ const TASK_GROUPS = {
     'monocular_geometry', 'segmentation', 'prompted_segmentation',
   ],
   'time-series': ['neural_operator', 'diffusion_text_generation'],
+  biology: ['structure_prediction'],
 };
 
 function taskLabel(task) {

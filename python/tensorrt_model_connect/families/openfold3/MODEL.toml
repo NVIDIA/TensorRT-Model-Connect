@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "openfold3"
+plugin = "openfold3"
+module = "plugin"
+config_adapter = "model_config.py|config_from_dir"
+aliases = ["openfold3", "openfold-3", "OpenFold3"]
+prefixes = ["openfold3", "openfold-3"]

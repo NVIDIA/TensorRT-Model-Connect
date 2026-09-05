@@ -289,6 +289,7 @@ class TestClassifyModality:
             "neural_operator": "neural_operator",
             "object_detection": "detection",
             "omni_multimodal": "omni",
+            "structure_prediction": "structured",
         }
         for strategy, modality in expected.items():
             assert mod.classify_modality(
