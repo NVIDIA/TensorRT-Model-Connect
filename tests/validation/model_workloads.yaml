@@ -76,6 +76,8 @@ models:
     workloads: [mmlu_continuation_parity]
   bert-base-uncased:
     workloads: [stsbenchmark_encoder_embedding_parity]
+  convnext-tiny-in12k-ft-in1k:
+    workloads: [imagenette_image_classification]
   bge-small-en-v1.5:
     workloads: [stsbenchmark_encoder_embedding_parity]
   bloom-560m:

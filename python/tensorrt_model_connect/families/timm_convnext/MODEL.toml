@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_convnext"
+plugin = "timm_convnext"
+module = "plugin"
+python_profile_specs = [
+  "timm_convnext_reference|families/timm_convnext/python_profile_requirements/timm_convnext_reference.lock.txt|families/timm_convnext/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_convnext_reference",
+]
+aliases = [
+  "timm_convnext",
+  "convnext_tiny",
+]
+prefixes = [
+  "timm_convnext",
+  "convnext",
+]
