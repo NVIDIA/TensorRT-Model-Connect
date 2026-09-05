@@ -1389,6 +1389,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/convnext_tiny.in12k_ft_in1k",
+      "revision": "aa096f03029c7f0ec052013f64c819b34f8ad790",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "convnext_tiny"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",
