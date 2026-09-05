@@ -1,0 +1,437 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "families/canary/runtime/kv_cache.h"
+
+#include "trtmc/runtime/trt_module.h"
+
+#include <algorithm>
+#include <cassert>
+#include <cstring>
+#include <stdexcept>
+#include <tuple>
+
+namespace trtmc {
+
+CanaryKvCache::CanaryKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
+                             cudaStream_t stream, DType cache_dtype, int32_t batch_capacity,
+                             CanaryKvCacheNames names)
+    : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim),
+      batch_capacity_(std::max(batch_capacity, 1)), stream_(stream), cache_dtype_(cache_dtype),
+      cache_element_size_(dtype_size(cache_dtype)), names_(std::move(names)) {
+
+    // If names were not supplied, generate standard defaults.
+    if (names_.cache_k.empty()) {
+        names_.cache_k.reserve(static_cast<std::size_t>(num_layers));
+        names_.cache_v.reserve(static_cast<std::size_t>(num_layers));
+        names_.present_k.reserve(static_cast<std::size_t>(num_layers));
+        names_.present_v.reserve(static_cast<std::size_t>(num_layers));
+        for (int32_t i = 0; i < num_layers; ++i) {
+            std::string suffix = "_" + std::to_string(i);
+            names_.cache_k.push_back("cache_k" + suffix);
+            names_.cache_v.push_back("cache_v" + suffix);
+            names_.present_k.push_back("present_k" + suffix);
+            names_.present_v.push_back("present_v" + suffix);
+        }
+    }
+
+    cache_k_.reserve(static_cast<std::size_t>(num_layers));
+    cache_v_.reserve(static_cast<std::size_t>(num_layers));
+    present_k_.reserve(static_cast<std::size_t>(num_layers));
+    present_v_.reserve(static_cast<std::size_t>(num_layers));
+
+    for (int32_t i = 0; i < num_layers; ++i) {
+        const std::vector<int64_t> cache_shape =
+            uses_batched_layout() ? std::vector<int64_t>{batch_capacity_, max_length, kv_dim}
+                                  : std::vector<int64_t>{max_length, kv_dim};
+        const std::vector<int64_t> present_shape =
+            uses_batched_layout() ? std::vector<int64_t>{batch_capacity_, kv_dim}
+                                  : std::vector<int64_t>{1, kv_dim};
+        cache_k_.emplace_back(cache_shape, cache_dtype_, stream);
+        cache_v_.emplace_back(cache_shape, cache_dtype_, stream);
+        present_k_.emplace_back(present_shape, cache_dtype_, stream);
+        present_v_.emplace_back(present_shape, cache_dtype_, stream);
+    }
+
+    // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
+    mask_buf_.resize(static_cast<std::size_t>(max_length) + 1);
+
+    reset();
+}
+
+// Masked score constant is model-local.
+static constexpr float kMaskedScore = -1.0e4F;
+
+void CanaryKvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
+    if (!has_position_input_)
+        return;
+    const int32_t count = uses_batched_layout() ? batch_size_ : seq_len;
+    pos_buf_vec_.resize(static_cast<std::size_t>(count));
+    for (int32_t i = 0; i < count; ++i)
+        pos_buf_vec_[static_cast<std::size_t>(i)] =
+            uses_batched_layout() ? position_ : position_ + i;
+    Tensor pos_t;
+    pos_t.data = pos_buf_vec_.data();
+    pos_t.shape = {static_cast<int64_t>(count)};
+    pos_t.dtype = DType::kInt32;
+    inputs[names_.position_id] = pos_t;
+}
+
+void CanaryKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
+    // Batched prefill mask: (seq_len, max_length + seq_len). Columns
+    // [0, valid) are visible cache, [valid, max_length) are stale slots,
+    // [max_length, max_length+seq_len) are the new tokens — causal so
+    // token i sees tokens 0..i.
+    const int32_t valid = std::max(0, std::min(position_, max_length_));
+    const int32_t kv_len = max_length_ + seq_len;
+    const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
+    mask_buf_.assign(total, kMaskedScore);
+    for (int32_t i = 0; i < seq_len; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
+        for (int32_t j = 0; j < valid; ++j)
+            mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
+        for (int32_t j = 0; j <= i; ++j)
+            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+                0.0f;
+    }
+    Tensor mask_t;
+    mask_t.data = mask_buf_.data();
+    mask_t.shape = {static_cast<int64_t>(seq_len), static_cast<int64_t>(kv_len)};
+    mask_t.dtype = DType::kFloat32;
+    inputs[names_.attention_mask] = mask_t;
+}
+
+void CanaryKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len) {
+    // Diffusion block mask: all valid prefix cache rows are visible, stale cache
+    // rows are hidden, and every token in the current block can see every other
+    // token in the current block.
+    const int32_t valid = std::max(0, std::min(position_, max_length_));
+    const int32_t kv_len = max_length_ + seq_len;
+    const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
+    mask_buf_.assign(total, kMaskedScore);
+    for (int32_t i = 0; i < seq_len; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
+        for (int32_t j = 0; j < valid; ++j)
+            mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
+        for (int32_t j = 0; j < seq_len; ++j)
+            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+                0.0f;
+    }
+    Tensor mask_t;
+    mask_t.data = mask_buf_.data();
+    mask_t.shape = {static_cast<int64_t>(seq_len), static_cast<int64_t>(kv_len)};
+    mask_t.dtype = DType::kFloat32;
+    inputs[names_.attention_mask] = mask_t;
+}
+
+void CanaryKvCache::write_decode_mask(TensorMap& inputs) {
+    if (bound_module_ == nullptr || bound_module_->input_rank(names_.attention_mask) != 3)
+        throw std::runtime_error("Canary decoder must expose rank-3 attention_mask");
+
+    const int32_t valid = std::max(0, std::min(position_, max_length_));
+    const int32_t mask_width = max_length_ + 1;
+    const int32_t rows = batch_size_;
+    mask_buf_.assign(static_cast<std::size_t>(rows) * static_cast<std::size_t>(mask_width),
+                     kMaskedScore);
+    for (int32_t batch = 0; batch < rows; ++batch) {
+        const std::size_t row =
+            static_cast<std::size_t>(batch) * static_cast<std::size_t>(mask_width);
+        for (int32_t i = 0; i < valid; ++i)
+            mask_buf_[row + static_cast<std::size_t>(i)] = 0.0F;
+        mask_buf_[row + static_cast<std::size_t>(mask_width - 1)] = 0.0F;
+    }
+
+    Tensor mask_t;
+    mask_t.data = mask_buf_.data();
+    mask_t.shape = {rows, 1, mask_width};
+    mask_t.dtype = DType::kFloat32;
+    inputs[names_.attention_mask] = mask_t;
+}
+
+void CanaryKvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
+    if (seq_len <= 0)
+        seq_len = 1;
+    write_position_input(inputs, seq_len);
+    if (uses_batched_layout() && seq_len > 1)
+        throw std::invalid_argument(
+            "CanaryKvCache batched request decoding only supports one token per lane");
+    if (seq_len > 1)
+        write_batched_mask(inputs, seq_len);
+    else
+        write_decode_mask(inputs);
+}
+
+void CanaryKvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len) {
+    if (seq_len <= 0)
+        seq_len = 1;
+    write_position_input(inputs, seq_len);
+    write_bidirectional_mask(inputs, seq_len);
+}
+
+void CanaryKvCache::bind_to(ITrtModule& module) {
+    if (names_.cache_k.empty())
+        throw std::runtime_error("Canary KV cache has no cache tensor names");
+    const auto& cache_name = names_.cache_k.front();
+    if (module.input_rank(cache_name) != 3 || module.input_rank(names_.attention_mask) != 3) {
+        throw std::runtime_error("Canary decoder does not match its rank-3 batch contract");
+    }
+    const auto minimum =
+        module.input_profile_shape(cache_name, module.profile_idx(), ProfileShapeSelector::kMin);
+    const auto maximum =
+        module.input_profile_shape(cache_name, module.profile_idx(), ProfileShapeSelector::kMax);
+    if (minimum.size() != 3 || maximum.size() != 3 || minimum[1] != max_length_ ||
+        maximum[1] != max_length_ || minimum[2] != kv_dim_ || maximum[2] != kv_dim_) {
+        throw std::runtime_error("Canary decoder does not match its fixed KV-row contract");
+    }
+
+    bound_module_ = &module;
+    has_position_input_ = module.has_input(names_.position_id);
+    const std::vector<int64_t> cache_shape{batch_size_, max_length_, kv_dim_};
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        module.bind_external(names_.cache_k[layer], cache_k_[layer].data(), cache_shape);
+        module.bind_external(names_.cache_v[layer], cache_v_[layer].data(), cache_shape);
+        module.bind_external(names_.present_k[layer], present_k_[layer].data());
+        module.bind_external(names_.present_v[layer], present_v_[layer].data());
+    }
+}
+
+void CanaryKvCache::bind_cache_inputs(ITrtModule& module) {
+    has_position_input_ = module.has_input(names_.position_id);
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        module.bind_external(names_.cache_k[li], cache_k_[li].data());
+        module.bind_external(names_.cache_v[li], cache_v_[li].data());
+    }
+}
+
+void CanaryKvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
+                                     const std::vector<const void*>& prefill_v, int32_t seq_len) {
+    if (seq_len <= 0)
+        return;
+    if (seq_len > max_length_)
+        throw std::runtime_error("CanaryKvCache::write_prefill_kv: seq_len exceeds max_length");
+    if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
+        static_cast<int32_t>(prefill_v.size()) != num_layers_) {
+        throw std::runtime_error(
+            "CanaryKvCache::write_prefill_kv: per-layer pointer count mismatch");
+    }
+    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(cache_k_[li].data(), prefill_k[li], block_bytes, cudaMemcpyDeviceToDevice,
+                        stream_);
+        cudaMemcpyAsync(cache_v_[li].data(), prefill_v[li], block_bytes, cudaMemcpyDeviceToDevice,
+                        stream_);
+    }
+    position_ = seq_len;
+}
+
+void CanaryKvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
+                                      const std::vector<const void*>& prefill_v, int32_t seq_len) {
+    if (seq_len <= 0)
+        return;
+    if (position_ + seq_len > max_length_)
+        throw std::runtime_error("CanaryKvCache::append_prefill_kv: append exceeds max_length");
+    if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
+        static_cast<int32_t>(prefill_v.size()) != num_layers_) {
+        throw std::runtime_error(
+            "CanaryKvCache::append_prefill_kv: per-layer pointer count mismatch");
+    }
+    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
+    const auto offset = static_cast<std::size_t>(position_) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, prefill_k[li],
+                        block_bytes, cudaMemcpyDeviceToDevice, stream_);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, prefill_v[li],
+                        block_bytes, cudaMemcpyDeviceToDevice, stream_);
+    }
+    position_ += seq_len;
+}
+
+void CanaryKvCache::set_position(int32_t position) {
+    position_ = std::max(0, std::min(position, max_length_));
+}
+
+void CanaryKvCache::set_batch_size(int32_t batch_size) {
+    if (batch_size <= 0 || batch_size > batch_capacity_) {
+        throw std::invalid_argument("CanaryKvCache batch size must be in [1, " +
+                                    std::to_string(batch_capacity_) + "]");
+    }
+    batch_size_ = batch_size;
+}
+
+void CanaryKvCache::advance(int32_t n_tokens) {
+    // For now, only single-token advance is supported.
+    // n_tokens > 1 reserved for future batched prefill (TASK-10).
+    assert(n_tokens == 1 && "CanaryKvCache::advance: only n_tokens==1 supported");
+    (void)n_tokens;
+
+    auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+
+    if (position_ < max_length_) {
+        auto offset = static_cast<std::size_t>(position_) * row_bytes;
+        for (int32_t i = 0; i < num_layers_; ++i) {
+            auto li = static_cast<std::size_t>(i);
+            if (uses_batched_layout()) {
+                const auto cache_pitch = static_cast<std::size_t>(max_length_) * row_bytes;
+                cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, cache_pitch,
+                                  present_k_[li].data(), row_bytes, row_bytes,
+                                  static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice,
+                                  stream_);
+                cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, cache_pitch,
+                                  present_v_[li].data(), row_bytes, row_bytes,
+                                  static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice,
+                                  stream_);
+            } else {
+                cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
+                                present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice,
+                                stream_);
+                cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
+                                present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice,
+                                stream_);
+            }
+        }
+        ++position_;
+    } else {
+        if (uses_batched_layout()) {
+            throw std::runtime_error(
+                "CanaryKvCache batched decoder exceeded its fixed cache length");
+        }
+        // Cache full: shift [1..max) → [0..max-1), then write at tail
+        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
+        auto tail_offset = shift_bytes;
+        for (int32_t i = 0; i < num_layers_; ++i) {
+            auto li = static_cast<std::size_t>(i);
+            auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
+            auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
+            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
+                            cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
+                            cudaMemcpyDeviceToDevice, stream_);
+        }
+        // position_ stays at max_length_ (cache is full, all slots visible)
+    }
+}
+
+std::unique_ptr<CanaryInferenceState> CanaryKvCache::create_empty() const {
+    return std::make_unique<CanaryKvCache>(num_layers_, max_length_, kv_dim_, stream_, cache_dtype_,
+                                           batch_capacity_, names_);
+}
+
+bool CanaryKvCache::is_compatible_with(const CanaryKvCache& other) const {
+    return std::tie(num_layers_, max_length_, kv_dim_, batch_capacity_, cache_dtype_, stream_) ==
+           std::tie(other.num_layers_, other.max_length_, other.kv_dim_, other.batch_capacity_,
+                    other.cache_dtype_, other.stream_);
+}
+
+void CanaryKvCache::copy_from(const CanaryInferenceState& other) {
+    const auto* source = dynamic_cast<const CanaryKvCache*>(&other);
+    if (source == nullptr || !is_compatible_with(*source)) {
+        throw std::invalid_argument("CanaryKvCache::copy_from: incompatible state");
+    }
+
+    const int32_t valid_rows = std::max(0, std::min(source->position_, max_length_));
+    const std::size_t row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const std::size_t copy_bytes = static_cast<std::size_t>(valid_rows) * row_bytes;
+    batch_size_ = source->batch_size_;
+    for (int32_t i = 0; i < num_layers_ && copy_bytes > 0; ++i) {
+        const auto li = static_cast<std::size_t>(i);
+        cudaError_t status;
+        if (uses_batched_layout()) {
+            const auto pitch = static_cast<std::size_t>(max_length_) * row_bytes;
+            status = cudaMemcpy2DAsync(cache_k_[li].data(), pitch, source->cache_k_[li].data(),
+                                       pitch, copy_bytes, static_cast<std::size_t>(batch_size_),
+                                       cudaMemcpyDeviceToDevice, stream_);
+        } else {
+            status = cudaMemcpyAsync(cache_k_[li].data(), source->cache_k_[li].data(), copy_bytes,
+                                     cudaMemcpyDeviceToDevice, stream_);
+        }
+        if (status != cudaSuccess) {
+            throw std::runtime_error(std::string("CanaryKvCache::copy_from K failed: ") +
+                                     cudaGetErrorString(status));
+        }
+        if (uses_batched_layout()) {
+            const auto pitch = static_cast<std::size_t>(max_length_) * row_bytes;
+            status = cudaMemcpy2DAsync(cache_v_[li].data(), pitch, source->cache_v_[li].data(),
+                                       pitch, copy_bytes, static_cast<std::size_t>(batch_size_),
+                                       cudaMemcpyDeviceToDevice, stream_);
+        } else {
+            status = cudaMemcpyAsync(cache_v_[li].data(), source->cache_v_[li].data(), copy_bytes,
+                                     cudaMemcpyDeviceToDevice, stream_);
+        }
+        if (status != cudaSuccess) {
+            throw std::runtime_error(std::string("CanaryKvCache::copy_from V failed: ") +
+                                     cudaGetErrorString(status));
+        }
+    }
+    position_ = valid_rows;
+}
+
+void CanaryKvCache::copy_lanes_from(const CanaryKvCache& source,
+                                    const std::vector<int32_t>& source_lanes) {
+    if (!is_compatible_with(source) || !uses_batched_layout()) {
+        throw std::invalid_argument("CanaryKvCache::copy_lanes_from: incompatible state");
+    }
+    set_batch_size(static_cast<int32_t>(source_lanes.size()));
+    const int32_t valid_rows = std::max(0, std::min(source.position_, max_length_));
+    const std::size_t row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const std::size_t lane_bytes = static_cast<std::size_t>(max_length_) * row_bytes;
+    const std::size_t valid_bytes = static_cast<std::size_t>(valid_rows) * row_bytes;
+    for (std::size_t dst_lane = 0; dst_lane < source_lanes.size(); ++dst_lane) {
+        const int32_t src_lane = source_lanes[dst_lane];
+        if (src_lane < 0 || src_lane >= source.batch_size_) {
+            throw std::out_of_range("CanaryKvCache::copy_lanes_from: source lane out of range");
+        }
+        for (int32_t layer = 0; layer < num_layers_ && valid_bytes > 0; ++layer) {
+            const auto li = static_cast<std::size_t>(layer);
+            const auto src_offset = static_cast<std::size_t>(src_lane) * lane_bytes;
+            const auto dst_offset = dst_lane * lane_bytes;
+            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + dst_offset,
+                            static_cast<const uint8_t*>(source.cache_k_[li].data()) + src_offset,
+                            valid_bytes, cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + dst_offset,
+                            static_cast<const uint8_t*>(source.cache_v_[li].data()) + src_offset,
+                            valid_bytes, cudaMemcpyDeviceToDevice, stream_);
+        }
+    }
+    position_ = valid_rows;
+}
+
+void CanaryKvCache::reset() {
+    // Reset only the logical sequence length. Attention masks hide every
+    // stale cache row, and each present row is overwritten before use.
+    position_ = 0;
+}
+
+std::size_t CanaryKvCache::device_memory_bytes() const {
+    std::size_t total = 0;
+    for (const auto& t : cache_k_)
+        total += t.nbytes();
+    for (const auto& t : cache_v_)
+        total += t.nbytes();
+    for (const auto& t : present_k_)
+        total += t.nbytes();
+    for (const auto& t : present_v_)
+        total += t.nbytes();
+    return total;
+}
+
+bool CanaryKvCache::ok() const {
+    if (cache_k_.size() != static_cast<std::size_t>(num_layers_))
+        return false;
+    for (const auto& t : cache_k_) {
+        if (!t.ok())
+            return false;
+    }
+    return true;
+}
+
+} // namespace trtmc

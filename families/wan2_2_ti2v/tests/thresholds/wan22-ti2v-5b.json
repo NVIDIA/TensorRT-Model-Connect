@@ -1,0 +1,14 @@
+{
+  "threshold_overrides": {
+    "exact_num_frames": 121,
+    "exact_video_height": 704,
+    "exact_video_width": 1280,
+    "max_pixel_mean": 0.98,
+    "max_temporal_motion_ratio": 2.0,
+    "min_pixel_mean": 0.02,
+    "min_pixel_std": 0.01,
+    "min_temporal_motion_ratio": 0.5,
+    "min_temporal_profile_correlation": 0.75,
+    "min_active_transition_fraction": 0.9
+  }
+}

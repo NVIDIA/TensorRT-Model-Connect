@@ -1,0 +1,20 @@
+{
+  "name": "gemma-2-2b-tp4",
+  "hf_id": "google/gemma-2-2b-it",
+  "bundle": "gemma-2-2b-tp4.bundle",
+  "family": "gemma",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "gemma-2-2b-tp4",
+      "prompt": "What is 2 + 2? Answer with just the number.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  ],
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 4
+}

@@ -1,0 +1,8 @@
+{
+  "threshold_overrides": {
+    "min_pixel_mean": 0.02,
+    "max_pixel_mean": 0.98,
+    "min_pixel_std": 0.01,
+    "contract_min_frame_count": 320
+  }
+}

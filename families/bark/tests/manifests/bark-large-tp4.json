@@ -1,0 +1,23 @@
+{
+  "name": "bark-large-tp4",
+  "hf_id": "suno/bark",
+  "hf_dependencies": [
+    {
+      "repo_id": "openai/whisper-large-v3-turbo"
+    }
+  ],
+  "bundle": "bark-large-tp4.bundle",
+  "family": "bark",
+  "task": "audio_generation",
+  "testcases": [
+    {
+      "name": "bark-large-tp4",
+      "prompt": "Hello, this is a test of the text to speech system.",
+      "max_new_tokens": 768,
+      "seed": 42
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp32",
+  "max_sequence_length": 1024
+}

@@ -1,0 +1,24 @@
+{
+  "name": "qwen-image-edit-2511",
+  "hf_id": "Qwen/Qwen-Image-Edit-2511",
+  "bundle": "qwen-image-edit-2511.bundle",
+  "family": "qwen_image",
+  "task": "image_edit",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "qwen-image-edit-2511",
+      "semantic_assessment": true,
+      "prompt": "Turn the image into a watercolor illustration while preserving the main subject.",
+      "test_image": "data/test_img.jpeg",
+      "negative_prompt": " ",
+      "num_inference_steps": 20,
+      "cfg_scale": 4.0,
+      "seed": 42,
+      "reference_precision": "bf16"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "image_height": 1024,
+  "image_width": 1024
+}

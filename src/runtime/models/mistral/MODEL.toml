@@ -1,9 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-id = "mistral"
-runtime_library = "libtrtmc_model_mistral.so"
-runtime_plugins = ["plugin.cpp|register_mistral_plugin"]
-runtime_strategies = ["mistral_decoder_kv_cache"]
-[validation_profiles]
-decoder_debug = ["mistral_decoder_kv_cache"]

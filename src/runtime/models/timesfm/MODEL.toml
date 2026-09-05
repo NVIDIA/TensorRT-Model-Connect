@@ -1,7 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-id = "timesfm"
-runtime_library = "libtrtmc_model_timesfm.so"
-runtime_plugins = ["plugin.cpp|register_timesfm_plugin"]
-runtime_strategies = ["timesfm_trt"]

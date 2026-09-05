@@ -1,0 +1,24 @@
+{
+  "name": "nemotron-h-nano-9b-tp4",
+  "hf_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+  "bundle": "nemotron-h-nano-9b-tp4.bundle",
+  "family": "nemotron_h",
+  "task": "text_generation",
+  "trust_remote_code": true,
+  "testcases": [
+    {
+      "name": "nemotron-h-nano-9b-tp4",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "reference_backend": "golden_snapshot",
+      "metadata": {
+        "golden_snapshot_path": "data/nemotron_h_nano_9b_golden.json"
+      }
+    }
+  ],
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 4
+}

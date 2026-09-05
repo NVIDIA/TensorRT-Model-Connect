@@ -1,0 +1,653 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""PixArt-Sigma / PixArt-Alpha family build.
+
+Supports PixArt-Sigma and PixArt-Alpha text-to-image diffusion models.
+Architecture: T5-XXL text encoder + PixArt DiT (ada_norm_single) + AutoencoderKL VAE.
+
+Components:
+  text_encoder: T5EncoderModel (T5-XXL, d_model=4096, 24 layers)
+  transformer: PixArtTransformer2DModel (28 layers, dim=1152, 16 heads,
+               ada_norm_single with per-block scale_shift_table,
+               fixed 2D sinusoidal position embeddings — no RoPE)
+  vae: AutoencoderKL (4 latent channels, block_out_channels=[128,256,512,512])
+  scheduler: DPMSolverMultistepScheduler (dpmsolver++, epsilon prediction)
+
+Key differences from Wan/FLUX:
+  - No RoPE: uses fixed 2D sinusoidal position embeddings (buffer, not learned)
+  - ada_norm_single: per-block scale_shift_table[6, dim] + global timestep
+  - 4-channel latent VAE (vs 16-channel for FLUX/Z-Image)
+  - Cross-attention has no norm and no gate (plain residual add)
+  - caption_projection: T5 4096 -> 1152 (Linear + GELU + Linear)
+  - DPM-Solver++ scheduler (not flow matching)
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .config import ModelConfig
+from .checkpoint_mapper import WeightDict
+
+
+from .parallel import ParallelConfig, normalize_parallel_config
+
+if TYPE_CHECKING:
+    from tensorrt_model_connect.build import BuildRequest
+    from tensorrt_model_connect.bundle_writer import BundleWriter
+
+
+class _PixArtModel:
+    # T5-XXL text encoder params
+    _T5_D_MODEL = 4096
+    _T5_NUM_HEADS = 64
+    _T5_D_KV = 64
+    _T5_D_FF = 10240
+    _T5_NUM_LAYERS = 24
+    _T5_VOCAB_SIZE = 32128
+    _T5_MAX_SEQ_LEN_BY_PIPELINE = {
+        "PixArtAlphaPipeline": 120,
+        "PixArtSigmaPipeline": 300,
+    }
+
+    # PixArt DiT params (XL-2 configuration)
+    _DIT_DIM = 1152  # 16 heads * 72 head_dim
+    _DIT_NUM_HEADS = 16
+    _DIT_HEAD_DIM = 72
+    _DIT_NUM_LAYERS = 28
+    _DIT_FFN_DIM = 4608  # 4 * 1152
+    _DIT_CAPTION_CHANNELS = 4096  # T5 output dim before projection
+    _DIT_CROSS_ATTN_DIM = 1152  # after caption_projection
+    _DIT_PATCH_SIZE = 2
+    _DIT_IN_CHANNELS = 4
+    _DIT_OUT_CHANNELS = 8
+
+    # VAE params
+    _VAE_LATENT_CHANNELS = 4
+    _VAE_SCALING_FACTOR = 0.13025
+    _VAE_SCALE_FACTOR = 8  # 2^(len(block_out_channels)-1) = 2^3
+
+    # Image dimensions
+    _IMAGE_HEIGHT = 1024
+    _IMAGE_WIDTH = 1024
+
+    _T5_COMPONENT = 0
+    _DIT_COMPONENT = 1
+    _VAE_COMPONENT = 2
+
+    def _text_sequence_length(self, config: ModelConfig) -> int:
+        """Return the Diffusers text-length contract for this PixArt pipeline."""
+        pipeline_class = str(config.raw.get("_class_name", "") or "")
+        return self._T5_MAX_SEQ_LEN_BY_PIPELINE[pipeline_class]
+
+    def load_weights(
+        self,
+        model_dir: str,
+        config: ModelConfig,
+    ) -> WeightDict:
+        """Load weight paths from diffusers-format directory."""
+        from pathlib import Path
+
+        model_path = Path(model_dir)
+        weights = WeightDict()
+
+        if (model_path / "model_index.json").exists():
+            weights["_model_format"] = "diffusers"
+            weights["_text_encoder_dir"] = str(model_path / "text_encoder")
+            weights["_transformer_dir"] = str(model_path / "transformer")
+            weights["_vae_dir"] = str(model_path / "vae")
+        else:
+            raise ValueError(f"Expected diffusers format with model_index.json in {model_dir}")
+
+        # Read transformer config for exact architecture params
+        import json
+
+        transformer_config_path = model_path / "transformer" / "config.json"
+        if transformer_config_path.exists():
+            tc = json.loads(transformer_config_path.read_text())
+            weights["_transformer_config"] = tc
+
+        return weights
+
+    def build_components(
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
+        parallel_config=None,
+    ) -> dict:
+        """Build all three component engines."""
+        from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+        from .standard_dit_builder import build_standard_dit_engine
+        from .standard_dit_tp_builder import (
+            build_standard_dit_engine as build_standard_dit_tp_engine,
+        )
+        from .vae_2d_builder import build_vae_2d_decoder_engine
+        import json
+        from pathlib import Path
+
+        parallel = normalize_parallel_config(parallel_config)
+        parallel.validate()
+
+        selected_fp32 = {int(index) for index in config.raw.get("_fp32_layers", ())}
+        valid_components = {
+            self._T5_COMPONENT,
+            self._DIT_COMPONENT,
+            self._VAE_COMPONENT,
+        }
+        invalid_components = sorted(selected_fp32 - valid_components)
+        if invalid_components:
+            raise ValueError(
+                "PixArt fp32_layers contains invalid component indices: "
+                f"{invalid_components}; expected 0=T5, 1=DiT, or 2=VAE"
+            )
+
+        def component_precision(component: int) -> str:
+            if precision == "fp16" and component in selected_fp32:
+                return "fp32"
+            return precision
+
+        t5_precision = component_precision(self._T5_COMPONENT)
+        dit_precision = component_precision(self._DIT_COMPONENT)
+        vae_precision = component_precision(self._VAE_COMPONENT)
+
+        text_encoder_dir = weights["_text_encoder_dir"]
+        transformer_dir = weights["_transformer_dir"]
+        vae_dir = weights["_vae_dir"]
+
+        # Read transformer config for exact params
+        tc = weights.get("_transformer_config", {})
+        num_heads = tc.get("num_attention_heads", self._DIT_NUM_HEADS)
+        head_dim = tc.get("attention_head_dim", self._DIT_HEAD_DIM)
+        dit_dim = num_heads * head_dim
+        num_layers = tc.get("num_layers", self._DIT_NUM_LAYERS)
+        patch_size = tc.get("patch_size", self._DIT_PATCH_SIZE)
+        tc.get("in_channels", self._DIT_IN_CHANNELS)
+        cross_attn_dim = tc.get("cross_attention_dim", dit_dim)
+        ffn_dim = dit_dim * 4  # PixArt uses 4x multiplier
+
+        # Read T5 config from text encoder directory
+        t5_config_path = Path(text_encoder_dir) / "config.json"
+        t5_cfg = {}
+        if t5_config_path.exists():
+            t5_cfg = json.loads(t5_config_path.read_text())
+
+        t5_d_model = t5_cfg.get("d_model", self._T5_D_MODEL)
+        t5_num_heads = t5_cfg.get("num_heads", self._T5_NUM_HEADS)
+        t5_d_kv = t5_cfg.get("d_kv", self._T5_D_KV)
+        t5_d_ff = t5_cfg.get("d_ff", self._T5_D_FF)
+        t5_num_layers = t5_cfg.get("num_layers", self._T5_NUM_LAYERS)
+        t5_vocab_size = t5_cfg.get("vocab_size", self._T5_VOCAB_SIZE)
+        text_seq_len = self._text_sequence_length(config)
+
+        # Image and latent dimensions
+        img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
+        img_w = config.raw.get("image_width", self._IMAGE_WIDTH)
+        h_lat = img_h // self._VAE_SCALE_FACTOR
+        w_lat = img_w // self._VAE_SCALE_FACTOR
+        num_patches = (h_lat // patch_size) * (w_lat // patch_size)
+
+        print(
+            f"[pixart] DiT: dim={dit_dim}, heads={num_heads}, "
+            f"layers={num_layers}, patches={num_patches} "
+            f"({h_lat // patch_size}x{w_lat // patch_size})",
+            file=sys.stderr,
+        )
+
+        # 1. T5 text encoder
+        print("[pixart] Loading T5 encoder weights ...", file=sys.stderr)
+        t5_weights = load_t5_weights(
+            text_encoder_dir,
+            d_model=t5_d_model,
+            num_heads=t5_num_heads,
+            d_kv=t5_d_kv,
+            d_ff=t5_d_ff,
+            num_layers=t5_num_layers,
+            vocab_size=t5_vocab_size,
+            precision=t5_precision,
+        )
+        t5_plan = build_t5_encoder_engine(
+            t5_weights,
+            d_model=t5_d_model,
+            num_heads=t5_num_heads,
+            d_kv=t5_d_kv,
+            d_ff=t5_d_ff,
+            num_layers=t5_num_layers,
+            vocab_size=t5_vocab_size,
+            max_seq_len=text_seq_len,
+            precision=t5_precision,
+            verbose=verbose,
+        )
+
+        # 2. DiT denoiser (no RoPE — uses fixed sinusoidal position embeddings)
+        print("[pixart] Loading PixArt DiT weights ...", file=sys.stderr)
+        dit_weights = _load_pixart_dit_weights(
+            transformer_dir,
+            dim=dit_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            ffn_dim=ffn_dim,
+            cross_attn_dim=cross_attn_dim,
+        )
+
+        dit_plan = None
+        dit_rank_plans = None
+        if parallel.enabled:
+            dit_rank_plans = {}
+            for rank in range(parallel.tp_size):
+                print(
+                    f"[pixart] Building PixArt DiT TP rank {rank}/{parallel.tp_size} ...",
+                    file=sys.stderr,
+                )
+                dit_rank_plans[rank] = build_standard_dit_tp_engine(
+                    dit_weights,
+                    dim=dit_dim,
+                    num_heads=num_heads,
+                    num_layers=num_layers,
+                    ffn_dim=ffn_dim,
+                    context_dim=cross_attn_dim,
+                    num_patches=num_patches,
+                    text_seq_len=text_seq_len,
+                    verbose=verbose,
+                    parallel_config=parallel.for_rank(rank),
+                )
+        else:
+            dit_plan = build_standard_dit_engine(
+                dit_weights,
+                dim=dit_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                ffn_dim=ffn_dim,
+                context_dim=cross_attn_dim,
+                num_patches=num_patches,
+                text_seq_len=text_seq_len,
+                precision=dit_precision,
+                verbose=verbose,
+            )
+
+        # 3. VAE decoder
+        print("[pixart] Building VAE decoder engine ...", file=sys.stderr)
+        vae_plan = build_vae_2d_decoder_engine(
+            vae_dir,
+            latent_channels=self._VAE_LATENT_CHANNELS,
+            h_lat=h_lat,
+            w_lat=w_lat,
+            scaling_factor=self._VAE_SCALING_FACTOR,
+            shift_factor=0.0,
+            precision=vae_precision,
+            verbose=verbose,
+        )
+
+        # 4. Serialize preprocessor weights
+        preprocessor_weights = _serialize_preprocessor_weights(dit_weights, t5_d_model, dit_dim)
+
+        out = {
+            "text_encoders": [("t5", t5_plan)],
+            "vae_decoder": vae_plan,
+            "preprocessor_weights": preprocessor_weights,
+        }
+        if parallel.enabled:
+            out["denoiser_ranks"] = dit_rank_plans or {}
+        else:
+            out["denoiser"] = dit_plan
+        return out
+
+    def get_diffusion_config(self, config: ModelConfig) -> dict:
+        """Return diffusion pipeline configuration."""
+        tc = config.raw.get("_transformer_config", {})
+
+        img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
+        img_w = config.raw.get("image_width", self._IMAGE_WIDTH)
+
+        num_heads = tc.get("num_attention_heads", self._DIT_NUM_HEADS)
+        head_dim = tc.get("attention_head_dim", self._DIT_HEAD_DIM)
+        dit_dim = num_heads * head_dim
+        num_layers = tc.get("num_layers", self._DIT_NUM_LAYERS)
+        patch_size = tc.get("patch_size", self._DIT_PATCH_SIZE)
+        sample_size = tc.get("sample_size", self._IMAGE_HEIGHT // self._VAE_SCALE_FACTOR)
+        interpolation_scale = tc.get("interpolation_scale")
+        if interpolation_scale is None:
+            interpolation_scale = max(sample_size // 64, 1)
+
+        return {
+            "diffusion_backend_type": "wan_3d",
+            "scheduler": "dpmsolver_multistep",
+            "num_inference_steps": 20,
+            "guidance_scale": 4.5,
+            "image_height": img_h,
+            "image_width": img_w,
+            "video_height": img_h,
+            "video_width": img_w,
+            "video_num_frames": 1,
+            "dit_dim": dit_dim,
+            "dit_num_heads": num_heads,
+            "dit_num_layers": num_layers,
+            "patch_size": [1, patch_size, patch_size],
+            "z_dim": self._VAE_LATENT_CHANNELS,
+            "scale_factor_temporal": 1,
+            "scale_factor_spatial": self._VAE_SCALE_FACTOR,
+            "freq_dim": 256,  # Sinusoidal timestep embedding dim
+            "text_seq_len": self._text_sequence_length(config),
+            # Empty: DDIM models skip Wan-style denormalization.
+            # VAE scaling (1/scaling_factor) is handled in the 2D VAE decode.
+            "latents_mean": [],
+            "latents_std": [],
+            "num_vae_caches": 0,
+            "vae_model_id": "",
+            "text_encoder_dim": self._T5_D_MODEL,
+            "vae_scaling_factor": self._VAE_SCALING_FACTOR,
+            "use_rope": 0,  # PixArt uses fixed sinusoidal pos embed
+            "pos_embed_base_size": sample_size // patch_size,
+            "pos_embed_interpolation_scale": interpolation_scale,
+        }
+
+
+def _load_pixart_dit_weights(
+    model_dir: str,
+    *,
+    dim: int,
+    num_heads: int,
+    num_layers: int,
+    ffn_dim: int,
+    cross_attn_dim: int,
+) -> WeightDict:
+    """Load PixArt DiT weights and map to standard naming.
+
+    PixArt uses 'transformer_blocks.{i}' prefix while the standard DiT
+    builder expects 'blocks.{i}'. This function loads weights with the
+    PixArt naming and maps them to the standard convention.
+    """
+    from pathlib import Path
+    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+
+    import numpy as np
+
+    model_path = Path(model_dir)
+    readers = _open_safetensors(model_path)
+    weights = WeightDict()
+
+    def _t(name: str) -> np.ndarray:
+        """Load and transpose [out, in] -> [in, out]."""
+        w = _load_tensor(readers, name)
+        return np.ascontiguousarray(w.T, dtype=np.float32)
+
+    def _f(name: str) -> np.ndarray:
+        """Load flat (1D) weight."""
+        return _load_tensor(readers, name).astype(np.float32)
+
+    def _maybe_f(name: str) -> np.ndarray | None:
+        if _has_tensor(readers, name):
+            return _f(name)
+        return None
+
+    for i in range(num_layers):
+        # PixArt prefix -> standard prefix
+        src = f"transformer_blocks.{i}"
+        dst = f"blocks.{i}"
+
+        # Per-block scale_shift_table: [6, dim] -> [1, 6, dim]
+        sst = _load_tensor(readers, f"{src}.scale_shift_table")
+        weights[f"{dst}.scale_shift_table"] = sst.astype(np.float32).reshape(1, 6, dim)
+
+        # Self-attention (all projections have bias in PixArt)
+        for proj in ("to_q", "to_k", "to_v"):
+            weights[f"{dst}.attn1.{proj}.weight"] = _t(f"{src}.attn1.{proj}.weight")
+            b = _maybe_f(f"{src}.attn1.{proj}.bias")
+            if b is not None:
+                weights[f"{dst}.attn1.{proj}.bias"] = b
+
+        weights[f"{dst}.attn1.to_out.0.weight"] = _t(f"{src}.attn1.to_out.0.weight")
+        b = _maybe_f(f"{src}.attn1.to_out.0.bias")
+        if b is not None:
+            weights[f"{dst}.attn1.to_out.0.bias"] = b
+
+        # Cross-attention
+        for proj in ("to_q", "to_k", "to_v"):
+            weights[f"{dst}.attn2.{proj}.weight"] = _t(f"{src}.attn2.{proj}.weight")
+            b = _maybe_f(f"{src}.attn2.{proj}.bias")
+            if b is not None:
+                weights[f"{dst}.attn2.{proj}.bias"] = b
+
+        weights[f"{dst}.attn2.to_out.0.weight"] = _t(f"{src}.attn2.to_out.0.weight")
+        b = _maybe_f(f"{src}.attn2.to_out.0.bias")
+        if b is not None:
+            weights[f"{dst}.attn2.to_out.0.bias"] = b
+
+        # FFN: ff.net.0.proj (GELU Linear) + ff.net.2 (output Linear)
+        # Map to standard naming: ffn.net.0.proj / ffn.net.2
+        weights[f"{dst}.ffn.net.0.proj.weight"] = _t(f"{src}.ff.net.0.proj.weight")
+        b = _maybe_f(f"{src}.ff.net.0.proj.bias")
+        if b is not None:
+            weights[f"{dst}.ffn.net.0.proj.bias"] = b
+
+        weights[f"{dst}.ffn.net.2.weight"] = _t(f"{src}.ff.net.2.weight")
+        b = _maybe_f(f"{src}.ff.net.2.bias")
+        if b is not None:
+            weights[f"{dst}.ffn.net.2.bias"] = b
+
+    # Final output: scale_shift_table [2, dim] -> [1, 2, dim]
+    sst_final = _load_tensor(readers, "scale_shift_table")
+    weights["scale_shift_table"] = sst_final.astype(np.float32).reshape(1, 2, dim)
+
+    # Final projection
+    weights["proj_out.weight"] = _t("proj_out.weight")
+    b = _maybe_f("proj_out.bias")
+    if b is not None:
+        weights["proj_out.bias"] = b
+
+    # Preprocessor weights (used externally, not in TRT engine)
+    # Patch embedding Conv2d
+    if _has_tensor(readers, "pos_embed.proj.weight"):
+        weights["pos_embed.proj.weight"] = _load_tensor(readers, "pos_embed.proj.weight").astype(
+            np.float32
+        )
+    if _has_tensor(readers, "pos_embed.proj.bias"):
+        weights["pos_embed.proj.bias"] = _load_tensor(readers, "pos_embed.proj.bias").astype(
+            np.float32
+        )
+
+    # Timestep embedder (adaln_single)
+    _adaln_keys = [
+        "adaln_single.emb.timestep_embedder.linear_1.weight",
+        "adaln_single.emb.timestep_embedder.linear_1.bias",
+        "adaln_single.emb.timestep_embedder.linear_2.weight",
+        "adaln_single.emb.timestep_embedder.linear_2.bias",
+        "adaln_single.linear.weight",
+        "adaln_single.linear.bias",
+    ]
+    for key in _adaln_keys:
+        if _has_tensor(readers, key):
+            w = _load_tensor(readers, key).astype(np.float32)
+            if w.ndim == 2:
+                weights[key] = np.ascontiguousarray(w.T, dtype=np.float32)
+            else:
+                weights[key] = w
+
+    # Caption projection (T5 4096 -> dit_dim)
+    _caption_keys = [
+        "caption_projection.linear_1.weight",
+        "caption_projection.linear_1.bias",
+        "caption_projection.linear_2.weight",
+        "caption_projection.linear_2.bias",
+    ]
+    for key in _caption_keys:
+        if _has_tensor(readers, key):
+            w = _load_tensor(readers, key).astype(np.float32)
+            if w.ndim == 2:
+                weights[key] = np.ascontiguousarray(w.T, dtype=np.float32)
+            else:
+                weights[key] = w
+
+    return weights
+
+
+def _serialize_preprocessor_weights(
+    dit_weights: WeightDict,
+    t5_dim: int,
+    dit_dim: int,
+) -> bytes:
+    """Serialize PixArt preprocessor weights into binary format.
+
+    Format: JSON index (length-prefixed) + contiguous float32 data.
+
+    Preprocessor weights stored:
+        pos_embed.proj.weight, pos_embed.proj.bias
+        adaln_single.emb.timestep_embedder.linear_1.weight/bias
+        adaln_single.emb.timestep_embedder.linear_2.weight/bias
+        adaln_single.linear.weight/bias
+        caption_projection.linear_1.weight/bias
+        caption_projection.linear_2.weight/bias
+
+    These are mapped to Wan-compatible key names where possible so the
+    C++ parse_preprocessor_weights() can load them:
+        pos_embed.proj -> patch_embedding
+        timestep_embedder -> condition_embedder.time_embedding
+        adaln_single.linear -> condition_embedder.time_proj
+        caption_projection -> condition_embedder.text_embedding
+    """
+    import json
+    import struct
+    import numpy as np
+
+    key_map = {
+        # Patch embedding -> patch_embedding (Wan-compatible)
+        "pos_embed.proj.weight": "patch_embedding.weight",
+        "pos_embed.proj.bias": "patch_embedding.bias",
+        # Timestep MLP -> condition_embedder.time_embedding
+        "adaln_single.emb.timestep_embedder.linear_1.weight": "condition_embedder.time_embedding.0.weight",
+        "adaln_single.emb.timestep_embedder.linear_1.bias": "condition_embedder.time_embedding.0.bias",
+        "adaln_single.emb.timestep_embedder.linear_2.weight": "condition_embedder.time_embedding.2.weight",
+        "adaln_single.emb.timestep_embedder.linear_2.bias": "condition_embedder.time_embedding.2.bias",
+        # adaln_single.linear -> condition_embedder.time_proj
+        "adaln_single.linear.weight": "condition_embedder.time_proj.weight",
+        "adaln_single.linear.bias": "condition_embedder.time_proj.bias",
+        # Caption projection -> condition_embedder.text_embedding
+        "caption_projection.linear_1.weight": "condition_embedder.text_embedding.weight",
+        "caption_projection.linear_1.bias": "condition_embedder.text_embedding.bias",
+        "caption_projection.linear_2.weight": "condition_embedder.text_embedding_2.weight",
+        "caption_projection.linear_2.bias": "condition_embedder.text_embedding_2.bias",
+    }
+
+    index = {}
+    data_parts = []
+    offset = 0
+
+    for src_key, dst_key in key_map.items():
+        if src_key not in dit_weights:
+            continue
+        w = dit_weights[src_key]
+        if not isinstance(w, np.ndarray):
+            w = np.array(w, dtype=np.float32)
+        w = np.ascontiguousarray(w.astype(np.float32))
+
+        # Patch embedding is Conv2d [out_ch, C, kH, kW].
+        # The C++ patchify produces patches in (C, kH, kW) order
+        # (see WanDiffusionBackend::patchify — C loops outermost).
+        # So the weight stays in (out_ch, C, kH, kW) order — just
+        # flatten to [out_ch, patch_dim] then transpose to [patch_dim, out_ch].
+        if src_key == "pos_embed.proj.weight" and w.ndim > 2:
+            out_ch = w.shape[0]
+            patch_dim = int(np.prod(w.shape[1:]))
+            w = np.ascontiguousarray(w.reshape(out_ch, patch_dim).T)
+
+        nbytes = w.nbytes
+        index[dst_key] = {"offset": offset, "shape": list(w.shape)}
+        data_parts.append(w.tobytes())
+        offset += nbytes
+
+    index_json = json.dumps(index).encode("utf-8")
+    result = struct.pack("<I", len(index_json)) + index_json
+    for part in data_parts:
+        result += part
+
+    return result
+
+
+def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+    """Build one PixArt image-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("pixart does not support dynamic_kv_cache")
+
+    if request.max_sequence_length is not None:
+        raise NotImplementedError("pixart does not support max_sequence_length")
+
+    if request.video_num_frames is not None:
+        raise NotImplementedError("pixart does not support video_num_frames")
+
+    if request.context_parallel_size != 1:
+        raise ValueError("this family does not support context parallelism")
+
+    if request.task != "image_generation":
+        raise ValueError("pixart supports only task=image_generation")
+    if request.precision not in {"fp16", "fp32"}:
+        raise ValueError("PixArt supports only precision=fp16 or fp32")
+    if request.max_batch_size != 1:
+        raise NotImplementedError("PixArt requires max_batch_size=1")
+    if request.quantization not in {None, "none"}:
+        raise NotImplementedError("PixArt does not support quantization")
+
+    model_dir = Path(request.model_dir)
+    model_index = json.loads((model_dir / "model_index.json").read_text(encoding="utf-8"))
+    pipeline_class = str(model_index.get("_class_name", ""))
+    model_types = {
+        "PixArtAlphaPipeline": "pixart_alpha",
+        "PixArtSigmaPipeline": "pixart_sigma",
+    }
+    if pipeline_class not in model_types:
+        raise ValueError(f"PixArt does not support pipeline class {pipeline_class!r}")
+    model_type = model_types[pipeline_class]
+    height = int(request.image_height or _PixArtModel._IMAGE_HEIGHT)
+    width = int(request.image_width or _PixArtModel._IMAGE_WIDTH)
+    if height % 16 or width % 16:
+        raise ValueError("PixArt image dimensions must be divisible by 16")
+    config = ModelConfig(
+        model_type=model_type,
+        raw={
+            "_class_name": pipeline_class,
+            "_fp32_layers": request.fp32_layers,
+            "image_height": height,
+            "image_width": width,
+        },
+    )
+    parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
+    model = _PixArtModel()
+    weights = model.load_weights(str(model_dir), config)
+    components = model.build_components(
+        str(model_dir),
+        config,
+        weights,
+        precision=request.precision,
+        verbose=request.verbose,
+        parallel_config=parallel,
+    )
+
+    writer.set_header(family="pixart", task=request.task, backend=request.backend)
+    writer.add_bytes("text_encoder.0.plan", components["text_encoders"][0][1])
+    if parallel.enabled:
+        plans = components["denoiser_ranks"]
+        for rank in range(parallel.tp_size):
+            writer.add_bytes(f"denoiser.rank{rank}.plan", plans[rank])
+    else:
+        writer.add_bytes("denoiser.plan", components["denoiser"])
+    writer.add_bytes("vae.plan", components["vae_decoder"])
+    writer.add_bytes("preprocessor.weights", components["preprocessor_weights"])
+    writer.add_bytes("tokenizer.json", (model_dir / "tokenizer/tokenizer.json").read_bytes())
+    runtime = model.get_diffusion_config(config)
+    runtime.update(
+        {
+            "tensor_parallel_size": parallel.tp_size,
+            "num_text_encoders": 1,
+            "max_batch_size": {"dit": 1, "text_encoder": 1, "vae": 1},
+            "tokenizer_add_special_tokens": False,
+            "tokenizer_prefix_ids": [],
+            "tokenizer_suffix_ids": [1],
+        }
+    )
+    writer.add_json("runtime.json", runtime)

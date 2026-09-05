@@ -1,0 +1,35 @@
+{
+  "name": "qwen3-0.6b-fp16",
+  "hf_id": "Qwen/Qwen3-0.6B",
+  "bundle": "qwen3-0.6b-fp16.bundle",
+  "family": "qwen",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "qwen3-0.6b-fp16",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false
+    },
+    {
+      "name": "qwen3-0.6b-fp16-native-kv-two-chunk-parity",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. What is the capital of France? Answer in one word.",
+      "expected_kv_cache_rows": 256,
+      "expected_prefill_chunks": 2,
+      "expected_prefill_chunk_limit": 64,
+      "max_new_tokens": 2,
+      "temperature": 0.0,
+      "top_k": 1,
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

@@ -1,0 +1,18 @@
+{
+  "name": "starcoder2-3b-tp2",
+  "hf_id": "bigcode/starcoder2-3b",
+  "bundle": "starcoder2-3b-tp2.bundle",
+  "family": "starcoder2",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "starcoder2-3b-tp2",
+      "prompt": "def fibonacci(n):",
+      "max_new_tokens": 20
+    }
+  ],
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 2
+}

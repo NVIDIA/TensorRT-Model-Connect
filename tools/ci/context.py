@@ -26,18 +26,6 @@ class CiContext:
         self.commands = CommandRunner(cwd=self.repository, env=self.env)
         self.state_dir = self.repository / self.env.get("TRTMC_CI_STATE_DIR", ".ci")
 
-    def prepare_shared_directories(self) -> None:
-        for name in (
-            "ENGINE_DIR",
-            "HF_HOME",
-            "HF_HUB_CACHE",
-            "HUGGINGFACE_HUB_CACHE",
-            "HF_MODULES_CACHE",
-        ):
-            value = self.env.get(name, "")
-            if value:
-                Path(value).mkdir(parents=True, exist_ok=True)
-
     def run(
         self,
         command: Sequence[str | Path],
@@ -62,32 +50,6 @@ class CiContext:
             env=environment,
         )
 
-    def output(
-        self,
-        command: Sequence[str | Path],
-        *,
-        updates: Mapping[str, str] | None = None,
-        unset: Sequence[str] = (),
-        check: bool = True,
-    ) -> str:
-        return self.run(
-            command, updates=updates, unset=unset, check=check, capture_output=True
-        ).stdout.strip()
-
-    def executable(self, name: str) -> str:
-        path = shutil.which(name, path=self.env.get("PATH"))
-        if not path:
-            raise CiError(f"Required executable was not found on PATH: {name}")
-        return path
-
-    def read_json(self, path: str | Path) -> dict[str, object]:
-        return json.loads((self.repository / path).read_text(encoding="utf-8"))
-
-    def write_json(self, path: str | Path, value: object) -> None:
-        destination = self.repository / path
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
     def write_state(self, name: str, value: Mapping[str, str]) -> Path:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         destination = self.state_dir / name
@@ -106,12 +68,6 @@ class CiContext:
         ):
             raise CiError(f"Reusable CI state is invalid: {path}")
         return value
-
-    @staticmethod
-    def positive_integer(value: str, name: str) -> int:
-        if not value.isdigit() or int(value) < 1:
-            raise CiError(f"{name} must be a positive integer")
-        return int(value)
 
     def remove(self, *paths: str | Path) -> None:
         for value in paths:

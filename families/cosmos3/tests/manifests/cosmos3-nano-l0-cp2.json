@@ -1,0 +1,25 @@
+{
+  "name": "cosmos3-nano-l0-cp2",
+  "hf_id": "nvidia/Cosmos3-Nano",
+  "hf_revision": "411f42a8fdfb8c5b2583cb8786e0938f49796eaa",
+  "bundle": "cosmos3-nano-l0-cp2.bundle",
+  "family": "cosmos3",
+  "task": "image_generation",
+  "precision": "bf16",
+  "max_sequence_length": 4096,
+  "image_height": 720,
+  "image_width": 1280,
+  "video_num_frames": 189,
+  "tensor_parallel_size": 1,
+  "context_parallel_size": 2,
+  "testcases": [
+    {
+      "name": "cosmos3-nano-l0-cp2",
+      "test_prompt": "{\"description\":\"A modern industrial robotic arm wipes a dirty white plate with a green sponge in a bright residential kitchen. The arm moves smoothly in circular motions while the plate becomes clean.\",\"camera\":\"A stable medium close-up with a subtle push-in.\",\"lighting\":\"Natural daylight with warm overhead fill.\",\"duration\":\"7s\"}",
+      "num_inference_steps": 35,
+      "guidance_scale": 6.0,
+      "seed": 42,
+      "runtime_timeout_s": 7200
+    }
+  ]
+}

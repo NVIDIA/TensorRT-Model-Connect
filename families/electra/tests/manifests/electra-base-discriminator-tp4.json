@@ -1,0 +1,17 @@
+{
+  "name": "electra-base-discriminator-tp4",
+  "hf_id": "google/electra-base-discriminator",
+  "bundle": "electra-base-discriminator-tp4.bundle",
+  "family": "electra",
+  "task": "encoding",
+  "testcases": [
+    {
+      "name": "electra-base-discriminator-tp4",
+      "prompt": "The capital of France is",
+      "reference_precision": "fp32"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp32",
+  "max_sequence_length": 256
+}

@@ -1,0 +1,23 @@
+{
+  "name": "multilingual-e5-small",
+  "hf_id": "intfloat/multilingual-e5-small",
+  "hf_revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+  "bundle": "multilingual-e5-small.bundle",
+  "family": "bert",
+  "task": "embedding",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "multilingual-e5-small-query-en",
+      "reference_precision": "fp32",
+      "prompt": "query: What is artificial intelligence?"
+    },
+    {
+      "name": "multilingual-e5-small-passage-zh",
+      "reference_precision": "fp32",
+      "prompt": "passage: \u4eba\u5de5\u667a\u80fd\u662f\u8ba9\u673a\u5668\u6267\u884c\u901a\u5e38\u9700\u8981\u4eba\u7c7b\u667a\u80fd\u7684\u4efb\u52a1\u3002"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512
+}

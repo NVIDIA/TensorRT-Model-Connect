@@ -1,0 +1,25 @@
+{
+  "name": "k2-horizon-7b",
+  "hf_id": "IFM/K2-Horizon-7B",
+  "hf_revision": "586b03f0fd1fbbf2f13eeafc33749e95ae34dd10",
+  "bundle": "k2-horizon-7b.bundle",
+  "family": "k2_horizon",
+  "task": "text_generation",
+  "precision": "bf16",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1,
+  "trust_remote_code": true,
+  "testcases": [
+    {
+      "name": "k2-horizon-7b",
+      "premerge": true,
+      "reference_precision": "bf16",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 4,
+      "temperature": 0.0,
+      "top_k": 1,
+      "use_chat_template": false,
+      "expected_continuation_token_ids": [11511, 15, 589, 7169]
+    }
+  ]
+}

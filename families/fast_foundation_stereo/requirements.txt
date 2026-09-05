@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+Pillow
+# Imported by the official checkpoint source used by this family E2E.
+imageio>=2.37
+omegaconf==2.3.0
+opencv-python-headless>=4.11
+timm>=1.0

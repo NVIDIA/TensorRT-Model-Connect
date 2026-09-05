@@ -1,0 +1,1027 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""BART family plugin -- encoder-decoder seq2seq model.
+
+BART is an encoder-decoder transformer for text generation (summarization,
+translation, etc.):
+  - Encoder: token embeddings + learned positional embeddings + LayerNorm
+             -> N self-attention layers -> encoder output [seq_len, d_model]
+  - Decoder: autoregressive text generation with causal self-attention (KV cache)
+             + cross-attention to encoder output + GELU MLP
+  - Uses LayerNorm, GELU activation, learned positional embeddings
+  - model_type: "bart", architectures: ["BartModel", "BartForConditionalGeneration"]
+  - Shared embedding between encoder and decoder
+  - Position embeddings have offset=2 (first 2 positions are reserved)
+  - Post-norm (normalize_before=False): norm AFTER residual connection
+
+Cross-attention design:
+  Same as Whisper -- cross_k/cross_v inputs to the decoder engine are the RAW
+  encoder output. Per-layer K/V projections are baked into the decoder TRT graph.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import tensorrt as trt
+
+from .config import ModelConfig
+from .checkpoint_mapper import (
+    WeightDict,
+    _open_safetensors,
+    _load_tensor,
+    _has_tensor,
+    _transpose_2d,
+)
+from . import graph_ops
+from .parallel import ParallelConfig, normalize_parallel_config
+
+
+if TYPE_CHECKING:
+    from tensorrt_model_connect.build import BuildRequest
+    from tensorrt_model_connect.bundle_writer import BundleWriter
+
+
+class _BartModel:
+    def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
+        model_dir_path = Path(model_dir)
+        readers = _open_safetensors(model_dir_path)
+        raw = config.raw
+        enc_layers = raw.get("encoder_layers", config.num_hidden_layers)
+        dec_layers = raw.get("decoder_layers", config.num_hidden_layers)
+        enc_heads = raw.get("encoder_attention_heads", config.num_attention_heads)
+        dec_heads = raw.get("decoder_attention_heads", config.num_attention_heads)
+        enc_ffn = raw.get("encoder_ffn_dim", config.intermediate_size)
+        dec_ffn = raw.get("decoder_ffn_dim", config.intermediate_size)
+        max_position_embeddings = raw.get("max_position_embeddings", 1024)
+        normalize_embedding = raw.get("normalize_embedding", True)
+
+        weights = WeightDict()
+        weights["_enc_layers"] = enc_layers
+        weights["_dec_layers"] = dec_layers
+        weights["_enc_heads"] = enc_heads
+        weights["_dec_heads"] = dec_heads
+        weights["_enc_ffn"] = enc_ffn
+        weights["_dec_ffn"] = dec_ffn
+        weights["_max_position_embeddings"] = max_position_embeddings
+        weights["_normalize_embedding"] = normalize_embedding
+
+        # Shared embedding (used by both encoder and decoder)
+        if _has_tensor(readers, "shared.weight"):
+            shared_embed = _load_tensor(readers, "shared.weight").astype(np.float32)
+        elif _has_tensor(readers, "model.shared.weight"):
+            shared_embed = _load_tensor(readers, "model.shared.weight").astype(np.float32)
+        else:
+            raise RuntimeError("BART: cannot find shared embedding weight")
+        weights["shared_embedding"] = shared_embed
+
+        # Encoder position embeddings (shape [max_pos+2, hidden] due to offset=2)
+        for key in ("encoder.embed_positions.weight", "model.encoder.embed_positions.weight"):
+            if _has_tensor(readers, key):
+                weights["enc_pos_embedding"] = _load_tensor(readers, key).astype(np.float32)
+                break
+        if "enc_pos_embedding" not in weights:
+            raise RuntimeError("BART: cannot find encoder position embeddings")
+
+        # Encoder layernorm_embedding
+        if normalize_embedding:
+            for prefix in ("encoder", "model.encoder"):
+                if _has_tensor(readers, f"{prefix}.layernorm_embedding.weight"):
+                    weights["enc_embed_norm"] = _load_tensor(
+                        readers, f"{prefix}.layernorm_embedding.weight"
+                    ).astype(np.float32)
+                    weights["enc_embed_norm_beta"] = _load_tensor(
+                        readers, f"{prefix}.layernorm_embedding.bias"
+                    ).astype(np.float32)
+                    break
+
+        # Encoder layers
+        for i in range(enc_layers):
+            hf = f"encoder.layers.{i}"
+            if not _has_tensor(readers, f"{hf}.self_attn.q_proj.weight"):
+                hf = f"model.encoder.layers.{i}"
+            pfx = f"enc_layer.{i}"
+            for proj in ("q", "k", "v"):
+                weights[f"{pfx}.w_{proj}"] = _transpose_2d(
+                    _load_tensor(readers, f"{hf}.self_attn.{proj}_proj.weight"), f"enc_{proj}"
+                )
+                weights[f"{pfx}.b_{proj}"] = _load_tensor(
+                    readers, f"{hf}.self_attn.{proj}_proj.bias"
+                ).astype(np.float32)
+            weights[f"{pfx}.w_o"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.self_attn.out_proj.weight"), "enc_o"
+            )
+            weights[f"{pfx}.b_o"] = _load_tensor(readers, f"{hf}.self_attn.out_proj.bias").astype(
+                np.float32
+            )
+            weights[f"{pfx}.attn_norm"] = _load_tensor(
+                readers, f"{hf}.self_attn_layer_norm.weight"
+            ).astype(np.float32)
+            weights[f"{pfx}.attn_norm_beta"] = _load_tensor(
+                readers, f"{hf}.self_attn_layer_norm.bias"
+            ).astype(np.float32)
+            weights[f"{pfx}.w_fc1"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.fc1.weight"), "enc_fc1"
+            )
+            weights[f"{pfx}.b_fc1"] = _load_tensor(readers, f"{hf}.fc1.bias").astype(np.float32)
+            weights[f"{pfx}.w_fc2"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.fc2.weight"), "enc_fc2"
+            )
+            weights[f"{pfx}.b_fc2"] = _load_tensor(readers, f"{hf}.fc2.bias").astype(np.float32)
+            weights[f"{pfx}.ffn_norm"] = _load_tensor(
+                readers, f"{hf}.final_layer_norm.weight"
+            ).astype(np.float32)
+            weights[f"{pfx}.ffn_norm_beta"] = _load_tensor(
+                readers, f"{hf}.final_layer_norm.bias"
+            ).astype(np.float32)
+
+        # Decoder position embeddings
+        for key in ("decoder.embed_positions.weight", "model.decoder.embed_positions.weight"):
+            if _has_tensor(readers, key):
+                weights["dec_pos_embedding"] = _load_tensor(readers, key).astype(np.float32)
+                break
+        if "dec_pos_embedding" not in weights:
+            raise RuntimeError("BART: cannot find decoder position embeddings")
+
+        # Decoder layernorm_embedding
+        if normalize_embedding:
+            for prefix in ("decoder", "model.decoder"):
+                if _has_tensor(readers, f"{prefix}.layernorm_embedding.weight"):
+                    weights["dec_embed_norm"] = _load_tensor(
+                        readers, f"{prefix}.layernorm_embedding.weight"
+                    ).astype(np.float32)
+                    weights["dec_embed_norm_beta"] = _load_tensor(
+                        readers, f"{prefix}.layernorm_embedding.bias"
+                    ).astype(np.float32)
+                    break
+
+        # Decoder layers
+        for i in range(dec_layers):
+            hf = f"decoder.layers.{i}"
+            if not _has_tensor(readers, f"{hf}.self_attn.q_proj.weight"):
+                hf = f"model.decoder.layers.{i}"
+            pfx = f"layer.{i}"
+            for proj in ("q", "k", "v"):
+                weights[f"{pfx}.w_{proj}"] = _transpose_2d(
+                    _load_tensor(readers, f"{hf}.self_attn.{proj}_proj.weight"), f"dec_{proj}"
+                )
+                weights[f"{pfx}.{proj}_bias"] = _load_tensor(
+                    readers, f"{hf}.self_attn.{proj}_proj.bias"
+                ).astype(np.float32)
+            weights[f"{pfx}.w_o"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.self_attn.out_proj.weight"), "dec_o"
+            )
+            weights[f"{pfx}.o_bias"] = _load_tensor(
+                readers, f"{hf}.self_attn.out_proj.bias"
+            ).astype(np.float32)
+            weights[f"{pfx}.input_norm"] = _load_tensor(
+                readers, f"{hf}.self_attn_layer_norm.weight"
+            ).astype(np.float32)
+            weights[f"{pfx}.input_norm_beta"] = _load_tensor(
+                readers, f"{hf}.self_attn_layer_norm.bias"
+            ).astype(np.float32)
+            for proj in ("q", "k", "v"):
+                weights[f"{pfx}.cross_w_{proj}"] = _transpose_2d(
+                    _load_tensor(readers, f"{hf}.encoder_attn.{proj}_proj.weight"), f"xattn_{proj}"
+                )
+                weights[f"{pfx}.cross_b_{proj}"] = _load_tensor(
+                    readers, f"{hf}.encoder_attn.{proj}_proj.bias"
+                ).astype(np.float32)
+            weights[f"{pfx}.cross_w_o"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.encoder_attn.out_proj.weight"), "xattn_o"
+            )
+            weights[f"{pfx}.cross_b_o"] = _load_tensor(
+                readers, f"{hf}.encoder_attn.out_proj.bias"
+            ).astype(np.float32)
+            weights[f"{pfx}.cross_attn_norm"] = _load_tensor(
+                readers, f"{hf}.encoder_attn_layer_norm.weight"
+            ).astype(np.float32)
+            weights[f"{pfx}.cross_attn_norm_beta"] = _load_tensor(
+                readers, f"{hf}.encoder_attn_layer_norm.bias"
+            ).astype(np.float32)
+            weights[f"{pfx}.w_fc1"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.fc1.weight"), "dec_fc1"
+            )
+            weights[f"{pfx}.fc1_bias"] = _load_tensor(readers, f"{hf}.fc1.bias").astype(np.float32)
+            weights[f"{pfx}.w_fc2"] = _transpose_2d(
+                _load_tensor(readers, f"{hf}.fc2.weight"), "dec_fc2"
+            )
+            weights[f"{pfx}.fc2_bias"] = _load_tensor(readers, f"{hf}.fc2.bias").astype(np.float32)
+            weights[f"{pfx}.post_attn_norm"] = _load_tensor(
+                readers, f"{hf}.final_layer_norm.weight"
+            ).astype(np.float32)
+            weights[f"{pfx}.post_attn_norm_beta"] = _load_tensor(
+                readers, f"{hf}.final_layer_norm.bias"
+            ).astype(np.float32)
+
+        # LM head
+        if _has_tensor(readers, "lm_head.weight"):
+            weights["w_out"] = _transpose_2d(_load_tensor(readers, "lm_head.weight"), "lm_head")
+        else:
+            weights["w_out"] = _transpose_2d(shared_embed.copy(), "embedding_tied")
+
+        return weights
+
+    def build_engine(
+        self,
+        config,
+        weights,
+        max_cache_length,
+        *,
+        verbose=False,
+        debug_layer_outputs=False,
+        parallel_config=None,
+        precision="fp32",
+    ):
+        self._max_cache_length = max_cache_length
+        parallel = normalize_parallel_config(parallel_config)
+        if parallel.enabled:
+            if precision != "fp32":
+                raise NotImplementedError(
+                    "BART tensor-parallel decoder builds currently require fp32"
+                )
+            parallel.validate()
+            from .decoder_tp_builder import build_bart_tp_decoder_engine
+
+            return build_bart_tp_decoder_engine(
+                config,
+                weights,
+                max_cache_length,
+                verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs,
+                parallel_config=parallel,
+            )
+
+        dec_layers = weights["_dec_layers"]
+        dec_heads = weights["_dec_heads"]
+        dec_ffn = weights["_dec_ffn"]
+        normalize_embedding = weights["_normalize_embedding"]
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        head_dim = hidden // dec_heads
+        attention_window = max_cache_length + 1
+        max_enc_seq = max_cache_length
+        activation_function = config.hidden_act or "gelu"
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported BART precision: {precision}")
+
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        trt_config = builder.create_builder_config()
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
+
+        token_id = network.add_input("token_id", trt.int32, (1,))
+        position_id = network.add_input("position_id", trt.int32, (1,))
+        attention_mask = network.add_input("attention_mask", trt.float32, (attention_window,))
+        cross_attention_mask = network.add_input(
+            "cross_attention_mask", trt.float32, (max_enc_seq,)
+        )
+
+        cache_k_inputs, cache_v_inputs = [], []
+        for i in range(dec_layers):
+            cache_k_inputs.append(
+                network.add_input(
+                    graph_ops.layer_tensor_name("cache_k", i),
+                    trt.float32,
+                    (max_cache_length, hidden),
+                )
+            )
+            cache_v_inputs.append(
+                network.add_input(
+                    graph_ops.layer_tensor_name("cache_v", i),
+                    trt.float32,
+                    (max_cache_length, hidden),
+                )
+            )
+
+        cross_k_inputs, cross_v_inputs = [], []
+        for i in range(dec_layers):
+            cross_k_inputs.append(
+                network.add_input(
+                    graph_ops.layer_tensor_name("cross_k", i), trt.float32, (max_enc_seq, hidden)
+                )
+            )
+            cross_v_inputs.append(
+                network.add_input(
+                    graph_ops.layer_tensor_name("cross_v", i), trt.float32, (max_enc_seq, hidden)
+                )
+            )
+
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["shared_embedding"], dtype=work_np_dtype
+        )
+        pos_embed_np = weights["dec_pos_embedding"]
+        pos_embedding_table = graph_ops.add_constant(
+            network, pos_embed_np.shape, pos_embed_np, dtype=work_np_dtype
+        )
+
+        tok_embed = network.add_gather(embedding_table, token_id, 0).get_output(0)
+        # Position offset=2 for BART
+        offset_weights = trt.Weights(np.array([2], dtype=np.int32))
+        offset_layer = network.add_constant((1,), offset_weights)
+        offset_const = offset_layer.get_output(0)
+        offset_pos = network.add_elementwise(
+            position_id, offset_const, trt.ElementWiseOperation.SUM
+        ).get_output(0)
+        pos_embed = network.add_gather(pos_embedding_table, offset_pos, 0).get_output(0)
+        hidden_state = network.add_elementwise(
+            tok_embed, pos_embed, trt.ElementWiseOperation.SUM
+        ).get_output(0)
+
+        if normalize_embedding:
+            hidden_state = graph_ops.add_layer_norm_native(
+                network,
+                hidden_state,
+                hidden,
+                weights["dec_embed_norm"],
+                weights["dec_embed_norm_beta"],
+                config.rms_norm_eps,
+                dtype=work_np_dtype,
+            )
+
+        cache_k_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype
+            else value
+            for value in cache_k_inputs
+        ]
+        cache_v_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype
+            else value
+            for value in cache_v_inputs
+        ]
+        cross_k_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype
+            else value
+            for value in cross_k_inputs
+        ]
+        cross_v_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype
+            else value
+            for value in cross_v_inputs
+        ]
+        attention_mask_work = (
+            network.add_cast(attention_mask, work_trt_dtype).get_output(0)
+            if attention_mask.dtype != work_trt_dtype
+            else attention_mask
+        )
+        cross_attention_mask_work = (
+            network.add_cast(cross_attention_mask, work_trt_dtype).get_output(0)
+            if cross_attention_mask.dtype != work_trt_dtype
+            else cross_attention_mask
+        )
+
+        if debug_layer_outputs:
+            _mark_debug_output(network, hidden_state, "debug_embed")
+
+        present_k_outputs, present_v_outputs = [], []
+        for layer_idx in range(dec_layers):
+            prefix = f"layer.{layer_idx}"
+            result = _add_bart_decoder_layer(
+                network=network,
+                hidden=hidden_state,
+                cache_k=cache_k_work[layer_idx],
+                cache_v=cache_v_work[layer_idx],
+                cross_k=cross_k_work[layer_idx],
+                cross_v=cross_v_work[layer_idx],
+                attention_mask=attention_mask_work,
+                cross_attention_mask=cross_attention_mask_work,
+                eps=config.rms_norm_eps,
+                weights=weights,
+                prefix=prefix,
+                hidden_size=hidden,
+                num_heads=dec_heads,
+                head_dim=head_dim,
+                ffn_dim=dec_ffn,
+                max_cache_length=max_cache_length,
+                max_enc_seq=max_enc_seq,
+                activation_function=activation_function,
+                dtype=work_np_dtype,
+            )
+            hidden_state = result["hidden"]
+            present_k_outputs.append(result["present_k"])
+            present_v_outputs.append(result["present_v"])
+            if debug_layer_outputs:
+                _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
+
+        logits = graph_ops.add_matmul_rhs_constant(
+            network, hidden_state, hidden, vocab, weights["w_out"], dtype=work_np_dtype
+        )
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, np.zeros(vocab, dtype=work_np_dtype), dtype=work_np_dtype
+        )
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
+        logits.name = "logits"
+        network.mark_output(logits)
+
+        for i in range(dec_layers):
+            present_k = present_k_outputs[i]
+            present_v = present_v_outputs[i]
+            if present_k.dtype != trt.float32:
+                present_k = network.add_cast(present_k, trt.float32).get_output(0)
+                present_v = network.add_cast(present_v, trt.float32).get_output(0)
+            present_k.name = graph_ops.layer_tensor_name("present_k", i)
+            present_v.name = graph_ops.layer_tensor_name("present_v", i)
+            network.mark_output(present_k)
+            network.mark_output(present_v)
+
+        if verbose:
+            print(
+                f"[trtmc build] Building BART decoder ({dec_layers}L, "
+                f"h={hidden}, heads={dec_heads}, ffn={dec_ffn}, "
+                f"cache={max_cache_length}, precision={precision})",
+                file=sys.stderr,
+            )
+        plan = builder.build_serialized_network(network, trt_config)
+        if plan is None:
+            raise RuntimeError("TensorRT decoder engine build failed")
+        return bytes(plan)
+
+    def build_vision_engine(
+        self,
+        model_dir,
+        config,
+        weights,
+        *,
+        verbose=False,
+        precision="fp32",
+    ):
+        mcl = getattr(self, "_max_cache_length", 256)
+        return _build_bart_encoder(
+            config, weights, max_cache_length=mcl, verbose=verbose, precision=precision
+        )
+
+    def get_vl_config(self, config):
+        raw = config.raw
+        return {
+            "encoder_layers": raw.get("encoder_layers", config.num_hidden_layers),
+            "decoder_layers": raw.get("decoder_layers", config.num_hidden_layers),
+            "encoder_attention_heads": raw.get(
+                "encoder_attention_heads", config.num_attention_heads
+            ),
+            "decoder_attention_heads": raw.get(
+                "decoder_attention_heads", config.num_attention_heads
+            ),
+            "encoder_ffn_dim": raw.get("encoder_ffn_dim", config.intermediate_size),
+            "decoder_ffn_dim": raw.get("decoder_ffn_dim", config.intermediate_size),
+            "max_position_embeddings": raw.get("max_position_embeddings", 1024),
+            "has_vision_engine": True,
+            "is_encoder_decoder": True,
+            "decoder_start_token_id": raw.get("decoder_start_token_id", 2),
+            "forced_bos_token_id": raw.get("forced_bos_token_id", 0),
+            "position_embedding_offset": 2,
+        }
+
+
+def _build_bart_encoder(
+    config,
+    weights,
+    *,
+    max_cache_length=256,
+    verbose=False,
+    precision="fp32",
+):
+    enc_layers = weights["_enc_layers"]
+    enc_heads = weights["_enc_heads"]
+    enc_ffn = weights["_enc_ffn"]
+    weights["_max_position_embeddings"]
+    normalize_embedding = weights["_normalize_embedding"]
+    hidden = config.hidden_size
+    vocab = config.vocab_size
+    max_enc_seq = max_cache_length
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(f"Unsupported BART precision: {precision}")
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    tc = builder.create_builder_config()
+    tc.clear_flag(trt.BuilderFlag.TF32)
+
+    input_ids = network.add_input("input_ids", trt.int32, (max_enc_seq,))
+    attention_mask = network.add_input("attention_mask", trt.float32, (max_enc_seq,))
+
+    embedding_table = graph_ops.add_constant(
+        network, (vocab, hidden), weights["shared_embedding"], dtype=work_np_dtype
+    )
+    enc_pos_np = weights["enc_pos_embedding"]
+    pos_embedding_table = graph_ops.add_constant(
+        network, enc_pos_np.shape, enc_pos_np, dtype=work_np_dtype
+    )
+
+    tok_embed = network.add_gather(embedding_table, input_ids, 0).get_output(0)
+    # Position indices [2, 3, ..., max_enc_seq+1] for offset=2
+    pos_indices = np.arange(2, max_enc_seq + 2, dtype=np.int32)
+    pos_idx_layer = network.add_constant((max_enc_seq,), trt.Weights(pos_indices))
+    pos_indices_const = pos_idx_layer.get_output(0)
+    pos_embed = network.add_gather(pos_embedding_table, pos_indices_const, 0).get_output(0)
+
+    hs = network.add_elementwise(tok_embed, pos_embed, trt.ElementWiseOperation.SUM).get_output(0)
+
+    if normalize_embedding:
+        hs = graph_ops.add_layer_norm_native(
+            network,
+            hs,
+            hidden,
+            weights["enc_embed_norm"],
+            weights["enc_embed_norm_beta"],
+            config.rms_norm_eps,
+            dtype=work_np_dtype,
+        )
+
+    # Reshape attention mask [max_enc_seq] -> [1, 1, 1, max_enc_seq]
+    # for native IAttention broadcast across heads and query positions.
+    enc_mask_4d = network.add_shuffle(attention_mask)
+    enc_mask_4d.reshape_dims = (1, 1, 1, max_enc_seq)
+    enc_mask = enc_mask_4d.get_output(0)
+    if enc_mask.dtype != work_trt_dtype:
+        enc_mask = network.add_cast(enc_mask, work_trt_dtype).get_output(0)
+    head_dim = hidden // enc_heads
+    activation_function = config.hidden_act or "gelu"
+
+    for li in range(enc_layers):
+        pfx = f"enc_layer.{li}"
+        # Post-norm BART encoder: self-attention with padding mask
+        q = graph_ops.add_bias_sum(
+            network,
+            graph_ops.add_matmul_rhs_constant(
+                network, hs, hidden, hidden, weights[f"{pfx}.w_q"], dtype=work_np_dtype
+            ),
+            hidden,
+            weights[f"{pfx}.b_q"],
+            dtype=work_np_dtype,
+        )
+        k = graph_ops.add_bias_sum(
+            network,
+            graph_ops.add_matmul_rhs_constant(
+                network, hs, hidden, hidden, weights[f"{pfx}.w_k"], dtype=work_np_dtype
+            ),
+            hidden,
+            weights[f"{pfx}.b_k"],
+            dtype=work_np_dtype,
+        )
+        v = graph_ops.add_bias_sum(
+            network,
+            graph_ops.add_matmul_rhs_constant(
+                network, hs, hidden, hidden, weights[f"{pfx}.w_v"], dtype=work_np_dtype
+            ),
+            hidden,
+            weights[f"{pfx}.b_v"],
+            dtype=work_np_dtype,
+        )
+        ctx_flat = graph_ops.add_attention_from_rows(
+            network,
+            q,
+            k,
+            v,
+            num_heads=enc_heads,
+            head_dim=head_dim,
+            q_seq=max_enc_seq,
+            kv_seq=max_enc_seq,
+            mask=enc_mask,
+        )
+        attn = graph_ops.add_bias_sum(
+            network,
+            graph_ops.add_matmul_rhs_constant(
+                network, ctx_flat, hidden, hidden, weights[f"{pfx}.w_o"], dtype=work_np_dtype
+            ),
+            hidden,
+            weights[f"{pfx}.b_o"],
+            dtype=work_np_dtype,
+        )
+        hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
+        hs = graph_ops.add_layer_norm_native(
+            network,
+            hs,
+            hidden,
+            weights[f"{pfx}.attn_norm"],
+            weights[f"{pfx}.attn_norm_beta"],
+            config.rms_norm_eps,
+            dtype=work_np_dtype,
+        )
+
+        fc1 = graph_ops.add_bias_sum(
+            network,
+            graph_ops.add_matmul_rhs_constant(
+                network, hs, hidden, enc_ffn, weights[f"{pfx}.w_fc1"], dtype=work_np_dtype
+            ),
+            enc_ffn,
+            weights[f"{pfx}.b_fc1"],
+            dtype=work_np_dtype,
+        )
+        act = graph_ops.add_activation(network, fc1, activation_function, dtype=work_np_dtype)
+        fc2 = graph_ops.add_bias_sum(
+            network,
+            graph_ops.add_matmul_rhs_constant(
+                network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"], dtype=work_np_dtype
+            ),
+            hidden,
+            weights[f"{pfx}.b_fc2"],
+            dtype=work_np_dtype,
+        )
+        hs = network.add_elementwise(hs, fc2, trt.ElementWiseOperation.SUM).get_output(0)
+        hs = graph_ops.add_layer_norm_native(
+            network,
+            hs,
+            hidden,
+            weights[f"{pfx}.ffn_norm"],
+            weights[f"{pfx}.ffn_norm_beta"],
+            config.rms_norm_eps,
+            dtype=work_np_dtype,
+        )
+
+    if hs.dtype != trt.float32:
+        hs = network.add_cast(hs, trt.float32).get_output(0)
+    hs.name = "encoder_output"
+    network.mark_output(hs)
+    if verbose:
+        print(
+            f"[trtmc build] Building BART encoder ({enc_layers}L, "
+            f"h={hidden}, heads={enc_heads}, seq={max_enc_seq}, "
+            f"precision={precision})",
+            file=sys.stderr,
+        )
+    plan = builder.build_serialized_network(network, tc)
+    if plan is None:
+        raise RuntimeError("TensorRT encoder engine build failed")
+    return bytes(plan)
+
+
+def _add_bart_decoder_layer(
+    *,
+    network,
+    hidden,
+    cache_k,
+    cache_v,
+    cross_k,
+    cross_v,
+    attention_mask,
+    cross_attention_mask,
+    eps,
+    weights,
+    prefix,
+    hidden_size,
+    num_heads,
+    head_dim,
+    ffn_dim,
+    max_cache_length,
+    max_enc_seq,
+    activation_function="gelu",
+    dtype=np.float32,
+):
+    attention_size = hidden_size
+    attention_window = max_cache_length + 1
+
+    # Self-attention (no pre-norm for post-LN BART)
+    q = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype
+        ),
+        attention_size,
+        weights[f"{prefix}.q_bias"],
+        dtype=dtype,
+    )
+    k = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_k"], dtype=dtype
+        ),
+        attention_size,
+        weights[f"{prefix}.k_bias"],
+        dtype=dtype,
+    )
+    v = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_v"], dtype=dtype
+        ),
+        attention_size,
+        weights[f"{prefix}.v_bias"],
+        dtype=dtype,
+    )
+    present_k, present_v = k, v
+
+    kr = network.add_shuffle(k)
+    kr.reshape_dims = (1, attention_size)
+    vr = network.add_shuffle(v)
+    vr.reshape_dims = (1, attention_size)
+    ak = network.add_concatenation([cache_k, kr.get_output(0)])
+    ak.axis = 0
+    av = network.add_concatenation([cache_v, vr.get_output(0)])
+    av.axis = 0
+
+    m4 = network.add_shuffle(attention_mask)
+    m4.reshape_dims = (1, 1, 1, attention_window)
+    cf = graph_ops.add_attention_from_rows(
+        network,
+        q,
+        ak.get_output(0),
+        av.get_output(0),
+        num_heads=num_heads,
+        head_dim=head_dim,
+        q_seq=1,
+        kv_seq=attention_window,
+        mask=m4.get_output(0),
+    )
+    sa = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network, cf, attention_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype
+        ),
+        hidden_size,
+        weights[f"{prefix}.o_bias"],
+        dtype=dtype,
+    )
+    # Residual + post-norm
+    psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
+    psa = graph_ops.add_layer_norm_native(
+        network,
+        psa,
+        hidden_size,
+        weights[f"{prefix}.input_norm"],
+        weights[f"{prefix}.input_norm_beta"],
+        eps,
+        dtype=dtype,
+    )
+
+    # Cross-attention (no pre-norm)
+    cq = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network, psa, hidden_size, attention_size, weights[f"{prefix}.cross_w_q"], dtype=dtype
+        ),
+        attention_size,
+        weights[f"{prefix}.cross_b_q"],
+        dtype=dtype,
+    )
+    ck_proj = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network,
+            cross_k,
+            hidden_size,
+            attention_size,
+            weights[f"{prefix}.cross_w_k"],
+            dtype=dtype,
+        ),
+        attention_size,
+        weights[f"{prefix}.cross_b_k"],
+        dtype=dtype,
+    )
+    cv_proj = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network,
+            cross_v,
+            hidden_size,
+            attention_size,
+            weights[f"{prefix}.cross_w_v"],
+            dtype=dtype,
+        ),
+        attention_size,
+        weights[f"{prefix}.cross_b_v"],
+        dtype=dtype,
+    )
+
+    cross_mask_4d = network.add_shuffle(cross_attention_mask)
+    cross_mask_4d.reshape_dims = (1, 1, 1, max_enc_seq)
+    ccf = graph_ops.add_attention_from_rows(
+        network,
+        cq,
+        ck_proj,
+        cv_proj,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        q_seq=1,
+        kv_seq=max_enc_seq,
+        mask=cross_mask_4d.get_output(0),
+    )
+    ca = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"], dtype=dtype
+        ),
+        hidden_size,
+        weights[f"{prefix}.cross_b_o"],
+        dtype=dtype,
+    )
+    # Residual + post-norm
+    pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
+    pca = graph_ops.add_layer_norm_native(
+        network,
+        pca,
+        hidden_size,
+        weights[f"{prefix}.cross_attn_norm"],
+        weights[f"{prefix}.cross_attn_norm_beta"],
+        eps,
+        dtype=dtype,
+    )
+
+    # MLP (no pre-norm, GELU)
+    fc1 = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network, pca, hidden_size, ffn_dim, weights[f"{prefix}.w_fc1"], dtype=dtype
+        ),
+        ffn_dim,
+        weights[f"{prefix}.fc1_bias"],
+        dtype=dtype,
+    )
+    act = graph_ops.add_activation(network, fc1, activation_function, dtype=dtype)
+    fc2 = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(
+            network, act, ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"], dtype=dtype
+        ),
+        hidden_size,
+        weights[f"{prefix}.fc2_bias"],
+        dtype=dtype,
+    )
+    # Residual + post-norm
+    out = network.add_elementwise(pca, fc2, trt.ElementWiseOperation.SUM).get_output(0)
+    out = graph_ops.add_layer_norm_native(
+        network,
+        out,
+        hidden_size,
+        weights[f"{prefix}.post_attn_norm"],
+        weights[f"{prefix}.post_attn_norm_beta"],
+        eps,
+        dtype=dtype,
+    )
+
+    return {"hidden": out, "present_k": present_k, "present_v": present_v}
+
+
+def _mark_debug_output(network, tensor, name):
+    out = tensor
+    if out.dtype != trt.float32:
+        out = network.add_cast(out, trt.float32).get_output(0)
+    out.name = name
+    network.mark_output(out)
+
+
+_BUNDLE_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenizer.model",
+)
+
+
+def _positive_int(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if result < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _runtime_config(model_dir: Path, config: ModelConfig, model: _BartModel, **updates) -> dict:
+    runtime = {
+        "vocab_size": config.vocab_size,
+        "hidden_size": config.hidden_size,
+        "bos_token_id": config.bos_token_id,
+        "eos_token_id": config.eos_token_id,
+        "pad_token_id": config.pad_token_id,
+    }
+    runtime.update(model.get_vl_config(config) or {})
+    generation_path = model_dir / "generation_config.json"
+    if generation_path.is_file():
+        generation = json.loads(generation_path.read_text(encoding="utf-8"))
+        if not isinstance(generation, dict):
+            raise ValueError("generation_config.json must contain one JSON object")
+        if "eos_token_id" in generation:
+            runtime["eos_token_id"] = generation["eos_token_id"]
+    runtime.update(updates)
+    return runtime
+
+
+def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+    """Build one BART encoder-decoder bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("bart does not support dynamic_kv_cache")
+
+    if request.image_height is not None:
+        raise NotImplementedError("bart does not support image_height")
+
+    if request.image_width is not None:
+        raise NotImplementedError("bart does not support image_width")
+
+    if request.video_num_frames is not None:
+        raise NotImplementedError("bart does not support video_num_frames")
+
+    if request.max_batch_size != 1:
+        raise NotImplementedError("bart does not support max_batch_size")
+
+    if request.context_parallel_size != 1:
+        raise ValueError("this family does not support context parallelism")
+
+    if request.task != "text_generation":
+        raise ValueError("bart supports only task=text_generation")
+
+    model_dir = Path(request.model_dir)
+    config = ModelConfig.from_dir(model_dir)
+    if str(config.model_type).lower() not in {"bart", "mbart"}:
+        raise ValueError(f"BART does not support model_type={config.model_type!r}")
+    precision = str(request.precision).lower()
+    if precision not in {"fp32", "fp16"}:
+        raise ValueError("BART precision must be fp32 or fp16")
+    max_sequence_length = _positive_int(
+        request.max_sequence_length or min(config.max_position_embeddings, 256),
+        "max_sequence_length",
+    )
+    if max_sequence_length > config.max_position_embeddings:
+        raise ValueError("BART max_sequence_length exceeds checkpoint context capacity")
+    if request.quantization not in {None, "none"}:
+        raise NotImplementedError("BART does not support quantized builds")
+    if request.fp32_layers:
+        raise NotImplementedError("BART does not support mixed-precision layers")
+
+    parallel = ParallelConfig(
+        tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
+    )
+    parallel.validate()
+    if parallel.enabled and precision != "fp32":
+        raise NotImplementedError("BART tensor-parallel builds require fp32")
+    model = _BartModel()
+    config.raw["_model_dir"] = str(model_dir)
+    weights = model.load_weights(str(model_dir), config)
+
+    writer.set_header(family="bart", task=request.task, backend=request.backend)
+    if parallel.enabled:
+        for rank in range(parallel.tp_size):
+            plan = model.build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                verbose=bool(request.verbose),
+                debug_layer_outputs=False,
+                parallel_config=parallel.for_rank(rank),
+            )
+            writer.add_bytes(f"engine.rank{rank}.plan", plan)
+    else:
+        plan = model.build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            verbose=bool(request.verbose),
+            debug_layer_outputs=False,
+            parallel_config=parallel,
+        )
+        writer.add_bytes("engine.plan", plan)
+    encoder_plan = model.build_vision_engine(
+        str(model_dir),
+        config,
+        weights,
+        precision=precision,
+        verbose=bool(request.verbose),
+    )
+    if encoder_plan is None:
+        raise RuntimeError("BART encoder build returned no engine")
+    writer.add_bytes("encoder.plan", encoder_plan)
+    writer.add_json(
+        "runtime.json",
+        _runtime_config(
+            model_dir,
+            config,
+            model,
+            precision=precision,
+            max_cache_length=max_sequence_length,
+            decoder_engine_layout="dual_profile" if parallel.enabled else "single",
+            tensor_parallel_size=parallel.tp_size,
+            tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
+        ),
+    )
+    for filename in _BUNDLE_FILES:
+        path = model_dir / filename
+        if path.is_file():
+            writer.add_bytes(filename, path.read_bytes())

@@ -1,0 +1,18 @@
+{
+  "name": "sam3",
+  "hf_id": "facebook/sam3",
+  "hf_revision": "3c879f39826c281e95690f02c7821c4de09afae7",
+  "bundle": "sam3.bundle",
+  "family": "sam3",
+  "task": "text_prompted_segmentation",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "sam3",
+      "premerge": true,
+      "prompt": "car",
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1
+}

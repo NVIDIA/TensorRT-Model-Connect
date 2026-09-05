@@ -1,0 +1,22 @@
+{
+  "name": "qwen3-0.6b-native-l0",
+  "hf_id": "Qwen/Qwen3-0.6B",
+  "bundle": "qwen3-0.6b-native-l0.bundle",
+  "family": "qwen",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "qwen3-0.6b-native-l0",
+      "premerge": true,
+      "reference_precision": "bf16",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  ],
+  "precision": "bf16",
+  "max_sequence_length": 40960,
+  "tensor_parallel_size": 1
+}

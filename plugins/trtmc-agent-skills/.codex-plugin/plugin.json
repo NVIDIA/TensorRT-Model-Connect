@@ -7,17 +7,19 @@
     "codex",
     "skills",
     "git",
+    "github",
     "pull-requests",
     "developer-workflow",
     "tensorrt",
-    "model-profiling",
+    "model-development",
+    "profiling",
     "documentation"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "TensorRT-Model-Connect Skills",
-    "shortDescription": "Repo skills for TensorRT, docs, and GitHub workflows",
-    "longDescription": "Installs TensorRT-Model-Connect Codex skills for GitHub PR workflow, documentation maintenance, model transformation, precision optimization, profiling, numerical debugging, and native TensorRT builder changes.",
+    "shortDescription": "Repo skills for models, docs, profiling, and GitHub",
+    "longDescription": "Installs concise TensorRT-Model-Connect skills for family development, precision, debugging, profiling, documentation, environment setup, and GitHub workflows.",
     "developerName": "NVIDIA",
     "category": "Development",
     "capabilities": [
@@ -27,8 +29,10 @@
     "defaultPrompt": [
       "Use $write-git-messages to draft a PR message from my diff.",
       "Use $submit-github-pr to push this branch and open a PR.",
-      "Use $debug-trt-mismatch to investigate a TensorRT vs HuggingFace mismatch.",
-      "Use $profile-model to profile a model and summarize bottlenecks."
+      "Use $transform-model to add this checkpoint as one self-contained family.",
+      "Use $debug-trt-mismatch to locate this family's first output divergence.",
+      "Use $profile-model to measure this model through its public Task API.",
+      "Use $setup-trtmc-environment to prepare this checkout for one family."
     ],
     "brandColor": "#76B900"
   }

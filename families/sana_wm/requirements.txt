@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+Pillow
+accelerate>=1.3
+diffusers
+PyYAML==6.0.3
+einops==0.8.2
+ftfy
+huggingface-hub==1.26.0
+imageio[pyav]
+flash-linear-attention>=0.4.2
+mmcv==1.7.2
+omegaconf
+pyrallis
+pytz
+qwen-vl-utils
+scipy
+termcolor
+timm==0.6.13
+tokenizers==0.22.2
+tqdm
+transformers==5.2.0

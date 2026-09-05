@@ -1,0 +1,19 @@
+{
+  "name": "nllb-200-distilled-600m",
+  "hf_id": "facebook/nllb-200-distilled-600M",
+  "bundle": "nllb-200-distilled-600m.bundle",
+  "family": "m2m_100",
+  "task": "text_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "nllb-200-distilled-600m",
+      "premerge": true,
+      "reference_precision": "fp16",
+      "prompt": "The house is wonderful.",
+      "max_new_tokens": 20
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

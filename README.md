@@ -2,182 +2,127 @@
 
 <h1>TensorRT-Model-Connect</h1>
 
-<p><strong>Deploy supported Hugging Face models for end-to-end TensorRT inference in just two commands.</strong></p>
+<p><strong>Self-contained model families that build TensorRT bundles and implement native C++ task APIs.</strong></p>
 
-[Documentation](https://nvidia.github.io/TensorRT-Model-Connect/)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Model Support](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[API Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview)
-
-</div>
-
-> **Public Preview** — TensorRT-Model-Connect is evolving rapidly and is
-> intended for evaluation and feedback. APIs, scope, and direction may change.
-> See [Project status](#project-status).
-
-<a id="news-and-updates"></a>
-
-## 📰 News and Updates
-
-<!-- Newest first. Keep no more than the three most recent entries. -->
-
-- **2026-08-23 · Blog** — [AI-Native by Design: What We Learned Building
-  TensorRT-Model-Connect](https://nvidia.github.io/TensorRT-Model-Connect/blog/ai-native-by-design)
-- **2026-08-18 · Announcement** — [TensorRT-Model-Connect enters public
-  preview](https://x.com/NVIDIAAI/status/2089750360869233059)
-
-<a id="example-code"></a>
-
-## 💻 Example Code
-
-```bash
-trtmc build Qwen/Qwen3-0.6B --max-cache-length 16384 --output qwen3-0.6b.bundle
-trtmc run ./qwen3-0.6b.bundle --prompt "What is the capital of France? Answer in one word." --chat-template --no-thinking
-# Generated text: Paris
-```
-
-The same bundle works from
-[C++](https://nvidia.github.io/TensorRT-Model-Connect/api/cpp-api):
-
-```cpp
-auto pipeline = trtmc::load("./qwen3-0.6b.bundle");
-std::cout << pipeline->generate("What is the capital of France? Answer in one word.").text << '\n';
-```
-
-<a id="get-started-and-stay-tuned"></a>
-
-## 🌟 Get Started & Stay Tuned
-
-<div align="center">
-
-<img width="960" height="540" alt="Animated TensorRT-Model-Connect project hero" src="TRTMCHERO-small.gif" />
+[Documentation](https://nvidia.github.io/TensorRT-Model-Connect/)&nbsp;&nbsp;|&nbsp;&nbsp;[Supported Models](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)&nbsp;&nbsp;|&nbsp;&nbsp;[Architecture](https://nvidia.github.io/TensorRT-Model-Connect/architecture/ai-native-horizontal-scaling)
 
 </div>
 
-Ready to try TensorRT-Model-Connect? Follow the
-[Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start)
-to build and run your first supported model.
+## Architecture
 
-We're glad you're here. [Star the repository](https://github.com/NVIDIA/TensorRT-Model-Connect)
-to keep TensorRT-Model-Connect on your radar as we share new model integrations,
-releases, examples, and community updates. Ideas and feedback are always
-welcome through the [issue chooser](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/new/choose).
-
-<a id="what-is-tensorrt-model-connect"></a>
-
-## 🔎 What is TensorRT-Model-Connect?
-**TensorRT Model Connect is an extensive collection of AI Model reference implementations in C++, on top of NVIDIA TensorRT**. Model Connect is powered by an agentic workflow that continuously adds support for upcoming models, drastically reducing integration effort on user side and time until new models become compatible.
-<img width="1318" height="1088" alt="MC-what-it-is" src="website/static/img/readme/model-connect-overview.png" />
-
-<a id="choose-the-right-tensorrt-path"></a>
-
-## 🧭 Choose the right abstraction layer
-
-- Use TensorRT-Model-Connect to explore models quickly and evaluate broad
-  model coverage.
-- For production LLM/VLM deployment on NVIDIA edge platforms where performance
-  is the priority, start directly with
-  [TensorRT Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM).
-
-<img width="1606" height="979" alt="TensorRT abstraction layers from Model Connect through Edge-LLM to TensorRT" src="website/static/img/readme/tensorrt-stack.png" />
-
-<a id="why-tensorrt-model-connect"></a>
-
-## 💡 Why TensorRT-Model-Connect?
-
-- Start from a supported Hugging Face or local checkpoint and build TensorRT
-  engines without an intermediate ONNX export step.
-- Hand a versioned `.bundle` artifact from the Python-first build environment
-  to native C++ task APIs such as text generation, transcription, image and
-  video generation, segmentation, embedding, and forecasting.
-- Use model-family-owned builders, runtime pipelines, helper kernels, and
-  validation contracts as concrete blueprints for modification and
-  customization.
-- Keep native TensorRT execution and exactly qualified optimized-runtime
-  dispatch behind the same task-oriented application boundary.
-
-Read the [Project Overview](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/project-overview)
-for the architecture boundary, intended users, and comparison with other
-TensorRT integration paths.
-
-TensorRT-Model-Connect is a reference implementation. Users are responsible
-for trusting the checkpoints, bundles, native libraries, and local environment
-they provide when building or running models.
-
-<a id="getting-started"></a>
-
-## 🚀 Getting Started
-
-**Recommended Quick Start: AI-Native**
-
-Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
-prompt:
+Every model family is one complete vertical slice:
 
 ```text
-/goal Use the current TensorRT-Model-Connect checkout, or clone
-https://github.com/NVIDIA/TensorRT-Model-Connect.git if none is provided. Read
-AGENTS.md, then follow website/docs/getting-started/source-build.md and
-website/docs/getting-started/quick-start.md exactly. Do not modify source,
-tests, Dockerfiles, git history, or remote state. Report the selected GPU,
-exact commands, bundle path, inference output, and any deviation from the
-documentation.
+families/<family>/
+├── support.py        # checkpoint ownership + supported/default tasks
+├── model.py          # plain build(request, writer); inheritance forbidden
+├── requirements.txt  # optional family-owned build/reference/test dependencies
+├── runtime/          # one libtrtmc_model_<family>.so
+└── tests/            # family-owned manifests and validation
 ```
 
-Want to know more? See the
-[Quick Start documentation](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start).
+The shared core is intentionally narrow. Python reads standard Hugging Face
+metadata, asks every lightweight family `support.py`, requires exactly one
+owner, and imports only that family's `model.py`. C++ reads the bundle header,
+loads exactly the named backend and family DSO, and returns an abstract
+interface from `trtmc/task.h`. Family implementations depend on those
+interfaces; they do not depend on each other.
 
-<a id="explore-the-documentation"></a>
+There is no central model registry, runtime-strategy switch, builder base
+class, compatibility layer, or fallback path.
 
-## 📚 Explore the documentation
+GPU build/reference/E2E environments use one pinned base image. A family may
+add a plain `requirements.txt` in its own directory; changing it does not
+publish another image digest or modify a central dependency registry.
 
-| Goal | Start here |
-| --- | --- |
-| Complete the first Qwen inference | [Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start) |
-| Select and install an environment | [Get Started](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/overview) |
-| Compile the CLI, backends, and model DSOs | [Build from Source](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/source-build) |
-| Find an exact checkpoint or model recipe | [Models & Recipes](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview) |
-| Look up task and feature workflows | [User Guides](https://nvidia.github.io/TensorRT-Model-Connect/user-guides/overview) |
-| Learn through progressive labs and self-checks | [Tutorials](https://nvidia.github.io/TensorRT-Model-Connect/learning-path) |
-| Look up CLI, Python, C++, bundle, and config contracts | [Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview) |
-| Understand architecture or extend the repository | [Developer Guide](https://nvidia.github.io/TensorRT-Model-Connect/developer-guide/overview) |
-| Review compatibility, limitations, and lifecycle policy | [Release & Support](https://nvidia.github.io/TensorRT-Model-Connect/release-support/overview) |
-| Give a coding agent repository-specific guidance | [AI & Agent Guide](https://nvidia.github.io/TensorRT-Model-Connect/agent-guide) |
+## Build a bundle
 
-<a id="supported-models"></a>
+```bash
+python -m tensorrt_model_connect build openai-community/gpt2 \
+  --precision fp16 \
+  --output gpt2.bundle
+```
 
-## 🧩 Supported models
+The positional model may be a Hugging Face model ID or local snapshot. The
+matching family owns its model identities, supported tasks, meaningful default
+task, TensorRT graph, weights, section names, and runtime configuration. Use
+`--task` only to override the family default. The bundle container stores only
+`format`, `family`, `task`, `backend`, and section offsets and lengths.
 
-The [Supported Models](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)
-page is the single source of truth for exact checkpoints, Hugging Face
-architectures, TRTMC profiles, precision, quantization, optimized-runtime
-dispatch, configuration, and qualification evidence.
+Two existing opt-in paths remain direct rather than becoming configuration
+systems:
 
-<a id="get-help-and-file-an-issue"></a>
+```bash
+# Llama runtime-sized KV cache
+python -m tensorrt_model_connect build MODEL -o model.bundle --dynamic-kv-cache
+trtmc run model.bundle --runtime-root /opt/trtmc/lib \
+  --kv-cache-size 1GiB --prompt "Hello"
 
-## 🛟 Get help and file an issue
+# TensorRT-RTX, when its Python package and optional backend DSO are installed
+python -m tensorrt_model_connect build MODEL -o model.bundle --backend trt_rtx
+trtmc run model.bundle --runtime-root /opt/trtmc/lib \
+  --runtime-cache kernels.cache --cuda-graphs --prompt "Hello"
+```
 
-Start with [Get Help and File an Issue](https://nvidia.github.io/TensorRT-Model-Connect/release-support/get-help)
-to choose the right support route and collect the model, environment, command,
-and log details maintainers need. Use the
-[issue chooser](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/new/choose)
-for usage questions, reproducible bugs, feature or model requests, and
-documentation corrections.
+## Load from C++
 
-Do not disclose suspected security vulnerabilities in a public issue. Follow
-[SECURITY.md](SECURITY.md) to report them privately to NVIDIA PSIRT.
+```cpp
+#include <trtmc/runtime/family_loader.h>
+#include <trtmc/task.h>
 
-<a id="project-status"></a>
+auto task = trtmc::load_task("gpt2.bundle", "/opt/trtmc/lib");
+auto* text = dynamic_cast<trtmc::ITextGeneration*>(task.get());
+if (text == nullptr) throw std::runtime_error("unexpected task");
+auto result = text->generate("What is TensorRT?");
+```
 
-## 🧪 Project status
+The runtime directory must contain the native core, runtime loader, requested
+backend, and exact family DSO produced by the same build.
 
-TensorRT-Model-Connect is an experimental project. Its APIs, scope, and
-direction may evolve as we learn from users. This preview is intended to inform
-future decisions and does not establish a specific product roadmap or release
-timeline.
+## Applications and tools
 
-<a id="contributing"></a>
+Applications depend one way on public ModelConnect APIs; core and model
+families never depend on application code.
 
-## 🤝 Contributing
+- [Bring your own kernel](examples/byok/README.md) connects an explicit
+  TVM-FFI kernel DSO to a family-owned TensorRT graph, either directly in the
+  family or through the optional pre-serialization graph transform.
+- [Persistent audio streaming](examples/audio_streaming/README.md) loads one
+  bundle once and serves one prompt per input line through the public Task API.
+- [Cosmos3 dual Spark](examples/models/cosmos3/dual_spark/README.md) runs the
+  CP=2 video pipeline across two DGX Sparks.
+- [Nemotron VoiceChat full duplex](examples/models/nemotron_voicechat/full_duplex/README.md)
+  provides the live ALSA microphone/speaker application.
+- `trtmc-bench` and [the performance matrix](apps/benchmark/performance/README.md)
+  measure the public Task APIs without adding behavior to core.
 
-- Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing source or model
-  integration changes.
-- TensorRT-Model-Connect is licensed under the terms in [LICENSE](LICENSE).
+## Add a family
 
-<!-- Collaborative review anchor: batch 2. -->
+Adding a family means adding one directory, including its own `support.py`. It
+must not require editing core source lists, registries, or sibling families.
+Similar code is copied until a real shared contract—not code similarity—proves
+a shared boundary is needed.
+
+If the family needs packages beyond the base environment, install them with
+`python -m pip install -r families/<family>/requirements.txt` before its build
+or reference test. Native bundle deployment never reads this file or launches
+Python.
+
+See [Add a Model Family](website/docs/extend/add-model-family.md) and the
+[full architecture](website/docs/architecture/ai-native-horizontal-scaling.md).
+
+## Validate
+
+```bash
+PYTHONPATH=core/builder:apps/benchmark:. python3 -m tools.model_ci validate
+PYTHONPATH=core/builder:apps/benchmark:. python3 -m pytest -q
+git diff --check
+```
+
+Then build and run the affected family's native target and real E2E recipe.
+Do not weaken a correctness threshold to make CI pass.
+
+## Contributing and license
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md). Contributions require DCO sign-off.
+TensorRT-Model-Connect is licensed under [Apache-2.0](LICENSE).

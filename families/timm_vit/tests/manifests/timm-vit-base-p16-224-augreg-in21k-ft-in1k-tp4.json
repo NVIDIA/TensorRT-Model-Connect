@@ -1,0 +1,16 @@
+{
+  "name": "timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4",
+  "hf_id": "timm/vit_base_patch16_224.augreg_in21k_ft_in1k",
+  "bundle": "timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4.bundle",
+  "family": "timm_vit",
+  "task": "classification",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4",
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "max_sequence_length": 1
+}

@@ -1,0 +1,20 @@
+{
+  "name": "phi-moe-l0-tp4",
+  "hf_id": "microsoft/Phi-tiny-MoE-instruct",
+  "bundle": "phi-moe-l0-tp4.bundle",
+  "family": "phi_moe",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "phi-moe-l0-tp4",
+      "prompt": "Name the largest ocean on Earth.",
+      "max_new_tokens": 5,
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  ],
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 4
+}

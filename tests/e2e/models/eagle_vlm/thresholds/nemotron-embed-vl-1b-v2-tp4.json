@@ -1,8 +1,0 @@
-{
-  "threshold_overrides": {
-    "cosine_similarity": 0.99,
-    "l2_distance": 0.1,
-    "topk_neighborhood_overlap_10": 0.8,
-    "topk_neighborhood_overlap_100": 0.7
-  }
-}

@@ -5,9 +5,9 @@ development in a personal fork and submit changes to
 [`NVIDIA/TensorRT-Model-Connect`](https://github.com/NVIDIA/TensorRT-Model-Connect)
 through a pull request. Do not work directly on the upstream `main` branch.
 
-The [Contributor Quickstart](website/docs/extend/contributing.md) and the
-[Developer Guide](website/docs/developer-guide/overview.md) provide additional
-project-specific design, testing, and ownership guidance.
+The [Contributor Quickstart](website/docs/extend/contributing.md) and
+[architecture guide](website/docs/architecture/ai-native-horizontal-scaling.md)
+provide project-specific design, testing, and ownership guidance.
 
 ## Development workflow
 
@@ -41,16 +41,20 @@ Use a concise branch name that describes one purpose, such as
 
 ### 3. Find the narrowest owner
 
-Before editing, identify the component that owns the behavior. Model-specific
-semantics should normally remain in that model family's directory; shared
-infrastructure should contain only genuinely model-independent contracts. Start
-with the relevant guide:
+Before editing, identify the component that owns the behavior. A normal model
+contribution changes only `families/<owner>/**`. It may duplicate sibling
+implementation but must not import it. A shared-core change requires a concrete
+model-independent contract that the current public API cannot express.
+
+Start with the relevant guide:
 
 - [Add a Model Family](website/docs/extend/add-model-family.md)
-- [Add an Optimized Runtime Implementation](website/docs/extend/add-optimized-runtime.md)
-- [Add a Runtime Strategy](website/docs/extend/add-runtime-strategy.md)
-- [Add a Config Schema](website/docs/extend/add-config-schema.md)
-- [Validate a Model Contribution](website/docs/extend/model-validation.md)
+- [AI-Native Horizontal Scaling Architecture](website/docs/architecture/ai-native-horizontal-scaling.md)
+- [Bring Your Own Kernel](examples/byok/README.md), only for an explicit BYOK contribution
+
+Python family builders are plain functions and must not inherit. Do not add a
+compatibility path, fallback, migration layer, family dependency hash, or
+artifact digest. Digest pins are limited to CI container base images.
 
 Open an issue before investing in a large, cross-cutting, or user-visible design
 when the intended ownership or approach is not already clear.
@@ -79,8 +83,8 @@ pull request after the branch is pushed.
 Start with repository consistency checks:
 
 ```bash
-PYTHONPATH=python:. python3 tools/model_ci.py validate
-PYTHONPATH=python:. python3 tools/test_impact.py --validate
+PYTHONPATH=core/builder:apps/benchmark:. python3 -m tools.model_ci validate
+PYTHONPATH=core/builder:apps/benchmark:. python3 tools/test_impact.py --validate
 git diff --check
 ```
 
@@ -89,8 +93,8 @@ needs the declared model, runtime, hardware, and comparison evidence. For
 documentation changes, run:
 
 ```bash
-python3 tools/check_doc_file_references.py --strict website/docs
 npm --prefix website ci
+npm --prefix website run test:model-support
 npm --prefix website run build
 ```
 

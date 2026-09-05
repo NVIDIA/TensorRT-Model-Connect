@@ -1,0 +1,23 @@
+{
+  "name": "wan21-t2v-1.3b-l0-tp4",
+  "hf_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+  "bundle": "wan21-t2v-1.3b-l0-tp4.bundle",
+  "family": "wan_t2v",
+  "task": "image_generation",
+  "testcases": [
+    {
+      "name": "wan21-t2v-1.3b-l0-tp4",
+      "test_prompt": "A cat sitting on a beach watching the sunset",
+      "test_type": "diffusion",
+      "num_inference_steps": 15,
+      "reference_precision": "fp32",
+      "seed": 42
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "context_parallel_size": 1,
+  "precision": "fp32",
+  "image_height": 384,
+  "image_width": 672,
+  "video_num_frames": 5
+}

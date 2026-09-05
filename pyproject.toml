@@ -2,99 +2,85 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [build-system]
-requires = ["tomli>=2.0; python_version < '3.11'"]
-build-backend = "_pyproject_backend"
-backend-path = ["."]
+requires = [
+    "apache-tvm-ffi==0.1.12",
+    "conan-py-build==0.4.3",
+    "torch>=2.6",
+]
+build-backend = "conan_py_build.build"
 
 [project]
 name = "tensorrt-model-connect"
-dynamic = ["version", "dependencies"]
-description = "TensorRT-Model-Connect builder for HuggingFace models and .bundle artifacts"
+version = "0.1.0"
+description = "Build model checkpoints into native TensorRT .bundle artifacts"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "ASSET_LICENSES.md"]
-requires-python = ">=3.10"
-
-[tool.tensorrt-model-connect.package]
-base-version = "0.1.0"
-default-tensorrt-version = "11.1.0.106"
+requires-python = ">=3.12"
 dependencies = [
     "safetensors>=0.4",
     "numpy>=1.24",
     "ml_dtypes>=0.4",
     "onnx>=1.16",
-    "onnxscript>=0.2",
-    "transformers>=4.40",
+    "transformers==5.2.0",
     "huggingface_hub>=0.23",
     "sentencepiece>=0.1.99",
     "cuda-python>=13.0.3,<14",
     "apache-tvm-ffi==0.1.12",
+    "tensorrt==11.1.0.106",
     "PyYAML>=6.0",
-    "tomli>=2.0; python_version < '3.11'",
 ]
+
+[project.scripts]
+trtmc-bench = "trtmc_benchmark.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7.0", "torch>=2.0", "jsonschema>=4.23,<5"]
-# Build-only dependency for official Wan checkpoints containing T5/VAE .pth
-# files. Kept out of the base install and never required by the C++ runtime.
-wan = ["torch>=2.0"]
-fast-foundation-stereo = [
-    "torch>=2.6",
-    "timm>=1.0",
-]
-moge = ["torch>=2.4"]
-chronos = ["chronos-forecasting>=2.2.2"]
-# clip: required by tests/e2e/models/flux/e2e_plugins/comparators/clip_metrics.py for
-# CLIP-based semantic metrics on diffusion model outputs.  Gracefully skipped
-# at runtime when absent, but all CLIP gates become no-ops without it.
-clip = ["open-clip-torch>=2.20", "Pillow>=9.0"]
-validation = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
+cutedsl = ["nvidia-cutlass-dsl==4.7.1"]
 
 [tool.conan-py-build.wheel]
-packages = ["python/tensorrt_model_connect"]
+packages = [
+    "core/builder/tensorrt_model_connect",
+    "apps/benchmark/trtmc_benchmark",
+    "families",
+]
 
 [tool.conan-py-build.sdist]
 include = [
-    "python",
-    "src/runtime/models/fast_foundation_stereo/native_plugins",
+    "CMakeLists.txt",
+    "ASSET_LICENSES.md",
+    "LICENSE",
+    "NOTICE",
+    "cmake",
+    "conanfile.py",
+    "core",
+    "apps",
+    "families",
+    "requirements",
     "third_party",
+    "examples",
+    "tools/perf_matrix.py",
 ]
 exclude = [
     "__pycache__",
     "*.pyc",
-    "python/tensorrt_model_connect/build",
-    "python/tensorrt_model_connect/*.egg-info",
+    "core/builder/tensorrt_model_connect/build",
+    "core/builder/tensorrt_model_connect/*.egg-info",
 ]
 
 [tool.pytest.ini_options]
 testpaths = [
-    "tests/builder",
-    "tests/tools",
-    "tests/e2e",
-    "python/tensorrt_model_connect/families",
+    "families",
+    "core/builder/tests",
+    "apps/benchmark/trtmc_benchmark/tests",
+    "examples/audio_streaming/test_audio_streaming.py",
+    "examples/models/cosmos3/dual_spark/test_cosmos3_dual_spark_source.py",
+    "examples/models/nemotron_voicechat/full_duplex/test_voicechat_full_duplex_source.py",
+    "tools/tests",
 ]
 markers = [
-    "trt: tests requiring TensorRT + CUDA GPU",
-    "e2e: end-to-end tests requiring GPU and engine bundles",
-    "unit: Unit tests — no GPU, no TRT",
-    "gpu: Requires NVIDIA GPU",
-    "model_proof_allocator: resource-sensitive model-proof lease concurrency tests",
-    "slow: Slow tests (>30s)",
-    "text: Text generation models",
-    "vision: Vision/VL models",
-    "audio: Audio models (Whisper, Bark, PersonaPlex, Nemotron VoiceChat)",
-    "diffusion: Diffusion models (Wan, FLUX, Z-Image)",
-]
-
-[tool.coverage.run]
-source = ["tensorrt_model_connect"]
-omit = ["*/tests/*", "*/__pycache__/*"]
-
-[tool.coverage.report]
-show_missing = true
-precision = 1
-exclude_lines = [
-    "pragma: no cover",
-    "if __name__ == .__main__.",
-    "raise NotImplementedError",
+    "gpu: tests requiring a CUDA GPU",
+    "trt: tests requiring TensorRT and CUDA",
+    "e2e: end-to-end tests requiring checkpoints and native runtime",
+    "unit: unit tests that do not require a GPU",
 ]

@@ -1,9 +1,0 @@
-{
-  "threshold_overrides": {
-    "audio_min_rms": 0.001,
-    "audio_min_peak": 0.01,
-    "agent_text_min_similarity": 0.75,
-    "transcript_min_words": 8,
-    "transcript_min_similarity": 0.35
-  }
-}

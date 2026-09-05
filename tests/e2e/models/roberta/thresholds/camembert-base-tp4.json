@@ -1,8 +1,0 @@
-{
-  "threshold_overrides": {
-    "cls_embedding_cosine": 0.999,
-    "hidden_state_cosine": 0.99,
-    "hidden_state_l2": 0.1,
-    "logit_atol": 0.01
-  }
-}

@@ -1,0 +1,28 @@
+{
+  "name": "lfm2-350m-bf16-model-card",
+  "hf_id": "LiquidAI/LFM2-350M",
+  "hf_revision": "f37d3f5c8c5484bc01dad379a595cf4c68c4e70e",
+  "bundle": "lfm2-350m-bf16-model-card.bundle",
+  "family": "lfm2",
+  "task": "text_generation",
+  "precision": "bf16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "lfm2-350m-bf16-model-card-sampling",
+      "reference_precision": "bf16",
+      "prompt": "What is C. elegans?",
+      "max_new_tokens": 512,
+      "temperature": 0.3,
+      "min_p": 0.15,
+      "top_k": 50,
+      "seed": 42,
+      "determinism_reruns": 1,
+      "use_chat_template": true,
+      "do_sample": true,
+      "repetition_penalty": 1.05
+    }
+  ],
+  "max_sequence_length": 32768,
+  "tensor_parallel_size": 1
+}

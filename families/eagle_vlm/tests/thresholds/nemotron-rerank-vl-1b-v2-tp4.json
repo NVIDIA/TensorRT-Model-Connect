@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "contract_ranking_agreement": 1.0
+  }
+}

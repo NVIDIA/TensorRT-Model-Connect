@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Required by the checkpoint's trust_remote_code reference.
+causal-conv1d==1.6.2.post1
+mamba-ssm==2.3.2.post1
+transformers==4.48.3

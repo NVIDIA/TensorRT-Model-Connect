@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "trtmc/pipeline.h"
-#include "trtmc/trtmc_io.hpp"
+#include "trtmc/runtime/family_loader.h"
+#include "trtmc/task.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #include <chrono>
 #include <cmath>
@@ -22,15 +25,14 @@ struct Options {
     std::string bundle;
     std::string image;
     std::string state;
-    std::string backend_dir;
-    std::string model_plugin_dir;
+    std::string runtime_root;
     double control_hz{50.0};
 };
 
 void usage(const char* program) {
     std::cerr << "Usage: " << program
               << " MODEL.bundle --image FRAME.png --state STATE.f32 "
-                 "[--backend-dir DIR] [--model-plugin-dir DIR] [--control-hz 50]\n";
+                 "--runtime-root DIR [--control-hz 50]\n";
 }
 
 std::string take_value(int& index, int argc, char** argv, const std::string& option) {
@@ -47,10 +49,8 @@ Options parse_options(int argc, char** argv) {
             options.image = take_value(index, argc, argv, argument);
         else if (argument == "--state")
             options.state = take_value(index, argc, argv, argument);
-        else if (argument == "--backend-dir")
-            options.backend_dir = take_value(index, argc, argv, argument);
-        else if (argument == "--model-plugin-dir")
-            options.model_plugin_dir = take_value(index, argc, argv, argument);
+        else if (argument == "--runtime-root")
+            options.runtime_root = take_value(index, argc, argv, argument);
         else if (argument == "--control-hz")
             options.control_hz = std::stod(take_value(index, argc, argv, argument));
         else if (!argument.empty() && argument[0] == '-')
@@ -61,9 +61,10 @@ Options parse_options(int argc, char** argv) {
             throw std::invalid_argument("only one bundle may be specified");
     }
     if (options.bundle.empty() || options.image.empty() || options.state.empty() ||
-        !std::isfinite(options.control_hz) || options.control_hz <= 0.0)
+        options.runtime_root.empty() || !std::isfinite(options.control_hz) ||
+        options.control_hz <= 0.0)
         throw std::invalid_argument(
-            "bundle, image, state, and a positive control rate are required");
+            "bundle, image, state, runtime root, and a positive control rate are required");
     return options;
 }
 
@@ -82,25 +83,46 @@ std::vector<float> read_state(const std::string& path) {
     return state;
 }
 
+struct Image {
+    std::vector<float> pixels;
+    int width{0};
+    int height{0};
+};
+
+Image read_image(const std::string& path) {
+    Image image;
+    int channels = 0;
+    unsigned char* data = stbi_load(path.c_str(), &image.width, &image.height, &channels, 3);
+    if (data == nullptr)
+        throw std::runtime_error("failed to decode recorded image: " + path);
+    const auto count = static_cast<std::size_t>(image.width) * image.height * 3U;
+    image.pixels.resize(count);
+    for (std::size_t index = 0; index < count; ++index)
+        image.pixels[index] = static_cast<float>(data[index]) / 255.0F;
+    stbi_image_free(data);
+    return image;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     try {
         const auto options = parse_options(argc, argv);
-        const auto image = trtmc::io::read_image(options.image);
-        if (image.empty() || image.height != 480 || image.width != 640)
+        const auto image = read_image(options.image);
+        if (image.pixels.empty() || image.height != 480 || image.width != 640)
             throw std::runtime_error("recorded image must be 640x480 RGB");
         const auto state = read_state(options.state);
 
-        trtmc::LoadOptions load_options;
-        if (!options.backend_dir.empty())
-            load_options.backend_search_paths.push_back(options.backend_dir);
-        if (!options.model_plugin_dir.empty())
-            load_options.model_plugin_search_paths.push_back(options.model_plugin_dir);
-        auto pipeline = trtmc::load(options.bundle, load_options);
-        const trtmc::RobotObservation observation{
-            image.pixels.data(), image.height, image.width, 3, state.data(), 14};
-        const auto chunk = pipeline->predict_action_chunk(observation);
+        auto task = trtmc::load_task(options.bundle, options.runtime_root);
+        auto* control = dynamic_cast<trtmc::IRobotControl*>(task.get());
+        if (control == nullptr)
+            throw std::runtime_error("bundle does not implement the robot_control Task API");
+        const trtmc::RobotObservation observation{{image.pixels.data(), image.pixels.size()},
+                                                  image.height,
+                                                  image.width,
+                                                  3,
+                                                  {state.data(), state.size()}};
+        const auto chunk = control->predict_action_chunk(observation);
         if (chunk.num_actions != 100 || chunk.action_dim != 14 || chunk.actions.size() != 1400)
             throw std::runtime_error("qualified ACT bundle must return a 100x14 action chunk");
 

@@ -1,0 +1,27 @@
+{
+  "name": "minimax-h3-768p",
+  "hf_id": "MiniMaxAI/MiniMax-H3",
+  "hf_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
+  "bundle": "minimax-h3-768p.bundle",
+  "family": "minimax_h3",
+  "task": "image_generation",
+  "precision": "bf16",
+  "reference_precision": "bf16",
+  "testcases": [
+    {
+      "name": "minimax-h3-768p",
+      "premerge": true,
+      "semantic_assessment": true,
+      "runtime_timeout_s": 7200,
+      "test_type": "diffusion",
+      "prompt_file": "prompts/t2va-example-1.json",
+      "num_inference_steps": 50,
+      "seed": 0,
+      "reference_precision": "bf16"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "image_height": 768,
+  "image_width": 1344,
+  "video_num_frames": 124
+}

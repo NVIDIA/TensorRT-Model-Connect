@@ -1,0 +1,31 @@
+{
+  "name": "timesfm-2.0-500m-official-tp4",
+  "hf_id": "google/timesfm-2.0-500m-pytorch",
+  "bundle": "timesfm-2.0-500m-official-tp4.bundle",
+  "family": "timesfm",
+  "task": "time_series_forecast",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "timesfm-2.0-500m-official-tp4",
+      "inputs": {
+        "past_values": [
+          0.05,
+          0.15,
+          0.3,
+          0.5,
+          0.65,
+          0.8,
+          0.95,
+          1.1,
+          1.18,
+          1.24,
+          1.28,
+          1.31
+        ],
+        "frequency": 2
+      }
+    }
+  ],
+  "tensor_parallel_size": 4
+}

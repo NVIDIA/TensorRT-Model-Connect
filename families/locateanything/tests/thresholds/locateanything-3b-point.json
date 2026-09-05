@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "normalized_text_edit_distance": 0.5,
+    "localization_box_iou": 0.9,
+    "localization_point_distance": 10.0
+  }
+}

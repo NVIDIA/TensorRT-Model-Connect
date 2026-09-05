@@ -1,0 +1,18 @@
+{
+  "name": "nemotron-speech-streaming-en-0.6b-tp4",
+  "hf_id": "nvidia/nemotron-speech-streaming-en-0.6b",
+  "bundle": "nemotron-speech-streaming-en-0.6b-tp4.bundle",
+  "family": "nemotron_speech_streaming",
+  "task": "transcription_streaming",
+  "testcases": [
+    {
+      "name": "nemotron-speech-streaming-en-0.6b-tp4",
+      "test_input_audio": "data/Recording.wav",
+      "reference_precision": "fp32",
+      "chunk_ms": 1120
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp32",
+  "max_sequence_length": 128
+}

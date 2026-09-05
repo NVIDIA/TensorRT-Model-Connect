@@ -1,0 +1,17 @@
+{
+  "name": "vgg16-tv-in1k",
+  "hf_id": "timm/vgg16.tv_in1k",
+  "bundle": "vgg16-tv-in1k.bundle",
+  "family": "timm_vgg",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "vgg16-tv-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

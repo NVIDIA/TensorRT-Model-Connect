@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "top1_margin_atol": 0.12
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "marian-en-ru-tp4",
+  "hf_id": "Helsinki-NLP/opus-mt-en-ru",
+  "bundle": "marian-en-ru-tp4.bundle",
+  "family": "marian",
+  "task": "text_generation",
+  "testcases": [
+    {
+      "name": "marian-en-ru-tp4",
+      "prompt": "The house is wonderful.",
+      "max_new_tokens": 20,
+      "reference_precision": "fp32"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp32",
+  "max_sequence_length": 256
+}

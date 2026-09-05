@@ -1,0 +1,23 @@
+{
+  "name": "internvl3-8b",
+  "hf_id": "OpenGVLab/InternVL3-8B-hf",
+  "bundle": "internvl3-8b-vl.bundle",
+  "family": "internvl",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "internvl3-8b",
+      "reference_precision": "fp32",
+      "reference_backend": "golden_snapshot",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg",
+      "metadata": {
+        "golden_snapshot_path": "data/internvl3_8b_golden.json"
+      }
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 384
+}

@@ -1,0 +1,17 @@
+{
+  "name": "dpr-ctx-encoder-tp4",
+  "hf_id": "facebook/dpr-ctx_encoder-single-nq-base",
+  "bundle": "dpr-ctx-encoder-tp4.bundle",
+  "family": "dpr",
+  "task": "embedding",
+  "testcases": [
+    {
+      "name": "dpr-ctx-encoder-tp4",
+      "prompt": "The capital of France is Paris",
+      "reference_precision": "fp32"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp32",
+  "max_sequence_length": 256
+}

@@ -1,0 +1,57 @@
+{
+  "name": "nemotron-labs-diffusion-8b",
+  "hf_id": "nvidia/Nemotron-Labs-Diffusion-8B",
+  "bundle": "nemotron-labs-diffusion-8b.bundle",
+  "family": "nemotron_labs_diffusion",
+  "task": "text_generation",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "nemotron-labs-diffusion-8b-ar",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 32,
+      "inputs": {
+        "generation_mode": "ar",
+        "temperature": 0.0
+      }
+    },
+    {
+      "name": "nemotron-labs-diffusion-8b-diffusion",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 32,
+      "inputs": {
+        "generation_mode": "diffusion",
+        "block_length": 32,
+        "threshold": 0.9,
+        "temperature": 0.0
+      }
+    },
+    {
+      "name": "nemotron-labs-diffusion-8b-linear-spec",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 32,
+      "inputs": {
+        "generation_mode": "linear_spec",
+        "threshold": 0.9,
+        "temperature": 0.0
+      }
+    },
+    {
+      "name": "nemotron-labs-diffusion-8b-linear-spec-lora",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 32,
+      "inputs": {
+        "generation_mode": "linear_spec_lora",
+        "block_length": 32,
+        "threshold": 0.9,
+        "temperature": 0.0
+      }
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 640
+}

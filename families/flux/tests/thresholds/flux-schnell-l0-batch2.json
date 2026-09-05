@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "batch_min_pairwise_pixel_mae": 0.01
+  }
+}

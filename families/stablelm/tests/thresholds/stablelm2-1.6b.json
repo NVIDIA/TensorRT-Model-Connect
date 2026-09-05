@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "contract_token_agreement_rate": 1.0
+  }
+}

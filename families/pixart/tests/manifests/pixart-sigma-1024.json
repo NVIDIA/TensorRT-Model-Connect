@@ -1,0 +1,24 @@
+{
+  "name": "pixart-sigma-1024",
+  "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+  "bundle": "pixart-sigma-1024.bundle",
+  "family": "pixart",
+  "task": "image_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "pixart-sigma-1024",
+      "semantic_assessment": true,
+      "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
+      "test_type": "diffusion",
+      "num_inference_steps": 20,
+      "seed": 42
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "fp32_layers": [
+    0
+  ],
+  "image_height": 1024,
+  "image_width": 1024
+}

@@ -1,6 +1,0 @@
-# Waived E2E tests — centralized skip/xfail tracking.
-# Format: model-name  SKIP|XFAIL  (reason)
-# Platform-specific: GB300/model-name  XFAIL  (reason)
-
-eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
-eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)

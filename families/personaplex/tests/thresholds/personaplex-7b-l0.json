@@ -1,0 +1,10 @@
+{
+  "threshold_overrides": {
+    "audio_token_match_rate": 0.7,
+    "depth_token_match_rate": 0.7,
+    "speech_min_frame_exact": 0.7,
+    "speech_min_duration_s": 0.1,
+    "speech_min_rms": 0.001,
+    "speech_min_token_match": 0.8
+  }
+}

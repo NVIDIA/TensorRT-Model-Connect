@@ -1,0 +1,17 @@
+{
+  "name": "mnasnet-100-rmsp-in1k",
+  "hf_id": "timm/mnasnet_100.rmsp_in1k",
+  "bundle": "mnasnet-100-rmsp-in1k.bundle",
+  "family": "timm_mnasnet",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "mnasnet-100-rmsp-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

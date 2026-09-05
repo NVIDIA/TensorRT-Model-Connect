@@ -1,0 +1,18 @@
+{
+  "name": "sam-vit-base-tp4",
+  "hf_id": "facebook/sam-vit-base",
+  "bundle": "sam-vit-base-tp4.bundle",
+  "family": "sam",
+  "task": "prompted_segmentation",
+  "testcases": [
+    {
+      "name": "sam-vit-base-tp4",
+      "test_image": "data/test_img.jpeg",
+      "point_x": 0.5,
+      "point_y": 0.5
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp32",
+  "max_sequence_length": 1
+}

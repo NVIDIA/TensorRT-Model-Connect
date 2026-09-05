@@ -1,0 +1,20 @@
+{
+  "name": "riva-translate-4b",
+  "hf_id": "nvidia/Riva-Translate-4B-Instruct-v1.1",
+  "bundle": "riva-translate-4b.bundle",
+  "family": "mistral",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "riva-translate-4b",
+      "reference_precision": "fp32",
+      "prompt": "<s>System\nYou are an expert at translating text from English to French.</s>\n<s>User\nWhat is the French translation of the sentence: Hello, how are you?</s>\n<s>Assistant\n",
+      "max_new_tokens": 20,
+      "use_chat_template": false
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

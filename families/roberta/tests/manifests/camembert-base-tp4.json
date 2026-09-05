@@ -1,0 +1,17 @@
+{
+  "name": "camembert-base-tp4",
+  "hf_id": "almanach/camembert-base",
+  "bundle": "camembert-base-tp4.bundle",
+  "family": "roberta",
+  "task": "encoding",
+  "testcases": [
+    {
+      "name": "camembert-base-tp4",
+      "prompt": "Bonjour le monde",
+      "reference_precision": "fp32"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp32",
+  "max_sequence_length": 256
+}

@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "iou_per_prompt": 0.7,
+    "num_masks_consistency": true
+  }
+}

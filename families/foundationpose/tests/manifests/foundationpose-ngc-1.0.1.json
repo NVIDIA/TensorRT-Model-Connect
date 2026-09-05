@@ -1,0 +1,28 @@
+{
+  "name": "foundationpose-ngc-1.0.1",
+  "bundle": "foundationpose-ngc-1.0.1.bundle",
+  "family": "foundationpose",
+  "task": "pose_hypothesis_refinement",
+  "precision": "fp16",
+  "external_files": [
+    {
+      "path": "refine_model.onnx",
+      "url": "https://api.ngc.nvidia.com/v2/models/nvidia/isaac/foundationpose/versions/1.0.1_onnx/files/refine_model.onnx"
+    },
+    {
+      "path": "score_model.onnx",
+      "url": "https://api.ngc.nvidia.com/v2/models/nvidia/isaac/foundationpose/versions/1.0.1_onnx/files/score_model.onnx"
+    }
+  ],
+  "testcases": [
+    {
+      "name": "foundationpose-ngc-1.0.1-synthetic-crops",
+      "premerge": true,
+      "num_hypotheses": 3,
+      "refinement_iterations": 2,
+      "mesh_diameter": 0.18
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

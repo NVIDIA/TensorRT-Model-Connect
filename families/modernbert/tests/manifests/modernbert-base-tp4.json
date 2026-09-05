@@ -1,0 +1,17 @@
+{
+  "name": "modernbert-base-tp4",
+  "hf_id": "answerdotai/ModernBERT-base",
+  "bundle": "modernbert-base-tp4.bundle",
+  "family": "modernbert",
+  "task": "encoding",
+  "testcases": [
+    {
+      "name": "modernbert-base-tp4",
+      "prompt": "A man is slicing open a fish.",
+      "reference_precision": "fp32"
+    }
+  ],
+  "tensor_parallel_size": 4,
+  "precision": "fp32",
+  "max_sequence_length": 256
+}

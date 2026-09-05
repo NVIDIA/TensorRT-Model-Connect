@@ -1,0 +1,19 @@
+{
+  "name": "dinov3-vits16-timm-l0",
+  "hf_id": "timm/vit_small_patch16_dinov3_qkvb.lvd1689m",
+  "hf_revision": "2c7705788ac282557562465d6443606664a55f05",
+  "bundle": "dinov3-vits16-timm-l0.bundle",
+  "family": "dinov3",
+  "task": "image_features",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "dinov3-vits16-timm-l0",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "num_register_tokens": 4
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

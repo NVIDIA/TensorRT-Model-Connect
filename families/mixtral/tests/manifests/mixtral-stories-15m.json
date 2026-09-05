@@ -1,0 +1,20 @@
+{
+  "name": "mixtral-stories-15m",
+  "hf_id": "ggml-org/stories15M_MOE",
+  "bundle": "mixtral-stories-15m.bundle",
+  "family": "mixtral",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "mixtral-stories-15m",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "Once upon a time there was a little",
+      "max_new_tokens": 20
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

@@ -1,0 +1,19 @@
+{
+  "name": "deepseek-v2-lite",
+  "hf_id": "deepseek-ai/DeepSeek-V2-Lite",
+  "bundle": "deepseek-v2-lite.bundle",
+  "family": "deepseek_v2",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "deepseek-v2-lite",
+      "reference_precision": "fp16",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 10
+    }
+  ],
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1
+}

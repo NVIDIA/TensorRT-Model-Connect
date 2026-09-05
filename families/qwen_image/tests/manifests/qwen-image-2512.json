@@ -1,0 +1,23 @@
+{
+  "name": "qwen-image-2512",
+  "hf_id": "Qwen/Qwen-Image-2512",
+  "bundle": "qwen-image-2512.bundle",
+  "family": "qwen_image",
+  "task": "image_generation",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "qwen-image-2512",
+      "semantic_assessment": true,
+      "prompt": "A cat holding a sign that says hello world",
+      "negative_prompt": " ",
+      "num_inference_steps": 20,
+      "cfg_scale": 4.0,
+      "seed": 42,
+      "reference_precision": "bf16"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "image_height": 1024,
+  "image_width": 1024
+}
