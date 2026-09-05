@@ -299,6 +299,8 @@ models:
     workloads: [mmlu_continuation_parity]
   starcoder2-3b:
     workloads: [humaneval_code_continuation_parity]
+  swin-tiny-patch4-window7-224-ms-in1k:
+    workloads: [imagenette_image_classification]
   t5-small:
     workloads: [wmt14_en_de_t5_translation_parity]
   timesfm-2.0-500m-official:

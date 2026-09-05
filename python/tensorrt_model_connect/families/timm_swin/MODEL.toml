@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_swin"
+plugin = "timm_swin"
+module = "plugin"
+python_profile_specs = [
+  "timm_swin_reference|families/timm_swin/python_profile_requirements/timm_swin_reference.lock.txt|families/timm_swin/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_swin_reference",
+]
+aliases = [
+  "timm_swin",
+  "swin",
+]
+prefixes = [
+  "timm_swin",
+  "swin",
+]
