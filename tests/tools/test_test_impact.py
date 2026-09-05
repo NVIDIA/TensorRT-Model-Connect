@@ -301,6 +301,13 @@ class TorchReference:
             "hf_id": "example/foundationpose-case",
         },
         {
+            "name": "openfold3-case",
+            "family": "openfold3",
+            "runtime_strategy": "openfold3_structure_prediction",
+            "task_strategy": "structure_prediction",
+            "hf_id": "example/openfold3-case",
+        },
+        {
             "name": "media-core",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
@@ -2060,6 +2067,32 @@ class TestUnitTiers:
 
         assert match.rule == "foundationpose_preprocessed_refinement_example"
         assert match.models == ["foundationpose-case"]
+        assert match.unit_tiers == ["cpp", "tools"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "examples/models/openfold3/README.md",
+            "examples/models/openfold3/benchmark_reference.py",
+            "examples/models/openfold3/generate_reference.py",
+            "examples/models/openfold3/native_structure_prediction/CMakeLists.txt",
+            "examples/models/openfold3/native_structure_prediction/main.cpp",
+            "examples/models/openfold3/qualification/gb300-trt11.2-fp16.json",
+            "examples/models/openfold3/qualification/thresholds/ubiquitin-fp16.json",
+            "examples/models/openfold3/qualify.py",
+            "examples/models/openfold3/query_ubiquitin.json",
+            "examples/models/openfold3/reference_runner.yml",
+        ],
+    )
+    def test_openfold3_structure_prediction_example_is_model_owned(
+        self, imap, path
+    ):
+        """OpenFold3 examples run its E2E plus native C++ and tools checks."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "openfold3_structure_prediction_example"
+        assert match.models == ["openfold3-case"]
         assert match.unit_tiers == ["cpp", "tools"]
         assert match.rebuild_cpp is True
 

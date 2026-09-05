@@ -1846,6 +1846,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestNoImpact.test_local_qwen3_fixture_scopes_to_qwen3",),
         ),
         ClassificationRule(
+            priority=451,
+            name="openfold3_structure_prediction_example",
+            matcher=_regex_rule(r"examples/models/(openfold3)/.+$"),
+            resolver=_match_result(
+                "openfold3_structure_prediction_example",
+                _family_models,
+                ["cpp", "tools"],
+                True,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_openfold3_structure_prediction_example_is_model_owned",
+            ),
+        ),
+        ClassificationRule(
             priority=453,
             name="cosmos3_dual_spark_example",
             matcher=_regex_rule(r"examples/models/(cosmos3)/dual_spark/.+$"),

@@ -104,6 +104,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     "reranking": "reranking",
     "robot_action_chunk": "numeric",
     "pose_hypothesis_refinement": "numeric",
+    "structure_prediction": "structured",
     "neural_operator": "neural_operator",
     "omni_multimodal": "omni",
     # Kept explicit for forward-compatible manifests.  Unknown strategies
