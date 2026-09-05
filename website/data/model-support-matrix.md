@@ -110,6 +110,7 @@ SPDX-License-Identifier: Apache-2.0
 | `timm/mnasnet_100.rmsp_in1k` | `mnasnet-100-rmsp-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/inception_v3.tv_in1k` | `inception-v3-tv-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/repvgg_a2.rvgg_in1k` | `repvgg-a2-rvgg-in1k` | `FP16` | None | — | 🟢 Green |
+| `timm/crossvit_9_240.in1k` | `crossvit-9-240-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/resnet50.a1_in1k` | `resnet50-a1-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/vgg16.tv_in1k` | `vgg16-tv-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/vit_base_patch16_224.augreg_in21k_ft_in1k` | `timm-vit-base-p16-224-augreg-in21k-ft-in1k` | `FP16` | None | — | 🟢 Green |
