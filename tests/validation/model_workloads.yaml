@@ -194,6 +194,8 @@ models:
     workloads: [imagenette_image_classification]
   mnasnet-100-rmsp-in1k:
     workloads: [imagenette_image_classification]
+  mobilenetv2-100-ra-in1k:
+    workloads: [imagenette_image_classification]
   modernbert-base:
     workloads: [stsbenchmark_encoder_embedding_parity]
   multilingual-e5-small:
