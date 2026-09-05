@@ -2,7 +2,8 @@
 
 This example builds OpenFold3 with direct TensorRT Python APIs, then runs the
 resulting bundle in native C++. Python, PyTorch, OpenFold3, ONNX, and external
-preprocessing are not loaded after the bundle is built.
+preprocessing are not loaded after the bundle is built. ONNX artifacts and the
+TensorRT ONNX parser are not used to build the model.
 
 ## Qualified profile
 
@@ -27,8 +28,10 @@ retaining FP32 pair/MSA contractions and other sensitive operations.
 
 ## Build
 
-Run from the repository root in a CUDA/TensorRT environment. OpenFold3 is needed
-only to prepare features and load the checkpoint during engine construction.
+Run from the repository root in a CUDA/TensorRT environment. The qualified
+ubiquitin inputs are already prepared and committed, so building this example
+does not require the OpenFold3 Python package. PyTorch loads the checkpoint;
+the family builder creates every engine with TensorRT Python APIs.
 
 ```bash
 PACKAGE=/tmp/openfold3-ubiquitin
@@ -40,22 +43,21 @@ curl -fL \
   -o "$PACKAGE/of3-ob-2025-06-30-174k.pt"
 curl -fL https://openfold3-data.s3.amazonaws.com/components.bcif \
   -o "$PACKAGE/components.bcif"
-
-python -m pip install openfold3==0.5.0
-python -m tensorrt_model_connect.families.openfold3.prepare_model_dir \
-  --query examples/models/openfold3/query_ubiquitin.json \
-  --components "$PACKAGE/components.bcif" \
-  --output-dir "$PACKAGE"
+cp examples/models/openfold3/query_ubiquitin.json "$PACKAGE/query.json"
+cp tests/e2e/models/openfold3/data/openfold3_{features.npz,structure.json} \
+  "$PACKAGE/"
 
 # Mixed FP16 is the family default.
 trtmc build "$PACKAGE" -o "$BUNDLE"
 ```
 
-Preparation validates the pinned component dictionary, request envelope, dummy
-template convention, and every feature shape. It writes a deterministic,
-pickle-free feature archive. The isolated build profile verifies that the
-OpenFold3 0.5.0 model source matches the pinned revision; the builder separately
-verifies checkpoint and component sizes and hashes before compiling any plan.
+To prepare another supported protein request, install `openfold3==0.5.0` and run
+`python -m tensorrt_model_connect.families.openfold3.prepare_model_dir` with
+`--query`, `--components`, and `--output-dir`. Preparation validates the request,
+dummy-template convention, and feature shapes, then writes a deterministic,
+pickle-free archive. OpenFold3 is not needed for the subsequent engine build.
+The builder verifies checkpoint and component identities before compiling any
+plan.
 
 The bundle contains input and atom embedding, the learned two-block dummy-template
 path used when search is disabled, the four-block query-MSA module, all 48

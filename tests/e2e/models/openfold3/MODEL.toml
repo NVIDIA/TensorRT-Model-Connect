@@ -12,6 +12,8 @@ files = [
   { path = "of3-ob-2025-06-30-174k.pt", url = "https://openfold3-data.s3.amazonaws.com/openfold3-parameters/of3-ob-2025-06-30-174k.pt", sha256 = "bd43301c011d5f87580d3e8b548658869433e4488399feb03035ba248f8e29e4", size = 2287872989 },
   { path = "components.bcif", url = "https://openfold3-data.s3.amazonaws.com/components.bcif", sha256 = "473d845c8b250b188dbed9bf505ae206692a178a2a7c4869bf8f9de707ffcc0c", size = 63393643 },
   { path = "query.json", url = "https://raw.githubusercontent.com/aqlaboratory/openfold-3/c4771653c5d0a3ebb0b3af71b05efd64bc44ee86/examples/example_inference_inputs/query_ubiquitin.json", sha256 = "bc2b205720cb6cab8b9f199f080af4cb58e7625ffe10179cba28d6297b7000bf", size = 240 },
+  { path = "openfold3_features.npz", url = "https://raw.githubusercontent.com/NVIDIA/TensorRT-Model-Connect/7da6d9ddc08ce32f84f68f4919e8b890dec9aab2/tests/e2e/models/openfold3/data/openfold3_features.npz", sha256 = "60a28fa84b8088849b96e67c16d537a6f79858229907736f381fdd5b100766c4", size = 4386540 },
+  { path = "openfold3_structure.json", url = "https://raw.githubusercontent.com/NVIDIA/TensorRT-Model-Connect/7da6d9ddc08ce32f84f68f4919e8b890dec9aab2/tests/e2e/models/openfold3/data/openfold3_structure.json", sha256 = "23dab4813f744c3ff8b922d665359cbd830abf168fa4a2c2e8bb917cf4d219f2", size = 93641 },
 ]
 
 [e2e_defaults.structure_prediction]
