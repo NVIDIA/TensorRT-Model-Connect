@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_ghostnet"
+plugin = "timm_ghostnet"
+test_manifests = [
+  "manifests/ghostnet-100-in1k.json",
+]
+
+[e2e_defaults.image_classification]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = ["test_image"]
