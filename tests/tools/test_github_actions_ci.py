@@ -117,6 +117,9 @@ def _run_internal_ci_snapshot(
     pr_head_sha: str,
     event_name: str = "pull_request_target",
     actor_role: str = "maintain",
+    pr_author_association: str = "CONTRIBUTOR",
+    changed_files: list[dict[str, str]] | None = None,
+    pr_head_sha_after_scan: str | None = None,
     community_conclusion: str = "success",
     community_head_sha: str | None = None,
     community_merge_sha: str | None = None,
@@ -140,8 +143,22 @@ endpoint = next(
 )
 if "/collaborators/" in endpoint:
     print(os.environ["FAKE_ACTOR_ROLE"])
+elif "/files?" in endpoint:
+    changes = json.loads(os.environ["FAKE_CHANGED_FILES"])
+    protected = []
+    for change in changes:
+        for key in ("filename", "previous_filename"):
+            path = change.get(key)
+            if isinstance(path, str) and (
+                path in {"CODEOWNERS", ".github"} or path.startswith(".github/")
+            ):
+                protected.append(path)
+    print(len(protected))
 elif "/pulls/" in endpoint:
-    print(os.environ["FAKE_PULL_JSON"])
+    if "--jq" in arguments and arguments[arguments.index("--jq") + 1] == ".head.sha":
+        print(os.environ["FAKE_CURRENT_HEAD_SHA"])
+    else:
+        print(os.environ["FAKE_PULL_JSON"])
 elif "/actions/workflows/community-cpu.yml/runs" in endpoint:
     query = arguments[arguments.index("--jq") + 1]
     old_merge = os.environ["FAKE_COMMUNITY_MERGE_SHA"]
@@ -170,6 +187,7 @@ else:
             "repo": {"full_name": "NVIDIA/TensorRT-Model-Connect"},
         },
         "head": {"sha": pr_head_sha},
+        "author_association": pr_author_association,
         "merge_commit_sha": "a" * 40,
     }
     environment = os.environ.copy()
@@ -182,6 +200,8 @@ else:
             "FAKE_COMMUNITY_CONCLUSION": community_conclusion,
             "FAKE_COMMUNITY_HEAD_SHA": community_head_sha or pr_head_sha,
             "FAKE_COMMUNITY_MERGE_SHA": community_merge_sha or "",
+            "FAKE_CHANGED_FILES": json.dumps(changed_files or []),
+            "FAKE_CURRENT_HEAD_SHA": pr_head_sha_after_scan or pr_head_sha,
             "FAKE_PULL_JSON": json.dumps(pull),
             "GH_TOKEN": "test-token",
             "GITHUB_OUTPUT": str(output),
@@ -802,6 +822,12 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "head_repo" not in authorize
     assert "head_ref" not in authorize
     assert '[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
+    assert "author_association" in authorize
+    assert '"/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100"' in authorize
+    assert ".previous_filename?" in authorize
+    assert 'startswith(".github/")' in authorize
+    assert "The PR head changed while protected paths were inspected" in authorize
+    assert "External pull requests cannot modify .github/** or CODEOWNERS" in authorize
     assert "Community CPU / Required" in authorize
     assert (
         "/actions/workflows/community-cpu.yml/runs?event=pull_request&head_sha=$head_sha"
@@ -936,6 +962,80 @@ def test_internal_ci_bridge_uses_upstream_pr_metadata_without_fork_access(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "changed_files",
+    (
+        [{"filename": ".github/workflows/untrusted.yml"}],
+        [{"filename": "moved.yml", "previous_filename": ".github/workflows/secure.yml"}],
+        [{"filename": "CODEOWNERS"}],
+    ),
+)
+def test_internal_ci_bridge_rejects_external_repository_control_changes(
+    tmp_path: Path,
+    changed_files: list[dict[str, str]],
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        changed_files=changed_files,
+    )
+
+    assert result.returncode != 0
+    assert (
+        "External pull requests cannot modify .github/** or CODEOWNERS"
+        in result.stdout + result.stderr
+    )
+
+
+@pytest.mark.parametrize("association", ("OWNER", "MEMBER"))
+def test_internal_ci_bridge_allows_organization_repository_control_changes(
+    tmp_path: Path,
+    association: str,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        pr_author_association=association,
+        changed_files=[{"filename": ".github/workflows/trusted.yml"}],
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_internal_ci_bridge_rejects_a_head_change_during_protected_path_scan(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        pr_head_sha_after_scan="f7b48712c82318ded4e41c0dd7003379e1790198",
+    )
+
+    assert result.returncode != 0
+    assert "The PR head changed while protected paths were inspected" in (
+        result.stdout + result.stderr
+    )
+
+
+def test_codeowners_self_protects_the_repository_control_plane() -> None:
+    codeowners = REPO_ROOT / ".github" / "CODEOWNERS"
+
+    assert codeowners.is_file()
+    assert not (REPO_ROOT / "CODEOWNERS").exists()
+    source = codeowners.read_text(encoding="utf-8")
+    assert "* @yifeif-nv" in source
+    assert "/.github/ @yifeif-nv" in source
 
 
 def test_internal_ci_bridge_accepts_a_green_head_after_the_base_moves(

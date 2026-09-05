@@ -146,6 +146,13 @@ the repository's DCO check.
 Compilation, source tests, model parity, target-hardware execution,
 performance, and release qualification are different evidence tiers.
 
+Repository workflows and ownership policy form a trusted control plane.
+Pull requests authored outside the NVIDIA GitHub organization cannot modify
+`.github/**` or `CODEOWNERS`; open an issue describing the requested change so
+a repository maintainer can evaluate and land it from an organization-owned
+branch. This restriction applies even when the rest of the contribution is
+valid.
+
 ## 6. Run public CPU validation
 
 Opening the pull request or pushing a new commit automatically starts
