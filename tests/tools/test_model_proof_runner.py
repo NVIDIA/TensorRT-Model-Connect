@@ -740,6 +740,7 @@ def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -
         "qwen3-0.6b-regression-native-kv-chunked-prefill",
         "qwen3-0.6b-topp",
         "qwen3-4b-instruct-2507",
+        "s1-mini-fp16",
     }
     assert all(case["ci_tier"] != "l0_only" for case in selection["e2e_cases"])
 

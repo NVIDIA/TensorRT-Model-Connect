@@ -1205,6 +1205,8 @@ additional_profiles:
     inherit: qwen_moe.generate
   - model: riva-translate-4b
     inherit: mistral.generate
+  - model: s1-mini-fp16
+    inherit: qwen.generate
   - model: roberta-base
     inherit: roberta.encode
   - model: roberta-large

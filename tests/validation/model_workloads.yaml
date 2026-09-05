@@ -257,6 +257,9 @@ models:
   qwen3-0.6b-fp16:
     workloads: [mmlu_five_shot_mcq]
     reference_cache_identity: qwen3-0.6b-mmlu-five-shot-v1
+  s1-mini-fp16:
+    workloads: [mmlu_five_shot_mcq]
+    reference_cache_identity: s1-mini-fp16-mmlu-five-shot-v1
   qwen3-0.6b-fp8:
     workloads: [mmlu_five_shot_mcq]
     reference_cache_identity: qwen3-0.6b-mmlu-five-shot-v1
@@ -327,3 +330,4 @@ models:
     workloads: [stsbenchmark_encoder_embedding_parity]
   z-image-turbo:
     workloads: [dpg_bench_diffusion_image]
+  

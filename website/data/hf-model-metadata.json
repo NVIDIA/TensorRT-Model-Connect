@@ -4,6 +4,15 @@
   "purpose": "Documentation metadata only; checkpoint qualification remains defined by the README release row and E2E manifest.",
   "checkpoints": [
     {
+   "hf_id": "superwhisper/s1-mini",
+  "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "revision_source": "declared",
+  "metadata_file": "config.json",
+  "model_type": "qwen2",
+  "architectures": ["Qwen2ForCausalLM"],
+  "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "BAAI/bge-small-en-v1.5",
       "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
       "revision_source": "resolved",
@@ -14,6 +23,7 @@
       ],
       "architecture_source": "config.architectures"
     },
+
     {
       "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
       "revision": "e96271d77398def8ebb9fc595e7c0056dc625ab7",

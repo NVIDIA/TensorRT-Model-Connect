@@ -1,0 +1,23 @@
+{
+  "name": "s1-mini-fp16",
+  "hf_id": "superwhisper/s1-mini",
+  "hf_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bundle": "s1-mini-fp16.bundle",
+  "family": "qwen",
+  "runtime_strategy": "qwen_decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "max_cache_length": 256,
+  "testcases": [
+    {
+      "name": "s1-mini-fp16",
+      "reference_family": "chat_qwen3_posttrained",
+      "user_contract": "chat_response",
+      "reference_precision": "fp32",
+      "prompt": "[Styling: semi-formal] [Structure: prose] [Context: general] so um yeah for the trip we need to pack like sunscreen and uh chargers",
+      "max_new_tokens": 64,
+      "core": true
+    }
+  ]
+}

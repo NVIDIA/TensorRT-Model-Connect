@@ -14,6 +14,7 @@ test_manifests = [
   "manifests/qwen3-0.6b-topp.json",
   "manifests/qwen3-4b-instruct-2507-tp4.json",
   "manifests/qwen3-4b-instruct-2507.json",
+  "manifests/s1-mini-fp16.json",
 ]
 
 [e2e_defaults.text_generation_causal]
