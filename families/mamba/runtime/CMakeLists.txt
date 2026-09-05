@@ -54,4 +54,30 @@ if(TRTMC_BUILD_TESTS)
     ${TRTMC_CUDART_LIBRARY}
   )
   add_test(NAME ${test_name} COMMAND ${test_name})
+
+  set(test_name test_mamba_recurrent_pipeline)
+  add_executable(${test_name}
+    ${PROJECT_SOURCE_DIR}/families/mamba/tests/cpp/${test_name}.cpp
+  )
+  target_include_directories(${test_name} PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(${test_name} SYSTEM PRIVATE
+    ${TRTMC_TRT_INCLUDE_DIR}
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(${test_name} PRIVATE
+    trtmc_model_mamba
+    trtmc_backend_trt
+    trtmc_core
+    ${TRTMC_TRT_LIBRARY}
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  add_test(NAME ${test_name} COMMAND ${test_name})
+  set_tests_properties(${test_name} PROPERTIES
+    LABELS gpu
+    SKIP_RETURN_CODE 77
+  )
 endif()

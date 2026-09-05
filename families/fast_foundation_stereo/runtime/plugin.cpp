@@ -37,6 +37,8 @@ std::unique_ptr<ITrtModule> load_module(IBackend& backend, const std::vector<cha
 } // namespace trtmc::fast_foundation_stereo
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("fast_foundation_stereo does not support --kv-cache-size");
     const auto& feature_plan =
         trtmc::fast_foundation_stereo::require_section(context.reader, "engine.plan");
     auto feature = trtmc::fast_foundation_stereo::load_module(context.backend, feature_plan,

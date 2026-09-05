@@ -94,6 +94,7 @@ def build_sam_tp_encoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 
     eps_t = graph_ops.add_constant(

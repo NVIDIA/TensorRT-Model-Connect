@@ -11,7 +11,9 @@
       "premerge": true,
       "reference_precision": "bf16",
       "prompt": "What is the capital of France? Answer in one word.",
-      "max_new_tokens": 10
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false
     }
   ],
   "precision": "bf16",

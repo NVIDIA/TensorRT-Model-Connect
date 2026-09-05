@@ -32,3 +32,36 @@ set_target_properties(trtmc_model_dinov3 PROPERTIES
 install(TARGETS trtmc_model_dinov3
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_dinov3_image_preprocess
+    ${PROJECT_SOURCE_DIR}/families/dinov3/tests/cpp/test_dinov3_image_preprocess.cpp
+  )
+  target_include_directories(test_dinov3_image_preprocess PRIVATE
+    ${PROJECT_SOURCE_DIR}
+  )
+  target_link_libraries(test_dinov3_image_preprocess PRIVATE
+    trtmc_model_dinov3
+  )
+  target_compile_options(test_dinov3_image_preprocess PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(
+    NAME test_dinov3_image_preprocess
+    COMMAND test_dinov3_image_preprocess
+  )
+
+  add_executable(test_dinov3_pipeline
+    ${PROJECT_SOURCE_DIR}/families/dinov3/tests/cpp/test_dinov3_pipeline.cpp
+  )
+  target_include_directories(test_dinov3_pipeline PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_dinov3_pipeline SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_dinov3_pipeline PRIVATE trtmc_model_dinov3)
+  target_compile_options(test_dinov3_pipeline PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME test_dinov3_pipeline COMMAND test_dinov3_pipeline)
+endif()

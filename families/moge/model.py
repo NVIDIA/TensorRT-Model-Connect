@@ -1293,6 +1293,7 @@ def _build_native_engine(
 ) -> bytes:
     fast_path = precision == "fp16"
     import tensorrt as trt
+
     logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -1332,6 +1333,9 @@ def _build_native_engine(
         network.mark_output(tensor)
 
     config = builder.create_builder_config()
+    # Level 3 enables the FP16 fused-attention fast path. Level 0 keeps the
+    # broad dynamic FP32 attention graph decomposed for reliable builds.
+    config.builder_optimization_level = 3 if fast_path else 0
     tf32 = getattr(trt.BuilderFlag, "TF32", None)
     if tf32 is not None:
         if fast_path:
@@ -1357,10 +1361,6 @@ def _build_native_engine(
     if not profile:
         raise RuntimeError("Failed to configure the MoGe dynamic image profile")
     config.add_optimization_profile(profile)
-    if hasattr(config, "builder_optimization_level"):
-        # Level 3 enables the FP16 fused-attention fast path. Level 0 keeps the
-        # broad dynamic FP32 attention graph decomposed for reliable builds.
-        config.builder_optimization_level = 3 if fast_path else 0
     if hasattr(config, "avg_timing_iterations"):
         config.avg_timing_iterations = 3
     if hasattr(config, "max_aux_streams"):
@@ -1415,6 +1415,8 @@ def build_moge_engine(
 
 def build(request, writer) -> None:
     """Build one native MoGe-2 bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("moge does not support dynamic_kv_cache")
 
     if request.task != "monocular_geometry":
         raise ValueError("moge supports only task=monocular_geometry")
@@ -1438,5 +1440,5 @@ def build(request, writer) -> None:
         precision=request.precision,
         verbose=bool(request.verbose),
     )
-    writer.set_header(family="moge", task=request.task, backend="trt")
+    writer.set_header(family="moge", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)

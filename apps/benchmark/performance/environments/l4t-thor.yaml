@@ -32,5 +32,4 @@ execution:
   local_files_only: false
   hf_cache_mode: per_entry
   hf_cache_retention: delete_always
-  minimum_gpu_free_fraction: 0.0
   timeout_seconds: 14400

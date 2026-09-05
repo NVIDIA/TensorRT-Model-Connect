@@ -563,6 +563,7 @@ class _PersonaPlexModel:
 
         return extras
 
+
 def _load_temporal_weights(
     weights: WeightDict,
     readers,
@@ -1381,6 +1382,9 @@ def _build_mimi_decoder_engine(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one PersonaPlex speech-to-speech bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("personaplex does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("personaplex does not support image_height")
 
@@ -1414,7 +1418,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _PersonaPlexModel()
     weights = model.load_weights(str(model_dir), config)
 
-    writer.set_header(family="personaplex", task=request.task, backend="trt")
+    writer.set_header(family="personaplex", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             writer.add_bytes(
@@ -1475,8 +1479,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "temporal_num_layers": int(weights["_num_hidden_layers"]),
         "depth_hidden_size": int(weights["_depth_hidden"]),
         "depth_num_layers": int(weights["_depth_num_layers"]),
-        "depth_num_heads": int(weights["_depth_num_heads"]),
-        "depth_num_kv_heads": int(weights["_depth_num_heads"]),
         "depth_max_cache_length": num_codebooks + 2,
         "text_padding_id": 3,
         "mimi_decode_codebooks": _PERSONAPLEX_MIMI_CODEBOOKS,

@@ -216,6 +216,9 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("xlnet does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("xlnet does not support image_height")
 
@@ -256,7 +259,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     model = _XLNetModel()
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="xlnet", task=request.task, backend="trt")
+    writer.set_header(family="xlnet", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

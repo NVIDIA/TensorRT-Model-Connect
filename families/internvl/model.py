@@ -393,6 +393,9 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one InternVL vision-language bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("internvl does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("internvl does not support image_height")
 
@@ -423,7 +426,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_model_dir"] = str(model_dir)
     model = _InternVLModel()
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="internvl", task=request.task, backend="trt")
+    writer.set_header(family="internvl", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             writer.add_bytes(
@@ -479,10 +482,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "vision_output_dim": int(vl.get("vision_output_dim", config.hidden_size)),
         "prefill_max_length": int(vl.get("prefill_max_length", max_length)),
         "io_map": {
-            "cache_k_pattern": "cache_k_{layer}",
-            "cache_v_pattern": "cache_v_{layer}",
-            "present_k_pattern": "present_k_{layer}",
-            "present_v_pattern": "present_v_{layer}",
+            "cache_k_pattern": "cache_k_{i}",
+            "cache_v_pattern": "cache_v_{i}",
+            "present_k_pattern": "present_k_{i}",
+            "present_v_pattern": "present_v_{i}",
         },
     }
     runtime.update(vl)

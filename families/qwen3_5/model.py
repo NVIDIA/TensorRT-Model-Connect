@@ -488,6 +488,7 @@ class _Qwen35Model:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
 
         # --- Inputs ---
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -1361,6 +1362,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _Qwen35Model, *
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen3.5 hybrid bundle through family-owned code only."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("qwen3_5 does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("qwen3_5 does not support image_height")
 
@@ -1372,7 +1376,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.max_batch_size != 1:
         raise NotImplementedError("qwen3_5 does not support max_batch_size")
-
 
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
@@ -1412,7 +1415,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         debug_layer_outputs=False,
     )
 
-    writer.set_header(family="qwen3_5", task=request.task, backend="trt")
+    writer.set_header(family="qwen3_5", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json(
         "runtime.json",

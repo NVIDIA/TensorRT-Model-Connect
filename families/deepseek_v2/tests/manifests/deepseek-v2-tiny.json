@@ -12,7 +12,7 @@
       "name": "deepseek-v2-tiny",
       "premerge": true,
       "reference_precision": "fp16",
-      "reference_experts_implementation": "eager",
+      "reference_experts_implementation": "batched_mm",
       "prompt": "The capital of France is",
       "max_new_tokens": 10
     }

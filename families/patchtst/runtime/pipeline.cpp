@@ -70,6 +70,9 @@ ForecastResult Pipeline::forecast(const ForecastRequest& request) {
     result.values.resize(count);
     std::memcpy(result.values.data(), output->second.data, count * sizeof(float));
     result.shape = output->second.shape;
+    if (config_.output_name == "regression_outputs" && result.shape.size() == 3 &&
+        result.shape[1] == 1)
+        result.shape.erase(result.shape.begin() + 1);
     return result;
 }
 

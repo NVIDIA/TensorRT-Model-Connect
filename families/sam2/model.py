@@ -206,6 +206,9 @@ class _Sam2Model:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one SAM2 video-segmentation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("sam2 does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("sam2 does not support max_sequence_length")
 
@@ -252,7 +255,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "recurrent.3.plan",
         "recurrent.4.plan",
     )
-    writer.set_header(family="sam2", task=request.task, backend="trt")
+    writer.set_header(family="sam2", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     for source, target in zip(_EXTRA_PLAN_SECTIONS, names, strict=True):
         writer.add_bytes(target, extra[source])

@@ -279,6 +279,7 @@ class _BartModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
         trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -483,7 +484,6 @@ class _BartModel:
             "has_vision_engine": True,
             "is_encoder_decoder": True,
             "decoder_start_token_id": raw.get("decoder_start_token_id", 2),
-            "forced_bos_token_id": raw.get("forced_bos_token_id", 0),
             "position_embedding_offset": 2,
         }
 
@@ -515,6 +515,7 @@ def _build_bart_encoder(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
+    tc.builder_optimization_level = 1
     tc.clear_flag(trt.BuilderFlag.TF32)
 
     input_ids = network.add_input("input_ids", trt.int32, (max_enc_seq,))
@@ -925,6 +926,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _BartModel, **u
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one BART encoder-decoder bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("bart does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("bart does not support image_height")
 
@@ -936,7 +940,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.max_batch_size != 1:
         raise NotImplementedError("bart does not support max_batch_size")
-
 
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
@@ -972,7 +975,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config)
 
-    writer.set_header(family="bart", task=request.task, backend="trt")
+    writer.set_header(family="bart", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

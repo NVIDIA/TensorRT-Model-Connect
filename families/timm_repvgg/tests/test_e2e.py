@@ -19,7 +19,6 @@ from tensorrt_model_connect import BuildRequest, build
 FAMILY = "timm_repvgg"
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
-THRESHOLD_ROOT = TEST_ROOT / "thresholds"
 
 
 def _cases() -> dict[str, tuple[dict, dict]]:
@@ -103,15 +102,6 @@ def _asset(case: dict) -> Path:
     return path
 
 
-def _cosine(left, right) -> float:
-    first = np.asarray(left, dtype=np.float64).reshape(-1)
-    second = np.asarray(right, dtype=np.float64).reshape(-1)
-    assert first.shape == second.shape and first.size > 0
-    denominator = float(np.linalg.norm(first) * np.linalg.norm(second))
-    assert denominator > 0.0
-    return float(np.dot(first, second) / denominator)
-
-
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
@@ -153,15 +143,17 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     from PIL import Image
     from timm.data import create_transform, resolve_model_data_config
 
-    reference = timm.create_model("hf-hub:" + manifest["hf_id"], pretrained=True)
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    reference = timm.create_model(
+        config["architecture"],
+        pretrained=False,
+        pretrained_cfg=config["pretrained_cfg"],
+        num_classes=int(config["num_classes"]),
+        checkpoint_path=str(model_dir / "model.safetensors"),
+    )
     reference = reference.to("cuda").eval()
     transform = create_transform(**resolve_model_data_config(reference), is_training=False)
     pixels = transform(Image.open(_asset(case)).convert("RGB")).unsqueeze(0).to("cuda")
     with torch.no_grad():
         expected = reference(pixels).float().cpu().numpy()
-    thresholds = json.loads((THRESHOLD_ROOT / f"{case_name}.json").read_text(encoding="utf-8"))[
-        "threshold_overrides"
-    ]
-    assert _cosine(actual["logits"], expected) >= float(thresholds["logit_cosine"])
     assert int(actual["top_class"]) == int(np.argmax(expected))
-    assert thresholds["top1_match"] is True

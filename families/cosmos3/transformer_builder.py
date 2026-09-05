@@ -111,6 +111,7 @@ def build_cosmos3_transformer_engine(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     build_config = builder.create_builder_config()
+    build_config.builder_optimization_level = 1
     build_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 

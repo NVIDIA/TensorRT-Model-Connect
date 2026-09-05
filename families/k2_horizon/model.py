@@ -411,6 +411,7 @@ def build_engine(
     flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     network = builder.create_network(flags)
     builder_config = builder.create_builder_config()
+    builder_config.builder_optimization_level = 1
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
@@ -747,6 +748,8 @@ def _runtime_config(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build the qualified K2-Horizon BF16 bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("k2_horizon does not support dynamic_kv_cache")
 
     if request.image_height is not None or request.image_width is not None:
         raise NotImplementedError("K2-Horizon does not support image dimensions")
@@ -785,7 +788,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         verbose=bool(request.verbose),
     )
 
-    writer.set_header(family="k2_horizon", task=request.task, backend="trt")
+    writer.set_header(family="k2_horizon", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json(
         "runtime.json",

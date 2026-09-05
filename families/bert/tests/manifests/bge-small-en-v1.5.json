@@ -3,7 +3,7 @@
   "hf_id": "BAAI/bge-small-en-v1.5",
   "bundle": "bge-small-en-v1.5.bundle",
   "family": "bert",
-  "task": "embedding",
+  "task": "encoding",
   "precision": "fp16",
   "testcases": [
     {

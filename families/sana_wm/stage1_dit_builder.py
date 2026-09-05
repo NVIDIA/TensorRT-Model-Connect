@@ -8287,6 +8287,7 @@ def build_sana_wm_stage1_dit_engine(
     logger = get_process_trt_logger(trt, verbose=verbose)
     builder = trt.Builder(logger)
     builder_config = builder.create_builder_config()
+    builder_config.builder_optimization_level = 1
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     shape = stage1_shape_from_config(raw_config, weights)

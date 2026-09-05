@@ -452,6 +452,7 @@ def build_encoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
     # Disable TF32 to ensure full FP32 precision. TF32 uses 10-bit mantissa
     # which causes significant accuracy loss across 12+ encoder layers.
     trt_config.clear_flag(trt.BuilderFlag.TF32)
@@ -869,6 +870,9 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one BERT bundle without shared model orchestration."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("bert does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("bert does not support image_height")
 
@@ -914,7 +918,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.set_header(
         family="bert",
         task=request.task,
-        backend="trt",
+        backend=request.backend,
     )
     if parallel.enabled:
         for rank in range(parallel.tp_size):

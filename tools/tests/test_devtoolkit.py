@@ -162,7 +162,7 @@ class DockerLifecycleRunner(RecordingRunner):
         stdout = ""
         stderr = ""
         returncode = 0
-        if arguments == [sys.executable, "-m", "tools.ci", "image", "ensure"]:
+        if arguments[:2] == ["docker", "build"]:
             self.image_exists = True
         elif arguments[:3] == ["docker", "container", "inspect"]:
             identifier = arguments[3]
@@ -209,11 +209,12 @@ class DockerLifecycleRunner(RecordingRunner):
 
 def _checkout(tmp_path: Path) -> Path:
     (tmp_path / "pyproject.toml").write_text("[project]\nname='test'\n", encoding="utf-8")
-    (tmp_path / "Dockerfile").write_text(
-        "FROM example/base@sha256:" + "a" * 64 + "\n", encoding="utf-8"
-    )
-    (tmp_path / "tools/ci").mkdir(parents=True)
-    (tmp_path / "tools/ci/__main__.py").write_text("", encoding="utf-8")
+    for filename in ("Dockerfile.dev.x86", "Dockerfile.dev.aarch64"):
+        (tmp_path / filename).write_text(
+            "FROM example/base@sha256:" + "a" * 64 + "\n", encoding="utf-8"
+        )
+    (tmp_path / "requirements").mkdir()
+    (tmp_path / "requirements/community-ci.txt").write_text("pytest\n", encoding="utf-8")
     alpha = tmp_path / "families/alpha"
     alpha.mkdir(parents=True)
     (alpha / "model.py").write_text("def build(request, writer): pass\n", encoding="utf-8")
@@ -228,12 +229,14 @@ def _mutation_commands(runner: RecordingRunner) -> list[list[str]]:
     return [
         command
         for command in runner.commands
-        if command == [sys.executable, "-m", "tools.ci", "image", "ensure"]
-        or command[:2] in (["docker", "create"], ["docker", "start"])
+        if command[:2] in (["docker", "build"], ["docker", "create"], ["docker", "start"])
     ]
 
 
-def test_docker_uses_source_ci_and_only_the_selected_family_dependency(tmp_path: Path) -> None:
+def test_docker_uses_host_image_and_only_the_selected_family_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("trtmc_devtoolkit.api.platform.machine", lambda: "x86_64")
     checkout = _checkout(tmp_path)
     runner = DockerLifecycleRunner()
 
@@ -244,12 +247,17 @@ def test_docker_uses_source_ci_and_only_the_selected_family_dependency(tmp_path:
         container="trtmc-test",
     )
 
-    image_call = runner.calls[
-        runner.commands.index([sys.executable, "-m", "tools.ci", "image", "ensure"])
+    assert [command for command in runner.commands if command[:2] == ["docker", "build"]] == [
+        [
+            "docker",
+            "build",
+            "--file",
+            "Dockerfile.dev.x86",
+            "--tag",
+            "trtmc:test",
+            "requirements",
+        ]
     ]
-    assert image_call[2] is not None
-    assert image_call[2]["TRTMC_CI_WORKSPACE"] == str(checkout)
-    assert image_call[2]["TRTMC_CI_IMAGE"] == "trtmc:test"
     assert runner.commands[-1] == [
         "docker",
         "exec",
@@ -283,6 +291,41 @@ def test_docker_uses_source_ci_and_only_the_selected_family_dependency(tmp_path:
     )
 
 
+@pytest.mark.parametrize(
+    ("machine", "dockerfile"),
+    (
+        ("x86_64", "Dockerfile.dev.x86"),
+        ("aarch64", "Dockerfile.dev.aarch64"),
+    ),
+)
+def test_docker_build_selects_the_host_development_dockerfile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    machine: str,
+    dockerfile: str,
+) -> None:
+    monkeypatch.setattr("trtmc_devtoolkit.api.platform.machine", lambda: machine)
+    runner = DockerLifecycleRunner()
+
+    DevToolkit.from_checkout(_checkout(tmp_path), runner=runner).prepare_docker(gpu="none")
+
+    assert [command for command in runner.commands if command[:2] == ["docker", "build"]] == [
+        ["docker", "build", "--file", dockerfile, "--tag", "trtmc-dev:current", "requirements"]
+    ]
+
+
+def test_unknown_docker_host_architecture_fails_before_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("trtmc_devtoolkit.api.platform.machine", lambda: "riscv64")
+    runner = DockerLifecycleRunner()
+
+    with pytest.raises(DevToolkitError, match="unsupported.*riscv64"):
+        DevToolkit.from_checkout(_checkout(tmp_path), runner=runner).prepare_docker()
+
+    assert runner.calls == []
+
+
 def test_family_without_dependencies_does_not_add_an_install_step(tmp_path: Path) -> None:
     runner = DockerLifecycleRunner()
 
@@ -299,24 +342,13 @@ def test_repeated_ensure_is_idempotent(tmp_path: Path) -> None:
     second = toolkit.prepare_docker(gpu="0")
 
     assert first.container_id == second.container_id == "container-123"
-    assert (
-        sum(
-            command == [sys.executable, "-m", "tools.ci", "image", "ensure"]
-            for command in runner.commands
-        )
-        == 2
-    )
+    assert sum(command[:2] == ["docker", "build"] for command in runner.commands) == 2
     assert sum(command[:2] == ["docker", "create"] for command in runner.commands) == 1
     assert sum(command[:2] == ["docker", "start"] for command in runner.commands) == 1
 
 
-@pytest.mark.parametrize(
-    "policy",
-    (DockerTargetPolicy.ENSURE, DockerTargetPolicy.CREATE),
-)
 def test_foreign_name_collision_fails_before_any_mutation(
     tmp_path: Path,
-    policy: DockerTargetPolicy,
 ) -> None:
     runner = DockerLifecycleRunner()
     runner.image_exists = True
@@ -329,7 +361,7 @@ def test_foreign_name_collision_fails_before_any_mutation(
     toolkit = DevToolkit.from_checkout(_checkout(tmp_path), runner=runner)
 
     with pytest.raises(DevToolkitError, match="not owned by this checkout"):
-        toolkit.prepare_docker(policy=policy)
+        toolkit.prepare_docker(policy=DockerTargetPolicy.ENSURE)
 
     assert _mutation_commands(runner) == []
     assert not any("rm" in command for command in runner.commands)
@@ -699,3 +731,13 @@ def test_devtoolkit_has_no_legacy_registry_or_cohort_modules() -> None:
         )
         if (root / "trtmc_devtoolkit" / name).exists()
     ]
+
+
+def test_automated_source_build_passes_the_selected_gpu_sm() -> None:
+    source = (REPO / "website/docs/getting-started/source-build.md").read_text(encoding="utf-8")
+    automated = source.split("The toolkit reuses", 1)[0]
+
+    assert '"--query-gpu=compute_cap"' in automated
+    assert '.stdout.strip().replace(".", "")' in automated
+    assert "gpu=gpu" in automated
+    assert 'environment={"TRTMC_SM": sm}' in automated

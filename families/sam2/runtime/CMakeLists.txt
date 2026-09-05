@@ -44,15 +44,40 @@ install(TARGETS trtmc_model_sam2
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_sam2_frame_conversion
+    ../tests/cpp/test_frame_conversion.cpp
+  )
+  target_include_directories(test_sam2_frame_conversion PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_sam2_frame_conversion SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_sam2_frame_conversion PRIVATE
+    trtmc_model_sam2
+  )
+  target_compile_options(test_sam2_frame_conversion PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME test_sam2_frame_conversion
+    COMMAND test_sam2_frame_conversion
+  )
+
   add_executable(sam2_operational_probe
     ../tests/cpp/operational_probe.cpp
   )
   target_include_directories(sam2_operational_probe PRIVATE
+    ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(sam2_operational_probe SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
   )
   target_link_libraries(sam2_operational_probe PRIVATE
     trtmc_runtime
     nlohmann_json::nlohmann_json
+    ${TRTMC_CUDART_LIBRARY}
   )
   target_compile_options(sam2_operational_probe PRIVATE
     -Wall -Wextra -Wpedantic

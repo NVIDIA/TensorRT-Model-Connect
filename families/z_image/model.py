@@ -410,6 +410,9 @@ def _serialize_preprocessor_weights(dit_weights: WeightDict) -> bytes:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Z-Image image-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("z_image does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("z_image does not support max_sequence_length")
 
@@ -452,7 +455,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         max_batch_size=request.max_batch_size,
     )
 
-    writer.set_header(family="z_image", task=request.task, backend="trt")
+    writer.set_header(family="z_image", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.0.plan", components["text_encoders"][0][1])
     if parallel.enabled:
         plans = components["denoiser_ranks"]

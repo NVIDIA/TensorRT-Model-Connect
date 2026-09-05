@@ -37,7 +37,7 @@ _TIMM_DINOV3_VIT_ARCHITECTURE = "vit_small_patch16_dinov3_qkvb"
 _TIMM_DINOV3_VIT_CONFIG = {
     "model_type": "dinov3_vit",
     "architectures": ["DINOv3ViTModel"],
-    "image_size": 256,
+    "image_size": 224,
     "patch_size": 16,
     "num_channels": 3,
     "hidden_size": 384,
@@ -624,7 +624,6 @@ class _Dinov3Model:
             architecture = "convnext"
         else:
             raise ValueError(f"Unsupported DINOv3 model_type: {config.model_type!r}")
-        is_timm = config.raw.get("_dinov3_checkpoint_layout") == "timm"
         return {
             "model_type": config.model_type,
             "dinov3_architecture": architecture,
@@ -634,9 +633,6 @@ class _Dinov3Model:
             "sequence_length": sequence_length,
             "image_mean": [0.485, 0.456, 0.406],
             "image_std": [0.229, 0.224, 0.225],
-            "interpolation": "bicubic" if is_timm else "bilinear",
-            "do_center_crop": is_timm,
-            "crop_pct": 1.0,
             **specific,
         }
 
@@ -652,6 +648,9 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one DINOv3 bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("dinov3 does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("dinov3 does not support image_height")
 
@@ -687,7 +686,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("DINOv3 does not support tensor parallelism")
     model = _Dinov3Model()
     weights = model.load_weights(str(model_dir), config, precision=precision)
-    writer.set_header(family="dinov3", task=request.task, backend="trt")
+    writer.set_header(family="dinov3", task=request.task, backend=request.backend)
     plan = model.build_engine(
         config,
         weights,
@@ -701,14 +700,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     runtime_source = model.get_bundle_config_overrides(config)
     runtime = {
         key: runtime_source[key]
-        for key in (
-            "input_image_h",
-            "input_image_w",
-            "image_mean",
-            "image_std",
-            "interpolation",
-            "do_center_crop",
-            "crop_pct",
-        )
+        for key in ("input_image_h", "input_image_w", "image_mean", "image_std")
     }
     writer.add_json("runtime.json", runtime)

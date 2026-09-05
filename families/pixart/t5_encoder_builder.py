@@ -80,6 +80,7 @@ def build_t5_encoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
 
     # --- Inputs ---
     input_ids = network.add_input("input_ids", trt.int32, (1, max_seq_len))

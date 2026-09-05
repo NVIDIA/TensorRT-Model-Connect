@@ -3,7 +3,7 @@
   "hf_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
   "bundle": "paraphrase-multilingual-minilm-l12-v2.bundle",
   "family": "bert",
-  "task": "embedding",
+  "task": "encoding",
   "precision": "fp16",
   "testcases": [
     {

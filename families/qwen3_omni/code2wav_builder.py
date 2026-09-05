@@ -141,6 +141,7 @@ def build_code2wav_engine(
         )
 
     build_config = builder.create_builder_config()
+    build_config.builder_optimization_level = 1
     build_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
     if verbose:
         print(

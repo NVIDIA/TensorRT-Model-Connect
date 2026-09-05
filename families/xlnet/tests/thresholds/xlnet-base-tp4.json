@@ -1,6 +1,5 @@
 {
   "threshold_overrides": {
-    "cls_embedding_cosine": 0.95,
-    "cls_embedding_l2": 100.0
+    "cls_embedding_cosine": 0.95
   }
 }

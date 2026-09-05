@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_magpie_tts SHARED
+  distributed_runtime.cpp
   ipa_tokenizer.cpp
   audio_helpers.cpp
   cuda_common.cpp
@@ -36,6 +37,7 @@ target_link_libraries(trtmc_model_magpie_tts PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_magpie_tts PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -49,3 +51,28 @@ set_target_properties(trtmc_model_magpie_tts PROPERTIES
 install(TARGETS trtmc_model_magpie_tts
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  foreach(test_name IN ITEMS
+      test_magpie_codec_plan
+      test_magpie_decode_policy
+      test_magpie_decoder_plan
+      test_magpie_generation_plan
+      test_magpie_pipeline
+      test_magpie_text_completion_policy
+  )
+    add_executable(${test_name}
+      ${PROJECT_SOURCE_DIR}/families/magpie_tts/tests/cpp/${test_name}.cpp
+    )
+    target_include_directories(${test_name} PRIVATE
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_include_directories(${test_name} SYSTEM PRIVATE
+      ${TRTMC_CUDA_INCLUDE_DIR}
+    )
+    target_link_libraries(${test_name} PRIVATE trtmc_model_magpie_tts)
+    target_compile_options(${test_name} PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
+endif()

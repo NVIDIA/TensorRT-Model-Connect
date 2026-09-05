@@ -197,6 +197,7 @@ class _T5Model:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         tc = builder.create_builder_config()
+        tc.builder_optimization_level = 1
         tc.clear_flag(trt.BuilderFlag.TF32)
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
@@ -382,6 +383,7 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32"):
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
+    tc.builder_optimization_level = 1
     tc.clear_flag(trt.BuilderFlag.TF32)
     et = graph_ops.add_constant(
         network, (1, 1), np.array([eps], dtype=work_np_dtype), dtype=work_np_dtype
@@ -716,6 +718,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _T5Model, **upd
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one T5 encoder-decoder bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("t5 does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("t5 does not support image_height")
 
@@ -761,7 +766,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if not (model_dir / "tokenizer.json").is_file():
         model.ensure_tokenizer_json(model_dir)
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="t5", task=request.task, backend="trt")
+    writer.set_header(family="t5", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

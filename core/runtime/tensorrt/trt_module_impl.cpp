@@ -61,9 +61,11 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
 TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
                              cudaStream_t stream, int32_t profile_idx,
                              void* distributed_communicator,
-                             const std::vector<ModuleExternalBinding>& external_bindings)
+                             const std::vector<ModuleExternalBinding>& external_bindings,
+                             bool backend_managed_cuda_graph)
     : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
       distributed_communicator_(distributed_communicator),
+      backend_managed_cuda_graph_(backend_managed_cuda_graph),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
@@ -309,7 +311,7 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     // Determine allocation shape (max) and initial runtime shape (opt).
     nvinfer1::Dims alloc_dims = trt_shape;
     nvinfer1::Dims init_dims = trt_shape;
-    bool is_dynamic = has_dynamic_shapes_ && num_profiles > 0 && dims_are_dynamic(trt_shape);
+    bool is_dynamic = num_profiles > 0 && dims_are_dynamic(trt_shape);
 
     if (is_dynamic) {
         alloc_dims =
@@ -332,12 +334,12 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     if (external != initial_external_bindings_.end()) {
         entry.d_ptr = external->second;
         entry.is_external = true;
-    } else if (should_allocate_input(name, nbytes)) {
-        auto err = cudaMalloc(&entry.d_ptr, nbytes);
-        if (err != cudaSuccess)
-            entry.d_ptr = nullptr;
-        else
+    } else if (!is_dynamic && should_allocate_input(name, nbytes)) {
+        void* allocation = nullptr;
+        if (cudaMalloc(&allocation, nbytes) == cudaSuccess) {
+            entry.d_ptr = allocation;
             cudaMemsetAsync(entry.d_ptr, 0, nbytes, stream_);
+        }
     }
 
     if (entry.d_ptr)
@@ -347,6 +349,20 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
         ctx_->setInputShape(name.c_str(), init_dims);
 
     buffers_[name] = std::move(entry);
+}
+
+void TrtModuleImpl::ensure_input_buffer(const std::string& name, BufferEntry& entry) {
+    if (entry.d_ptr != nullptr || entry.is_external || !should_allocate_input(name, entry.nbytes))
+        return;
+    const cudaError_t error = cudaMalloc(&entry.d_ptr, entry.nbytes);
+    if (error != cudaSuccess)
+        throw std::runtime_error("Unable to allocate TensorRT input buffer for '" + name + "'");
+    cudaMemsetAsync(entry.d_ptr, 0, entry.nbytes, stream_);
+    if (!bind_tensor_address(name, entry)) {
+        cudaFree(entry.d_ptr);
+        entry.d_ptr = nullptr;
+        throw std::runtime_error("TensorRT rejected input buffer for '" + name + "'");
+    }
 }
 
 void TrtModuleImpl::allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
@@ -581,6 +597,8 @@ TensorMap TrtModuleImpl::forward(const TensorMap& inputs) {
 // --- Forward async ---
 
 void TrtModuleImpl::enable_cuda_graph() {
+    if (backend_managed_cuda_graph_)
+        return;
     use_cuda_graph_ = true;
     cuda_graph_->reset();
 }
@@ -592,7 +610,11 @@ void TrtModuleImpl::forward_async(const TensorMap& inputs) {
         if (it == buffers_.end())
             continue;
         auto& entry = it->second;
-        if (!entry.is_input || !entry.d_ptr)
+        if (!entry.is_input)
+            continue;
+
+        ensure_input_buffer(name, entry);
+        if (!entry.d_ptr)
             continue;
 
         update_dynamic_shape(name, entry, tensor.shape);
@@ -731,7 +753,11 @@ void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
         if (it == buffers_.end() || !dt_ptr)
             continue;
         auto& entry = it->second;
-        if (!entry.is_input || !entry.d_ptr)
+        if (!entry.is_input)
+            continue;
+
+        ensure_input_buffer(name, entry);
+        if (!entry.d_ptr)
             continue;
 
         update_dynamic_shape(name, entry, dt_ptr->shape());

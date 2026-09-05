@@ -173,6 +173,7 @@ def build_ltx_dit_engine(
     logger = get_process_trt_logger(trt, verbose=verbose)
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
 
     network = builder.create_network(

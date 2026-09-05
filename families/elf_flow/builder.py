@@ -251,6 +251,7 @@ def build_elf_flow_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     builder_config = builder.create_builder_config()
+    builder_config.builder_optimization_level = 1
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
     # ELF sampling accumulates small denoising differences across many steps.
     # Keep the fp32 build in full fp32 rather than TensorRT's default TF32 path

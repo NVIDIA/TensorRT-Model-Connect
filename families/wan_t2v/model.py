@@ -455,6 +455,9 @@ def _serialize_preprocessor_weights(dit_weights: dict) -> bytes:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Wan text-to-video bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("wan_t2v does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("wan_t2v does not support max_sequence_length")
 
@@ -500,7 +503,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         parallel_config=parallel,
     )
 
-    writer.set_header(family="wan_t2v", task=request.task, backend="trt")
+    writer.set_header(family="wan_t2v", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.0.plan", components["text_encoders"][0][1])
     if parallel.enabled:
         plans = components["denoiser_ranks"]

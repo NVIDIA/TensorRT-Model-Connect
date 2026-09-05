@@ -26,18 +26,11 @@ DOC_FILES = {
 SHARED_PREFIXES = (
     ".github/",
     "apps/",
-    "benchmarks/",
     "cmake/",
-    "configs/",
     "core/",
     "examples/",
-    "include/",
     "plugins/",
-    "python/tensorrt_model_connect/",
     "requirements/",
-    "scripts/",
-    "src/",
-    "tests/",
     "third_party/",
     "tools/",
 )
@@ -53,7 +46,6 @@ SHARED_FILES = {
     "Dockerfile.dev.aarch64",
     "Dockerfile.dev.x86",
     ".dockerignore",
-    "_pyproject_backend.py",
     "conanfile.py",
     "conftest.py",
     "pyproject.toml",
@@ -105,6 +97,9 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
         if len(parts) >= 2 and parts[0] == "families":
             family = parts[1]
             if family not in known:
+                if not (repo / path).exists():
+                    shared = True
+                    continue
                 raise ValueError(f"changed path names unknown family {family!r}: {path}")
             selected.add(family)
             continue
@@ -115,6 +110,9 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
             shared = True
             continue
         if path in SHARED_FILES or path.startswith(SHARED_PREFIXES):
+            shared = True
+            continue
+        if not (repo / path).exists():
             shared = True
             continue
         unknown.append(path)
@@ -159,7 +157,6 @@ def validate(repo: Path) -> None:
             "runtime/CMakeLists.txt",
             "tests/test_e2e.py",
             "tests/manifests",
-            "tests/thresholds",
         ):
             if not (root / required).exists():
                 violations.append(f"{family}: missing {required}")

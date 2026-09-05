@@ -9,6 +9,7 @@
     {
       "name": "deepseek-ocr",
       "reference_precision": "bf16",
+      "reference_backend": "hf_transformers",
       "prompt": "Extract the text from this image.",
       "max_new_tokens": 300,
       "test_image": "data/orc_test_img.jpeg"

@@ -378,6 +378,7 @@ class _DeepSeekV2Model:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
 
         if precision == "fp16":
             work_np_dtype = np.float16
@@ -1292,6 +1293,9 @@ def _runtime_config(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one DeepSeek-V2 bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("deepseek_v2 does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("deepseek_v2 does not support image_height")
 
@@ -1336,7 +1340,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_parallel_build_enabled"] = parallel.enabled
     config.raw["_quantized_build_requested"] = False
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="deepseek_v2", task=request.task, backend="trt")
+    writer.set_header(family="deepseek_v2", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

@@ -11,6 +11,13 @@ import tempfile
 from pathlib import Path
 
 
+def _vocab_size(tokenizer) -> int:
+    id_to_token = getattr(tokenizer, "_id2token", None)
+    if not id_to_token:
+        raise ValueError("MagpieTTS IPA tokenizer has no _id2token vocabulary")
+    return len(id_to_token)
+
+
 def load_tokenizer(nemo_path: str | Path, lang_key: str = "english_phoneme"):
     """Instantiate the checkpoint-owned NeMo IPA tokenizer."""
     import yaml
@@ -33,7 +40,6 @@ def load_tokenizer(nemo_path: str | Path, lang_key: str = "english_phoneme"):
     if not isinstance(model_config, dict):
         raise FileNotFoundError(f"model_config.yaml not found in {archive}")
 
-    text_vocab_size = int(model_config["text_vocab_size"])
     tokenizers = model_config["text_tokenizers"]
     if lang_key not in tokenizers:
         raise ValueError(f"MagpieTTS checkpoint does not define tokenizer {lang_key!r}")
@@ -67,4 +73,4 @@ def load_tokenizer(nemo_path: str | Path, lang_key: str = "english_phoneme"):
                     g2p[key] = str(path)
         tokenizer = instantiate(OmegaConf.create(tokenizer_config))
 
-    return tokenizer, text_vocab_size
+    return tokenizer, _vocab_size(tokenizer)

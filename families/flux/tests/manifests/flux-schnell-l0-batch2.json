@@ -22,13 +22,12 @@
       "test_prompt": "A red cube on a white table",
       "test_type": "diffusion",
       "num_inference_steps": 20,
-      "reference_precision": "fp16",
+      "reference_precision": "fp32",
       "seed": 42
     }
   ],
   "tensor_parallel_size": 1,
   "image_height": 384,
   "image_width": 384,
-  "video_num_frames": 1,
   "max_batch_size": 2
 }

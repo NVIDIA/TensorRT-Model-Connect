@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -27,6 +28,7 @@ class BuildRequest:
     family: str
     task: str
     precision: str
+    backend: str = "trt"
     max_sequence_length: int | None = None
     image_height: int | None = None
     image_width: int | None = None
@@ -36,6 +38,7 @@ class BuildRequest:
     context_parallel_size: int = 1
     quantization: str | None = None
     fp32_layers: tuple[int, ...] = ()
+    dynamic_kv_cache: bool = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
 
@@ -44,6 +47,8 @@ class BuildRequest:
             raise ValueError("precision must be non-empty")
         _validate_id("family", self.family)
         _validate_id("task", self.task)
+        if self.backend not in {"trt", "trt_rtx"}:
+            raise ValueError("backend must be 'trt' or 'trt_rtx'")
         if self.max_sequence_length is not None and self.max_sequence_length < 1:
             raise ValueError("max_sequence_length must be positive")
         for field in ("image_height", "image_width", "video_num_frames"):
@@ -60,6 +65,8 @@ class BuildRequest:
             raise ValueError("quantization must be non-empty when provided")
         if any(layer < 0 for layer in self.fp32_layers):
             raise ValueError("fp32_layers must contain non-negative indices")
+        if not isinstance(self.dynamic_kv_cache, bool):
+            raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
             raise ValueError("graph_transform must be callable when provided")
 
@@ -95,10 +102,26 @@ def _load_family(family: str) -> ModuleType:
         raise
 
 
+def _select_backend(backend: str) -> None:
+    """Bind the explicit build backend before importing a family builder."""
+
+    loaded = sys.modules.get("tensorrt")
+    if backend == "trt":
+        if sys.modules.get("tensorrt_rtx") is not None:
+            raise RuntimeError("TensorRT-RTX is already loaded in this process")
+        return
+
+    rtx = importlib.import_module("tensorrt_rtx")
+    if loaded is not None and loaded is not rtx:
+        raise RuntimeError("TensorRT is already loaded in this process")
+    sys.modules["tensorrt"] = rtx
+
+
 def build(request: BuildRequest) -> None:
     """Run one family builder and publish its bundle on success."""
 
     family = _resolve_family(request)
+    _select_backend(request.backend)
     family_module = _load_family(family)
     writer = BundleWriter(request.output_path)
     try:

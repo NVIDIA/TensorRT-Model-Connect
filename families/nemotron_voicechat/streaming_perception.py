@@ -410,6 +410,7 @@ def _build_streaming_encoder(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.clear_flag(trt.BuilderFlag.TF32)
     eps = graph_ops.add_constant(network, (1, 1), np.array([1e-5], dtype=np.float32))
     mel = network.add_input("mel_features", trt.float32, (mel_bins, mel_len))

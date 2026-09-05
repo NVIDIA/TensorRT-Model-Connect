@@ -26,7 +26,6 @@ class BuilderContext:
 def create_builder_context(
     *,
     verbose: bool,
-    workspace_bytes: int | None = None,
     strongly_typed: bool = True,
     disable_tf32: bool = False,
 ) -> BuilderContext:
@@ -38,8 +37,8 @@ def create_builder_context(
         flags |= 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     network = builder.create_network(flags)
     config = builder.create_builder_config()
-    if workspace_bytes is not None:
-        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
+    config.builder_optimization_level = 1
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
     if disable_tf32:
         config.clear_flag(trt.BuilderFlag.TF32)
     return BuilderContext(

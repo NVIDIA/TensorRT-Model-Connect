@@ -2,6 +2,11 @@
   "name": "nemotron-voicechat-11b",
   "hf_id": "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
   "hf_revision": "359ada7b1c60851e40ff08065f9b0340244f27e0",
+  "hf_dependencies": [
+    {
+      "repo_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
+    }
+  ],
   "bundle": "nemotron-voicechat-11b.bundle",
   "family": "nemotron_voicechat",
   "task": "speech_session",

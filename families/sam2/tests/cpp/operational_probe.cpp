@@ -3,12 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/sam2/runtime/sam2_pipeline.h"
 #include "trtmc/runtime/family_loader.h"
 #include "trtmc/task.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -24,6 +26,12 @@ constexpr std::int32_t kWidth = 1088;
 constexpr std::size_t kFrameCount = 5;
 
 using Frames = std::array<std::vector<std::uint8_t>, kFrameCount>;
+
+void require_cuda(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
+    }
+}
 
 Frames make_frames() {
     Frames frames;
@@ -114,6 +122,9 @@ int main(int argc, char** argv) {
         auto session = video->create_video_segmentation_session();
         if (session == nullptr)
             throw std::runtime_error("SAM2 did not create a video session");
+        auto* device_session = dynamic_cast<trtmc::sam2::ISam2DeviceMaskSession*>(session.get());
+        if (device_session == nullptr)
+            throw std::runtime_error("SAM2 session does not expose device masks");
         const auto frames = argc == 9 ? load_frames(argv + 4) : make_frames();
         const auto input = request(frames);
         const auto first = session->segment(input);
@@ -143,6 +154,25 @@ int main(int argc, char** argv) {
         }
         const bool temporal = std::any_of(masks.begin() + 1, masks.end(),
                                           [&](const auto& mask) { return mask != masks.front(); });
+        const auto device = device_session->segment_device(input);
+        const bool device_metadata_exact =
+            device.label == first.frames.front().object_ids.front() &&
+            device.detector_score == first.frames.front().detection_scores.front() &&
+            first.frames.front().boxes.size() == device.prompt_box_xyxy.size() &&
+            std::equal(device.prompt_box_xyxy.begin(), device.prompt_box_xyxy.end(),
+                       first.frames.front().boxes.begin());
+        int previous_device = -1;
+        require_cuda(cudaGetDevice(&previous_device), "cudaGetDevice");
+        require_cuda(cudaSetDevice(device.mask_device_ordinal), "cudaSetDevice");
+        bool device_masks_match_host = true;
+        for (std::size_t index = 0; index < device.masks.size(); ++index) {
+            std::vector<std::uint8_t> copied(static_cast<std::size_t>(kHeight) * kWidth);
+            require_cuda(cudaMemcpy(copied.data(), device.masks[index], copied.size(),
+                                    cudaMemcpyDeviceToHost),
+                         "cudaMemcpy device mask");
+            device_masks_match_host = device_masks_match_host && copied == masks[index];
+        }
+        require_cuda(cudaSetDevice(previous_device), "restore CUDA device");
         std::ofstream mask_output(argv[3], std::ios::binary | std::ios::trunc);
         if (!mask_output)
             throw std::runtime_error("cannot create SAM2 mask output");
@@ -161,6 +191,9 @@ int main(int argc, char** argv) {
             {"mask_foreground_pixels", counts},
             {"temporally_distinct_masks", temporal},
             {"metadata_exact", metadata_exact},
+            {"device_mask_ordinal", device.mask_device_ordinal},
+            {"device_metadata_exact", device_metadata_exact},
+            {"device_masks_match_host", device_masks_match_host},
         };
         std::cout << receipt.dump() << '\n';
         return 0;

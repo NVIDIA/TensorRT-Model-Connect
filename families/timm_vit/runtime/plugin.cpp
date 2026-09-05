@@ -3,12 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/timm_vit/runtime/distributed_runtime.h"
 #include "families/timm_vit/runtime/pipeline.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
-#include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -41,33 +40,8 @@ TimmVitPreprocessConfig parse_config(const std::vector<char>& data, std::int32_t
     return config;
 }
 
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::int32_t require_rank(std::int32_t tp_size) {
-    require_nccl(tp_size);
-    if (tp_size == 1)
-        return 0;
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("timm ViT TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= tp_size)
-        throw std::runtime_error("timm ViT RANK is outside tensor_parallel_size");
-    return static_cast<std::int32_t>(rank);
-}
-
-std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<char>& plan) {
-    ModuleCreateOptions options{};
+std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<char>& plan,
+                                        const ModuleCreateOptions& options) {
     auto engine = backend.create_module(plan.data(), plan.size(), options);
     if (!engine || !engine->ok())
         throw std::runtime_error("timm ViT engine failed to load");
@@ -78,12 +52,20 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 } // namespace trtmc::timm_vit
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("timm_vit does not support --kv-cache-size");
     const auto& config_data = trtmc::timm_vit::require_section(context.reader, "runtime.json");
     std::int32_t tp_size = 0;
     auto config = trtmc::timm_vit::parse_config(config_data, tp_size);
-    const auto rank = trtmc::timm_vit::require_rank(tp_size);
-    const std::string section = tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(rank);
+    const auto group = trtmc::timm_vit::initialize_tensor_parallel_group(tp_size);
+    const std::string section =
+        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(group.rank) + ".plan";
     const auto& plan = trtmc::timm_vit::require_section(context.reader, section.c_str());
-    auto engine = trtmc::timm_vit::load_engine(context.backend, plan);
+    trtmc::ModuleCreateOptions options{};
+    if (tp_size > 1) {
+        options.distributed_communicator = group.communicator;
+        options.distributed_owner = group.owner;
+    }
+    auto engine = trtmc::timm_vit::load_engine(context.backend, plan, options);
     return new trtmc::ImageClassificationPipeline(std::move(engine), std::move(config));
 }

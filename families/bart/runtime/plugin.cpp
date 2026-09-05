@@ -64,14 +64,13 @@ BartRuntimeConfig parse_runtime_config(std::string_view text) {
     }
     if (!json.is_object())
         throw std::runtime_error("bart runtime.json must be an object");
-    if (json.size() != 22)
+    if (json.size() != 21)
         throw std::runtime_error("bart runtime.json has an unexpected field set");
     const int32_t encoder_layers = require_value<int32_t>(json, "encoder_layers");
     const int32_t encoder_heads = require_value<int32_t>(json, "encoder_attention_heads");
     const int32_t encoder_ffn = require_value<int32_t>(json, "encoder_ffn_dim");
     const int32_t decoder_ffn = require_value<int32_t>(json, "decoder_ffn_dim");
     const int32_t max_positions = require_value<int32_t>(json, "max_position_embeddings");
-    (void)require_value<int32_t>(json, "forced_bos_token_id");
     const int32_t position_offset = require_value<int32_t>(json, "position_embedding_offset");
     const bool has_encoder = require_value<bool>(json, "has_vision_engine");
     const bool is_encoder_decoder = require_value<bool>(json, "is_encoder_decoder");
@@ -361,5 +360,7 @@ ITask* create_bart(const FamilyContext& context) {
 } // namespace trtmc
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("bart does not support --kv-cache-size");
     return trtmc::create_bart(context);
 }

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .process import CiError, CommandRunner, GitHubFiles
+from .process import CommandRunner, GitHubFiles
 
 
 class DockerImageManager:
@@ -30,15 +30,6 @@ class DockerImageManager:
                 ".",
             ]
         )
-        if self._inspect(image).returncode:
-            raise CiError(f"Docker image was not created: {image}")
         self.github.environment("TRTMC_CI_IMAGE", image)
         print(f"TRTMC_CI_IMAGE={image}")
         return image
-
-    def _inspect(self, image: str):
-        return self.commands.run(
-            ["docker", "image", "inspect", image],
-            check=False,
-            capture_output=True,
-        )

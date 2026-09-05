@@ -279,6 +279,7 @@ class _M2M100Model:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
         trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -509,6 +510,7 @@ def _build_m2m100_encoder(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
+    tc.builder_optimization_level = 1
     tc.clear_flag(trt.BuilderFlag.TF32)
 
     # Input: token IDs [max_source_length]
@@ -874,6 +876,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _M2M100Model, *
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one M2M-100 encoder-decoder bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("m2m_100 does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("m2m_100 does not support image_height")
 
@@ -937,7 +942,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if encoder_plan is None:
         raise RuntimeError("M2M-100 encoder build returned no engine")
 
-    writer.set_header(family="m2m_100", task=request.task, backend="trt")
+    writer.set_header(family="m2m_100", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", decoder_plan)
     writer.add_bytes("encoder.plan", encoder_plan)
     writer.add_json(

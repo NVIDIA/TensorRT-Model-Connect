@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from trtmc_benchmark.builder import _build_command
+import trtmc_benchmark.builder as benchmark_builder
+from trtmc_benchmark.builder import BundleBuilder, _build_command
 from trtmc_benchmark.catalog import (
     ManifestCatalog,
     default_manifest_root,
@@ -86,6 +87,72 @@ def test_build_command_is_the_current_closed_build_request(tmp_path: Path) -> No
     assert "source-revision" not in joined
 
 
+def test_build_command_passes_manifest_backend_and_dynamic_kv_cache(tmp_path: Path) -> None:
+    manifest = json.loads(
+        (REPO / "families/llama/tests/manifests/minitron-4b-width-l0.json").read_text()
+    )
+    manifest["backend"] = "trt_rtx"
+    manifest_path = tmp_path / "model.json"
+    manifest_path.write_text(json.dumps(manifest))
+    model = ManifestCatalog(tmp_path).resolve(str(manifest_path))
+
+    assert model.build_settings["backend"] == "trt_rtx"
+    assert model.build_settings["dynamic_kv_cache"] is True
+    case = resolve_case(model, tmp_path / "model.bundle")
+
+    command = _build_command(model, tmp_path / "checkpoint", tmp_path / "model.bundle", (case,))
+
+    assert command[command.index("--backend") + 1] == "trt_rtx"
+    assert command.count("--dynamic-kv-cache") == 1
+
+
+def test_bundle_builder_uses_core_model_resolution(tmp_path: Path, monkeypatch) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "model.bundle")
+    checkpoint = tmp_path / "resolved-checkpoint"
+    checkpoint.mkdir()
+    calls = []
+
+    def resolve_model(value: str, revision: str | None) -> Path:
+        calls.append((value, revision))
+        return checkpoint
+
+    monkeypatch.setattr(benchmark_builder, "_resolve_model", resolve_model)
+    plan = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+
+    assert calls == [(model.hf_id, model.hf_revision or None)]
+    assert plan.model_dir == checkpoint
+
+
+@pytest.mark.parametrize("selector", ["model", "family", "default"])
+def test_bundle_builder_keeps_explicit_model_dir_cli_behavior(
+    tmp_path: Path, monkeypatch, selector: str
+) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "model.bundle")
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    calls = []
+
+    def resolve_model(value: str, revision: str | None) -> Path:
+        calls.append((value, revision))
+        return Path(value)
+
+    monkeypatch.setattr(benchmark_builder, "_resolve_model", resolve_model)
+    key = {"model": model.name, "family": model.family, "default": ""}[selector]
+    plan = BundleBuilder(tmp_path / "cache", model_dirs={key: checkpoint})._plan(model, (case,))
+
+    assert calls == [(str(checkpoint.resolve()), None)]
+    assert plan.model_dir == checkpoint.resolve()
+
+
+def test_bundle_builder_has_no_second_model_resolver() -> None:
+    source = (REPO / "apps/benchmark/trtmc_benchmark/builder.py").read_text()
+    assert "snapshot_download" not in source
+    assert "_MODEL_DIR" not in source
+    assert "repository / model.hf_id" not in source
+
+
 def _worker(tmp_path: Path) -> Path:
     path = tmp_path / "worker"
     path.write_text(
@@ -130,8 +197,20 @@ def test_service_runs_worker_and_writes_reports(tmp_path: Path) -> None:
     result = BenchmarkService(_worker(tmp_path)).run((case,), output)
     assert result["status"] == "completed"
     assert result["cells"][0]["metrics"]["latency_ms"]["p50"] == 2.0
+    assert result["cells"][0]["samples_ms"] == [2.0, 2.0]
     assert (output / "result.json").is_file()
     assert (output / "report.html").is_file()
+
+
+def test_case_resolution_rejects_unknown_telemetry_override(tmp_path: Path) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+
+    with pytest.raises(BenchmarkError, match="unknown telemetry field"):
+        resolve_case(
+            model,
+            tmp_path / "model.bundle",
+            overrides={"telemetry.typo": 100},
+        )
 
 
 def test_metrics_keep_task_specific_rates() -> None:

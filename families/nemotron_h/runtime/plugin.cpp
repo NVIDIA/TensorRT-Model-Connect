@@ -103,7 +103,9 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 || config.vocab_size <= 0 ||
         config.num_attention_layers <= 0 || config.num_mamba_layers <= 0 ||
-        config.num_attention_layers + config.num_mamba_layers != config.num_layers ||
+        std::count(layer_types.begin(), layer_types.end(), "attention") !=
+            config.num_attention_layers ||
+        std::count(layer_types.begin(), layer_types.end(), "mamba2") != config.num_mamba_layers ||
         config.d_inner <= 0 || config.mamba_d_state <= 0 || config.mamba_d_conv <= 0 ||
         config.mamba_nheads <= 0 || config.mamba_head_dim <= 0 || config.conv_dim <= 0 ||
         config.max_cache_length <= 0 || config.tensor_parallel_size <= 0 || groups <= 0 ||
@@ -203,5 +205,7 @@ ITask* create(const FamilyContext& context) {
 } // namespace trtmc::nemotron_h
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("nemotron_h does not support --kv-cache-size");
     return trtmc::nemotron_h::create(context);
 }

@@ -24,8 +24,6 @@ struct SpeechConfig {
 
     int32_t depth_hidden_size{0};
     int32_t depth_num_layers{6};
-    int32_t depth_num_heads{0};
-    int32_t depth_num_kv_heads{0};
     int32_t depth_max_cache_length{16};
 
     std::vector<float> depth_projection;

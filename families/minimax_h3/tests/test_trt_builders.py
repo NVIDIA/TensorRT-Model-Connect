@@ -126,9 +126,16 @@ def test_builders_apply_default_or_overridden_workspace(
     class WorkspaceConfigured(Exception):
         pass
 
-    def capture(_config, supplied, *, default_bytes):
-        observed.update(supplied=supplied, default_bytes=default_bytes)
+    def capture(config, supplied, *, default_bytes):
+        observed.update(
+            supplied=supplied,
+            default_bytes=default_bytes,
+            builder_optimization_level=config.builder_optimization_level,
+        )
         raise WorkspaceConfigured
+
+    class FakeConfig:
+        builder_optimization_level = None
 
     class FakeBuilder:
         @staticmethod
@@ -137,7 +144,7 @@ def test_builders_apply_default_or_overridden_workspace(
 
         @staticmethod
         def create_builder_config():
-            return object()
+            return FakeConfig()
 
     monkeypatch.setattr(trt, "Builder", lambda _logger: FakeBuilder())
     monkeypatch.setattr(op, "configure_builder", lambda _config: None)
@@ -147,7 +154,11 @@ def test_builders_apply_default_or_overridden_workspace(
         kwargs["sequence_length"] = 1
     with pytest.raises(WorkspaceConfigured):
         builder(*args, **kwargs)
-    assert observed == {"supplied": workspace_bytes, "default_bytes": default_bytes}
+    assert observed == {
+        "supplied": workspace_bytes,
+        "default_bytes": default_bytes,
+        "builder_optimization_level": 1,
+    }
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "8589934592"])

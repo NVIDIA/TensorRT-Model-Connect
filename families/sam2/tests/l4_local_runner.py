@@ -241,6 +241,9 @@ def run(probe: Path, bundle: Path, runtime_root: Path, fixture_dir: Path) -> dic
         "mask_foreground_pixels",
         "temporally_distinct_masks",
         "metadata_exact",
+        "device_mask_ordinal",
+        "device_metadata_exact",
+        "device_masks_match_host",
     }
     if not isinstance(receipt, dict) or set(receipt) != required:
         raise QualificationError("SAM2 local probe returned an invalid receipt")
@@ -269,6 +272,10 @@ def run(probe: Path, bundle: Path, runtime_root: Path, fixture_dir: Path) -> dic
         receipt["same_session_repeat_exact"] is not True
         or receipt["binary_masks"] is not True
         or receipt["temporally_distinct_masks"] is not True
+        or type(receipt["device_mask_ordinal"]) is not int
+        or receipt["device_mask_ordinal"] < 0
+        or receipt["device_metadata_exact"] is not True
+        or receipt["device_masks_match_host"] is not True
     ):
         raise QualificationError("SAM2 local probe runtime invariants failed")
     _enforce(metrics, thresholds)

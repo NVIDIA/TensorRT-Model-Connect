@@ -601,6 +601,7 @@ def _build_encoder(config, weights, *, precision="fp32", verbose=False):
     b = trt.Builder(log)
     net = b.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = b.create_builder_config()
+    tc.builder_optimization_level = 1
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 
     eps = graph_ops.add_constant(

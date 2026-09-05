@@ -32,6 +32,9 @@ def _model_files(model_dir: Path) -> tuple[Path, Path]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one pose-hypothesis refinement bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("foundationpose does not support dynamic_kv_cache")
+
     if request.task != "pose_hypothesis_refinement":
         raise ValueError("foundationpose supports only task=pose_hypothesis_refinement")
     if request.precision not in {"fp16", "fp32"}:
@@ -70,6 +73,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=request.precision,
         verbose=bool(request.verbose),
     )
-    writer.set_header(family="foundationpose", task=request.task, backend="trt")
+    writer.set_header(family="foundationpose", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", refiner_plan)
     writer.add_bytes("score.plan", scorer_plan)

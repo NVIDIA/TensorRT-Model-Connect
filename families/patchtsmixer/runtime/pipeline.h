@@ -18,6 +18,7 @@ struct RuntimeConfig {
     std::int32_t context_length;
     std::int32_t num_input_channels;
     std::int32_t prediction_length;
+    std::int32_t tensor_parallel_size;
 };
 
 RuntimeConfig parse_runtime_config(const std::string& json);

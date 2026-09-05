@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_bark SHARED
+  distributed_runtime.cpp
   wordpiece_tokenizer.cpp
   decode_runtime.cpp
   kv_cache.cpp
@@ -29,6 +30,7 @@ target_link_libraries(trtmc_model_bark PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_bark PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -44,20 +46,23 @@ install(TARGETS trtmc_model_bark
 )
 
 if(TRTMC_BUILD_TESTS)
-  add_executable(bark_token_trace
-    ../tests/cpp/bark_token_trace.cpp
+  add_executable(test_bark_pipeline
+    ${PROJECT_SOURCE_DIR}/families/bark/tests/cpp/test_bark_pipeline.cpp
   )
-  target_include_directories(bark_token_trace PRIVATE
+  target_include_directories(test_bark_pipeline PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/core/runtime/include
   )
-  target_include_directories(bark_token_trace SYSTEM PRIVATE
+  target_include_directories(test_bark_pipeline SYSTEM PRIVATE
     ${TRTMC_CUDA_INCLUDE_DIR}
   )
-  target_link_libraries(bark_token_trace PRIVATE
-    trtmc_runtime
+  target_link_libraries(test_bark_pipeline PRIVATE
     trtmc_model_bark
     ${TRTMC_CUDART_LIBRARY}
   )
-  target_compile_options(bark_token_trace PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(test_bark_pipeline PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME bark_pipeline COMMAND test_bark_pipeline)
+  set_tests_properties(bark_pipeline PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
 endif()

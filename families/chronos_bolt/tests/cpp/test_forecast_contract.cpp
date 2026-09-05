@@ -24,7 +24,7 @@ class RecordingModule final : public trtmc::ITrtModule {
         const auto* data = static_cast<const float*>(input.data);
         context.assign(data, data + input.numel());
         context_shape = input.shape;
-        return {{"quantile_preds", {output.data(), {1, 2, 3}, trtmc::DType::kFloat32}}};
+        return {{"quantile_preds", {output.data(), {1, 3, 2}, trtmc::DType::kFloat32}}};
     }
 
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
@@ -78,7 +78,7 @@ void test_short_series_is_left_padded() {
     const std::vector<float> values{11.0F, 12.0F};
     const std::vector<float> mask;
 
-    pipeline.forecast(request(values, mask));
+    const auto result = pipeline.forecast(request(values, mask));
 
     require(recording->context_shape == std::vector<std::int64_t>({1, 4}),
             "Chronos-Bolt must send its configured context length");
@@ -86,6 +86,8 @@ void test_short_series_is_left_padded() {
                 std::isnan(recording->context[1]) && recording->context[2] == 11.0F &&
                 recording->context[3] == 12.0F,
             "Chronos-Bolt must left-pad a short series as unobserved");
+    require(result.shape == std::vector<std::int64_t>({1, 3, 2}),
+            "Chronos-Bolt must report quantile-major forecast shape");
 }
 
 void test_frequency_is_rejected() {

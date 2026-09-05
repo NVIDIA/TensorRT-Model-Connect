@@ -1074,9 +1074,10 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    if (argc != 6) {
+    const bool baseline_only = argc == 7 && std::string(argv[6]) == "--baseline-only";
+    if (argc != 6 && !baseline_only) {
         std::cerr << "usage: native_lifecycle_probe BUNDLE WAV RUNTIME_ROOT "
-                     "OUTPUT_WAV RECEIPT_JSON\n";
+                     "OUTPUT_WAV RECEIPT_JSON [--baseline-only]\n";
         return 2;
     }
 
@@ -1089,7 +1090,7 @@ int main(int argc, char** argv) {
     try {
         auto pipeline = trtmc::load_task(bundle_path, runtime_root);
         auto* session_provider = dynamic_cast<trtmc::ISpeechSessionProvider*>(pipeline.get());
-        if (session_provider == nullptr)
+        if (!baseline_only && session_provider == nullptr)
             throw std::runtime_error("loaded pipeline does not expose ISpeechSession");
         auto* batch_provider = dynamic_cast<trtmc::ISpeechBatchSessionProvider*>(pipeline.get());
         if (batch_provider == nullptr)
@@ -1098,12 +1099,17 @@ int main(int argc, char** argv) {
         const auto input = trtmc::cli::io::read_wav(input_path);
         if (input.sample_rate != 16000 || input.num_samples != 249734)
             throw std::runtime_error("pinned model-card sample shape does not match contract");
-        const auto slash = input_path.find_last_of('/');
-        const std::string function_input_path =
-            input_path.substr(0, slash == std::string::npos ? 0 : slash + 1U) + "sample_fc.wav";
-        const auto function_input = trtmc::cli::io::read_wav(function_input_path);
-        if (function_input.sample_rate != 16000 || function_input.num_samples != 190278)
-            throw std::runtime_error("pinned function-call sample shape does not match contract");
+        trtmc::AudioResult function_input;
+        if (!baseline_only) {
+            const auto slash = input_path.find_last_of('/');
+            const std::string function_input_path =
+                input_path.substr(0, slash == std::string::npos ? 0 : slash + 1U) + "sample_fc.wav";
+            function_input = trtmc::cli::io::read_wav(function_input_path);
+            if (function_input.sample_rate != 16000 || function_input.num_samples != 190278) {
+                throw std::runtime_error(
+                    "pinned function-call sample shape does not match contract");
+            }
+        }
 
         const auto config = base_config(input.sample_rate);
 
@@ -1115,6 +1121,41 @@ int main(int argc, char** argv) {
         }
         std::cerr << "[probe] baseline complete: audio_samples=" << baseline.audio.size()
                   << " audio_events=" << baseline.count(EventKind::kAgentAudio) << '\n';
+
+        const bool baseline_contract =
+            static_cast<int32_t>(baseline.audio.size()) == kExpectedOutputSamples &&
+            baseline.count(EventKind::kAgentAudio) ==
+                kExpectedOutputSamples / kOutputFrameSamples &&
+            baseline.agent_text() == kExpectedAgentText &&
+            baseline.count(EventKind::kInputFinished) == 1;
+        if (baseline_only) {
+            trtmc::AudioResult baseline_audio;
+            baseline_audio.samples = baseline.audio;
+            baseline_audio.num_samples = static_cast<int32_t>(baseline_audio.samples.size());
+            baseline_audio.sample_rate = 22050;
+            trtmc::cli::io::write_wav(baseline_audio, output_wav);
+
+            std::ofstream receipt(receipt_path);
+            if (!receipt)
+                throw std::runtime_error("cannot create receipt: " + receipt_path);
+            receipt << "{\n";
+            receipt << "  \"schema_version\": 3,\n";
+            receipt << "  \"pass\": " << json_bool(baseline_contract) << ",\n";
+            receipt << "  \"baseline\": {\n";
+            receipt << "    \"output_samples\": " << baseline.audio.size() << ",\n";
+            receipt << "    \"audio_events\": " << baseline.count(EventKind::kAgentAudio) << ",\n";
+            receipt << "    \"agent_text\": \"" << json_escape(baseline.agent_text()) << "\",\n";
+            receipt << "    \"input_finished_events\": "
+                    << baseline.count(EventKind::kInputFinished) << "\n";
+            receipt << "  }\n";
+            receipt << "}\n";
+            receipt.close();
+
+            std::cout << "receipt=" << receipt_path << '\n';
+            std::cout << "output_wav=" << output_wav << '\n';
+            std::cout << "pass=" << json_bool(baseline_contract) << '\n';
+            return baseline_contract ? 0 : 1;
+        }
 
         Capture irregular;
         int irregular_append_calls = 0;
@@ -1779,12 +1820,6 @@ int main(int argc, char** argv) {
                   << " resumed_audio=" << function_channel.agent_resumed_audio_events
                   << " pass=" << json_bool(function_channel.pass()) << '\n';
 
-        const bool baseline_contract =
-            static_cast<int32_t>(baseline.audio.size()) == kExpectedOutputSamples &&
-            baseline.count(EventKind::kAgentAudio) ==
-                kExpectedOutputSamples / kOutputFrameSamples &&
-            baseline.agent_text() == kExpectedAgentText &&
-            baseline.count(EventKind::kInputFinished) == 1;
         const bool irregular_parity = bitwise_equal(irregular.audio, baseline.audio) &&
                                       irregular.agent_text() == baseline.agent_text() &&
                                       audio_events_before_finish > 0 &&

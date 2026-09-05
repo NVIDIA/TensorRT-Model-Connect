@@ -260,6 +260,7 @@ def build_nanocodec_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
+    tc.builder_optimization_level = 1
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 
     # === Inputs ===

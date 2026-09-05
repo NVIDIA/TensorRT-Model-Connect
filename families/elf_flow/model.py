@@ -441,6 +441,9 @@ _BUNDLE_FILES = (
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one ELF Flow model and its text encoder."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("elf_flow does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("elf_flow does not support image_height")
 
@@ -452,7 +455,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.max_batch_size != 1:
         raise NotImplementedError("elf_flow does not support max_batch_size")
-
 
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
@@ -508,7 +510,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if text_encoder is None:
         raise FileNotFoundError("ELF Flow requires its family-owned T5 encoder checkpoint")
 
-    writer.set_header(family="elf_flow", task=request.task, backend="trt")
+    writer.set_header(family="elf_flow", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_bytes("text_encoder.plan", text_encoder)
     writer.add_json("runtime.json", model.get_bundle_config_overrides(config))

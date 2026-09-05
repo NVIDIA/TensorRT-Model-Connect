@@ -36,7 +36,6 @@ class DockerTargetPolicy(str, Enum):
     ADOPT = "adopt"
     START = "start"
     ENSURE = "ensure"
-    CREATE = "create"
 
 
 @dataclass(frozen=True)
@@ -387,7 +386,7 @@ class DockerLifecycle:
         if current is None and policy in {DockerTargetPolicy.ADOPT, DockerTargetPolicy.START}:
             raise DevToolkitError(f"Docker container {request.name} does not exist")
 
-        if policy in {DockerTargetPolicy.ENSURE, DockerTargetPolicy.CREATE}:
+        if policy is DockerTargetPolicy.ENSURE:
             build_image()
             image = self._image(request.image)
         else:

@@ -22,7 +22,7 @@ The graph owns image/state mean-standard-deviation normalization and action unno
 Build the bundle with the policy revision:
 
 ```bash
-trtmc build lerobot/act_aloha_sim_transfer_cube_human \
+python -m tensorrt_model_connect build lerobot/act_aloha_sim_transfer_cube_human \
   --revision ba73b2766f1371cdc133ca4efb97eb090d744625 \
   --precision fp32 \
   -o /tmp/act-aloha-sim-transfer-cube.bundle

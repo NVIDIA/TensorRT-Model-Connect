@@ -172,5 +172,7 @@ ITask* create(const FamilyContext& context) {
 } // namespace trtmc::nemotron
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("nemotron does not support --kv-cache-size");
     return trtmc::nemotron::create(context);
 }

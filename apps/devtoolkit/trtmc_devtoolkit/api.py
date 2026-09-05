@@ -5,10 +5,9 @@
 
 from __future__ import annotations
 
-import os
+import platform
 import re
 import shutil
-import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -57,6 +56,15 @@ class DevToolkit:
         ipc: str | None = None,
     ) -> PreparedEnvironment:
         """Prepare one exact checkout container without replacing collisions."""
+        machine = platform.machine()
+        dockerfile = {
+            "x86_64": "Dockerfile.dev.x86",
+            "aarch64": "Dockerfile.dev.aarch64",
+        }.get(machine)
+        if dockerfile is None:
+            raise DevToolkitError(f"unsupported Docker development host architecture: {machine}")
+        if not (self.repository / dockerfile).is_file():
+            raise DevToolkitError(f"checkout does not provide {dockerfile}")
         requirements = self._family_requirements(family)
         target = DockerTargetRequest(
             repository=self.repository,
@@ -71,7 +79,7 @@ class DevToolkit:
         state = DockerLifecycle(self.repository, self.runner).prepare(
             target,
             policy=policy,
-            build_image=lambda: self._build_docker_image(image),
+            build_image=lambda: self._build_docker_image(image, dockerfile),
         )
         if requirements is not None and policy is not DockerTargetPolicy.ADOPT:
             self.runner.run(
@@ -101,22 +109,10 @@ class DevToolkit:
             image_id=state.image_id,
         )
 
-    def _build_docker_image(self, image: str) -> None:
-        if not (self.repository / "Dockerfile").is_file():
-            raise DevToolkitError("checkout does not provide the pinned-base Dockerfile")
-        if not (self.repository / "tools/ci/__main__.py").is_file():
-            raise DevToolkitError("checkout does not provide tools.ci")
-        environment = dict(os.environ)
-        environment.update(
-            {
-                "TRTMC_CI_WORKSPACE": str(self.repository),
-                "TRTMC_CI_IMAGE": image,
-            }
-        )
+    def _build_docker_image(self, image: str, dockerfile: str) -> None:
         self.runner.run(
-            [sys.executable, "-m", "tools.ci", "image", "ensure"],
+            ["docker", "build", "--file", dockerfile, "--tag", image, "requirements"],
             cwd=self.repository,
-            env=environment,
         )
 
     def prepare_local(

@@ -48,6 +48,15 @@ bool load_throws(const std::filesystem::path& bundle, const std::string& runtime
     }
 }
 
+bool rtx_options_throw(const std::filesystem::path& bundle, const std::string& runtime_root) {
+    try {
+        (void)trtmc::load_task(bundle.string(), runtime_root, 0, "runtime.cache", true);
+        return false;
+    } catch (const std::invalid_argument&) {
+        return true;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -71,6 +80,14 @@ int main(int argc, char** argv) {
     auto second_task = trtmc::load_task(bundle_path.string(), runtime_root.string());
     check(dynamic_cast<trtmc::ITimeSeriesForecast*>(second_task.get()) != nullptr,
           "backend and family DSO cache supports a second load");
+
+    auto sized_task = trtmc::load_task(bundle_path.string(), runtime_root.string(), 4096);
+    auto* sized_forecast = dynamic_cast<trtmc::ITimeSeriesForecast*>(sized_task.get());
+    const auto sized_result = sized_forecast->forecast({values, mask});
+    check(sized_result.shape == std::vector<std::int64_t>({4096, 3}),
+          "runtime KV bytes reach the selected family directly");
+    check(rtx_options_throw(bundle_path, runtime_root.string()),
+          "TensorRT-RTX options reject a non-RTX bundle");
 
     check(load_throws(bundle_path, ""), "empty runtime root rejected");
     check(load_throws(bundle_path, (runtime_root / "missing").string()),

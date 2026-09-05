@@ -36,3 +36,27 @@ def test_receipt_rejects_missing_runtime_marker() -> None:
         assert_native_kv_receipt(
             _payload("[trtmc.prefill] tokens=65 launches=2 max_chunk=64"), _case(), 65
         )
+
+
+def test_two_chunk_parity_does_not_claim_a_fixed_prompt_token_sum() -> None:
+    stderr = "\n".join(
+        [
+            "[trtmc] KV cache rows=256 (bundle max=256)",
+            "[trtmc.prefill] tokens=95 launches=2 max_chunk=64",
+        ]
+    )
+    assert_native_kv_receipt(_payload(stderr), _case(), 96)
+
+
+def test_long_regression_keeps_exact_prompt_and_observed_token_gates() -> None:
+    case = {**_case(), "expected_prompt_tokens": 65}
+    stderr = "\n".join(
+        [
+            "[trtmc] KV cache rows=256 (bundle max=256)",
+            "[trtmc.prefill] tokens=64 launches=2 max_chunk=64",
+        ]
+    )
+    with pytest.raises(AssertionError):
+        assert_native_kv_receipt(_payload(stderr), case, 65)
+    with pytest.raises(AssertionError):
+        assert_native_kv_receipt(_payload(stderr), case, 64)

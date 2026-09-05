@@ -382,6 +382,7 @@ def build_deepseek_ocr_tp_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
     multi_device_preview = getattr(
         trt.PreviewFeature, "MULTIDEVICE_RUNTIME_10_16", None)
     if multi_device_preview is not None:

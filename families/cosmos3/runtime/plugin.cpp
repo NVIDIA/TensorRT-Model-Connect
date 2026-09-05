@@ -76,5 +76,7 @@ ITask* create(const FamilyContext& context) {
 } // namespace trtmc::cosmos3
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("cosmos3 does not support --kv-cache-size");
     return trtmc::cosmos3::create(context);
 }

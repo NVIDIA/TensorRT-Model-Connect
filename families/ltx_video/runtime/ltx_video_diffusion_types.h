@@ -32,17 +32,14 @@ struct LTXVideoDiffusionConfig {
     int32_t scale_factor_spatial{0};
     int32_t dit_dim{0};
     int32_t dit_num_heads{0};
-    int32_t freq_dim{0};
     int32_t text_seq_len{0};
     int32_t text_encoder_dim{0};
 
-    int32_t num_vae_caches{0};
     std::vector<float> latents_mean;
     std::vector<float> latents_std;
     std::vector<int32_t> patch_size;
     std::vector<int32_t> axes_dims_rope;
     float rope_theta{10000.0F};
-    std::string vae_model_id;
 
     bool guidance_embeds{false};
     bool use_rope{true};

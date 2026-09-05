@@ -8,10 +8,10 @@
     {
       "name": "convbert-base-tp2",
       "prompt": "The capital of France is Paris.",
-      "reference_precision": "fp16"
+      "reference_precision": "fp32"
     }
   ],
   "tensor_parallel_size": 2,
-  "precision": "fp16",
+  "precision": "fp32",
   "max_sequence_length": 256
 }

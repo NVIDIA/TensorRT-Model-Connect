@@ -139,7 +139,7 @@ def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
 # ---------------------------------------------------------------------------
 
 
-@with_builder_context()
+@with_builder_context(builder_optimization_level=1)
 def build_dual_profile_decoder_engine(
     config: "ModelConfig",
     weights: "WeightDict",

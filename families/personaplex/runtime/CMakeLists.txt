@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_personaplex SHARED
+  distributed_runtime.cpp
   resampler.cpp
   decode_runtime.cpp
   kv_cache.cpp
@@ -34,6 +35,7 @@ target_link_libraries(trtmc_model_personaplex PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_personaplex PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -47,3 +49,36 @@ set_target_properties(trtmc_model_personaplex PROPERTIES
 install(TARGETS trtmc_model_personaplex
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_personaplex_decode_runtime
+    ${PROJECT_SOURCE_DIR}/families/personaplex/tests/cpp/test_decode_runtime.cpp
+    ${PROJECT_SOURCE_DIR}/families/personaplex/runtime/decode_runtime.cpp
+  )
+  target_include_directories(test_personaplex_decode_runtime PRIVATE
+    ${PROJECT_SOURCE_DIR}
+  )
+  target_compile_options(test_personaplex_decode_runtime PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME test_personaplex_decode_runtime COMMAND test_personaplex_decode_runtime)
+
+  foreach(test_name IN ITEMS
+      test_personaplex_speech_decode_stop_policy
+      test_personaplex_speech_depth_plan
+      test_personaplex_speech_generation_helpers
+      test_personaplex_speech_mimi_decode_plan
+      test_personaplex_speech_temporal_embed_plan)
+    string(REPLACE "test_personaplex_" "" test_source ${test_name})
+    add_executable(${test_name}
+      ${PROJECT_SOURCE_DIR}/families/personaplex/tests/cpp/test_${test_source}.cpp
+    )
+    target_include_directories(${test_name} PRIVATE
+      ${PROJECT_SOURCE_DIR}
+    )
+    target_compile_options(${test_name} PRIVATE
+      -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
+endif()

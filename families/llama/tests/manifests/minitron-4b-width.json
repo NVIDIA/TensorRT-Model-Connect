@@ -12,9 +12,12 @@
       "name": "minitron-4b-width",
       "reference_precision": "fp16",
       "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
-      "max_new_tokens": 20
+      "max_new_tokens": 20,
+      "kv_cache_size": "1GiB",
+      "expected_kv_cache_rows": 8192
     }
   ],
   "max_sequence_length": 131072,
-  "tensor_parallel_size": 1
+  "tensor_parallel_size": 1,
+  "dynamic_kv_cache": true
 }

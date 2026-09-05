@@ -17,11 +17,15 @@ namespace {
 
 class RecordingModule final : public trtmc::ITrtModule {
   public:
+    explicit RecordingModule(std::string output_name = "prediction_outputs",
+                             std::vector<std::int64_t> output_shape = {1, 2, 2})
+        : output_name_(std::move(output_name)), output_shape_(std::move(output_shape)) {}
+
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
         record(inputs.at("past_values"), values, shape);
         std::vector<std::int64_t> ignored_shape;
         record(inputs.at("past_observed_mask"), mask, ignored_shape);
-        return {{"prediction_outputs", {output.data(), {1, 2, 2}, trtmc::DType::kFloat32}}};
+        return {{output_name_, {output.data(), output_shape_, trtmc::DType::kFloat32}}};
     }
 
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
@@ -38,7 +42,7 @@ class RecordingModule final : public trtmc::ITrtModule {
     bool has_input(const std::string& name) const override {
         return name == "past_values" || name == "past_observed_mask";
     }
-    bool has_output(const std::string& name) const override { return name == "prediction_outputs"; }
+    bool has_output(const std::string& name) const override { return name == output_name_; }
     trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
     std::vector<std::int64_t> tensor_shape(const std::string&) const override { return {}; }
     std::vector<std::int64_t> input_profile_shape(const std::string&, std::int32_t,
@@ -62,6 +66,9 @@ class RecordingModule final : public trtmc::ITrtModule {
     std::vector<float> output = std::vector<float>(4, 0.0F);
 
   private:
+    std::string output_name_;
+    std::vector<std::int64_t> output_shape_;
+
     static void record(const trtmc::Tensor& tensor, std::vector<float>& destination,
                        std::vector<std::int64_t>& destination_shape) {
         const auto* data = static_cast<const float*>(tensor.data);
@@ -144,6 +151,17 @@ void test_partial_multichannel_timestep_is_rejected() {
     require(rejected, "PatchTST must reject a partial channel timestep");
 }
 
+void test_single_target_regression_uses_the_logical_reference_shape() {
+    auto module =
+        std::make_unique<RecordingModule>("regression_outputs", std::vector<std::int64_t>{1, 1, 2});
+    trtmc::patchtst::Pipeline pipeline(std::move(module), {4, 1, 1, 1, "regression_outputs"});
+    const std::vector<float> values{1.0F, 2.0F, 3.0F, 4.0F};
+    const auto result = pipeline.forecast(request(values, {}));
+
+    require(result.shape == std::vector<std::int64_t>({1, 2}),
+            "PatchTST must omit the implementation-only singleton target axis");
+}
+
 } // namespace
 
 int main() {
@@ -151,6 +169,7 @@ int main() {
     test_overlong_multichannel_series_is_left_truncated();
     test_partial_multichannel_timestep_is_rejected();
     test_frequency_is_rejected();
+    test_single_target_regression_uses_the_logical_reference_shape();
     std::cerr << "ALL PASSED\n";
     return 0;
 }

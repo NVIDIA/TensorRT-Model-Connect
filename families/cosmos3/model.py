@@ -83,6 +83,8 @@ def _build_vae(weights: dict[str, Any], *, first_frame_only: bool, verbose: bool
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one fixed-profile Cosmos3-Nano bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("cosmos3 does not support dynamic_kv_cache")
 
     if request.task != "image_generation":
         raise ValueError("cosmos3 supports only task=image_generation")
@@ -117,7 +119,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model_dir = Path(request.model_dir)
     transformer_dir, vae_dir, tokenizer_dir = _require_checkpoint(model_dir)
 
-    writer.set_header(family="cosmos3", task=request.task, backend="trt")
+    writer.set_header(family="cosmos3", task=request.task, backend=request.backend)
     denoiser = _build_denoiser(
         transformer_dir,
         context_parallel_size=request.context_parallel_size,

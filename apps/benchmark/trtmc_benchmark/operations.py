@@ -44,7 +44,6 @@ class OperationSpec:
     """Performance semantics for one native worker Task API operation."""
 
     name: str
-    supports_batch: bool = False
     rate_metrics: tuple[RateMetric, ...] = ()
     stage_timings: tuple[str, ...] = ()
     per_item_latency: PerItemLatencyMetric | None = None
@@ -86,7 +85,6 @@ _OPERATIONS = (
     ),
     OperationSpec(
         name="generate_image",
-        supports_batch=True,
         rate_metrics=(RateMetric("generated_images", "images_per_s"),),
         per_item_latency=PerItemLatencyMetric("generated_images", "seconds_per_image_p50"),
         metric_factory=_generated_media_metrics,
@@ -207,7 +205,3 @@ def operation_for_name(name: str) -> OperationSpec:
         raise BenchmarkError(
             f"benchmark operation {name!r} is not registered; available: {available}"
         ) from exc
-
-
-def registered_operations() -> tuple[OperationSpec, ...]:
-    return _OPERATIONS

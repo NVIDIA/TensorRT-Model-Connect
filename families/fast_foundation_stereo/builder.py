@@ -93,8 +93,8 @@ def _serialize_network(
     aux_streams: int,
 ) -> bytes:
     config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
     config.builder_optimization_level = optimization_level
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
     config.max_aux_streams = aux_streams
     plan = builder.build_serialized_network(network, config)
     if plan is None:

@@ -172,6 +172,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Granite bundle through family-owned code only."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("granite does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("granite does not support image_height")
 
@@ -183,7 +186,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.max_batch_size != 1:
         raise NotImplementedError("granite does not support max_batch_size")
-
 
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
@@ -219,7 +221,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_parallel_build_enabled"] = parallel.enabled
     weights = model.load_weights(str(model_dir), config, precision=precision)
 
-    writer.set_header(family="granite", task=request.task, backend="trt")
+    writer.set_header(family="granite", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

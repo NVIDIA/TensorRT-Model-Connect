@@ -8,12 +8,14 @@ source. Start at the repository root.
 
 ## Automated environment preparation
 
-The repository-local `apps/devtoolkit` Python API builds the root pinned-base
-Dockerfile through `tools.ci`, starts a persistent container for the current
-checkout, and optionally installs one family's declared dependencies:
+The repository-local `apps/devtoolkit` Python API selects
+`Dockerfile.dev.x86` or `Dockerfile.dev.aarch64` from the host architecture,
+runs the direct development-image build, starts a persistent container for the
+current checkout, and optionally installs one family's declared dependencies:
 
 ```python
 from pathlib import Path
+import subprocess
 import sys
 
 repo = Path.cwd()
@@ -21,10 +23,25 @@ sys.path.insert(0, str(repo / "apps" / "devtoolkit"))
 
 from trtmc_devtoolkit import DevToolkit, DockerTargetPolicy
 
+gpu = "0"
+sm = subprocess.run(
+    [
+        "nvidia-smi",
+        "-i",
+        gpu,
+        "--query-gpu=compute_cap",
+        "--format=csv,noheader,nounits",
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip().replace(".", "")
+
 toolkit = DevToolkit.from_checkout(repo)
 environment = toolkit.prepare_docker(
     family="qwen",
-    gpu="0",
+    gpu=gpu,
+    environment={"TRTMC_SM": sm},
     policy=DockerTargetPolicy.ENSURE,
 )
 print(" ".join(environment.command("bash")))
@@ -32,11 +49,12 @@ print(" ".join(environment.command("bash")))
 
 The toolkit reuses a container only when its checkout-owned configuration still
 matches. A foreign name collision or configuration drift fails without removing
-or replacing the container. The toolkit has no environment catalog or secondary
-artifact identity. The root Dockerfile's first `FROM` is the shared image pin;
-optional Python dependencies remain in `families/<family>/requirements.txt`.
-See `apps/devtoolkit/README.md` for lifecycle policies and the explicit
-existing-interpreter local path.
+or replacing the container. Unknown host architectures fail before Docker is
+invoked. The toolkit has no environment catalog or secondary artifact identity.
+Each development Dockerfile's first `FROM` is its base-image pin; repository CI
+continues to use the root `Dockerfile`. Optional Python dependencies remain in
+`families/<family>/requirements.txt`. See `apps/devtoolkit/README.md` for
+lifecycle policies and the explicit existing-interpreter local path.
 
 The manual commands below remain the direct source-build path and show the
 operations performed by development mode.
@@ -90,19 +108,27 @@ TRTMC_BUILD_DIR="build-sm${TRTMC_SM}"
 cmake -S . -B "$TRTMC_BUILD_DIR" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CUDA_ARCHITECTURES="${TRTMC_SM}-real" \
-  -DTRTMC_BUILD_BACKEND_TRT=ON \
   -DTRTMC_BUILD_BACKEND_RTX=OFF \
   -DTRTMC_BUILD_TESTS=OFF \
-  -DTRTMC_BUILD_BENCHMARKS=OFF \
-  -DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF
+  -DTRTMC_BUILD_EXAMPLES=OFF
 
 cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
   trtmc \
   trtmc_backend_trt \
   trtmc_model_qwen
 
-export TRTMC_MODEL_PLUGIN_DIR="$TRTMC_BUILD_DIR/models"
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
+```
+
+TensorRT-RTX is an explicit optional build. When its SDK is installed, enable
+only its backend DSO with the exact include and library directories:
+
+```bash
+cmake -S . -B "$TRTMC_BUILD_DIR" \
+  -DTRTMC_BUILD_BACKEND_RTX=ON \
+  -DTRTMC_RTX_INCLUDE_DIR=/absolute/tensorrt-rtx/include \
+  -DTRTMC_RTX_LIBRARY_DIR=/absolute/tensorrt-rtx/lib
+cmake --build "$TRTMC_BUILD_DIR" --target trtmc_backend_rtx
 ```
 
 This path skips CI-only Python profiles and unrelated model DSOs. Continue to

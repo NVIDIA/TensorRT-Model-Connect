@@ -154,7 +154,7 @@ class _ModernBertModel:
             parallel.validate()
             if quant_ctx is not None:
                 raise ValueError("ModernBERT tensor-parallel builds do not support quantization")
-            from .model.parallel import build_tp_modernbert_engine
+            from .parallel import build_tp_modernbert_engine
 
             return build_tp_modernbert_engine(
                 config,
@@ -190,6 +190,7 @@ class _ModernBertModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
         trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # Inputs
@@ -465,6 +466,9 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("modernbert does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("modernbert does not support image_height")
 
@@ -507,7 +511,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     model = _ModernBertModel()
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="modernbert", task=request.task, backend="trt")
+    writer.set_header(family="modernbert", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

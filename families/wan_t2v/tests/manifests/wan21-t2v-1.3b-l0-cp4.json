@@ -10,7 +10,7 @@
       "test_prompt": "A cat sitting on a beach watching the sunset",
       "test_type": "diffusion",
       "num_inference_steps": 15,
-      "reference_precision": "fp16",
+      "reference_precision": "fp32",
       "seed": 42
     }
   ],

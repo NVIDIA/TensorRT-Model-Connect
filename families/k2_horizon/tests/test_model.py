@@ -224,6 +224,8 @@ def test_build_writes_the_exact_native_kv_bundle(monkeypatch, tmp_path: Path) ->
     writer = Writer()
     request = SimpleNamespace(
         model_dir=tmp_path,
+        backend="trt",
+        dynamic_kv_cache=False,
         task="text_generation",
         precision="bf16",
         max_sequence_length=256,

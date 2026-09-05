@@ -44,3 +44,33 @@ set_target_properties(trtmc_model_lance PROPERTIES
 install(TARGETS trtmc_model_lance
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_lance_vl_pipeline
+    ${PROJECT_SOURCE_DIR}/families/lance/tests/cpp/test_lance_vl_pipeline.cpp
+  )
+  target_include_directories(test_lance_vl_pipeline PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_lance_vl_pipeline SYSTEM PRIVATE
+    ${TRTMC_TRT_INCLUDE_DIR}
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_lance_vl_pipeline PRIVATE
+    trtmc_model_lance
+    trtmc_backend_trt
+    trtmc_core
+    ${TRTMC_TRT_LIBRARY}
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_lance_vl_pipeline PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME test_lance_vl_pipeline COMMAND test_lance_vl_pipeline)
+  set_tests_properties(test_lance_vl_pipeline PROPERTIES
+    LABELS gpu
+    SKIP_RETURN_CODE 77
+  )
+endif()

@@ -256,6 +256,7 @@ def build_flux2_dit_engine(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 128 << 30)
     if fp8_scales is not None:
         config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED

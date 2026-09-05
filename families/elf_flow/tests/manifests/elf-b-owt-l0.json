@@ -1,6 +1,14 @@
 {
   "name": "elf-b-owt-l0",
   "hf_id": "embedded-language-flows/ELF-B-owt",
+  "hf_dependencies": [
+    {
+      "repo_id": "embedded-language-flows/t5_small_encoder_jax"
+    },
+    {
+      "repo_id": "google-t5/t5-small"
+    }
+  ],
   "bundle": "elf-b-owt-l0.bundle",
   "family": "elf_flow",
   "task": "text_generation",

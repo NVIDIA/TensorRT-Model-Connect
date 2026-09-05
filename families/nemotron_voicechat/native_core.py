@@ -363,6 +363,7 @@ def build_rnnt_predictor(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     builder_config = builder.create_builder_config()
+    builder_config.builder_optimization_level = 1
     _disable_tf32(builder_config)
     token_id = network.add_input("token_id", trt.int32, (1,))
     embedding = graph_ops.add_constant(
@@ -420,6 +421,7 @@ def build_rnnt_joint(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     builder_config = builder.create_builder_config()
+    builder_config.builder_optimization_level = 1
     _disable_tf32(builder_config)
     encoder = network.add_input("encoder_frame", trt.float32, (1, encoder_hidden))
     predictor = network.add_input("pred_output", trt.float32, (1, predictor_hidden))
@@ -683,6 +685,7 @@ class VoiceChatThinkerBuilder:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
         _disable_tf32(trt_config)
 
         # --- Inputs ---

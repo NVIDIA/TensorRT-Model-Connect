@@ -124,6 +124,7 @@ def _make_builder(verbose: bool):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     # Shape ops are tiny; 256 MiB workspace is plenty.
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 256 << 20)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))

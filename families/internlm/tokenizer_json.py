@@ -9,7 +9,6 @@ from pathlib import Path
 
 
 TOKENIZER_REPO = "internlm/internlm2-step-prover"
-TOKENIZER_REVISION = "6c727046190546168bf3aba9a1d78d5fb325ff14"
 
 
 def ensure_tokenizer_json(
@@ -17,7 +16,7 @@ def ensure_tokenizer_json(
     *,
     previous_error: str | None = None,
 ) -> Path:
-    """Return the checkpoint JSON or the family's exact official dependency."""
+    """Return the checkpoint JSON or the family's official dependency."""
 
     path = Path(model_dir) / "tokenizer.json"
     if path.is_file():
@@ -33,12 +32,10 @@ def ensure_tokenizer_json(
             hf_hub_download(
                 repo_id=TOKENIZER_REPO,
                 filename="tokenizer.json",
-                revision=TOKENIZER_REVISION,
             )
         )
     except Exception as error:
         detail = f": {previous_error}" if previous_error else ""
         raise FileNotFoundError(
-            f"InternLM tokenizer dependency is unavailable: "
-            f"{TOKENIZER_REPO}@{TOKENIZER_REVISION}{detail}"
+            f"InternLM tokenizer dependency is unavailable: {TOKENIZER_REPO}{detail}"
         ) from error

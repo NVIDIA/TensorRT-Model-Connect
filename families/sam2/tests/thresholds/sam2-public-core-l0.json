@@ -1,5 +1,0 @@
-{
-  "threshold_overrides": {
-    "mean_mask_iou": 0.7
-  }
-}

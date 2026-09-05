@@ -18,6 +18,5 @@
   "tensor_parallel_size": 1,
   "quantization": "fp8",
   "image_height": 384,
-  "image_width": 384,
-  "video_num_frames": 1
+  "image_width": 384
 }

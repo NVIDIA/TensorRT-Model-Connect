@@ -62,7 +62,7 @@ def _apply_norm(
     )
 
 
-@with_builder_context()
+@with_builder_context(builder_optimization_level=1)
 def build_personaplex_tp_decoder_engine(
     config: "ModelConfig",
     weights: "WeightDict",

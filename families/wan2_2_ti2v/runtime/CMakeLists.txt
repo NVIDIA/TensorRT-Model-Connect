@@ -45,3 +45,25 @@ set_target_properties(trtmc_model_wan2_2_ti2v PROPERTIES
 install(TARGETS trtmc_model_wan2_2_ti2v
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  foreach(test_name IN ITEMS test_wan2_2_easycache test_wan2_2_prompt_cleaner)
+    add_executable(${test_name}
+      ${PROJECT_SOURCE_DIR}/families/wan2_2_ti2v/tests/cpp/${test_name}.cpp
+    )
+    target_include_directories(${test_name} PRIVATE
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_include_directories(${test_name} SYSTEM PRIVATE
+      ${TRTMC_CUDA_INCLUDE_DIR}
+    )
+    target_link_libraries(${test_name} PRIVATE
+      trtmc_model_wan2_2_ti2v
+    )
+    target_compile_options(${test_name} PRIVATE
+      -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
+endif()

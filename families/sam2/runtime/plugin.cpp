@@ -41,6 +41,8 @@ NativePlanModuleFactory makeModuleFactory(IBackend& backend) {
 } // namespace trtmc::sam2
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("sam2 does not support --kv-cache-size");
     auto engines = trtmc::sam2::makeNativeVideoEngineSet(
         context.reader, trtmc::sam2::makeModuleFactory(context.backend));
     auto processor = std::make_unique<trtmc::sam2::NativeVideoProcessor>(std::move(engines));

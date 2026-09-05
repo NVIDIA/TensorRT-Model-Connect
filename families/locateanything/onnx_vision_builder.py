@@ -51,6 +51,7 @@ def build_engine_from_onnx(
             "ONNX parsing failed:\n" + "\n".join(errors))
 
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
 
     if verbose:
         print(f"[trtmc build] Building vision TRT engine from ONNX "

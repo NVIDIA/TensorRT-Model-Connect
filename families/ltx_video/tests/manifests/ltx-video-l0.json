@@ -14,7 +14,7 @@
       "num_inference_steps": 30,
       "guidance_scale": 3.0,
       "seed": 42,
-      "reference_precision": "fp16"
+      "reference_precision": "fp32"
     }
   ],
   "tensor_parallel_size": 1,

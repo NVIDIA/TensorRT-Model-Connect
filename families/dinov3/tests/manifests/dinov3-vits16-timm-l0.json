@@ -10,7 +10,8 @@
     {
       "name": "dinov3-vits16-timm-l0",
       "premerge": true,
-      "test_image": "data/test_img.jpeg"
+      "test_image": "data/test_img.jpeg",
+      "num_register_tokens": 4
     }
   ],
   "tensor_parallel_size": 1,

@@ -554,6 +554,7 @@ def build_act_engine(
     network.mark_output(actions)
 
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     tf32 = getattr(trt.BuilderFlag, "TF32", None)
     if tf32 is not None:
         config.clear_flag(tf32)

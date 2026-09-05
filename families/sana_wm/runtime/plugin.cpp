@@ -36,6 +36,8 @@ std::shared_ptr<ITokenizer> load_tokenizer(const BundleReader& bundle, const cha
 } // namespace trtmc::sana_wm_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("sana_wm does not support --kv-cache-size");
     using namespace trtmc;
     const auto& runtime = sana_wm_factory::require_section(context.reader, "runtime.json");
     const std::string runtime_text(runtime.begin(), runtime.end());

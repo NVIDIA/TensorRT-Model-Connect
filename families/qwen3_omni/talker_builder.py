@@ -86,6 +86,7 @@ def _build_text_projection_plan(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     build_config = builder.create_builder_config()
+    build_config.builder_optimization_level = 1
     token_ids = network.add_input("token_id", trt.int32, (-1,))
     profile = builder.create_optimization_profile()
     profile.set_shape("token_id", (1,), (min(64, max_tokens),), (max_tokens,))
@@ -394,6 +395,7 @@ def _build_decoder_plan(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     build_config = builder.create_builder_config()
+    build_config.builder_optimization_level = 1
     work_np_dtype, work_trt_dtype = _work_dtypes(precision)
 
     input_embed = network.add_input("input_embed", trt.float32, (-1, hidden_size))

@@ -35,6 +35,7 @@ def create_builder_context(
         flags |= 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     network = builder.create_network(flags)
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
     if disable_tf32:
         config.clear_flag(trt.BuilderFlag.TF32)

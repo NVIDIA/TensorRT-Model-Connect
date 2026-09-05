@@ -56,7 +56,9 @@ class ManifestCatalog:
                 model = self._load(path)
             except BenchmarkError as error:
                 entries.append(
-                    CatalogEntry(path.stem, "-", path.parents[2].name, "-", "-", "invalid", str(error))
+                    CatalogEntry(
+                        path.stem, "-", path.parents[2].name, "-", "-", "invalid", str(error)
+                    )
                 )
                 continue
             if model.task not in supported:
@@ -103,13 +105,6 @@ class ManifestCatalog:
                 )
         return tuple(sorted(entries, key=lambda entry: entry.name))
 
-    def models(self) -> tuple[ModelDescriptor, ...]:
-        return tuple(
-            entry.model
-            for entry in self.entries()
-            if entry.status == "ready" and entry.model is not None
-        )
-
     def resolve(self, selector: str) -> ModelDescriptor:
         direct = Path(selector).expanduser()
         if direct.is_file():
@@ -145,8 +140,10 @@ class ManifestCatalog:
         if missing:
             raise BenchmarkError(f"model manifest {path} is missing: {', '.join(missing)}")
         testcases = raw["testcases"]
-        if not isinstance(testcases, list) or not testcases or not all(
-            isinstance(value, Mapping) for value in testcases
+        if (
+            not isinstance(testcases, list)
+            or not testcases
+            or not all(isinstance(value, Mapping) for value in testcases)
         ):
             raise BenchmarkError(f"model manifest must contain testcase objects: {path}")
         settings = {
@@ -161,6 +158,8 @@ class ManifestCatalog:
                 "context_parallel_size",
                 "quantization",
                 "fp32_layers",
+                "backend",
+                "dynamic_kv_cache",
             )
             if key in raw
         }
@@ -250,24 +249,7 @@ def resolve_case(
         request["media_type"] = "video"
     measurement = resolution.measurement
     sources = dict(resolution.sources)
-    for field, value in (overrides or {}).items():
-        namespace, separator, name = field.partition(".")
-        if not separator or namespace not in _OVERRIDE_NAMESPACES or not name:
-            raise BenchmarkError(
-                f"override must be request.*, measurement.*, or telemetry.*: {field!r}"
-            )
-        if namespace == "request":
-            request[name] = value
-            sources[name] = "benchmark override"
-        elif namespace == "measurement":
-            measurement = _measurement_update(measurement, name, value)
-        else:
-            measurement = _measurement_update(
-                measurement,
-                "telemetry" if name == "gpu" else "telemetry_interval_ms",
-                value,
-            )
-    return ResolvedCase(
+    resolved = ResolvedCase(
         name=str(testcase["name"]),
         model=model,
         testcase_name=str(testcase["name"]),
@@ -278,6 +260,7 @@ def resolve_case(
         measurement=measurement,
         sources=sources,
     )
+    return apply_overrides(resolved, overrides or {})
 
 
 def _select_testcase(model: ModelDescriptor, name: str | None) -> Mapping[str, Any]:
@@ -289,9 +272,7 @@ def _select_testcase(model: ModelDescriptor, name: str | None) -> Mapping[str, A
     return matches[0]
 
 
-def _measurement_update(
-    measurement: MeasurementSpec, field: str, value: Any
-) -> MeasurementSpec:
+def _measurement_update(measurement: MeasurementSpec, field: str, value: Any) -> MeasurementSpec:
     fields = {
         "warmup",
         "iterations",
@@ -307,39 +288,40 @@ def _measurement_update(
     return replace(measurement, **{field: value})
 
 
-def apply_overrides(
-    case: ResolvedCase, overrides: Mapping[str, Any]
-) -> ResolvedCase:
+def apply_overrides(case: ResolvedCase, overrides: Mapping[str, Any]) -> ResolvedCase:
     request = dict(case.request)
     measurement = case.measurement
     sources = dict(case.sources)
     for field, value in overrides.items():
         namespace, separator, name = field.partition(".")
-        if not separator:
-            raise BenchmarkError(f"invalid override {field!r}")
+        if not separator or namespace not in _OVERRIDE_NAMESPACES or not name:
+            raise BenchmarkError(
+                f"override must be request.*, measurement.*, or telemetry.*: {field!r}"
+            )
         if namespace == "request":
             request[name] = value
             sources[name] = "benchmark override"
         elif namespace == "measurement":
             measurement = _measurement_update(measurement, name, value)
         elif namespace == "telemetry":
-            target = "telemetry" if name == "gpu" else "telemetry_interval_ms"
+            targets = {"gpu": "telemetry", "interval_ms": "telemetry_interval_ms"}
+            if name not in targets:
+                raise BenchmarkError(f"unknown telemetry field {name!r}")
+            target = targets[name]
             measurement = _measurement_update(measurement, target, value)
-        else:
-            raise BenchmarkError(f"unsupported override namespace {namespace!r}")
     return case.with_values(request=request, measurement=measurement, sources=sources)
 
 
-def expand_sweeps(
-    case: ResolvedCase, sweeps: Mapping[str, list[Any]]
-) -> tuple[ResolvedCase, ...]:
+def expand_sweeps(case: ResolvedCase, sweeps: Mapping[str, list[Any]]) -> tuple[ResolvedCase, ...]:
     if not sweeps:
         return (case,)
     fields = tuple(sweeps)
     if any(not values for values in sweeps.values()):
         raise BenchmarkError("sweep axes must be non-empty")
     result = []
-    for index, values in enumerate(itertools.product(*(sweeps[field] for field in fields)), start=1):
+    for index, values in enumerate(
+        itertools.product(*(sweeps[field] for field in fields)), start=1
+    ):
         overrides = dict(zip(fields, values, strict=True))
         resolved = apply_overrides(case, overrides)
         suffix = ",".join(f"{field}={value}" for field, value in overrides.items())

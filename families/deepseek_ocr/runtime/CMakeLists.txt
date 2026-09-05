@@ -3,6 +3,7 @@
 
 add_library(trtmc_model_deepseek_ocr SHARED
   bpe_tokenizer.cpp
+  distributed_runtime.cpp
   image_preprocessor.cpp
   kv_cache.cpp
   pipeline.cpp
@@ -32,6 +33,7 @@ target_link_libraries(trtmc_model_deepseek_ocr PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_deepseek_ocr PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -61,5 +63,31 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME deepseek_ocr_runtime_config
     COMMAND test_deepseek_ocr_runtime_config
+  )
+
+  add_executable(test_deepseek_ocr_sequence_prefill
+    ../tests/cpp/test_sequence_prefill.cpp
+  )
+  target_include_directories(test_deepseek_ocr_sequence_prefill PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_deepseek_ocr_sequence_prefill SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_deepseek_ocr_sequence_prefill PRIVATE
+    trtmc_model_deepseek_ocr
+    trtmc_core
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_deepseek_ocr_sequence_prefill PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME deepseek_ocr_sequence_prefill
+    COMMAND test_deepseek_ocr_sequence_prefill
+  )
+  set_tests_properties(deepseek_ocr_sequence_prefill PROPERTIES
+    SKIP_RETURN_CODE 77
+    LABELS gpu
   )
 endif()

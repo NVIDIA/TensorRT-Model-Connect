@@ -307,6 +307,7 @@ class _WhisperModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
 
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
@@ -553,6 +554,7 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
+    tc.builder_optimization_level = 1
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype), dtype=work_np_dtype
@@ -950,6 +952,9 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Whisper transcription bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("whisper does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("whisper does not support image_height")
 
@@ -980,7 +985,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
     weights = model.load_weights(str(model_dir), config)
     max_length = int(request.max_sequence_length or 256)
-    writer.set_header(family="whisper", task=request.task, backend="trt")
+    writer.set_header(family="whisper", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             writer.add_bytes(

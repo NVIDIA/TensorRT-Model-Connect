@@ -23,6 +23,10 @@ class ITokenizer {
     virtual std::string token_for_id(std::int32_t id) const = 0;
 };
 
+std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
+                                               std::size_t tokenizer_json_size,
+                                               bool add_special_tokens = false);
+
 std::unique_ptr<ITokenizer> CreateUnigramTokenizer(const char* tokenizer_json_data,
                                                    std::size_t tokenizer_json_size,
                                                    bool add_special_tokens = true);

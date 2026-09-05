@@ -336,6 +336,9 @@ def _compile_ltx_vae_decoder_engine(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one LTX-Video image-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("ltx_video does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("ltx_video does not support max_sequence_length")
 
@@ -383,12 +386,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if len(text_encoders) != 1:
         raise RuntimeError("LTX-Video must produce exactly one text encoder")
 
-    writer.set_header(family="ltx_video", task=request.task, backend="trt")
+    writer.set_header(family="ltx_video", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.0.plan", text_encoders[0][1])
     writer.add_bytes("denoiser.plan", components["denoiser"])
     writer.add_bytes("vae.plan", components["vae_decoder"])
-    tokenizer_path = model_dir / "tokenizer/tokenizer.json"
-    writer.add_bytes("tokenizer.json", tokenizer_path.read_bytes())
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_dir / "tokenizer", local_files_only=True, use_fast=True
+    )
+    writer.add_bytes("tokenizer.json", tokenizer.backend_tokenizer.to_str().encode("utf-8"))
 
     runtime = model.get_diffusion_config(config)
     runtime.update(

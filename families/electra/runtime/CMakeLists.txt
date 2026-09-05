@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_electra SHARED
+  distributed_runtime.cpp
   wordpiece_tokenizer.cpp
   pipeline.cpp
   plugin.cpp
@@ -20,6 +21,7 @@ target_link_libraries(trtmc_model_electra PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_electra PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"

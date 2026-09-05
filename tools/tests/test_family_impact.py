@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tools import model_ci, test_impact
+from tools import test_impact
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -16,7 +16,6 @@ def _repo(tmp_path: Path) -> Path:
         root = tmp_path / "families" / family
         (root / "runtime").mkdir(parents=True)
         (root / "tests/manifests").mkdir(parents=True)
-        (root / "tests/thresholds").mkdir()
         (root / "model.py").write_text("def build(request, writer):\n    pass\n")
         (root / "support.py").write_text("def describe(metadata):\n    return None\n")
         (root / "runtime/CMakeLists.txt").write_text("# owned\n")
@@ -72,14 +71,11 @@ def test_families_package_selects_all_directly(tmp_path: Path) -> None:
         ".coderabbit.yaml",
         ".gitignore",
         "ASSET_LICENSES.md",
-        "benchmarks/removed.py",
-        "configs/environment-cohorts/removed.json",
         "examples/removed.py",
         "plugins/removed/SKILL.md",
-        "tests/e2e/removed.py",
         "requirements/community-ci.txt",
-        "_pyproject_backend.py",
         "conftest.py",
+        "retired-root/deleted.py",
     ],
 )
 def test_shared_and_deleted_infrastructure_is_classified(tmp_path: Path, path: str) -> None:
@@ -96,12 +92,17 @@ def test_docs_do_not_select_model_proofs(tmp_path: Path) -> None:
 
 
 def test_unclassified_path_fails_closed(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    path = repo / "mystery/file.xyz"
+    path.parent.mkdir()
+    path.write_text("unknown\n")
     with pytest.raises(ValueError, match="unclassified"):
-        test_impact.classify(_repo(tmp_path), ["mystery/file.xyz"])
+        test_impact.classify(repo, ["mystery/file.xyz"])
 
 
 def test_validation_requires_no_metadata_registry(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
+    assert not (repo / "families/alpha/tests/thresholds").exists()
     test_impact.validate(repo)
     (repo / "families/alpha/MODEL.toml").write_text("id='alpha'\n")
     with pytest.raises(ValueError, match="MODEL.toml"):
@@ -127,13 +128,6 @@ def test_validation_rejects_central_model_cpp_tests(tmp_path: Path) -> None:
     source.write_text("int main() {}\n")
     with pytest.raises(ValueError, match="central tests/cpp/models"):
         test_impact.validate(repo)
-
-
-def test_matrix_contains_only_family_key() -> None:
-    assert model_ci.matrix(["alpha", "beta"]) == [
-        {"family": "alpha"},
-        {"family": "beta"},
-    ]
 
 
 def test_changed_files_includes_deletions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

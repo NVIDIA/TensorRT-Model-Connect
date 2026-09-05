@@ -4,8 +4,10 @@
  */
 
 #include "families/patchtsmixer/runtime/pipeline.h"
+#include "families/patchtsmixer/runtime/plugin_helpers.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -80,7 +82,53 @@ trtmc::ForecastRequest request(const std::vector<float>& values, const std::vect
 }
 
 trtmc::patchtsmixer::RuntimeConfig config() {
-    return {4, 2, 2};
+    return {4, 2, 2, 1};
+}
+
+void test_tensor_parallel_rank_contract_is_strict() {
+    unsetenv("OMPI_COMM_WORLD_SIZE");
+    unsetenv("OMPI_COMM_WORLD_RANK");
+    unsetenv("OMPI_COMM_WORLD_LOCAL_RANK");
+    require(trtmc::patchtsmixer::require_rank(1) == 0,
+            "single-rank PatchTSMixer must not require an MPI launcher");
+
+    auto rejected = [] {
+        try {
+            (void)trtmc::patchtsmixer::require_rank(2);
+            return false;
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+    };
+
+    require(rejected(), "multi-rank PatchTSMixer must require the OpenMPI world size");
+    setenv("OMPI_COMM_WORLD_SIZE", "2x", 1);
+    setenv("OMPI_COMM_WORLD_RANK", "0", 1);
+    setenv("OMPI_COMM_WORLD_LOCAL_RANK", "0", 1);
+    require(rejected(), "PatchTSMixer must reject a malformed OpenMPI world size");
+    setenv("OMPI_COMM_WORLD_SIZE", "3", 1);
+    require(rejected(), "PatchTSMixer OpenMPI world size must match tensor_parallel_size");
+    setenv("OMPI_COMM_WORLD_SIZE", "2", 1);
+    setenv("OMPI_COMM_WORLD_RANK", "2", 1);
+    require(rejected(), "PatchTSMixer must reject an out-of-range global rank");
+    setenv("OMPI_COMM_WORLD_RANK", "0", 1);
+    setenv("OMPI_COMM_WORLD_LOCAL_RANK", "-1", 1);
+    require(rejected(), "PatchTSMixer must reject a negative local rank");
+}
+
+void test_runtime_config_requires_tensor_parallel_size() {
+    const auto parsed = trtmc::patchtsmixer::parse_runtime_config(
+        R"({"context_length":4,"num_input_channels":2,"prediction_length":2,"tensor_parallel_size":4})");
+    require(parsed.tensor_parallel_size == 4, "PatchTSMixer must parse tensor_parallel_size");
+
+    bool rejected = false;
+    try {
+        (void)trtmc::patchtsmixer::parse_runtime_config(
+            R"({"context_length":4,"num_input_channels":2,"prediction_length":2})");
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    require(rejected, "PatchTSMixer must reject runtime.json without tensor_parallel_size");
 }
 
 void test_short_multichannel_series_is_left_padded() {
@@ -147,6 +195,8 @@ void test_partial_multichannel_timestep_is_rejected() {
 } // namespace
 
 int main() {
+    test_runtime_config_requires_tensor_parallel_size();
+    test_tensor_parallel_rank_contract_is_strict();
     test_short_multichannel_series_is_left_padded();
     test_overlong_multichannel_series_is_left_truncated();
     test_partial_multichannel_timestep_is_rejected();

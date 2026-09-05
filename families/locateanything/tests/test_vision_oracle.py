@@ -13,8 +13,8 @@ from PIL import Image
 from families.locateanything.tests.vision_oracle import (
     VISION_FEATURE_COSINE,
     _bundle_section,
-    _patchify_pixels,
     assert_vision_parity,
+    preprocess_image_inputs_for_trt,
 )
 
 
@@ -50,14 +50,12 @@ def test_patchified_pixels_follow_locateanything_contract(tmp_path) -> None:
     image = np.stack((red, np.zeros_like(red), np.zeros_like(red)), axis=-1)
     image_path = tmp_path / "image.png"
     Image.fromarray(image).save(image_path)
-    inputs = _patchify_pixels(
+    inputs = preprocess_image_inputs_for_trt(
         image_path,
-        {
-            "fixed_image_size": 4,
-            "patch_size": 2,
-            "image_mean": [0.0, 0.0, 0.0],
-            "image_std": [1.0, 1.0, 1.0],
-        },
+        fixed_image_size=4,
+        patch_size=2,
+        image_mean=(0.0, 0.0, 0.0),
+        image_std=(1.0, 1.0, 1.0),
     )
     assert inputs["pixel_values"].shape == (4, 3, 2, 2)
     assert inputs["image_grid_hws"].tolist() == [[2, 2]]

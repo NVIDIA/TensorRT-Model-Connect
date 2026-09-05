@@ -119,16 +119,13 @@ LTXVideoDiffusionConfig make_diffusion_config(const std::string& json) {
     dc.scale_factor_spatial = require_int(document, "scale_factor_spatial");
     dc.dit_dim = require_int(document, "dit_dim");
     dc.dit_num_heads = require_int(document, "dit_num_heads");
-    dc.freq_dim = require_int(document, "freq_dim");
     dc.text_seq_len = require_int(document, "text_seq_len");
     dc.text_encoder_dim = require_int(document, "text_encoder_dim");
-    dc.num_vae_caches = require_int(document, "num_vae_caches");
     dc.latents_mean = require_number_array(document, "latents_mean");
     dc.latents_std = require_number_array(document, "latents_std");
     dc.patch_size = require_int_array(document, "patch_size");
     dc.axes_dims_rope = optional_int_array(document, "axes_dims_rope");
     dc.rope_theta = optional_number(document, "rope_theta", 10000.0F);
-    dc.vae_model_id = require_string(document, "vae_model_id");
     dc.guidance_embeds = optional_int_flag(document, "guidance_embeds", false);
     dc.use_rope = optional_int_flag(document, "use_rope", true);
     dc.vae_scaling_factor = optional_number(document, "vae_scaling_factor", 0.0F);

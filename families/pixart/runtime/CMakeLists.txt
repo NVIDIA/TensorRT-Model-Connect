@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_pixart SHARED
+  distributed_runtime.cpp
   unigram_tokenizer.cpp
   diffusion_helpers.cpp
   gpu_matmul.cpp
@@ -28,6 +29,7 @@ target_link_libraries(trtmc_model_pixart PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
   CUDA::cublas
 )
 target_compile_options(trtmc_model_pixart PRIVATE
@@ -42,3 +44,28 @@ set_target_properties(trtmc_model_pixart PROPERTIES
 install(TARGETS trtmc_model_pixart
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_pixart_denoising_step_seam
+    ${PROJECT_SOURCE_DIR}/families/pixart/tests/cpp/test_pixart_denoising_step_seam.cpp
+  )
+  target_include_directories(test_pixart_denoising_step_seam PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(test_pixart_denoising_step_seam PRIVATE trtmc_model_pixart)
+  target_compile_options(test_pixart_denoising_step_seam PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME test_pixart_denoising_step_seam COMMAND test_pixart_denoising_step_seam)
+
+  add_executable(test_pixart_gpu_matmul
+    ${PROJECT_SOURCE_DIR}/families/pixart/tests/cpp/test_pixart_gpu_matmul.cpp
+  )
+  target_include_directories(test_pixart_gpu_matmul PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(test_pixart_gpu_matmul PRIVATE trtmc_model_pixart)
+  target_compile_options(test_pixart_gpu_matmul PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME test_pixart_gpu_matmul COMMAND test_pixart_gpu_matmul)
+  set_tests_properties(test_pixart_gpu_matmul PROPERTIES LABELS gpu)
+endif()

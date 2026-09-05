@@ -23,11 +23,16 @@
         844.2675,
         463.7225
       ],
+      "camera_intrinsics_file": "assets/demo_0_intrinsics.npy",
       "action": "w-80,jw-40,w-40,lw-60,w-100",
+      "translation_speed": 0.055,
+      "rotation_speed_deg": 1.2,
       "num_inference_steps": 60,
       "cfg_scale": 5.0,
-      "reference_precision": "bf16",
-      "seed": 0
+      "fps": 16,
+      "flow_shift": 9.8,
+      "no_action_overlay": true,
+      "seed": 42
     }
   ],
   "tensor_parallel_size": 1,

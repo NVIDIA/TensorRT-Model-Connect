@@ -381,6 +381,7 @@ def build_qwen25vl_text_encoder_engine(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 

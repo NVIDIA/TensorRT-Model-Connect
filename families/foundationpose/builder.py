@@ -577,9 +577,9 @@ def build_foundationpose_engine(
             (max_batch, _INPUT_HEIGHT, _INPUT_WIDTH, _INPUT_CHANNELS),
         )
     config = builder.create_builder_config()
+    config.builder_optimization_level = 4
     config.add_optimization_profile(profile)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
-    config.builder_optimization_level = 4
     config.max_aux_streams = 0
     if verbose:
         print(

@@ -57,6 +57,7 @@ RuntimeConfig parse_runtime_config(const std::string& json) {
         require_positive_int(json, "context_length"),
         require_positive_int(json, "num_input_channels"),
         require_positive_int(json, "prediction_length"),
+        require_positive_int(json, "tensor_parallel_size"),
     };
     return config;
 }

@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Fast Foundation Stereo bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("fast_foundation_stereo does not support dynamic_kv_cache")
+
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
@@ -69,6 +72,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         valid_iters=8,
         verbose=request.verbose,
     )
-    writer.set_header(family="fast_foundation_stereo", task=request.task, backend="trt")
+    writer.set_header(family="fast_foundation_stereo", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_bytes("post.plan", post)

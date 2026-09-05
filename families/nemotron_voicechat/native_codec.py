@@ -472,6 +472,7 @@ def build_codec_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     # NeMo's RVQVAEModel.decode enters disable_tf32(); preserve that
     # numerics boundary for model-card parity.
     config.clear_flag(trt.BuilderFlag.TF32)

@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import struct
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
@@ -30,15 +30,28 @@ def _bundle_section(bundle: Path, name: str) -> bytes:
     return data
 
 
-def _patchify_pixels(image_path: Path, config: dict) -> dict[str, np.ndarray]:
+def preprocess_image_inputs_for_trt(
+    image_path: Path,
+    *,
+    fixed_image_size: int = 448,
+    patch_size: int = 14,
+    image_mean: Sequence[float] = (0.5, 0.5, 0.5),
+    image_std: Sequence[float] = (0.5, 0.5, 0.5),
+    interpolation: str = "bicubic",
+) -> dict[str, np.ndarray]:
+    """Apply the fixed LocateAnything patchified image contract."""
     from PIL import Image
 
-    size = int(config["fixed_image_size"])
-    patch = int(config["patch_size"])
+    size = int(fixed_image_size)
+    patch = int(patch_size)
+    if size <= 0 or patch <= 0 or size % patch:
+        raise ValueError("fixed_image_size must be positive and divisible by patch_size")
+    if interpolation != "bicubic":
+        raise ValueError("LocateAnything image interpolation must be bicubic")
     image = Image.open(image_path).convert("RGB").resize((size, size), Image.Resampling.BICUBIC)
     pixels = np.asarray(image, dtype=np.float32) / 255.0
-    mean = np.asarray(config["image_mean"], dtype=np.float32)
-    std = np.asarray(config["image_std"], dtype=np.float32)
+    mean = np.asarray(image_mean, dtype=np.float32)
+    std = np.asarray(image_std, dtype=np.float32)
     chw = ((pixels - mean) / std).transpose(2, 0, 1)
     channels = chw.shape[0]
     grid = size // patch
@@ -101,13 +114,19 @@ def _execute_vision_plan(plan: bytes, inputs: dict[str, np.ndarray]) -> np.ndarr
 def native_vision_features(bundle: Path, image_path: Path) -> np.ndarray:
     config = json.loads(_bundle_section(bundle, "runtime.json"))
     assert config["preprocessor_type"] == "patchify_chw"
-    inputs = _patchify_pixels(image_path, config)
+    inputs = preprocess_image_inputs_for_trt(
+        image_path,
+        fixed_image_size=int(config["fixed_image_size"]),
+        patch_size=int(config["patch_size"]),
+        image_mean=config["image_mean"],
+        image_std=config["image_std"],
+        interpolation=str(config["interpolation"]),
+    )
     return _execute_vision_plan(_bundle_section(bundle, "vision.plan"), inputs)
 
 
 def official_vision_features(model_dir: Path, image_path: Path) -> np.ndarray:
     import torch
-    from PIL import Image
 
     from families.locateanything.config import ModelConfig
     from families.locateanything.vision_builder import (
@@ -123,27 +142,18 @@ def official_vision_features(model_dir: Path, image_path: Path) -> np.ndarray:
     _load_vision_and_projector_weights(model_dir, vision_model, projector)
     vision_model = vision_model.to(device="cuda", dtype=torch.float32).eval()
     projector = projector.to(device="cuda", dtype=torch.float32).eval()
-
-    processor_path = model_dir / "image_processing_locateanything.py"
-    spec = importlib.util.spec_from_file_location(
-        "trtmc_locateanything_vision_oracle", processor_path
-    )
-    assert spec is not None and spec.loader is not None
-    processor_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(processor_module)
-    vision_config = config.raw["vision_config"]
-    image_processor = processor_module.LocateAnythingImageProcessor(
-        patch_size=int(vision_config["patch_size"]),
-        merge_kernel_size=vision_config["merge_kernel_size"],
+    inputs = preprocess_image_inputs_for_trt(
+        image_path,
+        fixed_image_size=448,
+        patch_size=14,
         image_mean=(0.5, 0.5, 0.5),
         image_std=(0.5, 0.5, 0.5),
+        interpolation="bicubic",
     )
-    image = Image.open(image_path).convert("RGB").resize((448, 448), Image.Resampling.BICUBIC)
-    encoded = image_processor(images=[image], return_tensors="pt")
     with torch.no_grad():
         vit_features = vision_model(
-            encoded["pixel_values"].to(device="cuda", dtype=torch.float32),
-            encoded["image_grid_hws"].to(device="cuda"),
+            torch.from_numpy(inputs["pixel_values"]).to(device="cuda", dtype=torch.float32),
+            torch.from_numpy(inputs["image_grid_hws"]).to(device="cuda", dtype=torch.int32),
         )
         features = projector(torch.cat(vit_features, dim=0))
     result = features.float().cpu().numpy()

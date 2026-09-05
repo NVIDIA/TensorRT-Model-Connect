@@ -308,6 +308,7 @@ def build_marian_tp_decoder_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
     trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     token_id = network.add_input("token_id", trt.int32, (1,))

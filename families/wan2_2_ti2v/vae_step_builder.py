@@ -291,6 +291,7 @@ def build_vae_step_engine(
     flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     network = builder.create_network(flags)
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, OFFICIAL_VAE_WORKSPACE_GIB << 30)
     compute_capability, integrated = _current_cuda_device_profile()
     convolution_precision = select_vae_convolution_precision(

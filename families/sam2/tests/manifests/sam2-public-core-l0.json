@@ -5,14 +5,10 @@
   "bundle": "sam2-public-core-l0.bundle",
   "family": "sam2",
   "task": "video_segmentation",
-  "inputs": {
-    "fixture_kind": "deterministic_synthetic_rgb8"
-  },
   "testcases": [
     {
       "name": "sam2-public-core-l0",
-      "premerge": true,
-      "prompt": "the moving red rectangle"
+      "premerge": true
     }
   ],
   "tensor_parallel_size": 1,

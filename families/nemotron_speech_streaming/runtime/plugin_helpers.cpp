@@ -57,9 +57,18 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
 }
 
 std::shared_ptr<ITokenizer> create_tokenizer(const std::vector<char>& data, bool add_special) {
-    auto tokenizer = CreateUnigramTokenizer(data.data(), data.size(), add_special);
+    const auto json = nlohmann::json::parse(data.begin(), data.end());
+    const auto type = json.at("model").at("type").get<std::string>();
+    std::unique_ptr<ITokenizer> tokenizer;
+    if (type == "BPE") {
+        tokenizer = CreateBpeTokenizer(data.data(), data.size(), add_special);
+    } else if (type == "Unigram") {
+        tokenizer = CreateUnigramTokenizer(data.data(), data.size(), add_special);
+    } else {
+        throw std::runtime_error("unsupported tokenizer model.type: " + type);
+    }
     if (!tokenizer)
-        throw std::runtime_error("tokenizer.json is not Unigram");
+        throw std::runtime_error("failed to create " + type + " tokenizer");
     return std::shared_ptr<ITokenizer>(std::move(tokenizer));
 }
 

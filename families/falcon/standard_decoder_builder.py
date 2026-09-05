@@ -161,6 +161,7 @@ def build_standard_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
     if verbose:
         trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 

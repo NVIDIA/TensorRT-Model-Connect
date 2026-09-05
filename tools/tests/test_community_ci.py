@@ -169,7 +169,7 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     assert "needs" not in jobs["unit"]
     unit_steps = {step["name"]: step for step in jobs["unit"]["steps"]}
     assert unit_steps["Run hardened source-only units"]["run"] == (
-        "python3 -m tools.community_ci unit --scope all"
+        "python3 -m tools.community_ci unit"
     )
     assert jobs["required"]["needs"] == [
         "source-quality",

@@ -51,4 +51,18 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_elf_flow_runtime_config PRIVATE trtmc_model_elf_flow)
   target_compile_options(test_elf_flow_runtime_config PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME elf_flow_runtime_config COMMAND test_elf_flow_runtime_config)
+
+  add_executable(test_elf_flow_pipeline
+    ${PROJECT_SOURCE_DIR}/families/elf_flow/tests/cpp/test_elf_flow_pipeline.cpp
+  )
+  target_include_directories(test_elf_flow_pipeline PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_elf_flow_pipeline SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_elf_flow_pipeline PRIVATE trtmc_model_elf_flow)
+  target_compile_options(test_elf_flow_pipeline PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME test_elf_flow_pipeline COMMAND test_elf_flow_pipeline)
 endif()

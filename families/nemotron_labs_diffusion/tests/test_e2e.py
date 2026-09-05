@@ -255,6 +255,10 @@ def _native_arguments(case: dict) -> list[str]:
     arguments = [
         "--prompt",
         _case_text(case),
+        "--use-chat-template",
+        "true",
+        "--enable-thinking",
+        "false",
         "--max-new-tokens",
         str(int(case["max_new_tokens"])),
         "--temperature",
@@ -327,6 +331,16 @@ def _reference_generate(
     raise ValueError(f"unsupported generation_mode: {mode}")
 
 
+def _tokenize_reference_prompt(tokenizer, prompt: str):
+    rendered = tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    return tokenizer(rendered, return_tensors="pt", add_special_tokens=False)
+
+
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
     manifest["task"]
     import torch
@@ -353,7 +367,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         )
         generation_model = model.model
     model.to("cuda").eval()
-    encoded = tokenizer(_case_text(case), return_tensors="pt")
+    encoded = _tokenize_reference_prompt(tokenizer, _case_text(case))
     encoded = {key: value.to("cuda") for key, value in encoded.items()}
     with torch.no_grad():
         generated = _reference_generate(
@@ -444,6 +458,8 @@ def test_native_arguments_preserve_generation_contract(monkeypatch: pytest.Monke
         options = dict(zip(arguments[::2], arguments[1::2], strict=True))
         expected = {
             "--prompt": _case_text(case),
+            "--use-chat-template": "true",
+            "--enable-thinking": "false",
             "--max-new-tokens": str(int(case["max_new_tokens"])),
             "--temperature": str(float(inputs["temperature"])),
             "--top-k": "1",
@@ -454,6 +470,39 @@ def test_native_arguments_preserve_generation_contract(monkeypatch: pytest.Monke
         if "threshold" in inputs:
             expected["--threshold"] = str(float(inputs["threshold"]))
         assert options == expected
+
+
+def test_reference_prompt_uses_the_native_chat_contract() -> None:
+    class Tokenizer:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.calls.append(("template", messages, kwargs))
+            return "rendered prompt"
+
+        def __call__(self, text, **kwargs):
+            self.calls.append(("tokenize", text, kwargs))
+            return {"input_ids": "tokens"}
+
+    tokenizer = Tokenizer()
+    assert _tokenize_reference_prompt(tokenizer, "hello") == {"input_ids": "tokens"}
+    assert tokenizer.calls == [
+        (
+            "template",
+            [{"role": "user", "content": "hello"}],
+            {
+                "tokenize": False,
+                "add_generation_prompt": True,
+                "enable_thinking": False,
+            },
+        ),
+        (
+            "tokenize",
+            "rendered prompt",
+            {"return_tensors": "pt", "add_special_tokens": False},
+        ),
+    ]
 
 
 def test_reference_generation_preserves_family_mode() -> None:

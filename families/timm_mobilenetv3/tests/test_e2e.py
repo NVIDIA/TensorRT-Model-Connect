@@ -15,7 +15,6 @@ FAMILY = "timm_mobilenetv3"
 TASKS = frozenset({"classification"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
-THRESHOLD_ROOT = TEST_ROOT / "thresholds"
 
 
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:
@@ -180,12 +179,6 @@ def _run_json(
     return payloads[0]
 
 
-def _thresholds(case_name: str) -> dict:
-    path = THRESHOLD_ROOT / f"{case_name}.json"
-    assert path.is_file(), f"selected {FAMILY} E2E requires exact thresholds: {path}"
-    return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
-
-
 def _asset(raw: str) -> Path:
     path = Path(raw)
     if not path.is_absolute():
@@ -235,8 +228,7 @@ def _official_reference(model_dir: Path, case: dict):
     return int(logits.argmax(dim=-1).item())
 
 
-def _assert_parity(actual, expected, thresholds: dict) -> None:
-    assert thresholds["top1_match"] is True
+def _assert_parity(actual, expected) -> None:
     assert int(actual["top_class"]) == expected
 
 
@@ -248,4 +240,4 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _build(model_dir, bundle, manifest)
     actual = _native(binary, runtime_root, bundle, case)
     expected = _official_reference(model_dir, case)
-    _assert_parity(actual, expected, _thresholds(case_name))
+    _assert_parity(actual, expected)

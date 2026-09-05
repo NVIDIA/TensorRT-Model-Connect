@@ -70,7 +70,7 @@ ForecastResult Pipeline::forecast(const ForecastRequest& request) {
     ForecastResult result;
     result.values.resize(expected);
     std::memcpy(result.values.data(), output->second.data, expected * sizeof(float));
-    result.shape = {1, config_.prediction_length, config_.num_quantiles};
+    result.shape = {1, config_.num_quantiles, config_.prediction_length};
     return result;
 }
 

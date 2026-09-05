@@ -83,6 +83,8 @@ std::unique_ptr<ITrtModule> load(IBackend& backend, const BundleReader& bundle, 
 } // namespace trtmc::sam3_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("sam3 does not support --kv-cache-size");
     using namespace trtmc;
     const auto& runtime = sam3_factory::require_section(context.reader, "runtime.json");
     const auto config =

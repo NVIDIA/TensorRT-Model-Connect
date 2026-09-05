@@ -3,6 +3,7 @@
 
 add_library(trtmc_model_qwen_vl SHARED
   bpe_tokenizer.cpp
+  distributed_runtime.cpp
   image_preprocessor.cpp
   kv_cache.cpp
   lora_peft_artifact.cpp
@@ -34,6 +35,7 @@ target_link_libraries(trtmc_model_qwen_vl PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_qwen_vl PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"

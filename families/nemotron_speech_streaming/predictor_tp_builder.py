@@ -152,6 +152,7 @@ def build_nemotron_streaming_tp_predictor(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 256 << 20)
 
     token_id = network.add_input("token_id", trt.int32, (1,))

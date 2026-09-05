@@ -51,6 +51,8 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 } // namespace trtmc::timm_mnasnet
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("timm_mnasnet does not support --kv-cache-size");
     const auto& config_data = trtmc::timm_mnasnet::require_section(context.reader, "runtime.json");
     const auto& plan = trtmc::timm_mnasnet::require_section(context.reader, "engine.plan");
     auto config = trtmc::timm_mnasnet::parse_config(config_data);

@@ -60,4 +60,28 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_wan_parallel_runtime_config PRIVATE trtmc_model_wan_t2v)
   target_compile_options(test_wan_parallel_runtime_config PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME wan_parallel_runtime_config COMMAND test_wan_parallel_runtime_config)
+
+  foreach(test_name IN ITEMS
+      test_wan_generation_plan
+      test_wan_generation_conditioning
+      test_wan_denoising_step_seam
+      test_wan_pipeline)
+    add_executable(${test_name}
+      ${PROJECT_SOURCE_DIR}/families/wan_t2v/tests/cpp/${test_name}.cpp
+    )
+    target_include_directories(${test_name} PRIVATE
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_include_directories(${test_name} SYSTEM PRIVATE
+      ${TRTMC_CUDA_INCLUDE_DIR}
+    )
+    target_link_libraries(${test_name} PRIVATE
+      trtmc_model_wan_t2v
+    )
+    target_compile_options(${test_name} PRIVATE
+      -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
 endif()

@@ -696,6 +696,9 @@ def _build_chronos_network(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Chronos-Bolt bundle without shared model orchestration."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("chronos_bolt does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("chronos_bolt does not support image_height")
 
@@ -707,7 +710,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.max_batch_size != 1:
         raise NotImplementedError("chronos_bolt does not support max_batch_size")
-
 
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
@@ -759,7 +761,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if prediction_length <= 0 or not isinstance(quantiles, list) or not quantiles:
         raise ValueError("Chronos-Bolt checkpoint must declare prediction_length and quantiles")
 
-    writer.set_header(family="chronos_bolt", task=request.task, backend="trt")
+    writer.set_header(family="chronos_bolt", task=request.task, backend=request.backend)
     if request.tensor_parallel_size == 1:
         writer.add_bytes("engine.plan", plan)
     else:

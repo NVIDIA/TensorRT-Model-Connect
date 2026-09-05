@@ -153,6 +153,7 @@ def build_magpie_tp_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
     trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     input_embed = network.add_input("input_embed", trt.float32, (-1, hidden))

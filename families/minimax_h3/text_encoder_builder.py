@@ -105,6 +105,7 @@ def build_text_encoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     op.configure_builder(config)
     op.configure_workspace(
         config,

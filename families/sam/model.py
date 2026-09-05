@@ -492,6 +492,7 @@ class _SamModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 
         eps_t = graph_ops.add_constant(network, (1, 1), np.array([1e-6], dtype=np.float32))
@@ -760,6 +761,7 @@ class _SamModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
 
         eps_t = graph_ops.add_constant(network, (1, 1), np.array([1e-6], dtype=np.float32))
 
@@ -1664,6 +1666,9 @@ class _SamModel:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one SAM prompted-segmentation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("sam does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("sam does not support max_sequence_length")
 
@@ -1694,7 +1699,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     model = _SamModel()
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="sam", task=request.task, backend="trt")
+    writer.set_header(family="sam", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

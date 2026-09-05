@@ -1,6 +1,11 @@
 {
   "name": "internlm2-1.8b",
   "hf_id": "internlm/internlm2-math-plus-1_8b",
+  "hf_dependencies": [
+    {
+      "repo_id": "internlm/internlm2-step-prover"
+    }
+  ],
   "bundle": "internlm2-1.8b.bundle",
   "family": "internlm",
   "task": "text_generation",

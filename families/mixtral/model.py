@@ -196,6 +196,7 @@ class _MixtralModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
 
         if precision == "fp16":
             work_np_dtype = np.float16
@@ -717,6 +718,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _MixtralModel, 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Mixtral bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("mixtral does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("mixtral does not support image_height")
 
@@ -750,8 +754,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("Mixtral max_sequence_length exceeds checkpoint context capacity")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("Mixtral quantization requires a family-owned qualified path")
-    if request.fp32_layers:
-        raise NotImplementedError("Mixtral does not expose mixed-precision layer selection")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
@@ -760,8 +762,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
     config.raw["_quantized_build_requested"] = False
+    config.raw["_fp32_layers"] = sorted(set(request.fp32_layers))
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="mixtral", task=request.task, backend="trt")
+    writer.set_header(family="mixtral", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

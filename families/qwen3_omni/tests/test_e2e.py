@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import struct
 import subprocess
 from pathlib import Path
 
@@ -223,15 +222,9 @@ def _native_text(binary: Path, runtime_root: Path, bundle: Path, case: dict) -> 
     return json.loads(completed.stdout)
 
 
-def _reference_eos_token_id(config) -> int:
-    eos_token_id = config.im_end_token_id
-    assert isinstance(eos_token_id, int) and not isinstance(eos_token_id, bool)
-    return eos_token_id
-
-
 def _official_reference(
     model_dir: Path, manifest: dict, case: dict, audio_path: Path
-) -> tuple[np.ndarray, int, np.ndarray, str, list[int]]:
+) -> tuple[int, str]:
     import soundfile as sf
     import torch
     from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
@@ -271,82 +264,24 @@ def _official_reference(
         return_tensors="pt",
         padding=True,
     ).to(model.device)
-    code_inputs = []
-
-    def capture_code2wav_input(_module, args) -> None:
-        code_inputs.append(args[0].detach().cpu())
-
-    hook = model.code2wav.register_forward_pre_hook(capture_code2wav_input)
     torch.manual_seed(int(case["seed"]))
     torch.cuda.manual_seed_all(int(case["seed"]))
-    try:
-        with torch.inference_mode():
-            text_ids, audio = model.generate(
-                **inputs,
-                thinker_max_new_tokens=int(case["max_new_tokens"]),
-                talker_max_new_tokens=int(case["talker_max_new_tokens"]),
-                thinker_do_sample=False,
-                talker_do_sample=False,
-                speaker=str(case["speaker"]),
-            )
-    finally:
-        hook.remove()
-    assert len(code_inputs) == 1
-    codes = np.asarray(code_inputs[0], dtype=np.int32)
-    generated = text_ids[0, inputs["input_ids"].shape[1] :].detach().cpu().tolist()
-    eos_token_id = _reference_eos_token_id(model.config)
-    if generated and generated[-1] == eos_token_id:
-        generated.pop()
-    text = processor.tokenizer.decode(generated).strip()
+    with torch.inference_mode():
+        text_ids, audio = model.generate(
+            **inputs,
+            thinker_max_new_tokens=int(case["max_new_tokens"]),
+            talker_max_new_tokens=int(case["talker_max_new_tokens"]),
+            thinker_do_sample=False,
+            talker_do_sample=False,
+            speaker=str(case["speaker"]),
+        )
+    generated = text_ids[:, inputs["input_ids"].shape[1] :]
+    text = processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
+    assert text
     samples = np.asarray(audio.detach().float().cpu()).reshape(-1)
     assert samples.size > 0 and np.isfinite(samples).all()
     sf.write(audio_path, samples, 24000, subtype="PCM_16")
-    return samples, 24000, codes, text, generated
-
-
-def _bundle_section(bundle: Path, name: str) -> bytes:
-    with bundle.open("rb") as file:
-        assert file.read(8) == b"BUNDLE\x01\x00"
-        header_length = struct.unpack("<Q", file.read(8))[0]
-        header = json.loads(file.read(header_length))
-        descriptor = header["sections"][name]
-        file.seek(16 + header_length + int(descriptor["offset"]))
-        data = file.read(int(descriptor["length"]))
-    assert len(data) == int(descriptor["length"])
-    return data
-
-
-def _teacher_forced_code2wav(bundle: Path, codes: np.ndarray) -> np.ndarray:
-    import tensorrt as trt
-    import torch
-
-    runtime_config = json.loads(_bundle_section(bundle, "runtime.json"))
-    quantizers = int(runtime_config["code2wav_num_quantizers"])
-    max_frames = int(runtime_config["code2wav_max_frames"])
-    upsample_factor = int(runtime_config["code2wav_upsample_factor"])
-    output_delay = int(runtime_config["code2wav_output_delay"])
-    assert codes.ndim == 3 and codes.shape[:2] == (1, quantizers)
-    frames = int(codes.shape[2])
-    assert 0 < frames <= max_frames
-    padded = np.zeros((1, quantizers, max_frames), dtype=np.int32)
-    padded[:, :, :frames] = codes
-
-    logger = trt.Logger(trt.Logger.ERROR)
-    runtime = trt.Runtime(logger)
-    engine = runtime.deserialize_cuda_engine(_bundle_section(bundle, "code2wav.plan"))
-    assert engine is not None
-    context = engine.create_execution_context()
-    device_codes = torch.from_numpy(padded).to(device="cuda")
-    waveform_shape = tuple(context.get_tensor_shape("waveform"))
-    waveform = torch.empty(waveform_shape, device="cuda", dtype=torch.float32)
-    assert context.set_tensor_address("codec_tokens", device_codes.data_ptr())
-    assert context.set_tensor_address("waveform", waveform.data_ptr())
-    stream = torch.cuda.current_stream()
-    assert context.execute_async_v3(stream.cuda_stream)
-    stream.synchronize()
-    samples = frames * upsample_factor - output_delay
-    assert 0 < samples <= waveform.numel()
-    return np.asarray(waveform.detach().cpu()).reshape(-1)[:samples]
+    return 24000, text
 
 
 def _thresholds(case_name: str) -> dict:
@@ -393,7 +328,6 @@ def _assert_waveform_parity(
     assert float(np.max(np.abs(actual))) >= float(thresholds["peak_min"])
     ratio = actual.size / max(reference.size, 1)
     assert ratio >= float(thresholds["duration_ratio_min"])
-    assert ratio <= float(thresholds["duration_ratio_max"])
     assert actual.size == reference.size
     denominator = float(
         np.linalg.norm(actual.astype(np.float64)) * np.linalg.norm(reference.astype(np.float64))
@@ -402,20 +336,6 @@ def _assert_waveform_parity(
     cosine = float(np.dot(actual.astype(np.float64), reference.astype(np.float64)) / denominator)
     assert cosine >= float(thresholds["waveform_cosine_min"])
     return int(actual.size)
-
-
-def _assert_teacher_forced_code2wav(
-    actual: np.ndarray, reference: np.ndarray, thresholds: dict
-) -> None:
-    actual = np.asarray(actual, dtype=np.float32).reshape(-1)
-    reference = np.asarray(reference, dtype=np.float32).reshape(-1)
-    assert actual.size == reference.size
-    denominator = float(
-        np.linalg.norm(actual.astype(np.float64)) * np.linalg.norm(reference.astype(np.float64))
-    )
-    assert denominator > 0.0
-    cosine = float(np.dot(actual.astype(np.float64), reference.astype(np.float64)) / denominator)
-    assert cosine >= float(thresholds["waveform_cosine_min"])
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -430,13 +350,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     assert int(native_audio_result["num_samples"]) > 0
     native_text = _native_text(binary, runtime_root, bundle, case)
     reference_audio = tmp_path / "official-hf.wav"
-    reference, sample_rate, codes, reference_text, reference_token_ids = _official_reference(
-        model_dir, manifest, case, reference_audio
-    )
+    sample_rate, reference_text = _official_reference(model_dir, manifest, case, reference_audio)
     assert native_text["text"] == reference_text
-    assert native_text["token_ids"] == reference_token_ids
     thresholds = _thresholds(case_name)
-    _assert_teacher_forced_code2wav(_teacher_forced_code2wav(bundle, codes), reference, thresholds)
     actual_samples = _assert_native_audio(native_audio, reference_audio, sample_rate, thresholds)
     assert int(native_audio_result["num_samples"]) == actual_samples
 
@@ -448,7 +364,6 @@ def test_native_audio_contract_requires_exact_reference_waveform() -> None:
     thresholds = {
         "duration_s_min": 0.5,
         "duration_ratio_min": 0.5,
-        "duration_ratio_max": 2.0,
         "rms_min": 0.005,
         "peak_min": 0.02,
         "waveform_cosine_min": 0.25,

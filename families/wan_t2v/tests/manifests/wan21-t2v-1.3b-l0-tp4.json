@@ -10,13 +10,13 @@
       "test_prompt": "A cat sitting on a beach watching the sunset",
       "test_type": "diffusion",
       "num_inference_steps": 15,
-      "reference_precision": "fp16",
+      "reference_precision": "fp32",
       "seed": 42
     }
   ],
   "tensor_parallel_size": 4,
   "context_parallel_size": 1,
-  "precision": "fp16",
+  "precision": "fp32",
   "image_height": 384,
   "image_width": 672,
   "video_num_frames": 5

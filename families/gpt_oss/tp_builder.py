@@ -532,6 +532,8 @@ def build_gpt_oss_tp_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
+    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))

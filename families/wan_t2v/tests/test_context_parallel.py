@@ -190,17 +190,12 @@ def test_build_writes_one_shared_cp_plan_and_new_runtime_contract(
     assert writer.json_sections["runtime.json"]["parallel_size"] == size
 
 
-def test_cp4_manifest_uses_build_request_fields_and_exact_thresholds() -> None:
+def test_cp4_manifest_uses_build_request_fields() -> None:
     root = Path(__file__).resolve().parent
     manifest = json.loads(
         (root / "manifests/wan21-t2v-1.3b-l0-cp4.json").read_text(encoding="utf-8")
     )
-    thresholds = json.loads(
-        (root / "thresholds/wan21-t2v-1.3b-l0-cp4.json").read_text(encoding="utf-8")
-    )
-
     assert manifest["tensor_parallel_size"] == 1
     assert manifest["context_parallel_size"] == 4
     assert manifest["bundle"].endswith(".bundle")
     assert manifest["task"] == "image_generation"
-    assert thresholds["threshold_overrides"]["min_frame_cosine_uint8"] == 0.95

@@ -108,6 +108,7 @@ def build_segformer_tp_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
 
     pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, H_in, W_in))
 

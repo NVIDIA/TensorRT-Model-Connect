@@ -39,3 +39,23 @@ set_target_properties(trtmc_model_flux PROPERTIES
 install(TARGETS trtmc_model_flux
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  foreach(test_name IN ITEMS
+      test_flux_batch_utils
+      test_flux_denoising_step_seam
+      test_flux_generation_plan
+      test_flux_host_contracts
+  )
+    add_executable(${test_name}
+      ${PROJECT_SOURCE_DIR}/families/flux/tests/cpp/${test_name}.cpp
+    )
+    target_include_directories(${test_name} PRIVATE
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_link_libraries(${test_name} PRIVATE trtmc_model_flux)
+    target_compile_options(${test_name} PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
+endif()

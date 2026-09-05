@@ -160,6 +160,7 @@ def build_tp_encoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
     # Disable TF32 to ensure full FP32 precision. TF32 uses 10-bit mantissa
     # which causes significant accuracy loss across 12+ encoder layers.
     trt_config.clear_flag(trt.BuilderFlag.TF32)

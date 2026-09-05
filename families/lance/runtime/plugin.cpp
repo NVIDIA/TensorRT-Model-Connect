@@ -11,7 +11,6 @@
 #include "trtmc/runtime/trt_backend.h"
 
 #include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -45,19 +44,7 @@ std::int32_t require_positive_int(const nlohmann::json& json, const char* key) {
     return value;
 }
 
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
 std::int32_t require_rank(std::int32_t tp_size) {
-    require_nccl(tp_size);
     if (tp_size == 1)
         return 0;
     const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
@@ -90,6 +77,8 @@ LanceKvCacheNames build_kv_names(const nlohmann::json& config, std::int32_t num_
 } // namespace trtmc::lance_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("lance does not support --kv-cache-size");
     using namespace trtmc;
     const std::string runtime_text = lance_factory::section_text(context.reader, "runtime.json");
     const auto config = nlohmann::json::parse(runtime_text);

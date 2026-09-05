@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_timm_vit SHARED
+  distributed_runtime.cpp
   image_preprocess_seam.cpp
   pipeline.cpp
   plugin.cpp
@@ -23,6 +24,7 @@ target_link_libraries(trtmc_model_timm_vit PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_timm_vit PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -36,3 +38,16 @@ set_target_properties(trtmc_model_timm_vit PROPERTIES
 install(TARGETS trtmc_model_timm_vit
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_timm_vit_image_preprocess
+    ${PROJECT_SOURCE_DIR}/families/timm_vit/tests/cpp/test_image_preprocess.cpp
+  )
+  target_include_directories(test_timm_vit_image_preprocess PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(test_timm_vit_image_preprocess PRIVATE trtmc_model_timm_vit)
+  target_compile_options(test_timm_vit_image_preprocess PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME timm_vit_image_preprocess COMMAND test_timm_vit_image_preprocess)
+endif()

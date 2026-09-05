@@ -15,7 +15,7 @@ Every model family is one complete vertical slice:
 ```text
 families/<family>/
 ├── support.py        # checkpoint ownership + supported/default tasks
-├── model.py          # plain build(request, writer) function
+├── model.py          # plain build(request, writer); inheritance forbidden
 ├── requirements.txt  # optional family-owned build/reference/test dependencies
 ├── runtime/          # one libtrtmc_model_<family>.so
 └── tests/            # family-owned manifests and validation
@@ -49,6 +49,21 @@ task, TensorRT graph, weights, section names, and runtime configuration. Use
 `--task` only to override the family default. The bundle container stores only
 `format`, `family`, `task`, `backend`, and section offsets and lengths.
 
+Two existing opt-in paths remain direct rather than becoming configuration
+systems:
+
+```bash
+# Llama runtime-sized KV cache
+python -m tensorrt_model_connect build MODEL -o model.bundle --dynamic-kv-cache
+trtmc run model.bundle --runtime-root /opt/trtmc/lib \
+  --kv-cache-size 1GiB --prompt "Hello"
+
+# TensorRT-RTX, when its Python package and optional backend DSO are installed
+python -m tensorrt_model_connect build MODEL -o model.bundle --backend trt_rtx
+trtmc run model.bundle --runtime-root /opt/trtmc/lib \
+  --runtime-cache kernels.cache --cuda-graphs --prompt "Hello"
+```
+
 ## Load from C++
 
 ```cpp
@@ -72,6 +87,8 @@ families never depend on application code.
 - [Bring your own kernel](examples/byok/README.md) connects an explicit
   TVM-FFI kernel DSO to a family-owned TensorRT graph, either directly in the
   family or through the optional pre-serialization graph transform.
+- [Persistent audio streaming](examples/audio_streaming/README.md) loads one
+  bundle once and serves one prompt per input line through the public Task API.
 - [Cosmos3 dual Spark](examples/models/cosmos3/dual_spark/README.md) runs the
   CP=2 video pipeline across two DGX Sparks.
 - [Nemotron VoiceChat full duplex](examples/models/nemotron_voicechat/full_duplex/README.md)
@@ -97,7 +114,7 @@ See [Add a Model Family](website/docs/extend/add-model-family.md) and the
 ## Validate
 
 ```bash
-PYTHONPATH=core/builder:apps/benchmark:. python3 tools/model_ci.py validate
+PYTHONPATH=core/builder:apps/benchmark:. python3 -m tools.model_ci validate
 PYTHONPATH=core/builder:apps/benchmark:. python3 -m pytest -q
 git diff --check
 ```

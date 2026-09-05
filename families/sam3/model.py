@@ -121,6 +121,7 @@ def _resolve_sam3_config(raw: dict) -> dict:
     tracker = raw_tracker if video_tracking_supported else {}
     text_eos_token_id = int(text.get("eos_token_id", 49407))
     text_pad_token_id = text_eos_token_id
+    text_bos_token_id = int(text.get("bos_token_id", 49406))
     vision_image_size = int(vision_backbone.get("image_size", 1008))
 
     return {
@@ -164,9 +165,12 @@ def _resolve_sam3_config(raw: dict) -> dict:
         "text_num_layers": int(text.get("num_hidden_layers", 24)),
         "text_vocab_size": int(text.get("vocab_size", 49408)),
         "text_max_position_embeddings": int(text.get("max_position_embeddings", 32)),
-        "text_bos_token_id": int(text.get("bos_token_id", 49406)),
+        "text_bos_token_id": text_bos_token_id,
         "text_eos_token_id": text_eos_token_id,
         "text_pad_token_id": text_pad_token_id,
+        "tokenizer_add_special_tokens": False,
+        "tokenizer_prefix_ids": [text_bos_token_id],
+        "tokenizer_suffix_ids": [text_eos_token_id],
         "text_layer_norm_eps": float(text.get("layer_norm_eps", 1e-5)),
         "text_hidden_act": str(text.get("hidden_act", "gelu")),
         "vision_image_size": vision_image_size,
@@ -628,9 +632,9 @@ class _Sam3Model:
             # Keep the model-owned BOS/EOS frame explicit in the bundle so a
             # build made without importing Transformers still produces the
             # exact prompt tokens expected by the text and detector engines.
-            "tokenizer_add_special_tokens": 0,
-            "tokenizer_prefix_ids": [cfg["text_bos_token_id"]],
-            "tokenizer_suffix_ids": [cfg["text_eos_token_id"]],
+            "tokenizer_add_special_tokens": cfg["tokenizer_add_special_tokens"],
+            "tokenizer_prefix_ids": cfg["tokenizer_prefix_ids"],
+            "tokenizer_suffix_ids": cfg["tokenizer_suffix_ids"],
             "sam3_text_max_position_embeddings": cfg["text_max_position_embeddings"],
             "sam3_text_hidden_size": cfg["text_hidden_size"],
             "sam3_text_projection_dim": int(
@@ -700,6 +704,9 @@ class _Sam3Model:
 
 
 _RUNTIME_FIELDS = (
+    "tokenizer_add_special_tokens",
+    "tokenizer_prefix_ids",
+    "tokenizer_suffix_ids",
     "text_max_position_embeddings",
     "text_pad_token_id",
     "image_size",
@@ -739,6 +746,9 @@ _RUNTIME_FIELDS = (
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one SAM3 text-prompted segmentation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("sam3 does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("sam3 does not support max_sequence_length")
 
@@ -791,7 +801,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise RuntimeError("SAM3 build did not produce every required engine")
     runtime_source = config.raw.get("_sam3_config", _resolve_sam3_config(config.raw))
     runtime = {key: runtime_source[key] for key in _RUNTIME_FIELDS}
-    writer.set_header(family="sam3", task=request.task, backend="trt")
+    writer.set_header(family="sam3", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", text)
     writer.add_bytes("vision.plan", vision)
     for name, plan in extra.items():

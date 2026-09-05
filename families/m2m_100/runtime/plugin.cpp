@@ -369,5 +369,7 @@ ITask* create_m2m_100(const FamilyContext& context) {
 } // namespace trtmc
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("m2m_100 does not support --kv-cache-size");
     return trtmc::create_m2m_100(context);
 }

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_roberta SHARED
+  distributed_runtime.cpp
   bpe_tokenizer.cpp
   unigram_tokenizer.cpp
   pipeline.cpp
@@ -21,6 +22,7 @@ target_link_libraries(trtmc_model_roberta PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_roberta PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"

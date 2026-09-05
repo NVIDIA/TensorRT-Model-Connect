@@ -82,10 +82,14 @@ def shard_standard_decoder_weights(
             sharded[key] = value
         elif key.endswith((".w_q", ".w_k", ".w_v", ".q_bias", ".k_bias", ".v_bias")):
             sharded[key] = _slice_last_dim(value, rank, tp_size)
-        elif key.endswith((".w_o", ".w_fc2")):
+        elif key.endswith((".w_o", ".w_down", ".w_fc2")):
             sharded[key] = _slice_first_dim(value, rank, tp_size)
-        elif key.endswith((".w_fc1", ".fc1_bias")):
+        elif key.endswith((".w_gate", ".w_up", ".w_fc1", ".fc1_bias")):
             sharded[key] = _slice_last_dim(value, rank, tp_size)
+        elif key.endswith((".q_norm", ".k_norm")) and value.size > model_config.head_dim:
+            sharded[key] = _slice_first_dim(
+                value.reshape(-1, model_config.head_dim), rank, tp_size
+            ).reshape(-1)
         else:
             sharded[key] = value
 

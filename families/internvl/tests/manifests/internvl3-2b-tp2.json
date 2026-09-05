@@ -10,10 +10,11 @@
       "prompt": "What color is the vehicle in this image? Answer in one word.",
       "max_new_tokens": 10,
       "test_image": "data/test_img.jpeg",
-      "reference_precision": "fp16"
+      "reference_precision": "fp32",
+      "reference_backend": "hf_transformers"
     }
   ],
   "tensor_parallel_size": 2,
-  "precision": "fp16",
+  "precision": "fp32",
   "max_sequence_length": 384
 }

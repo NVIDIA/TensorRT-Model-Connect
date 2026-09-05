@@ -16,12 +16,15 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from families.lerobot_act.model import ACTION_MAX, ACTION_MIN
 
 
 FAMILY = "lerobot_act"
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
+_ACTION_MIN = np.asarray(ACTION_MIN, dtype=np.float32)
+_ACTION_MAX = np.asarray(ACTION_MAX, dtype=np.float32)
 
 
 def _cases() -> dict[str, tuple[dict, dict]]:
@@ -186,7 +189,6 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict, tmp_
     assert np.array_equal(actions, qualification_actions)
     assert summary["num_actions"] == 100
     assert summary["action_dim"] == 14
-    assert summary["within_training_bounds"] is True
     return summary, actions
 
 
@@ -218,25 +220,87 @@ def _run_reference(model_dir: Path, case: dict, tmp_path: Path) -> np.ndarray:
 
 
 def _assert_operational_summary(summary: dict) -> None:
-    assert float(summary["control_effective_hz"]) >= 49.0
-    assert float(summary["control_p99_abs_jitter_ms"]) <= 5.0
+    assert float(summary["control_frequency_hz"]) == 50.0
+    for field in (
+        "action_step_capacity_hz",
+        "chunk_inference_p50_ms",
+        "chunk_inference_p95_ms",
+        "chunk_throughput_per_second",
+        "gpu_memory_delta_mib",
+        "gpu_memory_total_mib",
+        "peak_resident_memory_mib",
+        "startup_ms",
+    ):
+        value = float(summary[field])
+        assert np.isfinite(value) and value > 0.0
+    effective_hz = float(summary["control_effective_hz"])
+    assert np.isfinite(effective_hz) and effective_hz >= 49.0
+    jitter = float(summary["control_p99_abs_jitter_ms"])
+    assert np.isfinite(jitter) and 0.0 <= jitter <= 5.0
     assert int(summary["control_missed_deadlines"]) == 0
-    assert 0.0 < float(summary["gpu_memory_delta_mib"]) <= 1024.0
-    assert 0.0 < float(summary["peak_resident_memory_mib"]) <= 2048.0
-    assert 0.0 < float(summary["startup_ms"]) <= 5000.0
+    assert float(summary["gpu_memory_delta_mib"]) <= 1024.0
+    assert float(summary["peak_resident_memory_mib"]) <= 2048.0
+    assert float(summary["startup_ms"]) <= 5000.0
 
 
 def test_operational_summary_keeps_the_old_limits() -> None:
     _assert_operational_summary(
         {
+            "control_frequency_hz": 50.0,
+            "action_step_capacity_hz": 100.0,
+            "chunk_inference_p50_ms": 1.0,
+            "chunk_inference_p95_ms": 2.0,
+            "chunk_throughput_per_second": 1000.0,
             "control_effective_hz": 50.0,
             "control_p99_abs_jitter_ms": 1.0,
             "control_missed_deadlines": 0,
             "gpu_memory_delta_mib": 1.0,
+            "gpu_memory_total_mib": 1024.0,
             "peak_resident_memory_mib": 1.0,
             "startup_ms": 1.0,
         }
     )
+
+
+def test_operational_summary_rejects_invalid_active_invariants() -> None:
+    summary = {
+        "control_frequency_hz": 50.0,
+        "action_step_capacity_hz": 100.0,
+        "chunk_inference_p50_ms": 1.0,
+        "chunk_inference_p95_ms": 2.0,
+        "chunk_throughput_per_second": 1000.0,
+        "control_effective_hz": 50.0,
+        "control_p99_abs_jitter_ms": 1.0,
+        "control_missed_deadlines": 0,
+        "gpu_memory_delta_mib": 1.0,
+        "gpu_memory_total_mib": 1024.0,
+        "peak_resident_memory_mib": 1.0,
+        "startup_ms": 1.0,
+    }
+    for field in ("chunk_inference_p50_ms", "chunk_throughput_per_second", "gpu_memory_total_mib"):
+        with pytest.raises(AssertionError):
+            _assert_operational_summary({**summary, field: 0.0})
+    with pytest.raises(AssertionError):
+        _assert_operational_summary({**summary, "control_frequency_hz": 49.0})
+    with pytest.raises(AssertionError):
+        _assert_operational_summary({**summary, "control_p99_abs_jitter_ms": -0.1})
+    with pytest.raises(AssertionError):
+        _assert_operational_summary({**summary, "control_effective_hz": np.inf})
+
+
+def _assert_actions_in_training_bounds(actions: np.ndarray) -> None:
+    values = np.asarray(actions, dtype=np.float32)
+    assert values.shape == (100, 14)
+    in_bounds = np.logical_and(values >= _ACTION_MIN, values <= _ACTION_MAX)
+    assert float(np.mean(in_bounds)) >= 1.0
+
+
+def test_actual_actions_must_be_inside_training_bounds() -> None:
+    actions = np.broadcast_to((_ACTION_MIN + _ACTION_MAX) / 2.0, (100, 14)).copy()
+    _assert_actions_in_training_bounds(actions)
+    actions[0, 0] = _ACTION_MIN[0] - 0.1
+    with pytest.raises(AssertionError):
+        _assert_actions_in_training_bounds(actions)
 
 
 def test_e2e(case_name: str, tmp_path: Path) -> None:
@@ -261,6 +325,7 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
     summary, actual = _run_native(binary, runtime_root, bundle, case, tmp_path)
     expected = _run_reference(model_dir, case, tmp_path)
     assert actual.shape == expected.shape == (100, 14)
+    _assert_actions_in_training_bounds(actual)
     delta = actual.astype(np.float64) - expected.astype(np.float64)
     thresholds = json.loads((THRESHOLD_ROOT / f"{case_name}.json").read_text(encoding="utf-8"))[
         "threshold_overrides"

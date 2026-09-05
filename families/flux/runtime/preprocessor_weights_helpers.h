@@ -72,5 +72,12 @@ inline void load_preprocessor_floats(const nlohmann::json& index, const char* bl
     std::memcpy(output.data(), blob + offset, byte_count);
 }
 
+inline void load_optional_preprocessor_floats(const nlohmann::json& index, const char* blob,
+                                              std::size_t blob_size, const std::string& key,
+                                              std::vector<float>& output) {
+    if (index.contains(key))
+        load_preprocessor_floats(index, blob, blob_size, key, output);
+}
+
 } // namespace flux_preprocessor_weights
 } // namespace trtmc

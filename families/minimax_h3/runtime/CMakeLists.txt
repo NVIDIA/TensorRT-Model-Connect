@@ -53,4 +53,28 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_minimax_h3_math PRIVATE trtmc_model_minimax_h3)
   target_compile_options(test_minimax_h3_math PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME minimax_h3_math COMMAND test_minimax_h3_math)
+
+  add_executable(test_minimax_h3_cuda_rng
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_minimax_h3_cuda_rng.cpp
+  )
+  target_include_directories(test_minimax_h3_cuda_rng PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_cuda_rng SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_minimax_h3_cuda_rng PRIVATE
+    trtmc_model_minimax_h3
+    trtmc_core
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_minimax_h3_cuda_rng PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME test_minimax_h3_cuda_rng COMMAND test_minimax_h3_cuda_rng)
+  set_tests_properties(test_minimax_h3_cuda_rng PROPERTIES
+    LABELS gpu
+    SKIP_RETURN_CODE 77
+  )
 endif()

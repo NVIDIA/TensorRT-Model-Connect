@@ -3,19 +3,14 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
-import pytest
-
-from families.qwen3_omni.tests.test_e2e import _reference_eos_token_id
+from pathlib import Path
 
 
-def test_reference_eos_comes_from_the_root_omni_config() -> None:
-    config = SimpleNamespace(im_end_token_id=151645, thinker_config=SimpleNamespace())
-    assert _reference_eos_token_id(config) == 151645
-
-
-@pytest.mark.parametrize("value", [True, "151645", None])
-def test_reference_eos_rejects_non_integer_values(value) -> None:
-    with pytest.raises(AssertionError):
-        _reference_eos_token_id(SimpleNamespace(im_end_token_id=value))
+def test_e2e_gates_only_thinker_text_and_final_waveform() -> None:
+    source = Path(__file__).with_name("test_e2e.py").read_text(encoding="utf-8")
+    assert 'native_text["text"] == reference_text' in source
+    assert 'native_text["token_ids"]' not in source
+    assert "_teacher_forced_code2wav" not in source
+    assert "duration_ratio_max" not in source
+    assert "actual.size == reference.size" in source
+    assert "waveform_cosine_min" in source

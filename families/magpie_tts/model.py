@@ -229,48 +229,23 @@ def _extract_ipa_assets(nemo_path: str) -> dict[str, bytes]:
     phoneme_dict_tsv = "\n".join(tsv_lines) + "\n"
 
     # --- Step 4: Get authoritative vocab from NeMo IPATokenizer ---
-    vocab_text = None
     grapheme_prefix = "#"
-    eos_id = -1
     ignore_ambiguous = True
 
-    try:
-        tokenizer, text_vocab_size = magpie_tokenizer.load_tokenizer(path)
-        # Extract vocab: _id2token is the authoritative mapping
-        if hasattr(tokenizer, "_id2token"):
-            id2token = tokenizer._id2token
-            vocab_lines = []
-            for i in range(len(id2token)):
-                vocab_lines.append(str(id2token[i]))
-            vocab_text = "\n".join(vocab_lines) + "\n"
+    tokenizer, text_vocab_size = magpie_tokenizer.load_tokenizer(path)
+    id2token = tokenizer._id2token
+    vocab_text = "\n".join(str(id2token[index]) for index in range(len(id2token))) + "\n"
 
-        # Extract config from tokenizer / g2p attributes
-        g2p = getattr(tokenizer, "g2p", None)
-        if g2p and hasattr(g2p, "grapheme_prefix"):
-            gp = getattr(g2p, "grapheme_prefix", "")
-            if gp:
-                grapheme_prefix = str(gp)
-            else:
-                grapheme_prefix = ""  # NeMo uses no prefix
-        else:
-            grapheme_prefix = ""  # NeMo default: no grapheme prefix
-        if g2p and hasattr(g2p, "ignore_ambiguous_words"):
-            ignore_ambiguous = bool(g2p.ignore_ambiguous_words)
-        # EOS is text_vocab_size + 1 (NeMo convention, set by caller)
-        eos_id = text_vocab_size + 1 if text_vocab_size else -1
-    except Exception as e:
-        raise RuntimeError(
-            f"NeMo IPATokenizer failed to load — this is required for MagpieTTS "
-            f"bundle builds. Install families/magpie_tts/requirements.txt.\n"
-            f"Error: {e}"
-        ) from e
-
-    if vocab_text is None:
-        raise RuntimeError(
-            "NeMo IPATokenizer loaded but _id2token vocab is missing. "
-            "The NeMo installation may be incomplete or incompatible. "
-            "Install families/magpie_tts/requirements.txt."
-        )
+    # Extract config from tokenizer / g2p attributes
+    g2p = getattr(tokenizer, "g2p", None)
+    if g2p and hasattr(g2p, "grapheme_prefix"):
+        gp = getattr(g2p, "grapheme_prefix", "")
+        grapheme_prefix = str(gp) if gp else ""
+    else:
+        grapheme_prefix = ""
+    if g2p and hasattr(g2p, "ignore_ambiguous_words"):
+        ignore_ambiguous = bool(g2p.ignore_ambiguous_words)
+    eos_id = text_vocab_size + 1
 
     # --- Step 5: Build config JSON ---
     config_json = json.dumps(
@@ -694,6 +669,7 @@ class _MagpieTTSModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
         trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # Dynamic inputs: seq_len varies from 1 (decode) to ctx_len (prefill)
@@ -1127,6 +1103,7 @@ def _build_magpie_encoder(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
+    tc.builder_optimization_level = 1
     tc.clear_flag(trt.BuilderFlag.TF32)
 
     eps_tensor = graph_ops.add_constant(
@@ -1662,6 +1639,7 @@ def _build_local_transformer_engine(  # pragma: no cover
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
 
     input_embed = network.add_input("input_embed", trt.float32, (1, lt_hidden))
@@ -1785,6 +1763,9 @@ def _mark_debug_output(network, tensor, name):
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one MagpieTTS audio-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("magpie_tts does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("magpie_tts does not support image_height")
 
@@ -1818,7 +1799,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _MagpieTTSModel()
     weights = model.load_weights(str(model_dir), config)
 
-    writer.set_header(family="magpie_tts", task=request.task, backend="trt")
+    writer.set_header(family="magpie_tts", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             writer.add_bytes(

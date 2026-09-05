@@ -251,6 +251,9 @@ class _MiniMaxH3Model:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one MiniMax-H3 image-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("minimax_h3 does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("minimax_h3 does not support max_sequence_length")
 
@@ -289,7 +292,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if profile.first_block_cache:
         raise RuntimeError("MiniMax-H3 minimal build uses the monolithic denoiser profile")
 
-    writer.set_header(family="minimax_h3", task=request.task, backend="trt")
+    writer.set_header(family="minimax_h3", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.plan", components["text_encoder"])
     writer.add_bytes("adaln.plan", components["adaln_precompute"])
     writer.add_bytes("denoiser.plan", components["denoiser"])

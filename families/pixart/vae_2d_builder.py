@@ -433,6 +433,7 @@ def build_vae_2d_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
 
     inp = network.add_input("latent_input", trt.float32, (1, latent_channels, h_lat, w_lat))

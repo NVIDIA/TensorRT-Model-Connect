@@ -41,6 +41,33 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+def _tokenizer_json_bytes(tokenizer_dir: Path) -> bytes:
+    tokenizer_json = tokenizer_dir / "tokenizer.json"
+    if tokenizer_json.is_file():
+        return tokenizer_json.read_bytes()
+
+    sentencepiece_model = tokenizer_dir / "spiece.model"
+    if not sentencepiece_model.is_file():
+        raise FileNotFoundError(f"PixArt tokenizer is missing {sentencepiece_model}")
+
+    import sentencepiece as sentencepiece_lib
+    from tokenizers import Tokenizer, decoders, normalizers, pre_tokenizers
+    from tokenizers.models import Unigram
+
+    sentencepiece = sentencepiece_lib.SentencePieceProcessor(model_file=str(sentencepiece_model))
+    vocab = [
+        (sentencepiece.id_to_piece(index), sentencepiece.get_score(index))
+        for index in range(sentencepiece.get_piece_size())
+    ]
+    tokenizer = Tokenizer(Unigram(vocab, int(sentencepiece.unk_id())))
+    tokenizer.normalizer = normalizers.Sequence(
+        [normalizers.Prepend(prepend="\u2581"), normalizers.Replace(" ", "\u2581")]
+    )
+    tokenizer.pre_tokenizer = pre_tokenizers.Sequence([])
+    tokenizer.decoder = decoders.Metaspace()
+    return tokenizer.to_str().encode("utf-8")
+
+
 class _PixArtModel:
     # T5-XXL text encoder params
     _T5_D_MODEL = 4096
@@ -572,6 +599,9 @@ def _serialize_preprocessor_weights(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one PixArt image-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("pixart does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("pixart does not support max_sequence_length")
 
@@ -625,7 +655,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         parallel_config=parallel,
     )
 
-    writer.set_header(family="pixart", task=request.task, backend="trt")
+    writer.set_header(family="pixart", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.0.plan", components["text_encoders"][0][1])
     if parallel.enabled:
         plans = components["denoiser_ranks"]
@@ -635,7 +665,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         writer.add_bytes("denoiser.plan", components["denoiser"])
     writer.add_bytes("vae.plan", components["vae_decoder"])
     writer.add_bytes("preprocessor.weights", components["preprocessor_weights"])
-    writer.add_bytes("tokenizer.json", (model_dir / "tokenizer/tokenizer.json").read_bytes())
+    writer.add_bytes("tokenizer.json", _tokenizer_json_bytes(model_dir / "tokenizer"))
     runtime = model.get_diffusion_config(config)
     runtime.update(
         {

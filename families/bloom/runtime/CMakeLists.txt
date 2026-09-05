@@ -35,3 +35,20 @@ set_target_properties(trtmc_model_bloom PROPERTIES
 install(TARGETS trtmc_model_bloom
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_bloom_tokenizer_contract
+    ${PROJECT_SOURCE_DIR}/families/bloom/tests/cpp/test_bloom_tokenizer_contract.cpp
+  )
+  target_include_directories(test_bloom_tokenizer_contract PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(test_bloom_tokenizer_contract PRIVATE
+    trtmc_model_bloom
+  )
+  target_compile_options(test_bloom_tokenizer_contract PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME bloom_tokenizer_contract COMMAND test_bloom_tokenizer_contract)
+endif()

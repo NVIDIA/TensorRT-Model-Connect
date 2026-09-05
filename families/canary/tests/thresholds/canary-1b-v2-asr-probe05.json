@@ -1,7 +1,6 @@
 {
   "threshold_overrides": {
     "contract_ned_threshold": 0.1,
-    "wer": 0.1,
-    "cer": 0.1
+    "wer": 0.1
   }
 }

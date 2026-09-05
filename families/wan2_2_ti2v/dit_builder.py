@@ -297,6 +297,7 @@ def build_dit_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     build_config = builder.create_builder_config()
+    build_config.builder_optimization_level = 1
     build_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 96 << 30)
 
     latent = network.add_input(

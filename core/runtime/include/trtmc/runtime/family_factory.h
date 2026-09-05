@@ -8,6 +8,8 @@
 #include "trtmc/bundle.h"
 #include "trtmc/task.h"
 
+#include <cstdint>
+
 namespace trtmc {
 
 class IBackend;
@@ -15,6 +17,7 @@ class IBackend;
 struct FamilyContext {
     const BundleReader& reader;
     IBackend& backend;
+    std::uint64_t kv_cache_size_bytes{0};
 };
 
 using CreateFamilyFn = ITask* (*)(const FamilyContext& context);

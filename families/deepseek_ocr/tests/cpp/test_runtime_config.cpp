@@ -5,6 +5,7 @@
 
 #include "families/deepseek_ocr/runtime/image_preprocessor.h"
 #include "families/deepseek_ocr/runtime/runtime_config.h"
+#include "families/deepseek_ocr/runtime/tensor_names.h"
 
 #include <iostream>
 #include <string>
@@ -34,10 +35,10 @@ int main() {
         "image_std": [0.25, 0.25, 0.25],
         "prefill_max_length": 768,
         "io_map": {
-            "cache_k_pattern": "cache_k_{layer}",
-            "cache_v_pattern": "cache_v_{layer}",
-            "present_k_pattern": "present_k_{layer}",
-            "present_v_pattern": "present_v_{layer}"
+            "cache_k_pattern": "cache_k_{i}",
+            "cache_v_pattern": "cache_v_{i}",
+            "present_k_pattern": "present_k_{i}",
+            "present_v_pattern": "present_v_{i}"
         }
     })";
 
@@ -67,7 +68,11 @@ int main() {
     check(model.model.image_token_id == 128815, "runtime image token");
     check(model.model.vision_output_dim == 1280, "runtime vision width");
     check(model.model.prefill_max_length == 768, "prefill length");
-    check(model.cache_k_pattern == "cache_k_{layer}", "cache K pattern");
-    check(model.model.present_v_pattern == "present_v_{layer}", "present V pattern");
+    check(model.cache_k_pattern == "cache_k_{i}", "cache K pattern");
+    check(model.model.present_v_pattern == "present_v_{i}", "present V pattern");
+    check(trtmc::deepseek_ocr_expand_layer_name(model.cache_k_pattern, 3) == "cache_k_3",
+          "cache K expansion");
+    check(trtmc::deepseek_ocr_expand_layer_name(model.model.present_v_pattern, 3) == "present_v_3",
+          "present V expansion");
     return ok ? 0 : 1;
 }

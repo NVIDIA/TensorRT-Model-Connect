@@ -244,6 +244,15 @@ def _world_request(case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         camera_intrinsics=[float(value) for value in case.get("camera_intrinsics", [])],
         media_type="video",
     )
+    for name, convert in (
+        ("translation_speed", float),
+        ("rotation_speed_deg", float),
+        ("fps", int),
+        ("flow_shift", float),
+        ("no_action_overlay", bool),
+    ):
+        if name in case:
+            request[name] = convert(case[name])
     return request
 
 

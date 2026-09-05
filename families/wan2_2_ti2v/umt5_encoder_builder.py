@@ -534,6 +534,7 @@ def build_umt5_encoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     build_config = builder.create_builder_config()
+    build_config.builder_optimization_level = 1
     build_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 32 << 30)
 
     input_ids = network.add_input("input_ids", trt.int32, (1, model.sequence_length))

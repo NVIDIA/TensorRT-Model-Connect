@@ -73,21 +73,6 @@ std::vector<int32_t> optional_int_array(const nlohmann::json& document, const ch
     return document.contains(key) ? require_int_array(document, key) : std::vector<int32_t>{};
 }
 
-std::vector<float> require_number_array(const nlohmann::json& document, const char* key) {
-    const auto& value = require_member(document, key);
-    if (!value.is_array())
-        throw std::runtime_error(std::string("runtime.json '") + key + "' must be an array");
-    std::vector<float> result;
-    result.reserve(value.size());
-    for (const auto& element : value) {
-        if (!element.is_number())
-            throw std::runtime_error(std::string("runtime.json '") + key +
-                                     "' must contain only numbers");
-        result.push_back(element.get<float>());
-    }
-    return result;
-}
-
 bool optional_int_flag(const nlohmann::json& document, const char* key, bool default_value) {
     if (!document.contains(key))
         return default_value;
@@ -101,66 +86,69 @@ void load_preprocessor_weights(const nlohmann::json& index_json, const char* blo
                                std::size_t blob_size, FluxPreprocessorWeights& w) {
     flux_preprocessor_weights::load_preprocessor_floats(
         index_json, blob, blob_size, "patch_embedding.weight", w.patch_embed_weight);
-    flux_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
-                                                        "patch_embedding.bias", w.patch_embed_bias);
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
+        index_json, blob, blob_size, "patch_embedding.bias", w.patch_embed_bias);
     flux_preprocessor_weights::load_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.time_embedding.0.weight",
         w.time_emb_0_weight);
-    flux_preprocessor_weights::load_preprocessor_floats(
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.time_embedding.0.bias", w.time_emb_0_bias);
     flux_preprocessor_weights::load_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.time_embedding.2.weight",
         w.time_emb_2_weight);
-    flux_preprocessor_weights::load_preprocessor_floats(
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.time_embedding.2.bias", w.time_emb_2_bias);
 
-    flux_preprocessor_weights::load_preprocessor_floats(
-        index_json, blob, blob_size, "condition_embedder.time_proj.weight", w.time_proj_weight);
-    flux_preprocessor_weights::load_preprocessor_floats(
-        index_json, blob, blob_size, "condition_embedder.time_proj.bias", w.time_proj_bias);
-
-    flux_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
-                                                        "condition_embedder.text_embedding.weight",
-                                                        w.text_proj_weight);
-    flux_preprocessor_weights::load_preprocessor_floats(
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
+        index_json, blob, blob_size, "condition_embedder.text_embedding.weight",
+        w.text_proj_weight);
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.text_embedding.bias", w.text_proj_bias);
-    flux_preprocessor_weights::load_preprocessor_floats(
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.text_embedding_2.weight",
         w.text_proj_2_weight);
-    flux_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
-                                                        "condition_embedder.text_embedding_2.bias",
-                                                        w.text_proj_2_bias);
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
+        index_json, blob, blob_size, "condition_embedder.text_embedding_2.bias",
+        w.text_proj_2_bias);
 
     flux_preprocessor_weights::load_preprocessor_floats(
         index_json, blob, blob_size, "context_embedder.weight", w.context_embed_weight);
-    flux_preprocessor_weights::load_preprocessor_floats(
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
         index_json, blob, blob_size, "context_embedder.bias", w.context_embed_bias);
 
-    flux_preprocessor_weights::load_preprocessor_floats(
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.guidance_embedding.0.weight",
         w.guidance_emb_0_weight);
-    flux_preprocessor_weights::load_preprocessor_floats(
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.guidance_embedding.0.bias",
         w.guidance_emb_0_bias);
-    flux_preprocessor_weights::load_preprocessor_floats(
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.guidance_embedding.2.weight",
         w.guidance_emb_2_weight);
-    flux_preprocessor_weights::load_preprocessor_floats(
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
         index_json, blob, blob_size, "condition_embedder.guidance_embedding.2.bias",
         w.guidance_emb_2_bias);
 
-    flux_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
-                                                        "vae_bn.running_mean", w.vae_bn_mean);
-    flux_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
-                                                        "vae_bn.running_var", w.vae_bn_var);
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
+        index_json, blob, blob_size, "vae_bn.running_mean", w.vae_bn_mean);
+    flux_preprocessor_weights::load_optional_preprocessor_floats(
+        index_json, blob, blob_size, "vae_bn.running_var", w.vae_bn_var);
 }
 
 void finalize_preprocessor_weights(FluxPreprocessorWeights& w) {
+    if (w.text_proj_weight.empty() != w.text_proj_2_weight.empty())
+        throw std::runtime_error("FLUX preprocessor text embedding weights are incomplete");
+    if (w.guidance_emb_0_weight.empty() != w.guidance_emb_2_weight.empty())
+        throw std::runtime_error("FLUX preprocessor guidance embedding weights are incomplete");
+    if (w.vae_bn_mean.empty() != w.vae_bn_var.empty())
+        throw std::runtime_error(
+            "FLUX preprocessor VAE batch normalization weights are incomplete");
     if (!w.patch_embed_weight.empty() && !w.patch_embed_bias.empty()) {
         const auto dit_dim = static_cast<int32_t>(w.patch_embed_bias.size());
         w.patch_dim = static_cast<int32_t>(w.patch_embed_weight.size()) / dit_dim;
     }
-    w.valid = !w.patch_embed_weight.empty() && !w.time_emb_0_weight.empty();
+    w.valid = !w.patch_embed_weight.empty() && !w.time_emb_0_weight.empty() &&
+              !w.time_emb_2_weight.empty() && !w.context_embed_weight.empty();
 }
 
 FluxPreprocessorWeights parse_preprocessor_weights(const std::vector<char>& data) {
@@ -204,12 +192,9 @@ FluxDiffusionConfig make_diffusion_config(const std::string& json) {
     dc.text_seq_len = require_int(document, "text_seq_len");
     dc.text_encoder_dim = require_int(document, "text_encoder_dim");
     dc.num_vae_caches = require_int(document, "num_vae_caches");
-    dc.latents_mean = require_number_array(document, "latents_mean");
-    dc.latents_std = require_number_array(document, "latents_std");
     dc.patch_size = require_int_array(document, "patch_size");
     dc.axes_dims_rope = optional_int_array(document, "axes_dims_rope");
     dc.rope_theta = optional_number(document, "rope_theta", 10000.0F);
-    dc.vae_model_id = require_string(document, "vae_model_id");
     dc.guidance_embeds = optional_int_flag(document, "guidance_embeds", false);
     dc.use_rope = optional_int_flag(document, "use_rope", true);
     dc.vae_scaling_factor = optional_number(document, "vae_scaling_factor", 0.0F);

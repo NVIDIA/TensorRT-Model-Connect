@@ -172,6 +172,7 @@ class _QwenImageModel:
         config: ModelConfig,
         weights: WeightDict,
         *,
+        edit_condition_image_size: tuple[int, int] | None = None,
         precision: str = "bf16",
         verbose: bool = False,
         max_batch_size: int = 1,
@@ -231,7 +232,6 @@ class _QwenImageModel:
 
         # 1. Bundle config.json blob -- pure file-IO transform, fast.
         print("[qwen-image] Building bundle config ...", file=sys.stderr)
-        edit_condition_image_size = None
         bundle_cfg = build_bundle_config(
             repo,
             edit_condition_image_size=edit_condition_image_size,
@@ -502,6 +502,9 @@ class _QwenImageModel:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen-Image generation or editing bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("qwen_image does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("qwen_image does not support max_sequence_length")
 
@@ -524,12 +527,22 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Qwen-Image does not support fp32_layers")
 
     model_dir = Path(request.model_dir)
-    config = ModelConfig(
-        model_type="qwen_image_edit" if request.task == "image_edit" else "qwen_image",
-        raw={
+    if request.task == "image_edit":
+        if request.image_height is None or request.image_width is None:
+            raise ValueError(
+                "Qwen-Image Edit requires image_height and image_width for the condition image"
+            )
+        edit_condition_image_size = (request.image_height, request.image_width)
+        raw_geometry = {}
+    else:
+        edit_condition_image_size = None
+        raw_geometry = {
             "image_height": int(request.image_height or 1024),
             "image_width": int(request.image_width or 1024),
-        },
+        }
+    config = ModelConfig(
+        model_type="qwen_image_edit" if request.task == "image_edit" else "qwen_image",
+        raw=raw_geometry,
     )
     model = _QwenImageModel()
     weights = model.load_weights(str(model_dir), config)
@@ -537,6 +550,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         str(model_dir),
         config,
         weights,
+        edit_condition_image_size=edit_condition_image_size,
         precision=request.precision,
         verbose=request.verbose,
         max_batch_size=request.max_batch_size,
@@ -562,7 +576,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     text_encoders = components["text_encoders"]
     if len(text_encoders) != 1:
         raise RuntimeError("Qwen-Image must produce exactly one text encoder")
-    writer.set_header(family="qwen_image", task=request.task, backend="trt")
+    writer.set_header(family="qwen_image", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.0.plan", text_encoders[0][1])
     writer.add_bytes("denoiser.plan", components["denoiser"])
     writer.add_bytes("vae.plan", components["vae_decoder"])

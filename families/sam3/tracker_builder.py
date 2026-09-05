@@ -344,8 +344,8 @@ def _new_network(*, enable_tf32: bool, verbose: bool):
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
     config.builder_optimization_level = 5
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
     config.avg_timing_iterations = 8
     config.max_aux_streams = 0
     config.set_flag(trt.BuilderFlag.STRICT_NANS)

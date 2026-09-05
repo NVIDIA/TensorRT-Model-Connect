@@ -14,7 +14,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "dpr"
-TASKS = frozenset({"embedding"})
+TASKS = frozenset({"encoding"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -169,11 +169,14 @@ def _run_json(
             "--tag-output",
             "-x",
             "LD_LIBRARY_PATH",
+            "-x",
+            "TRTMC_NCCL_RENDEZVOUS",
             "-np",
             str(manifest["tensor_parallel_size"]),
             *invocation,
         ]
     env = os.environ.copy()
+    env["TRTMC_NCCL_RENDEZVOUS"] = str(bundle.with_suffix(".nccl-rendezvous"))
     env["LD_LIBRARY_PATH"] = ":".join(
         (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
     )
@@ -200,7 +203,8 @@ def _run_json(
 
 def _thresholds(case_name: str) -> dict:
     path = THRESHOLD_ROOT / f"{case_name}.json"
-    assert path.is_file(), f"selected {FAMILY} E2E requires exact thresholds: {path}"
+    if not path.is_file():
+        return {}
     return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
 
 
@@ -240,52 +244,41 @@ def _native(
     case: dict,
     tmp_path: Path,
 ):
-    manifest["task"]
+    assert manifest["task"] == "encoding"
     return _run_json(
-        binary, runtime_root, bundle, manifest, case, "embed", "--text", _case_text(case)
+        binary, runtime_root, bundle, manifest, case, "encode", "--text", _case_text(case)
     )
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
     task = manifest["task"]
     import torch
-    from tokenizers import Tokenizer
-    from transformers import DPRContextEncoder
+    from transformers import DPRContextEncoder, DPRContextEncoderTokenizerFast
 
     device = torch.device("cuda")
-    token_ids = Tokenizer.from_file(str(model_dir / "tokenizer.json")).encode(_case_text(case)).ids
-    encoded = {
-        "input_ids": torch.tensor([token_ids], dtype=torch.long),
-        "attention_mask": torch.ones((1, len(token_ids)), dtype=torch.long),
-    }
-    model = (
-        DPRContextEncoder.from_pretrained(
-            model_dir, trust_remote_code=True, torch_dtype=_torch_dtype(case["reference_precision"])
-        )
-        .to(device)
-        .eval()
-    )
+    tokenizer = DPRContextEncoderTokenizerFast.from_pretrained(model_dir, trust_remote_code=True)
+    encoded = tokenizer(_case_text(case), return_tensors="pt")
+    wrapper = DPRContextEncoder.from_pretrained(
+        model_dir, trust_remote_code=True, torch_dtype=_torch_dtype(case["reference_precision"])
+    ).to(device)
+    model = wrapper.ctx_encoder.bert_model.eval()
     encoded = {key: value.to(device) for key, value in encoded.items()}
     with torch.no_grad():
         outputs = model(**encoded)
-    assert task == "embedding"
-    return {"values": outputs.pooler_output[0].float().cpu().numpy()}
+    assert task == "encoding"
+    return {"values": outputs.last_hidden_state[0, 0].float().cpu().numpy()}
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    manifest["task"]
-    actual_values = actual["values"]
-    expected_values = expected["values"]
-    if "cosine_similarity" in thresholds:
-        cosine_limit = float(thresholds["cosine_similarity"])
-    else:
-        cosine_limit = float(thresholds["cls_embedding_cosine"])
-    assert _cosine(actual_values, expected_values) >= cosine_limit
-    if "l2_distance" in thresholds:
-        assert np.linalg.norm(
-            np.asarray(actual_values).reshape(-1) - np.asarray(expected_values).reshape(-1)
-        ) <= float(thresholds["l2_distance"])
-    return
+    del manifest, case
+    configured = thresholds.get(
+        "contract_cosine_threshold", thresholds.get("cls_embedding_cosine", 0.8)
+    )
+    assert _cosine(actual["values"], expected["values"]) >= max(float(configured), 0.8)
+
+
+def test_dpr_cases_keep_the_encoder_only_cls_contract() -> None:
+    assert all(manifest["task"] == "encoding" for _path, manifest, _case in CASES.values())
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:

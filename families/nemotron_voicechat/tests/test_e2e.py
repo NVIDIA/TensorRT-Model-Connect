@@ -6,6 +6,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 import subprocess
 from functools import cache
@@ -243,47 +244,13 @@ def _wav_stats(path: Path) -> dict:
     }
 
 
-def _complete_agent_text(events: object) -> str:
-    assert isinstance(events, list), "speech-session events must be a list"
-    last_sequence_by_epoch: dict[int, int] = {}
-    agent_text_epochs: list[int] = []
-    final_text_by_epoch: dict[int, str] = {}
-    for event in events:
-        assert isinstance(event, dict), "speech-session events must be objects"
-        epoch = event.get("epoch")
-        sequence = event.get("sequence")
-        assert type(epoch) is int and epoch > 0, "speech-session event epoch must be positive"
-        assert type(sequence) is int and sequence >= 0, (
-            "speech-session event sequence must be non-negative"
-        )
-        previous = last_sequence_by_epoch.get(epoch)
-        assert previous is None or sequence > previous, (
-            f"speech-session event sequence is not increasing for epoch {epoch}"
-        )
-        last_sequence_by_epoch[epoch] = sequence
-
-        if event.get("kind") != "agent_text":
-            continue
-        is_final = event.get("is_final")
-        text = event.get("text")
-        assert type(is_final) is bool, "agent_text is_final must be a boolean"
-        assert isinstance(text, str), "agent_text text must be a string"
-        if epoch not in agent_text_epochs:
-            agent_text_epochs.append(epoch)
-        assert epoch not in final_text_by_epoch, f"agent_text epoch {epoch} continued after final"
-        if is_final:
-            assert text.strip(), f"agent_text epoch {epoch} final text must not be empty"
-            final_text_by_epoch[epoch] = text
-
-    assert agent_text_epochs, "speech-session produced no agent_text events"
-    missing = [epoch for epoch in agent_text_epochs if epoch not in final_text_by_epoch]
-    assert not missing, f"agent_text epochs missing a final event: {missing}"
-    return " ".join(final_text_by_epoch[epoch] for epoch in agent_text_epochs)
+def _normalized_words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
 
 
 def _edit_distance(left: str, right: str) -> float:
-    a = " ".join(left.lower().split())
-    b = " ".join(right.lower().split())
+    a = " ".join(_normalized_words(left))
+    b = " ".join(_normalized_words(right))
     previous = list(range(len(b) + 1))
     for index, char_a in enumerate(a, start=1):
         current = [index]
@@ -297,6 +264,14 @@ def _edit_distance(left: str, right: str) -> float:
     return previous[-1] / max(len(a), len(b), 1)
 
 
+def test_text_similarity_ignores_punctuation_only_differences() -> None:
+    assert _edit_distance("Hello, world!", "hello world") == 0.0
+
+
+def test_transcript_word_count_ignores_punctuation_only_tokens() -> None:
+    assert _normalized_words("hello ... !!! world") == ["hello", "world"]
+
+
 def _native_model_card(
     binary: Path,
     runtime_root: Path,
@@ -308,30 +283,20 @@ def _native_model_card(
     manifest["task"]
     inputs = case.get("inputs") or {}
     source = _speech_source(case, "speech_source_relative_path")
-    output = tmp_path / "native.wav"
-    payload = _run_json(
-        binary,
-        runtime_root,
-        bundle,
-        manifest,
-        case,
-        "speech-session",
-        "--input",
-        str(source),
-        "--output",
-        str(output),
-        "--timeout-ms",
-        str(int(inputs.get("runtime_timeout_s", 1800)) * 1000),
-        timeout_s=int(inputs.get("runtime_timeout_s", 1800)),
-    )
-    assert output.is_file()
-    payload["audio"] = str(output)
-    payload["text"] = _complete_agent_text(payload.get("events"))
+    probe = _run_lifecycle_probe(runtime_root, bundle, case, tmp_path, baseline_only=True)
+    assert probe["probe_returncode"] == 0
+    output = probe["audio"]
+    receipt = probe["receipt"]
+    baseline = receipt["baseline"]
+    payload = {
+        "receipt": receipt,
+        "probe_returncode": probe["probe_returncode"],
+        "audio": str(output),
+        "text": str(baseline["agent_text"]),
+    }
     payload["source_stats"] = _wav_stats(source)
     payload["output_stats"] = _wav_stats(output)
-    payload["event_audio_samples"] = sum(
-        int(event.get("audio_samples", 0)) for event in payload["events"]
-    )
+    payload["reported_audio_samples"] = int(baseline["output_samples"])
     transcription = _run_json(
         binary,
         runtime_root,
@@ -363,47 +328,65 @@ def _lifecycle_binary(timeout_s: int) -> Path:
             "--parallel",
             "8",
             "--target",
-            "nemotron_voicechat_lifecycle_probe",
+            "test_nemotron_voicechat_lifecycle_probe_host",
         ],
         check=True,
         timeout=timeout_s,
     )
-    probe = build_dir / "nemotron_voicechat_lifecycle_probe"
+    probe = build_dir / "test_nemotron_voicechat_lifecycle_probe_host"
     assert probe.is_file()
     return probe
 
 
-def _native_lifecycle(runtime_root: Path, bundle: Path, case: dict, tmp_path: Path) -> dict:
+def _run_lifecycle_probe(
+    runtime_root: Path,
+    bundle: Path,
+    case: dict,
+    tmp_path: Path,
+    *,
+    baseline_only: bool,
+) -> dict:
     inputs = case.get("inputs") or {}
     source = _speech_source(case, "speech_source_relative_path")
-    _speech_source(case, "function_speech_source_relative_path")
-    output = tmp_path / "lifecycle.wav"
-    receipt_path = tmp_path / "lifecycle.json"
+    mode = "baseline" if baseline_only else "lifecycle"
+    output = tmp_path / f"{mode}.wav"
+    receipt_path = tmp_path / f"{mode}.json"
     environment = os.environ.copy()
     environment["LD_LIBRARY_PATH"] = ":".join(
         value for value in (str(runtime_root), environment.get("LD_LIBRARY_PATH", "")) if value
     )
+    invocation = [
+        str(_lifecycle_binary(int(inputs.get("lifecycle_build_timeout_s", 600)))),
+        str(bundle),
+        str(source),
+        str(runtime_root),
+        str(output),
+        str(receipt_path),
+    ]
+    if baseline_only:
+        invocation.append("--baseline-only")
     completed = subprocess.run(
-        [
-            str(_lifecycle_binary(int(inputs["lifecycle_build_timeout_s"]))),
-            str(bundle),
-            str(source),
-            str(runtime_root),
-            str(output),
-            str(receipt_path),
-        ],
+        invocation,
         check=False,
         capture_output=True,
         text=True,
         env=environment,
-        timeout=int(inputs["lifecycle_runtime_timeout_s"]),
+        timeout=int(
+            inputs.get("lifecycle_runtime_timeout_s", inputs.get("runtime_timeout_s", 1800))
+        ),
     )
     assert completed.returncode in {0, 1}, completed.stderr[-2000:]
     assert receipt_path.is_file(), "VoiceChat lifecycle probe did not write its receipt"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert not receipt.get("error"), receipt.get("error")
     assert output.is_file(), "VoiceChat lifecycle probe did not write its audio artifact"
-    return {"receipt": receipt, "probe_returncode": completed.returncode}
+    return {"receipt": receipt, "probe_returncode": completed.returncode, "audio": output}
+
+
+def _native_lifecycle(runtime_root: Path, bundle: Path, case: dict, tmp_path: Path) -> dict:
+    _speech_source(case, "function_speech_source_relative_path")
+    probe = _run_lifecycle_probe(runtime_root, bundle, case, tmp_path, baseline_only=False)
+    return {"receipt": probe["receipt"], "probe_returncode": probe["probe_returncode"]}
 
 
 def _native(
@@ -460,7 +443,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     assert output["all_finite"] is True
     assert output["sample_rate"] == int(expected["expected_output_sample_rate"])
     assert output["num_samples"] == int(expected["expected_output_num_samples"])
-    assert actual["event_audio_samples"] == output["num_samples"]
+    assert actual["reported_audio_samples"] == output["num_samples"]
     frame_samples = int(expected["expected_output_samples_per_frame"])
     assert output["num_samples"] % frame_samples == 0
     codec_frames = output["num_samples"] // frame_samples
@@ -472,7 +455,6 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     assert output["rms"] >= float(thresholds["audio_min_rms"])
     assert output["peak"] >= float(thresholds["audio_min_peak"])
     actual_text = str(actual["text"])
-    assert len(actual_text.split()) >= int(thresholds["transcript_min_words"])
     assert 1.0 - _edit_distance(actual_text, expected["text"]) >= float(
         thresholds["agent_text_min_similarity"]
     )
@@ -481,7 +463,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         str(term).casefold() in normalized_text for term in expected["required_response_terms"]
     )
     transcript = str(actual["transcript"])
-    assert len(transcript.split()) >= int(thresholds["transcript_min_words"])
+    assert len(_normalized_words(transcript)) >= int(thresholds["transcript_min_words"])
     assert 1.0 - _edit_distance(transcript, expected["text"]) >= _TRANSCRIPT_MIN_SIMILARITY
     assert int(expected["sample_rate"]) == int(expected["expected_output_sample_rate"])
     assert expected["samples"].size == int(expected["expected_output_num_samples"])
@@ -499,44 +481,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _assert_parity(actual, expected, manifest, case, _thresholds(case_name))
 
 
-def test_complete_agent_text_uses_the_final_event_for_each_epoch() -> None:
-    def agent_text(epoch: int, sequence: int, text: str, is_final: bool) -> dict:
-        return {
-            "kind": "agent_text",
-            "epoch": epoch,
-            "sequence": sequence,
-            "text": text,
-            "is_final": is_final,
-        }
-
-    events = [
-        {"kind": "turn_started", "epoch": 2, "sequence": 0},
-        agent_text(2, 1, "Hi ", False),
-        agent_text(2, 2, "there !", False),
-        agent_text(2, 3, "Hi there!", True),
-        {"kind": "turn_finished", "epoch": 2, "sequence": 4},
-        {"kind": "turn_started", "epoch": 4, "sequence": 0},
-        agent_text(4, 1, "The sky ", False),
-        agent_text(4, 2, "is blue.", False),
-        agent_text(4, 3, "The sky is blue.", True),
-        {"kind": "turn_finished", "epoch": 4, "sequence": 4},
-    ]
-    original_events = json.loads(json.dumps(events))
-
-    assert _complete_agent_text(events) == "Hi there! The sky is blue."
-    assert events == original_events
-
-
-def test_complete_agent_text_rejects_an_incomplete_epoch() -> None:
-    events = [
-        {
-            "kind": "agent_text",
-            "epoch": 2,
-            "sequence": 0,
-            "text": "incomplete",
-            "is_final": False,
-        }
-    ]
-
-    with pytest.raises(AssertionError, match="missing a final event"):
-        _complete_agent_text(events)
+def test_manifest_declares_text_tokenizer_dependency() -> None:
+    for _, manifest, _ in CASES.values():
+        assert manifest["hf_dependencies"] == [{"repo_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2"}]

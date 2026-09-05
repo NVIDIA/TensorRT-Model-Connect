@@ -4,13 +4,13 @@
  */
 
 #include "families/qwen_vl/runtime/cuda_stream.h"
+#include "families/qwen_vl/runtime/distributed_runtime.h"
 #include "families/qwen_vl/runtime/pipeline.h"
 #include "families/qwen_vl/runtime/plugin_helpers.h"
 #include "families/qwen_vl/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
+#include "trtmc/runtime/trt_backend.h"
 
-#include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -29,31 +29,6 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
 std::string section_text(const BundleReader& bundle, const char* name) {
     const auto& data = require_section(bundle, name);
     return std::string(data.begin(), data.end());
-}
-
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::int32_t require_rank(std::int32_t size) {
-    require_nccl(size);
-    if (size == 1)
-        return 0;
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("Qwen-VL TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= size)
-        throw std::runtime_error("Qwen-VL RANK is outside tensor_parallel_size");
-    return static_cast<std::int32_t>(rank);
 }
 
 QwenVlKvCacheNames kv_names(const nlohmann::json& config, std::int32_t layers) {
@@ -88,32 +63,54 @@ std::vector<TensorInfo> lora_contract(const ITrtModule& module) {
 } // namespace trtmc::qwen_vl_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("qwen_vl does not support --kv-cache-size");
     using namespace trtmc;
     const auto runtime = qwen_vl_factory::section_text(context.reader, "runtime.json");
     const auto config = nlohmann::json::parse(runtime);
     const auto tp_size = config.at("tensor_parallel_size").get<std::int32_t>();
     if (tp_size <= 0)
         throw std::runtime_error("Qwen-VL tensor_parallel_size must be positive");
-    const auto rank = qwen_vl_factory::require_rank(tp_size);
-    const std::string decode_section =
-        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(rank) + ".plan";
-    const auto& decode_plan =
-        qwen_vl_factory::require_section(context.reader, decode_section.c_str());
-    const auto& prefill_plan = qwen_vl_factory::require_section(context.reader, "prefill.plan");
-    const auto& vision_plan = qwen_vl_factory::require_section(context.reader, "vision.plan");
+    auto group = qwen_vl::initialize_tensor_parallel_group(tp_size);
 
     auto stream = std::make_shared<QwenVlCudaStream>();
     if (!stream->ok())
         throw std::runtime_error("Qwen-VL failed to create its CUDA stream");
     ModuleCreateOptions options{};
     options.stream = stream->get();
-    auto decode =
-        load_trt_module_from_plan(&context.backend, &decode_plan, decode_section.c_str(), options);
-    auto prefill =
-        load_trt_module_from_plan(&context.backend, &prefill_plan, "prefill.plan", options);
-    auto vision = load_trt_module_from_plan(&context.backend, &vision_plan, "vision.plan", options);
-    decode.module->keep_alive(stream);
-    prefill.module->keep_alive(stream);
+    std::unique_ptr<ITrtModule> decode;
+    std::unique_ptr<ITrtModule> prefill;
+    if (tp_size > 1) {
+        options.distributed_communicator = group.communicator;
+        options.distributed_owner = group.owner;
+        const std::string section = "engine.rank" + std::to_string(group.rank) + ".plan";
+        const auto plan = qwen_vl_factory::require_section(context.reader, section.c_str());
+        auto modules =
+            context.backend.create_dual_profile_modules(plan.data(), plan.size(), options);
+        if (modules.decode == nullptr || !modules.decode->ok() || modules.prefill == nullptr ||
+            !modules.prefill->ok()) {
+            throw std::runtime_error(
+                "Qwen-VL tensor-parallel engine did not create both profile contexts");
+        }
+        decode = std::move(modules.decode);
+        prefill = std::move(modules.prefill);
+    } else {
+        const auto decode_plan = qwen_vl_factory::require_section(context.reader, "engine.plan");
+        const auto prefill_plan = qwen_vl_factory::require_section(context.reader, "prefill.plan");
+        auto loaded_decode =
+            load_trt_module_from_plan(&context.backend, &decode_plan, "engine.plan", options);
+        auto loaded_prefill =
+            load_trt_module_from_plan(&context.backend, &prefill_plan, "prefill.plan", options);
+        decode = std::move(loaded_decode.module);
+        prefill = std::move(loaded_prefill.module);
+    }
+    const auto vision_plan = qwen_vl_factory::require_section(context.reader, "vision.plan");
+    ModuleCreateOptions vision_options{};
+    vision_options.stream = stream->get();
+    auto vision =
+        load_trt_module_from_plan(&context.backend, &vision_plan, "vision.plan", vision_options);
+    decode->keep_alive(stream);
+    prefill->keep_alive(stream);
     vision.module->keep_alive(stream);
 
     const auto layers = config.at("num_layers").get<std::int32_t>();
@@ -122,12 +119,12 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("Qwen-VL runtime.json has invalid cache geometry");
     auto names = qwen_vl_factory::kv_names(config, layers);
     const auto cache_name = names.cache_k.front();
-    const auto shape = decode.module->tensor_shape(cache_name);
+    const auto shape = decode->tensor_shape(cache_name);
     if (shape.size() < 2 || shape[1] <= 0)
         throw std::runtime_error("Qwen-VL decoder cache shape is invalid");
     auto state = std::make_unique<QwenVlKvCache>(
         layers, max_cache, static_cast<std::int32_t>(shape[1]), options.stream,
-        decode.module->tensor_dtype(cache_name), std::move(names));
+        decode->tensor_dtype(cache_name), std::move(names));
 
     auto tokenizer = create_tokenizer_from_bundle(context.reader);
     if (!tokenizer)
@@ -139,16 +136,15 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     model.id_eos_ids = config.at("id_eos_ids").get<std::vector<std::int32_t>>();
     model.image_token_id = config.at("image_token_id").get<std::int32_t>();
     model.vision_output_dim = config.at("vision_output_dim").get<std::int32_t>();
-    model.has_position_input = decode.module->has_input("position_id");
+    model.has_position_input = decode->has_input("position_id");
     model.num_layers = layers;
     model.prefill_max_length = config.at("prefill_max_length").get<std::int32_t>();
     model.present_k_pattern = config.at("io_map").at("present_k_pattern").get<std::string>();
     model.present_v_pattern = config.at("io_map").at("present_v_pattern").get<std::string>();
     auto preprocess = qwen_vl_parse_preprocess_config(runtime);
     auto adapters = std::make_shared<qwen_vl::LoraAdapterCache>(
-        qwen_vl_factory::lora_contract(*decode.module), options.stream);
-    return new QwenVlPipeline(std::move(decode.module), std::move(vision.module), std::move(state),
+        qwen_vl_factory::lora_contract(*decode), options.stream);
+    return new QwenVlPipeline(std::move(decode), std::move(vision.module), std::move(state),
                               std::move(model), std::move(preprocess), options.stream,
-                              std::move(tokenizer), "", std::move(prefill.module),
-                              std::move(adapters));
+                              std::move(tokenizer), "", std::move(prefill), std::move(adapters));
 }

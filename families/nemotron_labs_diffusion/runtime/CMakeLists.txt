@@ -35,6 +35,23 @@ install(TARGETS trtmc_model_nemotron_labs_diffusion
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_nemotron_labs_diffusion_chat_template
+    ${PROJECT_SOURCE_DIR}/families/nemotron_labs_diffusion/tests/cpp/test_chat_template.cpp
+  )
+  target_include_directories(test_nemotron_labs_diffusion_chat_template PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(test_nemotron_labs_diffusion_chat_template PRIVATE
+    trtmc_model_nemotron_labs_diffusion
+  )
+  target_compile_options(test_nemotron_labs_diffusion_chat_template PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME nemotron_labs_diffusion_chat_template
+    COMMAND test_nemotron_labs_diffusion_chat_template
+  )
+
   add_executable(test_nemotron_labs_diffusion_runtime_config
     ${PROJECT_SOURCE_DIR}/families/nemotron_labs_diffusion/tests/cpp/test_nemotron_labs_diffusion_runtime_config.cpp
   )

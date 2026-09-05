@@ -37,12 +37,9 @@ struct FluxDiffusionConfig {
     int32_t text_encoder_dim{0};
 
     int32_t num_vae_caches{0};
-    std::vector<float> latents_mean;
-    std::vector<float> latents_std;
     std::vector<int32_t> patch_size;
     std::vector<int32_t> axes_dims_rope;
     float rope_theta{10000.0F};
-    std::string vae_model_id;
 
     bool guidance_embeds{false};
     bool use_rope{true};
@@ -68,9 +65,6 @@ struct FluxPreprocessorWeights {
     std::vector<float> time_emb_0_bias;
     std::vector<float> time_emb_2_weight;
     std::vector<float> time_emb_2_bias;
-
-    std::vector<float> time_proj_weight;
-    std::vector<float> time_proj_bias;
 
     std::vector<float> text_proj_weight;
     std::vector<float> text_proj_bias;

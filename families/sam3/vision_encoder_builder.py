@@ -673,6 +673,7 @@ def build_sam3_vision_encoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
     pixel_values = network.add_input("pixel_values", trt.float32, (-1, 3, image_size, image_size))

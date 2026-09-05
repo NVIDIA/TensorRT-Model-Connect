@@ -10,13 +10,13 @@
     {
       "name": "wan22-ti2v-5b-l0",
       "premerge": true,
+      "reference_backend": "invariant_only",
       "runtime_timeout_s": 14400,
       "test_type": "diffusion",
       "test_prompt": "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage",
       "num_inference_steps": 15,
       "guidance_scale": 5.0,
-      "seed": 42,
-      "reference_precision": "bf16"
+      "seed": 42
     }
   ],
   "tensor_parallel_size": 1,

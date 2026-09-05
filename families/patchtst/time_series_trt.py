@@ -38,6 +38,7 @@ def build_serialized_network(
     tag: str = "time_series",
 ) -> bytes:
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.avg_timing_iterations = 8
     config.max_aux_streams = 0
     config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)

@@ -3,10 +3,6 @@
     "min_pixel_mean": 0.02,
     "max_pixel_mean": 0.98,
     "min_pixel_std": 0.01,
-    "contract_min_pixel_mean": 0.02,
-    "contract_max_pixel_mean": 0.98,
-    "contract_min_pixel_std": 0.01,
-    "contract_psnr_threshold": 28.0,
-    "contract_ssim_threshold": 0.97
+    "contract_min_frame_count": 320
   }
 }

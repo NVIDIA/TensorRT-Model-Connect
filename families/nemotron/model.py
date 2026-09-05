@@ -222,9 +222,9 @@ _BUNDLE_FILES = (
 
 
 def _chat_template(model_dir: Path) -> bytes:
-    value = json.loads(
-        (model_dir / "tokenizer_config.json").read_text(encoding="utf-8")
-    ).get("chat_template")
+    value = json.loads((model_dir / "tokenizer_config.json").read_text(encoding="utf-8")).get(
+        "chat_template"
+    )
     if not isinstance(value, str) or not value:
         raise ValueError("Nemotron tokenizer_config.json requires chat_template")
     return value.encode("utf-8")
@@ -267,6 +267,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Nemotron bundle through family-owned code only."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("nemotron does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("nemotron does not support image_height")
 
@@ -327,7 +330,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     config.raw.pop("_decoder_engine_role", None)
 
-    writer.set_header(family="nemotron", task=request.task, backend="trt")
+    writer.set_header(family="nemotron", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", decode)
     writer.add_bytes("prefill.plan", prefill)
     writer.add_json(

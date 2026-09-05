@@ -214,6 +214,7 @@ def build_sana_wm_refiner_text_connector_engine(
     logger = get_process_trt_logger(trt_module, verbose=verbose)
     builder = trt_module.Builder(logger)
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt_module.MemoryPoolType.WORKSPACE, 16 << 30)
 
     network = builder.create_network(
@@ -498,6 +499,7 @@ def _build_exact_sana_wm_refiner_text_connector_engine(
     logger = get_process_trt_logger(trt_module, verbose=verbose)
     builder = trt_module.Builder(logger)
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt_module.MemoryPoolType.WORKSPACE, 16 << 30)
     network = builder.create_network(
         1 << int(trt_module.NetworkDefinitionCreationFlag.STRONGLY_TYPED)

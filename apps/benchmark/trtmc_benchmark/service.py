@@ -98,6 +98,10 @@ class BenchmarkService:
                 "operation": case.operation,
                 "artifact_dir": directory_name,
                 "metrics": metrics,
+                "samples_ms": [
+                    float(observation["runtime_e2e_wall_ms"])
+                    for observation in worker_result["observations"]
+                ],
                 "output_summary": worker_result.get("output_summary", {}),
                 "load_ms": worker_result.get("load_ms"),
                 "timing_scope": worker_result.get("timing_scope"),
@@ -146,9 +150,7 @@ def _gpu_environment() -> dict[str, Any]:
         "--format=csv,noheader,nounits",
     ]
     try:
-        completed = subprocess.run(
-            command, check=True, capture_output=True, text=True, timeout=5
-        )
+        completed = subprocess.run(command, check=True, capture_output=True, text=True, timeout=5)
         gpus = []
         for row in csv.reader(io.StringIO(completed.stdout)):
             if len(row) != 4:

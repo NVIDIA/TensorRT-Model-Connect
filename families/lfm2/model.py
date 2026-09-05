@@ -632,6 +632,7 @@ def build_lfm2_engine(
     flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     network = builder.create_network(flags)
     builder_config = builder.create_builder_config()
+    builder_config.builder_optimization_level = 1
     # Match the qualified native-KV builder ceiling. This is build-time tactic
     # scratch, not an eager runtime allocation.
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
@@ -974,6 +975,9 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one dense LFM2 bundle without shared model orchestration."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("lfm2 does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("lfm2 does not support image_height")
 
@@ -985,7 +989,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.max_batch_size != 1:
         raise NotImplementedError("lfm2 does not support max_batch_size")
-
 
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
@@ -1033,7 +1036,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         decoder_engine_layout="single",
     )
 
-    writer.set_header(family="lfm2", task=request.task, backend="trt")
+    writer.set_header(family="lfm2", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json("runtime.json", runtime_config)
     for filename in _BUNDLE_FILES:

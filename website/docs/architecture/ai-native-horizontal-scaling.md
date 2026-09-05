@@ -77,52 +77,35 @@ by the existing BYOK subgraph-replacement use case.
 
 ## System overview
 
-This diagram shows control and data flow for one build and one load. It does
-not represent source dependencies.
+This sequence shows control and data flow for one build and one load. Sequence
+arrows represent calls and returned data only; source dependencies are shown
+separately below.
 
 ```mermaid
-flowchart LR
-  Model["HF model ID or local checkpoint"]
+sequenceDiagram
+  participant User
+  participant Resolver
+  participant BuildCore
+  participant FamilyBuild as family/model.py
+  participant TRT as TensorRT Build API
+  participant Bundle
+  participant Loader as Runtime Loader
+  participant FamilyRuntime as family DSO
+  participant Backend as TensorRT Backend
 
-  subgraph BuildTime["Build time: Python"]
-    Resolver["Model resolver<br/>unique family + default task"]
-    FamilySupport["family/support.py<br/>identity + tasks"]
-    BuildCore["Build core<br/>resolved request"]
-    FamilyBuild["family/model.py<br/>build(request, writer)"]
-    TRTBuild["TensorRT Build API"]
-    Writer["BundleWriter"]
-  end
-
-  Bundle["Bundle<br/>header + named sections"]
-
-  subgraph RunTime["Runtime: native C++"]
-    RuntimeLoader["Runtime loader<br/>read header + dlopen"]
-    FamilySO["family DSO<br/>create task"]
-    Pipeline["family pipeline<br/>dispatch + bindings"]
-    TaskAPI["Abstract Task API"]
-    EngineAPI["Abstract Engine API"]
-    Backend["TensorRT backend"]
-  end
-
-  App["User application"]
-
-  Model -->|"identity metadata"| Resolver
-  Resolver -.->|"query every family"| FamilySupport
-  Resolver -->|"resolved build request"| BuildCore
-  BuildCore -.->|"call once"| FamilyBuild
-  FamilyBuild -->|"construct graph and engine"| TRTBuild
-  TRTBuild -->|"engine bytes"| FamilyBuild
-  FamilyBuild -->|"stream named sections"| Writer
-  Writer ==>|"publish"| Bundle
-
-  App -->|"load(bundle)"| RuntimeLoader
-  Bundle ==>|"bounded read"| RuntimeLoader
-  RuntimeLoader -.->|"load exact DSO"| FamilySO
-  FamilySO -->|"create"| Pipeline
-  App -->|"task call"| TaskAPI
-  TaskAPI -->|"virtual dispatch"| Pipeline
-  Pipeline -->|"execute engine"| EngineAPI
-  EngineAPI --> Backend
+  User->>Resolver: model ID or local checkpoint
+  Resolver-->>BuildCore: unique family and task
+  BuildCore->>FamilyBuild: build(request, writer)
+  FamilyBuild->>TRT: construct and serialize engines
+  TRT-->>FamilyBuild: engine bytes
+  FamilyBuild->>Bundle: stream named sections
+  User->>Loader: load(bundle)
+  Loader->>Bundle: bounded header and section read
+  Loader->>FamilyRuntime: dlopen exact family and call factory
+  FamilyRuntime->>Backend: create engines through Engine API
+  FamilyRuntime-->>User: abstract Task interface
+  User->>FamilyRuntime: task call through interface
+  FamilyRuntime->>Backend: bind and enqueue
 ```
 
 There are two model-control transfers:
@@ -193,28 +176,11 @@ Key properties:
 - No family points to another family.
 
 ```mermaid
-classDiagram
-direction BT
-
-class IFamilySupport {
-  <<protocol>>
-  +describe(metadata)
-}
-
-class IFamilyBuild {
-  <<protocol>>
-  +build(request, writer)
-}
-
-class Family1Support
-class Family1Model
-class Family2Support
-class Family2Model
-
-IFamilySupport <|.. Family1Support : implements
-IFamilySupport <|.. Family2Support : implements
-IFamilyBuild <|.. Family1Model : implements
-IFamilyBuild <|.. Family2Model : implements
+flowchart BT
+  Family1Support["family1/support.py::describe"] --> SupportContract["Model support protocol"]
+  Family2Support["family2/support.py::describe"] --> SupportContract
+  Family1Build["family1/model.py::build"] --> BuildSignature["Structural build(request, writer) contract<br/>signature conformance; never subclasses"]
+  Family2Build["family2/model.py::build"] --> BuildSignature
 ```
 
 ### Runtime dependencies
@@ -251,6 +217,8 @@ Key properties:
   not `libtrtmc_runtime.so` implementation.
 - A family pipeline drives engines through the abstract Engine API and does not
   link `libtrtmc_backend_trt.so`.
+- A family whose graph uses distributed collectives owns its communicator and
+  NCCL loading. A replicated plan that only selects by rank does not load NCCL.
 - The backend implements the Engine API and does not depend on any family.
 - A real model-specific TensorRT custom plugin may be compiled directly into
   its owner family DSO. It does not become shared backend implementation.
@@ -365,7 +333,7 @@ families/<family>/
   tests/
     test_e2e.py
     manifests/*.json          # cases + their checkpoint and premerge declarations
-    thresholds/*.json
+    thresholds/*.json             # optional numeric overrides only
     data/ and assets/
     cpp/*.cpp                 # optional family-native tests
 ```
@@ -483,8 +451,9 @@ def build(request, writer):
     ...
 ```
 
-- `request` contains the resolved local model path, family, task, precision,
-  parallel sizes, and explicit shape limits.
+- `request` contains the resolved local model path, family, task, backend,
+  precision, parallel sizes, explicit shape limits, and the direct dynamic-KV
+  opt-in.
 - `writer` exposes header fields and streaming named sections.
 - The family reads config and weights, builds TensorRT engines, and writes its
   own bundle sections.
@@ -539,8 +508,9 @@ Runtime dispatch occurs once:
 2. Runtime reads the fixed header and bounded section table.
 3. Runtime derives and loads `libtrtmc_model_<family>.so` from the explicit
    runtime root.
-4. Runtime finds the fixed family-factory symbol and passes BundleReader and
-   Engine API contracts.
+4. Runtime finds the fixed family-factory symbol and passes BundleReader,
+   Engine API, and the direct runtime KV budget. Backend-only RTX cache and
+   whole-graph options are applied through the Engine API wrapper.
 5. Family creates engines, bindings, and a concrete task pipeline.
 6. Runtime returns the abstract Task interface. Later requests call the family
    pipeline directly.
@@ -594,7 +564,7 @@ kernel registry, or depend on examples.
 | central Python model registry | discovery imports support only; build imports one `model.py` |
 | central CMake source list | each family defines its own DSO target |
 | shared model helper | keep family-local copies |
-| global E2E runner/comparator | each family owns runner, reference, thresholds, and fixtures |
+| global E2E runner/comparator | each family owns runner, reference, optional numeric thresholds, and fixtures |
 | one family failure affects runtime | a process loads only the requested family DSO |
 
 Multiple teams or agents can work in different family directories without
@@ -614,10 +584,10 @@ Every family proves a real closed loop:
 4. Family creates real engines, binds tensors, and executes a real Task call.
 5. Output meets family-owned correctness criteria.
 
-Visual and diffusion families compare deterministic native outputs directly
-with their official reference and owner-local numeric thresholds, including
-latent, SSIM, and low-frequency checks where applicable. A central VLM judge
-is not a substitute for this direct parity proof.
+Each family owns its effective correctness contract. A case uses direct
+official-reference parity only when that family contract declares it; other
+cases may use task-level, artifact, or runtime invariants. There is no generic
+fallback comparator or repository-wide visual threshold set.
 
 Core tests only shared boundaries: discovery uniqueness, container bounds,
 safe DSO path derivation, factory loading, and error propagation.

@@ -52,6 +52,8 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 } // namespace trtmc::timm_efficientnet
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("timm_efficientnet does not support --kv-cache-size");
     const auto& config_data =
         trtmc::timm_efficientnet::require_section(context.reader, "runtime.json");
     const auto& plan = trtmc::timm_efficientnet::require_section(context.reader, "engine.plan");

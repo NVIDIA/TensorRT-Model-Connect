@@ -156,7 +156,7 @@ class _TimmVitModel:
             parallel.validate()
             if quant_ctx is not None:
                 raise ValueError("timm_vit tensor-parallel builds do not support quantization")
-            from .model.parallel import build_timm_vit_tp_engine
+            from .parallel import build_timm_vit_tp_engine
 
             return build_timm_vit_tp_engine(
                 config,
@@ -210,10 +210,9 @@ class _TimmVitModel:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network(
-            1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-        )
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
         trt_config.avg_timing_iterations = 8
         trt_config.max_aux_streams = 0
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
@@ -473,6 +472,9 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm ViT bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("timm_vit does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("timm_vit does not support image_height")
 
@@ -509,7 +511,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     model = _TimmVitModel()
     weights = model.load_weights(str(model_dir), config, precision=precision)
-    writer.set_header(family="timm_vit", task=request.task, backend="trt")
+    writer.set_header(family="timm_vit", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(
