@@ -11,7 +11,10 @@
       "test_input_audio": "data/Recording.wav",
       "reference_precision": "fp16",
       "language": "en-US",
-      "chunk_ms": 1120
+      "chunk_ms": 1120,
+      "max_new_tokens": 80,
+      "att_context_left": 56,
+      "att_context_right": 13
     }
   ],
   "tensor_parallel_size": 1,

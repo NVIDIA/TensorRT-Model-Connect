@@ -21,6 +21,8 @@ struct ModuleCreateOptions {
     cudaStream_t stream{nullptr};            // nullptr = backend creates one
     void* distributed_communicator{nullptr}; // TensorRT 11.0+ NCCL communicator, optional
     std::shared_ptr<void> distributed_owner; // keeps communicator alive
+    const char* runtime_cache_path{""};      // TensorRT-RTX JIT cache, optional
+    bool cuda_graphs{false};                 // TensorRT-RTX whole-graph capture
 };
 
 struct ModuleExternalBinding {

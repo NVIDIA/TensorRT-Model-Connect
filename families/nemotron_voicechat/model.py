@@ -16,7 +16,6 @@ from .config import ModelConfig
 
 VOICECHAT_MODEL_ID = "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B"
 TEXT_MODEL_ID = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
-TEXT_MODEL_REVISION = "6533e8de2c68e4536bf7c411d7a3ce5734111476"
 _TEXT_ASSETS = ("tokenizer.json",)
 
 if TYPE_CHECKING:
@@ -100,7 +99,6 @@ def _resolve_text_assets() -> Path:
     snapshot = Path(
         snapshot_download(
             repo_id=TEXT_MODEL_ID,
-            revision=TEXT_MODEL_REVISION,
             allow_patterns=list(_TEXT_ASSETS),
         )
     )
@@ -210,6 +208,9 @@ def _runtime_config(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build every VoiceChat component and package one native TRT bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("nemotron_voicechat does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("nemotron_voicechat does not support image_height")
 
@@ -250,7 +251,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     stt, speech = _voicechat_sections(raw)
     thinker = _thinker_config(model_path, precision)
     verbose = request.verbose
-    writer.set_header(family="nemotron_voicechat", task=request.task, backend="trt")
+    writer.set_header(family="nemotron_voicechat", task=request.task, backend=request.backend)
 
     thinker_weights = native_core.VoiceChatThinkerBuilder().load_weights(str(model_path), thinker)
     thinker_plan = native_core.build_thinker_engine(

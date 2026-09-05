@@ -61,6 +61,27 @@ def test_operational_gate_rejects_non_distinct_masks() -> None:
         "binary_masks": True,
         "mask_foreground_pixels": [2000] * 5,
         "temporally_distinct_masks": False,
+        "device_mask_ordinal": 0,
+        "device_metadata_exact": True,
+        "device_masks_match_host": True,
+    }
+    with pytest.raises(AssertionError):
+        assert_operational_receipt(receipt)
+
+
+def test_operational_gate_requires_device_masks_to_match_host() -> None:
+    receipt = {
+        "metadata_exact": True,
+        "same_session_repeat_exact": True,
+        "bbox_xyxy": [136.0, 160.0, 952.0, 1120.0],
+        "detector_score": 1.0,
+        "label": 1,
+        "binary_masks": True,
+        "mask_foreground_pixels": [2000] * 5,
+        "temporally_distinct_masks": True,
+        "device_mask_ordinal": 0,
+        "device_metadata_exact": True,
+        "device_masks_match_host": False,
     }
     with pytest.raises(AssertionError):
         assert_operational_receipt(receipt)

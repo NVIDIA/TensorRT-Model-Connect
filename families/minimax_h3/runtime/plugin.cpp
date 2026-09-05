@@ -72,6 +72,8 @@ MiniMaxH3ModuleLoader make_loader(IBackend& backend, PlanMap plans) {
 } // namespace trtmc::minimax_h3_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("minimax_h3 does not support --kv-cache-size");
     using namespace trtmc;
     const auto& runtime = minimax_h3_factory::require_section(context.reader, "runtime.json");
     const auto config = nlohmann::json::parse(runtime.begin(), runtime.end());

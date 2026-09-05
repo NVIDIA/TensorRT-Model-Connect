@@ -871,6 +871,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _QwenMoeModel, 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen-MoE bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("qwen_moe does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("qwen_moe does not support image_height")
 
@@ -913,7 +916,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _QwenMoeModel()
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config, precision=precision)
-    writer.set_header(family="qwen_moe", task=request.task, backend="trt")
+    writer.set_header(family="qwen_moe", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

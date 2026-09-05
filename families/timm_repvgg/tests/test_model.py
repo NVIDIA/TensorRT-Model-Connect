@@ -164,6 +164,8 @@ def test_plain_build_publishes_abstract_classification_bundle(
 
     request = SimpleNamespace(
         model_dir=tmp_path,
+        backend="trt",
+        dynamic_kv_cache=False,
         family="timm_repvgg",
         task="classification",
         precision="fp16",

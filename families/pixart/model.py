@@ -572,6 +572,9 @@ def _serialize_preprocessor_weights(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one PixArt image-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("pixart does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("pixart does not support max_sequence_length")
 
@@ -625,7 +628,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         parallel_config=parallel,
     )
 
-    writer.set_header(family="pixart", task=request.task, backend="trt")
+    writer.set_header(family="pixart", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.0.plan", components["text_encoders"][0][1])
     if parallel.enabled:
         plans = components["denoiser_ranks"]

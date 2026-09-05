@@ -14,10 +14,6 @@ from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import copy
 
 
-def _enabled(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _set_runpath(path: Path, runpath: str) -> None:
     try:
         subprocess.run(
@@ -28,6 +24,19 @@ def _set_runpath(path: Path, runpath: str) -> None:
         )
     except (OSError, subprocess.CalledProcessError) as error:
         raise ConanException(f"cannot set RUNPATH on {path.name}: {error}") from error
+
+
+def _needed_libraries(path: Path) -> tuple[str, ...]:
+    try:
+        result = subprocess.run(
+            ["patchelf", "--print-needed", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ConanException(f"cannot read dependencies from {path.name}: {error}") from error
+    return tuple(result.stdout.splitlines())
 
 
 def _make_executable(path: Path) -> None:
@@ -46,7 +55,7 @@ class TensorRTModelConnectConan(ConanFile):
 
     def generate(self) -> None:
         toolchain = CMakeToolchain(self)
-        toolchain.cache_variables["TRTMC_BUILD_TESTS"] = _enabled("TRTMC_CONAN_ENABLE_TEST_TARGETS")
+        toolchain.cache_variables["TRTMC_BUILD_TESTS"] = False
         for name in (
             "TRT_ROOT",
             "CMAKE_CUDA_ARCHITECTURES",
@@ -81,7 +90,7 @@ class TensorRTModelConnectConan(ConanFile):
                 )
         copy(
             self,
-            "libtrtmc_backend_trt.so",
+            "libtrtmc_backend_trt*.so",
             src=str(build),
             dst=str(module_bin),
             keep_path=False,
@@ -129,7 +138,7 @@ class TensorRTModelConnectConan(ConanFile):
             path.name.removeprefix("libtrtmc_model_").removesuffix(".so")
             for path in module_bin.glob("libtrtmc_model_*.so")
         }
-        if not expected or packaged != expected:
+        if packaged != expected:
             missing = sorted(expected - packaged)
             extra = sorted(packaged - expected)
             raise ConanException(
@@ -144,6 +153,7 @@ class TensorRTModelConnectConan(ConanFile):
             for library in ("libtrtmc_core.so", "libtrtmc_runtime.so")
         ]
         backend = module_bin / "libtrtmc_backend_trt.so"
+        backends = sorted(module_bin.glob("libtrtmc_backend_trt*.so"))
         byok = module_bin / "libtrtmc_byok_tvm_ffi.so"
         benchmark_worker = module_bin / "trtmc_benchmark_worker"
         dataset_benchmark = module_bin / "trtmc_dataset_benchmark"
@@ -165,19 +175,19 @@ class TensorRTModelConnectConan(ConanFile):
             _set_runpath(library, "$ORIGIN:/usr/local/cuda/lib64")
         _set_runpath(
             byok,
-            "$ORIGIN:$ORIGIN/../../tensorrt_libs:$ORIGIN/../../tvm_ffi/lib:"
-            "/usr/local/cuda/lib64",
+            "$ORIGIN:$ORIGIN/../../tensorrt_libs:$ORIGIN/../../tvm_ffi/lib:/usr/local/cuda/lib64",
         )
         for library in (
-            backend,
+            *backends,
             *module_bin.glob("libtrtmc_model_*.so"),
         ):
-            torch_runpath = (
-                ":$ORIGIN/../../torch/lib"
-                if library.name == "libtrtmc_model_sana_wm.so"
-                else ""
-            )
+            runpaths = ["$ORIGIN", "$ORIGIN/../../tensorrt_libs", "/usr/local/cuda/lib64"]
+            if any(
+                dependency.startswith(("libtorch", "libc10"))
+                for dependency in _needed_libraries(library)
+            ):
+                runpaths.append("$ORIGIN/../../torch/lib")
             _set_runpath(
                 library,
-                "$ORIGIN:$ORIGIN/../../tensorrt_libs:/usr/local/cuda/lib64" + torch_runpath,
+                ":".join(runpaths),
             )

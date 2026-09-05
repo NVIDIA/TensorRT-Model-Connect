@@ -8,11 +8,11 @@
     {
       "name": "nemotron-speech-streaming-en-0.6b-tp4",
       "test_input_audio": "data/Recording.wav",
-      "reference_precision": "fp16",
+      "reference_precision": "fp32",
       "chunk_ms": 1120
     }
   ],
   "tensor_parallel_size": 4,
-  "precision": "fp16",
+  "precision": "fp32",
   "max_sequence_length": 128
 }

@@ -2,6 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 Pillow
-diffusers
+accelerate>=1.1.1
+dashscope
+decord
+diffusers>=0.31.0
+easydict
 einops==0.8.1
+flash-attn
 ftfy==6.3.1
+imageio[ffmpeg]
+librosa
+numpy>=1.23.5,<2
+opencv-python>=4.9.0.80
+peft
+tokenizers>=0.20.3
+tqdm
+transformers>=4.49.0,<=4.51.3

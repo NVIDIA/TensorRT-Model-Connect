@@ -3,12 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/bark/runtime/distributed_runtime.h"
 #include "families/bark/runtime/pipeline.h"
 #include "families/bark/runtime/plugin_helpers.h"
 #include "trtmc/runtime/family_factory.h"
 
-#include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -22,31 +21,6 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     if (section == nullptr || section->length == 0)
         throw std::runtime_error("bundle section is missing or empty: " + std::string(name));
     return bundle.read_section(name);
-}
-
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::int32_t require_rank(std::int32_t size) {
-    require_nccl(size);
-    if (size == 1)
-        return 0;
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("Bark TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= size)
-        throw std::runtime_error("Bark RANK is outside tensor_parallel_size");
-    return static_cast<std::int32_t>(rank);
 }
 
 BarkConfig parse_config(const nlohmann::json& json) {
@@ -97,38 +71,83 @@ BarkConfig parse_config(const nlohmann::json& json) {
 } // namespace trtmc::bark_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("bark does not support --kv-cache-size");
     using namespace trtmc;
     const auto& runtime_data = bark_factory::require_section(context.reader, "runtime.json");
     const auto document = nlohmann::json::parse(runtime_data.begin(), runtime_data.end());
     const auto tp_size = document.at("tensor_parallel_size").get<std::int32_t>();
     if (tp_size <= 0)
         throw std::runtime_error("Bark tensor_parallel_size must be positive");
-    const auto rank = bark_factory::require_rank(tp_size);
+    const auto group = bark::initialize_tensor_parallel_group(tp_size);
     const std::string semantic_section =
         tp_size == 1 ? "semantic.decode.plan"
-                     : "semantic.decode.rank" + std::to_string(rank) + ".plan";
+                     : "semantic.decode.rank" + std::to_string(group.rank) + ".plan";
     const std::string semantic_prefill_section =
         tp_size == 1 ? "semantic.prefill.plan"
-                     : "semantic.prefill.rank" + std::to_string(rank) + ".plan";
+                     : "semantic.prefill.rank" + std::to_string(group.rank) + ".plan";
     const std::string coarse_section =
-        tp_size == 1 ? "coarse.decode.plan" : "coarse.decode.rank" + std::to_string(rank) + ".plan";
+        tp_size == 1 ? "coarse.decode.plan"
+                     : "coarse.decode.rank" + std::to_string(group.rank) + ".plan";
     const std::string coarse_prefill_section =
         tp_size == 1 ? "coarse.prefill.plan"
-                     : "coarse.prefill.rank" + std::to_string(rank) + ".plan";
+                     : "coarse.prefill.rank" + std::to_string(group.rank) + ".plan";
     ModuleCreateOptions options{};
-    const auto load = [&](const char* name, cudaStream_t stream = nullptr) {
-        auto module_options = options;
+    ModuleCreateOptions decoder_options{};
+    if (tp_size > 1) {
+        decoder_options.distributed_communicator = group.communicator;
+        decoder_options.distributed_owner = group.owner;
+    }
+    const auto load = [&](const char* name, const ModuleCreateOptions& base_options,
+                          cudaStream_t stream = nullptr) {
+        auto module_options = base_options;
         module_options.stream = stream;
         const auto& plan = bark_factory::require_section(context.reader, name);
         return load_trt_module_from_plan(&context.backend, &plan, name, module_options).module;
     };
-    auto semantic = load(semantic_section.c_str());
-    const auto stream = semantic->stream();
-    auto coarse = load(coarse_section.c_str(), stream);
-    auto semantic_prefill = load(semantic_prefill_section.c_str(), stream);
-    auto coarse_prefill = load(coarse_prefill_section.c_str(), stream);
-    auto codec = load("codec.plan", stream);
-    auto fine = load("fine.plan", stream);
+    std::unique_ptr<ITrtModule> semantic;
+    std::unique_ptr<ITrtModule> coarse;
+    std::unique_ptr<ITrtModule> semantic_prefill;
+    std::unique_ptr<ITrtModule> coarse_prefill;
+    cudaStream_t stream = nullptr;
+    if (tp_size == 1) {
+        const auto& semantic_plan =
+            bark_factory::require_section(context.reader, semantic_section.c_str());
+        auto semantic_modules = context.backend.create_dual_profile_modules(
+            semantic_plan.data(), semantic_plan.size(), options);
+        if (!semantic_modules.prefill || !semantic_modules.decode ||
+            !semantic_modules.prefill->ok() || !semantic_modules.decode->ok())
+            throw std::runtime_error(
+                "Bark semantic engine does not provide prefill and decode profiles");
+        semantic_prefill = std::move(semantic_modules.prefill);
+        semantic = std::move(semantic_modules.decode);
+        semantic_prefill->set_timing_label(semantic_prefill_section);
+        semantic->set_timing_label(semantic_section);
+        stream = semantic->stream();
+
+        auto coarse_options = options;
+        coarse_options.stream = stream;
+        const auto& coarse_plan =
+            bark_factory::require_section(context.reader, coarse_section.c_str());
+        auto coarse_modules = context.backend.create_dual_profile_modules(
+            coarse_plan.data(), coarse_plan.size(), coarse_options);
+        if (!coarse_modules.prefill || !coarse_modules.decode || !coarse_modules.prefill->ok() ||
+            !coarse_modules.decode->ok())
+            throw std::runtime_error(
+                "Bark coarse engine does not provide prefill and decode profiles");
+        coarse_prefill = std::move(coarse_modules.prefill);
+        coarse = std::move(coarse_modules.decode);
+        coarse_prefill->set_timing_label(coarse_prefill_section);
+        coarse->set_timing_label(coarse_section);
+    } else {
+        semantic = load(semantic_section.c_str(), decoder_options);
+        stream = semantic->stream();
+        coarse = load(coarse_section.c_str(), decoder_options, stream);
+        semantic_prefill = load(semantic_prefill_section.c_str(), decoder_options, stream);
+        coarse_prefill = load(coarse_prefill_section.c_str(), decoder_options, stream);
+    }
+    auto codec = load("codec.plan", options, stream);
+    auto fine = load("fine.plan", options, stream);
 
     auto config = bark_factory::parse_config(document);
     const auto semantic_layers = document.at("semantic_num_layers").get<std::int32_t>();

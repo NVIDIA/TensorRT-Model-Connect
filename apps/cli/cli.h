@@ -8,6 +8,7 @@
 #include "trtmc/bundle.h"
 #include "trtmc/task.h"
 
+#include <cstdint>
 #include <iosfwd>
 #include <string>
 #include <unordered_map>
@@ -53,6 +54,9 @@ struct Command {
     std::unordered_map<std::string, std::string> options;
     std::vector<std::string> frames;
     std::vector<std::string> inputs;
+    std::uint64_t kv_cache_size_bytes{0};
+    std::string runtime_cache_path;
+    bool cuda_graphs{false};
 };
 
 Command parse_args(int argc, char** argv);

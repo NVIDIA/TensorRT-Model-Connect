@@ -57,7 +57,7 @@ from .prefill_config import (
     MAX_SEQUENCE_PREFILL_LENGTH,
     sequence_prefill_profile_lengths,
 )
-from .parallel import normalize_parallel_config
+from .parallel import ParallelConfig, normalize_parallel_config
 from .default_decoder import _apply_norm, _mark_debug_output
 
 
@@ -1980,6 +1980,9 @@ def _build_deepseek_ocr_vision_engine(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one DeepSeek-OCR vision-language bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("deepseek_ocr does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("deepseek_ocr does not support image_height")
 
@@ -1997,39 +2000,59 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "vision_language_generation":
         raise ValueError("deepseek_ocr supports only task=vision_language_generation")
-    if request.tensor_parallel_size != 1 or request.quantization not in {None, "none"}:
-        raise NotImplementedError("DeepSeek-OCR supports only single-device non-quantized builds")
+    if request.quantization not in {None, "none"}:
+        raise NotImplementedError("DeepSeek-OCR supports only non-quantized builds")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "deepseek_vl_v2":
         raise ValueError(f"DeepSeek-OCR does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
     max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
+    parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
+    parallel.validate()
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
     model = _DeepseekOcrModel()
     weights = model.load_weights(str(model_dir), config, precision=precision)
-    config.raw["_decoder_engine_role"] = "prefill"
-    prefill = model.build_engine(
-        config,
-        weights,
-        max_length,
-        precision=precision,
-        quant_ctx=None,
-        verbose=request.verbose,
-        parallel_config=None,
-    )
-    config.raw["_decoder_engine_role"] = "decode"
-    decode = model.build_engine(
-        config,
-        weights,
-        max_length,
-        precision=precision,
-        quant_ctx=None,
-        verbose=request.verbose,
-        parallel_config=None,
-    )
-    config.raw.pop("_decoder_engine_role", None)
+    writer.set_header(family="deepseek_ocr", task=request.task, backend=request.backend)
+    if parallel.enabled:
+        for rank in range(parallel.tp_size):
+            writer.add_bytes(
+                f"engine.rank{rank}.plan",
+                model.build_engine(
+                    config,
+                    weights,
+                    max_length,
+                    precision=precision,
+                    quant_ctx=None,
+                    verbose=request.verbose,
+                    parallel_config=parallel.for_rank(rank),
+                ),
+            )
+    else:
+        config.raw["_decoder_engine_role"] = "prefill"
+        prefill = model.build_engine(
+            config,
+            weights,
+            max_length,
+            precision=precision,
+            quant_ctx=None,
+            verbose=request.verbose,
+            parallel_config=parallel,
+        )
+        config.raw["_decoder_engine_role"] = "decode"
+        decode = model.build_engine(
+            config,
+            weights,
+            max_length,
+            precision=precision,
+            quant_ctx=None,
+            verbose=request.verbose,
+            parallel_config=parallel,
+        )
+        config.raw.pop("_decoder_engine_role", None)
+        writer.add_bytes("engine.plan", decode)
+        writer.add_bytes("prefill.plan", prefill)
     vision = model.build_vision_engine(
         str(model_dir), config, weights, precision=precision, verbose=request.verbose
     )
@@ -2037,7 +2060,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise RuntimeError("DeepSeek-OCR vision build returned no engine")
     vl = model.get_vl_config(config) or {}
     runtime = {
-        "tensor_parallel_size": 1,
+        "tensor_parallel_size": parallel.tp_size,
         "num_layers": config.num_hidden_layers,
         "max_cache_length": max_length,
         "vocab_size": config.vocab_size,
@@ -2047,16 +2070,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "vision_output_dim": int(vl.get("vision_output_dim", config.hidden_size)),
         "prefill_max_length": int(vl.get("prefill_max_length", max_length)),
         "io_map": {
-            "cache_k_pattern": "cache_k_{layer}",
-            "cache_v_pattern": "cache_v_{layer}",
-            "present_k_pattern": "present_k_{layer}",
-            "present_v_pattern": "present_v_{layer}",
+            "cache_k_pattern": "cache_k_{i}",
+            "cache_v_pattern": "cache_v_{i}",
+            "present_k_pattern": "present_k_{i}",
+            "present_v_pattern": "present_v_{i}",
         },
     }
     runtime.update(vl)
-    writer.set_header(family="deepseek_ocr", task=request.task, backend="trt")
-    writer.add_bytes("engine.plan", decode)
-    writer.add_bytes("prefill.plan", prefill)
     writer.add_bytes("vision.plan", vision)
     writer.add_json("runtime.json", runtime)
     for filename in (

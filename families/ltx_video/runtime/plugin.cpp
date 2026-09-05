@@ -33,6 +33,8 @@ std::string section_text(const BundleReader& bundle, const char* name) {
 } // namespace trtmc::ltx_video_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("ltx_video does not support --kv-cache-size");
     using namespace trtmc;
     const auto runtime = ltx_video_factory::section_text(context.reader, "runtime.json");
     ModuleCreateOptions options{};

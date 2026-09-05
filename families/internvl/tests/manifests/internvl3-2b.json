@@ -10,6 +10,7 @@
       "name": "internvl3-2b",
       "premerge": true,
       "reference_precision": "fp32",
+      "reference_backend": "hf_transformers",
       "prompt": "What color is the vehicle in this image? Answer in one word.",
       "max_new_tokens": 10,
       "test_image": "data/test_img.jpeg"

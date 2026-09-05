@@ -29,8 +29,10 @@ from typing import TYPE_CHECKING
 import io
 import json
 import math
+import shutil
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -73,6 +75,15 @@ _CANARY_V2_LANGUAGES = [
     "ru",
     "uk",
 ]
+
+_TOKENIZER_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenizer.model",
+)
 
 
 def _dynamic_batch_shape(network, reference, tail: tuple[int, ...]):
@@ -210,8 +221,7 @@ def _runtime_tokenizer_document(tokenizer_model: Path) -> dict[str, object]:
             "type": "Unigram",
             "unk_id": processor.unk_id(),
             "vocab": [
-                [processor.IdToPiece(index), 0.0]
-                for index in range(processor.GetPieceSize())
+                [processor.IdToPiece(index), 0.0] for index in range(processor.GetPieceSize())
             ],
         },
         "added_tokens": [],
@@ -950,10 +960,15 @@ class _CanaryModel:
         self._vl_config: dict = {}
         self._prompt_metadata: dict = {}
 
-    def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
+    def load_weights(
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        tokenizer_dir: Path,
+    ) -> WeightDict:
         w = WeightDict()
         sd, ncfg = _load_nemo_archive(model_dir)
-        tokenizer_model = _extract_tokenizer_from_nemo(model_dir, Path(model_dir), ncfg)
+        tokenizer_model = _extract_tokenizer_from_nemo(model_dir, tokenizer_dir, ncfg)
         if tokenizer_model.exists():
             self._prompt_metadata = _canary_prompt_metadata(ncfg, tokenizer_model)
 
@@ -1722,6 +1737,9 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Canary transcription bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("canary does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("canary does not support image_height")
 
@@ -1750,9 +1768,26 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _CanaryModel()
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
-    weights = model.load_weights(str(model_dir), config)
+    with tempfile.TemporaryDirectory(prefix="trtmc-canary-tokenizer-") as temporary:
+        tokenizer_dir = Path(temporary)
+        for filename in _TOKENIZER_FILES:
+            source = model_dir / filename
+            if source.is_file():
+                shutil.copyfile(source, tokenizer_dir / filename)
+        weights = model.load_weights(str(model_dir), config, tokenizer_dir)
+        tokenizer_runtime = _tokenizer_runtime_contract(tokenizer_dir)
+        tokenizer_model = tokenizer_dir / "tokenizer.model"
+        if not tokenizer_model.is_file():
+            raise FileNotFoundError("Canary archive does not contain tokenizer.model")
+        tokenizer_document = _runtime_tokenizer_document(tokenizer_model)
+        tokenizer_files = {
+            filename: (tokenizer_dir / filename).read_bytes()
+            for filename in _TOKENIZER_FILES
+            if filename != "tokenizer.json"
+            if (tokenizer_dir / filename).is_file()
+        }
     max_length = int(request.max_sequence_length or 256)
-    writer.set_header(family="canary", task=request.task, backend="trt")
+    writer.set_header(family="canary", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             writer.add_bytes(
@@ -1797,12 +1832,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             values = provider(config)
             if values:
                 runtime.update(values)
-    runtime.update(_tokenizer_runtime_contract(model_dir))
+    runtime.update(tokenizer_runtime)
     writer.add_json("runtime.json", runtime)
-    tokenizer_model = model_dir / "tokenizer.model"
-    if not tokenizer_model.is_file():
-        raise FileNotFoundError("Canary build did not produce tokenizer.model")
-    writer.add_json("tokenizer.json", _runtime_tokenizer_document(tokenizer_model))
+    writer.add_json("tokenizer.json", tokenizer_document)
     extra = (
         model.build_extra_engines(
             config, weights, max_length, precision=request.precision, verbose=request.verbose
@@ -1811,13 +1843,5 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     for name, data in extra.items():
         writer.add_bytes(name, data)
-    for filename in (
-        "tokenizer_config.json",
-        "vocab.json",
-        "merges.txt",
-        "special_tokens_map.json",
-        "tokenizer.model",
-    ):
-        path = model_dir / filename
-        if path.is_file():
-            writer.add_bytes(filename, path.read_bytes())
+    for filename, data in tokenizer_files.items():
+        writer.add_bytes(filename, data)

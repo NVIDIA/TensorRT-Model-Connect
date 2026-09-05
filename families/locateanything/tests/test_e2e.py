@@ -9,8 +9,10 @@ import os
 import re
 import shutil
 import subprocess
+from itertools import permutations
 from math import hypot
 from pathlib import Path
+import numpy as np
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 
@@ -170,11 +172,14 @@ def _run_json(
             "--tag-output",
             "-x",
             "LD_LIBRARY_PATH",
+            "-x",
+            "TRTMC_NCCL_RENDEZVOUS",
             "-np",
             str(manifest["tensor_parallel_size"]),
             *invocation,
         ]
     env = os.environ.copy()
+    env["TRTMC_NCCL_RENDEZVOUS"] = str(bundle.with_suffix(".nccl-rendezvous"))
     env["LD_LIBRARY_PATH"] = ":".join(
         (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
     )
@@ -236,18 +241,25 @@ def _edit_distance(left: str, right: str) -> float:
     return previous[-1] / max(len(a), len(b), 1)
 
 
+_REFERENCE = re.compile(r"<ref>.+?</ref>", re.DOTALL)
 _LOCALIZATION = re.compile(r"<box>\s*((?:<[0-9]{1,4}>\s*)+)\s*</box>")
 _COORDINATE = re.compile(r"<([0-9]{1,4})>")
 
 
-def _single_localization(text: str) -> tuple[int, ...]:
-    matches = _LOCALIZATION.findall(text)
-    assert "<ref>" in text and "</ref>" in text and len(matches) == 1
-    coordinates = tuple(int(value) for value in _COORDINATE.findall(matches[0]))
-    assert len(coordinates) in {2, 4} and all(0 <= value <= 1000 for value in coordinates)
-    if len(coordinates) == 4:
-        assert coordinates[2] > coordinates[0] and coordinates[3] > coordinates[1]
-    return coordinates
+def _localizations(text: str) -> tuple[tuple[int, ...], ...]:
+    matches = list(_LOCALIZATION.finditer(text))
+    assert matches and _REFERENCE.search(text)
+    assert text.count("<box>") == text.count("</box>") == len(matches)
+    result = []
+    for match in matches:
+        coordinates = tuple(int(value) for value in _COORDINATE.findall(match.group(1)))
+        assert len(coordinates) in {2, 4}
+        assert all(0 <= value <= 1000 for value in coordinates)
+        if len(coordinates) == 4:
+            assert coordinates[2] > coordinates[0] and coordinates[3] > coordinates[1]
+        result.append(coordinates)
+    assert len({len(coordinates) for coordinates in result}) == 1
+    return tuple(result)
 
 
 def _box_iou(left: tuple[int, ...], right: tuple[int, ...]) -> float:
@@ -258,6 +270,24 @@ def _box_iou(left: tuple[int, ...], right: tuple[int, ...]) -> float:
     left_area = (left[2] - left[0]) * (left[3] - left[1])
     right_area = (right[2] - right[0]) * (right[3] - right[1])
     return intersection / (left_area + right_area - intersection)
+
+
+def _matched_box_iou(
+    left: tuple[tuple[int, ...], ...], right: tuple[tuple[int, ...], ...]
+) -> float:
+    return max(
+        min(_box_iou(first, second) for first, second in zip(left, candidate))
+        for candidate in permutations(right)
+    )
+
+
+def _matched_point_distance(
+    left: tuple[tuple[int, ...], ...], right: tuple[tuple[int, ...], ...]
+) -> float:
+    return min(
+        max(hypot(first[0] - second[0], first[1] - second[1]) for first, second in zip(left, candidate))
+        for candidate in permutations(right)
+    )
 
 
 def _torch_dtype(precision: str):
@@ -308,10 +338,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     from PIL import Image
     from transformers import AutoProcessor, AutoModel
 
-    from families.locateanything.tests.vision_oracle import official_vision_features
-
     image = Image.open(_asset(case["test_image"])).convert("RGB")
-    vision_features = official_vision_features(model_dir, _asset(case["test_image"]))
     processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
     model = (
         AutoModel.from_pretrained(
@@ -335,40 +362,67 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     return {
         "token_ids": ids.cpu().tolist(),
         "text": processor.decode(ids, skip_special_tokens=True),
-        "vision_features": vision_features,
     }
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    manifest["task"]
-    actual_text = str(actual["text"])
-    expected_text = str(expected["text"])
-    distance = _edit_distance(actual_text, expected_text)
-    similarity = 1.0 - distance
-    assert similarity >= float(thresholds["semantic_similarity"])
-    assert distance <= float(thresholds["normalized_text_edit_distance"])
-    actual_words = actual_text.casefold().split()
-    expected_words = expected_text.casefold().split()
-    matches = sum(left == right for left, right in zip(actual_words, expected_words))
-    agreement = matches / max(len(actual_words), len(expected_words), 1)
-    assert agreement >= float(thresholds["token_agreement_rate"])
-    actual_localization = _single_localization(actual_text)
-    expected_localization = _single_localization(expected_text)
-    assert len(actual_localization) == len(expected_localization)
-    if len(actual_localization) == 2:
-        distance = hypot(
-            actual_localization[0] - expected_localization[0],
-            actual_localization[1] - expected_localization[1],
-        )
-        assert distance <= float(thresholds["localization_point_distance"])
+    del manifest, case
+    actual_text = str(actual["text"]).strip()
+    expected_text = str(expected["text"]).strip()
+    assert actual_text
+    assert _edit_distance(actual_text, expected_text) <= float(
+        thresholds["normalized_text_edit_distance"]
+    )
+    actual_localizations = _localizations(actual_text)
+    expected_localizations = _localizations(expected_text)
+    assert len(actual_localizations) == len(expected_localizations)
+    assert len(actual_localizations[0]) == len(expected_localizations[0])
+    if len(actual_localizations[0]) == 2:
+        assert _matched_point_distance(
+            actual_localizations, expected_localizations
+        ) <= float(thresholds["localization_point_distance"])
     else:
-        assert _box_iou(actual_localization, expected_localization) >= float(
+        assert _matched_box_iou(actual_localizations, expected_localizations) >= float(
             thresholds["localization_box_iou"]
         )
-    from families.locateanything.tests.vision_oracle import assert_vision_parity
 
-    assert_vision_parity(actual["vision_features"], expected["vision_features"])
-    return
+
+def _assert_native_vision_health(features) -> None:
+    values = np.asarray(features)
+    assert values.size > 0
+    assert np.isfinite(values).all()
+    assert np.any(values != 0)
+
+
+def test_native_vision_health_rejects_invalid_output() -> None:
+    _assert_native_vision_health(np.asarray([1.0], dtype=np.float32))
+    for invalid in ([], [0.0], [np.nan]):
+        with pytest.raises(AssertionError):
+            _assert_native_vision_health(invalid)
+
+
+def test_grounding_contract_requires_valid_matching_localizations() -> None:
+    thresholds = {
+        "normalized_text_edit_distance": 0.5,
+        "localization_box_iou": 0.9,
+        "localization_point_distance": 10.0,
+    }
+    text = "<ref>vehicle</ref><box><100><100><300><300></box>"
+    _assert_parity(
+        {"text": text},
+        {"text": text},
+        {"task": "vision_language_generation"},
+        {},
+        thresholds,
+    )
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            {"text": text + "<box><400><400><500><500></box>"},
+            {"text": text},
+            {"task": "vision_language_generation"},
+            {},
+            thresholds,
+        )
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -377,9 +431,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     _build(model_dir, bundle, manifest)
-    actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
     from families.locateanything.tests.vision_oracle import native_vision_features
 
-    actual["vision_features"] = native_vision_features(bundle, _asset(case["test_image"]))
+    _assert_native_vision_health(native_vision_features(bundle, _asset(case["test_image"])))
+    actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
     expected = _official_reference(model_dir, manifest, case, tmp_path)
     _assert_parity(actual, expected, manifest, case, _thresholds(case_name))

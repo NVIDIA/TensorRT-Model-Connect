@@ -303,15 +303,18 @@ def _native(
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
-    task = manifest["task"]
     import torch
     from diffusers import ModularPipeline
 
     pipeline = ModularPipeline.from_pretrained(model_dir, workflow="t2va", local_files_only=True)
-    pipeline.load_components(dtype=_torch_dtype(case["reference_precision"]), local_files_only=True)
+    pipeline.load_components(
+        dtype=_torch_dtype(case["reference_precision"]),
+        pretrained_model_name_or_path=model_dir,
+        local_files_only=True,
+    )
     pipeline = pipeline.to("cuda")
     prompts = _case_text(case)
-    generator = torch.Generator(device="cuda").manual_seed(int(case["seed"]))
+    generator = torch.Generator().manual_seed(int(case["seed"]))
     kwargs = {
         "prompt": prompts,
         "height": int(manifest["image_height"]),
@@ -325,48 +328,56 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         kwargs["negative_prompt"] = case["negative_prompt"]
     if "guidance_scale" in case:
         kwargs["guidance_scale"] = float(case["guidance_scale"])
-    output = pipeline(output="videos", output_type="pil", **kwargs)
-    if task == "world_model_generation" or int(manifest.get("video_num_frames", 1)) > 1:
-        images = output[0]
+    output = pipeline(output="videos", output_type="np", **kwargs)
+    videos = output.get("videos")
+    if isinstance(videos, torch.Tensor):
+        frames = videos.detach().float().cpu().numpy()
     else:
-        images = output
-    return {
-        "images": [np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0 for image in images]
-    }
+        frames = np.asarray(videos[0])
+    assert frames.shape == (
+        int(manifest["video_num_frames"]),
+        int(manifest["image_height"]),
+        int(manifest["image_width"]),
+        3,
+    )
+    frames_path = tmp_path / "reference-frames.npy"
+    np.save(frames_path, frames)
+    return {"frames_path": frames_path}
 
 
-def _write_semantic_artifacts(case: dict, actual_images: list, expected_images: list) -> None:
+def _write_semantic_artifacts(
+    case: dict, actual_paths: list[Path], expected_frames_path: Path
+) -> None:
     if not case.get("semantic_assessment"):
         return
     output_root = os.environ.get("TRTMC_E2E_ARTIFACT_DIR")
     if not output_root:
         return
-    from PIL import Image
-
     output = Path(output_root) / str(case["name"])
     output.mkdir(parents=True, exist_ok=False)
-    assert len(actual_images) == len(expected_images) and actual_images
+    expected_frames = np.load(expected_frames_path, mmap_mode="r", allow_pickle=False)
+    from PIL import Image
+
+    assert len(actual_paths) == len(expected_frames) and actual_paths
     sample_count = int(case.get("semantic_samples", 1))
-    assert 1 <= sample_count <= min(6, len(actual_images))
+    assert 1 <= sample_count <= min(6, len(actual_paths))
     if sample_count == 1:
-        sample_indices = [(len(actual_images) - 1) // 2]
+        sample_indices = [(len(actual_paths) - 1) // 2]
     else:
         sample_indices = [
-            round(index * (len(actual_images) - 1) / (sample_count - 1))
+            round(index * (len(actual_paths) - 1) / (sample_count - 1))
             for index in range(sample_count)
         ]
     for source_index in sample_indices:
-        actual = actual_images[source_index]
-        expected = expected_images[source_index]
-        for label, image in (("trt", actual), ("reference", expected)):
-            pixels = np.rint(np.clip(np.asarray(image), 0.0, 1.0) * 255.0).astype(np.uint8)
-            Image.fromarray(pixels).save(output / f"{label}-{source_index:03d}.png")
+        shutil.copyfile(actual_paths[source_index], output / f"trt-{source_index:03d}.png")
+        pixels = np.rint(np.clip(expected_frames[source_index], 0.0, 1.0) * 255.0).astype(np.uint8)
+        Image.fromarray(pixels).save(output / f"reference-{source_index:03d}.png")
     (output / "metadata.json").write_text(
         json.dumps(
             {
                 "family": "minimax_h3",
                 "case": case["name"],
-                "frame_count": len(actual_images),
+                "frame_count": len(actual_paths),
                 "prompt": _case_text(case),
                 "sample_count": sample_count,
                 "sampled_frame_indices": sample_indices,
@@ -380,137 +391,127 @@ def _write_semantic_artifacts(case: dict, actual_images: list, expected_images: 
     )
 
 
-def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    manifest["task"]
+def _load_rgb(path: Path) -> np.ndarray:
     from PIL import Image
 
+    with Image.open(path) as image:
+        return np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+
+
+def _block_means(frame: np.ndarray, block: int) -> np.ndarray:
+    height, width, channels = frame.shape
+    assert height % block == 0 and width % block == 0 and channels == 3
+    return frame.reshape(height // block, block, width // block, block, channels).mean(
+        axis=(1, 3), dtype=np.float64
+    )
+
+
+def _streaming_visual_metrics(
+    actual_paths: list[Path], expected_frames_path: Path, block: int
+) -> dict[str, float | tuple[int, int, int]]:
+    expected_frames = np.load(expected_frames_path, mmap_mode="r", allow_pickle=False)
+    assert len(actual_paths) == len(expected_frames) and actual_paths
+    correlations = []
+    actual_brightness = []
+    expected_brightness = []
+    std_ratios = []
+    actual_activity = []
+    expected_activity = []
+    previous_actual = None
+    previous_expected = None
+    frame_shape = None
+    for index, actual_path in enumerate(actual_paths):
+        actual = _load_rgb(actual_path)
+        expected = np.asarray(expected_frames[index], dtype=np.float32)
+        assert actual.shape == expected.shape and actual.ndim == 3 and actual.shape[2] == 3
+        assert np.isfinite(actual).all() and np.isfinite(expected).all()
+        assert 0.0 <= float(actual.min()) <= float(actual.max()) <= 1.0
+        assert 0.0 <= float(expected.min()) <= float(expected.max()) <= 1.0
+        if frame_shape is None:
+            frame_shape = actual.shape
+        else:
+            assert actual.shape == frame_shape
+        actual_blocks = _block_means(actual, block)
+        expected_blocks = _block_means(expected, block)
+        correlations.append(_centered_correlation(actual_blocks, expected_blocks))
+        actual_brightness.append(float(actual_blocks.mean()))
+        expected_brightness.append(float(expected_blocks.mean()))
+        expected_std = float(expected.std(dtype=np.float64))
+        actual_std = float(actual.std(dtype=np.float64))
+        std_ratios.append(
+            actual_std / expected_std
+            if expected_std > np.finfo(np.float64).eps
+            else (1.0 if actual_std <= np.finfo(np.float64).eps else float("inf"))
+        )
+        if previous_actual is not None and previous_expected is not None:
+            actual_activity.append(float(np.mean(np.abs(actual_blocks - previous_actual))))
+            expected_activity.append(float(np.mean(np.abs(expected_blocks - previous_expected))))
+        previous_actual = actual_blocks
+        previous_expected = expected_blocks
+    assert frame_shape is not None and actual_activity and expected_activity
+    actual_activity_array = np.asarray(actual_activity)
+    expected_activity_array = np.asarray(expected_activity)
+    expected_activity_sum = float(expected_activity_array.sum())
+    assert expected_activity_sum > np.finfo(np.float64).eps
+    return {
+        "frame_shape": frame_shape,
+        "minimum_frame_low_frequency_correlation": float(min(correlations)),
+        "mean_low_frequency_correlation": float(np.mean(correlations)),
+        "brightness_profile_correlation": _centered_correlation(
+            actual_brightness, expected_brightness
+        ),
+        "maximum_frame_brightness_absolute_error": float(
+            np.max(np.abs(np.asarray(actual_brightness) - np.asarray(expected_brightness)))
+        ),
+        "minimum_frame_std_ratio": float(min(std_ratios)),
+        "maximum_frame_std_ratio": float(max(std_ratios)),
+        "temporal_motion_ratio": float(actual_activity_array.sum() / expected_activity_sum),
+        "temporal_profile_correlation": _centered_correlation(
+            actual_activity_array, expected_activity_array
+        ),
+        "maximum_temporal_activity_absolute_error": float(
+            np.max(np.abs(actual_activity_array - expected_activity_array))
+        ),
+    }
+
+
+def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
     artifact = Path(actual["artifact"])
-    if artifact.is_dir():
-        actual_paths = sorted(artifact.glob("*.png"))
-    else:
-        actual_paths = [artifact]
+    actual_paths = sorted(artifact.glob("*.png")) if artifact.is_dir() else [artifact]
+    expected_frames_path = Path(expected["frames_path"])
     assert actual_paths
-    actual_images = [
-        np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
-        for path in actual_paths
-    ]
-    expected_images = expected["images"]
-    assert len(actual_images) == len(expected_images)
-    std_ratios = np.asarray(
-        [
-            float(actual.std()) / max(float(reference.std()), 1e-12)
-            for actual, reference in zip(actual_images, expected_images)
-        ]
+    assert len(actual_paths) == int(thresholds["exact_num_frames"])
+    metrics = _streaming_visual_metrics(
+        actual_paths, expected_frames_path, int(thresholds["low_frequency_block_size"])
     )
-    assert float(std_ratios.min()) >= float(thresholds["minimum_frame_std_ratio"])
-    assert float(std_ratios.max()) <= float(thresholds["maximum_frame_std_ratio"])
-    if "exact_num_frames" in thresholds:
-        assert len(actual_images) == int(thresholds["exact_num_frames"])
-    for image in actual_images:
-        if "exact_video_height" in thresholds:
-            assert image.shape[0] == int(thresholds["exact_video_height"])
-        if "exact_video_width" in thresholds:
-            assert image.shape[1] == int(thresholds["exact_video_width"])
-    cosine = min((_cosine(a, b) for a, b in zip(actual_images, expected_images)))
-    if "min_frame_cosine_uint8" in thresholds:
-        assert cosine >= float(thresholds["min_frame_cosine_uint8"])
-    elif "min_cosine_uint8" in thresholds:
-        assert cosine >= float(thresholds["min_cosine_uint8"])
-    elif "latent_cosine_per_step" in thresholds:
-        assert cosine >= float(thresholds["latent_cosine_per_step"])
-    rmse = max(
-        (float(np.sqrt(np.mean((a - b) ** 2))) for a, b in zip(actual_images, expected_images))
+    assert metrics["frame_shape"] == (
+        int(thresholds["exact_video_height"]),
+        int(thresholds["exact_video_width"]),
+        3,
     )
-    if "max_rmse_uint8" in thresholds:
-        assert rmse * 255.0 <= float(thresholds["max_rmse_uint8"])
-    if "contract_psnr_threshold" in thresholds:
-        psnr = float("inf") if rmse == 0 else 20.0 * np.log10(1.0 / rmse)
-        assert psnr >= float(thresholds["contract_psnr_threshold"])
-    elif "psnr" in thresholds:
-        psnr = float("inf") if rmse == 0 else 20.0 * np.log10(1.0 / rmse)
-        assert psnr >= float(thresholds["psnr"])
-    if "ssim" in thresholds or "contract_ssim_threshold" in thresholds:
-        scores = []
-        for left, right in zip(actual_images, expected_images):
-            mean_left = float(left.mean())
-            mean_right = float(right.mean())
-            variance_left = float(left.var())
-            variance_right = float(right.var())
-            covariance = float(np.mean((left - mean_left) * (right - mean_right)))
-            scores.append(
-                (2 * mean_left * mean_right + 0.01**2)
-                * (2 * covariance + 0.03**2)
-                / (
-                    (mean_left**2 + mean_right**2 + 0.01**2)
-                    * (variance_left + variance_right + 0.03**2)
-                )
-            )
-        limit = (
-            float(thresholds["contract_ssim_threshold"])
-            if "contract_ssim_threshold" in thresholds
-            else float(thresholds["ssim"])
-        )
-        assert min(scores) >= limit
-    if "minimum_frame_low_frequency_correlation" in thresholds:
-        block = int(thresholds["low_frequency_block_size"])
-        correlations = []
-        for left, right in zip(actual_images, expected_images):
-            height = left.shape[0] // block * block
-            width = left.shape[1] // block * block
-            low_left = (
-                left[:height, :width]
-                .reshape(height // block, block, width // block, block, 3)
-                .mean(axis=(1, 3))
-            )
-            low_right = (
-                right[:height, :width]
-                .reshape(height // block, block, width // block, block, 3)
-                .mean(axis=(1, 3))
-            )
-            correlations.append(_centered_correlation(low_left, low_right))
-        assert min(correlations) >= float(thresholds["minimum_frame_low_frequency_correlation"])
-        assert float(np.mean(correlations)) >= float(
-            thresholds["minimum_mean_low_frequency_correlation"]
-        )
-        brightness_left = np.asarray([image.mean() for image in actual_images])
-        brightness_right = np.asarray([image.mean() for image in expected_images])
-        assert _centered_correlation(brightness_left, brightness_right) >= float(
-            thresholds["minimum_brightness_profile_correlation"]
-        )
-        assert float(np.max(np.abs(brightness_left - brightness_right))) <= float(
-            thresholds["maximum_frame_brightness_absolute_error"]
-        )
-    if len(actual_images) > 1 and "min_temporal_motion_ratio" in thresholds:
-        actual_motion = np.asarray(
-            [np.mean(np.abs(b - a)) for a, b in zip(actual_images, actual_images[1:])]
-        )
-        expected_motion = np.asarray(
-            [np.mean(np.abs(b - a)) for a, b in zip(expected_images, expected_images[1:])]
-        )
-        ratio = float(actual_motion.mean() / max(expected_motion.mean(), 1e-12))
-        assert ratio >= float(thresholds["min_temporal_motion_ratio"])
-        assert ratio <= float(thresholds["max_temporal_motion_ratio"])
-        assert _centered_correlation(actual_motion, expected_motion) >= float(
-            thresholds["min_temporal_profile_correlation"]
-        )
-        assert float(np.max(np.abs(actual_motion - expected_motion))) <= float(
-            thresholds["maximum_temporal_activity_absolute_error"]
-        )
-    for image in actual_images:
-        if "contract_min_pixel_mean" in thresholds:
-            assert float(image.mean()) >= float(thresholds["contract_min_pixel_mean"])
-        elif "min_pixel_mean" in thresholds:
-            assert float(image.mean()) >= float(thresholds["min_pixel_mean"])
-        if "contract_max_pixel_mean" in thresholds:
-            assert float(image.mean()) <= float(thresholds["contract_max_pixel_mean"])
-        elif "max_pixel_mean" in thresholds:
-            assert float(image.mean()) <= float(thresholds["max_pixel_mean"])
-        if "contract_min_pixel_std" in thresholds:
-            assert float(image.std()) >= float(thresholds["contract_min_pixel_std"])
-        elif "min_pixel_std" in thresholds:
-            assert float(image.std()) >= float(thresholds["min_pixel_std"])
-    _write_semantic_artifacts(case, actual_images, expected_images)
-    return
+    assert metrics["minimum_frame_low_frequency_correlation"] >= float(
+        thresholds["minimum_frame_low_frequency_correlation"]
+    )
+    assert metrics["mean_low_frequency_correlation"] >= float(
+        thresholds["minimum_mean_low_frequency_correlation"]
+    )
+    assert metrics["brightness_profile_correlation"] >= float(
+        thresholds["minimum_brightness_profile_correlation"]
+    )
+    assert metrics["maximum_frame_brightness_absolute_error"] <= float(
+        thresholds["maximum_frame_brightness_absolute_error"]
+    )
+    assert metrics["minimum_frame_std_ratio"] >= float(thresholds["minimum_frame_std_ratio"])
+    assert metrics["maximum_frame_std_ratio"] <= float(thresholds["maximum_frame_std_ratio"])
+    assert metrics["temporal_motion_ratio"] >= float(thresholds["min_temporal_motion_ratio"])
+    assert metrics["temporal_motion_ratio"] <= float(thresholds["max_temporal_motion_ratio"])
+    assert metrics["temporal_profile_correlation"] >= float(
+        thresholds["min_temporal_profile_correlation"]
+    )
+    assert metrics["maximum_temporal_activity_absolute_error"] <= float(
+        thresholds["maximum_temporal_activity_absolute_error"]
+    )
+    _write_semantic_artifacts(case, actual_paths, expected_frames_path)
 
 
 def test_semantic_artifacts_are_paired(monkeypatch, tmp_path: Path) -> None:
@@ -523,11 +524,11 @@ def test_semantic_artifacts_are_paired(monkeypatch, tmp_path: Path) -> None:
         "prompt_file": str(prompt_file),
         "semantic_assessment": True,
     }
-    _write_semantic_artifacts(
-        case,
-        [np.zeros((2, 2, 3), dtype=np.float32)],
-        [np.ones((2, 2, 3), dtype=np.float32)],
-    )
+    actual = tmp_path / "actual.png"
+    actual.write_bytes(b"actual")
+    reference = tmp_path / "reference.npy"
+    np.save(reference, np.ones((1, 2, 2, 3), dtype=np.float32))
+    _write_semantic_artifacts(case, [actual], reference)
     output = tmp_path / "semantic-probe"
     assert sorted(path.name for path in output.iterdir()) == [
         "metadata.json",

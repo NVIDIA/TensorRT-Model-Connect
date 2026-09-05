@@ -209,5 +209,7 @@ ITask* create(const FamilyContext& context) {
 } // namespace trtmc::codegen
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("codegen does not support --kv-cache-size");
     return trtmc::codegen::create(context);
 }

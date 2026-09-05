@@ -22,7 +22,8 @@ INPUTS=/tmp/foundationpose-inputs
 EXAMPLE_BUILD=/tmp/foundationpose-example
 RUNTIME_ROOT=/path/to/tensorrt_model_connect/bin
 
-trtmc build "$MODEL_DIR" --task pose_hypothesis_refinement --precision fp16 --output "$BUNDLE"
+python -m tensorrt_model_connect build "$MODEL_DIR" \
+  --task pose_hypothesis_refinement --precision fp16 --output "$BUNDLE"
 python3 examples/models/foundationpose/preprocessed_refinement/prepare_synthetic_inputs.py "$INPUTS"
 
 cmake -S examples/models/foundationpose/preprocessed_refinement -B "$EXAMPLE_BUILD"

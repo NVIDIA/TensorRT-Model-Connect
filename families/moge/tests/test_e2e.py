@@ -267,8 +267,27 @@ def _geometry(data: dict[str, np.ndarray], label: str) -> tuple[np.ndarray, ...]
     assert np.isfinite(intrinsics).all(), label
     assert np.array_equal(intrinsics[2], np.asarray([0.0, 0.0, 1.0], dtype=np.float32))
     assert intrinsics[0, 0] > 0.0 and intrinsics[1, 1] > 0.0
+    assert intrinsics[0, 1] == 0.0 and intrinsics[1, 0] == 0.0
     assert intrinsics[0, 2] == 0.5 and intrinsics[1, 2] == 0.5
     return points, depth, mask, intrinsics
+
+
+def test_geometry_rejects_camera_skew() -> None:
+    geometry = {
+        "points": np.asarray([[[0.0, 0.0, 1.0]]], dtype=np.float32),
+        "depth": np.asarray([[1.0]], dtype=np.float32),
+        "mask": np.asarray([[1]], dtype=np.uint8),
+        "intrinsics": np.asarray(
+            [[1.0, 0.0, 0.5], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        ),
+    }
+    _geometry(geometry, "valid")
+    for row, column in ((0, 1), (1, 0)):
+        invalid = {**geometry, "intrinsics": geometry["intrinsics"].copy()}
+        invalid["intrinsics"][row, column] = 0.1
+        with pytest.raises(AssertionError):
+            _geometry(invalid, "invalid")
 
 
 def _metrics(actual: dict[str, np.ndarray], reference: dict[str, np.ndarray]) -> dict[str, float]:

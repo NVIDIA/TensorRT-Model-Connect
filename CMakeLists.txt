@@ -153,6 +153,58 @@ set_target_properties(trtmc_backend_trt PROPERTIES
   INSTALL_RPATH "\$ORIGIN"
 )
 
+option(TRTMC_BUILD_BACKEND_RTX "Build TensorRT-RTX backend DSO" OFF)
+if(TRTMC_BUILD_BACKEND_RTX)
+  if(NOT IS_DIRECTORY "${TRTMC_RTX_INCLUDE_DIR}" OR
+     NOT EXISTS "${TRTMC_RTX_INCLUDE_DIR}/NvInfer.h")
+    message(FATAL_ERROR
+      "TRTMC_BUILD_BACKEND_RTX=ON requires TRTMC_RTX_INCLUDE_DIR with NvInfer.h"
+    )
+  endif()
+  if(NOT IS_DIRECTORY "${TRTMC_RTX_LIBRARY_DIR}")
+    message(FATAL_ERROR
+      "TRTMC_BUILD_BACKEND_RTX=ON requires TRTMC_RTX_LIBRARY_DIR"
+    )
+  endif()
+  find_library(TRTMC_RTX_LIBRARY
+    NAMES tensorrt_rtx
+    PATHS "${TRTMC_RTX_LIBRARY_DIR}"
+    NO_DEFAULT_PATH
+  )
+  if(NOT TRTMC_RTX_LIBRARY)
+    message(FATAL_ERROR
+      "TRTMC_RTX_LIBRARY_DIR does not contain libtensorrt_rtx"
+    )
+  endif()
+
+  add_library(trtmc_backend_rtx SHARED
+    core/runtime/tensorrt/rtx_backend.cpp
+    core/runtime/tensorrt/trt_logger.cpp
+    core/runtime/tensorrt/trt_module_impl.cpp
+  )
+  target_include_directories(trtmc_backend_rtx
+    PRIVATE
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+      ${PROJECT_SOURCE_DIR}/core
+  )
+  target_include_directories(trtmc_backend_rtx SYSTEM PRIVATE
+    ${TRTMC_RTX_INCLUDE_DIR}
+    ${CUDAToolkit_INCLUDE_DIRS}
+  )
+  target_link_libraries(trtmc_backend_rtx
+    PRIVATE
+      trtmc_core
+      ${TRTMC_RTX_LIBRARY}
+      CUDA::cudart
+  )
+  target_compile_options(trtmc_backend_rtx PRIVATE -Wall -Wextra -Wpedantic)
+  set_target_properties(trtmc_backend_rtx PROPERTIES
+    OUTPUT_NAME trtmc_backend_trt_rtx
+    BUILD_RPATH "\$ORIGIN"
+    INSTALL_RPATH "\$ORIGIN"
+  )
+endif()
+
 if(TRTMC_HAS_TVM_FFI)
   add_library(trtmc_byok_tvm_ffi SHARED
     core/runtime/byok/byok.cpp
@@ -324,6 +376,27 @@ if(TRTMC_BUILD_TESTS)
   add_dependencies(test_family_loader trtmc_test_backend_fake trtmc_test_family_fake)
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
 
+  add_executable(test_trt_module_dynamic_input
+    core/runtime/tests/test_trt_module_dynamic_input.cpp
+  )
+  target_include_directories(test_trt_module_dynamic_input PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${PROJECT_SOURCE_DIR}/core
+  )
+  target_include_directories(test_trt_module_dynamic_input SYSTEM PRIVATE
+    ${TRTMC_TRT_INCLUDE_DIR}
+    ${CUDAToolkit_INCLUDE_DIRS}
+  )
+  target_link_libraries(test_trt_module_dynamic_input PRIVATE
+    trtmc_backend_trt
+    trtmc_core
+    ${TRTMC_TRT_LIBRARY}
+    CUDA::cudart
+  )
+  target_compile_options(test_trt_module_dynamic_input PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME trt_module_dynamic_input COMMAND test_trt_module_dynamic_input)
+  set_tests_properties(trt_module_dynamic_input PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
+
   if(TRTMC_BUILD_EXAMPLES)
     add_executable(test_dataset_answer apps/benchmark/tests/native/test_dataset_answer.cpp)
     target_include_directories(test_dataset_answer PRIVATE
@@ -425,6 +498,11 @@ install(TARGETS trtmc_core trtmc_runtime
 install(TARGETS trtmc_backend_trt
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+if(TARGET trtmc_backend_rtx)
+  install(TARGETS trtmc_backend_rtx
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+endif()
 if(TRTMC_HAS_TVM_FFI)
   install(TARGETS trtmc_byok_tvm_ffi
     EXPORT trtmcTargets

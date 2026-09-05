@@ -10,8 +10,10 @@
 #include "families/llama/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -35,6 +37,7 @@ struct RuntimeConfig {
     std::int32_t max_cache_length;
     std::string precision;
     std::string decoder_engine_layout;
+    bool dynamic_kv_cache;
 };
 
 template <typename T>
@@ -58,13 +61,20 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (!json.is_object())
         throw std::runtime_error("llama runtime.json must be an object");
-    if (json.size() != 12 && json.size() != 14)
+    const bool dynamic_kv_cache = json.contains("dynamic_kv_cache");
+    const std::size_t expected_fields =
+        12 + (json.contains("native_kv_cache") ? 2 : 0) + (dynamic_kv_cache ? 1 : 0);
+    if (json.size() != expected_fields)
         throw std::runtime_error("llama runtime.json has an unexpected field set");
-    if (json.size() == 14 &&
+    if (json.contains("native_kv_cache") &&
         (!require_value<bool>(json, "native_kv_cache") ||
          require_value<std::int32_t>(json, "native_kv_contract_version") != 1)) {
         throw std::runtime_error("llama runtime.json has an invalid native KV contract");
     }
+    if (dynamic_kv_cache && !require_value<bool>(json, "dynamic_kv_cache"))
+        throw std::runtime_error("llama runtime.json has an invalid dynamic KV contract");
+    if (dynamic_kv_cache && json.contains("native_kv_cache"))
+        throw std::runtime_error("llama runtime.json declares incompatible KV contracts");
 
     RuntimeConfig config{
         require_value<std::int32_t>(json, "hidden_size"),
@@ -79,6 +89,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::int32_t>(json, "max_cache_length"),
         require_value<std::string>(json, "precision"),
         require_value<std::string>(json, "decoder_engine_layout"),
+        dynamic_kv_cache,
     };
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 || config.vocab_size <= 0 ||
@@ -91,6 +102,9 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (config.decoder_engine_layout != "split" && config.decoder_engine_layout != "dual_profile") {
         throw std::runtime_error("llama runtime.json contains invalid decoder_engine_layout");
+    }
+    if (config.dynamic_kv_cache && config.decoder_engine_layout != "dual_profile") {
+        throw std::runtime_error("runtime-sized Llama KV cache requires a dual-profile engine");
     }
     return config;
 }
@@ -135,6 +149,38 @@ std::int32_t prefill_token_limit(const ITrtModule& module) {
     return static_cast<std::int32_t>(shape.front());
 }
 
+std::uint64_t checked_multiply(std::uint64_t left, std::uint64_t right) {
+    if (left != 0 && right > std::numeric_limits<std::uint64_t>::max() / left)
+        throw std::overflow_error("llama KV cache byte accounting overflow");
+    return left * right;
+}
+
+std::int32_t runtime_cache_rows(const FamilyContext& context, const RuntimeConfig& config,
+                                const DecoderModules& modules) {
+    const std::string first_cache = llama_layer_tensor_name("cache_k", 0);
+    const bool decode_dynamic = modules.decode->input_is_dynamic(first_cache);
+    const bool prefill_dynamic = modules.prefill->input_is_dynamic(first_cache);
+    if (decode_dynamic != config.dynamic_kv_cache || prefill_dynamic != config.dynamic_kv_cache) {
+        throw std::runtime_error("llama runtime.json does not match the engine KV row contract");
+    }
+    if (context.kv_cache_size_bytes == 0)
+        return config.max_cache_length;
+
+    const std::uint64_t kv_dim =
+        checked_multiply(static_cast<std::uint64_t>(config.num_key_value_heads),
+                         static_cast<std::uint64_t>(config.head_dim));
+    const std::uint64_t row_bytes = checked_multiply(
+        checked_multiply(checked_multiply(static_cast<std::uint64_t>(config.num_layers), kv_dim),
+                         static_cast<std::uint64_t>(dtype_size(cache_dtype(config.precision)))),
+        2);
+    const std::uint64_t requested_rows = context.kv_cache_size_bytes / row_bytes;
+    if (requested_rows == 0) {
+        throw std::invalid_argument("--kv-cache-size is smaller than one Llama KV cache row");
+    }
+    return static_cast<std::int32_t>(
+        std::min(requested_rows, static_cast<std::uint64_t>(config.max_cache_length)));
+}
+
 DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& config) {
     DecoderModules modules;
     if (config.decoder_engine_layout == "split") {
@@ -160,15 +206,20 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
 
 ITask* create(const FamilyContext& context) {
     const RuntimeConfig config = parse_runtime_config(context.reader);
+    if (context.kv_cache_size_bytes != 0 && !config.dynamic_kv_cache) {
+        throw std::invalid_argument(
+            "--kv-cache-size requires a bundle built with --dynamic-kv-cache");
+    }
     DecoderModules modules = load_modules(context, config);
+    const std::int32_t cache_rows = runtime_cache_rows(context, config, modules);
     const cudaStream_t stream = modules.decode->stream();
     const std::int32_t kv_dim = config.num_key_value_heads * config.head_dim;
-    auto state = std::make_unique<LlamaKvCache>(config.num_layers, config.max_cache_length, kv_dim,
-                                                stream, cache_dtype(config.precision),
+    auto state = std::make_unique<LlamaKvCache>(config.num_layers, cache_rows, kv_dim, stream,
+                                                cache_dtype(config.precision),
                                                 make_kv_names(config.num_layers));
     if (!state->ok())
         throw std::runtime_error("llama failed to create KV cache");
-    std::cerr << "[trtmc] KV cache rows=" << config.max_cache_length
+    std::cerr << "[trtmc] KV cache rows=" << cache_rows
               << " (bundle max=" << config.max_cache_length << ")\n";
 
     LlamaTextGenConfig text_config;

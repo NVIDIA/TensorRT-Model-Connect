@@ -64,7 +64,7 @@ class SourceQualityChecks:
         self.architecture_contracts()
 
     def family_coverage(self) -> None:
-        self.context.run(["python", "tools/model_ci.py", "validate"])
+        self.context.run(["python", "-m", "tools.model_ci", "validate"])
 
     def complexity(self) -> None:
         self.context.run(
@@ -154,9 +154,6 @@ class UnitTestRunner:
         self.context = context
 
     def premerge(self) -> None:
-        scope = self.context.env.get("TRTMC_PREMERGE_UNIT_SCOPE", "all")
-        if scope != "all":
-            raise CiError("the CPU unit stage supports only scope=all")
         EnvironmentVerifier(self.context).verify()
         self.context.run(
             [
@@ -165,6 +162,7 @@ class UnitTestRunner:
                 "pytest",
                 "core/builder/tests",
                 "apps/benchmark/trtmc_benchmark/tests",
+                "examples/audio_streaming/test_audio_streaming.py",
                 "examples/models/cosmos3/dual_spark/test_cosmos3_dual_spark_source.py",
                 (
                     "examples/models/nemotron_voicechat/full_duplex/"

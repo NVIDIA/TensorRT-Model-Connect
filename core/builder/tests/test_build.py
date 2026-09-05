@@ -38,6 +38,8 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
     assert BuildRequest.__bases__ == (object,)
     assert request.tensor_parallel_size == 2
     assert request.context_parallel_size == 3
+    assert request.backend == "trt"
+    assert request.dynamic_kv_cache is False
 
 
 @pytest.mark.parametrize(
@@ -52,7 +54,9 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
         ("context_parallel_size", 0),
         ("quantization", ""),
         ("fp32_layers", (-1,)),
+        ("dynamic_kv_cache", 1),
         ("graph_transform", object()),
+        ("backend", "unknown"),
     ],
 )
 def test_build_request_rejects_invalid_direct_inputs(
@@ -92,6 +96,37 @@ def test_load_family_imports_only_the_exact_model_module(monkeypatch) -> None:
 
     assert build_core._load_family("exact_family") is expected
     assert imported == ["families.exact_family.model"]
+
+
+def test_rtx_backend_is_bound_before_family_import(monkeypatch) -> None:
+    standard = object()
+    rtx = object()
+    monkeypatch.delitem(sys.modules, "tensorrt", raising=False)
+    monkeypatch.setitem(sys.modules, "tensorrt_rtx", rtx)
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name: rtx if name == "tensorrt_rtx" else standard,
+    )
+
+    build_core._select_backend("trt_rtx")
+
+    assert sys.modules["tensorrt"] is rtx
+
+
+def test_backend_cannot_switch_after_tensor_rt_is_loaded(monkeypatch) -> None:
+    standard = object()
+    rtx = object()
+    monkeypatch.setitem(sys.modules, "tensorrt", standard)
+    monkeypatch.setitem(sys.modules, "tensorrt_rtx", rtx)
+    monkeypatch.setattr(importlib, "import_module", lambda _name: rtx)
+
+    with pytest.raises(RuntimeError, match="already loaded"):
+        build_core._select_backend("trt_rtx")
+
+    monkeypatch.setitem(sys.modules, "tensorrt", rtx)
+    with pytest.raises(RuntimeError, match="already loaded"):
+        build_core._select_backend("trt")
 
 
 def test_family_internal_import_error_is_not_wrapped(monkeypatch) -> None:

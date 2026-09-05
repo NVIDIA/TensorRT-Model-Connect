@@ -373,6 +373,9 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one LocateAnything vision-language bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("locateanything does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("locateanything does not support image_height")
 
@@ -443,14 +446,14 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "vision_output_dim": int(vl.get("vision_output_dim", config.hidden_size)),
         "prefill_max_length": int(vl.get("prefill_max_length", max_length)),
         "io_map": {
-            "cache_k_pattern": "cache_k_{layer}",
-            "cache_v_pattern": "cache_v_{layer}",
-            "present_k_pattern": "present_k_{layer}",
-            "present_v_pattern": "present_v_{layer}",
+            "cache_k_pattern": "cache_k_{i}",
+            "cache_v_pattern": "cache_v_{i}",
+            "present_k_pattern": "present_k_{i}",
+            "present_v_pattern": "present_v_{i}",
         },
     }
     runtime.update(vl)
-    writer.set_header(family="locateanything", task=request.task, backend="trt")
+    writer.set_header(family="locateanything", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", decode)
     writer.add_bytes("prefill.plan", prefill)
     writer.add_bytes("vision.plan", vision)

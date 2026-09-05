@@ -32,7 +32,6 @@ class CommandRunner:
         check: bool = True,
         capture_output: bool = False,
         env: Mapping[str, str] | None = None,
-        timeout: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
             list(command),
@@ -41,7 +40,6 @@ class CommandRunner:
             text=True,
             check=False,
             capture_output=capture_output,
-            timeout=timeout,
         )
         if check and result.returncode != 0:
             rendered = " ".join(command)

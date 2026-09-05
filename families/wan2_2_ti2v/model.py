@@ -92,6 +92,9 @@ class _Wan22TI2VModel:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Wan2.2 TI2V image-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("wan2_2_ti2v does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("wan2_2_ti2v does not support max_sequence_length")
 
@@ -159,7 +162,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if len(text_encoders) != 1:
         raise RuntimeError("Wan2.2 TI2V must produce exactly one text encoder")
 
-    writer.set_header(family="wan2_2_ti2v", task=request.task, backend="trt")
+    writer.set_header(family="wan2_2_ti2v", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.0.plan", text_encoders[0][1])
     writer.add_bytes("denoiser.plan", components["denoiser"])
     writer.add_bytes("vae.plan", components["vae_decoder"])

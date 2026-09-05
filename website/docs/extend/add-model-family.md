@@ -16,7 +16,7 @@ families/my_family/
 └── tests/
     ├── test_e2e.py
     ├── manifests/<case>.json
-    └── thresholds/<testcase>.json
+    └── thresholds/<testcase>.json  # optional numeric override
 ```
 
 `support.py` owns checkpoint identity and task capabilities without importing
@@ -41,9 +41,15 @@ identity field, write a small `describe(metadata)` function that checks its
 exact family-owned root JSON shape or declare a minimal set of exact sentinel
 files; do not match the repository name.
 
-`model.py` must expose exactly one plain function:
+`model.py` must expose exactly one plain function. Any helper it calls is
+implemented in this file or elsewhere in the same family directory:
 
 ```python
+def _build_my_family_engine(request):
+    # Family-owned TensorRT graph, weight mapping, and serialization.
+    ...
+
+
 def build(request, writer):
     if request.context_parallel_size != 1:
         raise ValueError("my_family does not support context parallelism")
@@ -51,7 +57,7 @@ def build(request, writer):
         raise ValueError("my_family supports only text_generation")
     writer.set_header(family="my_family", task=request.task, backend="trt")
     writer.add_json("runtime.json", {"tensor_parallel_size": 1})
-    writer.add_bytes("engine.plan", build_engine(request))
+    writer.add_bytes("engine.plan", _build_my_family_engine(request))
 ```
 
 The builder must not inherit from a base class. It may import the shared
@@ -67,6 +73,12 @@ no extra dependency omit the file.
 The runtime CMake file creates `trtmc_model_my_family`. Its factory exports
 `trtmc_create_family`, reads only sections owned by this family, and returns a
 concrete implementation of an abstract interface in `trtmc/task.h`.
+The family pipeline depends on and implements `trtmc/task.h`; `trtmc/task.h`
+never includes or links a family.
+
+If the family graph contains distributed collectives, that same family owns
+its communicator setup and NCCL loading. A replicated plan that only selects a
+rank-specific section must not load NCCL.
 
 `FamilyContext.reader` is read-only. A factory normally consumes its sections
 before returning. If a pipeline needs deferred section loading, copy the
@@ -81,10 +93,17 @@ python -m pip install -r families/my_family/requirements.txt  # only if present
 python tools/test_impact.py --validate
 ```
 
-`test_e2e.py` directly builds the bundle, invokes the native CLI through
-`TRTMC_BINARY` and `TRTMC_RUNTIME_ROOT`, runs the official reference, and
-applies only thresholds it actually reads. It must not import a central runner,
+`test_e2e.py` directly builds the bundle and invokes the native CLI through
+`TRTMC_BINARY` and `TRTMC_RUNTIME_ROOT`. It runs exactly the family-owned oracle
+declared by the case: an official reference when required, otherwise explicit
+runtime or task invariants. It never falls through to a generic comparator. A
+threshold sidecar exists only when the case overrides a numeric default, and
+contains only values the family test reads. It must not import a central runner,
 comparator, or sibling-family fixture.
+
+The expected diff boundary for a normal family contribution is
+`families/my_family/**`. Examples, benchmarks, and BYOK are optional consumers
+of public APIs; neither a family nor core may import their implementation.
 
 An E2E manifest may declare an exact `hf_id` (and, when available,
 `hf_revision`) or omit `hf_id` for a prepared local checkpoint supplied through

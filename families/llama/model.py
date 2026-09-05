@@ -127,7 +127,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.max_batch_size != 1:
         raise NotImplementedError("llama does not support max_batch_size")
 
-
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
@@ -161,6 +160,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = list(request.fp32_layers)
     config.raw["_resolved_build_precision"] = precision
+    config.raw["dynamic_kv_cache"] = request.dynamic_kv_cache
     weights = load_standard_weights(
         str(model_dir),
         config,
@@ -168,8 +168,23 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         fp32_layers=request.fp32_layers,
     )
 
-    writer.set_header(family="llama", task=request.task, backend="trt")
-    if request.fp32_layers:
+    writer.set_header(family="llama", task=request.task, backend=request.backend)
+    if request.dynamic_kv_cache:
+        if request.fp32_layers:
+            raise NotImplementedError(
+                "runtime-sized Llama KV cache does not support FP32 layer overrides"
+            )
+        config.raw["_decoder_engine_role"] = "dual_profile"
+        plan = _build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            verbose=bool(request.verbose),
+        )
+        writer.add_bytes("engine.plan", plan)
+        layout = "dual_profile"
+    elif request.fp32_layers:
         config.raw["_decoder_engine_role"] = "dual_profile"
         plan = _build_engine(
             config,
@@ -202,16 +217,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         layout = "split"
     config.raw.pop("_decoder_engine_role", None)
 
-    writer.add_json(
-        "runtime.json",
-        _runtime_config(
-            model_dir,
-            config,
-            precision=precision,
-            max_cache_length=max_sequence_length,
-            decoder_engine_layout=layout,
-        ),
+    runtime_config = _runtime_config(
+        model_dir,
+        config,
+        precision=precision,
+        max_cache_length=max_sequence_length,
+        decoder_engine_layout=layout,
     )
+    if request.dynamic_kv_cache:
+        runtime_config["dynamic_kv_cache"] = True
+    writer.add_json("runtime.json", runtime_config)
     for filename in _BUNDLE_FILES:
         path = model_dir / filename
         if path.is_file():

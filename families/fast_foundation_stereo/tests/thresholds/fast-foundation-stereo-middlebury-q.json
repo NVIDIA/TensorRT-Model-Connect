@@ -1,9 +1,0 @@
-{
-  "threshold_overrides": {
-    "bad_2px_fraction": 0.03,
-    "candidate_nonocc_bp2_max_reference_plus_fraction": 0.03,
-    "candidate_nonocc_epe_max_reference_plus_px": 0.5,
-    "global_cosine": 0.999,
-    "mean_abs_error": 0.5
-  }
-}

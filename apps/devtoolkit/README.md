@@ -4,11 +4,14 @@
 it. It has no environment catalog, compatibility matrix, receipt database, or
 artifact identity layer.
 
-The shared Docker path is the repository's normal path: it builds the root
-`Dockerfile`, whose base image is pinned in its first `FROM`, through
-`tools.ci image ensure`. The app then owns the small inspect/create/start
-lifecycle for one explicitly named persistent container. It does not calculate
-another image, source, dependency, wheel, plan, or bundle digest.
+The Docker path selects the repository's existing `Dockerfile.dev.x86` or
+`Dockerfile.dev.aarch64` from `platform.machine()` and runs the same direct
+development-image build documented for source builds. Each Dockerfile pins its
+base image in the first `FROM`. An unknown host architecture fails before any
+Docker command. Repository CI continues to own the separate root `Dockerfile`.
+The app then owns the small inspect/create/start lifecycle for one explicitly
+named persistent container. It does not calculate an image, source, dependency,
+wheel, plan, or bundle digest.
 
 ```python
 from pathlib import Path
@@ -33,10 +36,9 @@ and optional IPC mode still match. A foreign collision or configuration drift
 fails closed; the toolkit never removes or replaces a container. `ADOPT`
 requires an already-running match, performs no mutation, and reuses any family
 dependencies already present. `START` may start a stopped match without
-building an image. `ENSURE` and the idempotent-retry spelling `CREATE` run the
-checkout's image-ensure command and create a missing target. Other policies
-install the selected family's optional requirements after the target is
-running.
+building an image. `ENSURE` builds the selected development image and creates a
+missing target. All policies except `ADOPT` install the selected family's
+optional requirements after the target is running.
 
 Requested environment values are passed to `docker create` in a mode-`0600`
 temporary `--env-file`, which is removed immediately after the command. Values

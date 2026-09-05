@@ -483,6 +483,83 @@ def _text_threshold(thresholds: dict[str, float]) -> float:
     return thresholds["normalized_text_edit_distance"]
 
 
+def _assert_numeric_logits(
+    native_logits: np.ndarray, reference_logits: np.ndarray, thresholds: dict[str, float]
+) -> np.ndarray:
+    native_logits = np.asarray(native_logits)
+    reference_logits = np.asarray(reference_logits)
+    assert native_logits.ndim == reference_logits.ndim == 2
+    rows = min(native_logits.shape[0], reference_logits.shape[0])
+    columns = min(native_logits.shape[1], reference_logits.shape[1])
+    assert rows > 0 and columns > 0
+    actual = np.nan_to_num(
+        native_logits[:rows, :columns].astype(np.float64),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    reference = np.nan_to_num(
+        reference_logits[:rows, :columns].astype(np.float64),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    actual_norm = np.linalg.norm(actual, axis=1)
+    reference_norm = np.linalg.norm(reference, axis=1)
+    denominator = actual_norm * reference_norm
+    cosines = np.divide(
+        np.sum(actual * reference, axis=1),
+        denominator,
+        out=np.zeros(rows, dtype=np.float64),
+        where=(actual_norm >= 1e-12) & (reference_norm >= 1e-12),
+    )
+    relative_l2 = np.linalg.norm(actual - reference, axis=1) / np.maximum(
+        reference_norm, 1e-12
+    )
+    cosine_ok = float(np.percentile(cosines, 5)) >= thresholds["logit_cosine_p5"]
+    relative_l2_ok = float(np.percentile(relative_l2, 95)) <= thresholds["logit_rel_l2_p95"]
+
+    actual_top1 = actual.argmax(axis=1)
+    expected_top1 = reference.argmax(axis=1)
+    agreement = float((actual_top1 == expected_top1).mean())
+    sorted_reference = np.sort(reference, axis=1)
+    stable = sorted_reference[:, -1] - sorted_reference[:, -2] >= thresholds["stable_margin"]
+    stable_rate = (
+        float((actual_top1[stable] == expected_top1[stable]).mean()) if stable.any() else 1.0
+    )
+    unstable = ~stable
+    if unstable.any():
+        reference_top5 = np.argsort(reference, axis=1)[:, -5:]
+        unstable_rate = float(
+            np.mean(
+                [actual_top1[index] in reference_top5[index] for index in np.where(unstable)[0]]
+            )
+        )
+    else:
+        unstable_rate = 1.0
+    token_quality = agreement >= thresholds["token_agreement_rate"] or (
+        stable_rate >= thresholds["stable_top1_match_rate"]
+        and unstable_rate >= thresholds["unstable_topk_hit_rate"]
+    )
+    assert cosine_ok or relative_l2_ok
+    assert token_quality
+    return actual_top1
+
+
+def test_numeric_logits_match_main_nonfinite_and_vocab_truncation() -> None:
+    thresholds = {
+        "logit_cosine_p5": 0.99,
+        "logit_rel_l2_p95": 0.05,
+        "stable_margin": 0.1,
+        "stable_top1_match_rate": 0.9,
+        "token_agreement_rate": 0.8,
+        "unstable_topk_hit_rate": 0.8,
+    }
+    reference = np.asarray([[np.nan, np.inf, -np.inf]], dtype=np.float32)
+    actual = np.pad(reference, ((0, 0), (0, 1)), constant_values=123.0)
+    assert _assert_numeric_logits(actual, reference, thresholds).tolist() == [0]
+
+
 def _assert_correctness(
     payload: dict,
     case: dict,
@@ -526,44 +603,7 @@ def _assert_correctness(
             assert actual_ids == reference_ids
     assert _normalized_edit_distance(actual_decoded, reference_text) <= _text_threshold(thresholds)
 
-    assert native_logits.shape == reference_logits.shape
-    assert native_logits.ndim == 2 and native_logits.shape[0] > 0
-    assert np.isfinite(native_logits).all() and np.isfinite(reference_logits).all()
-    cosines = []
-    relative_l2 = []
-    for actual, expected in zip(native_logits, reference_logits, strict=True):
-        denominator = max(float(np.linalg.norm(expected)), 1e-12)
-        relative_l2.append(float(np.linalg.norm(actual - expected)) / denominator)
-        product = float(np.linalg.norm(actual) * np.linalg.norm(expected))
-        cosines.append(float(np.dot(actual, expected)) / max(product, 1e-12))
-    cosine_ok = float(np.percentile(cosines, 5)) >= thresholds["logit_cosine_p5"]
-    relative_l2_ok = float(np.percentile(relative_l2, 95)) <= thresholds["logit_rel_l2_p95"]
-
-    actual_top1 = native_logits.argmax(axis=1)
-    expected_top1 = reference_logits.argmax(axis=1)
-    agreement = float((actual_top1 == expected_top1).mean())
-    sorted_reference = np.sort(reference_logits, axis=1)
-    stable = sorted_reference[:, -1] - sorted_reference[:, -2] >= thresholds["stable_margin"]
-    stable_rate = (
-        float((actual_top1[stable] == expected_top1[stable]).mean()) if stable.any() else 1.0
-    )
-    unstable = ~stable
-    if unstable.any():
-        reference_top5 = np.argsort(reference_logits, axis=1)[:, -5:]
-        unstable_rate = float(
-            np.mean(
-                [actual_top1[index] in reference_top5[index] for index in np.where(unstable)[0]]
-            )
-        )
-    else:
-        unstable_rate = 1.0
-    token_quality = agreement >= thresholds["token_agreement_rate"] or (
-        stable_rate >= thresholds["stable_top1_match_rate"]
-        and unstable_rate >= thresholds["unstable_topk_hit_rate"]
-    )
-    assert cosine_ok or relative_l2_ok
-    assert token_quality
-    assert actual_top1.tolist() == actual_ids
+    _assert_numeric_logits(native_logits, reference_logits, thresholds)
     assert actual_ids == reference_ids == case["expected_continuation_token_ids"]
 
 

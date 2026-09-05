@@ -4,11 +4,10 @@
  */
 
 #include "families/pixart/runtime/diffusion_helpers.h"
+#include "families/pixart/runtime/distributed_runtime.h"
 #include "families/pixart/runtime/pipeline.h"
 #include "trtmc/runtime/family_factory.h"
 
-#include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -24,48 +23,32 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     return bundle.read_section(name);
 }
 
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::pair<std::int32_t, std::int32_t> rank_and_size(const nlohmann::json& json) {
-    const auto size = json.at("tensor_parallel_size").get<std::int32_t>();
-    if (size <= 0)
-        throw std::runtime_error("PixArt tensor_parallel_size must be positive");
-    require_nccl(size);
-    if (size == 1)
-        return {0, 1};
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("PixArt TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= size)
-        throw std::runtime_error("PixArt RANK is outside tensor_parallel_size");
-    return {static_cast<std::int32_t>(rank), size};
-}
-
 } // namespace
 } // namespace trtmc::pixart_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("pixart does not support --kv-cache-size");
     using namespace trtmc;
     const auto& data = pixart_factory::require_section(context.reader, "runtime.json");
     const std::string runtime(data.begin(), data.end());
     const auto document = nlohmann::json::parse(runtime);
-    const auto [rank, size] = pixart_factory::rank_and_size(document);
+    const auto size = document.at("tensor_parallel_size").get<std::int32_t>();
+    if (size <= 0)
+        throw std::runtime_error("PixArt tensor_parallel_size must be positive");
+    const auto group = pixart::initialize_tensor_parallel_group(size);
     const std::string denoiser =
-        size == 1 ? "denoiser.plan" : "denoiser.rank" + std::to_string(rank) + ".plan";
+        size == 1 ? "denoiser.plan" : "denoiser.rank" + std::to_string(group.rank) + ".plan";
     ModuleCreateOptions options{};
-    auto parts =
-        load_diffusion_parts(&context.backend, context.reader, runtime, options, denoiser, nullptr);
+    ModuleCreateOptions denoiser_options{};
+    const ModuleCreateOptions* selected_denoiser_options = nullptr;
+    if (size > 1) {
+        denoiser_options.distributed_communicator = group.communicator;
+        denoiser_options.distributed_owner = group.owner;
+        selected_denoiser_options = &denoiser_options;
+    }
+    auto parts = load_diffusion_parts(&context.backend, context.reader, runtime, options, denoiser,
+                                      selected_denoiser_options);
     const auto& batch = document.at("max_batch_size");
     parts.config.max_batch_size.dit = batch.at("dit").get<std::int32_t>();
     parts.config.max_batch_size.text_encoder = batch.at("text_encoder").get<std::int32_t>();
@@ -75,5 +58,5 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     return new PixArtPipeline(std::move(parts.text_encoders.front().module),
                               std::move(parts.denoiser.module), std::move(parts.vae.module),
                               std::move(parts.config), std::move(parts.weights),
-                              std::move(parts.tokenizer), "", nullptr, rank, size);
+                              std::move(parts.tokenizer), "", nullptr, group.rank, size);
 }

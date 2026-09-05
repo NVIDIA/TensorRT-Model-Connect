@@ -1785,6 +1785,9 @@ def _mark_debug_output(network, tensor, name):
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one MagpieTTS audio-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("magpie_tts does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("magpie_tts does not support image_height")
 
@@ -1818,7 +1821,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _MagpieTTSModel()
     weights = model.load_weights(str(model_dir), config)
 
-    writer.set_header(family="magpie_tts", task=request.task, backend="trt")
+    writer.set_header(family="magpie_tts", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             writer.add_bytes(

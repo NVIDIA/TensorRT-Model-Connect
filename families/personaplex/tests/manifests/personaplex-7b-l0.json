@@ -1,6 +1,11 @@
 {
   "name": "personaplex-7b-l0",
   "hf_id": "nvidia/personaplex-7b-v1",
+  "hf_dependencies": [
+    {
+      "repo_id": "kyutai/mimi"
+    }
+  ],
   "bundle": "personaplex-7b-l0.bundle",
   "family": "personaplex",
   "task": "speech_to_speech",

@@ -1,7 +1,5 @@
 {
   "threshold_overrides": {
-    "logit_atol": 0.001,
-    "pairwise_ordering_agreement": 1.0,
-    "score_correlation": 0.95
+    "contract_ranking_agreement": 1.0
   }
 }

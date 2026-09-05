@@ -118,6 +118,7 @@ class LlamaKvCache : public LlamaInferenceState {
     bool has_position_input_{false};
     bool binding_mode_initialized_{false};
     bool native_kv_update_enabled_{false};
+    bool dynamic_binding_enabled_{false};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
     LlamaKvCacheNames names_;

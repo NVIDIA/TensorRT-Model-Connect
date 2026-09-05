@@ -270,6 +270,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one InternLM bundle through family-owned code only."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("internlm does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("internlm does not support image_height")
 
@@ -317,7 +320,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     tokenizer_json = model.ensure_tokenizer_json(model_dir)
     weights = model.load_weights(str(model_dir), config)
 
-    writer.set_header(family="internlm", task=request.task, backend="trt")
+    writer.set_header(family="internlm", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

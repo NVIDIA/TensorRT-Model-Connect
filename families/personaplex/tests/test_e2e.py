@@ -6,6 +6,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,6 +19,7 @@ TASKS = frozenset({"speech_to_speech"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
+_MPI_RANK_ZERO = re.compile(r"^\[[^,]+,0\]<stdout>:(.*)$")
 
 
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:
@@ -34,6 +36,13 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
 
 
 CASES = _case_index()
+
+
+def test_manifests_declare_mimi_dependency() -> None:
+    expected = [{"repo_id": "kyutai/mimi"}]
+    for path in sorted(MANIFEST_ROOT.glob("*.json")):
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        assert manifest["hf_dependencies"] == expected, path
 
 
 def _selected_cases(config) -> tuple[list[str], bool]:
@@ -152,7 +161,9 @@ def _run_json(
     case: dict,
     command: str,
     *arguments: str,
+    rank_output_root: Path | None = None,
 ) -> dict:
+    tp_size = int(manifest["tensor_parallel_size"])
     invocation = [
         str(binary),
         command,
@@ -161,19 +172,33 @@ def _run_json(
         str(runtime_root),
         *arguments,
     ]
-    if int(manifest["tensor_parallel_size"]) > 1:
+    if tp_size > 1:
         mpirun = shutil.which("mpirun")
         assert mpirun, "selected multi-GPU E2E requires mpirun"
+        if rank_output_root is not None:
+            invocation = [
+                "bash",
+                "-c",
+                'rank="${OMPI_COMM_WORLD_RANK:?missing rank}"; '
+                'out="$1/rank_${rank}"; mkdir -p "$out"; shift; '
+                'exec "$@" --output "$out/native.wav"',
+                "trtmc_rank_audio",
+                str(rank_output_root),
+                *invocation,
+            ]
         invocation = [
             mpirun,
             "--tag-output",
             "-x",
             "LD_LIBRARY_PATH",
+            "-x",
+            "TRTMC_NCCL_RENDEZVOUS",
             "-np",
-            str(manifest["tensor_parallel_size"]),
+            str(tp_size),
             *invocation,
         ]
     env = os.environ.copy()
+    env["TRTMC_NCCL_RENDEZVOUS"] = str(bundle.with_suffix(".nccl-rendezvous"))
     env["LD_LIBRARY_PATH"] = ":".join(
         (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
     )
@@ -187,10 +212,15 @@ def _run_json(
     )
     payloads = []
     for line in completed.stdout.splitlines():
-        start = line.find("{")
-        if start >= 0:
+        if tp_size > 1:
+            match = _MPI_RANK_ZERO.fullmatch(line)
+            candidate = match.group(1) if match else ""
+        else:
+            start = line.find("{")
+            candidate = line[start:] if start >= 0 else ""
+        if candidate.lstrip().startswith("{"):
             try:
-                payloads.append(json.loads(line[start:]))
+                payloads.append(json.loads(candidate))
             except json.JSONDecodeError:
                 pass
     assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
@@ -198,6 +228,40 @@ def _run_json(
     payload = payloads[0]
     payload["_stderr"] = completed.stderr
     return payload
+
+
+def test_tp_audio_launcher_uses_rank_local_output_and_rank_zero_json(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        stdout = "\n".join(('[1,1]<stdout>:{"rank":1}', '[1,0]<stdout>:{"rank":0}'))
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/mpirun")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    output_root = tmp_path / "rank-outputs"
+
+    payload = _run_json(
+        Path("/trtmc"),
+        Path("/runtime"),
+        tmp_path / "model.bundle",
+        {"tensor_parallel_size": 4},
+        {},
+        "speak",
+        "--input",
+        "/input.wav",
+        rank_output_root=output_root,
+    )
+    assert payload["rank"] == 0
+    command = captured["command"]
+    wrapper = command[command.index("bash") + 2]
+    assert str(output_root) in command
+    assert "OMPI_COMM_WORLD_RANK" in wrapper
+    assert "rank_${rank}" in wrapper and '--output "$out/native.wav"' in wrapper
+    assert "PMI" not in wrapper and "RANK:-" not in wrapper
 
 
 def _thresholds(case_name: str) -> dict:
@@ -225,7 +289,25 @@ def _native(
 ):
     manifest["task"]
     source = _asset(case["test_input_audio"])
-    output = tmp_path / "native.wav"
+    tp_size = int(manifest["tensor_parallel_size"])
+    rank_output_root = tmp_path / "rank-outputs" if tp_size > 1 else None
+    output = (
+        rank_output_root / "rank_0/native.wav"
+        if rank_output_root is not None
+        else tmp_path / "native.wav"
+    )
+    arguments = [
+        "--input",
+        str(source),
+        "--max-new-tokens",
+        str(int(case["max_new_tokens"])),
+        "--seed",
+        str(int(case["seed"])),
+        "--tail-frames",
+        str(int(case["speech_test_max_frames"])),
+    ]
+    if rank_output_root is None:
+        arguments.extend(("--output", str(output)))
     payload = _run_json(
         binary,
         runtime_root,
@@ -233,21 +315,11 @@ def _native(
         manifest,
         case,
         "speak",
-        "--input",
-        str(source),
-        "--output",
-        str(output),
-        "--max-new-tokens",
-        str(int(case["max_new_tokens"])),
-        "--seed",
-        str(int(case["seed"])),
-        "--tail-frames",
-        str(int(case["speech_test_max_frames"])),
+        *arguments,
+        rank_output_root=rank_output_root,
     )
     assert output.is_file()
     payload["audio"] = str(output)
-    import re
-
     frames = []
     for line in payload["_stderr"].splitlines():
         if "<stderr>:" in line and (not line.startswith("[1,0]<stderr>:")):

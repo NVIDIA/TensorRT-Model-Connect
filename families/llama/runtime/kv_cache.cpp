@@ -259,8 +259,9 @@ void LlamaKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len) 
 }
 
 void LlamaKvCache::write_decode_mask(TensorMap& inputs) {
-    if (bound_module_ == nullptr || bound_module_->tensor_shape(names_.attention_mask) !=
-                                        std::vector<int64_t>{1, max_length_ + 1}) {
+    if (bound_module_ == nullptr ||
+        (!dynamic_binding_enabled_ && bound_module_->tensor_shape(names_.attention_mask) !=
+                                          std::vector<int64_t>{1, max_length_ + 1})) {
         throw std::runtime_error("Llama standard decoder has an invalid attention-mask contract");
     }
 
@@ -309,12 +310,19 @@ void LlamaKvCache::bind_to(ITrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
     if (configure_binding_mode(module)) {
+        dynamic_binding_enabled_ = false;
         bind_native_cache(module);
         return;
     }
 
     ensure_standard_present_buffers();
-    if (module.tensor_shape(names_.attention_mask) != std::vector<int64_t>{1, max_length_ + 1}) {
+    dynamic_binding_enabled_ = module.input_is_dynamic(names_.cache_k.front());
+    if (dynamic_binding_enabled_ != module.input_is_dynamic(names_.attention_mask)) {
+        throw std::runtime_error(
+            "Llama runtime-sized KV engine must make cache and attention mask dynamic");
+    }
+    if (!dynamic_binding_enabled_ &&
+        module.tensor_shape(names_.attention_mask) != std::vector<int64_t>{1, max_length_ + 1}) {
         throw std::runtime_error("Llama standard decoder has an invalid attention-mask contract");
     }
     const std::vector<int64_t> cache_shape{max_length_, kv_dim_};
@@ -324,14 +332,20 @@ void LlamaKvCache::bind_to(ITrtModule& module) {
         if (!module.has_input(names_.cache_k[layer]) || !module.has_input(names_.cache_v[layer]) ||
             !module.has_output(names_.present_k[layer]) ||
             !module.has_output(names_.present_v[layer]) ||
-            module.tensor_shape(names_.cache_k[layer]) != cache_shape ||
-            module.tensor_shape(names_.cache_v[layer]) != cache_shape ||
+            (!dynamic_binding_enabled_ &&
+             (module.tensor_shape(names_.cache_k[layer]) != cache_shape ||
+              module.tensor_shape(names_.cache_v[layer]) != cache_shape)) ||
             module.tensor_shape(names_.present_k[layer]) != present_shape ||
             module.tensor_shape(names_.present_v[layer]) != present_shape) {
             throw std::runtime_error("Llama standard decoder has an invalid KV contract");
         }
-        module.bind_external(names_.cache_k[layer], cache_k_[layer].data());
-        module.bind_external(names_.cache_v[layer], cache_v_[layer].data());
+        if (dynamic_binding_enabled_) {
+            module.bind_external(names_.cache_k[layer], cache_k_[layer].data(), cache_shape);
+            module.bind_external(names_.cache_v[layer], cache_v_[layer].data(), cache_shape);
+        } else {
+            module.bind_external(names_.cache_k[layer], cache_k_[layer].data());
+            module.bind_external(names_.cache_v[layer], cache_v_[layer].data());
+        }
         module.bind_external(names_.present_k[layer], present_k_[layer].data());
         module.bind_external(names_.present_v[layer], present_v_[layer].data());
     }
@@ -341,20 +355,32 @@ void LlamaKvCache::bind_cache_inputs(ITrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
     if (configure_binding_mode(module)) {
+        dynamic_binding_enabled_ = false;
         bind_native_cache(module);
         return;
     }
 
+    dynamic_binding_enabled_ = module.input_is_dynamic(names_.cache_k.front());
+    if (dynamic_binding_enabled_ != module.input_is_dynamic(names_.attention_mask)) {
+        throw std::runtime_error(
+            "Llama runtime-sized KV engine must make cache and attention mask dynamic");
+    }
     const std::vector<int64_t> cache_shape{max_length_, kv_dim_};
     for (int32_t i = 0; i < num_layers_; ++i) {
         const auto layer = static_cast<std::size_t>(i);
         if (!module.has_input(names_.cache_k[layer]) || !module.has_input(names_.cache_v[layer]) ||
-            module.tensor_shape(names_.cache_k[layer]) != cache_shape ||
-            module.tensor_shape(names_.cache_v[layer]) != cache_shape) {
+            (!dynamic_binding_enabled_ &&
+             (module.tensor_shape(names_.cache_k[layer]) != cache_shape ||
+              module.tensor_shape(names_.cache_v[layer]) != cache_shape))) {
             throw std::runtime_error("Llama standard prefill has an invalid KV contract");
         }
-        module.bind_external(names_.cache_k[layer], cache_k_[layer].data());
-        module.bind_external(names_.cache_v[layer], cache_v_[layer].data());
+        if (dynamic_binding_enabled_) {
+            module.bind_external(names_.cache_k[layer], cache_k_[layer].data(), cache_shape);
+            module.bind_external(names_.cache_v[layer], cache_v_[layer].data(), cache_shape);
+        } else {
+            module.bind_external(names_.cache_k[layer], cache_k_[layer].data());
+            module.bind_external(names_.cache_v[layer], cache_v_[layer].data());
+        }
     }
 }
 

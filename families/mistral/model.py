@@ -88,6 +88,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Mistral bundle through family-owned code only."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("mistral does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("mistral does not support image_height")
 
@@ -99,7 +102,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.max_batch_size != 1:
         raise NotImplementedError("mistral does not support max_batch_size")
-
 
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
@@ -148,7 +150,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     config.raw.pop("_decoder_engine_role", None)
 
-    writer.set_header(family="mistral", task=request.task, backend="trt")
+    writer.set_header(family="mistral", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", decode)
     writer.add_bytes("prefill.plan", prefill)
     writer.add_json(

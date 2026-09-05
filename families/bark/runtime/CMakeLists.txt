@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_bark SHARED
+  distributed_runtime.cpp
   wordpiece_tokenizer.cpp
   decode_runtime.cpp
   kv_cache.cpp
@@ -29,6 +30,7 @@ target_link_libraries(trtmc_model_bark PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_bark PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -42,22 +44,3 @@ set_target_properties(trtmc_model_bark PROPERTIES
 install(TARGETS trtmc_model_bark
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-
-if(TRTMC_BUILD_TESTS)
-  add_executable(bark_token_trace
-    ../tests/cpp/bark_token_trace.cpp
-  )
-  target_include_directories(bark_token_trace PRIVATE
-    ${PROJECT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/core/runtime/include
-  )
-  target_include_directories(bark_token_trace SYSTEM PRIVATE
-    ${TRTMC_CUDA_INCLUDE_DIR}
-  )
-  target_link_libraries(bark_token_trace PRIVATE
-    trtmc_runtime
-    trtmc_model_bark
-    ${TRTMC_CUDART_LIBRARY}
-  )
-  target_compile_options(bark_token_trace PRIVATE -Wall -Wextra -Wpedantic)
-endif()

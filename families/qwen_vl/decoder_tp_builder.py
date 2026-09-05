@@ -58,8 +58,8 @@ def _apply_norm(
     eps: float | None = None,
 ) -> trt.ITensor:
     return graph_blocks.apply_norm(
-        network, inp, hidden_size, gamma, beta, eps_tensor, norm_type,
-        dtype=dtype, eps=eps)
+        network, inp, hidden_size, gamma, beta, eps_tensor, norm_type, dtype=dtype, eps=eps
+    )
 
 
 def build_qwen_vl_tp_decoder_engine(
@@ -105,8 +105,10 @@ def build_qwen_vl_tp_decoder_engine(
     num_kv_heads = config.num_key_value_heads // parallel.tp_size
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
-        weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
-    attention_window = max_cache_length + 1
+        weights, num_kv_heads=num_kv_heads, head_dim=head_dim
+    )
+    opt_prefill_length = min(64, max_cache_length)
+    rope_table_length = max_cache_length * 2
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -123,38 +125,75 @@ def build_qwen_vl_tp_decoder_engine(
         work_np_dtype = np.float32
         work_trt_dtype = trt.float32
 
-    token_id = network.add_input("token_id", trt.int32, (1,))
-    position_id = network.add_input("position_id", trt.int32, (1,))
-    attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+    token_id = network.add_input("token_id", trt.int32, (-1,))
+    position_id = network.add_input("position_id", trt.int32, (-1,))
+    attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
 
     input_embed_tensor = None
     use_input_embed_tensor = None
     if embed_input:
-        input_embed_tensor = network.add_input("input_embed", trt.float32, (1, hidden))
-        use_input_embed_tensor = network.add_input("use_input_embed", trt.float32, (1,))
+        input_embed_tensor = network.add_input("input_embed", trt.float32, (-1, hidden))
+        use_input_embed_tensor = network.add_input("use_input_embed", trt.float32, (-1, 1))
 
     deepstack_embed_inputs: list[trt.ITensor] = []
     deepstack_active_tensor = None
     if deepstack_num_levels > 0:
         for level in range(deepstack_num_levels):
-            deepstack_embed_inputs.append(network.add_input(
-                f"deepstack_embed_{level}", trt.float32, (1, hidden)))
-        deepstack_active_tensor = network.add_input(
-            "deepstack_active", trt.float32, (1,))
+            deepstack_embed_inputs.append(
+                network.add_input(f"deepstack_embed_{level}", trt.float32, (-1, hidden))
+            )
+        deepstack_active_tensor = network.add_input("deepstack_active", trt.float32, (-1, 1))
 
     cache_k_inputs = []
     cache_v_inputs = []
     for i in range(num_layers):
-        cache_k_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_k", i),
-            work_trt_dtype,
-            (max_cache_length, kv_attention_size),
-        ))
-        cache_v_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_v", i),
-            work_trt_dtype,
-            (max_cache_length, kv_attention_size),
-        ))
+        cache_k_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_k", i),
+                work_trt_dtype,
+                (max_cache_length, kv_attention_size),
+            )
+        )
+        cache_v_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_v", i),
+                work_trt_dtype,
+                (max_cache_length, kv_attention_size),
+            )
+        )
+
+    def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False) -> None:
+        profile = builder.create_optimization_profile()
+        min_sq = opt_sq if fixed else 1
+        profile.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
+        profile.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        profile.set_shape(
+            "attention_mask",
+            (min_sq, max_cache_length + min_sq),
+            (opt_sq, max_cache_length + opt_sq),
+            (max_sq, max_cache_length + max_sq),
+        )
+        if embed_input:
+            profile.set_shape(
+                "input_embed",
+                (min_sq, hidden),
+                (opt_sq, hidden),
+                (max_sq, hidden),
+            )
+            profile.set_shape("use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+        for level in range(deepstack_num_levels):
+            profile.set_shape(
+                f"deepstack_embed_{level}",
+                (min_sq, hidden),
+                (opt_sq, hidden),
+                (max_sq, hidden),
+            )
+        if deepstack_num_levels > 0:
+            profile.set_shape("deepstack_active", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+        trt_config.add_optimization_profile(profile)
+
+    _add_profile(opt_prefill_length, max_cache_length)
+    _add_profile(1, 1, fixed=True)
 
     if work_trt_dtype != trt.float32:
         attention_mask = network.add_cast(attention_mask, work_trt_dtype).get_output(0)
@@ -165,7 +204,8 @@ def build_qwen_vl_tp_decoder_engine(
         return network.add_cast(tensor, work_trt_dtype).get_output(0)
 
     embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
+        network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype
+    )
 
     cos_half_tensor = None
     sin_half_tensor = None
@@ -173,47 +213,62 @@ def build_qwen_vl_tp_decoder_engine(
     if position_type == "rope":
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
         cos_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            rope_table_length,
+            head_dim,
+            config.rope_theta,
+            True,
+            partial_rotary_factor,
+            interleaved=interleaved_rope,
+        )
         sin_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            rope_table_length,
+            head_dim,
+            config.rope_theta,
+            False,
+            partial_rotary_factor,
+            interleaved=interleaved_rope,
+        )
         cos_half_tensor = _cast_work_dtype(
-            graph_ops.add_constant(network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype))
+            graph_ops.add_constant(network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+        )
         sin_half_tensor = _cast_work_dtype(
-            graph_ops.add_constant(network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype))
+            graph_ops.add_constant(network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
+        )
     else:
         raise NotImplementedError("Qwen-VL tensor-parallel builds require RoPE")
 
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype), dtype=work_np_dtype
+    )
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
 
     token_embed = network.add_gather(embedding_table, token_id, 0).get_output(0)
     if embed_input and input_embed_tensor is not None and use_input_embed_tensor is not None:
         token_embed_for_math = _cast_work_dtype(token_embed)
-        flag_broadcast = network.add_shuffle(use_input_embed_tensor)
-        flag_broadcast.reshape_dims = (1, 1)
-        flag_for_math = flag_broadcast.get_output(0)
+        flag_for_math = use_input_embed_tensor
         if work_trt_dtype != trt.float32:
             flag_for_math = network.add_cast(flag_for_math, work_trt_dtype).get_output(0)
         one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
-            dtype=work_np_dtype)
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
+        )
         one_const = _cast_work_dtype(one_const)
         inv_flag = network.add_elementwise(
-            one_const, flag_for_math, trt.ElementWiseOperation.SUB).get_output(0)
+            one_const, flag_for_math, trt.ElementWiseOperation.SUB
+        ).get_output(0)
         tok_part = network.add_elementwise(
-            inv_flag, token_embed_for_math, trt.ElementWiseOperation.PROD).get_output(0)
+            inv_flag, token_embed_for_math, trt.ElementWiseOperation.PROD
+        ).get_output(0)
         input_embed_for_math = input_embed_tensor
         if input_embed_for_math.dtype != work_trt_dtype:
             input_embed_for_math = network.add_cast(
-                input_embed_for_math, work_trt_dtype).get_output(0)
+                input_embed_for_math, work_trt_dtype
+            ).get_output(0)
         embed_part = network.add_elementwise(
-            flag_for_math, input_embed_for_math, trt.ElementWiseOperation.PROD).get_output(0)
+            flag_for_math, input_embed_for_math, trt.ElementWiseOperation.PROD
+        ).get_output(0)
         hidden_state = network.add_elementwise(
-            tok_part, embed_part, trt.ElementWiseOperation.SUM).get_output(0)
+            tok_part, embed_part, trt.ElementWiseOperation.SUM
+        ).get_output(0)
     else:
         hidden_state = token_embed
 
@@ -274,20 +329,47 @@ def build_qwen_vl_tp_decoder_engine(
     final_norm = weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
         hidden_state = _apply_norm(
-            network, hidden_state, hidden, final_norm,
-            weights.get("final_norm_beta"), eps_tensor, norm_type,
-            dtype=work_np_dtype, eps=config.rms_norm_eps)
+            network,
+            hidden_state,
+            hidden,
+            final_norm,
+            weights.get("final_norm_beta"),
+            eps_tensor,
+            norm_type,
+            dtype=work_np_dtype,
+            eps=config.rms_norm_eps,
+        )
+
+    hidden_shape = network.add_shape(hidden_state).get_output(0)
+    one_hidden = graph_ops.add_constant(
+        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
+    )
+    last_start = network.add_elementwise(
+        hidden_shape, one_hidden, trt.ElementWiseOperation.SUB
+    ).get_output(0)
+    last_size = graph_ops.add_constant(
+        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
+    )
+    last_slice = network.add_slice(hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
+    last_slice.set_input(1, last_start)
+    last_slice.set_input(2, last_size)
+    last_hidden = last_slice.get_output(0)
 
     out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, out_vocab, weights["w_out"], dtype=work_np_dtype)
+        network, last_hidden, hidden, out_vocab, weights["w_out"], dtype=work_np_dtype
+    )
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(network, logits, out_vocab, lm_bias, dtype=work_np_dtype)
     else:
         logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, np.zeros(out_vocab, dtype=work_np_dtype),
-            dtype=work_np_dtype)
+            network,
+            logits,
+            out_vocab,
+            np.zeros(out_vocab, dtype=work_np_dtype),
+            dtype=work_np_dtype,
+        )
     if work_trt_dtype != trt.float32:
         logits = network.add_cast(logits, trt.float32).get_output(0)
     logits.name = "logits"
@@ -349,15 +431,26 @@ def _add_tp_decoder_layer(
     eps: float | None = None,
 ) -> dict[str, trt.ITensor]:
     attn = graph_blocks.add_attention_block(
-        network, hidden, cache_k, cache_v, attention_mask, position_id,
-        weights=weights, prefix=prefix,
-        hidden_size=hidden_size, attention_size=attention_size,
+        network,
+        hidden,
+        cache_k,
+        cache_v,
+        attention_mask,
+        position_id,
+        weights=weights,
+        prefix=prefix,
+        hidden_size=hidden_size,
+        attention_size=attention_size,
         kv_attention_size=kv_attention_size,
-        num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
         max_cache_length=max_cache_length,
         attention_scale=attention_scale,
-        eps_tensor=eps_tensor, eps=eps,
-        norm_type=norm_type, position_type="rope",
+        eps_tensor=eps_tensor,
+        eps=eps,
+        norm_type=norm_type,
+        position_type="rope",
         alibi_slopes_tensor=None,
         alibi_indices_tensor=None,
         dtype=dtype,
@@ -367,6 +460,7 @@ def _add_tp_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
+        sequence_length=None,
     )
     attn_out = add_all_reduce_sum(network, attn["attn_out"], tp_size)
 
@@ -374,54 +468,74 @@ def _add_tp_decoder_layer(
         post_attn_norm_w = weights.get(f"{prefix}.post_attn_norm")
         if post_attn_norm_w is not None:
             norm2 = _apply_norm(
-                network, hidden, hidden_size,
+                network,
+                hidden,
+                hidden_size,
                 post_attn_norm_w,
                 weights.get(f"{prefix}.post_attn_norm_beta"),
-                eps_tensor, norm_type, dtype=dtype, eps=eps)
+                eps_tensor,
+                norm_type,
+                dtype=dtype,
+                eps=eps,
+            )
         else:
             norm2 = attn["normed"]
     else:
         residual1 = network.add_elementwise(
-            hidden, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
+            hidden, attn_out, trt.ElementWiseOperation.SUM
+        ).get_output(0)
         norm2 = _apply_norm(
-            network, residual1, hidden_size,
+            network,
+            residual1,
+            hidden_size,
             weights[f"{prefix}.post_attn_norm"],
             weights.get(f"{prefix}.post_attn_norm_beta"),
-            eps_tensor, norm_type, dtype=dtype, eps=eps)
+            eps_tensor,
+            norm_type,
+            dtype=dtype,
+            eps=eps,
+        )
 
     mlp_out = graph_blocks.add_swiglu_mlp(
-        network, norm2, weights=weights, prefix=prefix,
-        hidden_size=hidden_size, mlp_size=mlp_size, dtype=dtype,
-        quant_ctx=quant_ctx, layer_prefix=prefix)
+        network,
+        norm2,
+        weights=weights,
+        prefix=prefix,
+        hidden_size=hidden_size,
+        mlp_size=mlp_size,
+        dtype=dtype,
+        quant_ctx=quant_ctx,
+        layer_prefix=prefix,
+    )
     mlp_out = add_all_reduce_sum(network, mlp_out, tp_size)
 
     if parallel_residual:
         sum_attn = network.add_elementwise(
-            hidden, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
+            hidden, attn_out, trt.ElementWiseOperation.SUM
+        ).get_output(0)
         residual2 = network.add_elementwise(
-            sum_attn, mlp_out, trt.ElementWiseOperation.SUM).get_output(0)
+            sum_attn, mlp_out, trt.ElementWiseOperation.SUM
+        ).get_output(0)
         post_attn_tensor = sum_attn
     else:
         residual2 = network.add_elementwise(
-            residual1, mlp_out, trt.ElementWiseOperation.SUM).get_output(0)
+            residual1, mlp_out, trt.ElementWiseOperation.SUM
+        ).get_output(0)
         post_attn_tensor = residual1
 
     if deepstack_embed is not None and deepstack_active is not None:
-        ds_active_broadcast = network.add_shuffle(deepstack_active)
-        ds_active_broadcast.reshape_dims = (1, 1)
-        active = ds_active_broadcast.get_output(0)
+        active = deepstack_active
         deepstack_for_math = deepstack_embed
         if deepstack_for_math.dtype != residual2.dtype:
-            deepstack_for_math = network.add_cast(
-                deepstack_for_math, residual2.dtype).get_output(0)
+            deepstack_for_math = network.add_cast(deepstack_for_math, residual2.dtype).get_output(0)
         if active.dtype != deepstack_for_math.dtype:
-            active = network.add_cast(
-                active, deepstack_for_math.dtype).get_output(0)
+            active = network.add_cast(active, deepstack_for_math.dtype).get_output(0)
         ds_scaled = network.add_elementwise(
-            deepstack_for_math, active,
-            trt.ElementWiseOperation.PROD).get_output(0)
+            deepstack_for_math, active, trt.ElementWiseOperation.PROD
+        ).get_output(0)
         residual2 = network.add_elementwise(
-            residual2, ds_scaled, trt.ElementWiseOperation.SUM).get_output(0)
+            residual2, ds_scaled, trt.ElementWiseOperation.SUM
+        ).get_output(0)
 
     return {
         "hidden": residual2,

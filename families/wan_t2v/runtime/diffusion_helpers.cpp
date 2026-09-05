@@ -187,8 +187,10 @@ WanDiffusionConfig make_diffusion_config(const std::string& json) {
     dc.guidance_scale = require_number(document, "guidance_scale");
     dc.flow_shift = optional_number(document, "flow_shift", 1.0F);
     dc.unipc_lower_order_final = optional_int_flag(document, "unipc_lower_order_final", true);
-    dc.tokenizer_add_special_tokens =
-        optional_int_flag(document, "tokenizer_add_special_tokens", false);
+    const auto& add_special_tokens = require_member(document, "tokenizer_add_special_tokens");
+    if (!add_special_tokens.is_boolean())
+        throw std::runtime_error("runtime.json 'tokenizer_add_special_tokens' must be a boolean");
+    dc.tokenizer_add_special_tokens = add_special_tokens.get<bool>();
     dc.use_dynamic_shifting = optional_int_flag(document, "use_dynamic_shifting", false);
     dc.base_shift = optional_number(document, "base_shift", 0.5F);
     dc.max_shift = optional_number(document, "max_shift", 1.15F);

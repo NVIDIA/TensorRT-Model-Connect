@@ -751,6 +751,9 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one SegFormer bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("segformer does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("segformer does not support image_height")
 
@@ -784,7 +787,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     model = _SegformerModel()
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="segformer", task=request.task, backend="trt")
+    writer.set_header(family="segformer", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

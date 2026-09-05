@@ -250,6 +250,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one StableLM bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("stablelm does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("stablelm does not support image_height")
 
@@ -291,7 +294,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="stablelm", task=request.task, backend="trt")
+    writer.set_header(family="stablelm", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

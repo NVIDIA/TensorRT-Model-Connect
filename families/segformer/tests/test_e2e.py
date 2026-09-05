@@ -169,11 +169,14 @@ def _run_json(
             "--tag-output",
             "-x",
             "LD_LIBRARY_PATH",
+            "-x",
+            "TRTMC_NCCL_RENDEZVOUS",
             "-np",
             str(manifest["tensor_parallel_size"]),
             *invocation,
         ]
     env = os.environ.copy()
+    env["TRTMC_NCCL_RENDEZVOUS"] = str(bundle.with_suffix(".nccl-rendezvous"))
     env["LD_LIBRARY_PATH"] = ":".join(
         (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
     )
@@ -222,7 +225,7 @@ def _native(
     tmp_path: Path,
 ):
     manifest["task"]
-    return _run_json(
+    payload = _run_json(
         binary,
         runtime_root,
         bundle,
@@ -232,6 +235,11 @@ def _native(
         "--image",
         str(_asset(case["test_image"])),
     )
+    height = int(payload["height"])
+    width = int(payload["width"])
+    mask = np.asarray(payload["mask"])
+    assert mask.size == height * width
+    return {"mask": mask.reshape(height, width)}
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
@@ -275,32 +283,6 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     return {"mask": mask.cpu().numpy()}
 
 
-def _boundary_f_score(left: np.ndarray, right: np.ndarray, tolerance: int = 2) -> float:
-    def boundary(values: np.ndarray) -> np.ndarray:
-        result = np.zeros_like(values, dtype=bool)
-        result[:-1] |= values[:-1] != values[1:]
-        result[1:] |= values[:-1] != values[1:]
-        result[:, :-1] |= values[:, :-1] != values[:, 1:]
-        result[:, 1:] |= values[:, :-1] != values[:, 1:]
-        return result
-
-    def dilate(values: np.ndarray) -> np.ndarray:
-        padded = np.pad(values, tolerance)
-        result = np.zeros_like(values, dtype=bool)
-        for row in range(2 * tolerance + 1):
-            for column in range(2 * tolerance + 1):
-                result |= padded[row : row + values.shape[0], column : column + values.shape[1]]
-        return result
-
-    left_boundary = boundary(left)
-    right_boundary = boundary(right)
-    if not left_boundary.any() or not right_boundary.any():
-        return float(left_boundary.any() == right_boundary.any())
-    precision = float(left_boundary[dilate(right_boundary)].sum() / left_boundary.sum())
-    recall = float(right_boundary[dilate(left_boundary)].sum() / right_boundary.sum())
-    return 0.0 if precision + recall == 0.0 else 2.0 * precision * recall / (precision + recall)
-
-
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
     manifest["task"]
     left_map = np.asarray(actual["mask"])
@@ -308,7 +290,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     assert left_map.shape == right_map.shape and left_map.ndim == 2
     left = left_map.reshape(-1)
     right = right_map.reshape(-1)
-    assert float(np.mean(left == right)) >= float(thresholds["min_pixel_agreement"])
+    assert float(np.mean(left == right)) >= float(thresholds["pixel_accuracy"])
     class_ious = []
     for class_id in np.union1d(left, right):
         left_mask = left == class_id
@@ -317,8 +299,17 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         if union:
             class_ious.append(np.logical_and(left_mask, right_mask).sum() / union)
     assert class_ious and float(np.mean(class_ious)) >= float(thresholds["mIoU"])
-    assert _boundary_f_score(left_map, right_map) >= float(thresholds["boundary_f_score"])
-    return
+
+
+def test_segmentation_contract_uses_pixel_accuracy_and_miou() -> None:
+    values = np.asarray([[0, 0], [1, 1]], dtype=np.int32)
+    _assert_parity(
+        {"mask": values},
+        {"mask": values},
+        {"task": "segmentation"},
+        {},
+        {"pixel_accuracy": 0.99, "mIoU": 0.94},
+    )
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:

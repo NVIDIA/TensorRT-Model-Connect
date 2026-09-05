@@ -8,6 +8,7 @@
 #include "families/sam2/runtime/sam2_engine_contract.h"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -30,30 +31,49 @@ void validateBundleInventory(const BundleReader& bundle) {
         throw std::invalid_argument("SAM2 bundle is missing runtime.json");
 }
 
-class Session final : public IVideoSegmentationSession {
+constexpr std::size_t kRgbElementCount = static_cast<std::size_t>(kOriginalImageHeight) *
+                                         static_cast<std::size_t>(kOriginalImageWidth) * 3U;
+
+void requireFrameShape(const VideoFrameView& frame) {
+    if (frame.pixels == nullptr || frame.height != kOriginalImageHeight ||
+        frame.width != kOriginalImageWidth || frame.element_count != kRgbElementCount) {
+        throw std::invalid_argument("SAM2 frame does not match its fixed RGB contract");
+    }
+}
+
+using ConvertedRgb8Frames = std::array<std::vector<std::uint8_t>, kVideoFrameCount>;
+
+NativeRgb8Frames prepareRgb8Frames(const VideoSegmentationRequest& request,
+                                   ConvertedRgb8Frames& converted_frames) {
+    if (!request.text_prompt.empty())
+        throw std::invalid_argument("SAM2 bbox tracking does not accept a text prompt");
+    if (request.frames.size() != kVideoFrameCount)
+        throw std::invalid_argument("SAM2 requires exactly five frames");
+
+    NativeRgb8Frames frames{};
+    for (std::size_t index = 0; index < request.frames.size(); ++index) {
+        const auto& frame = request.frames[index];
+        requireFrameShape(frame);
+        if (frame.format == VideoFrameFormat::kRgb8) {
+            frames[index] = static_cast<const std::uint8_t*>(frame.pixels);
+        } else if (frame.format == VideoFrameFormat::kRgbFloat32) {
+            converted_frames[index] = convertSam2FloatFrameToRgb8(frame);
+            frames[index] = converted_frames[index].data();
+        } else {
+            throw std::invalid_argument("SAM2 frame has an unsupported RGB format");
+        }
+    }
+    return frames;
+}
+
+class Session final : public IVideoSegmentationSession, public ISam2DeviceMaskSession {
   public:
     explicit Session(std::unique_ptr<NativeVideoProcessor> processor)
         : processor_(std::move(processor)) {}
 
     VideoSegmentationResult segment(const VideoSegmentationRequest& request) override {
-        if (!request.text_prompt.empty())
-            throw std::invalid_argument("SAM2 bbox tracking does not accept a text prompt");
-        if (request.frames.size() != kVideoFrameCount)
-            throw std::invalid_argument("SAM2 requires exactly five frames");
-
-        NativeRgb8Frames frames{};
-        const auto element_count = static_cast<std::size_t>(kOriginalImageHeight) *
-                                   static_cast<std::size_t>(kOriginalImageWidth) * 3U;
-        for (std::size_t index = 0; index < request.frames.size(); ++index) {
-            const auto& frame = request.frames[index];
-            if (frame.pixels == nullptr || frame.format != VideoFrameFormat::kRgb8 ||
-                frame.height != kOriginalImageHeight || frame.width != kOriginalImageWidth ||
-                frame.element_count != element_count) {
-                throw std::invalid_argument("SAM2 frame does not match its fixed RGB8 contract");
-            }
-            frames[index] = static_cast<const std::uint8_t*>(frame.pixels);
-        }
-
+        ConvertedRgb8Frames converted_frames;
+        const auto frames = prepareRgb8Frames(request, converted_frames);
         const auto view = processor_->run(frames, true);
         const auto mask_size = static_cast<std::size_t>(kOriginalImageHeight) *
                                static_cast<std::size_t>(kOriginalImageWidth);
@@ -73,11 +93,48 @@ class Session final : public IVideoSegmentationSession {
         return result;
     }
 
+    Sam2DeviceMaskResultView segment_device(const VideoSegmentationRequest& request) override {
+        ConvertedRgb8Frames converted_frames;
+        const auto frames = prepareRgb8Frames(request, converted_frames);
+        const auto native = processor_->run(frames, false);
+        if (native.mask_device_ordinal < 0 ||
+            std::any_of(
+                native.masks.begin(), native.masks.end(),
+                [](const void* mask) { return mask == nullptr; })) {
+            throw std::runtime_error("SAM2 did not return five CUDA device masks");
+        }
+        Sam2DeviceMaskResultView result;
+        result.masks = native.masks;
+        result.mask_device_ordinal = native.mask_device_ordinal;
+        result.label = native.label;
+        result.detector_score = native.detector_score;
+        result.prompt_box_xyxy = native.prompt_box_xyxy;
+        return result;
+    }
+
   private:
     std::unique_ptr<NativeVideoProcessor> processor_;
 };
 
 } // namespace
+
+std::vector<std::uint8_t> convertSam2FloatFrameToRgb8(const VideoFrameView& frame) {
+    requireFrameShape(frame);
+    if (frame.format != VideoFrameFormat::kRgbFloat32)
+        throw std::invalid_argument("SAM2 float conversion requires RGB float32 input");
+
+    const auto* source = static_cast<const float*>(frame.pixels);
+    std::vector<std::uint8_t> result(kRgbElementCount);
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        const float value = source[index];
+        if (!std::isfinite(value) || value < 0.0F || value > 1.0F) {
+            throw std::invalid_argument(
+                "SAM2 RGB float32 input must contain finite values in [0, 1]");
+        }
+        result[index] = static_cast<std::uint8_t>(std::lround(value * 255.0F));
+    }
+    return result;
+}
 
 NativeVideoEngineSet makeNativeVideoEngineSet(const BundleReader& bundle,
                                               const NativePlanModuleFactory& module_factory) {

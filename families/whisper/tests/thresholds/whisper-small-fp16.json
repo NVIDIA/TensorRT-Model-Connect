@@ -1,5 +1,6 @@
 {
   "threshold_overrides": {
-    "normalized_text_edit_distance": 0.0
+    "contract_ned_threshold": 0.0,
+    "contract_wer_threshold": 0.0
   }
 }

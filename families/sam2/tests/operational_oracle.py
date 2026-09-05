@@ -51,3 +51,6 @@ def assert_operational_receipt(receipt: dict) -> None:
         type(value) is int and minimum <= value <= _FRAME_PIXELS - minimum for value in counts
     )
     assert receipt["temporally_distinct_masks"] is True
+    assert type(receipt["device_mask_ordinal"]) is int and receipt["device_mask_ordinal"] >= 0
+    assert receipt["device_metadata_exact"] is True
+    assert receipt["device_masks_match_host"] is True

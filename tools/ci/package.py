@@ -68,6 +68,9 @@ def load_native_libraries(bin_dir: Path, families: tuple[str, ...]) -> None:
         bin_dir / "libtrtmc_byok_tvm_ffi.so",
         *(bin_dir / f"libtrtmc_model_{family}.so" for family in families),
     ]
+    rtx_backend = bin_dir / "libtrtmc_backend_trt_rtx.so"
+    if rtx_backend.is_file():
+        libraries.append(rtx_backend)
     script = """
 import ctypes
 import os
@@ -97,7 +100,7 @@ for path in sys.argv[2:]:
 class WheelArchiveValidator:
     """Require only the Python packages and native artifacts users execute."""
 
-    def __init__(self, context: CiContext, _platform: str | None = None):
+    def __init__(self, context: CiContext):
         self.context = context
 
     def validate(self, wheels: list[Path]) -> None:
@@ -177,8 +180,7 @@ class WheelArchiveValidator:
             mismatched_python = sorted(
                 name
                 for name in expected_python
-                if archive.read(name)
-                != (self.context.repository / name).read_bytes()
+                if archive.read(name) != (self.context.repository / name).read_bytes()
             )
             if mismatched_python:
                 raise CiError(
@@ -191,9 +193,7 @@ class WheelArchiveValidator:
                 except (SyntaxError, UnicodeError):
                     invalid_python.append(name)
             if invalid_python:
-                raise CiError(
-                    f"{wheel}: family Python files do not compile: {invalid_python}"
-                )
+                raise CiError(f"{wheel}: family Python files do not compile: {invalid_python}")
 
             expected_family_data = {
                 path.relative_to(self.context.repository).as_posix()
@@ -254,8 +254,14 @@ class WheelArchiveValidator:
             backend_dsos = sorted(
                 name for name in module_bins if name.startswith("libtrtmc_backend_")
             )
-            if backend_dsos != ["libtrtmc_backend_trt.so"]:
-                raise CiError(f"{wheel}: expected one unaliased TensorRT backend DSO")
+            allowed_backends = [
+                ["libtrtmc_backend_trt.so"],
+                ["libtrtmc_backend_trt.so", "libtrtmc_backend_trt_rtx.so"],
+            ]
+            if backend_dsos not in allowed_backends:
+                raise CiError(
+                    f"{wheel}: expected only unaliased TensorRT backend DSOs, found {backend_dsos}"
+                )
             scripts = [name for name in names if name.endswith(".data/scripts/trtmc")]
             script_cores = [
                 name for name in names if name.endswith(".data/scripts/libtrtmc_core.so")
@@ -265,12 +271,10 @@ class WheelArchiveValidator:
             ]
             if len(scripts) != 1 or len(script_cores) != 1 or len(script_runtimes) != 1:
                 raise CiError(f"{wheel}: installed CLI payload is incomplete")
-            entry_points = [
-                name for name in names if name.endswith(".dist-info/entry_points.txt")
-            ]
-            if len(entry_points) != 1 or "trtmc-bench" not in archive.read(
-                entry_points[0]
-            ).decode("utf-8"):
+            entry_points = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
+            if len(entry_points) != 1 or "trtmc-bench" not in archive.read(entry_points[0]).decode(
+                "utf-8"
+            ):
                 raise CiError(f"{wheel}: trtmc-bench console entrypoint is missing")
         print(f"validated wheel={wheel} families={len(expected_families)}")
 
@@ -317,8 +321,7 @@ print(json.dumps({
         bin_dir = Path(payload["bin"])
         expected = set(family_ids(self.repository))
         expected_requirements = {
-            path.parent.name
-            for path in (self.repository / "families").glob("*/requirements.txt")
+            path.parent.name for path in (self.repository / "families").glob("*/requirements.txt")
         }
         if set(payload["family_requirements"]) != expected_requirements:
             raise CiError(f"installed family dependency declarations are incomplete: {wheel}")
@@ -405,7 +408,7 @@ class WheelPackageManager:
 
     def preflight(self) -> None:
         families = family_ids(self.context.repository)
-        self.context.run(["python", "tools/model_ci.py", "validate"])
+        self.context.run(["python", "-m", "tools.model_ci", "validate"])
         print(f"package preflight families={len(families)}")
 
     def build(self) -> None:
@@ -463,10 +466,6 @@ class WheelPackageManager:
         )
         InstalledWheelValidator(self.context.repository).validate(wheel)
         return wheel
-
-    def verify_installed(self) -> None:
-        wheel = Path(self.context.read_state(WHEEL_STATE)["wheel"])
-        InstalledWheelValidator(self.context.repository).validate(wheel)
 
     def select_compatible_wheel(self, directory: str = "dist") -> Path:
         wheels = sorted((self.context.repository / directory).glob("*.whl"))

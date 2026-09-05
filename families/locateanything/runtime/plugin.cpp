@@ -4,14 +4,13 @@
  */
 
 #include "families/locateanything/runtime/cuda_stream.h"
+#include "families/locateanything/runtime/distributed_runtime.h"
 #include "families/locateanything/runtime/pipeline.h"
 #include "families/locateanything/runtime/plugin_helpers.h"
 #include "families/locateanything/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
-#include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -46,31 +45,6 @@ std::int32_t require_positive_int(const nlohmann::json& json, const char* key) {
     return value;
 }
 
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::int32_t require_rank(std::int32_t tp_size) {
-    require_nccl(tp_size);
-    if (tp_size == 1)
-        return 0;
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("LocateAnything TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= tp_size)
-        throw std::runtime_error("LocateAnything RANK is outside tensor_parallel_size");
-    return static_cast<std::int32_t>(rank);
-}
-
 LocateanythingKvCacheNames build_kv_names(const nlohmann::json& config, std::int32_t num_layers) {
     const auto& io = config.at("io_map");
     const auto cache_k = io.at("cache_k_pattern").get<std::string>();
@@ -91,6 +65,8 @@ LocateanythingKvCacheNames build_kv_names(const nlohmann::json& config, std::int
 } // namespace trtmc::locateanything_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("locateanything does not support --kv-cache-size");
     using namespace trtmc;
     const std::string runtime_text =
         locateanything_factory::section_text(context.reader, "runtime.json");
@@ -100,9 +76,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
 
     const auto tp_size =
         locateanything_factory::require_positive_int(config, "tensor_parallel_size");
-    const auto rank = locateanything_factory::require_rank(tp_size);
+    const auto group = locateanything::initialize_tensor_parallel_group(tp_size);
     const std::string decode_section =
-        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(rank) + ".plan";
+        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(group.rank) + ".plan";
     const auto& decode_plan =
         locateanything_factory::require_section(context.reader, decode_section.c_str());
     const auto& prefill_plan =
@@ -115,10 +91,15 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("LocateAnything failed to create its CUDA stream");
     ModuleCreateOptions options{};
     options.stream = stream_owner->get();
-    auto decode =
-        load_trt_module_from_plan(&context.backend, &decode_plan, decode_section.c_str(), options);
+    ModuleCreateOptions text_options = options;
+    if (tp_size > 1) {
+        text_options.distributed_communicator = group.communicator;
+        text_options.distributed_owner = group.owner;
+    }
+    auto decode = load_trt_module_from_plan(&context.backend, &decode_plan, decode_section.c_str(),
+                                            text_options);
     auto prefill =
-        load_trt_module_from_plan(&context.backend, &prefill_plan, "prefill.plan", options);
+        load_trt_module_from_plan(&context.backend, &prefill_plan, "prefill.plan", text_options);
     auto vision = load_trt_module_from_plan(&context.backend, &vision_plan, "vision.plan", options);
     decode.module->keep_alive(stream_owner);
     prefill.module->keep_alive(stream_owner);

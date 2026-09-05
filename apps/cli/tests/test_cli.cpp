@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -121,6 +122,96 @@ class FakeStreamingAudio final : public trtmc::IAudioGeneration,
     }
 };
 
+class FakeTranscriptionStream final : public trtmc::ITranscriptionStream {
+  public:
+    explicit FakeTranscriptionStream(trtmc::TranscriptionStreamConfig config)
+        : config_(std::move(config)) {}
+
+    trtmc::TranscriptionStreamResult accept_audio(const float*, std::int32_t num_samples,
+                                                  bool) override {
+        accepted_samples_ += num_samples;
+        return {"partial", {}, false, 0, accepted_samples_, config_.input_sample_rate};
+    }
+
+    trtmc::TranscriptionStreamResult finish() override {
+        return {"final", {}, true, 1, accepted_samples_, config_.input_sample_rate};
+    }
+
+    void reset() override { accepted_samples_ = 0; }
+    trtmc::TranscriptionStreamConfig config() const override { return config_; }
+
+  private:
+    trtmc::TranscriptionStreamConfig config_;
+    std::int64_t accepted_samples_{0};
+};
+
+class FakeStreamingTranscription final : public trtmc::IStreamingTranscription {
+  public:
+    trtmc::TranscriptionStreamConfig seen;
+
+    std::unique_ptr<trtmc::ITranscriptionStream>
+    create_transcription_stream(const trtmc::TranscriptionStreamConfig& config) override {
+        seen = config;
+        return std::make_unique<FakeTranscriptionStream>(config);
+    }
+};
+
+class FakeTranscription final : public trtmc::ITranscription, public trtmc::IBatchTranscription {
+  public:
+    std::vector<trtmc::TranscriptionConfig> seen;
+
+    const char* task() const noexcept override { return trtmc::ITranscription::kTask; }
+
+    trtmc::TextResult transcribe(const float*, std::int32_t,
+                                 const trtmc::TranscriptionConfig& config) override {
+        seen = {config};
+        return {"transcribed", {1}};
+    }
+
+    std::vector<trtmc::TextResult>
+    transcribe_batch(const std::vector<trtmc::TranscriptionRequest>& requests) override {
+        seen.clear();
+        std::vector<trtmc::TextResult> results;
+        for (const auto& request : requests) {
+            seen.push_back(request.config);
+            results.push_back({"transcribed", {1}});
+        }
+        return results;
+    }
+};
+
+class FakeVideoSession final : public trtmc::IVideoSegmentationSession {
+  public:
+    explicit FakeVideoSession(std::string& prompt) : prompt_(prompt) {}
+
+    trtmc::VideoSegmentationResult
+    segment(const trtmc::VideoSegmentationRequest& request) override {
+        prompt_ = request.text_prompt;
+        trtmc::VideoSegmentationFrameResult frame;
+        frame.masks = {1};
+        frame.object_ids = {1};
+        frame.detection_scores = {1.0F};
+        frame.tracking_scores = {1.0F};
+        frame.boxes = {0.0F, 0.0F, 1.0F, 1.0F};
+        frame.num_objects = 1;
+        frame.height = 1;
+        frame.width = 1;
+        return {{std::move(frame)}};
+    }
+
+  private:
+    std::string& prompt_;
+};
+
+class FakeVideo final : public trtmc::IVideoSegmentation {
+  public:
+    std::string prompt;
+
+    std::unique_ptr<trtmc::IVideoSegmentationSession> create_video_segmentation_session() override {
+        return std::make_unique<FakeVideoSession>(prompt);
+    }
+};
+
 class FakeForecast final : public trtmc::ITimeSeriesForecast {
   public:
     std::int32_t seen_frequency{-1};
@@ -198,6 +289,30 @@ int main() {
     check(parse_throws(
               {"trtmc", "run", "model.bundle", "--runtime-root", "a", "--runtime-root", "b"}),
           "duplicate runtime root rejected");
+    const auto dynamic_kv =
+        parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--kv-cache-size", "1GiB"});
+    check(dynamic_kv.kv_cache_size_bytes == 1024ULL * 1024ULL * 1024ULL,
+          "runtime KV cache size is retained as bytes");
+    check(parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--kv-cache-size",
+                 "1000000000"})
+                  .kv_cache_size_bytes == 1000000000ULL,
+          "runtime KV cache accepts explicit bytes");
+    check(parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--kv-cache-size", "1GB"})
+                  .kv_cache_size_bytes == 1000000000ULL,
+          "runtime KV cache distinguishes decimal GB");
+    check(parse_throws(
+              {"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--kv-cache-size", "0"}),
+          "zero runtime KV cache is rejected");
+    check(parse_throws(
+              {"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--kv-cache-size", "1MiB"}),
+          "uncanonical runtime KV cache suffix is rejected");
+    const auto rtx = parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib",
+                            "--runtime-cache", "kernels.cache", "--cuda-graphs"});
+    check(rtx.runtime_cache_path == "kernels.cache" && rtx.cuda_graphs,
+          "TensorRT-RTX runtime options are retained directly");
+    check(parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--cuda-graphs",
+                        "--cuda-graphs"}),
+          "duplicate TensorRT-RTX graph option is rejected");
     check(
         parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--bogus", "value"}),
         "unknown command option rejected");
@@ -225,6 +340,10 @@ int main() {
                                "model.bundle",
                                "--runtime-root",
                                "lib",
+                               "--source-language-token-id",
+                               "256047",
+                               "--forced-bos-token-id",
+                               "256057",
                                "--initial-latents-raw",
                                "initial.f32",
                                "--condition-latents-raw",
@@ -251,6 +370,8 @@ int main() {
                                "0"});
     check(replay.options.at("--initial-latents-raw") == "initial.f32" &&
               replay.options.at("--sampling-steps-raw") == "steps.f32" &&
+              replay.options.at("--source-language-token-id") == "256047" &&
+              replay.options.at("--forced-bos-token-id") == "256057" &&
               replay.options.at("--generation-mode") == "diffusion" &&
               replay.options.at("--block-length") == "32" &&
               replay.options.at("--threshold") == "0.9",
@@ -277,6 +398,9 @@ int main() {
                               "--frame", "a.png", "--frame", "b.png", "--prompt", "car"});
     check(video.frames == std::vector<std::string>({"a.png", "b.png"}),
           "video frames preserve repeated option order");
+    const auto video_without_prompt = parse(
+        {"trtmc", "video-segment", "model.bundle", "--runtime-root", "lib", "--frame", "a.png"});
+    check(video_without_prompt.options.count("--prompt") == 0, "video prompt is optional");
     const auto transcription_batch =
         parse({"trtmc", "transcribe-batch", "model.bundle", "--runtime-root", "lib", "--input",
                "a.wav", "--input", "b.wav"});
@@ -294,6 +418,8 @@ int main() {
     run_command.name = "run";
     run_command.options.emplace("--prompt", "hello");
     run_command.options.emplace("--max-new-tokens", "3");
+    run_command.options.emplace("--source-language-token-id", "256047");
+    run_command.options.emplace("--forced-bos-token-id", "256057");
     run_command.options.emplace("--temperature", "0");
     run_command.options.emplace("--top-k", "9");
     run_command.options.emplace("--top-p", "0.8");
@@ -328,7 +454,8 @@ int main() {
     check(trtmc::cli::dispatch(run_command, text, output) == 0, "text task dispatch succeeds");
     check(output.str().find("hello:3") != std::string::npos,
           "text task dispatch writes result JSON");
-    check(text.seen.temperature == 0.0F && text.seen.top_k == 9 && text.seen.top_p == 0.8F &&
+    check(text.seen.source_language_token_id == 256047 && text.seen.forced_bos_token_id == 256057 &&
+              text.seen.temperature == 0.0F && text.seen.top_k == 9 && text.seen.top_p == 0.8F &&
               text.seen.min_p == 0.1F && text.seen.seed == 42 &&
               text.seen.repetition_penalty == 1.1F && text.seen.use_chat_template &&
               !text.seen.enable_thinking && text.seen.lora_adapter_id == "demo" &&
@@ -445,6 +572,157 @@ int main() {
     check(audio_output.str().find("\"format\":\"float32le\"") != std::string::npos,
           "streaming audio output format is explicit");
     std::filesystem::remove(audio_path);
+
+    const std::filesystem::path transcription_path = "/tmp/trtmc-cli-transcription-stream.wav";
+    trtmc::AudioResult transcription_audio;
+    transcription_audio.samples = {0.25F, -0.5F, 0.75F};
+    transcription_audio.num_samples = 3;
+    transcription_audio.sample_rate = 16000;
+    trtmc::cli::io::write_wav(transcription_audio, transcription_path.string());
+
+    const auto offline_transcription_command = parse({"trtmc",
+                                                      "transcribe",
+                                                      "model.bundle",
+                                                      "--runtime-root",
+                                                      "lib",
+                                                      "--input",
+                                                      transcription_path.string(),
+                                                      "--beam-size",
+                                                      "4",
+                                                      "--length-penalty",
+                                                      "0.5",
+                                                      "--source-language",
+                                                      "en",
+                                                      "--target-language",
+                                                      "fr",
+                                                      "--translate",
+                                                      "true",
+                                                      "--punctuation",
+                                                      "false",
+                                                      "--timestamps",
+                                                      "true",
+                                                      "--max-input-seconds",
+                                                      "45.5",
+                                                      "--segment-length-seconds",
+                                                      "30",
+                                                      "--segment-min-seconds",
+                                                      "20",
+                                                      "--segment-overlap-seconds",
+                                                      "2",
+                                                      "--lcs-merge",
+                                                      "true"});
+    FakeTranscription offline_transcription;
+    std::ostringstream offline_transcription_output;
+    check(trtmc::cli::dispatch(offline_transcription_command, offline_transcription,
+                               offline_transcription_output) == 0,
+          "offline transcription task dispatch succeeds");
+    check(offline_transcription.seen.size() == 1 && offline_transcription.seen[0].beam_size == 4 &&
+              offline_transcription.seen[0].length_penalty == 0.5F &&
+              offline_transcription.seen[0].source_language == "en" &&
+              offline_transcription.seen[0].target_language == "fr" &&
+              offline_transcription.seen[0].task == trtmc::TranscriptionTask::kTranslate &&
+              !offline_transcription.seen[0].punctuation &&
+              offline_transcription.seen[0].timestamps &&
+              offline_transcription.seen[0].max_input_duration_seconds == 45.5F &&
+              offline_transcription.seen[0].segment_duration_seconds == 30.0F &&
+              offline_transcription.seen[0].segment_min_duration_seconds == 20.0F &&
+              offline_transcription.seen[0].segment_overlap_seconds == 2.0F &&
+              offline_transcription.seen[0].lcs_merge,
+          "offline transcription options reach the Task API");
+
+    const auto batch_transcription_command = parse({"trtmc",
+                                                    "transcribe-batch",
+                                                    "model.bundle",
+                                                    "--runtime-root",
+                                                    "lib",
+                                                    "--input",
+                                                    transcription_path.string(),
+                                                    "--input",
+                                                    transcription_path.string(),
+                                                    "--beam-size",
+                                                    "2",
+                                                    "--length-penalty",
+                                                    "0",
+                                                    "--punctuation",
+                                                    "false",
+                                                    "--max-input-seconds",
+                                                    "45",
+                                                    "--segment-length-seconds",
+                                                    "30",
+                                                    "--segment-min-seconds",
+                                                    "20",
+                                                    "--segment-overlap-seconds",
+                                                    "2",
+                                                    "--lcs-merge",
+                                                    "true"});
+    std::ostringstream batch_transcription_output;
+    check(trtmc::cli::dispatch(batch_transcription_command, offline_transcription,
+                               batch_transcription_output) == 0,
+          "batch transcription task dispatch succeeds");
+    check(offline_transcription.seen.size() == 2 && offline_transcription.seen[0].beam_size == 2 &&
+              offline_transcription.seen[0].length_penalty == 0.0F &&
+              !offline_transcription.seen[0].punctuation &&
+              offline_transcription.seen[0].max_input_duration_seconds == 45.0F &&
+              offline_transcription.seen[0].segment_duration_seconds == 30.0F &&
+              offline_transcription.seen[0].segment_min_duration_seconds == 20.0F &&
+              offline_transcription.seen[0].segment_overlap_seconds == 2.0F &&
+              offline_transcription.seen[0].lcs_merge &&
+              offline_transcription.seen[1].beam_size == 2,
+          "batch transcription options reach every Task API request");
+
+    const auto transcription_command =
+        parse({"trtmc", "transcribe-streaming", "model.bundle", "--runtime-root", "lib", "--input",
+               transcription_path.string(), "--chunk-samples", "2", "--max-new-tokens", "80",
+               "--att-context-left", "56", "--att-context-right", "13", "--language", "en-US"});
+    FakeStreamingTranscription transcription;
+    std::ostringstream transcription_output;
+    check(trtmc::cli::dispatch(transcription_command, transcription, transcription_output) == 0,
+          "streaming transcription task dispatch succeeds");
+    check(transcription.seen.max_new_tokens == 80 && transcription.seen.att_context_left == 56 &&
+              transcription.seen.att_context_right == 13 && transcription.seen.language == "en-US",
+          "streaming transcription options reach the Task API");
+
+    auto default_transcription_command = transcription_command;
+    default_transcription_command.options.erase("--max-new-tokens");
+    default_transcription_command.options.erase("--att-context-left");
+    default_transcription_command.options.erase("--att-context-right");
+    default_transcription_command.options.erase("--language");
+    FakeStreamingTranscription default_transcription;
+    transcription_output.str("");
+    transcription_output.clear();
+    check(trtmc::cli::dispatch(default_transcription_command, default_transcription,
+                               transcription_output) == 0,
+          "default streaming transcription dispatch succeeds");
+    check(default_transcription.seen.max_new_tokens == 224 &&
+              default_transcription.seen.att_context_left == 70 &&
+              default_transcription.seen.att_context_right == 13 &&
+              default_transcription.seen.language.empty(),
+          "streaming transcription defaults remain unchanged");
+    std::filesystem::remove(transcription_path);
+
+    std::ostringstream usage;
+    trtmc::cli::print_usage(usage);
+    check(usage.str().find("--source-language-token-id") != std::string::npos &&
+              usage.str().find("--segment-overlap-seconds") != std::string::npos &&
+              usage.str().find("--runtime-cache") != std::string::npos &&
+              usage.str().find("--cuda-graphs") != std::string::npos,
+          "help lists direct Task and backend options");
+
+    const std::filesystem::path video_path = "/tmp/trtmc-cli-video-frame.ppm";
+    {
+        std::ofstream image_file(video_path, std::ios::binary);
+        image_file << "P6\n1 1\n255\n";
+        const char pixel[] = {char(0), char(127), char(255)};
+        image_file.write(pixel, sizeof(pixel));
+    }
+    auto video_command = video_without_prompt;
+    video_command.frames = {video_path.string()};
+    FakeVideo video_task;
+    std::ostringstream video_output;
+    check(trtmc::cli::dispatch(video_command, video_task, video_output) == 0,
+          "video segmentation dispatch accepts no prompt");
+    check(video_task.prompt.empty(), "missing video prompt reaches the family as empty");
+    std::filesystem::remove(video_path);
 
     const std::filesystem::path forecast_values_path = "/tmp/trtmc-cli-forecast-values.f32";
     const std::filesystem::path forecast_mask_path = "/tmp/trtmc-cli-forecast-mask.f32";

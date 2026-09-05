@@ -31,5 +31,4 @@ execution:
   local_files_only: false
   hf_cache_mode: shared
   hf_cache_retention: retain
-  minimum_gpu_free_fraction: 0.0
   timeout_seconds: 7200

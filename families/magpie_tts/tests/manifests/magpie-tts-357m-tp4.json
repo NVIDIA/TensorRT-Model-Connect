@@ -4,6 +4,18 @@
   "hf_dependencies": [
     {
       "repo_id": "openai/whisper-large-v3-turbo"
+    },
+    {
+      "repo_id": "nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps"
+    },
+    {
+      "repo_id": "google/byt5-small"
+    },
+    {
+      "repo_id": "microsoft/wavlm-base-plus"
+    },
+    {
+      "repo_id": "Edresson/Speaker_Encoder_H_ASP"
     }
   ],
   "bundle": "magpie-tts-357m-tp4.bundle",
@@ -18,6 +30,6 @@
     }
   ],
   "tensor_parallel_size": 4,
-  "precision": "fp16",
+  "precision": "fp32",
   "max_sequence_length": 512
 }

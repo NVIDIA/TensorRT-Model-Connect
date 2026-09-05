@@ -667,6 +667,9 @@ def _base_runtime_config(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one native Qwen3-Omni text-to-audio bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("qwen3_omni does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("qwen3_omni does not support image_height")
     if request.image_width is not None:
@@ -699,7 +702,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if max_cache_length > root_config.max_position_embeddings:
         raise ValueError("qwen3_omni max_sequence_length exceeds checkpoint capacity")
 
-    writer.set_header(family="qwen3_omni", task=request.task, backend="trt")
+    writer.set_header(family="qwen3_omni", task=request.task, backend=request.backend)
     model = _Qwen3OmniModel()
     thinker_weights = model.load_weights(str(model_dir), root_config, precision=precision)
     thinker_plan = model.build_engine(

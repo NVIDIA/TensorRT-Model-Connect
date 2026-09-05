@@ -3,3 +3,4 @@
 
 Pillow
 diffusers==0.40.0
+transformers==5.15.0

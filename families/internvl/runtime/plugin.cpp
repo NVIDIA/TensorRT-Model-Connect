@@ -64,6 +64,8 @@ InternvlKvCacheNames build_kv_names(const nlohmann::json& config, std::int32_t n
 } // namespace trtmc::internvl_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("internvl does not support --kv-cache-size");
     using namespace trtmc;
     const std::string runtime_text = internvl_factory::section_text(context.reader, "runtime.json");
     const auto config = nlohmann::json::parse(runtime_text);

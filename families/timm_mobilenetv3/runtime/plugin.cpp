@@ -52,6 +52,8 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 } // namespace trtmc::timm_mobilenetv3
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("timm_mobilenetv3 does not support --kv-cache-size");
     const auto& config_data =
         trtmc::timm_mobilenetv3::require_section(context.reader, "runtime.json");
     const auto& plan = trtmc::timm_mobilenetv3::require_section(context.reader, "engine.plan");

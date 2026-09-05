@@ -1030,6 +1030,9 @@ def _load_flux2_fp8_scales() -> dict[str, dict[str, float]]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one FLUX image-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("flux does not support dynamic_kv_cache")
+
     if request.max_sequence_length is not None:
         raise NotImplementedError("flux does not support max_sequence_length")
 
@@ -1086,7 +1089,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         max_batch_size=request.max_batch_size,
     )
 
-    writer.set_header(family="flux", task=request.task, backend="trt")
+    writer.set_header(family="flux", task=request.task, backend=request.backend)
     for index, (_name, plan) in enumerate(components["text_encoders"]):
         writer.add_bytes(f"text_encoder.{index}.plan", plan)
     if parallel.cp_enabled:

@@ -1019,6 +1019,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _GptOssModel, *
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one GPT-OSS bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("gpt_oss does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("gpt_oss does not support image_height")
 
@@ -1063,7 +1066,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_parallel_build_enabled"] = parallel.enabled
     config.raw["_quantized_build_requested"] = False
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="gpt_oss", task=request.task, backend="trt")
+    writer.set_header(family="gpt_oss", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

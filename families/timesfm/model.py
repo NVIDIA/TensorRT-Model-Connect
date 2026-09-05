@@ -556,6 +556,9 @@ def _build_timesfm_network(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one TimesFM bundle without shared model orchestration."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("timesfm does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("timesfm does not support image_height")
 
@@ -567,7 +570,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.max_batch_size != 1:
         raise NotImplementedError("timesfm does not support max_batch_size")
-
 
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
@@ -614,7 +616,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if frequency_count <= 0:
         raise ValueError("TimesFM checkpoint must declare frequency embeddings")
 
-    writer.set_header(family="timesfm", task=request.task, backend="trt")
+    writer.set_header(family="timesfm", task=request.task, backend=request.backend)
     if request.tensor_parallel_size == 1:
         writer.add_bytes("engine.plan", plan)
     else:

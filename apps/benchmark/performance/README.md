@@ -16,9 +16,26 @@ Neither the native core nor any family imports benchmark code. The candidate
 worker loads a bundle with the public load_task(bundle, runtime_root) API and
 calls the exact abstract Task interface implemented by that family.
 
+## Task API benchmark
+
+Use the packaged CLI for a single model or the checked-in multi-model example:
+
+```bash
+trtmc-bench list models
+trtmc-bench run --model distilgpt2 --runtime-root /opt/trtmc/lib -o results/distilgpt2
+trtmc-bench run apps/benchmark/example.yaml -o results/example
+```
+
+Missing bundles are built through the public build command and cached. Pass
+`--no-build` when every selected bundle must already exist.
+
 ## Timing contract
 
 Candidate measurements use one scope: public_task_call_wall.
+
+The candidate runs each family's production Task implementation as loaded. The
+benchmark does not override family runtime policy with tuning switches such as
+CUDA Graph enablement.
 
 The new architecture transfers control directly from the public Task interface
 to the family implementation, so the old pipeline-call and model-call scopes are

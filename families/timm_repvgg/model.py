@@ -313,6 +313,9 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one fused timm RepVGG image-classification bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("timm_repvgg does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("timm_repvgg does not support image_height")
     if request.image_width is not None:
@@ -340,7 +343,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         str(request.precision).lower(),
         bool(request.verbose),
     )
-    writer.set_header(family="timm_repvgg", task=request.task, backend="trt")
+    writer.set_header(family="timm_repvgg", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json(
         "runtime.json",

@@ -145,6 +145,8 @@ VoiceChatTtsPrompt load_tts_prompt(const BundleReader& bundle,
 } // namespace trtmc::voicechat_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("nemotron_voicechat does not support --kv-cache-size");
     using namespace trtmc;
     const auto runtime_text = voicechat_factory::section_text(context.reader, "runtime.json");
     auto config = voicechat_factory::parse_config(nlohmann::json::parse(runtime_text));

@@ -148,6 +148,46 @@ class FamilyLibrary {
     CreateFamilyFn create_{nullptr};
 };
 
+class RuntimeOptionsBackend final : public IBackend {
+  public:
+    RuntimeOptionsBackend(IBackend& backend, const std::string& runtime_cache_path,
+                          bool cuda_graphs)
+        : backend_(backend), runtime_cache_path_(runtime_cache_path), cuda_graphs_(cuda_graphs) {}
+
+    std::unique_ptr<ITrtModule> create_module(const void* plan_data, size_t plan_size,
+                                              const ModuleCreateOptions& options) override {
+        return backend_.create_module(plan_data, plan_size, with_runtime_options(options));
+    }
+
+    std::unique_ptr<ITrtModule>
+    create_module_prebound(const void* plan_data, size_t plan_size,
+                           const ModuleCreateOptions& options,
+                           const std::vector<ModuleExternalBinding>& bindings) override {
+        return backend_.create_module_prebound(plan_data, plan_size, with_runtime_options(options),
+                                               bindings);
+    }
+
+    BackendDualProfileModules
+    create_dual_profile_modules(const void* plan_data, size_t plan_size,
+                                const ModuleCreateOptions& options) override {
+        return backend_.create_dual_profile_modules(plan_data, plan_size,
+                                                    with_runtime_options(options));
+    }
+
+    const char* name() const override { return backend_.name(); }
+
+  private:
+    ModuleCreateOptions with_runtime_options(ModuleCreateOptions options) const {
+        options.runtime_cache_path = runtime_cache_path_.c_str();
+        options.cuda_graphs = cuda_graphs_;
+        return options;
+    }
+
+    IBackend& backend_;
+    const std::string& runtime_cache_path_;
+    bool cuda_graphs_;
+};
+
 struct RuntimeLibraryCache {
     std::mutex mutex;
     std::unordered_map<std::string, std::unique_ptr<BackendLibrary>> backends;
@@ -202,17 +242,24 @@ void require_matching_task(const BundleInfo& info, const ITask& task) {
 
 } // namespace
 
-std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::string& runtime_root) {
+std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::string& runtime_root,
+                                 std::uint64_t kv_cache_size_bytes,
+                                 const std::string& runtime_cache_path, bool cuda_graphs) {
     const BundleReader reader(bundle_path);
     const BundleInfo& info = reader.info();
     require_safe_id("family", info.family);
     require_safe_id("task", info.task);
     require_safe_id("backend", info.backend);
+    if ((!runtime_cache_path.empty() || cuda_graphs) && info.backend != "trt_rtx") {
+        throw std::invalid_argument(
+            "runtime cache and whole-graph capture require a TensorRT-RTX bundle");
+    }
 
     const fs::path root = explicit_runtime_root(runtime_root);
     IBackend& backend = cached_backend(root, info.backend);
     FamilyLibrary& family = cached_family(root, info.family);
-    FamilyContext context{reader, backend};
+    RuntimeOptionsBackend configured_backend(backend, runtime_cache_path, cuda_graphs);
+    FamilyContext context{reader, configured_backend, kv_cache_size_bytes};
     std::unique_ptr<ITask> task(family.create(context));
     if (task == nullptr)
         throw std::runtime_error("trtmc_create_family returned nullptr");

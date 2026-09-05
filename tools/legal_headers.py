@@ -26,7 +26,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
-MANAGED_YEAR = 2026
 COPYRIGHT_TEXT = (
     "SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & "
     "AFFILIATES. All rights reserved."

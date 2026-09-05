@@ -252,14 +252,35 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     images = Image.open(_asset(case["test_image"])).convert("RGB")
     if str(manifest["hf_id"]).startswith("timm/"):
         import timm
-        from timm.data import create_transform, resolve_model_data_config
 
-        model = timm.create_model("hf-hub:" + manifest["hf_id"], pretrained=True).to("cuda").eval()
-        transform = create_transform(**resolve_model_data_config(model), is_training=False)
-        pixels = transform(images).unsqueeze(0).to("cuda")
+        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+        architecture = config.get("architecture")
+        if architecture != "vit_small_patch16_dinov3_qkvb":
+            raise ValueError(f"unsupported timm DINOv3 architecture: {architecture!r}")
+        model = (
+            timm.create_model(
+                architecture,
+                pretrained=False,
+                img_size=224,
+                checkpoint_path=str(model_dir / "model.safetensors"),
+            )
+            .to("cuda")
+            .eval()
+        )
+        processor = transformers.DINOv3ViTImageProcessorFast(
+            do_resize=True,
+            size={"height": 224, "width": 224},
+            resample=2,
+            do_rescale=True,
+            rescale_factor=1 / 255,
+            do_normalize=True,
+            image_mean=[0.485, 0.456, 0.406],
+            image_std=[0.229, 0.224, 0.225],
+        )
+        pixels = processor(images=images, return_tensors="pt")["pixel_values"].to("cuda")
         with torch.no_grad():
             features = model.forward_features(pixels)
-            pooler = model.forward_head(features, pre_logits=True)
+            pooler = features[:, 0, :]
         return {
             "last_hidden_state": features.float().cpu().numpy(),
             "pooler_output": pooler.float().cpu().numpy(),
@@ -315,6 +336,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     )
     assert float(relative_frobenius) <= float(thresholds["relative_frobenius"])
     register_count = int(expected["num_register_tokens"])
+    assert register_count == int(case["num_register_tokens"])
     patch_start = 1 + register_count
     assert 0 <= register_count and patch_start < actual_hidden.shape[1]
     if register_count:
@@ -323,9 +345,8 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         ) >= float(thresholds["register_cosine"])
     actual_patches = actual_hidden[:, patch_start:, :].reshape(-1, actual_hidden.shape[-1])
     expected_patches = expected_hidden[:, patch_start:, :].reshape(-1, expected_hidden.shape[-1])
-    denominators = np.linalg.norm(actual_patches, axis=1) * np.linalg.norm(
-        expected_patches, axis=1
-    )
+    assert actual_patches.shape[0] > 0 and expected_patches.shape[0] > 0
+    denominators = np.linalg.norm(actual_patches, axis=1) * np.linalg.norm(expected_patches, axis=1)
     patch_cosines = np.divide(
         np.sum(actual_patches * expected_patches, axis=1),
         denominators,
@@ -334,7 +355,39 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     )
     assert float(np.mean(patch_cosines)) >= float(thresholds["mean_patch_cosine"])
     assert float(np.percentile(patch_cosines, 1.0)) >= float(thresholds["p01_patch_cosine"])
-    return
+
+
+def test_register_token_count_must_match_case_contract() -> None:
+    hidden = np.asarray([[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]], dtype=np.float32)
+    pooler = hidden[:, 0, :]
+    actual = {
+        "last_hidden_state": hidden.reshape(-1),
+        "last_hidden_state_shape": list(hidden.shape),
+        "pooler_output": pooler.reshape(-1),
+        "pooler_output_shape": list(pooler.shape),
+    }
+    expected = {
+        "last_hidden_state": hidden,
+        "pooler_output": pooler,
+        "num_register_tokens": 0,
+    }
+    thresholds = {
+        "full_cosine": 0.0,
+        "cls_cosine": 0.0,
+        "pooler_cosine": 0.0,
+        "relative_frobenius": 1.0,
+        "register_cosine": 0.0,
+        "mean_patch_cosine": 0.0,
+        "p01_patch_cosine": 0.0,
+    }
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            actual,
+            expected,
+            {"task": "image_features"},
+            {"num_register_tokens": 1},
+            thresholds,
+        )
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:

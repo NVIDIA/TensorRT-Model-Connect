@@ -15,7 +15,7 @@ import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 from tools.ci.container import CiContainer
@@ -24,9 +24,6 @@ from tools.ci.process import CiError, CommandRunner, GitHubFiles
 from tools.ci.quality import SourceQualityChecks
 from tools.ci.stage import ContainerStageRunner
 from tools import test_impact
-
-
-UNIT_SCOPES = ("all",)
 
 
 class CommunityCI:
@@ -49,8 +46,15 @@ class CommunityCI:
             env={**self.env, "CI_BASE_REF": resolved_base},
         )
         quality = SourceQualityChecks(context)
-        failures = self._collect((("New-architecture source quality", quality.run),))
-        self._raise_failures("Source quality", failures)
+        name = "New-architecture source quality"
+        print(f"::group::{name}")
+        try:
+            quality.run()
+        except CiError as error:
+            print(f"::error title={name}::{error}")
+            raise
+        finally:
+            print("::endgroup::")
 
     def impact(self, base: str | None) -> dict[str, object]:
         resolved_base = self.resolve_base(base)
@@ -78,9 +82,7 @@ class CommunityCI:
         )
         return summary
 
-    def unit(self, scope: str) -> None:
-        if scope not in UNIT_SCOPES:
-            raise CiError(f"Unit scope must be one of: {', '.join(UNIT_SCOPES)}")
+    def unit(self) -> None:
         image = self._ensure_cpu_image()
         runner_temp = Path(self.env.get("RUNNER_TEMP", tempfile.gettempdir())).resolve()
         runner_temp.mkdir(parents=True, exist_ok=True)
@@ -96,7 +98,6 @@ class CommunityCI:
                 "TRTMC_CI_CONTAINER_NAME": container_name,
                 "TRTMC_CI_HARDENED": "true",
                 "TRTMC_CI_SCRATCH_HOST": scratch,
-                "TRTMC_PREMERGE_UNIT_SCOPE": (scope),
                 "GITHUB_RUN_ID": self.env.get("GITHUB_RUN_ID", f"local-{os.getpid()}"),
                 "GITHUB_RUN_ATTEMPT": self.env.get("GITHUB_RUN_ATTEMPT", "1"),
             }
@@ -142,26 +143,6 @@ class CommunityCI:
         )
         return image
 
-    @staticmethod
-    def _collect(checks: Sequence[tuple[str, Callable[[], None]]]) -> list[str]:
-        failures = []
-        for name, operation in checks:
-            print(f"::group::{name}")
-            try:
-                operation()
-            except CiError as error:
-                print(f"::error title={name}::{error}")
-                failures.append(f"{name}: {error}")
-            finally:
-                print("::endgroup::")
-        return failures
-
-    @staticmethod
-    def _raise_failures(gate: str, failures: Sequence[str]) -> None:
-        if failures:
-            details = "\n".join(f"- {failure}" for failure in failures)
-            raise CiError(f"{gate} failed:\n{details}")
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -171,8 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         command = commands.add_parser(name)
         command.add_argument("--base")
 
-    unit = commands.add_parser("unit", help="Run one source-only unit scope")
-    unit.add_argument("--scope", choices=UNIT_SCOPES, required=True)
+    commands.add_parser("unit", help="Run the complete source-only unit suite")
     return parser
 
 
@@ -185,7 +165,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "impact":
             runner.impact(arguments.base)
         elif arguments.command == "unit":
-            runner.unit(arguments.scope)
+            runner.unit()
     except CiError as error:
         print(f"ERROR: {error}")
         return 1

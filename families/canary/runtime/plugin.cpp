@@ -3,14 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/canary/runtime/distributed_runtime.h"
 #include "families/canary/runtime/pipeline.h"
 #include "families/canary/runtime/plugin_helpers.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <algorithm>
-#include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -26,53 +25,35 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     return bundle.read_section(name);
 }
 
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::int32_t require_rank(std::int32_t tp_size) {
-    require_nccl(tp_size);
-    if (tp_size == 1)
-        return 0;
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("Canary TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= tp_size)
-        throw std::runtime_error("Canary RANK is outside tensor_parallel_size");
-    return static_cast<std::int32_t>(rank);
-}
-
 } // namespace
 } // namespace trtmc::canary_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("canary does not support --kv-cache-size");
     using namespace trtmc;
     const auto& runtime_data = canary_factory::require_section(context.reader, "runtime.json");
     const auto config = nlohmann::json::parse(runtime_data.begin(), runtime_data.end());
     const auto tp_size = config.at("tensor_parallel_size").get<std::int32_t>();
     if (tp_size <= 0)
         throw std::runtime_error("Canary tensor_parallel_size must be positive");
-    const auto rank = canary_factory::require_rank(tp_size);
+    const auto group = canary::initialize_tensor_parallel_group(tp_size);
     const std::string decoder_section =
-        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(rank) + ".plan";
+        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(group.rank) + ".plan";
     const auto& encoder_plan = canary_factory::require_section(context.reader, "encoder.plan");
     const auto& decoder_plan =
         canary_factory::require_section(context.reader, decoder_section.c_str());
     ModuleCreateOptions options{};
     auto encoder =
         load_trt_module_from_plan(&context.backend, &encoder_plan, "encoder.plan", options);
-    options.stream = encoder.module->stream();
+    ModuleCreateOptions decoder_options = options;
+    decoder_options.stream = encoder.module->stream();
+    if (tp_size > 1) {
+        decoder_options.distributed_communicator = group.communicator;
+        decoder_options.distributed_owner = group.owner;
+    }
     auto decoder = load_trt_module_from_plan(&context.backend, &decoder_plan,
-                                             decoder_section.c_str(), options);
+                                             decoder_section.c_str(), decoder_options);
 
     CanaryConfig model;
     model.num_mel_bins = config.at("num_mel_bins").get<std::int32_t>();
@@ -135,5 +116,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         config.at("mel_hop_length").get<std::int32_t>(),
         config.at("mel_chunk_length").get<std::int32_t>(),
         config.at("mel_sampling_rate").get<std::int32_t>(), config.at("mel_preemph").get<float>(),
-        config.at("mel_normalize_per_feature").get<bool>(), options.stream, std::move(tokenizer));
+        config.at("mel_normalize_per_feature").get<bool>(), decoder_options.stream,
+        std::move(tokenizer));
 }

@@ -10,10 +10,19 @@ from families.sam3.model import _RUNTIME_FIELDS, _load_sam3_processor_config, _r
 
 def test_resolved_config_contains_the_native_image_contract() -> None:
     config = _resolve_sam3_config(
-        {"detector_config": {"vision_config": {"backbone_config": {"image_size": 1008}}}}
+        {
+            "detector_config": {
+                "text_config": {"bos_token_id": 101, "eos_token_id": 102},
+                "vision_config": {"backbone_config": {"image_size": 1008}},
+            }
+        }
     )
 
     assert not set(_RUNTIME_FIELDS).difference(config)
+    runtime = {key: config[key] for key in _RUNTIME_FIELDS}
+    assert runtime["tokenizer_add_special_tokens"] is False
+    assert runtime["tokenizer_prefix_ids"] == [101]
+    assert runtime["tokenizer_suffix_ids"] == [102]
     assert config["image_size"] == config["vision_image_size"] == 1008
     assert config["score_threshold"] == 0.5
     assert config["mask_threshold"] == 0.5

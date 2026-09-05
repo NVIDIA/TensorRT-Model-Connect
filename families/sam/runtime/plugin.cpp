@@ -3,13 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/sam/runtime/distributed_runtime.h"
 #include "families/sam/runtime/plugin_helpers.h"
 #include "families/sam/runtime/sam_pipeline.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
-#include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -52,50 +51,32 @@ SamConfig parse_config(const std::vector<char>& data, std::int32_t& tp_size) {
     return config;
 }
 
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::int32_t require_rank(std::int32_t tp_size) {
-    require_nccl(tp_size);
-    if (tp_size == 1)
-        return 0;
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("SAM TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= tp_size)
-        throw std::runtime_error("SAM RANK is outside tensor_parallel_size");
-    return static_cast<std::int32_t>(rank);
-}
-
 } // namespace
 } // namespace trtmc::sam_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("sam does not support --kv-cache-size");
     const auto& config_data = trtmc::sam_factory::require_section(context.reader, "runtime.json");
     std::int32_t tp_size = 0;
     auto config = trtmc::sam_factory::parse_config(config_data, tp_size);
-    const auto rank = trtmc::sam_factory::require_rank(tp_size);
+    const auto group = trtmc::sam::initialize_tensor_parallel_group(tp_size);
     const std::string encoder_section =
-        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(rank) + ".plan";
+        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(group.rank) + ".plan";
     const auto& encoder_plan =
         trtmc::sam_factory::require_section(context.reader, encoder_section.c_str());
     const auto& decoder_plan = trtmc::sam_factory::require_section(context.reader, "decoder.plan");
-    trtmc::ModuleCreateOptions options{};
+    trtmc::ModuleCreateOptions encoder_options{};
+    if (tp_size > 1) {
+        encoder_options.distributed_communicator = group.communicator;
+        encoder_options.distributed_owner = group.owner;
+    }
     auto encoder = trtmc::load_trt_module_from_plan(&context.backend, &encoder_plan,
-                                                    encoder_section.c_str(), options);
-    options.stream = encoder.module->stream();
-    auto decoder =
-        trtmc::load_trt_module_from_plan(&context.backend, &decoder_plan, "decoder.plan", options);
+                                                    encoder_section.c_str(), encoder_options);
+    trtmc::ModuleCreateOptions decoder_options{};
+    decoder_options.stream = encoder.module->stream();
+    auto decoder = trtmc::load_trt_module_from_plan(&context.backend, &decoder_plan, "decoder.plan",
+                                                    decoder_options);
     return new trtmc::SamPipeline(std::move(encoder.module), std::move(decoder.module),
                                   std::move(config), "");
 }

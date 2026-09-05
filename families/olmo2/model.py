@@ -485,6 +485,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _Olmo2Model, **
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one OLMo2 bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("olmo2 does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("olmo2 does not support image_height")
 
@@ -527,7 +530,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _Olmo2Model()
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="olmo2", task=request.task, backend="trt")
+    writer.set_header(family="olmo2", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

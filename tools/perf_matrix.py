@@ -13,6 +13,8 @@ import math
 import os
 import re
 import shlex
+import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -46,6 +48,17 @@ RESULT_SCHEMA = "trtmc.perf-matrix/v2"
 REPORT_SCHEMA = "trtmc.perf-report/v2"
 PREPARATION_SCHEMA = "trtmc.perf-bundle-preparation/v2"
 TERMINAL_COMPARISONS = {"green", "yellow", "red"}
+FINISHED_RESULTS = TERMINAL_COMPARISONS | {"contract-mismatch"}
+HF_CACHE_ENVIRONMENT_NAMES = (
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "HUGGINGFACE_HUB_CACHE",
+    "HF_DATASETS_CACHE",
+    "TRANSFORMERS_CACHE",
+    "HF_ASSETS_CACHE",
+    "HF_MODULES_CACHE",
+    "HF_XET_CACHE",
+)
 OUTPUT_CONTRACTS = {
     "audio-shape",
     "classification-top-class",
@@ -75,9 +88,7 @@ REFERENCE_INPUTS = {
         ("model_dir", "sana_model"),
     ),
     "pytorch-personaplex": (("official_repo", "personaplex_repo"),),
-    "upstream-fast-foundation-stereo": (
-        ("model_dir", "fast_foundation_stereo_model"),
-    ),
+    "upstream-fast-foundation-stereo": (("model_dir", "fast_foundation_stereo_model"),),
 }
 REFERENCE_FIELDS = {
     "elf_repo",
@@ -110,6 +121,9 @@ class Environment:
     local_files_only: bool
     timeout_seconds: int
     references: Mapping[str, str]
+    storage_root: Path | None = None
+    hf_cache_mode: str = "shared"
+    hf_cache_retention: str = "retain"
 
 
 @dataclass(frozen=True)
@@ -339,6 +353,17 @@ def load_environment(path: Path) -> Environment:
     retention = storage.get("bundle_retention", "retain")
     if retention not in {"retain", "delete_on_pass", "delete_always"}:
         raise PerfMatrixError("bundle_retention must be retain, delete_on_pass, or delete_always")
+    storage_root = storage.get("storage_root")
+    if storage_root is not None and (not isinstance(storage_root, str) or not storage_root.strip()):
+        raise PerfMatrixError("storage_root must be a path or null")
+    hf_cache_mode = execution.get("hf_cache_mode", "shared")
+    if hf_cache_mode not in {"shared", "per_entry"}:
+        raise PerfMatrixError("hf_cache_mode must be shared or per_entry")
+    hf_cache_retention = execution.get("hf_cache_retention", "retain")
+    if hf_cache_retention not in {"retain", "delete_on_pass", "delete_always"}:
+        raise PerfMatrixError("hf_cache_retention must be retain, delete_on_pass, or delete_always")
+    if hf_cache_mode == "shared" and hf_cache_retention != "retain":
+        raise PerfMatrixError("a shared Hugging Face cache can only be retained")
     name = raw.get("name")
     if not isinstance(name, str) or not name:
         raise PerfMatrixError("environment name must be non-empty")
@@ -346,9 +371,7 @@ def load_environment(path: Path) -> Environment:
         name=name,
         trtmc_bench=_path(str(tools["trtmc_bench"]), "tools.trtmc_bench"),
         worker=_path(str(tools["trtmc_worker"]), "tools.trtmc_worker"),
-        hf_runner=_path(
-            str(tools["hf_transformers_runner"]), "tools.hf_transformers_runner"
-        ),
+        hf_runner=_path(str(tools["hf_transformers_runner"]), "tools.hf_transformers_runner"),
         task_runner=_path(str(tools["task_reference_runner"]), "tools.task_reference_runner"),
         results_root=_path(str(storage["results_root"]), "storage.results_root"),
         scratch_root=_path(str(storage["scratch_root"]), "storage.scratch_root"),
@@ -359,6 +382,11 @@ def load_environment(path: Path) -> Environment:
         local_files_only=bool(execution.get("local_files_only", False)),
         timeout_seconds=timeout,
         references={name: str(references[name]) for name in REFERENCE_FIELDS},
+        storage_root=(
+            _path(storage_root, "storage.storage_root") if storage_root is not None else None
+        ),
+        hf_cache_mode=str(hf_cache_mode),
+        hf_cache_retention=str(hf_cache_retention),
     )
 
 
@@ -372,12 +400,6 @@ def _selection_families(path: Path | None) -> set[str]:
     if not isinstance(value, Mapping):
         raise PerfMatrixError("model selection must contain an object")
     families = value.get("families", [])
-    if not families and isinstance(value.get("matrix"), list):
-        families = [
-            item.get("family")
-            for item in value["matrix"]
-            if isinstance(item, Mapping) and item.get("family")
-        ]
     if not isinstance(families, list) or not all(isinstance(item, str) for item in families):
         raise PerfMatrixError("model selection families must be strings")
     return set(families)
@@ -407,8 +429,10 @@ def select_entries(
         if missing:
             raise PerfMatrixError("unknown models: " + ", ".join(sorted(missing)))
         return selected
-    families = _selection_families(model_selection)
-    if families:
+    if model_selection is not None:
+        families = _selection_families(model_selection)
+        if not families:
+            raise PerfMatrixError("model selection matches no release entries")
         selected = [entry for entry in entries if entry["family"] in families]
         if not selected:
             raise PerfMatrixError("model selection matches no release entries")
@@ -437,7 +461,9 @@ def _coverage(entries: Sequence[Mapping[str, Any]], excluded: set[str]) -> None:
         raise PerfMatrixError("models are both configured and excluded: " + ", ".join(repeated))
 
 
-def resolve_entries(entries: Sequence[Mapping[str, Any]], environment: Environment) -> list[ResolvedEntry]:
+def resolve_entries(
+    entries: Sequence[Mapping[str, Any]], environment: Environment
+) -> list[ResolvedEntry]:
     catalog = ManifestCatalog(MANIFEST_ROOT)
     resolved: list[ResolvedEntry] = []
     for spec in entries:
@@ -449,20 +475,15 @@ def resolve_entries(entries: Sequence[Mapping[str, Any]], environment: Environme
                 )
             workload = spec["workload"]
             overrides = {
-                f"request.{name}": value
-                for name, value in workload.get("request", {}).items()
+                f"request.{name}": value for name, value in workload.get("request", {}).items()
             }
-            timing = timing_contract(
-                runner=str(spec["baseline"]["runner"]), family=model.family
-            )
+            timing = timing_contract(runner=str(spec["baseline"]["runner"]), family=model.family)
             overrides.update(
                 {
                     "measurement.warmup": int(spec["measurement"]["warmup"]),
                     "measurement.iterations": int(spec["measurement"]["iterations"]),
                     "measurement.timing_scope": "public_task_call_wall",
-                    "measurement.asset_loading_included": bool(
-                        timing["asset_loading_included"]
-                    ),
+                    "measurement.asset_loading_included": bool(timing["asset_loading_included"]),
                     "telemetry.gpu": "off",
                 }
             )
@@ -502,9 +523,7 @@ def _reference_precision(
     return str(model.precision)
 
 
-def _baseline_timing(
-    spec: Mapping[str, Any], declared: Mapping[str, Any]
-) -> dict[str, Any]:
+def _baseline_timing(spec: Mapping[str, Any], declared: Mapping[str, Any]) -> dict[str, Any]:
     baseline = spec["baseline"]
     result = {
         "timing_scope": declared["timing_scope"],
@@ -545,6 +564,18 @@ def preflight(
         for library in ("libtrtmc_runtime.so", "libtrtmc_backend_trt.so"):
             if not (environment.runtime_root / library).is_file():
                 raise PerfMatrixError(f"runtime_root is missing {library}")
+    if environment.storage_root is not None:
+        if not environment.storage_root.is_dir():
+            raise PerfMatrixError(f"storage_root does not exist: {environment.storage_root}")
+        for label, path in (
+            ("results_root", environment.results_root),
+            ("scratch_root", environment.scratch_root),
+            ("bundle_cache", environment.bundle_cache),
+        ):
+            if not path.is_relative_to(environment.storage_root):
+                raise PerfMatrixError(
+                    f"{label} must stay below storage_root {environment.storage_root}: {path}"
+                )
     environment.results_root.mkdir(parents=True, exist_ok=True)
     environment.scratch_root.mkdir(parents=True, exist_ok=True)
     environment.bundle_cache.mkdir(parents=True, exist_ok=True)
@@ -642,7 +673,9 @@ def _adapter_options(entry: ResolvedEntry, environment: Environment) -> dict[str
     for option_name, field in inputs:
         path = _path(environment.references[field], f"references.{field}")
         if not path.is_dir():
-            raise PerfMatrixError(f"entry {entry.spec['id']} reference path is not a directory: {path}")
+            raise PerfMatrixError(
+                f"entry {entry.spec['id']} reference path is not a directory: {path}"
+            )
         _validate_reference_path(entry, field, path)
         options[option_name] = str(path)
     return options
@@ -663,14 +696,11 @@ def _validate_reference_path(entry: ResolvedEntry, field: str, path: Path) -> No
     missing = [relative for relative in required if not (path / relative).exists()]
     if missing:
         raise PerfMatrixError(
-            f"entry {entry.spec['id']} reference path {path} is missing: "
-            + ", ".join(missing)
+            f"entry {entry.spec['id']} reference path {path} is missing: " + ", ".join(missing)
         )
 
 
-def baseline_command(
-    entry: ResolvedEntry, environment: Environment, output: Path
-) -> list[str]:
+def baseline_command(entry: ResolvedEntry, environment: Environment, output: Path) -> list[str]:
     baseline = entry.spec["baseline"]
     runner = str(baseline["runner"])
     request = json.dumps(entry.case.request, ensure_ascii=True, separators=(",", ":"))
@@ -711,9 +741,7 @@ def baseline_command(
         if baseline.get("generation_method"):
             arguments.extend(("--generation-method", str(baseline["generation_method"])))
         if baseline.get("experts_implementation"):
-            arguments.extend(
-                ("--experts-implementation", str(baseline["experts_implementation"]))
-            )
+            arguments.extend(("--experts-implementation", str(baseline["experts_implementation"])))
         if baseline.get("mode") == "torch-compile":
             arguments.extend(("--compile-mode", str(baseline.get("compile_mode", "default"))))
             if bool(baseline.get("fullgraph", False)):
@@ -762,6 +790,15 @@ def _command_environment() -> dict[str, str]:
     return environment
 
 
+def _entry_command_environment(environment: Environment, work: Path) -> dict[str, str]:
+    values = _command_environment()
+    if environment.hf_cache_mode == "per_entry":
+        values["HF_HOME"] = str((work / "hf-cache").resolve())
+        for name in HF_CACHE_ENVIRONMENT_NAMES[1:]:
+            values.pop(name, None)
+    return values
+
+
 def run_command(
     arguments: Sequence[str],
     *,
@@ -769,6 +806,7 @@ def run_command(
     stdout_path: Path,
     stderr_path: Path,
     verbose: bool,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     if verbose:
@@ -778,7 +816,7 @@ def run_command(
         completed = subprocess.run(
             list(arguments),
             cwd=REPOSITORY,
-            env=_command_environment(),
+            env=dict(env) if env is not None else _command_environment(),
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -847,6 +885,7 @@ def _candidate_result(path: Path) -> dict[str, Any]:
         raise PerfMatrixError(str(cell.get("error", "candidate failed")))
     return {
         "metrics": cell.get("metrics", {}),
+        "samples_ms": cell.get("samples_ms", []),
         "output_summary": cell.get("output_summary", {}),
         "timing_scope": cell.get("timing_scope"),
         "asset_loading_included": cell.get("asset_loading_included"),
@@ -861,6 +900,85 @@ def _p50(value: Mapping[str, Any]) -> float:
     if isinstance(p50, bool) or not isinstance(p50, (int, float)) or not math.isfinite(float(p50)):
         raise PerfMatrixError("measurement has no finite latency p50")
     return float(p50)
+
+
+_TIMING_STABILITY_SAMPLE_COUNT = 10
+_TIMING_STABILITY_MAX_HALF_CHANGE_PERCENT = 5.0
+_TIMING_STABILITY_MEDIAN_BAND_PERCENT = 5.0
+_TIMING_STABILITY_MIN_IN_BAND = 8
+
+
+def _timing_stability(values: Sequence[Any]) -> dict[str, Any]:
+    if len(values) != _TIMING_STABILITY_SAMPLE_COUNT:
+        return {
+            "status": "not_evaluated",
+            "sample_count": len(values),
+            "reason": "requires_10_samples",
+        }
+    try:
+        samples = [float(value) for value in values]
+    except (TypeError, ValueError):
+        return {
+            "status": "not_evaluated",
+            "sample_count": len(values),
+            "reason": "invalid_samples",
+        }
+    if not all(math.isfinite(value) and value > 0.0 for value in samples):
+        return {
+            "status": "not_evaluated",
+            "sample_count": len(samples),
+            "reason": "invalid_samples",
+        }
+
+    middle = len(samples) // 2
+    median_ms = float(statistics.median(samples))
+    first_half_median_ms = float(statistics.median(samples[:middle]))
+    second_half_median_ms = float(statistics.median(samples[middle:]))
+    half_change_percent = (
+        abs(second_half_median_ms - first_half_median_ms) / first_half_median_ms * 100.0
+    )
+    samples_within_band = sum(
+        abs(sample - median_ms) / median_ms * 100.0 <= _TIMING_STABILITY_MEDIAN_BAND_PERCENT
+        for sample in samples
+    )
+    stable = (
+        half_change_percent <= _TIMING_STABILITY_MAX_HALF_CHANGE_PERCENT
+        and samples_within_band >= _TIMING_STABILITY_MIN_IN_BAND
+    )
+    return {
+        "status": "stable" if stable else "unstable",
+        "sample_count": len(samples),
+        "median_ms": median_ms,
+        "first_half_median_ms": first_half_median_ms,
+        "second_half_median_ms": second_half_median_ms,
+        "half_median_change_percent": half_change_percent,
+        "samples_within_band": samples_within_band,
+    }
+
+
+def _measurement_stability(
+    reference: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> dict[str, Any]:
+    reference_result = _timing_stability(reference.get("samples_ms", []))
+    candidate_result = _timing_stability(candidate.get("samples_ms", []))
+    statuses = {reference_result["status"], candidate_result["status"]}
+    if statuses == {"stable"}:
+        status = "stable"
+    elif "unstable" in statuses:
+        status = "unstable"
+    else:
+        status = "not_evaluated"
+    return {
+        "status": status,
+        "policy": {
+            "required_samples": _TIMING_STABILITY_SAMPLE_COUNT,
+            "max_half_median_change_percent": _TIMING_STABILITY_MAX_HALF_CHANGE_PERCENT,
+            "median_band_percent": _TIMING_STABILITY_MEDIAN_BAND_PERCENT,
+            "minimum_samples_within_band": _TIMING_STABILITY_MIN_IN_BAND,
+        },
+        "reference": reference_result,
+        "candidate": candidate_result,
+    }
 
 
 def compare(
@@ -985,10 +1103,14 @@ def _output_contract(
             return False, "reference OCR text misses required content", None
         distance = _text_distance(left_text, right_text)
         limit = float(entry.spec["baseline"].get("max_normalized_edit_distance", 0.5))
-        return distance <= limit, "OCR text distance exceeds the contract", {
-            "normalized_edit_distance": distance,
-            "maximum": limit,
-        }
+        return (
+            distance <= limit,
+            "OCR text distance exceeds the contract",
+            {
+                "normalized_edit_distance": distance,
+                "maximum": limit,
+            },
+        )
     if contract == "localization":
         return _localization_contract(entry, left, right)
     if contract == "audio-shape":
@@ -1164,9 +1286,7 @@ def _localization_contract(
         if minimum < limit:
             return False, "localization box IoU is below the contract", evidence
     else:
-        distances = [
-            math.dist(a, b) for a, b in zip(candidate[1], reference[1], strict=True)
-        ]
+        distances = [math.dist(a, b) for a, b in zip(candidate[1], reference[1], strict=True)]
         maximum = max(distances)
         limit = float(entry.spec["baseline"]["max_localization_point_distance"])
         evidence.update(maximum_point_distance=maximum, allowed_point_distance=limit)
@@ -1183,9 +1303,7 @@ def _localization_contract(
 def _box_iou(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     lx1, ly1, lx2, ly2 = left
     rx1, ry1, rx2, ry2 = right
-    intersection = max(0.0, min(lx2, rx2) - max(lx1, rx1)) * max(
-        0.0, min(ly2, ry2) - max(ly1, ry1)
-    )
+    intersection = max(0.0, min(lx2, rx2) - max(lx1, rx1)) * max(0.0, min(ly2, ry2) - max(ly1, ry1))
     left_area = max(0.0, lx2 - lx1) * max(0.0, ly2 - ly1)
     right_area = max(0.0, rx2 - rx1) * max(0.0, ry2 - ry1)
     union = left_area + right_area - intersection
@@ -1211,9 +1329,7 @@ def _disparity(
     left_norm = math.sqrt(math.fsum(value * value for value in left_values))
     right_norm = math.sqrt(math.fsum(value * value for value in right_values))
     cosine = dot / (left_norm * right_norm) if left_norm and right_norm else 0.0
-    differences = [
-        abs(a - b) for a, b in zip(left_values, right_values, strict=True)
-    ]
+    differences = [abs(a - b) for a, b in zip(left_values, right_values, strict=True)]
     mean_error = math.fsum(differences) / len(differences)
     bad_fraction = sum(value > 2.0 for value in differences) / len(differences)
     baseline = entry.spec["baseline"]
@@ -1247,7 +1363,8 @@ def _float_artifact(summary: Mapping[str, Any]) -> list[float]:
 
 
 def _entry_slug(entry_id: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.-]+", "-", entry_id).strip("-") or "entry"
+    value = re.sub(r"[^a-zA-Z0-9_.-]+", "-", entry_id).strip("-")
+    return "entry" if value in {"", ".", ".."} else value
 
 
 def _execute_entry(
@@ -1259,48 +1376,110 @@ def _execute_entry(
     verbose: bool,
     attempt: int,
 ) -> dict[str, Any]:
-    artifact = run_directory / "artifacts" / _entry_slug(str(entry.spec["id"])) / f"attempt-{attempt}"
-    artifact.mkdir(parents=True, exist_ok=False)
-    candidate_output = artifact / "candidate"
-    reference_output = artifact / "reference.json"
-    logs = artifact / "logs"
-
-    candidate_arguments = candidate_command(
-        entry, environment, candidate_output, no_build=no_build
-    )
-    candidate_command_result = run_command(
-        candidate_arguments,
-        timeout=environment.timeout_seconds,
-        stdout_path=logs / "candidate.stdout.log",
-        stderr_path=logs / "candidate.stderr.log",
-        verbose=verbose,
-    )
-    if candidate_command_result["exit_code"] != 0:
-        raise PerfMatrixError("candidate command failed")
-    candidate = _candidate_result(candidate_output)
-
+    entry_slug = _entry_slug(str(entry.spec["id"]))
+    artifact_root = run_directory / "artifacts" / entry_slug
+    while True:
+        artifact = artifact_root / f"attempt-{attempt}"
+        try:
+            artifact.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            attempt += 1
+            continue
+        break
+    entry_work = environment.scratch_root / _entry_slug(run_directory.name) / entry_slug
+    work = entry_work / f"attempt-{attempt}"
+    command_environment = _entry_command_environment(environment, work)
+    commands: dict[str, Any] = {}
+    measurement_attempts: list[dict[str, Any]] = []
+    measurement_stability: dict[str, Any] | None = None
+    candidate: dict[str, Any] = {}
+    reference: dict[str, Any] = {}
+    status = "white"
+    comparison: dict[str, Any] = {}
     cleanup = None
+    cache_cleanup = None
     try:
-        reference_arguments = baseline_command(entry, environment, reference_output)
-        reference_command_result = run_command(
-            reference_arguments,
-            timeout=environment.timeout_seconds,
-            stdout_path=logs / "reference.stdout.log",
-            stderr_path=logs / "reference.stderr.log",
-            verbose=verbose,
-        )
-        if reference_command_result["exit_code"] != 0:
-            raise PerfMatrixError("reference command failed")
-        reference = _json_file(reference_output, "reference result")
-        if reference.get("status") != "completed":
-            raise PerfMatrixError(str(reference.get("error", "reference failed")))
-        status, comparison = compare(entry, candidate, reference)
+        for measurement_attempt in (1, 2):
+            status = "white"
+            comparison = {}
+            measurement_dir = artifact if measurement_attempt == 1 else artifact / "measurement-2"
+            candidate_output = measurement_dir / "candidate"
+            reference_output = measurement_dir / "reference.json"
+            logs = measurement_dir / "logs"
+            suffix = "" if measurement_attempt == 1 else "_measurement_2"
+
+            candidate_arguments = candidate_command(
+                entry, environment, candidate_output, no_build=no_build
+            )
+            candidate_result = run_command(
+                candidate_arguments,
+                timeout=environment.timeout_seconds,
+                stdout_path=logs / "candidate.stdout.log",
+                stderr_path=logs / "candidate.stderr.log",
+                verbose=verbose,
+                env=command_environment,
+            )
+            commands["candidate" + suffix] = candidate_result
+            if candidate_result["exit_code"] != 0:
+                raise PerfMatrixError("candidate command failed")
+            candidate = _candidate_result(candidate_output)
+
+            reference_arguments = baseline_command(entry, environment, reference_output)
+            reference_result = run_command(
+                reference_arguments,
+                timeout=environment.timeout_seconds,
+                stdout_path=logs / "reference.stdout.log",
+                stderr_path=logs / "reference.stderr.log",
+                verbose=verbose,
+                env=command_environment,
+            )
+            commands["reference" + suffix] = reference_result
+            if reference_result["exit_code"] != 0:
+                raise PerfMatrixError("reference command failed")
+            reference = _json_file(reference_output, "reference result")
+            if reference.get("status") != "completed":
+                raise PerfMatrixError(str(reference.get("error", "reference failed")))
+
+            status, comparison = compare(entry, candidate, reference)
+            if status not in TERMINAL_COMPARISONS:
+                measurement_stability = None
+                break
+            stability = _measurement_stability(reference, candidate)
+            measurement_attempts.append(
+                {
+                    "attempt": measurement_attempt,
+                    "reference": {
+                        "samples_ms": list(reference.get("samples_ms", [])),
+                        "stability": stability["reference"],
+                    },
+                    "candidate": {
+                        "samples_ms": list(candidate.get("samples_ms", [])),
+                        "stability": stability["candidate"],
+                    },
+                }
+            )
+            measurement_stability = {**stability, "attempts": list(measurement_attempts)}
+            if stability["status"] == "stable":
+                if measurement_attempt == 2:
+                    measurement_stability["status"] = "stable_after_retry"
+                break
+            if stability["status"] == "not_evaluated":
+                status = "white"
+                comparison = {"reason": "timing stability requires ten valid samples per side"}
+                measurement_stability["status"] = "measurement_inconclusive"
+                break
+            if measurement_attempt == 2:
+                status = "white"
+                comparison = {"reason": "timing did not settle after one remeasurement"}
+                measurement_stability["status"] = "measurement_inconclusive"
     finally:
-        if environment.bundle_retention == "delete_always":
-            cleanup = _cleanup_managed_bundle(candidate, entry, environment)
-    if environment.bundle_retention == "delete_on_pass" and status in TERMINAL_COMPARISONS:
-        cleanup = _cleanup_managed_bundle(candidate, entry, environment)
-    return {
+        passed = status in TERMINAL_COMPARISONS
+        if environment.bundle_retention == "delete_always" or (
+            environment.bundle_retention == "delete_on_pass" and passed
+        ):
+            cleanup = _cleanup_managed_bundle(candidate or None, entry, environment)
+        cache_cleanup = _cleanup_entry_work(entry_work, environment, passed=passed)
+    row = {
         "id": entry.spec["id"],
         "model": entry.model.name,
         "family": entry.model.family,
@@ -1313,18 +1492,24 @@ def _execute_entry(
         "reference": reference,
         "comparison": comparison,
         "bundle_cleanup": cleanup,
-        "commands": {
-            "candidate": candidate_command_result,
-            "reference": reference_command_result,
-        },
+        "hf_cache_cleanup": cache_cleanup,
+        "commands": commands,
     }
+    if measurement_stability is not None:
+        row["measurement_stability"] = measurement_stability
+    return row
 
 
 def _cleanup_managed_bundle(
-    candidate: Mapping[str, Any], entry: ResolvedEntry, environment: Environment
+    candidate: Mapping[str, Any] | None, entry: ResolvedEntry, environment: Environment
 ) -> dict[str, Any] | None:
-    preparation = candidate.get("preparation", {})
-    records = preparation.get("bundles", []) if isinstance(preparation, Mapping) else []
+    if candidate is None:
+        records: Sequence[Any] = [
+            {"model": entry.model.name, "bundle": str(entry.case.bundle_path)},
+        ]
+    else:
+        preparation = candidate.get("preparation", {})
+        records = preparation.get("bundles", []) if isinstance(preparation, Mapping) else []
     for record in records if isinstance(records, list) else []:
         if not isinstance(record, Mapping) or record.get("model") != entry.model.name:
             continue
@@ -1341,6 +1526,34 @@ def _cleanup_managed_bundle(
         bundle.unlink(missing_ok=True)
         return {"status": "deleted", "bundle": str(bundle)}
     return None
+
+
+def _cleanup_entry_work(
+    work: Path, environment: Environment, *, passed: bool
+) -> dict[str, Any] | None:
+    if environment.hf_cache_mode != "per_entry":
+        return None
+    policy = environment.hf_cache_retention
+    evidence: dict[str, Any] = {"path": str(work), "policy": policy, "status": "retained"}
+    if policy == "retain" or (policy == "delete_on_pass" and not passed):
+        return evidence
+    try:
+        relative = work.resolve().relative_to(environment.scratch_root)
+    except ValueError as error:
+        raise PerfMatrixError(
+            f"refusing to delete HF cache outside scratch_root: {work}"
+        ) from error
+    if len(relative.parts) < 2:
+        raise PerfMatrixError(f"refusing to delete broad HF cache path: {work}")
+    try:
+        shutil.rmtree(work)
+    except FileNotFoundError:
+        evidence["status"] = "already_absent"
+    except OSError as error:
+        evidence.update(status="failed", error=str(error))
+    else:
+        evidence["status"] = "deleted"
+    return evidence
 
 
 def _new_run_directory(root: Path) -> Path:
@@ -1399,16 +1612,17 @@ def _run_rows(
     verbose: bool,
 ) -> int:
     current = {
-        str(row.get("id")): row
-        for row in results.get("rows", [])
-        if isinstance(row, Mapping)
+        str(row.get("id")): row for row in results.get("rows", []) if isinstance(row, Mapping)
     }
     for entry in entries:
         entry_id = str(entry.spec["id"])
         previous = current.get(entry_id)
-        if previous and previous.get("status") in TERMINAL_COMPARISONS:
+        if previous and previous.get("status") in FINISHED_RESULTS:
             continue
         attempt = int(previous.get("attempts", 0)) + 1 if previous else 1
+        artifact_root = run_directory / "artifacts" / _entry_slug(entry_id)
+        while (artifact_root / f"attempt-{attempt}").exists():
+            attempt += 1
         try:
             row = _execute_entry(
                 entry,
@@ -1430,7 +1644,9 @@ def _run_rows(
                 "error": str(error),
             }
         current[entry_id] = row
-        results["rows"] = [current[str(value.spec["id"])] for value in entries]
+        results["rows"] = [
+            current[str(value.spec["id"])] for value in entries if str(value.spec["id"]) in current
+        ]
         _write_json(run_directory / "results.json", results)
         write_report(run_directory, results)
 
@@ -1451,6 +1667,12 @@ def write_report(
     preparation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     rows = [dict(row) for row in results.get("rows", []) if isinstance(row, Mapping)]
+    selected_ids = results.get("selected_entry_ids")
+    if not isinstance(selected_ids, list) or not all(
+        isinstance(value, str) for value in selected_ids
+    ):
+        raise PerfMatrixError("matrix results selected_entry_ids must be strings")
+    completed_ids = {str(row.get("id")) for row in rows}
     counts = {
         status: sum(row.get("status") == status for row in rows)
         for status in ("green", "yellow", "red", "contract-mismatch", "white")
@@ -1462,7 +1684,8 @@ def write_report(
         "suite": results.get("suite"),
         "environment": results.get("environment"),
         "summary": {
-            "selected": len(rows),
+            "selected": len(selected_ids),
+            "pending": sum(entry_id not in completed_ids for entry_id in selected_ids),
             "comparable": counts["green"] + counts["yellow"] + counts["red"],
             **counts,
         },
@@ -1479,15 +1702,24 @@ def _report_html(report: Mapping[str, Any]) -> str:
     rows = []
     for row in report.get("rows", []):
         comparison = row.get("comparison", {}) if isinstance(row, Mapping) else {}
+        measurement_stability = (
+            row.get("measurement_stability", {}) if isinstance(row, Mapping) else {}
+        )
         candidate = comparison.get("candidate_p50_ms", "")
         reference = comparison.get("reference_p50_ms", "")
         reason = comparison.get("reason", row.get("error", ""))
+        stability = (
+            measurement_stability.get("status", "")
+            if isinstance(measurement_stability, Mapping)
+            else ""
+        )
         rows.append(
             "<tr>"
             f"<td>{html.escape(str(row.get('id', '')))}</td>"
             f"<td>{html.escape(str(row.get('model', '')))}</td>"
             f"<td>{html.escape(str(row.get('operation', '')))}</td>"
             f"<td>{html.escape(str(row.get('status', '')))}</td>"
+            f"<td>{html.escape(str(stability))}</td>"
             f"<td>{html.escape(str(candidate))}</td>"
             f"<td>{html.escape(str(reference))}</td>"
             f"<td>{html.escape(str(reason))}</td>"
@@ -1502,10 +1734,12 @@ th,td {{ border: 1px solid #ddd; padding: .5rem; text-align: left; }}
 th {{ background: #f3f3f3; }}
 </style></head><body>
 <h1>TRTMC performance matrix</h1>
-<p>Status: {html.escape(str(report.get("status", "unknown")))}</p>
+<p>Status: {html.escape(str(report.get("status", "unknown")))};
+selected: {html.escape(str(report.get("summary", {}).get("selected", 0)))};
+pending: {html.escape(str(report.get("summary", {}).get("pending", 0)))}</p>
 <table><thead><tr><th>Entry</th><th>Model</th><th>Operation</th><th>Status</th>
-<th>Candidate p50 ms</th><th>Reference p50 ms</th><th>Reason</th></tr></thead>
-<tbody>{''.join(rows)}</tbody></table>
+<th>Stability</th><th>Candidate p50 ms</th><th>Reference p50 ms</th><th>Reason</th></tr></thead>
+<tbody>{"".join(rows)}</tbody></table>
 <p>Green is faster by more than the margin, yellow is within the margin, red is
 slower by more than the margin, and white is not comparable.</p>
 </body></html>
@@ -1564,9 +1798,9 @@ def _load_results(run_directory: Path) -> dict[str, Any]:
     return value
 
 
-def _common(arguments: argparse.Namespace) -> tuple[
-    Path, Path, str, list[dict[str, Any]], set[str], Environment, list[ResolvedEntry]
-]:
+def _common(
+    arguments: argparse.Namespace,
+) -> tuple[Path, Path, str, list[dict[str, Any]], set[str], Environment, list[ResolvedEntry]]:
     suite_path = arguments.suite.resolve()
     environment_path = arguments.environment.resolve()
     suite_name, all_entries, excluded = load_suite(suite_path)
@@ -1640,7 +1874,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             results = _load_results(run_directory)
             suite_name, all_entries, excluded = load_suite(Path(results["suite_path"]))
             environment = load_environment(Path(results["environment_path"]))
-            selected_ids = set(results.get("selected_entry_ids", []))
+            stored_ids = results.get("selected_entry_ids")
+            if (
+                not isinstance(stored_ids, list)
+                or not stored_ids
+                or not all(isinstance(value, str) and value for value in stored_ids)
+            ):
+                raise PerfMatrixError("matrix results has no selected entry IDs")
+            selected_ids = set(stored_ids)
+            missing = selected_ids - {str(entry["id"]) for entry in all_entries}
+            if missing:
+                raise PerfMatrixError(
+                    "selected entries are missing from the suite: " + ", ".join(sorted(missing))
+                )
             _coverage(all_entries, excluded)
             selected = [entry for entry in all_entries if entry["id"] in selected_ids]
             resolved = preflight(selected, environment, require_runtime=True)

@@ -10,10 +10,14 @@
       "prompt": "What color is the vehicle in this image? Answer in one word.",
       "max_new_tokens": 10,
       "test_image": "data/test_img.jpeg",
-      "reference_precision": "fp16"
+      "reference_precision": "fp32",
+      "reference_backend": "golden_snapshot",
+      "metadata": {
+        "golden_snapshot_path": "data/internvl3_8b_golden.json"
+      }
     }
   ],
   "tensor_parallel_size": 4,
-  "precision": "fp16",
+  "precision": "fp32",
   "max_sequence_length": 384
 }

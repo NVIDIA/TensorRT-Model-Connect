@@ -44,25 +44,25 @@ install(TARGETS trtmc_model_nemotron_voicechat
 
 if(TRTMC_BUILD_TESTS)
   find_package(Threads REQUIRED)
-  add_executable(nemotron_voicechat_lifecycle_probe
+  add_executable(test_nemotron_voicechat_lifecycle_probe_host
     ../tests/cpp/native_lifecycle_probe.cpp
   )
-  target_include_directories(nemotron_voicechat_lifecycle_probe PRIVATE
+  target_include_directories(test_nemotron_voicechat_lifecycle_probe_host PRIVATE
     ${PROJECT_SOURCE_DIR}/apps
     ${PROJECT_SOURCE_DIR}/core/runtime/include
   )
-  target_link_libraries(nemotron_voicechat_lifecycle_probe PRIVATE
+  target_link_libraries(test_nemotron_voicechat_lifecycle_probe_host PRIVATE
     trtmc_cli
     Threads::Threads
   )
-  target_compile_options(nemotron_voicechat_lifecycle_probe PRIVATE
+  target_compile_options(test_nemotron_voicechat_lifecycle_probe_host PRIVATE
     -Wall -Wextra -Wpedantic
   )
-  set_target_properties(nemotron_voicechat_lifecycle_probe PROPERTIES
+  set_target_properties(test_nemotron_voicechat_lifecycle_probe_host PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
     BUILD_RPATH "\$ORIGIN"
   )
   add_test(NAME nemotron_voicechat_lifecycle_probe_host
-    COMMAND nemotron_voicechat_lifecycle_probe
+    COMMAND test_nemotron_voicechat_lifecycle_probe_host
   )
 endif()

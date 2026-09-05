@@ -9,6 +9,7 @@
   "testcases": [
     {
       "name": "wan22-ti2v-5b",
+      "reference_backend": "wan_official",
       "semantic_assessment": true,
       "semantic_samples": 6,
       "runtime_timeout_s": 14400,
@@ -16,8 +17,7 @@
       "test_prompt": "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage",
       "num_inference_steps": 50,
       "guidance_scale": 5.0,
-      "seed": 42,
-      "reference_precision": "bf16"
+      "seed": 42
     }
   ],
   "tensor_parallel_size": 1,

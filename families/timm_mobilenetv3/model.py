@@ -471,6 +471,9 @@ class _TimmMobilenetv3Model:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm MobileNetV3 image-classification bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("timm_mobilenetv3 does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("timm_mobilenetv3 does not support image_height")
     if request.image_width is not None:
@@ -505,7 +508,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=precision,
         verbose=bool(request.verbose),
     )
-    writer.set_header(family="timm_mobilenetv3", task=request.task, backend="trt")
+    writer.set_header(family="timm_mobilenetv3", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     runtime_source = model.get_bundle_config_overrides(config)
     writer.add_json(

@@ -41,9 +41,6 @@ class BarkPipeline final : public IAudioGeneration {
     AudioResult generate_audio(const std::string& prompt,
                                const AudioGenerationConfig& cfg = {}) override;
 
-    // Family-local E2E seam. Production callers use IAudioGeneration only.
-    void set_token_trace_path(std::string path) { config_.dump_path = std::move(path); }
-
     void set_codec_module(std::unique_ptr<ITrtModule> codec);
     void set_fine_module(std::unique_ptr<ITrtModule> fine);
     void set_fine_embeddings(std::vector<float> embed, std::vector<float> pos_embed);

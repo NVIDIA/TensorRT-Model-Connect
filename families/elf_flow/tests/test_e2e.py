@@ -314,6 +314,24 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
     manifest["task"]
+    samples = [actual]
+    min_samples = int(thresholds.get("contract_min_samples", 1))
+    assert len(samples) >= min_samples
+    assert all(str(sample.get("text", "")).strip() for sample in samples)
+    expected_samples = thresholds.get("contract_expected_samples")
+    if expected_samples is not None:
+        assert len(samples) == int(expected_samples)
+
+    inputs = case.get("inputs") or {}
+    if inputs.get("generation_mode") == "conditional":
+        artifact, artifact_path = _replay(case)
+        has_text_condition = bool(case.get("prompt") or inputs.get("source_text"))
+        has_latent_condition = bool(
+            _replay_file(artifact, artifact_path, "condition_latents_raw")
+            and _replay_file(artifact, artifact_path, "condition_mask_raw")
+        )
+        assert has_text_condition or has_latent_condition
+
     if "normalized_text_edit_distance" in thresholds:
         limit = float(thresholds["normalized_text_edit_distance"])
     elif "contract_max_upstream_text_ned" in thresholds:
@@ -345,6 +363,16 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     return
 
 
+def test_manifests_declare_build_dependencies() -> None:
+    expected = [
+        {"repo_id": "embedded-language-flows/t5_small_encoder_jax"},
+        {"repo_id": "google-t5/t5-small"},
+    ]
+    for path in sorted(MANIFEST_ROOT.glob("*.json")):
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        assert manifest["hf_dependencies"] == expected, path
+
+
 def test_terminal_stripped_exact_token_contract() -> None:
     manifest = {"task": "text_generation"}
     case = {}
@@ -367,6 +395,27 @@ def test_terminal_stripped_exact_token_contract() -> None:
             manifest,
             case,
             thresholds,
+        )
+
+
+def test_unconditional_contract_requires_expected_sample_count() -> None:
+    manifest = {"task": "text_generation"}
+    case = {"inputs": {"generation_mode": "unconditional"}}
+    expected = {"text": "sample", "token_ids": [7]}
+    thresholds = {
+        "contract_expected_samples": 1,
+        "contract_max_upstream_text_ned": 0.01,
+        "contract_min_upstream_token_agreement_rate": 0.99,
+    }
+    actual = {"text": "sample", "token_ids": [7]}
+    _assert_parity(actual, expected, manifest, case, thresholds)
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            actual,
+            expected,
+            manifest,
+            case,
+            {**thresholds, "contract_expected_samples": 2},
         )
 
 

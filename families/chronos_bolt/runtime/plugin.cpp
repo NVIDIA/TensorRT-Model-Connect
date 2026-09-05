@@ -8,7 +8,6 @@
 #include "trtmc/runtime/trt_backend.h"
 
 #include <cstdlib>
-#include <dlfcn.h>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -46,19 +45,7 @@ RuntimeConfig parse_runtime_config(const std::vector<char>& data) {
                          require_positive_int(json, "tensor_parallel_size")};
 }
 
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
 std::int32_t require_rank(std::int32_t tensor_parallel_size) {
-    require_nccl(tensor_parallel_size);
     if (tensor_parallel_size == 1)
         return 0;
     const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
@@ -83,6 +70,8 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 } // namespace trtmc::chronos_bolt
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("chronos_bolt does not support --kv-cache-size");
     const auto& runtime = trtmc::chronos_bolt::require_section(context.reader, "runtime.json");
     auto config = trtmc::chronos_bolt::parse_runtime_config(runtime);
     const auto rank = trtmc::chronos_bolt::require_rank(config.tensor_parallel_size);

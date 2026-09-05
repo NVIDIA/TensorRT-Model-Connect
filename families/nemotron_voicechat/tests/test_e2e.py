@@ -363,12 +363,12 @@ def _lifecycle_binary(timeout_s: int) -> Path:
             "--parallel",
             "8",
             "--target",
-            "nemotron_voicechat_lifecycle_probe",
+            "test_nemotron_voicechat_lifecycle_probe_host",
         ],
         check=True,
         timeout=timeout_s,
     )
-    probe = build_dir / "nemotron_voicechat_lifecycle_probe"
+    probe = build_dir / "test_nemotron_voicechat_lifecycle_probe_host"
     assert probe.is_file()
     return probe
 
@@ -497,6 +497,11 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
     expected = _official_reference(model_dir, manifest, case, tmp_path)
     _assert_parity(actual, expected, manifest, case, _thresholds(case_name))
+
+
+def test_manifest_declares_text_tokenizer_dependency() -> None:
+    for _, manifest, _ in CASES.values():
+        assert manifest["hf_dependencies"] == [{"repo_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2"}]
 
 
 def test_complete_agent_text_uses_the_final_event_for_each_epoch() -> None:

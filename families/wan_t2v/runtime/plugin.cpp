@@ -28,6 +28,8 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
 } // namespace trtmc::wan_t2v
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("wan_t2v does not support --kv-cache-size");
     using namespace trtmc;
     const auto& data = wan_t2v::require_section(context.reader, "runtime.json");
     const std::string runtime(data.begin(), data.end());

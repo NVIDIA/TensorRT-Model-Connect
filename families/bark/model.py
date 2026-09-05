@@ -564,7 +564,6 @@ class _BarkModel:
                 engine_role=engine_role,
             )
             result["coarse.decode.plan"] = coarse_plan
-            result["coarse.prefill.plan"] = coarse_plan
 
         # Add embedding tables as raw bundle sections.
         # The C++ runtime does host-side embedding lookup for embed_input mode.
@@ -1026,6 +1025,9 @@ def _build_bark_fine_engine(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Bark audio-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("bark does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("bark does not support image_height")
 
@@ -1060,7 +1062,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_decoder_engine_layout"] = "dual_profile"
     weights = model.load_weights(str(model_dir), config)
 
-    writer.set_header(family="bark", task=request.task, backend="trt")
+    writer.set_header(family="bark", task=request.task, backend=request.backend)
     if parallel.enabled:
         semantic_weights = _extract_bark_sub_weights(weights, "semantic")
         semantic_cfg = weights["_semantic_cfg"]
@@ -1102,7 +1104,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             parallel_config=parallel,
         )
         writer.add_bytes("semantic.decode.plan", semantic_plan)
-        writer.add_bytes("semantic.prefill.plan", semantic_plan)
 
     extras = model.build_extra_engines(
         config,

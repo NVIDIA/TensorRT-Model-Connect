@@ -28,10 +28,11 @@ Cross-attention design:
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
-
+import shutil
 import sys
+import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import tensorrt as trt
@@ -872,6 +873,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _MarianModel, *
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Marian encoder-decoder bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("marian does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("marian does not support image_height")
 
@@ -883,7 +887,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.max_batch_size != 1:
         raise NotImplementedError("marian does not support max_batch_size")
-
 
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
@@ -915,10 +918,23 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Marian tensor-parallel builds require fp32")
     model = _MarianModel()
     config.raw["_model_dir"] = str(model_dir)
-    if not (model_dir / "tokenizer.json").is_file():
-        model.ensure_tokenizer_json(model_dir)
+    with tempfile.TemporaryDirectory(prefix="trtmc-marian-tokenizer-") as temporary:
+        tokenizer_dir = Path(temporary)
+        for filename in _BUNDLE_FILES:
+            source = model_dir / filename
+            if source.is_file():
+                shutil.copyfile(source, tokenizer_dir / filename)
+        if not (tokenizer_dir / "tokenizer.json").is_file():
+            model.ensure_tokenizer_json(tokenizer_dir)
+        if not (tokenizer_dir / "tokenizer.json").is_file():
+            raise FileNotFoundError("Marian checkpoint cannot produce tokenizer.json")
+        tokenizer_files = {
+            filename: (tokenizer_dir / filename).read_bytes()
+            for filename in _BUNDLE_FILES
+            if (tokenizer_dir / filename).is_file()
+        }
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="marian", task=request.task, backend="trt")
+    writer.set_header(family="marian", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(
@@ -965,7 +981,5 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
         ),
     )
-    for filename in _BUNDLE_FILES:
-        path = model_dir / filename
-        if path.is_file():
-            writer.add_bytes(filename, path.read_bytes())
+    for filename, data in tokenizer_files.items():
+        writer.add_bytes(filename, data)

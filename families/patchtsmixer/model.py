@@ -434,6 +434,9 @@ def _read_config(model_dir: Path) -> dict[str, Any]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one strict PatchTSMixer bundle without shared model orchestration."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("patchtsmixer does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("patchtsmixer does not support image_height")
 
@@ -457,8 +460,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError(f"PatchTSMixer supports only fp16 or fp32, got {precision!r}")
     if request.max_sequence_length is not None:
         raise ValueError("PatchTSMixer does not accept max_sequence_length")
-    if request.tensor_parallel_size != 1:
-        raise ValueError("PatchTSMixer seed supports tensor_parallel_size=1")
+    if request.tensor_parallel_size not in {1, 2, 4, 8}:
+        raise ValueError("PatchTSMixer tensor_parallel_size must be 1, 2, 4, or 8")
     if request.quantization is not None:
         raise ValueError("PatchTSMixer does not support quantization")
 
@@ -484,14 +487,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.set_header(
         family="patchtsmixer",
         task=request.task,
-        backend="trt",
+        backend=request.backend,
     )
-    writer.add_bytes("engine.plan", plan)
+    if request.tensor_parallel_size == 1:
+        writer.add_bytes("engine.plan", plan)
+    else:
+        for rank in range(request.tensor_parallel_size):
+            writer.add_bytes(f"engine.rank{rank}.plan", plan)
     writer.add_json(
         "runtime.json",
         {
             "context_length": int(config["context_length"]),
             "num_input_channels": int(config["num_input_channels"]),
             "prediction_length": int(config["prediction_length"]),
+            "tensor_parallel_size": request.tensor_parallel_size,
         },
     )

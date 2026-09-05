@@ -212,5 +212,7 @@ ITask* create(const FamilyContext& context) {
 } // namespace trtmc::k2_horizon
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("k2_horizon does not support --kv-cache-size");
     return trtmc::k2_horizon::create(context);
 }

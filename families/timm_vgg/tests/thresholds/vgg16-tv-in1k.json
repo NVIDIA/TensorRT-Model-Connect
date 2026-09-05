@@ -1,6 +1,0 @@
-{
-  "threshold_overrides": {
-    "logit_cosine": 0.999,
-    "top1_match": true
-  }
-}

@@ -1,7 +1,0 @@
-{
-  "threshold_overrides": {
-    "normalized_text_edit_distance": 0.8,
-    "token_agreement_rate": 0.25,
-    "unstable_topk_hit_rate": 0.75
-  }
-}

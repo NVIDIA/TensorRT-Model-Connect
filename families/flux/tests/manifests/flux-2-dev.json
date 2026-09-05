@@ -18,6 +18,5 @@
   ],
   "tensor_parallel_size": 1,
   "image_height": 1024,
-  "image_width": 1024,
-  "video_num_frames": 1
+  "image_width": 1024
 }

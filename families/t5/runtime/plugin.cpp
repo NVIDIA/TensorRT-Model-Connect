@@ -431,5 +431,7 @@ ITask* create_t5(const FamilyContext& context) {
 } // namespace trtmc
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("t5 does not support --kv-cache-size");
     return trtmc::create_t5(context);
 }

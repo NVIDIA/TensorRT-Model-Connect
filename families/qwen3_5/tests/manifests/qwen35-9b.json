@@ -12,6 +12,8 @@
       "premerge": true,
       "prompt": "What is the capital of France? Answer in one word.",
       "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false,
       "reference_precision": "fp32"
     }
   ],

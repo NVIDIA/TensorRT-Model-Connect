@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_timm_vit SHARED
+  distributed_runtime.cpp
   image_preprocess_seam.cpp
   pipeline.cpp
   plugin.cpp
@@ -23,6 +24,7 @@ target_link_libraries(trtmc_model_timm_vit PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_timm_vit PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"

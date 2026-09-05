@@ -188,6 +188,9 @@ _BUNDLE_FILES = (
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Nemotron Labs Diffusion bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("nemotron_labs_diffusion does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("nemotron_labs_diffusion does not support image_height")
 
@@ -263,7 +266,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     lora_config = model.get_lora_config(config)
     if lora_config:
         runtime.update(lora_config)
-    writer.set_header(family="nemotron_labs_diffusion", task=request.task, backend="trt")
+    writer.set_header(family="nemotron_labs_diffusion", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     for name, extra_plan in (extra or {}).items():
         writer.add_bytes(name, extra_plan)

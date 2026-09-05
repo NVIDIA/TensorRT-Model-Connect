@@ -2,20 +2,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Strict SANA-WM reference benchmark used by the performance application."""
+"""Run the official SANA-WM pipeline for the performance application."""
 
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
-import os
+import sys
 import time
 from pathlib import Path
+from typing import Any
 
 
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser()
+    value.add_argument("--reference-repo", required=True, type=Path)
     value.add_argument("--image", required=True, type=Path)
     value.add_argument("--model-dir", required=True, type=Path)
     value.add_argument("--prompt", required=True, type=Path)
@@ -27,129 +28,141 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--cfg_scale", required=True, type=float)
     value.add_argument("--flow_shift", required=True, type=float)
     value.add_argument("--seed", required=True, type=int)
-    value.add_argument("--translation_speed", type=float)
-    value.add_argument("--rotation_speed_deg", type=float)
-    value.add_argument("--output_dir", type=Path)
+    value.add_argument("--refiner_seed", required=True, type=int)
+    value.add_argument("--translation_speed", required=True, type=float)
+    value.add_argument("--rotation_speed_deg", required=True, type=float)
     value.add_argument("--no_action_overlay", action="store_true")
+    value.add_argument("--warmup", required=True, type=int)
+    value.add_argument("--iterations", required=True, type=int)
+    value.add_argument("--output", required=True, type=Path)
     return value
 
 
-def prompt_text(path: Path) -> str:
-    text = path.read_text(encoding="utf-8").strip()
-    if path.suffix == ".json":
-        value = json.loads(text)
-        text = str(value.get("prompt", ""))
-    if not text:
-        raise RuntimeError("SANA-WM prompt is empty")
-    return text
-
-
-def media_summary(result) -> dict[str, int | str]:
+def media_summary(video: Any) -> dict[str, int | str]:
     import numpy as np
 
-    frames = getattr(result, "frames", None)
-    if frames is None:
-        raise RuntimeError("SANA-WM reference returned no materialized video frames")
-    shape = tuple(int(value) for value in getattr(frames, "shape", ()))
-    if len(shape) == 5:
-        _, frame_count, first, second, third = shape
-        if third in {1, 3, 4}:
-            height, width, channels = first, second, third
-        elif first in {1, 3, 4}:
-            channels, height, width = first, second, third
-        else:
-            raise RuntimeError(f"unsupported SANA-WM video tensor shape: {shape}")
-    elif len(shape) == 4:
-        frame_count, first, second, third = shape
-        if third in {1, 3, 4}:
-            height, width, channels = first, second, third
-        elif first in {1, 3, 4}:
-            channels, height, width = first, second, third
-        else:
-            raise RuntimeError(f"unsupported SANA-WM video tensor shape: {shape}")
-    else:
-        video = frames[0]
-        if not isinstance(video, (list, tuple)) or not video:
-            raise RuntimeError("SANA-WM frames must contain one non-empty materialized video")
-        frame_count = len(video)
-        first_frame = video[0]
-        if hasattr(first_frame, "size") and not isinstance(first_frame, np.ndarray):
-            width, height = (int(value) for value in first_frame.size)
-            channels = len(first_frame.getbands())
-        else:
-            frame_shape = tuple(int(value) for value in np.asarray(first_frame).shape)
-            if len(frame_shape) != 3:
-                raise RuntimeError(f"unsupported SANA-WM frame shape: {frame_shape}")
-            if frame_shape[-1] in {1, 3, 4}:
-                height, width, channels = frame_shape
-            elif frame_shape[0] in {1, 3, 4}:
-                channels, height, width = frame_shape
-            else:
-                raise RuntimeError(f"unsupported SANA-WM frame shape: {frame_shape}")
+    shape = tuple(int(value) for value in np.asarray(video).shape)
+    if len(shape) != 4 or shape[-1] not in {1, 3, 4}:
+        raise RuntimeError(f"official SANA-WM video must be THWC, got {shape}")
+    frames, height, width, channels = shape
+    if frames < 1:
+        raise RuntimeError("official SANA-WM returned no video frames")
     return {
         "media_type": "video",
-        "media_count": frame_count,
-        "num_frames": frame_count,
+        "media_count": frames,
+        "num_frames": frames,
         "height": height,
         "width": width,
         "channels": channels,
     }
 
 
+def _official_module(reference_repo: Path) -> Any:
+    entrypoint = reference_repo / "inference_video_scripts/wm/inference_sana_wm.py"
+    if not entrypoint.is_file():
+        raise RuntimeError(f"official SANA-WM entrypoint does not exist: {entrypoint}")
+    sys.path.insert(0, str(reference_repo))
+    from inference_video_scripts.wm import inference_sana_wm
+
+    return inference_sana_wm
+
+
 def main() -> int:
     arguments = parser().parse_args()
-    output_path = os.environ.get("TRTMC_SANA_WM_BENCHMARK_OUTPUT")
-    if not output_path:
-        raise RuntimeError("TRTMC_SANA_WM_BENCHMARK_OUTPUT is required")
-    import numpy as np
+    if arguments.warmup < 0 or arguments.iterations < 1:
+        raise ValueError("SANA-WM benchmark warmup/iterations are invalid")
+
+    import pyrallis
     import torch
-    from diffusers import DiffusionPipeline
     from PIL import Image
 
-    pipeline = DiffusionPipeline.from_pretrained(
-        arguments.model_dir,
-        torch_dtype=torch.bfloat16,
-        local_files_only=True,
-    ).to("cuda")
-    parameters = inspect.signature(pipeline.__call__).parameters
-    required = {"prompt", "image", "action", "camera_intrinsics", "num_frames"}
-    if not required.issubset(parameters):
-        raise RuntimeError("installed SANA-WM pipeline lacks the required camera-control API")
+    reference_repo = arguments.reference_repo.resolve()
+    model_dir = arguments.model_dir.resolve()
+    official = _official_module(reference_repo)
+    required_model_paths = {
+        "config": model_dir / "config.yaml",
+        "model": model_dir / "dit/sana_wm_1600m_720p.safetensors",
+        "refiner": model_dir / "refiner",
+        "refiner text encoder": model_dir / "refiner/text_encoder",
+    }
+    missing = [name for name, path in required_model_paths.items() if not path.exists()]
+    if missing:
+        raise RuntimeError("SANA-WM model directory is missing: " + ", ".join(missing))
+    if not torch.cuda.is_available():
+        raise RuntimeError("official SANA-WM performance requires CUDA")
 
     image = Image.open(arguments.image).convert("RGB")
-    intrinsics = np.load(arguments.intrinsics).tolist()
-    prompt = prompt_text(arguments.prompt)
-    def invoke():
-        generator = torch.Generator(device="cuda").manual_seed(arguments.seed)
-        return pipeline(
-            prompt=prompt,
-            image=image,
-            action=arguments.action,
-            camera_intrinsics=intrinsics,
-            num_frames=arguments.num_frames,
-            num_inference_steps=arguments.step,
-            guidance_scale=arguments.cfg_scale,
-            generator=generator,
+    prompt = arguments.prompt.read_text(encoding="utf-8").strip()
+    if not prompt:
+        raise RuntimeError("SANA-WM prompt is empty")
+    trajectory = official.action_string_to_c2w(
+        arguments.action,
+        translation_speed=arguments.translation_speed,
+        rotation_speed_deg=arguments.rotation_speed_deg,
+    )
+    snapped_frames = official._snap_num_frames(
+        arguments.num_frames,
+        stride=8,
+        upper_bound=int(trajectory.shape[0]),
+    )
+    if snapped_frames != arguments.num_frames:
+        raise RuntimeError(
+            f"official SANA-WM cannot execute exactly {arguments.num_frames} frames; "
+            f"resolved {snapped_frames}"
         )
+    trajectory = trajectory[: arguments.num_frames]
+    cropped, source_size, resized_size, crop_offset = official.resize_and_center_crop(image)
+    intrinsics = official.load_intrinsics(arguments.intrinsics, arguments.num_frames)
+    intrinsics = official.transform_intrinsics_for_crop(
+        intrinsics, source_size, resized_size, crop_offset
+    )
+    config = pyrallis.parse(
+        config_class=official.InferenceConfig,
+        config_path=required_model_paths["config"],
+        args=[],
+    )
+    refiner = official.RefinerSettings(
+        root=required_model_paths["refiner"],
+        gemma_root=required_model_paths["refiner text encoder"],
+        seed=arguments.refiner_seed,
+    )
+    pipeline = official.SanaWMPipeline(
+        config=config,
+        model_path=required_model_paths["model"],
+        device="cuda",
+        refiner=refiner,
+    )
+    params = official.GenerationParams(
+        num_frames=arguments.num_frames,
+        fps=arguments.fps,
+        step=arguments.step,
+        cfg_scale=arguments.cfg_scale,
+        flow_shift=arguments.flow_shift,
+        seed=arguments.seed,
+    )
 
-    warmup = int(os.environ.get("TRTMC_SANA_WM_BENCHMARK_WARMUP", "1"))
-    iterations = int(os.environ.get("TRTMC_SANA_WM_BENCHMARK_ITERATIONS", "1"))
-    for _ in range(warmup):
+    def invoke() -> Any:
+        return pipeline.generate(cropped, prompt, trajectory, intrinsics, params)
+
+    for _ in range(arguments.warmup):
         invoke()
+        torch.cuda.synchronize()
     samples = []
     result = None
-    for _ in range(iterations):
+    for _ in range(arguments.iterations):
+        torch.cuda.synchronize()
         started = time.perf_counter()
         result = invoke()
         torch.cuda.synchronize()
         samples.append((time.perf_counter() - started) * 1000.0)
-    summary = media_summary(result)
-    Path(output_path).write_text(
+    if not isinstance(result, dict) or "video" not in result:
+        raise RuntimeError("official SANA-WM pipeline returned no video")
+    video = result["video"]
+    if not arguments.no_action_overlay:
+        video = official.apply_overlay(video, result["c2w"])
+    arguments.output.write_text(
         json.dumps(
-            {
-                "samples_ms": samples,
-                "output_summary": summary,
-            },
+            {"samples_ms": samples, "output_summary": media_summary(video)},
             indent=2,
             sort_keys=True,
         )

@@ -3,12 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/nemotron_speech_streaming/runtime/distributed_runtime.h"
 #include "families/nemotron_speech_streaming/runtime/pipeline.h"
 #include "families/nemotron_speech_streaming/runtime/plugin_helpers.h"
 #include "trtmc/runtime/family_factory.h"
 
-#include <cstdlib>
-#include <dlfcn.h>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -23,31 +22,6 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     if (section == nullptr || section->length == 0)
         throw std::runtime_error("bundle section is missing or empty: " + std::string(name));
     return bundle.read_section(name);
-}
-
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::int32_t require_rank(std::int32_t size) {
-    require_nccl(size);
-    if (size == 1)
-        return 0;
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("Nemotron streaming TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= size)
-        throw std::runtime_error("Nemotron streaming RANK is outside tensor_parallel_size");
-    return static_cast<std::int32_t>(rank);
 }
 
 RnntConfig parse_config(const nlohmann::json& json) {
@@ -97,6 +71,8 @@ RnntConfig parse_config(const nlohmann::json& json) {
 } // namespace trtmc::nemotron_streaming_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("nemotron_speech_streaming does not support --kv-cache-size");
     using namespace trtmc;
     const auto& runtime_data =
         nemotron_streaming_factory::require_section(context.reader, "runtime.json");
@@ -105,9 +81,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto tp_size = document.at("tensor_parallel_size").get<std::int32_t>();
     if (tp_size <= 0)
         throw std::runtime_error("Nemotron streaming tensor_parallel_size must be positive");
-    const auto rank = nemotron_streaming_factory::require_rank(tp_size);
+    const auto group = nemotron_speech_streaming::initialize_tensor_parallel_group(tp_size);
     const std::string predictor_section =
-        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(rank) + ".plan";
+        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(group.rank) + ".plan";
 
     ModuleCreateOptions options{};
     const auto& encoder_plan =
@@ -115,10 +91,15 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto encoder =
         load_trt_module_from_plan(&context.backend, &encoder_plan, "encoder.plan", options);
     options.stream = encoder.module->stream();
+    ModuleCreateOptions predictor_options = options;
+    if (tp_size > 1) {
+        predictor_options.distributed_communicator = group.communicator;
+        predictor_options.distributed_owner = group.owner;
+    }
     const auto& predictor_plan =
         nemotron_streaming_factory::require_section(context.reader, predictor_section.c_str());
     auto predictor = load_trt_module_from_plan(&context.backend, &predictor_plan,
-                                               predictor_section.c_str(), options);
+                                               predictor_section.c_str(), predictor_options);
     const auto& joint_plan =
         nemotron_streaming_factory::require_section(context.reader, "joint.plan");
     auto joint = load_trt_module_from_plan(&context.backend, &joint_plan, "joint.plan", options);

@@ -91,10 +91,12 @@ def _make_matmul_fn(
     dtype: np.dtype,
 ):
     """Create the Llama projection matmul callable."""
+
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
         del weight_name
         return graph_ops.add_matmul_rhs_constant(
-            network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
+            network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype
+        )
 
     return matmul
 
@@ -112,10 +114,8 @@ def _norm_multi(
     if norm_type == "layernorm":
         if beta is None:
             beta = np.zeros(hidden, dtype=np.float32)
-        return graph_ops.add_layer_norm(
-            network, inp, hidden, gamma, beta, eps_tensor, dtype=dtype)
-    return graph_ops.add_rms_norm(
-        network, inp, hidden, gamma, eps_tensor, dtype=dtype)
+        return graph_ops.add_layer_norm(network, inp, hidden, gamma, beta, eps_tensor, dtype=dtype)
+    return graph_ops.add_rms_norm(network, inp, hidden, gamma, eps_tensor, dtype=dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -133,17 +133,14 @@ def _swiglu_mlp(
     hidden: int,
     mlp_size: int,
 ) -> trt.ITensor:
-    gate = matmul(inp, hidden, mlp_size,
-                  weights[f"{prefix}.w_gate"], f"{prefix}.w_gate")
-    up = matmul(inp, hidden, mlp_size,
-                weights[f"{prefix}.w_up"], f"{prefix}.w_up")
+    gate = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_gate"], f"{prefix}.w_gate")
+    up = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_up"], f"{prefix}.w_up")
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
-    mlp_out = matmul(gated.get_output(0), mlp_size, hidden,
-                     weights[f"{prefix}.w_down"], f"{prefix}.w_down")
+    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    mlp_out = matmul(
+        gated.get_output(0), mlp_size, hidden, weights[f"{prefix}.w_down"], f"{prefix}.w_down"
+    )
     return mlp_out
 
 
@@ -159,14 +156,12 @@ def _gelu_fc_mlp(
     activation: str,
     work_np_dtype: np.dtype,
 ) -> trt.ITensor:
-    fc1 = matmul(inp, hidden, mlp_size,
-                 weights[f"{prefix}.w_fc1"], f"{prefix}.w_fc1")
+    fc1 = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_fc1"], f"{prefix}.w_fc1")
     fc1_bias = weights.get(f"{prefix}.fc1_bias")
     if fc1_bias is not None:
         fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias, dtype=work_np_dtype)
     activated = graph_ops.add_activation(network, fc1, activation, dtype=work_np_dtype)
-    fc2 = matmul(activated, mlp_size, hidden,
-                 weights[f"{prefix}.w_fc2"], f"{prefix}.w_fc2")
+    fc2 = matmul(activated, mlp_size, hidden, weights[f"{prefix}.w_fc2"], f"{prefix}.w_fc2")
     fc2_bias = weights.get(f"{prefix}.fc2_bias")
     if fc2_bias is not None:
         fc2 = graph_ops.add_bias_sum(network, fc2, hidden, fc2_bias, dtype=work_np_dtype)
@@ -183,7 +178,8 @@ def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
     model_type = getattr(config, "model_type", "").lower()
     if "moe" in model_type or "mamba" in model_type or "rwkv" in model_type:
         raise NotImplementedError(
-            f"dual_profile_decoder_builder does not support model_type={model_type!r}")
+            f"dual_profile_decoder_builder does not support model_type={model_type!r}"
+        )
     if "embedding" not in weights:
         raise NotImplementedError("missing embedding weight")
     if "final_norm" not in weights:
@@ -215,6 +211,7 @@ def build_dual_profile_decoder_engine(
     verbose: bool = False,
     profile_mode: str = "dual_profile",
     native_kv_cache: bool = False,
+    runtime_sized_kv_cache: bool = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -238,31 +235,32 @@ def build_dual_profile_decoder_engine(
     primitive attention graph with an explicit active-prefix causal mask.
     Llama enables it internally by default; it is not exposed as a user build
     flag.
+
+    ``runtime_sized_kv_cache`` makes the standard cache row dimension dynamic
+    from one row through the bundle capacity.
     """
     _supports_config(config, weights)
     if profile_mode not in ("dual_profile", "prefill", "decode"):
         raise ValueError(
-            "profile_mode must be 'dual_profile', 'prefill', or 'decode', "
-            f"got {profile_mode!r}")
+            f"profile_mode must be 'dual_profile', 'prefill', or 'decode', got {profile_mode!r}"
+        )
 
     if max_prefill_length is None:
         max_prefill_length = max_cache_length
-    if native_kv_cache:
+    if native_kv_cache or runtime_sized_kv_cache:
         # Physical KV capacity and one TensorRT enqueue's query length are
         # separate limits. Keep the complete model context in the cache while
         # bounding the explicit score matrix; the runtime transparently
         # advances through multiple chunks. Clamp explicit caller overrides as
         # well as the default so they cannot bypass this safety bound.
-        max_prefill_length = min(
-            max_prefill_length,
-            EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS,
-        )
+        max_prefill_length = min(max_prefill_length, EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS)
     max_prefill_length = max(1, min(max_prefill_length, max_cache_length))
     opt_prefill_length = max(1, min(opt_prefill_length, max_prefill_length))
 
     if native_kv_cache and position_type == "alibi":
-        raise NotImplementedError(
-            "TensorRT native KV cache prototype does not support ALiBi")
+        raise NotImplementedError("TensorRT native KV cache prototype does not support ALiBi")
+    if native_kv_cache and runtime_sized_kv_cache:
+        raise ValueError("native Llama KV cache has one fixed physical capacity")
 
     attention_size = weights.get("_attention_size", config.attention_size)
     mlp_size = weights.get("_mlp_size", config.intermediate_size)
@@ -273,14 +271,12 @@ def build_dual_profile_decoder_engine(
     num_kv_heads = config.num_key_value_heads
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
-        weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
+        weights, num_kv_heads=num_kv_heads, head_dim=head_dim
+    )
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
     native_rope_inv_freq: np.ndarray | None = None
     if native_kv_cache and position_type == "rope":
-        rope_scaling = (
-            config.raw.get("rope_parameters")
-            or config.raw.get("rope_scaling")
-        )
+        rope_scaling = config.raw.get("rope_parameters") or config.raw.get("rope_scaling")
         native_rope_inv_freq = graph_ops.make_native_active_rope_inv_freq(
             head_dim,
             config.rope_theta,
@@ -290,8 +286,7 @@ def build_dual_profile_decoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     # Native full-context Llama builds can require substantial tactic workspace
     # while TensorRT compiles the primitive attention graph. This is build-time
@@ -299,8 +294,7 @@ def build_dual_profile_decoder_engine(
     # does not allocate the bytes eagerly. Other paths keep TensorRT's device
     # default instead of imposing the former 1 GiB cap.
     if native_kv_cache:
-        trt_config.set_memory_pool_limit(
-            trt.MemoryPoolType.WORKSPACE, 16 << 30)
+        trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -316,52 +310,61 @@ def build_dual_profile_decoder_engine(
     cache_write_indices: trt.ITensor | None = None
     key_value_lengths: trt.ITensor | None = None
     if native_kv_cache:
-        cache_write_indices = network.add_input(
-            "cache_write_indices", trt.int32, (1,))
-        key_value_lengths = network.add_input(
-            "key_value_lengths", trt.int32, (1,))
+        cache_write_indices = network.add_input("cache_write_indices", trt.int32, (1,))
+        key_value_lengths = network.add_input("key_value_lengths", trt.int32, (1,))
     else:
-        attention_mask = network.add_input(
-            "attention_mask", trt.float32, (-1, -1))
+        attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
 
     cache_shape: tuple[int, ...]
     if native_kv_cache:
         cache_shape = (1, num_kv_heads, max_cache_length, head_dim)
+    elif runtime_sized_kv_cache:
+        cache_shape = (-1, kv_attention_size)
     else:
         cache_shape = (max_cache_length, kv_attention_size)
     cache_k_inputs: list[trt.ITensor] = []
     cache_v_inputs: list[trt.ITensor] = []
     for i in range(num_layers):
         ck = network.add_input(
-            graph_ops.layer_tensor_name("cache_k", i),
-            work_trt_dtype, cache_shape)
+            graph_ops.layer_tensor_name("cache_k", i), work_trt_dtype, cache_shape
+        )
         cv = network.add_input(
-            graph_ops.layer_tensor_name("cache_v", i),
-            work_trt_dtype, cache_shape)
+            graph_ops.layer_tensor_name("cache_v", i), work_trt_dtype, cache_shape
+        )
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
     # Cast the dense mask to compute dtype for elementwise broadcast.
     attention_mask_work: trt.ITensor | None = attention_mask
-    if (
-        attention_mask is not None
-        and work_trt_dtype != trt.float32
-    ):
-        attention_mask_work = network.add_cast(
-            attention_mask, work_trt_dtype).get_output(0)
+    if attention_mask is not None and work_trt_dtype != trt.float32:
+        attention_mask_work = network.add_cast(attention_mask, work_trt_dtype).get_output(0)
 
     # Prefill/decode optimization profiles — same graph, different Sq / cache.
     def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False):
         prof = builder.create_optimization_profile()
         min_sq = opt_sq if fixed else 1
+        opt_cache_rows = max_cache_length
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
         if not native_kv_cache:
             prof.set_shape(
                 "attention_mask",
-                (min_sq, max_cache_length + min_sq),
-                (opt_sq, max_cache_length + opt_sq),
-                (max_sq, max_cache_length + max_sq))
+                (min_sq, (1 if runtime_sized_kv_cache else max_cache_length) + min_sq),
+                (
+                    opt_sq,
+                    (opt_cache_rows if runtime_sized_kv_cache else max_cache_length) + opt_sq,
+                ),
+                (max_sq, max_cache_length + max_sq),
+            )
+        if runtime_sized_kv_cache:
+            for i in range(num_layers):
+                for prefix in ("cache_k", "cache_v"):
+                    prof.set_shape(
+                        graph_ops.layer_tensor_name(prefix, i),
+                        (1, kv_attention_size),
+                        (opt_cache_rows, kv_attention_size),
+                        (max_cache_length, kv_attention_size),
+                    )
         trt_config.add_optimization_profile(prof)
 
     if profile_mode == "prefill":
@@ -374,8 +377,8 @@ def build_dual_profile_decoder_engine(
 
     # ---- Shared constants ------------------------------------------------
     embedding_table = _const_in_work_dtype(
-        network, (vocab, hidden), weights["embedding"],
-        work_np_dtype, work_trt_dtype)
+        network, (vocab, hidden), weights["embedding"], work_np_dtype, work_trt_dtype
+    )
 
     # Native KV derives RoPE only for runtime-active positions, so the engine
     # stores a small [D/2] inverse-frequency constant instead of serializing an
@@ -397,32 +400,40 @@ def build_dual_profile_decoder_engine(
         else:
             kmax = max_cache_length + max_prefill_length
             cos_half_np = graph_ops.make_rope_table_half_dim(
-                kmax, head_dim, config.rope_theta, True,
-                partial_rotary_factor, interleaved=interleaved_rope,
-                rope_scaling=config.raw.get("rope_scaling"))
+                kmax,
+                head_dim,
+                config.rope_theta,
+                True,
+                partial_rotary_factor,
+                interleaved=interleaved_rope,
+                rope_scaling=config.raw.get("rope_scaling"),
+            )
             sin_half_np = graph_ops.make_rope_table_half_dim(
-                kmax, head_dim, config.rope_theta, False,
-                partial_rotary_factor, interleaved=interleaved_rope,
-                rope_scaling=config.raw.get("rope_scaling"))
+                kmax,
+                head_dim,
+                config.rope_theta,
+                False,
+                partial_rotary_factor,
+                interleaved=interleaved_rope,
+                rope_scaling=config.raw.get("rope_scaling"),
+            )
             # BF16 must round directly from the FP32 indexed table. Routing
             # through FP16 storage would introduce FP16 -> BF16 double rounding.
-            rope_np_dtype = (
-                np.float32 if work_trt_dtype == trt.bfloat16 else work_np_dtype
-            )
+            rope_np_dtype = np.float32 if work_trt_dtype == trt.bfloat16 else work_np_dtype
             cos_half_table = _const_in_work_dtype(
-                network, cos_half_np.shape, cos_half_np,
-                rope_np_dtype, work_trt_dtype)
+                network, cos_half_np.shape, cos_half_np, rope_np_dtype, work_trt_dtype
+            )
             sin_half_table = _const_in_work_dtype(
-                network, sin_half_np.shape, sin_half_np,
-                rope_np_dtype, work_trt_dtype)
+                network, sin_half_np.shape, sin_half_np, rope_np_dtype, work_trt_dtype
+            )
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
     position_embed_table: trt.ITensor | None = None
     if position_type == "learned":
         pos_embed_np = weights["position_embedding"]
         position_embed_table = _const_in_work_dtype(
-            network, pos_embed_np.shape, pos_embed_np,
-            work_np_dtype, work_trt_dtype)
+            network, pos_embed_np.shape, pos_embed_np, work_np_dtype, work_trt_dtype
+        )
 
     # ALiBi slopes + cache-slot positions for multi-row mask augmentation.
     alibi_slopes_tensor: trt.ITensor | None = None
@@ -433,24 +444,25 @@ def build_dual_profile_decoder_engine(
         # add_alibi_mask_4d casts the final bias to work_trt_dtype before adding
         # to the additive mask.
         alibi_slopes_tensor = graph_ops.add_constant(
-            network, (num_heads, 1, 1),
-            alibi_slopes_np.reshape(num_heads, 1, 1), dtype=np.float32)
+            network, (num_heads, 1, 1), alibi_slopes_np.reshape(num_heads, 1, 1), dtype=np.float32
+        )
         # Cache slot k (for k in [0, max_cache_length)) holds the K/V at
         # position k. The current step's K/V live in slots
         # [max_cache_length, max_cache_length + Sq) and their positions come
         # from position_id at runtime, so we only pre-build the cache half.
         alibi_cache_positions_fp32 = graph_ops.add_constant(
-            network, (max_cache_length,),
-            np.arange(max_cache_length, dtype=np.float32), dtype=np.float32)
+            network,
+            (max_cache_length,),
+            np.arange(max_cache_length, dtype=np.float32),
+            dtype=np.float32,
+        )
 
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1),
-        np.array([[config.rms_norm_eps]], dtype=np.float32),
-        dtype=np.float32)
+        network, (1, 1), np.array([[config.rms_norm_eps]], dtype=np.float32), dtype=np.float32
+    )
     eps_tensor_per_head = graph_ops.add_constant(
-        network, (1, 1, 1),
-        np.array([[[config.rms_norm_eps]]], dtype=np.float32),
-        dtype=np.float32)
+        network, (1, 1, 1), np.array([[[config.rms_norm_eps]]], dtype=np.float32), dtype=np.float32
+    )
 
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
@@ -464,8 +476,8 @@ def build_dual_profile_decoder_engine(
     if position_type == "learned" and position_embed_table is not None:
         pos_gather = network.add_gather(position_embed_table, position_id, 0)
         pos_add = network.add_elementwise(
-            hidden_state, pos_gather.get_output(0),
-            trt.ElementWiseOperation.SUM)
+            hidden_state, pos_gather.get_output(0), trt.ElementWiseOperation.SUM
+        )
         hidden_state = pos_add.get_output(0)
 
     # Make sure the main hidden stream is in the requested runtime dtype
@@ -476,11 +488,17 @@ def build_dual_profile_decoder_engine(
     # Optional embedding LayerNorm (Bloom).
     embed_norm = weights.get("embedding_norm")
     if embed_norm is not None:
-        embed_norm_beta = weights.get(
-            "embedding_norm_beta", np.zeros(hidden, dtype=np.float32))
+        embed_norm_beta = weights.get("embedding_norm_beta", np.zeros(hidden, dtype=np.float32))
         hidden_state = _norm_multi(
-            network, hidden_state, hidden, embed_norm, embed_norm_beta,
-            eps_tensor, "layernorm", work_np_dtype)
+            network,
+            hidden_state,
+            hidden,
+            embed_norm,
+            embed_norm_beta,
+            eps_tensor,
+            "layernorm",
+            work_np_dtype,
+        )
 
     # The native cache path shares one explicit BOOL mask across every layer.
     # The dense-mask path uses an additive-mask graph.
@@ -490,9 +508,14 @@ def build_dual_profile_decoder_engine(
     elif position_type == "alibi":
         assert attention_mask_work is not None
         mask_4d = graph_ops.add_alibi_mask_4d(
-            network, attention_mask_work, position_id,
-            alibi_slopes_tensor, alibi_cache_positions_fp32,
-            num_heads, target_dtype=work_trt_dtype)
+            network,
+            attention_mask_work,
+            position_id,
+            alibi_slopes_tensor,
+            alibi_cache_positions_fp32,
+            num_heads,
+            target_dtype=work_trt_dtype,
+        )
     else:
         assert attention_mask_work is not None
         mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask_work)
@@ -517,60 +540,85 @@ def build_dual_profile_decoder_engine(
 
         # Pre-attention norm.
         normed = _norm_multi(
-            network, hidden_state, hidden,
+            network,
+            hidden_state,
+            hidden,
             weights[f"{prefix}.input_norm"],
             weights.get(f"{prefix}.input_norm_beta"),
-            eps_tensor, norm_type, work_np_dtype)
+            eps_tensor,
+            norm_type,
+            work_np_dtype,
+        )
 
         # Q / K / V projections.
-        q = matmul(normed, hidden, attention_size,
-                   weights[f"{prefix}.w_q"], f"{prefix}.w_q")
-        k = matmul(normed, hidden, kv_attention_size,
-                   weights[f"{prefix}.w_k"], f"{prefix}.w_k")
-        v = matmul(normed, hidden, kv_attention_size,
-                   weights[f"{prefix}.w_v"], f"{prefix}.w_v")
+        q = matmul(normed, hidden, attention_size, weights[f"{prefix}.w_q"], f"{prefix}.w_q")
+        k = matmul(normed, hidden, kv_attention_size, weights[f"{prefix}.w_k"], f"{prefix}.w_k")
+        v = matmul(normed, hidden, kv_attention_size, weights[f"{prefix}.w_v"], f"{prefix}.w_v")
 
         # Optional QKV biases (Qwen2 / GPT-2 / OPT / Bloom / Falcon / etc.).
         q_bias = weights.get(f"{prefix}.q_bias")
         if q_bias is not None:
-            q = graph_ops.add_bias_sum(
-                network, q, attention_size, q_bias, dtype=work_np_dtype)
+            q = graph_ops.add_bias_sum(network, q, attention_size, q_bias, dtype=work_np_dtype)
         k_bias = weights.get(f"{prefix}.k_bias")
         if k_bias is not None:
-            k = graph_ops.add_bias_sum(
-                network, k, kv_attention_size, k_bias, dtype=work_np_dtype)
+            k = graph_ops.add_bias_sum(network, k, kv_attention_size, k_bias, dtype=work_np_dtype)
         v_bias = weights.get(f"{prefix}.v_bias")
         if v_bias is not None:
-            v = graph_ops.add_bias_sum(
-                network, v, kv_attention_size, v_bias, dtype=work_np_dtype)
+            v = graph_ops.add_bias_sum(network, v, kv_attention_size, v_bias, dtype=work_np_dtype)
 
         # Optional per-head q/k norm (Qwen3).
         q_norm = weights.get(f"{prefix}.q_norm")
         if q_norm is not None:
             q = graph_ops.add_rms_norm_per_head(
-                network, q, num_heads, head_dim, q_norm,
-                eps_tensor_per_head, dtype=work_np_dtype,
-                sequence_length=None)
+                network,
+                q,
+                num_heads,
+                head_dim,
+                q_norm,
+                eps_tensor_per_head,
+                dtype=work_np_dtype,
+                sequence_length=None,
+            )
         k_norm = weights.get(f"{prefix}.k_norm")
         if k_norm is not None:
             k = graph_ops.add_rms_norm_per_head(
-                network, k, num_kv_heads, head_dim, k_norm,
-                eps_tensor_per_head, dtype=work_np_dtype,
-                sequence_length=None)
+                network,
+                k,
+                num_kv_heads,
+                head_dim,
+                k_norm,
+                eps_tensor_per_head,
+                dtype=work_np_dtype,
+                sequence_length=None,
+            )
 
         # Position embedding (RoPE only; learned was applied above and ALiBi
         # is added into the attention mask).
         if position_type == "rope":
             q = graph_ops.add_apply_rope_native(
-                network, q, num_heads, head_dim,
-                cos_half_table, sin_half_table, rope_position_id,
-                rotary_embedding_dim, interleaved_rope,
-                sequence_length=None)
+                network,
+                q,
+                num_heads,
+                head_dim,
+                cos_half_table,
+                sin_half_table,
+                rope_position_id,
+                rotary_embedding_dim,
+                interleaved_rope,
+                sequence_length=None,
+            )
             k = graph_ops.add_apply_rope_native(
-                network, k, num_kv_heads, head_dim,
-                cos_half_table, sin_half_table, rope_position_id,
-                rotary_embedding_dim, interleaved_rope,
-                sequence_length=None)
+                network,
+                k,
+                num_kv_heads,
+                head_dim,
+                cos_half_table,
+                sin_half_table,
+                rope_position_id,
+                rotary_embedding_dim,
+                interleaved_rope,
+                sequence_length=None,
+            )
 
         if native_kv_cache:
             assert cache_write_indices is not None
@@ -599,25 +647,34 @@ def build_dual_profile_decoder_engine(
             # cache + update with concatenation for attention.
             present_k_outs.append(k)
             present_v_outs.append(v)
-            all_k_cat = network.add_concatenation(
-                [cache_k_inputs[layer_idx], k])
+            all_k_cat = network.add_concatenation([cache_k_inputs[layer_idx], k])
             all_k_cat.axis = 0
-            all_v_cat = network.add_concatenation(
-                [cache_v_inputs[layer_idx], v])
+            all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
             all_v_cat.axis = 0
             context = graph_ops.add_attention_from_rows(
-                network, q, all_k_cat.get_output(0), all_v_cat.get_output(0),
-                num_heads=num_heads, head_dim=head_dim,
+                network,
+                q,
+                all_k_cat.get_output(0),
+                all_v_cat.get_output(0),
+                num_heads=num_heads,
+                head_dim=head_dim,
                 num_kv_heads=num_kv_heads,
-                q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
-                scale=attn_scale, tag=f"{prefix}.attn")
+                q_seq=None,
+                kv_seq=None,
+                causal=False,
+                mask=mask_4d,
+                scale=attn_scale,
+                tag=f"{prefix}.attn",
+            )
 
-        attn_out = matmul(context, attention_size, hidden,
-                          weights[f"{prefix}.w_o"], f"{prefix}.w_o")
+        attn_out = matmul(
+            context, attention_size, hidden, weights[f"{prefix}.w_o"], f"{prefix}.w_o"
+        )
         o_bias = weights.get(f"{prefix}.o_bias")
         if o_bias is not None:
             attn_out = graph_ops.add_bias_sum(
-                network, attn_out, hidden, o_bias, dtype=work_np_dtype)
+                network, attn_out, hidden, o_bias, dtype=work_np_dtype
+            )
 
         # Residual structure: parallel (GPT-NeoX / CodeGen / Falcon-3) vs
         # sequential (everything else).
@@ -625,52 +682,81 @@ def build_dual_profile_decoder_engine(
             post_attn_norm_w = weights.get(f"{prefix}.post_attn_norm")
             if post_attn_norm_w is not None:
                 norm2 = _norm_multi(
-                    network, hidden_state, hidden,
+                    network,
+                    hidden_state,
+                    hidden,
                     post_attn_norm_w,
                     weights.get(f"{prefix}.post_attn_norm_beta"),
-                    eps_tensor, norm_type, work_np_dtype)
+                    eps_tensor,
+                    norm_type,
+                    work_np_dtype,
+                )
             else:
                 norm2 = normed
         else:
             residual1 = network.add_elementwise(
-                hidden_state, attn_out, trt.ElementWiseOperation.SUM)
+                hidden_state, attn_out, trt.ElementWiseOperation.SUM
+            )
             norm2 = _norm_multi(
-                network, residual1.get_output(0), hidden,
+                network,
+                residual1.get_output(0),
+                hidden,
                 weights[f"{prefix}.post_attn_norm"],
                 weights.get(f"{prefix}.post_attn_norm_beta"),
-                eps_tensor, norm_type, work_np_dtype)
+                eps_tensor,
+                norm_type,
+                work_np_dtype,
+            )
 
         # MLP — SwiGLU (Llama-style) or GeluFC (GPT-2-style).
         if mlp_type == "gelu_fc":
             mlp_out = _gelu_fc_mlp(
-                network, norm2,
-                matmul=matmul, weights=weights, prefix=prefix,
-                hidden=hidden, mlp_size=mlp_size,
-                activation=activation, work_np_dtype=work_np_dtype)
+                network,
+                norm2,
+                matmul=matmul,
+                weights=weights,
+                prefix=prefix,
+                hidden=hidden,
+                mlp_size=mlp_size,
+                activation=activation,
+                work_np_dtype=work_np_dtype,
+            )
         else:
             mlp_out = _swiglu_mlp(
-                network, norm2,
-                matmul=matmul, weights=weights, prefix=prefix,
-                hidden=hidden, mlp_size=mlp_size)
+                network,
+                norm2,
+                matmul=matmul,
+                weights=weights,
+                prefix=prefix,
+                hidden=hidden,
+                mlp_size=mlp_size,
+            )
 
         # Final residual.
         if parallel_residual:
-            sum_attn = network.add_elementwise(
-                hidden_state, attn_out, trt.ElementWiseOperation.SUM)
+            sum_attn = network.add_elementwise(hidden_state, attn_out, trt.ElementWiseOperation.SUM)
             residual2 = network.add_elementwise(
-                sum_attn.get_output(0), mlp_out, trt.ElementWiseOperation.SUM)
+                sum_attn.get_output(0), mlp_out, trt.ElementWiseOperation.SUM
+            )
         else:
             residual2 = network.add_elementwise(
-                residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM)
+                residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM
+            )
         hidden_state = residual2.get_output(0)
 
     # ---- Final norm + LM head -------------------------------------------
     final_norm = weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
         hidden_state = _norm_multi(
-            network, hidden_state, hidden, final_norm,
+            network,
+            hidden_state,
+            hidden,
+            final_norm,
             weights.get("final_norm_beta"),
-            eps_tensor, norm_type, work_np_dtype)
+            eps_tensor,
+            norm_type,
+            work_np_dtype,
+        )
 
     # Only the LAST prompt token's logits matter for the next-token sample,
     # so slice hidden_state from (Sq, hidden) to (1, hidden) before the LM
@@ -679,30 +765,28 @@ def build_dual_profile_decoder_engine(
     # computing (Sq - 1) redundant vocab-sized matmul rows during prefill.
     shape_t = network.add_shape(hidden_state).get_output(0)  # [2] int64
     one_hidden = graph_ops.add_constant(
-        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
-    start_sub = network.add_elementwise(
-        shape_t, one_hidden, trt.ElementWiseOperation.SUB)
+        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
+    )
+    start_sub = network.add_elementwise(shape_t, one_hidden, trt.ElementWiseOperation.SUB)
     start_t = start_sub.get_output(0)  # [Sq - 1, 0]
     size_t = graph_ops.add_constant(
-        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
+        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
+    )
     slicer = network.add_slice(hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
     slicer.set_input(1, start_t)
     slicer.set_input(2, size_t)
     last_hidden = slicer.get_output(0)
 
-    out_vocab = (weights["w_out"].shape[1]
-                 if isinstance(weights["w_out"], np.ndarray) else vocab)
+    out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
     logits = graph_ops.add_matmul_rhs_constant(
-        network, last_hidden, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
+        network, last_hidden, hidden, out_vocab, weights["w_out"], dtype=work_np_dtype
+    )
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
-        logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, lm_bias, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(network, logits, out_vocab, lm_bias, dtype=work_np_dtype)
     else:
         zero_bias = np.zeros(out_vocab, dtype=work_np_dtype)
-        logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, zero_bias, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(network, logits, out_vocab, zero_bias, dtype=work_np_dtype)
 
     if work_trt_dtype != trt.float32:
         logits = network.add_cast(logits, trt.float32).get_output(0)
@@ -719,14 +803,16 @@ def build_dual_profile_decoder_engine(
 
     if verbose:
         mode_label = "prefill-profile" if profile_mode == "prefill" else "dual-profile"
-        print(f"[trtmc build] Building {mode_label} engine "
-              f"(layers={num_layers}, hidden={hidden}, attn={attention_size}, "
-              f"kv={kv_attention_size}, "
-              f"mlp={mlp_size}, cache={max_cache_length}, "
-              f"opt_prefill={opt_prefill_length}, max_prefill={max_prefill_length}, "
-              f"norm={norm_type}, mlp_type={mlp_type}, pos={position_type}, "
-              f"precision={precision}) ...",
-              file=sys.stderr)
+        print(
+            f"[trtmc build] Building {mode_label} engine "
+            f"(layers={num_layers}, hidden={hidden}, attn={attention_size}, "
+            f"kv={kv_attention_size}, "
+            f"mlp={mlp_size}, cache={max_cache_length}, "
+            f"opt_prefill={opt_prefill_length}, max_prefill={max_prefill_length}, "
+            f"norm={norm_type}, mlp_type={mlp_type}, pos={position_type}, "
+            f"precision={precision}) ...",
+            file=sys.stderr,
+        )
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:

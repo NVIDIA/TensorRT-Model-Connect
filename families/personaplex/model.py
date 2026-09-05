@@ -563,6 +563,7 @@ class _PersonaPlexModel:
 
         return extras
 
+
 def _load_temporal_weights(
     weights: WeightDict,
     readers,
@@ -1381,6 +1382,9 @@ def _build_mimi_decoder_engine(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one PersonaPlex speech-to-speech bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("personaplex does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("personaplex does not support image_height")
 
@@ -1414,7 +1418,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _PersonaPlexModel()
     weights = model.load_weights(str(model_dir), config)
 
-    writer.set_header(family="personaplex", task=request.task, backend="trt")
+    writer.set_header(family="personaplex", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             writer.add_bytes(

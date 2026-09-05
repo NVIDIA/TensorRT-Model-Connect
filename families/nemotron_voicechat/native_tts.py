@@ -42,7 +42,6 @@ CHECKPOINT_PREFIX = "tts_model.tts_model."
 NUM_REFINEMENT_STEPS = 8
 FRAME_SECONDS = 0.08
 TEXT_MODEL_ID = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
-TEXT_MODEL_REVISION = "6533e8de2c68e4536bf7c411d7a3ce5734111476"
 
 
 @dataclass(frozen=True)
@@ -1477,7 +1476,6 @@ def _resolve_tokenizer_snapshot(tokenizer_dir: str | Path | None) -> Path:
     return Path(
         snapshot_download(
             repo_id=TEXT_MODEL_ID,
-            revision=TEXT_MODEL_REVISION,
             allow_patterns=["tokenizer.json"],
         )
     )

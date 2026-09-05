@@ -292,13 +292,55 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
     manifest["task"]
-    left = actual["values"]
-    right = expected["values"]
+    left = np.asarray(actual["values"])
+    shape = tuple(int(value) for value in actual["shape"])
+    assert shape and all(value > 0 for value in shape)
+    assert left.size == int(np.prod(shape))
+    left = left.reshape(shape)
+    right = np.asarray(expected["values"])
+    assert left.shape == right.shape and left.size > 0
+    assert np.isfinite(left).all() and np.isfinite(right).all()
+    if "regression" in str(case["name"]):
+        assert right.ndim in (1, 2, 3)
+        assert np.array_equal(np.sign(left), np.sign(right))
+    else:
+        assert right.ndim in (2, 3)
     assert _relative_l2(left, right) <= float(thresholds["relative_l2"])
-    assert np.max(np.abs(np.asarray(left).reshape(-1) - np.asarray(right).reshape(-1))) <= float(
+    assert np.max(np.abs(left.reshape(-1) - right.reshape(-1))) <= float(
         thresholds["max_pointwise_error"]
     )
-    return
+
+
+def test_regression_contract_requires_shape_and_sign_match() -> None:
+    manifest = {"task": "time_series_forecast"}
+    case = {"name": "patchtst-regression"}
+    thresholds = {"relative_l2": 1.0, "max_pointwise_error": 1.0}
+    expected = {"values": np.asarray([[0.1, -0.1]], dtype=np.float32)}
+    _assert_parity({**expected, "shape": [1, 2]}, expected, manifest, case, thresholds)
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            {"values": np.asarray([[-0.1, 0.1]], dtype=np.float32), "shape": [1, 2]},
+            expected,
+            manifest,
+            case,
+            thresholds,
+        )
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            {"values": np.asarray([0.1, -0.1], dtype=np.float32), "shape": [2]},
+            expected,
+            manifest,
+            case,
+            thresholds,
+        )
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            {"values": np.asarray([0.1, -0.1], dtype=np.float32), "shape": [2]},
+            {"values": np.asarray([0.1, -0.1], dtype=np.float32)},
+            manifest,
+            {"name": "patchtst-point-forecast"},
+            thresholds,
+        )
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:

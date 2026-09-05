@@ -801,7 +801,6 @@ def _build_sana_wm_vae_decoder_tile_plans(
 
 
 class _SanaWmModel:
-
     def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
         model_path = Path(model_dir)
         weights = WeightDict()
@@ -1005,6 +1004,9 @@ class _SanaWmModel:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one SANA-WM world-model bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("sana_wm does not support dynamic_kv_cache")
+
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
@@ -1060,7 +1062,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if missing:
         raise RuntimeError(f"SANA-WM build did not produce required sections: {missing}")
 
-    writer.set_header(family="sana_wm", task=request.task, backend="trt")
+    writer.set_header(family="sana_wm", task=request.task, backend=request.backend)
     for source, destination in section_map.items():
         writer.add_bytes(destination, extras[source])
 
@@ -1072,8 +1074,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "width": int(fields["video_width"]),
         "fps": int(fields["fps"]),
         "num_steps": int(fields["num_inference_steps"]),
-        "seed": 0,
-        "refiner_seed": 0,
+        "seed": 42,
+        "refiner_seed": 42,
         "vae_latent_dim": int(fields["vae_latent_dim"]),
         "vae_time_stride": int(fields["vae_time_stride"]),
         "vae_spatial_stride": int(fields["vae_spatial_stride"]),

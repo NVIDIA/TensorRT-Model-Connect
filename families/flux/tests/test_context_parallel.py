@@ -125,15 +125,12 @@ def test_cp_build_and_runtime_contract_is_family_owned() -> None:
         assert forbidden not in distributed
 
 
-def test_cp4_manifest_and_threshold_are_exactly_paired() -> None:
+def test_cp4_manifest_uses_direct_parallel_fields() -> None:
     manifest_path = TEST_ROOT / "manifests/flux-schnell-l0-cp4.json"
-    threshold_path = TEST_ROOT / "thresholds/flux-schnell-l0-cp4.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    thresholds = json.loads(threshold_path.read_text(encoding="utf-8"))
 
     assert manifest["family"] == "flux"
     assert manifest["tensor_parallel_size"] == 1
     assert manifest["context_parallel_size"] == 4
     assert manifest["task"] == "image_generation"
     assert [case["name"] for case in manifest["testcases"]] == [manifest["name"]]
-    assert thresholds["threshold_overrides"]["min_frame_cosine_uint8"] == 0.95

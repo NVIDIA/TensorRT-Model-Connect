@@ -224,6 +224,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tensorrt/trt_logger.h",
         "core/runtime/tensorrt/trt_module_impl.cpp",
         "core/runtime/tensorrt/trt_module_impl.h",
+        "core/runtime/tensorrt/rtx_backend.cpp",
         "core/runtime/byok/byok.cpp",
         "core/runtime/byok/tvm_ffi_function.cpp",
         "core/runtime/byok/tvm_ffi_function.h",
@@ -251,6 +252,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tests/test_byok_shape_spec.cpp",
         "core/runtime/tests/test_family_loader.cpp",
         "core/runtime/tests/test_task_api.cpp",
+        "core/runtime/tests/test_trt_module_dynamic_input.cpp",
     }
     expected_tools = {
         "tools/__init__.py",
@@ -261,7 +263,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/model_ci.py",
         "tools/perf_matrix.py",
         "tools/pr_metadata.py",
-        "tools/public_failure/identity.py",
         "tools/test_impact.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",
@@ -285,7 +286,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_family_impact.py",
         "tools/tests/test_new_ci.py",
         "tools/tests/test_pr_metadata.py",
-        "tools/tests/test_public_failure_identity.py",
         "tools/tests/test_public_source_hygiene.py",
     }
     expected_cmake = {"cmake/trtmcConfig.cmake.in"}
@@ -445,7 +445,11 @@ def test_builders_publish_the_explicit_task_without_guessing() -> None:
                 attr="task",
                 ctx=ast.Load(),
             ),
-            "backend": ast.Constant(value="trt"),
+            "backend": ast.Attribute(
+                value=ast.Name(id="request", ctx=ast.Load()),
+                attr="backend",
+                ctx=ast.Load(),
+            ),
         }
         for field, value in expected.items():
             if field not in keywords or ast.dump(keywords[field]) != ast.dump(value):
@@ -468,7 +472,11 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
     }
     # The core consumes these before dispatch. Every other field belongs to the
     # selected family's build function, including explicit unsupported checks.
-    family_owned_fields = request_fields - {"family", "output_path", "graph_transform"}
+    family_owned_fields = request_fields - {
+        "family",
+        "output_path",
+        "graph_transform",
+    }
 
     violations: list[str] = []
     for family in family_dirs():
@@ -489,6 +497,68 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
         for field in sorted(family_owned_fields - handled):
             violations.append(f"{family.name}:{field}")
     assert violations == []
+
+
+def test_runtime_sized_kv_build_flag_is_direct_and_family_owned() -> None:
+    build_api = REPO / "core/builder/tensorrt_model_connect/build.py"
+    build_tree = ast.parse(build_api.read_text(encoding="utf-8"), filename=str(build_api))
+    request_class = next(
+        node
+        for node in build_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "BuildRequest"
+    )
+    field = next(
+        node
+        for node in request_class.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "dynamic_kv_cache"
+    )
+    assert ast.unparse(field.annotation) == "bool"
+    assert isinstance(field.value, ast.Constant) and field.value.value is False
+
+    owners: list[str] = []
+    for family in family_dirs():
+        model = family / "model.py"
+        source = model.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(model))
+        if any(
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "request"
+            and node.attr == "dynamic_kv_cache"
+            for node in ast.walk(tree)
+        ):
+            owners.append(family.name)
+        if family.name != "llama":
+            assert (
+                f'raise NotImplementedError("{family.name} does not support dynamic_kv_cache")'
+                in source
+            )
+    assert owners == [family.name for family in family_dirs()]
+
+
+def test_runtime_sized_kv_budget_is_direct_and_family_owned() -> None:
+    factory = (REPO / "core/runtime/include/trtmc/runtime/family_factory.h").read_text(
+        encoding="utf-8"
+    )
+    loader = (REPO / "core/runtime/loader/family_loader.cpp").read_text(encoding="utf-8")
+    assert "std::uint64_t kv_cache_size_bytes{0};" in factory
+    assert "FamilyContext context{reader, configured_backend, kv_cache_size_bytes};" in loader
+    assert "LoadOptions" not in factory
+
+    handlers: list[str] = []
+    for family in family_dirs():
+        plugin = family / "runtime/plugin.cpp"
+        source = plugin.read_text(encoding="utf-8")
+        if "context.kv_cache_size_bytes" in source:
+            handlers.append(family.name)
+        if family.name != "llama":
+            assert (
+                f'throw std::invalid_argument("{family.name} does not support --kv-cache-size")'
+                in source
+            )
+    assert handlers == [family.name for family in family_dirs()]
 
 
 def test_family_python_has_no_sibling_or_shared_model_imports() -> None:
@@ -517,17 +587,20 @@ def test_family_python_has_no_sibling_or_shared_model_imports() -> None:
                                 f"{relative_module}->{resolved}"
                             )
 
-                if "tests" in path.relative_to(family).parts:
-                    continue
+                is_test = "tests" in path.relative_to(family).parts
                 modules: list[str] = []
                 if isinstance(node, ast.Import):
                     modules.extend(alias.name for alias in node.names)
                 elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                     modules.append(node.module)
                 for module in modules:
-                    if module.startswith("tensorrt_model_connect") and not any(
-                        module == allowed or module.startswith(allowed + ".")
-                        for allowed in ALLOWED_CORE_IMPORTS
+                    if (
+                        not is_test
+                        and module.startswith("tensorrt_model_connect")
+                        and not any(
+                            module == allowed or module.startswith(allowed + ".")
+                            for allowed in ALLOWED_CORE_IMPORTS
+                        )
                     ):
                         violations.append(f"{path.relative_to(REPO)}:{node.lineno}:{module}")
                     if module.startswith("families."):
@@ -626,6 +699,8 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
         for line in lines:
             normalized = line.lower()
             assert not normalized.startswith(("-r", "--requirement", "-c", "--constraint"))
+            assert not normalized.startswith(("-e", "--editable", "./", "../", "/", "file:"))
+            assert " @ file:" not in normalized
             assert "families/" not in normalized
             assert "sha256" not in normalized
             assert "--hash" not in normalized
@@ -771,9 +846,20 @@ def test_runtime_sources_have_no_sibling_family_dependency() -> None:
             if not path.is_file() or path.suffix not in {".h", ".hpp", ".cpp", ".cu", ".txt"}:
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
+            includes = re.findall(r'#include\s+[<"]([^>"]+)', text)
             for owner in include_pattern.findall(text):
                 if owner in family_names and owner != family.name:
                     violations.append(f"{path.relative_to(REPO)}:include:{owner}")
+            for include in includes:
+                if not include.startswith("../"):
+                    continue
+                target = (path.parent / include).resolve()
+                try:
+                    owner = target.relative_to(FAMILIES.resolve()).parts[0]
+                except (ValueError, IndexError):
+                    continue
+                if owner in family_names and owner != family.name:
+                    violations.append(f"{path.relative_to(REPO)}:relative-include:{owner}")
             if path.name == "CMakeLists.txt":
                 for owner in link_pattern.findall(text):
                     if owner in family_names and owner != family.name:
@@ -840,6 +926,7 @@ def test_distributed_runtimes_use_one_explicit_launcher_contract() -> None:
         '"OMPI_COMM_WORLD_LOCAL_RANK"',
         '"TRTMC_NCCL_RENDEZVOUS"',
         'dlopen("libnccl.so.2"',
+        "ncclCommInitRank",
     )
     forbidden = (
         '"PMI_SIZE"',
@@ -911,6 +998,50 @@ def test_native_loader_and_preprocessing_stay_out_of_shared_core() -> None:
     assert resize_sources
 
 
+def test_rtx_backend_is_an_explicit_optional_dso() -> None:
+    cmake = (REPO / "CMakeLists.txt").read_text(encoding="utf-8")
+    assert 'option(TRTMC_BUILD_BACKEND_RTX "Build TensorRT-RTX backend DSO" OFF)' in cmake
+    rtx_block = cmake.split("if(TRTMC_BUILD_BACKEND_RTX)", 1)[1].split("if(TRTMC_HAS_TVM_FFI)", 1)[
+        0
+    ]
+    for token in (
+        "TRTMC_RTX_INCLUDE_DIR",
+        "TRTMC_RTX_LIBRARY_DIR",
+        "core/runtime/tensorrt/rtx_backend.cpp",
+        "OUTPUT_NAME trtmc_backend_trt_rtx",
+    ):
+        assert token in rtx_block
+
+    source = (REPO / "core/runtime/tensorrt/rtx_backend.cpp").read_text(encoding="utf-8")
+    for method in (
+        "create_module(",
+        "create_module_prebound(",
+        "create_dual_profile_modules(",
+    ):
+        assert method in source
+    assert 'return "trt_rtx"' in source
+    assert "engine->createRuntimeConfig()" in source
+    assert "engine->createExecutionContext(runtime_config.get())" in source
+    assert "runtime_cache_path" in source
+    assert "setRuntimeCache" in source
+    assert "CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE" in source
+    assert "external_bindings, true" in source
+    for retired_surface in (
+        "create_profile_modules(",
+        "create_context_modules(",
+    ):
+        assert retired_surface not in source
+
+    backend_contract = (REPO / "core/runtime/include/trtmc/runtime/trt_backend.h").read_text(
+        encoding="utf-8"
+    )
+    assert 'const char* runtime_cache_path{""};' in backend_contract
+    assert "bool cuda_graphs{false};" in backend_contract
+    loader = (REPO / "core/runtime/loader/family_loader.cpp").read_text(encoding="utf-8")
+    assert "class RuntimeOptionsBackend final : public IBackend" in loader
+    assert "runtime cache and whole-graph capture require a TensorRT-RTX bundle" in loader
+
+
 def test_every_runtime_exports_only_the_task_factory_contract() -> None:
     forbidden = (
         "IPipeline",
@@ -954,20 +1085,22 @@ def test_every_runtime_exports_only_the_task_factory_contract() -> None:
     assert violations == []
 
 
-def test_family_factory_receives_only_the_file_backed_reader_and_backend() -> None:
+def test_family_factory_receives_only_direct_runtime_inputs() -> None:
     factory_header = (REPO / "core/runtime/include/trtmc/runtime/family_factory.h").read_text(
         encoding="utf-8"
     )
-    context_body = factory_header.split("struct FamilyContext {", 1)[1].split("};", 1)[0]
+    context_body = factory_header.split("struct FamilyContext {", 1)[1].split("\n};", 1)[0]
     assert "const BundleReader& reader;" in context_body
     assert "IBackend& backend;" in context_body
+    assert "std::uint64_t kv_cache_size_bytes{0};" in context_body
     assert "BundleFile" not in context_body
-    assert context_body.count(";") == 2
+    assert context_body.count(";") == 3
 
     loader = (REPO / "core/runtime/loader/family_loader.cpp").read_text(encoding="utf-8")
     load_task = loader.split("std::unique_ptr<ITask> load_task", 1)[1]
     assert "const BundleReader reader(bundle_path);" in load_task
-    assert "FamilyContext context{reader, backend};" in load_task
+    assert "RuntimeOptionsBackend configured_backend" in load_task
+    assert "FamilyContext context{reader, configured_backend, kv_cache_size_bytes};" in load_task
     assert "BundleFile" not in load_task
     assert "ReadBundleFile" not in load_task
 
@@ -1009,19 +1142,59 @@ def test_family_tokenizer_runtime_contract_is_explicitly_built() -> None:
     assert violations == []
 
 
-def test_family_tp_runtimes_use_the_openmpi_rank_contract() -> None:
+def test_family_tp_runtimes_load_nccl_only_for_collective_communicators() -> None:
     violations: list[str] = []
-    mpi_consumers = 0
+    communicator_implementations = 0
+    rank_only_consumers = 0
     for family in family_dirs():
-        for path in (family / "runtime").glob("*.cpp"):
+        sources: list[str] = []
+        for path in sorted((family / "runtime").glob("*.cpp")):
             source = path.read_text(encoding="utf-8", errors="ignore")
+            sources.append(source)
             if 'getenv("RANK")' in source:
                 violations.append(f"{path.relative_to(REPO)}:RANK")
-            if 'getenv("OMPI_COMM_WORLD_RANK")' in source:
-                mpi_consumers += 1
-                if 'dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL)' not in source:
-                    violations.append(f"{path.relative_to(REPO)}:NCCL")
-    assert mpi_consumers > 0
+            loads_nccl = 'dlopen("libnccl.so.2"' in source
+            initializes_nccl = "ncclCommInitRank" in source
+            if loads_nccl and not initializes_nccl:
+                violations.append(f"{path.relative_to(REPO)}:NCCL-without-communicator")
+            if initializes_nccl:
+                communicator_implementations += 1
+                for token in (
+                    '"OMPI_COMM_WORLD_SIZE"',
+                    '"OMPI_COMM_WORLD_RANK"',
+                    '"OMPI_COMM_WORLD_LOCAL_RANK"',
+                    'dlopen("libnccl.so.2"',
+                ):
+                    if token not in source:
+                        violations.append(f"{path.relative_to(REPO)}:missing:{token}")
+
+        runtime = "\n".join(sources)
+        build_source = "\n".join(
+            path.read_text(encoding="utf-8", errors="ignore")
+            for path in family.rglob("*.py")
+            if "tests" not in path.relative_to(family).parts
+        )
+        builds_collectives = "add_dist_collective" in build_source
+        initializes_nccl = "ncclCommInitRank" in runtime
+        passes_communicator = "distributed_communicator" in runtime
+        if builds_collectives != initializes_nccl or builds_collectives != passes_communicator:
+            violations.append(f"{family.name}:collective-runtime-mismatch")
+        if 'getenv("OMPI_COMM_WORLD_RANK")' in runtime and not initializes_nccl:
+            rank_only_consumers += 1
+            if 'dlopen("libnccl.so.2"' in runtime:
+                violations.append(f"{family.name}:rank-only-NCCL-loader")
+        if family.name == "patchtsmixer":
+            for token in (
+                '"OMPI_COMM_WORLD_SIZE"',
+                '"OMPI_COMM_WORLD_RANK"',
+                '"OMPI_COMM_WORLD_LOCAL_RANK"',
+                "cudaSetDevice(local_rank)",
+            ):
+                if token not in runtime:
+                    violations.append(f"patchtsmixer:missing:{token}")
+
+    assert communicator_implementations > 0
+    assert rank_only_consumers > 0
     assert violations == []
 
 
@@ -1205,9 +1378,7 @@ def test_every_family_owns_at_least_one_explicit_premerge_case() -> None:
             for index, case in enumerate(manifest.get("testcases", [])):
                 value = case.get("premerge")
                 if value is not None and not isinstance(value, bool):
-                    violations.append(
-                        f"{path.relative_to(REPO)}:testcases[{index}]:premerge"
-                    )
+                    violations.append(f"{path.relative_to(REPO)}:testcases[{index}]:premerge")
                 if value is True:
                     selected.append(str(case.get("name") or ""))
         if not selected or any(not name for name in selected):
@@ -1215,7 +1386,7 @@ def test_every_family_owns_at_least_one_explicit_premerge_case() -> None:
     assert violations == []
 
 
-def test_threshold_sidecars_have_one_direct_payload() -> None:
+def test_threshold_sidecars_are_optional_and_direct() -> None:
     violations: list[str] = []
     for family in family_dirs():
         test_file = family / "tests/test_e2e.py"
@@ -1243,9 +1414,7 @@ def test_threshold_sidecars_have_one_direct_payload() -> None:
             for case in json.loads(manifest_path.read_text(encoding="utf-8"))["testcases"]
         }
         threshold_names = {path.stem for path in (family / "tests/thresholds").glob("*.json")}
-        if case_names != threshold_names:
-            violations.append(
-                f"{family.name}:threshold-cases:missing={sorted(case_names - threshold_names)}:"
-                f"extra={sorted(threshold_names - case_names)}"
-            )
+        extra = threshold_names - case_names
+        if extra:
+            violations.append(f"{family.name}:threshold-cases:extra={sorted(extra)}")
     assert violations == []

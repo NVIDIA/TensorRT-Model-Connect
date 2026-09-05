@@ -14,10 +14,10 @@
           "Immune dysregulation in major depression: a critical review of existing evidence.\n\nIt is now well established that depression is associated with immune dysregulation. It is not, however, known whether this immune dysregulation plays a role in the pathophysiology of major depression or whether it increases the susceptibility of the depressed patient to immune-related disorders. This article presents a critical review of existing evidence for immune dysregulation in major depression, including changes in leucocyte trafficking, lymphocyte function, and markers of immune activation. Possible mediators of immune dysregulation in major depression are briefly discussed. Finally, the relationship between major depression and several medical conditions such as infection, allergy and autoimmune disorders, cardiovascular diseases, cancer and AIDS is critically reviewed."
         ]
       },
-      "reference_precision": "fp16"
+      "reference_precision": "fp32"
     }
   ],
   "tensor_parallel_size": 4,
-  "precision": "fp16",
+  "precision": "fp32",
   "max_sequence_length": 256
 }

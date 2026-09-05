@@ -18,15 +18,12 @@ class CiPipeline:
     def __init__(self, context: CiContext):
         package = WheelPackageManager(context)
         quality = SourceQualityChecks(context)
-        self.context = context
         self.stages: dict[str, tuple[tuple[str, Callable[[], object]], ...]] = {
             "impact": (("Resolve physical family impact", ImpactAnalyzer(context).run),),
             "family-coverage": (("Validate physical family coverage", quality.family_coverage),),
             "complexity": (("Check shared native complexity", quality.complexity),),
             "lint": (("Lint changed source files", quality.lint_changed_files),),
-            "source-quality": (
-                ("Run new-architecture source checks", quality.run),
-            ),
+            "source-quality": (("Run new-architecture source checks", quality.run),),
             "premerge-unit": (("Run all CPU units", UnitTestRunner(context).premerge),),
             "package": (
                 ("Build native wheel", package.build),

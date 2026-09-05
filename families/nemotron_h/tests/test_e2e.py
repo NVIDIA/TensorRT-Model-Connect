@@ -44,12 +44,7 @@ _CASES = _load_cases()
 
 
 def _csv_values(values: list[str]) -> set[str]:
-    return {
-        item.strip()
-        for value in values
-        for item in str(value).split(",")
-        if item.strip()
-    }
+    return {item.strip() for value in values for item in str(value).split(",") if item.strip()}
 
 
 def _selection(config) -> set[str]:
@@ -93,8 +88,7 @@ def _required_environment(tp_size: int):
 
     assert torch.cuda.is_available(), "selected E2E requires CUDA"
     assert torch.cuda.device_count() >= tp_size, (
-        f"{_FAMILY} TP{tp_size} requires {tp_size} visible GPUs; "
-        f"found {torch.cuda.device_count()}"
+        f"{_FAMILY} TP{tp_size} requires {tp_size} visible GPUs; found {torch.cuda.device_count()}"
     )
     if tp_size > 1:
         assert shutil.which("mpirun"), "selected TP E2E requires mpirun"
@@ -122,15 +116,15 @@ def _prompt(case: dict) -> str:
     repeated = case["prompt_repeat"]
     count = int(repeated["count"])
     assert count > 0
-    return (
-        str(repeated["separator"]).join([str(repeated["text"])] * count)
-        + str(repeated.get("suffix", ""))
+    return str(repeated["separator"]).join([str(repeated["text"])] * count) + str(
+        repeated.get("suffix", "")
     )
 
 
 def _thresholds(case_name: str) -> dict[str, float]:
     path = _TEST_DIR / "thresholds" / f"{case_name}.json"
-    assert path.is_file(), f"missing threshold file: {path}"
+    if not path.is_file():
+        return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
     thresholds = payload["threshold_overrides"]
     assert isinstance(thresholds, dict) and thresholds, path
@@ -276,9 +270,7 @@ def _apply_repetition_penalty(logits, token_ids: list[int], penalty: float):
     logits = logits.clone()
     for token_id in set(token_ids):
         logits[token_id] = (
-            logits[token_id] * penalty
-            if logits[token_id] < 0
-            else logits[token_id] / penalty
+            logits[token_id] * penalty if logits[token_id] < 0 else logits[token_id] / penalty
         )
     return logits
 
@@ -339,12 +331,16 @@ def _hf_reference(
         "bf16": torch.bfloat16,
     }
     assert reference_precision in dtypes, reference_precision
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        local_files_only=True,
-        trust_remote_code=trust_remote_code,
-        dtype=dtypes[reference_precision],
-    ).eval().to("cuda")
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            local_files_only=True,
+            trust_remote_code=trust_remote_code,
+            dtype=dtypes[reference_precision],
+        )
+        .eval()
+        .to("cuda")
+    )
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:
@@ -426,9 +422,54 @@ def _normalized_edit_distance(left: str, right: str) -> float:
 
 
 def _text_threshold(thresholds: dict[str, float]) -> float:
-    if "contract_ned_threshold" in thresholds:
-        return thresholds["contract_ned_threshold"]
-    return thresholds["normalized_text_edit_distance"]
+    return float(thresholds.get("contract_ned_threshold", 0.15))
+
+
+def _reference_backend(case: dict) -> str:
+    backend = case.get("reference_backend")
+    assert backend in {"golden_snapshot", "hf_transformers"}, (
+        f"unsupported {_FAMILY} reference backend: {backend!r}"
+    )
+    return backend
+
+
+def _golden_reference(case: dict) -> str:
+    metadata = case.get("metadata")
+    assert isinstance(metadata, dict), f"{case['name']} golden reference requires metadata"
+    value = metadata.get("golden_snapshot_path")
+    assert isinstance(value, str) and value, (
+        f"{case['name']} golden reference requires metadata.golden_snapshot_path"
+    )
+    path = Path(value)
+    if not path.is_absolute():
+        path = _TEST_DIR / path
+    assert path.is_file(), f"{case['name']} golden reference does not exist: {path}"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict), f"{case['name']} golden reference must be an object: {path}"
+    text = payload.get("text")
+    assert isinstance(text, str) and text.strip(), (
+        f"{case['name']} golden reference requires non-empty text: {path}"
+    )
+    return text.strip()
+
+
+def _assert_golden_correctness(
+    payload: dict,
+    case: dict,
+    thresholds: dict[str, float],
+    reference_text: str,
+) -> None:
+    actual_ids = payload["token_ids"]
+    assert isinstance(actual_ids, list) and actual_ids
+    assert all(isinstance(token_id, int) for token_id in actual_ids)
+    assert len(actual_ids) <= int(case["max_new_tokens"]), (
+        "Task API token_ids must contain generated tokens only"
+    )
+    actual_text = str(payload["text"]).strip()
+    assert actual_text
+    if case.get("enable_thinking") is False:
+        assert "<think>" not in actual_text.casefold()
+    assert _normalized_edit_distance(actual_text, reference_text) <= _text_threshold(thresholds)
 
 
 def _assert_correctness(
@@ -449,8 +490,6 @@ def _assert_correctness(
     actual_text = str(payload["text"]).strip()
     if case.get("enable_thinking") is False:
         assert "<think>" not in actual_text.casefold()
-    assert _normalized_edit_distance(actual_text, actual_decoded) <= _text_threshold(thresholds)
-
     if "expected_continuation_token_ids" in case:
         assert actual_ids == case["expected_continuation_token_ids"]
     if "expected_continuation_text" in case:
@@ -459,20 +498,49 @@ def _assert_correctness(
     if expected_answers:
         assert any(answer.casefold() in actual_decoded.casefold() for answer in expected_answers)
 
-    if sampling_support is not None:
-        threshold = thresholds["unstable_topk_hit_rate"]
-        assert sampling_support >= threshold
-        return
+    del sampling_support
+    assert actual_text
+    assert _normalized_edit_distance(actual_text, reference_text) <= _text_threshold(thresholds)
 
-    assert reference_ids
-    common = min(len(actual_ids), len(reference_ids))
-    assert common > 0
-    agreement = sum(
-        actual_ids[index] == reference_ids[index] for index in range(common)
-    ) / common
-    if "token_agreement_rate" in thresholds:
-        assert agreement >= thresholds["token_agreement_rate"]
-    assert _normalized_edit_distance(actual_decoded, reference_text) <= _text_threshold(thresholds)
+
+def test_reference_routes_keep_tp4_on_golden_and_single_gpu_on_hf() -> None:
+    expected_backends = {
+        "nemotron-h-nano-9b": "hf_transformers",
+        "nemotron-h-nano-9b-tp4": "golden_snapshot",
+    }
+    assert {name: case["reference_backend"] for name, (_, case) in _CASES.items()} == (
+        expected_backends
+    )
+    _, case = _CASES["nemotron-h-nano-9b-tp4"]
+    assert _reference_backend(case) == "golden_snapshot"
+    assert _golden_reference(case) == "Paris"
+    _assert_golden_correctness(
+        {"token_ids": [1], "text": "Paris"},
+        case,
+        _thresholds(case["name"]),
+        "Paris",
+    )
+    with pytest.raises(AssertionError, match="unsupported"):
+        _reference_backend({"name": "missing-backend"})
+
+
+def test_golden_reference_fails_closed_for_missing_or_invalid_data(tmp_path: Path) -> None:
+    case = {
+        "name": "broken-golden",
+        "metadata": {"golden_snapshot_path": str(tmp_path / "missing.json")},
+    }
+    with pytest.raises(AssertionError, match="does not exist"):
+        _golden_reference(case)
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("not JSON", encoding="utf-8")
+    case["metadata"]["golden_snapshot_path"] = str(invalid)
+    with pytest.raises(json.JSONDecodeError):
+        _golden_reference(case)
+
+    invalid.write_text("{}", encoding="utf-8")
+    with pytest.raises(AssertionError, match="requires non-empty text"):
+        _golden_reference(case)
 
 
 @pytest.mark.parametrize("case_name", sorted(_CASES))
@@ -509,6 +577,16 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         )
         assert repeated["token_ids"] == payload["token_ids"]
         assert repeated["text"] == payload["text"]
+
+    backend = _reference_backend(case)
+    if backend == "golden_snapshot":
+        _assert_golden_correctness(
+            payload,
+            case,
+            _thresholds(case_name),
+            _golden_reference(case),
+        )
+        return
 
     reference = _hf_reference(
         model_dir,

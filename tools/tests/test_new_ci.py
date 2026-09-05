@@ -314,6 +314,8 @@ def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
     conanfile = (repository / "conanfile.py").read_text()
     assert "self.requires(" not in conanfile
     assert "CMakeDeps" not in conanfile
+    assert "libtrtmc_model_sana_wm" not in conanfile
+    assert '"--print-needed"' in conanfile
     dockerfile = (repository / "Dockerfile").read_text()
     assert "openmpi-bin" in dockerfile
     assert "nvidia/nccl/lib" in dockerfile
@@ -329,9 +331,7 @@ def test_source_quality_runs_complexity_before_other_checks() -> None:
 def test_source_quality_lints_only_files_that_still_exist(tmp_path: Path) -> None:
     (tmp_path / "kept.py").write_text("", encoding="utf-8")
     context = RecordingContext(tmp_path, {})
-    context.run = lambda *_args, **_kwargs: SimpleNamespace(
-        stdout="kept.py\ndeleted.py\n"
-    )
+    context.run = lambda *_args, **_kwargs: SimpleNamespace(stdout="kept.py\ndeleted.py\n")
 
     assert SourceQualityChecks(context)._changed_files("base", "*.py") == ["kept.py"]
 
@@ -486,20 +486,18 @@ def test_gpu_free_unit_scope_keeps_family_python_in_physical_jobs(tmp_path: Path
 
     python_command = context.calls[2][0]
     assert python_command[:3] == ["python", "-m", "pytest"]
-    assert python_command[3:8] == [
+    assert python_command[3:9] == [
         "core/builder/tests",
         "apps/benchmark/trtmc_benchmark/tests",
+        "examples/audio_streaming/test_audio_streaming.py",
         "examples/models/cosmos3/dual_spark/test_cosmos3_dual_spark_source.py",
-        (
-            "examples/models/nemotron_voicechat/full_duplex/"
-            "test_voicechat_full_duplex_source.py"
-        ),
+        ("examples/models/nemotron_voicechat/full_duplex/test_voicechat_full_duplex_source.py"),
         "tools/tests",
     ]
     assert "families" not in python_command
 
     source = inspect.getsource(UnitTestRunner.premerge)
-    assert '"all"' in source
+    assert "TRTMC_PREMERGE_UNIT_SCOPE" not in source
     assert '"pytest"' in source
     assert '"not gpu and not trt"' in source
     assert '"cmake"' in source
@@ -525,7 +523,6 @@ def test_docker_ensure_builds_the_current_dockerfile(
         {"TRTMC_CI_IMAGE": "trtmc:test", "GITHUB_ENV": str(github_env)},
     )
     commands = []
-    monkeypatch.setattr(manager, "_inspect", lambda _image: SimpleNamespace(returncode=0))
     monkeypatch.setattr(
         manager.commands,
         "run",
@@ -698,6 +695,10 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
     with pytest.raises(CiError, match="benchmark catalog is missing"):
         WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
     benchmark_asset.unlink()
+
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr("tensorrt_model_connect/bin/libtrtmc_backend_trt_rtx.so", "")
+    WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
 
     with zipfile.ZipFile(wheel, "a") as archive:
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_backend_trt_11_1.so", "")

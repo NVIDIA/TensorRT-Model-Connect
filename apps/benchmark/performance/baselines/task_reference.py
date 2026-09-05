@@ -94,13 +94,10 @@ class Session:
     """One loaded reference model and its repeatable timed operation."""
 
     invoke: Callable[[], Mapping[str, Any]]
-    resolved_revision: str
     framework: str
     timing_scope: str = "task-model-call-wall"
     input_preparation_included: bool = False
     asset_loading_included: bool = False
-    reference_dependencies: Mapping[str, str] | None = None
-    reference_source: Mapping[str, str] | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -208,22 +205,6 @@ def _processor_kwargs(arguments: argparse.Namespace) -> dict[str, Any]:
     return values
 
 
-def _model_revision(model: Any, requested: str | None) -> str:
-    del model
-    return requested or "unreported"
-
-
-def _snapshot_revision(path: str | Path) -> str:
-    candidate = Path(path)
-    for parts in (candidate.parts, candidate.resolve().parts):
-        try:
-            index = parts.index("snapshots")
-        except ValueError:
-            continue
-        return parts[index + 1] if index + 1 < len(parts) else ""
-    return ""
-
-
 def _load_sam3_processor(
     transformers: Any,
     model: str,
@@ -232,14 +213,7 @@ def _load_sam3_processor(
     return transformers.Sam3Processor.from_pretrained(model, **processor_kwargs)
 
 
-def _cached_snapshot_revision(repo_id: str, requested: str | None) -> str:
-    del repo_id
-    return requested or ""
-
-
-def _cached_snapshot_path(
-    repo_id: str, requested: str | None, marker_file: str
-) -> Path | None:
+def _cached_snapshot_path(repo_id: str, requested: str | None, marker_file: str) -> Path | None:
     if Path(repo_id).exists():
         return Path(repo_id).resolve()
     try:
@@ -255,43 +229,6 @@ def _cached_snapshot_path(
     if isinstance(cached, str) and Path(cached).is_file():
         return Path(cached).parent.resolve()
     return None
-
-
-def _resolved_revision(arguments: argparse.Namespace, model: Any) -> str:
-    revision = _model_revision(model, arguments.revision)
-    if revision != "unresolved":
-        return revision
-    if Path(arguments.model).exists():
-        return "local-path"
-    try:
-        from huggingface_hub import hf_hub_download, snapshot_download
-
-        for filename in ("config.json", "model_index.json"):
-            try:
-                path = hf_hub_download(
-                    repo_id=arguments.model,
-                    filename=filename,
-                    revision=arguments.revision,
-                    local_files_only=True,
-                )
-            except (OSError, ValueError):
-                continue
-            revision = _snapshot_revision(path)
-            if revision:
-                return revision
-        try:
-            return _snapshot_revision(
-                snapshot_download(
-                    repo_id=arguments.model,
-                    revision=arguments.revision,
-                    local_files_only=True,
-                )
-            )
-        except (OSError, ValueError):
-            pass
-    except ImportError:
-        pass
-    return _cached_snapshot_revision(arguments.model, arguments.revision) or "unresolved"
 
 
 def _to_device(value: Any, device: Any, dtype: Any = None) -> Any:
@@ -416,25 +353,13 @@ def _load_tts(
             }
 
     if arguments.family == "magpie_tts":
-        revision = arguments.revision or _snapshot_revision(model_archive) or "unresolved"
-        framework = "nemo"
-        dependencies = {
-            MAGPIE_SPEAKER_ENCODER_REPO: _snapshot_revision(speaker_checkpoint) or speaker_revision
-        }
-    else:
-        revision = _resolved_revision(arguments, model)
-        framework = "transformers"
-        dependencies = None
-    if arguments.family == "magpie_tts":
         return Session(
             invoke,
-            revision,
-            framework,
+            "nemo",
             timing_scope="task-pipeline-call-wall",
             input_preparation_included=True,
-            reference_dependencies=dependencies,
         )
-    return Session(invoke, revision, framework, reference_dependencies=dependencies)
+    return Session(invoke, "transformers")
 
 
 def _load_nemo_asr_reference_model(
@@ -569,13 +494,12 @@ def _load_asr(
     if arguments.family in {"canary", "nemotron_speech_streaming"}:
         return Session(
             invoke,
-            _resolved_revision(arguments, model),
             framework,
             timing_scope="task-pipeline-call-wall",
             input_preparation_included=True,
             asset_loading_included=True,
         )
-    return Session(invoke, _resolved_revision(arguments, model), framework)
+    return Session(invoke, framework)
 
 
 def _load_vlm_model(
@@ -633,7 +557,6 @@ def _load_deepseek_ocr(
 
     return Session(
         invoke,
-        _resolved_revision(arguments, model),
         "transformers",
         timing_scope="task-pipeline-call-wall",
         input_preparation_included=True,
@@ -650,9 +573,6 @@ def _locateanything_tokenizer(arguments: argparse.Namespace, _torch_module: Any)
     from transformers import AutoTokenizer
 
     return AutoTokenizer.from_pretrained(arguments.model, **_processor_kwargs(arguments))
-
-
-
 
 
 def _load_locateanything(
@@ -675,9 +595,7 @@ def _load_locateanything(
     model = (
         transformers.AutoModel.from_pretrained(arguments.model, **load_options).eval().to(device)
     )
-    image_inputs = preprocess_locateanything(
-        str(_asset_path(arguments, request, "image_path"))
-    )
+    image_inputs = preprocess_locateanything(str(_asset_path(arguments, request, "image_path")))
     pixel_values = torch.from_numpy(image_inputs["pixel_values"]).to(device)
     image_grid_hws = torch.from_numpy(image_inputs["image_grid_hws"]).to(
         device=device, dtype=torch.int32
@@ -722,7 +640,7 @@ def _load_locateanything(
             raise RuntimeError("LocateAnything reference produced empty text")
         return {"text": text, "token_ids": token_ids, "output_tokens": len(token_ids)}
 
-    return Session(invoke, _resolved_revision(arguments, model), "transformers")
+    return Session(invoke, "transformers")
 
 
 def _vl_prompt_has_image_placeholder(text: str) -> bool:
@@ -809,7 +727,7 @@ def _load_vlm(
         text = processor.decode(generated, skip_special_tokens=True)
         return {"text": text, "token_ids": token_ids, "output_tokens": len(token_ids)}
 
-    return Session(invoke, _resolved_revision(arguments, model), "transformers")
+    return Session(invoke, "transformers")
 
 
 def _load_embedding(
@@ -863,7 +781,6 @@ def _load_embedding(
 
     return Session(
         invoke,
-        _resolved_revision(arguments, model),
         "transformers",
         timing_scope=str(declared_timing["timing_scope"]),
         input_preparation_included=bool(declared_timing["input_preparation_included"]),
@@ -910,7 +827,7 @@ def _load_reranking(
         scores = [float(score) for score in logits.reshape(-1).tolist()]
         return {"scores": scores, "document_count": len(documents)}
 
-    return Session(invoke, _resolved_revision(arguments, model), "transformers")
+    return Session(invoke, "transformers")
 
 
 _PIXART_TRTMC_MIXED_PRECISION = "pixart_fp16_dit_fp32_t5"
@@ -926,9 +843,7 @@ def _diffusion_component_precision_contract(
     if contract != _PIXART_TRTMC_MIXED_PRECISION:
         raise ValueError(f"unsupported diffusion component precision contract: {contract}")
     if arguments.family != "pixart" or arguments.precision != "fp16":
-        raise ValueError(
-            f"{contract} requires family=pixart and precision=fp16"
-        )
+        raise ValueError(f"{contract} requires family=pixart and precision=fp16")
     return contract
 
 
@@ -936,17 +851,12 @@ def _cast_floating_tensors(value: Any, dtype: Any, torch_module: Any) -> Any:
     if isinstance(value, torch_module.Tensor):
         return value.to(dtype=dtype) if value.is_floating_point() else value
     if isinstance(value, tuple):
-        return tuple(
-            _cast_floating_tensors(item, dtype, torch_module) for item in value
-        )
+        return tuple(_cast_floating_tensors(item, dtype, torch_module) for item in value)
     if isinstance(value, list):
-        return [
-            _cast_floating_tensors(item, dtype, torch_module) for item in value
-        ]
+        return [_cast_floating_tensors(item, dtype, torch_module) for item in value]
     if isinstance(value, dict):
         return {
-            key: _cast_floating_tensors(item, dtype, torch_module)
-            for key, item in value.items()
+            key: _cast_floating_tensors(item, dtype, torch_module) for key, item in value.items()
         }
     return value
 
@@ -970,9 +880,7 @@ def _configure_diffusion_component_precision(
     def fp32_transformer_output(_module: Any, _args: Any, output: Any) -> Any:
         return _cast_floating_tensors(output, torch_module.float32, torch_module)
 
-    pipeline.transformer.register_forward_pre_hook(
-        fp16_transformer_inputs, with_kwargs=True
-    )
+    pipeline.transformer.register_forward_pre_hook(fp16_transformer_inputs, with_kwargs=True)
     pipeline.transformer.register_forward_hook(fp32_transformer_output)
 
 
@@ -995,9 +903,9 @@ def _diffusion_pipeline(
         "z_image": "ZImagePipeline",
     }[arguments.family]
     pipeline_class = getattr(diffusers, class_name)
-    requested_revision = str(
-        options.get("model_revision", getattr(arguments, "revision", None) or "")
-    ) or None
+    requested_revision = (
+        str(options.get("model_revision", getattr(arguments, "revision", None) or "")) or None
+    )
     model_source: str | Path = model_id
     if arguments.local_files_only:
         cached = _cached_snapshot_path(model_id, requested_revision, "model_index.json")
@@ -1045,7 +953,6 @@ def _diffusion_pipeline(
         trust_remote_code=bool(options.get("trust_remote_code", arguments.trust_remote_code)),
         local_files_only=arguments.local_files_only,
     )
-
 
 
 def _load_diffusers(
@@ -1173,25 +1080,11 @@ def _load_diffusers(
         media_type = str(request.get("media_type", "image"))
         return _media_summary(media, media_type)
 
-    requested_revision = str(
-        options.get("model_revision", getattr(arguments, "revision", None) or "")
-    ) or None
-    revision = (
-        _model_revision(getattr(pipeline, "transformer", pipeline), requested_revision)
-        if options.get("model_revision")
-        else _resolved_revision(arguments, getattr(pipeline, "transformer", pipeline))
-    )
-    reference_model = str(options.get("model_id", getattr(arguments, "model", "unresolved")))
     return Session(
         invoke,
-        revision,
         "diffusers",
         timing_scope="task-pipeline-call-wall",
         input_preparation_included=True,
-        reference_source={
-            "repository": f"https://huggingface.co/{reference_model}",
-            "revision": revision,
-        },
     )
 
 
@@ -1224,11 +1117,7 @@ def _media_summary(media: Any, media_type: str) -> dict[str, Any]:
     width = height = channels = None
     size = getattr(item, "size", None)
     bands = getattr(item, "getbands", None)
-    if (
-        isinstance(size, tuple)
-        and len(size) == 2
-        and callable(bands)
-    ):
+    if isinstance(size, tuple) and len(size) == 2 and callable(bands):
         width, height = (int(value) for value in size)
         channels = len(bands())
     else:
@@ -1324,8 +1213,7 @@ def _load_timeseries(
                 )
             return _tensor_summary(value)
 
-        revision = _resolved_revision(arguments, getattr(model, "model", model))
-        return Session(invoke, revision, "chronos")
+        return Session(invoke, "chronos")
 
     config = transformers.AutoConfig.from_pretrained(
         arguments.model, **_processor_kwargs(arguments)
@@ -1407,10 +1295,13 @@ def _load_timeseries(
         ).reshape(1, length, channels)
 
         def invoke() -> Mapping[str, Any]:
-            with torch.inference_mode(), torch.autocast(
-                device_type="cuda",
-                dtype=dtype,
-                enabled=dtype != torch.float32,
+            with (
+                torch.inference_mode(),
+                torch.autocast(
+                    device_type="cuda",
+                    dtype=dtype,
+                    enabled=dtype != torch.float32,
+                ),
             ):
                 if is_mixer:
                     outputs = model(
@@ -1431,7 +1322,7 @@ def _load_timeseries(
                 output = torch.stack(list(output), dim=-1)
             return _tensor_summary(output)
 
-    return Session(invoke, _resolved_revision(arguments, model), "transformers")
+    return Session(invoke, "transformers")
 
 
 def _load_vision(
@@ -1478,11 +1369,7 @@ def _load_vision(
         processor = transformers.AutoImageProcessor.from_pretrained(
             arguments.model, **processor_kwargs
         )
-        model = (
-            transformers.AutoModel.from_pretrained(arguments.model, **kwargs)
-            .eval()
-            .to(device)
-        )
+        model = transformers.AutoModel.from_pretrained(arguments.model, **kwargs).eval().to(device)
         inputs = _to_device(
             processor(images=image, return_tensors="pt"),
             device,
@@ -1493,12 +1380,8 @@ def _load_vision(
             with torch.inference_mode():
                 outputs = model(**inputs)
             return {
-                "last_hidden_state_shape": _tensor_summary(
-                    outputs.last_hidden_state
-                )["shape"],
-                "pooler_output_shape": _tensor_summary(outputs.pooler_output)[
-                    "shape"
-                ],
+                "last_hidden_state_shape": _tensor_summary(outputs.last_hidden_state)["shape"],
+                "pooler_output_shape": _tensor_summary(outputs.pooler_output)["shape"],
             }
 
     elif arguments.family == "segformer":
@@ -1540,9 +1423,7 @@ def _load_vision(
                 outputs = model(**inputs)
             original_sizes = inputs.get("original_sizes")
             target_sizes = (
-                original_sizes.cpu().tolist()
-                if hasattr(original_sizes, "cpu")
-                else original_sizes
+                original_sizes.cpu().tolist() if hasattr(original_sizes, "cpu") else original_sizes
             )
             result = processor.post_process_instance_segmentation(
                 outputs,
@@ -1591,12 +1472,10 @@ def _load_vision(
                 "width": width,
             }
 
-    return Session(invoke, _resolved_revision(arguments, model), "transformers")
+    return Session(invoke, "transformers")
 
 
-def _qwen3_omni_chat_inputs(
-    processor: Any, conversation: Sequence[Mapping[str, Any]]
-) -> Any:
+def _qwen3_omni_chat_inputs(processor: Any, conversation: Sequence[Mapping[str, Any]]) -> Any:
     processor_template = getattr(processor, "chat_template", None)
     tokenizer_template = getattr(getattr(processor, "tokenizer", None), "chat_template", None)
     template = (
@@ -1664,7 +1543,7 @@ def _load_qwen3_omni(
             "sample_rate": 24_000,
         }
 
-    return Session(invoke, _resolved_revision(arguments, model), "transformers")
+    return Session(invoke, "transformers")
 
 
 def _load_personaplex(
@@ -1674,10 +1553,8 @@ def _load_personaplex(
 ) -> Session:
     official_repo = str(options.get("official_repo", ""))
     if not official_repo:
-        raise ValueError(
-            "pytorch-personaplex requires baseline.adapter_options.official_repo"
-        )
-    reference_revision = _reference_checkout(
+        raise ValueError("pytorch-personaplex requires baseline.adapter_options.official_repo")
+    official_repo = _reference_checkout(
         official_repo, repository="https://github.com/NVIDIA/personaplex"
     )
     import importlib.util
@@ -1757,17 +1634,11 @@ def _load_personaplex(
             "sample_rate": mimi.sample_rate,
         }
 
-    revision = arguments.revision or _snapshot_revision(model_weights) or "unresolved"
     return Session(
         invoke,
-        revision,
         "moshi",
         timing_scope="task-pipeline-call-wall",
         input_preparation_included=True,
-        reference_source={
-            "repository": "https://github.com/NVIDIA/personaplex",
-            "revision": reference_revision,
-        },
     )
 
 
@@ -1793,8 +1664,7 @@ def _load_fast_foundation_stereo(
     width = int(request.get("width", 700))
     if (height, width, max_disp, valid_iters) != (700, 700, 192, 8):
         raise ValueError(
-            "Fast Foundation Stereo performance requires 700x700, max_disp=192, "
-            "and valid_iters=8"
+            "Fast Foundation Stereo performance requires 700x700, max_disp=192, and valid_iters=8"
         )
     model_dir = options.get("model_dir")
     if not isinstance(model_dir, str) or not model_dir:
@@ -1857,15 +1727,10 @@ def _load_fast_foundation_stereo(
 
     return Session(
         invoke,
-        "unreported",
         f"torch-{torch.__version__}",
         timing_scope="task-pipeline-call-wall",
         input_preparation_included=True,
         asset_loading_included=False,
-        reference_source={
-            "repository": "https://github.com/NVlabs/Fast-FoundationStereo",
-            "revision": "a290ba04c1b3ad1ec41a33974a157b2917b624d4",
-        },
     )
 
 
@@ -1917,13 +1782,11 @@ def _run_elf(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
     options: Mapping[str, Any],
-) -> tuple[list[float], dict[str, Any], str, str, str, bool]:
+) -> tuple[list[float], dict[str, Any], str, str, bool]:
     reference_repo = str(options.get("reference_repo", ""))
     if not reference_repo:
-        raise ValueError(
-            "upstream-elf requires baseline.adapter_options.reference_repo"
-        )
-    reference_revision = _reference_checkout(
+        raise ValueError("upstream-elf requires baseline.adapter_options.reference_repo")
+    reference_repo = _reference_checkout(
         reference_repo, repository="https://github.com/lillian039/ELF"
     )
     count = arguments.warmup + arguments.iterations
@@ -2018,7 +1881,6 @@ def _run_elf(
     return (
         samples,
         summary,
-        reference_revision,
         "elf-pytorch",
         "task-model-call-wall",
         False,
@@ -2029,12 +1891,10 @@ def _run_lance(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
     options: Mapping[str, Any],
-) -> tuple[list[float], dict[str, Any], str, str, str, bool, dict[str, str]]:
+) -> tuple[list[float], dict[str, Any], str, str, bool]:
     reference_repo = str(options.get("reference_repo", ""))
     if not reference_repo:
-        raise ValueError(
-            "upstream-lance requires baseline.adapter_options.reference_repo"
-        )
+        raise ValueError("upstream-lance requires baseline.adapter_options.reference_repo")
     if arguments.precision != "bf16":
         raise ValueError("upstream-lance requires bf16 precision")
     with tempfile.TemporaryDirectory(prefix="trtmc-perf-lance-adapter-") as temporary:
@@ -2100,11 +1960,9 @@ def _run_lance(
     return (
         samples,
         {"text": str(payload.get("text", "")), "output_tokens": None},
-        "unreported",
         "lance-pytorch",
         "task-pipeline-call-wall",
         True,
-        {},
     )
 
 
@@ -2112,7 +1970,7 @@ def _run_lerobot_act(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
     options: Mapping[str, Any],
-) -> tuple[list[float], dict[str, Any], str, str, str, bool]:
+) -> tuple[list[float], dict[str, Any], str, str, bool]:
     source_root = str(options.get("source_root", ""))
     if not source_root:
         raise ValueError("LeRobot ACT reference requires adapter_options.source_root")
@@ -2126,10 +1984,7 @@ def _run_lerobot_act(
         output = Path(temporary) / "result.json"
         command = [
             sys.executable,
-            str(
-                REPOSITORY
-                / "families/lerobot_act/tests/performance_reference.py"
-            ),
+            str(REPOSITORY / "families/lerobot_act/tests/performance_reference.py"),
             "--source-root",
             source_root,
             "--model",
@@ -2174,7 +2029,6 @@ def _run_lerobot_act(
     return (
         samples,
         dict(summary),
-        str(payload.get("resolved_revision", "unreported")),
         str(payload.get("framework", "lerobot-pytorch")),
         "task-pipeline-call-wall",
         True,
@@ -2185,16 +2039,13 @@ def _run_sana_wm(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
     options: Mapping[str, Any],
-) -> tuple[list[float], dict[str, Any], str, str, str, bool, dict[str, str]]:
+) -> tuple[list[float], dict[str, Any], str, str, bool]:
     reference_repo = str(options.get("reference_repo", ""))
     if not reference_repo:
-        raise ValueError(
-            "upstream-sana-wm requires baseline.adapter_options.reference_repo"
-        )
-    reference_revision = _reference_checkout(
+        raise ValueError("upstream-sana-wm requires baseline.adapter_options.reference_repo")
+    reference_repo = _reference_checkout(
         reference_repo, repository="https://github.com/NVlabs/Sana"
     )
-    config: Mapping[str, Any] = {}
 
     model_root = arguments.manifest.resolve().parent.parent
 
@@ -2221,10 +2072,9 @@ def _run_sana_wm(
         prompt.write_text(prompt_text, encoding="utf-8")
         command = [
             sys.executable,
-            str(
-                REPOSITORY
-                / "apps/benchmark/performance/baselines/sana_wm_reference.py"
-            ),
+            str(REPOSITORY / "apps/benchmark/performance/baselines/sana_wm_reference.py"),
+            "--reference-repo",
+            reference_repo,
             "--image",
             str(image),
             "--model-dir",
@@ -2236,38 +2086,35 @@ def _run_sana_wm(
             "--intrinsics",
             str(intrinsics),
             "--translation_speed",
-            str(config.get("sana_wm.translation_speed", 0.055)),
+            str(request["translation_speed"]),
             "--rotation_speed_deg",
-            str(config.get("sana_wm.rotation_speed_deg", 1.2)),
+            str(request["rotation_speed_deg"]),
             "--num_frames",
-            str(request.get("num_frames", 321)),
+            str(request["num_frames"]),
             "--fps",
-            str(request.get("fps", config.get("sana_wm.fps", 16))),
+            str(request["fps"]),
             "--step",
-            str(request.get("num_steps", 60)),
+            str(request["num_steps"]),
             "--cfg_scale",
-            str(request.get("cfg_scale", 5.0)),
+            str(request["cfg_scale"]),
             "--flow_shift",
-            str(request.get("flow_shift", config.get("sana_wm.flow_shift", 9.8))),
+            str(request["flow_shift"]),
             "--seed",
-            str(request.get("seed", 42)),
-            "--output_dir",
-            str(root / "frames"),
-            "--no_action_overlay",
+            str(request["seed"]),
+            "--refiner_seed",
+            str(request["seed"]),
+            "--warmup",
+            str(arguments.warmup),
+            "--iterations",
+            str(arguments.iterations),
+            "--output",
+            str(output),
         ]
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "SANA_REPO": reference_repo,
-                "TRTMC_SANA_WM_BENCHMARK_OUTPUT": str(output),
-                "TRTMC_SANA_WM_BENCHMARK_WARMUP": str(arguments.warmup),
-                "TRTMC_SANA_WM_BENCHMARK_ITERATIONS": str(arguments.iterations),
-            }
-        )
+        if request["no_action_overlay"]:
+            command.append("--no_action_overlay")
         completed = subprocess.run(
             command,
             cwd=reference_repo,
-            env=environment,
             check=False,
             capture_output=True,
             text=True,
@@ -2281,31 +2128,15 @@ def _run_sana_wm(
     samples = [float(value) for value in payload.get("samples_ms", [])]
     if len(samples) != arguments.iterations:
         raise RuntimeError(
-            f"SANA-WM reference returned {len(samples)} samples; "
-            f"expected {arguments.iterations}"
+            f"SANA-WM reference returned {len(samples)} samples; expected {arguments.iterations}"
         )
     summary = dict(payload.get("output_summary", {}))
-    shape = summary.get("shape", [])
-    if isinstance(shape, list) and len(shape) >= 4:
-        summary.update(
-            {
-                "media_count": int(summary.get("frame_count", shape[0])),
-                "height": int(shape[-3]),
-                "width": int(shape[-2]),
-                "channels": int(shape[-1]),
-            }
-        )
     return (
         samples,
         summary,
-        reference_revision,
         "sana-wm-pytorch",
         "task-pipeline-call-wall",
         True,
-        {
-            "repository": "https://github.com/NVlabs/Sana",
-            "revision": reference_revision,
-        },
     )
 
 
@@ -2341,9 +2172,7 @@ def run(arguments: argparse.Namespace) -> int:
         raise ValueError(f"adapter {arguments.adapter} requires mode {expected_mode}")
     request = _json_object(arguments.request_json, "--request-json")
     options = _json_object(arguments.adapter_options_json, "--adapter-options-json")
-    configured_timing = _json_object(
-        arguments.timing_contract_json, "--timing-contract-json"
-    )
+    configured_timing = _json_object(arguments.timing_contract_json, "--timing-contract-json")
     declared_timing = timing_contract(
         runner="task-reference",
         family=arguments.family,
@@ -2364,24 +2193,21 @@ def run(arguments: argparse.Namespace) -> int:
     load_started = time.perf_counter()
     load_seconds: float | None = None
     if arguments.adapter == "upstream-elf":
-        samples, output_summary, _revision, framework, timing_scope, input_included = _run_elf(
+        samples, output_summary, framework, timing_scope, input_included = _run_elf(
             arguments, request, options
         )
     elif arguments.adapter == "upstream-lance":
         (
             samples,
             output_summary,
-            _revision,
             framework,
             timing_scope,
             input_included,
-            _reference_source,
         ) = _run_lance(arguments, request, options)
     elif arguments.adapter == "pytorch-lerobot-act":
         (
             samples,
             output_summary,
-            _revision,
             framework,
             timing_scope,
             input_included,
@@ -2390,11 +2216,9 @@ def run(arguments: argparse.Namespace) -> int:
         (
             samples,
             output_summary,
-            _revision,
             framework,
             timing_scope,
             input_included,
-            _reference_source,
         ) = _run_sana_wm(arguments, request, options)
     else:
         session = LOADERS[arguments.adapter](arguments, request, options)

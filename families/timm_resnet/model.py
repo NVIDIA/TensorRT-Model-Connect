@@ -169,8 +169,7 @@ class _TimmResnetModel:
 
         if bottleneck:
             w1 = weights[f"{prefix}.conv1.weight"]
-            out = graph_ops.add_conv2d(
-                network, x, w1, None, int(w1.shape[0]), (1, 1), dtype=dtype)
+            out = graph_ops.add_conv2d(network, x, w1, None, int(w1.shape[0]), (1, 1), dtype=dtype)
             out = self._add_bn(network, out, weights, f"{prefix}.bn1", dtype)
             out = graph_ops.add_relu(network, out)
 
@@ -178,37 +177,54 @@ class _TimmResnetModel:
             # Grouped (ResNeXt) convs store (out, in/groups, kh, kw).
             groups = max(1, int(w1.shape[0]) // int(w2.shape[1]))
             out = graph_ops.add_conv2d(
-                network, out, w2, None, int(w2.shape[0]), (3, 3),
-                stride=(stride, stride), padding=(1, 1), groups=groups, dtype=dtype)
+                network,
+                out,
+                w2,
+                None,
+                int(w2.shape[0]),
+                (3, 3),
+                stride=(stride, stride),
+                padding=(1, 1),
+                groups=groups,
+                dtype=dtype,
+            )
             out = self._add_bn(network, out, weights, f"{prefix}.bn2", dtype)
             out = graph_ops.add_relu(network, out)
 
             w3 = weights[f"{prefix}.conv3.weight"]
             out = graph_ops.add_conv2d(
-                network, out, w3, None, int(w3.shape[0]), (1, 1), dtype=dtype)
+                network, out, w3, None, int(w3.shape[0]), (1, 1), dtype=dtype
+            )
             out = self._add_bn(network, out, weights, f"{prefix}.bn3", dtype)
         else:
             w1 = weights[f"{prefix}.conv1.weight"]
             out = graph_ops.add_conv2d(
-                network, x, w1, None, int(w1.shape[0]), (3, 3),
-                stride=(stride, stride), padding=(1, 1), dtype=dtype)
+                network,
+                x,
+                w1,
+                None,
+                int(w1.shape[0]),
+                (3, 3),
+                stride=(stride, stride),
+                padding=(1, 1),
+                dtype=dtype,
+            )
             out = self._add_bn(network, out, weights, f"{prefix}.bn1", dtype)
             out = graph_ops.add_relu(network, out)
 
             w2 = weights[f"{prefix}.conv2.weight"]
             out = graph_ops.add_conv2d(
-                network, out, w2, None, int(w2.shape[0]), (3, 3),
-                padding=(1, 1), dtype=dtype)
+                network, out, w2, None, int(w2.shape[0]), (3, 3), padding=(1, 1), dtype=dtype
+            )
             out = self._add_bn(network, out, weights, f"{prefix}.bn2", dtype)
 
         down_key = f"{prefix}.downsample.0.weight"
         if down_key in weights:
             wd = weights[down_key]
             identity = graph_ops.add_conv2d(
-                network, x, wd, None, int(wd.shape[0]), (1, 1),
-                stride=(stride, stride), dtype=dtype)
-            identity = self._add_bn(
-                network, identity, weights, f"{prefix}.downsample.1", dtype)
+                network, x, wd, None, int(wd.shape[0]), (1, 1), stride=(stride, stride), dtype=dtype
+            )
+            identity = self._add_bn(network, identity, weights, f"{prefix}.downsample.1", dtype)
 
         out = graph_ops.add_sum(network, out, identity)
         return graph_ops.add_relu(network, out)
@@ -226,11 +242,9 @@ class _TimmResnetModel:
     ) -> bytes:
         del max_cache_length
         if quant_ctx is not None:
-            raise NotImplementedError(
-                "timm_resnet does not support quantized builds yet")
+            raise NotImplementedError("timm_resnet does not support quantized builds yet")
         if parallel_config is not None and getattr(parallel_config, "enabled", False):
-            raise NotImplementedError(
-                "timm_resnet does not support tensor-parallel builds")
+            raise NotImplementedError("timm_resnet does not support tensor-parallel builds")
 
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -241,8 +255,7 @@ class _TimmResnetModel:
 
         cfg = config.raw.get("_timm_resnet_config")
         if cfg is None:
-            raise RuntimeError(
-                "load_weights must run before build_engine to resolve the layout")
+            raise RuntimeError("load_weights must run before build_engine to resolve the layout")
         image_h = cfg["image_size_h"]
         image_w = cfg["image_size_w"]
         num_classes = cfg["num_classes"]
@@ -252,8 +265,7 @@ class _TimmResnetModel:
         # Stem halves twice (7x7 stride 2, then max pool stride 2) and stages
         # 2..4 halve once each, so the pooled map is input / 32.
         if image_h % 32 != 0 or image_w % 32 != 0:
-            raise ValueError(
-                f"timm_resnet input {image_h}x{image_w} must be divisible by 32")
+            raise ValueError(f"timm_resnet input {image_h}x{image_w} must be divisible by 32")
         feat_h, feat_w = image_h // 32, image_w // 32
 
         if verbose:
@@ -267,25 +279,30 @@ class _TimmResnetModel:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network(
-            1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-        )
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.avg_timing_iterations = 8
         trt_config.max_aux_streams = 0
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
-        pixel_values = network.add_input(
-            "pixel_values", trt.float32, (1, 3, image_h, image_w))
+        pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
         hidden = pixel_values
         if hidden.dtype != work_trt_dtype:
             hidden = network.add_cast(hidden, work_trt_dtype).get_output(0)
 
         stem_w = weights["conv1.weight"]
         hidden = graph_ops.add_conv2d(
-            network, hidden, stem_w, None, int(stem_w.shape[0]), (7, 7),
-            stride=(2, 2), padding=(3, 3), dtype=work_np_dtype)
+            network,
+            hidden,
+            stem_w,
+            None,
+            int(stem_w.shape[0]),
+            (7, 7),
+            stride=(2, 2),
+            padding=(3, 3),
+            dtype=work_np_dtype,
+        )
         hidden = self._add_bn(network, hidden, weights, "bn1", work_np_dtype)
         hidden = graph_ops.add_relu(network, hidden)
         hidden = graph_ops.add_max_pool2d(network, hidden, 3, 2, 1)
@@ -295,8 +312,8 @@ class _TimmResnetModel:
                 # First block of every stage after layer1 downsamples.
                 stride = 2 if (stage_idx > 0 and block == 0) else 1
                 hidden = self._add_block(
-                    network, hidden, weights, f"{stage}.{block}",
-                    stride, bottleneck, work_np_dtype)
+                    network, hidden, weights, f"{stage}.{block}", stride, bottleneck, work_np_dtype
+                )
 
         hidden = graph_ops.add_global_avg_pool(network, hidden, (feat_h, feat_w))
 
@@ -345,6 +362,9 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm ResNet image-classification bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("timm_resnet does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("timm_resnet does not support image_height")
     if request.image_width is not None:
@@ -370,9 +390,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if not model_type.startswith(("resnet", "resnext", "wide_resnet")):
         raise ValueError(f"timm ResNet does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
-    max_sequence_length = _positive_int(
-        request.max_sequence_length or 1, "max_sequence_length"
-    )
+    max_sequence_length = _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model = _TimmResnetModel()
     weights = model.load_weights(str(model_dir), config, precision=precision)
     plan = model.build_engine(
@@ -384,7 +402,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         verbose=bool(request.verbose),
         parallel_config=None,
     )
-    writer.set_header(family="timm_resnet", task=request.task, backend="trt")
+    writer.set_header(family="timm_resnet", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     runtime_source = model.get_bundle_config_overrides(config)
     writer.add_json(

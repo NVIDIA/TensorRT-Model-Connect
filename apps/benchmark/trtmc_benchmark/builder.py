@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -14,6 +13,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+
+from tensorrt_model_connect.build_cli import _resolve_model
 
 from .types import BenchmarkError, ModelDescriptor, ResolvedCase
 
@@ -127,9 +128,7 @@ class BundleBuilder:
         if not managed:
             raise BenchmarkError(f"explicit bundle does not exist: {requested}")
         if not allow_build:
-            raise BenchmarkError(
-                f"bundle for {model.name} is unavailable and --no-build was set"
-            )
+            raise BenchmarkError(f"bundle for {model.name} is unavailable and --no-build was set")
 
         plan = self._plan(model, cases)
         if dry_run:
@@ -143,51 +142,30 @@ class BundleBuilder:
         return plan.bundle, self._build(plan)
 
     def _plan(self, model: ModelDescriptor, cases: Sequence[ResolvedCase]) -> _BuildPlan:
-        model_dir = self._model_dir(model)
+        explicit = (
+            self.model_dirs.get(model.name)
+            or self.model_dirs.get(model.family)
+            or self.model_dirs.get("")
+        )
+        if explicit is not None and not explicit.is_dir():
+            raise BenchmarkError(f"model directory does not exist: {explicit}")
+        if explicit is None and not model.hf_id:
+            raise BenchmarkError(f"{model.name} has no hf_id; pass --model-dir")
+        try:
+            model_dir = _resolve_model(
+                str(explicit) if explicit is not None else model.hf_id,
+                None if explicit is not None else model.hf_revision or None,
+            ).resolve()
+        except Exception as error:
+            raise BenchmarkError(
+                f"cannot materialize checkpoint {model.hf_id!r} for {model.name}: {error}"
+            ) from error
         bundle = self.provisional_path(model)
         command = _build_command(model, model_dir, bundle, cases)
         timeout = int(os.environ.get("TRTMC_BENCH_BUILD_TIMEOUT_S", "3600"))
         if timeout <= 0:
             raise BenchmarkError("TRTMC_BENCH_BUILD_TIMEOUT_S must be positive")
         return _BuildPlan(model, model_dir, bundle, command, timeout)
-
-    def _model_dir(self, model: ModelDescriptor) -> Path:
-        explicit = (
-            self.model_dirs.get(model.name)
-            or self.model_dirs.get(model.family)
-            or self.model_dirs.get("")
-        )
-        if explicit is not None:
-            if not explicit.is_dir():
-                raise BenchmarkError(f"model directory does not exist: {explicit}")
-            return explicit
-
-        environment_name = "TRTMC_" + re.sub(r"[^A-Z0-9]+", "_", model.family.upper()) + "_MODEL_DIR"
-        configured = os.environ.get(environment_name)
-        if configured:
-            path = Path(configured).expanduser().resolve()
-            if not path.is_dir():
-                raise BenchmarkError(f"{environment_name} is not a directory: {path}")
-            return path
-
-        repository = Path(__file__).resolve().parents[3]
-        local = repository / model.hf_id
-        if model.hf_id and local.is_dir():
-            return local.resolve()
-        if not model.hf_id:
-            raise BenchmarkError(
-                f"{model.name} has no hf_id; pass --model-dir or set {environment_name}"
-            )
-        try:
-            from huggingface_hub import snapshot_download
-
-            return Path(
-                snapshot_download(repo_id=model.hf_id, revision=model.hf_revision or None)
-            ).resolve()
-        except Exception as error:
-            raise BenchmarkError(
-                f"cannot materialize checkpoint {model.hf_id!r} for {model.name}: {error}"
-            ) from error
 
     def _build(self, plan: _BuildPlan) -> BundlePreparation:
         plan.bundle.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +261,7 @@ def _build_command(
         ("tensor_parallel_size", "--tensor-parallel-size"),
         ("context_parallel_size", "--context-parallel-size"),
         ("quantization", "--quantization"),
+        ("backend", "--backend"),
     )
     for name, flag in flags:
         value = settings.get(name)
@@ -290,6 +269,8 @@ def _build_command(
             command.extend((flag, str(value)))
     for layer in settings.get("fp32_layers", ()):
         command.extend(("--fp32-layer", str(int(layer))))
+    if settings.get("dynamic_kv_cache", False):
+        command.append("--dynamic-kv-cache")
 
     image_cases = [case for case in cases if case.operation == "generate_image"]
     if image_cases:

@@ -11,7 +11,9 @@
       "name": "qwen3-4b-instruct-2507-tp4",
       "reference_precision": "fp32",
       "prompt": "What is the capital of Japan? Answer in one word.",
-      "max_new_tokens": 10
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false
     }
   ],
   "max_sequence_length": 256,

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_pixart SHARED
+  distributed_runtime.cpp
   unigram_tokenizer.cpp
   diffusion_helpers.cpp
   gpu_matmul.cpp
@@ -28,6 +29,7 @@ target_link_libraries(trtmc_model_pixart PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
   CUDA::cublas
 )
 target_compile_options(trtmc_model_pixart PRIVATE

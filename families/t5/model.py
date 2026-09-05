@@ -716,6 +716,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _T5Model, **upd
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one T5 encoder-decoder bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("t5 does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("t5 does not support image_height")
 
@@ -761,7 +764,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if not (model_dir / "tokenizer.json").is_file():
         model.ensure_tokenizer_json(model_dir)
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="t5", task=request.task, backend="trt")
+    writer.set_header(family="t5", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

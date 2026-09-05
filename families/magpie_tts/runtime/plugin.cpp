@@ -4,12 +4,11 @@
  */
 
 #include "families/magpie_tts/runtime/audio_helpers.h"
+#include "families/magpie_tts/runtime/distributed_runtime.h"
 #include "families/magpie_tts/runtime/pipeline.h"
 #include "families/magpie_tts/runtime/plugin_helpers.h"
 #include "trtmc/runtime/family_factory.h"
 
-#include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -25,35 +24,12 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     return bundle.read_section(name);
 }
 
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::int32_t require_rank(std::int32_t size) {
-    require_nccl(size);
-    if (size == 1)
-        return 0;
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("Magpie TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= size)
-        throw std::runtime_error("Magpie RANK is outside tensor_parallel_size");
-    return static_cast<std::int32_t>(rank);
-}
-
 } // namespace
 } // namespace trtmc::magpie_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("magpie_tts does not support --kv-cache-size");
     using namespace trtmc;
     const auto& runtime_data = magpie_factory::require_section(context.reader, "runtime.json");
     const std::string runtime(runtime_data.begin(), runtime_data.end());
@@ -61,9 +37,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto tp_size = document.at("tensor_parallel_size").get<std::int32_t>();
     if (tp_size <= 0)
         throw std::runtime_error("Magpie tensor_parallel_size must be positive");
-    const auto rank = magpie_factory::require_rank(tp_size);
+    const auto group = magpie_tts::initialize_tensor_parallel_group(tp_size);
     const std::string decoder_section =
-        tp_size == 1 ? "decoder.plan" : "decoder.rank" + std::to_string(rank) + ".plan";
+        tp_size == 1 ? "decoder.plan" : "decoder.rank" + std::to_string(group.rank) + ".plan";
 
     auto stream_owner = std::make_shared<MagpieCudaStream>();
     if (!stream_owner->ok())
@@ -77,10 +53,15 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         return std::move(module.module);
     };
     auto encoder = load("encoder.plan");
+    ModuleCreateOptions decoder_options = options;
+    if (tp_size > 1) {
+        decoder_options.distributed_communicator = group.communicator;
+        decoder_options.distributed_owner = group.owner;
+    }
     const auto& decoder_plan =
         magpie_factory::require_section(context.reader, decoder_section.c_str());
     auto decoder_profiles = context.backend.create_dual_profile_modules(
-        decoder_plan.data(), decoder_plan.size(), options);
+        decoder_plan.data(), decoder_plan.size(), decoder_options);
     if (!decoder_profiles.prefill || !decoder_profiles.prefill->ok() || !decoder_profiles.decode ||
         !decoder_profiles.decode->ok())
         throw std::runtime_error("Magpie decoder plan must contain prefill and decode profiles");

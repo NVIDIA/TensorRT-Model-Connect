@@ -26,7 +26,7 @@
       "top_k": 1
     }
   ],
-  "precision": "fp16",
+  "precision": "bf16",
   "max_sequence_length": 131072,
   "tensor_parallel_size": 1
 }

@@ -4,6 +4,18 @@
   "hf_dependencies": [
     {
       "repo_id": "openai/whisper-large-v3-turbo"
+    },
+    {
+      "repo_id": "nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps"
+    },
+    {
+      "repo_id": "google/byt5-small"
+    },
+    {
+      "repo_id": "microsoft/wavlm-base-plus"
+    },
+    {
+      "repo_id": "Edresson/Speaker_Encoder_H_ASP"
     }
   ],
   "hf_revision": "34d7e40da85cabc97f92198889b65cea27bc7fd1",

@@ -65,6 +65,8 @@ std::unique_ptr<ITokenizer> load_tokenizer(const BundleReader& bundle) {
 } // namespace trtmc::wan22_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("wan2_2_ti2v does not support --kv-cache-size");
     const auto& runtime = trtmc::wan22_factory::require_section(context.reader, "runtime.json");
     const std::string runtime_text(runtime.begin(), runtime.end());
     return new trtmc::Wan22TI2VPipeline(

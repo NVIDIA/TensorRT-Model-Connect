@@ -994,6 +994,9 @@ def _runtime_config(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Nemotron-H bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("nemotron_h does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("nemotron_h does not support image_height")
 
@@ -1036,7 +1039,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _NemotronHModel()
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="nemotron_h", task=request.task, backend="trt")
+    writer.set_header(family="nemotron_h", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

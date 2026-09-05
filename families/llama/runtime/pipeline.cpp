@@ -166,15 +166,9 @@ void require_batched_prefill_contract(ITrtModule& prefill, const LlamaTextGenCon
         throw std::runtime_error("LlamaTextGenerationPipeline: prefill requires LlamaKvCache");
 }
 
-int32_t resolve_prefill_chunk_limit(const LlamaKvCache& kv, const LlamaTextGenConfig& cfg,
-                                    int32_t sq) {
-    if (kv.needs_attention_mask()) {
-        if (cfg.prefill_max_length > 0 && sq > cfg.prefill_max_length)
-            throw std::runtime_error("Llama prompt exceeds the prefill profile");
-        return sq;
-    }
+int32_t resolve_prefill_chunk_limit(const LlamaTextGenConfig& cfg) {
     if (cfg.prefill_max_length <= 0)
-        throw std::runtime_error("Llama native KV prefill engine has no valid profile capacity");
+        throw std::runtime_error("Llama prefill engine has no valid profile capacity");
     return cfg.prefill_max_length;
 }
 
@@ -211,7 +205,7 @@ void LlamaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>
     std::vector<const void*> pk, pv;
     require_prefill_kv_pointers(*prefill_, config_, pk, pv);
 
-    const int32_t chunk_limit = resolve_prefill_chunk_limit(*kv, config_, sq);
+    const int32_t chunk_limit = resolve_prefill_chunk_limit(config_);
     int32_t launches = 0;
     int32_t max_chunk = 0;
     for (int32_t start = 0; start < sq;) {

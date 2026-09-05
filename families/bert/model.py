@@ -869,6 +869,9 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one BERT bundle without shared model orchestration."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("bert does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("bert does not support image_height")
 
@@ -914,7 +917,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.set_header(
         family="bert",
         task=request.task,
-        backend="trt",
+        backend=request.backend,
     )
     if parallel.enabled:
         for rank in range(parallel.tp_size):

@@ -1,6 +1,5 @@
 {
   "threshold_overrides": {
-    "top1_match": true,
     "top1_margin_atol": 0.12
   }
 }

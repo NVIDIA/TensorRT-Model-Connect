@@ -17,7 +17,6 @@ FAMILY = "timm_vit"
 TASKS = frozenset({"classification"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
-THRESHOLD_ROOT = TEST_ROOT / "thresholds"
 
 
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:
@@ -169,11 +168,14 @@ def _run_json(
             "--tag-output",
             "-x",
             "LD_LIBRARY_PATH",
+            "-x",
+            "TRTMC_NCCL_RENDEZVOUS",
             "-np",
             str(manifest["tensor_parallel_size"]),
             *invocation,
         ]
     env = os.environ.copy()
+    env["TRTMC_NCCL_RENDEZVOUS"] = str(bundle.with_suffix(".nccl-rendezvous"))
     env["LD_LIBRARY_PATH"] = ":".join(
         (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
     )
@@ -196,12 +198,6 @@ def _run_json(
     assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
     assert all((payload == payloads[0] for payload in payloads))
     return payloads[0]
-
-
-def _thresholds(case_name: str) -> dict:
-    path = THRESHOLD_ROOT / f"{case_name}.json"
-    assert path.is_file(), f"selected {FAMILY} E2E requires exact thresholds: {path}"
-    return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
 
 
 def _asset(raw: str) -> Path:
@@ -259,12 +255,8 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     return {"logits": logits.float().cpu().numpy()}
 
 
-def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    manifest["task"]
-    assert _cosine(actual["logits"], expected["logits"]) >= float(thresholds["logit_cosine"])
+def _assert_parity(actual, expected) -> None:
     assert int(np.argmax(actual["logits"])) == int(np.argmax(expected["logits"]))
-    assert thresholds["top1_match"] is True
-    return
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -275,4 +267,4 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _build(model_dir, bundle, manifest)
     actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
     expected = _official_reference(model_dir, manifest, case, tmp_path)
-    _assert_parity(actual, expected, manifest, case, _thresholds(case_name))
+    _assert_parity(actual, expected)

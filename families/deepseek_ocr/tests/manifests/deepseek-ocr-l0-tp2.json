@@ -10,10 +10,14 @@
       "prompt": "Extract the text from this image.",
       "max_new_tokens": 220,
       "test_image": "data/orc_test_img.jpeg",
-      "reference_precision": "fp16"
+      "reference_precision": "fp32",
+      "reference_backend": "golden_snapshot",
+      "metadata": {
+        "golden_snapshot_path": "data/deepseek_ocr_l0_golden.json"
+      }
     }
   ],
   "tensor_parallel_size": 2,
-  "precision": "fp16",
+  "precision": "fp32",
   "max_sequence_length": 4096
 }

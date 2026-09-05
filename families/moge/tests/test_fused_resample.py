@@ -38,9 +38,7 @@ def _half_pixel_resize_x2(tensor: np.ndarray) -> np.ndarray:
     return output
 
 
-def _replicate_conv3x3(
-    tensor: np.ndarray, weight: np.ndarray, bias: np.ndarray
-) -> np.ndarray:
+def _replicate_conv3x3(tensor: np.ndarray, weight: np.ndarray, bias: np.ndarray) -> np.ndarray:
     padded = np.pad(tensor, ((0, 0), (0, 0), (1, 1), (1, 1)), mode="edge")
     output = np.empty(
         (tensor.shape[0], weight.shape[0], tensor.shape[2], tensor.shape[3]),
@@ -49,27 +47,19 @@ def _replicate_conv3x3(
     for output_y in range(tensor.shape[2]):
         for output_x in range(tensor.shape[3]):
             patch = padded[:, :, output_y : output_y + 3, output_x : output_x + 3]
-            output[:, :, output_y, output_x] = (
-                np.einsum("nchw,ochw->no", patch, weight) + bias
-            )
+            output[:, :, output_y, output_x] = np.einsum("nchw,ochw->no", patch, weight) + bias
     return output
 
 
-def _fused_deconvolution(
-    tensor: np.ndarray, weight: np.ndarray, bias: np.ndarray
-) -> np.ndarray:
+def _fused_deconvolution(tensor: np.ndarray, weight: np.ndarray, bias: np.ndarray) -> np.ndarray:
     padded = np.pad(tensor, ((0, 0), (0, 0), (1, 1), (1, 1)), mode="edge")
     kernel = model._fuse_half_pixel_x2_conv_weight(weight)
     full_height = (padded.shape[2] - 1) * 2 + 6
     full_width = (padded.shape[3] - 1) * 2 + 6
-    full = np.zeros(
-        (padded.shape[0], kernel.shape[1], full_height, full_width), dtype=tensor.dtype
-    )
+    full = np.zeros((padded.shape[0], kernel.shape[1], full_height, full_width), dtype=tensor.dtype)
     for input_y in range(padded.shape[2]):
         for input_x in range(padded.shape[3]):
-            contribution = np.einsum(
-                "ni,iohw->nohw", padded[:, :, input_y, input_x], kernel
-            )
+            contribution = np.einsum("ni,iohw->nohw", padded[:, :, input_y, input_x], kernel)
             full[
                 :,
                 :,
@@ -78,16 +68,11 @@ def _fused_deconvolution(
             ] += contribution
     output_height = (padded.shape[2] - 1) * 2 - 8 + 6
     output_width = (padded.shape[3] - 1) * 2 - 8 + 6
-    return (
-        full[:, :, 4 : 4 + output_height, 4 : 4 + output_width]
-        + bias[None, :, None, None]
-    )
+    return full[:, :, 4 : 4 + output_height, 4 : 4 + output_width] + bias[None, :, None, None]
 
 
 @pytest.mark.parametrize("height,width", ((1, 1), (2, 3), (3, 5), (7, 4)))
-def test_fused_resample_matches_half_pixel_replicate_reference(
-    height: int, width: int
-) -> None:
+def test_fused_resample_matches_half_pixel_replicate_reference(height: int, width: int) -> None:
     random = np.random.default_rng(1000 + 10 * height + width)
     tensor = random.standard_normal((1, 3, height, width)).astype(np.float32)
     weight = random.standard_normal((2, 3, 3, 3)).astype(np.float32)
@@ -149,6 +134,8 @@ def test_abstract_build_entrypoint_preserves_both_supported_profiles(
 
     request = SimpleNamespace(
         task="monocular_geometry",
+        backend="trt",
+        dynamic_kv_cache=False,
         precision=precision,
         image_height=None,
         image_width=None,

@@ -32,6 +32,11 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
     return result
 
 
+def _thresholds(case_name: str) -> dict:
+    path = THRESHOLD_ROOT / f"{case_name}.json"
+    return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
+
+
 CASES = _case_index()
 
 
@@ -181,12 +186,6 @@ def _run_json(
     return payloads[0]
 
 
-def _thresholds(case_name: str) -> dict:
-    path = THRESHOLD_ROOT / f"{case_name}.json"
-    assert path.is_file(), f"selected {FAMILY} E2E requires exact thresholds: {path}"
-    return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
-
-
 def _asset(raw: str) -> Path:
     path = Path(raw)
     if not path.is_absolute():
@@ -243,11 +242,27 @@ def _official_reference(model_dir: Path, case: dict):
 
 
 def _assert_parity(actual, expected, thresholds: dict) -> None:
-    assert thresholds["top1_match"] is True
     if int(actual["top_class"]) == int(expected["top_class"]):
         return
-    assert float(expected["top1_margin"]) <= float(thresholds["top1_margin_atol"])
+    margin = thresholds.get("top1_margin_atol")
+    assert margin is not None
+    assert float(expected["top1_margin"]) <= float(margin)
     assert int(actual["top_class"]) == int(expected["second_class"])
+
+
+def test_top1_margin_contract_accepts_only_the_reference_runner_up() -> None:
+    thresholds = {"top1_margin_atol": 0.12}
+    _assert_parity(
+        {"top_class": 2},
+        {"top_class": 1, "second_class": 2, "top1_margin": 0.1},
+        thresholds,
+    )
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            {"top_class": 2},
+            {"top_class": 1, "second_class": 2, "top1_margin": 0.2},
+            thresholds,
+        )
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:

@@ -745,12 +745,28 @@ def _build_eagle_engine(
     # --- Output ---
     if is_reranker and "score_weight" in weights:
         # The pinned CrossEncoderHead is explicitly FP32 and casts the final
-        # hidden states before applying its linear projection. Preserve that
-        # small mixed-precision boundary instead of accumulating the score head
-        # in FP16.
+        # hidden states before applying its linear projection. Pool first, as
+        # the checkpoint does, rather than averaging independently rounded
+        # per-token logits in the runtime.
         score_input = hidden_state
         if score_input.dtype != trt.float32:
             score_input = network.add_cast(score_input, trt.float32).get_output(0)
+        if config.raw["pooling"] == "avg":
+            score_mask = network.add_cast(attention_mask_input, trt.float32).get_output(0)
+            score_mask_3d = network.add_shuffle(score_mask)
+            score_mask_3d.reshape_dims = (0, 0, 1)
+            masked_hidden = network.add_elementwise(
+                score_input, score_mask_3d.get_output(0), trt.ElementWiseOperation.PROD
+            )
+            hidden_sum = network.add_reduce(
+                masked_hidden.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True
+            )
+            token_count = network.add_reduce(
+                score_mask_3d.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True
+            )
+            score_input = network.add_elementwise(
+                hidden_sum.get_output(0), token_count.get_output(0), trt.ElementWiseOperation.DIV
+            ).get_output(0)
         score = graph_ops.add_matmul_rhs_constant(
             network,
             score_input,
@@ -1454,6 +1470,9 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Eagle encoder bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("eagle_vlm does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("eagle_vlm does not support image_height")
 
@@ -1481,7 +1500,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     model = _EagleModel()
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="eagle_vlm", task=request.task, backend="trt")
+    writer.set_header(family="eagle_vlm", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             writer.add_bytes(
@@ -1511,7 +1530,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
     runtime = {"tensor_parallel_size": parallel.tp_size}
     if request.task == "reranking":
-        runtime["pooling"] = "last"
+        runtime["pooling"] = config.raw["pooling"]
     runtime.update(_tokenizer_runtime_contract(model_dir))
     writer.add_json("runtime.json", runtime)
     for filename in (

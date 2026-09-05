@@ -46,8 +46,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: Qwen38Model, **
         if "eos_token_id" in generation:
             eos = generation["eos_token_id"]
             eos_token_ids = eos if isinstance(eos, list) else [eos]
-    if not eos_token_ids or any(isinstance(value, bool) or not isinstance(value, int)
-                                for value in eos_token_ids):
+    if not eos_token_ids or any(
+        isinstance(value, bool) or not isinstance(value, int) for value in eos_token_ids
+    ):
         raise ValueError("Qwen3.8 eos_token_id must contain one or more integer IDs")
     runtime["eos_token_ids"] = eos_token_ids
     runtime.update(updates)
@@ -81,6 +82,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: Qwen38Model, **
 
 def build(request, writer) -> None:
     """Build one Qwen3.8 hybrid text-generation bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("qwen3_8 does not support dynamic_kv_cache")
 
     if request.task != "text_generation":
         raise ValueError("qwen3_8 supports only task=text_generation")
@@ -128,7 +131,7 @@ def build(request, writer) -> None:
         debug_layer_outputs=False,
     )
 
-    writer.set_header(family="qwen3_8", task=request.task, backend="trt")
+    writer.set_header(family="qwen3_8", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json(
         "runtime.json",

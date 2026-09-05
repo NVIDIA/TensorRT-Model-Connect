@@ -231,6 +231,9 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _QwenModel, **u
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen bundle through family-owned code."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("qwen does not support dynamic_kv_cache")
+
     if request.image_height is not None:
         raise NotImplementedError("qwen does not support image_height")
 
@@ -298,7 +301,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         config.raw["_decoder_engine_layout"] = "dual_profile"
         quant_ctx = calibrate_qwen_fp8(model_dir, config, graph_ops)
     weights = model.load_weights(str(model_dir), config, precision=precision)
-    writer.set_header(family="qwen", task=request.task, backend="trt")
+    writer.set_header(family="qwen", task=request.task, backend=request.backend)
     if quantized and parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

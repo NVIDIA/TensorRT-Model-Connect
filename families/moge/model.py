@@ -1293,6 +1293,7 @@ def _build_native_engine(
 ) -> bytes:
     fast_path = precision == "fp16"
     import tensorrt as trt
+
     logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -1415,6 +1416,8 @@ def build_moge_engine(
 
 def build(request, writer) -> None:
     """Build one native MoGe-2 bundle."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("moge does not support dynamic_kv_cache")
 
     if request.task != "monocular_geometry":
         raise ValueError("moge supports only task=monocular_geometry")
@@ -1438,5 +1441,5 @@ def build(request, writer) -> None:
         precision=request.precision,
         verbose=bool(request.verbose),
     )
-    writer.set_header(family="moge", task=request.task, backend="trt")
+    writer.set_header(family="moge", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)

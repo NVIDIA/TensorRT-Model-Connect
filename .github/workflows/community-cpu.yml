@@ -124,7 +124,7 @@ jobs:
           python-version: "3.12"
 
       - name: Run hardened source-only units
-        run: python3 -m tools.community_ci unit --scope all
+        run: python3 -m tools.community_ci unit
 
   required:
     name: Community CPU / Required

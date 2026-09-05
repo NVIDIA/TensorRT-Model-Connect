@@ -31,7 +31,8 @@ class TrtModuleImpl final : public ITrtModule {
     TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
                   cudaStream_t stream, int32_t profile_idx = 0,
                   void* distributed_communicator = nullptr,
-                  const std::vector<ModuleExternalBinding>& external_bindings = {});
+                  const std::vector<ModuleExternalBinding>& external_bindings = {},
+                  bool backend_managed_cuda_graph = false);
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -92,6 +93,7 @@ class TrtModuleImpl final : public ITrtModule {
     void* distributed_communicator_{nullptr};
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
+    bool backend_managed_cuda_graph_{false};
     bool alias_groups_ready_{true};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
@@ -121,6 +123,7 @@ class TrtModuleImpl final : public ITrtModule {
                                 int32_t num_profiles);
     void allocate_single_input(nvinfer1::ICudaEngine* engine, const std::string& name,
                                int32_t num_profiles);
+    void ensure_input_buffer(const std::string& name, BufferEntry& entry);
     void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                   nvinfer1::OptProfileSelector selector);

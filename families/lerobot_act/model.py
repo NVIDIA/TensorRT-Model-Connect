@@ -105,6 +105,9 @@ def _validate_initial_policy(raw: dict[str, Any]) -> None:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build the one qualified LeRobot ACT policy contract."""
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("lerobot_act does not support dynamic_kv_cache")
+
     if request.task != "robot_control":
         raise ValueError("lerobot_act supports only task=robot_control")
     if request.precision.lower() != "fp32":
@@ -134,7 +137,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision="fp32",
         verbose=request.verbose,
     )
-    writer.set_header(family="lerobot_act", task=request.task, backend="trt")
+    writer.set_header(family="lerobot_act", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json(
         "runtime.json",

@@ -6,7 +6,6 @@
 #pragma once
 
 #include <cstdint>
-#include <string>
 #include <vector>
 
 namespace trtmc {
@@ -19,9 +18,6 @@ struct Dinov3PreprocessConfig {
     int32_t input_image_w{224};
     std::vector<float> image_mean{0.485F, 0.456F, 0.406F};
     std::vector<float> image_std{0.229F, 0.224F, 0.225F};
-    std::string interpolation{"bilinear"};
-    bool do_center_crop{false};
-    float crop_pct{1.0F};
 };
 
 std::vector<float> preprocess_dinov3_image(const float* image_pixels, int32_t image_height,

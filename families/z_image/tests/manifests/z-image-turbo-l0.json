@@ -13,7 +13,6 @@
       "test_type": "diffusion",
       "num_inference_steps": 9,
       "guidance_scale": 0.0,
-      "reference_precision": "fp16",
       "seed": 42
     }
   ],
@@ -26,6 +25,5 @@
     8
   ],
   "image_height": 512,
-  "image_width": 512,
-  "video_num_frames": 1
+  "image_width": 512
 }

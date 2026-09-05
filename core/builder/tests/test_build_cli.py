@@ -17,9 +17,7 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(build_cli, "build", captured.append)
     model = tmp_path / "model"
     model.mkdir()
-    (model / "config.json").write_text(
-        '{"model_type":"patchtsmixer"}', encoding="utf-8"
-    )
+    (model / "config.json").write_text('{"model_type":"patchtsmixer"}', encoding="utf-8")
     output = tmp_path / "model.bundle"
 
     assert (
@@ -33,6 +31,8 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
                 "time_series_forecast",
                 "--precision",
                 "fp16",
+                "--backend",
+                "trt_rtx",
                 "--max-sequence-length",
                 "1024",
                 "--image-height",
@@ -53,6 +53,7 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
                 "2",
                 "--fp32-layer",
                 "5",
+                "--dynamic-kv-cache",
                 "--verbose",
             ]
         )
@@ -64,6 +65,7 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
     assert request.family == "patchtsmixer"
     assert request.task == "time_series_forecast"
     assert request.precision == "fp16"
+    assert request.backend == "trt_rtx"
     assert request.max_sequence_length == 1024
     assert request.image_height == 512
     assert request.image_width == 768
@@ -73,6 +75,7 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
     assert request.context_parallel_size == 4
     assert request.quantization == "fp8"
     assert request.fp32_layers == (2, 5)
+    assert request.dynamic_kv_cache is True
     assert request.verbose is True
 
 
@@ -103,14 +106,10 @@ def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_pat
     )
 
     assert build_cli._resolve_model("openai-community/gpt2", "revision-1") == tmp_path
-    assert calls == [
-        {"repo_id": "openai-community/gpt2", "revision": "revision-1"}
-    ]
+    assert calls == [{"repo_id": "openai-community/gpt2", "revision": "revision-1"}]
 
 
-def test_build_command_rejects_a_task_the_family_does_not_own(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_build_command_rejects_a_task_the_family_does_not_own(monkeypatch, tmp_path: Path) -> None:
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")

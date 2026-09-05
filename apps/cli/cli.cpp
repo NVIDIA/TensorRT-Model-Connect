@@ -48,6 +48,8 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
           {"--prompt",
            "--image",
            "--max-new-tokens",
+           "--source-language-token-id",
+           "--forced-bos-token-id",
            "--temperature",
            "--top-k",
            "--top-p",
@@ -89,13 +91,19 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"transcribe",
          {CommandKind::kTranscribe,
           {"--input", "--max-output-tokens", "--source-language", "--target-language",
-           "--translate", "--timestamps"}}},
+           "--translate", "--beam-size", "--length-penalty", "--punctuation", "--timestamps",
+           "--max-input-seconds", "--segment-length-seconds", "--segment-min-seconds",
+           "--segment-overlap-seconds", "--lcs-merge"}}},
         {"transcribe-batch",
          {CommandKind::kTranscribeBatch,
           {"--input", "--max-output-tokens", "--source-language", "--target-language",
-           "--translate", "--timestamps"}}},
+           "--translate", "--beam-size", "--length-penalty", "--punctuation", "--timestamps",
+           "--max-input-seconds", "--segment-length-seconds", "--segment-min-seconds",
+           "--segment-overlap-seconds", "--lcs-merge"}}},
         {"transcribe-streaming",
-         {CommandKind::kTranscribeStreaming, {"--input", "--chunk-samples"}}},
+         {CommandKind::kTranscribeStreaming,
+          {"--input", "--chunk-samples", "--max-new-tokens", "--att-context-left",
+           "--att-context-right", "--language"}}},
         {"speak",
          {CommandKind::kSpeak,
           {"--input", "--output", "--max-new-tokens", "--seed", "--tail-frames"}}},
@@ -161,6 +169,36 @@ std::string take_value(int argc, char** argv, int& index, const std::string& opt
     if (value.empty())
         throw std::invalid_argument(option + " requires a non-empty value");
     return value;
+}
+
+std::uint64_t parse_byte_size(const std::string& text) {
+    std::uint64_t multiplier = 1;
+    std::string number = text;
+    if (text.size() > 3 && text.compare(text.size() - 3, 3, "GiB") == 0) {
+        multiplier = 1024ULL * 1024ULL * 1024ULL;
+        number.resize(number.size() - 3);
+    } else if (text.size() > 2 && text.compare(text.size() - 2, 2, "GB") == 0) {
+        multiplier = 1000ULL * 1000ULL * 1000ULL;
+        number.resize(number.size() - 2);
+    }
+    if (number.empty() || !std::all_of(number.begin(), number.end(), [](unsigned char value) {
+            return value >= '0' && value <= '9';
+        })) {
+        throw std::invalid_argument(
+            "--kv-cache-size must be positive integer bytes or a value like 1GB or 1GiB");
+    }
+    std::size_t consumed = 0;
+    std::uint64_t value = 0;
+    try {
+        value = std::stoull(number, &consumed);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("--kv-cache-size is outside its valid range");
+    }
+    if (value == 0 || consumed != number.size() ||
+        value > std::numeric_limits<std::uint64_t>::max() / multiplier) {
+        throw std::invalid_argument("--kv-cache-size is outside its valid range");
+    }
+    return value * multiplier;
 }
 
 std::string require_option(const Command& command, const std::string& option) {
@@ -372,6 +410,50 @@ nlohmann::json embedding_json(const EmbeddingResult& result) {
     return {{"dim", result.dim}, {"values", result.data}};
 }
 
+TranscriptionConfig transcription_config(const Command& command, std::int32_t input_sample_rate) {
+    TranscriptionConfig config;
+    config.input_sample_rate = input_sample_rate;
+    config.max_output_tokens =
+        int_option(command, "--max-output-tokens", config.max_output_tokens, 1);
+    config.beam_size = int_option(command, "--beam-size", config.beam_size, 1);
+    config.length_penalty = float_option(command, "--length-penalty", config.length_penalty);
+    if (has_option(command, "--source-language"))
+        config.source_language = command.options.at("--source-language");
+    if (has_option(command, "--target-language"))
+        config.target_language = command.options.at("--target-language");
+    if (has_option(command, "--translate") &&
+        parse_bool(command.options.at("--translate"), "--translate")) {
+        config.task = TranscriptionTask::kTranslate;
+    }
+    if (has_option(command, "--punctuation"))
+        config.punctuation = parse_bool(command.options.at("--punctuation"), "--punctuation");
+    if (has_option(command, "--timestamps"))
+        config.timestamps = parse_bool(command.options.at("--timestamps"), "--timestamps");
+    config.max_input_duration_seconds =
+        float_option(command, "--max-input-seconds", config.max_input_duration_seconds);
+    config.segment_duration_seconds =
+        float_option(command, "--segment-length-seconds", config.segment_duration_seconds);
+    config.segment_min_duration_seconds =
+        float_option(command, "--segment-min-seconds", config.segment_min_duration_seconds);
+    config.segment_overlap_seconds =
+        float_option(command, "--segment-overlap-seconds", config.segment_overlap_seconds);
+    if (has_option(command, "--lcs-merge"))
+        config.lcs_merge = parse_bool(command.options.at("--lcs-merge"), "--lcs-merge");
+    if (config.length_penalty < 0.0F)
+        throw std::invalid_argument("--length-penalty must be non-negative");
+    if (has_option(command, "--max-input-seconds") && config.max_input_duration_seconds <= 0.0F)
+        throw std::invalid_argument("--max-input-seconds must be positive");
+    if (has_option(command, "--segment-length-seconds") && config.segment_duration_seconds <= 0.0F)
+        throw std::invalid_argument("--segment-length-seconds must be positive");
+    if (has_option(command, "--segment-min-seconds") &&
+        config.segment_min_duration_seconds <= 0.0F) {
+        throw std::invalid_argument("--segment-min-seconds must be positive");
+    }
+    if (config.segment_overlap_seconds < 0.0F)
+        throw std::invalid_argument("--segment-overlap-seconds must be non-negative");
+    return config;
+}
+
 ImageGenerationConfig image_config(const Command& command) {
     ImageGenerationConfig config;
     if (has_option(command, "--negative-prompt"))
@@ -495,6 +577,10 @@ int dispatch_run(const Command& command, ITask& task, std::ostream& output) {
     const std::string prompt =
         has_option(command, "--prompt") ? command.options.at("--prompt") : std::string{};
     TextGenerationConfig config;
+    config.source_language_token_id =
+        int_option(command, "--source-language-token-id", config.source_language_token_id, 0);
+    config.forced_bos_token_id =
+        int_option(command, "--forced-bos-token-id", config.forced_bos_token_id, 0);
     config.temperature = float_option(command, "--temperature", 1.0F);
     config.top_k = int_option(command, "--top-k", 1, 0);
     config.top_p = float_option(command, "--top-p", 1.0F);
@@ -573,17 +659,17 @@ Command parse_args(int argc, char** argv) {
     if (name == "help") {
         if (argc != 2)
             throw std::invalid_argument("help does not accept arguments");
-        return {CommandKind::kHelp, name, {}, {}, {}, {}, {}};
+        return {CommandKind::kHelp, name, {}, {}, {}, {}, {}, 0, {}, false};
     }
     if (name == "version") {
         if (argc != 2)
             throw std::invalid_argument("version does not accept arguments");
-        return {CommandKind::kVersion, name, {}, {}, {}, {}, {}};
+        return {CommandKind::kVersion, name, {}, {}, {}, {}, {}, 0, {}, false};
     }
     if (name == "inspect") {
         if (argc != 3 || std::string(argv[2]).empty())
             throw std::invalid_argument("inspect requires exactly one BUNDLE path");
-        return {CommandKind::kInspect, name, argv[2], {}, {}, {}, {}};
+        return {CommandKind::kInspect, name, argv[2], {}, {}, {}, {}, 0, {}, false};
     }
 
     const auto spec = command_specs().find(name);
@@ -592,13 +678,31 @@ Command parse_args(int argc, char** argv) {
     if (argc < 3 || std::string(argv[2]).empty())
         throw std::invalid_argument(name + " requires a BUNDLE path");
 
-    Command command{spec->second.kind, name, argv[2], {}, {}, {}, {}};
+    Command command{spec->second.kind, name, argv[2], {}, {}, {}, {}, 0, {}, false};
     for (int index = 3; index < argc; ++index) {
         const std::string option = argv[index];
         if (option == "--runtime-root") {
             if (!command.runtime_root.empty())
                 throw std::invalid_argument("--runtime-root may be specified only once");
             command.runtime_root = take_value(argc, argv, index, option);
+            continue;
+        }
+        if (option == "--kv-cache-size") {
+            if (command.kv_cache_size_bytes != 0)
+                throw std::invalid_argument("--kv-cache-size may be specified only once");
+            command.kv_cache_size_bytes = parse_byte_size(take_value(argc, argv, index, option));
+            continue;
+        }
+        if (option == "--runtime-cache") {
+            if (!command.runtime_cache_path.empty())
+                throw std::invalid_argument("--runtime-cache may be specified only once");
+            command.runtime_cache_path = take_value(argc, argv, index, option);
+            continue;
+        }
+        if (option == "--cuda-graphs") {
+            if (command.cuda_graphs)
+                throw std::invalid_argument("--cuda-graphs may be specified only once");
+            command.cuda_graphs = true;
             continue;
         }
         if (!is_byok_option(option) && spec->second.options.count(option) == 0)
@@ -779,8 +883,9 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
             require_interface<IVideoSegmentation>(task).create_video_segmentation_session();
         if (session == nullptr)
             throw std::runtime_error("video segmentation family returned a null session");
-        const auto result =
-            session->segment({std::move(frames), require_option(command, "--prompt")});
+        const std::string prompt =
+            has_option(command, "--prompt") ? command.options.at("--prompt") : std::string{};
+        const auto result = session->segment({std::move(frames), prompt});
         nlohmann::json output_frames = nlohmann::json::array();
         for (const auto& frame : result.frames) {
             require_finite(frame.detection_scores, "video detection scores");
@@ -852,19 +957,7 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
     }
     case CommandKind::kTranscribe: {
         const AudioResult audio = read_audio(require_option(command, "--input"));
-        TranscriptionConfig config;
-        config.input_sample_rate = audio.sample_rate;
-        config.max_output_tokens = int_option(command, "--max-output-tokens", 224, 1);
-        if (has_option(command, "--source-language"))
-            config.source_language = command.options.at("--source-language");
-        if (has_option(command, "--target-language"))
-            config.target_language = command.options.at("--target-language");
-        if (has_option(command, "--translate") &&
-            parse_bool(command.options.at("--translate"), "--translate")) {
-            config.task = TranscriptionTask::kTranslate;
-        }
-        if (has_option(command, "--timestamps"))
-            config.timestamps = parse_bool(command.options.at("--timestamps"), "--timestamps");
+        const TranscriptionConfig config = transcription_config(command, audio.sample_rate);
         const auto result = require_interface<ITranscription>(task).transcribe(
             audio.samples.data(), checked_count(audio.samples.size(), "audio"), config);
         write_json(output, text_json(result));
@@ -877,19 +970,7 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         requests.reserve(command.inputs.size());
         for (const auto& path : command.inputs) {
             AudioResult audio = read_audio(path);
-            TranscriptionConfig config;
-            config.input_sample_rate = audio.sample_rate;
-            config.max_output_tokens = int_option(command, "--max-output-tokens", 224, 1);
-            if (has_option(command, "--source-language"))
-                config.source_language = command.options.at("--source-language");
-            if (has_option(command, "--target-language"))
-                config.target_language = command.options.at("--target-language");
-            if (has_option(command, "--translate") &&
-                parse_bool(command.options.at("--translate"), "--translate")) {
-                config.task = TranscriptionTask::kTranslate;
-            }
-            if (has_option(command, "--timestamps"))
-                config.timestamps = parse_bool(command.options.at("--timestamps"), "--timestamps");
+            TranscriptionConfig config = transcription_config(command, audio.sample_rate);
             requests.push_back({std::move(audio.samples), std::move(config)});
         }
         const auto results =
@@ -906,6 +987,13 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         const AudioResult audio = read_audio(require_option(command, "--input"));
         TranscriptionStreamConfig config;
         config.input_sample_rate = audio.sample_rate;
+        config.max_new_tokens = int_option(command, "--max-new-tokens", config.max_new_tokens, 1);
+        config.att_context_left =
+            int_option(command, "--att-context-left", config.att_context_left, 1);
+        config.att_context_right =
+            int_option(command, "--att-context-right", config.att_context_right, 0);
+        if (has_option(command, "--language"))
+            config.language = command.options.at("--language");
         auto stream =
             require_interface<IStreamingTranscription>(task).create_transcription_stream(config);
         if (stream == nullptr)
@@ -1130,8 +1218,19 @@ void print_usage(std::ostream& output) {
               "  --condition-mask-raw PATH] [--sampling-steps-raw PATH]\n"
               "  [--sde-noise-raw PATH] [--num-steps N] [--guidance-scale S]\n"
               "  [--cfg-scale S] [--sde-gamma S]\n\n"
+              "Text generation options:\n"
+              "  [--source-language-token-id N] [--forced-bos-token-id N]\n\n"
+              "Offline transcription options:\n"
+              "  [--beam-size N] [--length-penalty F] [--punctuation true|false]\n"
+              "  [--max-input-seconds F] [--segment-length-seconds F]\n"
+              "  [--segment-min-seconds F] [--segment-overlap-seconds F]\n"
+              "  [--lcs-merge true|false]\n\n"
               "BYOK options:\n"
               "  --byok-library DSO --byok-function FUNCTION --byok-name KERNEL\n\n"
+              "Runtime-sized KV cache:\n"
+              "  [--kv-cache-size BYTES|GB|GiB]\n\n"
+              "TensorRT-RTX runtime options:\n"
+              "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
               "Execution never searches for runtimes; --runtime-root is always required.\n";
 }
 
@@ -1168,7 +1267,9 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
             }
             load_byok_extension(command);
         }
-        std::unique_ptr<ITask> task = load_task(command.bundle, command.runtime_root);
+        std::unique_ptr<ITask> task =
+            load_task(command.bundle, command.runtime_root, command.kv_cache_size_bytes,
+                      command.runtime_cache_path, command.cuda_graphs);
         return dispatch(command, *task, output);
     } catch (const std::invalid_argument& exception) {
         error << "Error: " << exception.what() << "\n\n";

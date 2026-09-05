@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 from contextlib import nullcontext
+from dataclasses import replace
 import json
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -69,6 +70,158 @@ def _environment(tmp_path: Path) -> tuple[Path, perf.Environment]:
     path = tmp_path / "environment.yaml"
     path.write_text(yaml.safe_dump(value), encoding="utf-8")
     return path, perf.load_environment(path)
+
+
+def _fake_measurement_runner(
+    environment,
+    entry,
+    *,
+    candidate_samples=(),
+    candidate_tokens=(),
+    candidate_exit_codes=(),
+    record_bundle=False,
+):
+    state = {"candidate_runs": 0, "commands": [], "environments": []}
+
+    def run_command(arguments, *, stdout_path, stderr_path, env=None, **_kwargs):
+        state["commands"].append(list(arguments))
+        state["environments"].append(dict(env or {}))
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        output = Path(arguments[arguments.index("--output") + 1])
+        if Path(arguments[0]) == environment.trtmc_bench:
+            index = state["candidate_runs"]
+            state["candidate_runs"] += 1
+            exit_code = candidate_exit_codes[index] if index < len(candidate_exit_codes) else 0
+            if exit_code:
+                return {"argv": list(arguments), "exit_code": exit_code}
+            samples = candidate_samples[index] if index < len(candidate_samples) else [10.0] * 10
+            tokens = candidate_tokens[index] if index < len(candidate_tokens) else [1, 2]
+            bundles = (
+                [{"model": entry.model.name, "bundle": str(entry.case.bundle_path)}]
+                if record_bundle
+                else []
+            )
+            output.mkdir(parents=True)
+            (output / "result.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "trtmc.benchmark-run/v2",
+                        "status": "completed",
+                        "preparation": {"bundles": bundles},
+                        "cells": [
+                            {
+                                "status": "completed",
+                                "metrics": {"latency_ms": {"p50": float(np.median(samples))}},
+                                "samples_ms": samples,
+                                "output_summary": {
+                                    "token_ids": tokens,
+                                    "output_tokens": len(tokens),
+                                },
+                                "timing_scope": "public_task_call_wall",
+                                "asset_loading_included": False,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            output.write_text(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "precision": entry.reference_precision,
+                        "metrics": {"latency_ms": {"p50": 10.1}},
+                        "samples_ms": [10.1] * 10,
+                        "output_summary": {"token_ids": [1, 2], "output_tokens": 2},
+                        "measurement_policy": dict(entry.baseline_timing),
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return {
+            "argv": list(arguments),
+            "exit_code": 0,
+            "stdout_log": str(stdout_path),
+            "stderr_log": str(stderr_path),
+        }
+
+    return state, run_command
+
+
+def test_environment_enforces_storage_root_and_per_entry_cache_policy(tmp_path: Path) -> None:
+    environment_path, _ = _environment(tmp_path)
+    value = yaml.safe_load(environment_path.read_text(encoding="utf-8"))
+    storage_root = tmp_path / "managed"
+    storage_root.mkdir()
+    value["storage"]["storage_root"] = str(storage_root)
+    value["execution"].update({"hf_cache_mode": "per_entry", "hf_cache_retention": "delete_always"})
+    environment_path.write_text(yaml.safe_dump(value), encoding="utf-8")
+    environment = perf.load_environment(environment_path)
+
+    assert environment.storage_root == storage_root
+    assert environment.hf_cache_mode == "per_entry"
+    assert environment.hf_cache_retention == "delete_always"
+    with pytest.raises(perf.PerfMatrixError, match="results_root must stay below storage_root"):
+        perf.preflight((), environment, require_runtime=False)
+
+
+def test_per_entry_hf_cache_is_private_and_follows_retention(tmp_path: Path, monkeypatch) -> None:
+    environment_path, _ = _environment(tmp_path)
+    value = yaml.safe_load(environment_path.read_text(encoding="utf-8"))
+    value["execution"].update(
+        {"hf_cache_mode": "per_entry", "hf_cache_retention": "delete_on_pass"}
+    )
+    environment_path.write_text(yaml.safe_dump(value), encoding="utf-8")
+    environment = perf.load_environment(environment_path)
+    monkeypatch.setenv("HF_HUB_CACHE", "/shared/hub")
+    monkeypatch.setenv("HF_MODULES_CACHE", "/shared/modules")
+    monkeypatch.setenv("TRANSFORMERS_CACHE", "/shared/transformers")
+    work = environment.scratch_root / "entry" / "attempt-1"
+    (work / "hf-cache").mkdir(parents=True)
+
+    command_environment = perf._entry_command_environment(environment, work)
+    assert command_environment["HF_HOME"] == str((work / "hf-cache").resolve())
+    assert "HF_HUB_CACHE" not in command_environment
+    assert "HF_MODULES_CACHE" not in command_environment
+    assert "TRANSFORMERS_CACHE" not in command_environment
+    assert perf._cleanup_entry_work(work, environment, passed=False)["status"] == "retained"
+    assert perf._cleanup_entry_work(work, environment, passed=True)["status"] == "deleted"
+    assert not work.exists()
+
+
+def test_shared_hf_cache_cannot_be_deleted(tmp_path: Path) -> None:
+    environment_path, _ = _environment(tmp_path)
+    value = yaml.safe_load(environment_path.read_text(encoding="utf-8"))
+    value["execution"].update({"hf_cache_mode": "shared", "hf_cache_retention": "delete_always"})
+    environment_path.write_text(yaml.safe_dump(value), encoding="utf-8")
+
+    with pytest.raises(perf.PerfMatrixError, match="shared Hugging Face cache"):
+        perf.load_environment(environment_path)
+
+
+def test_checked_in_environments_have_no_dead_gpu_headroom_setting() -> None:
+    root = REPO / "apps/benchmark/performance/environments"
+    for path in root.glob("*.yaml"):
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert "minimum_gpu_free_fraction" not in value["execution"], path
+
+
+def test_explicit_empty_model_selection_fails_closed(tmp_path: Path) -> None:
+    selection = tmp_path / "selection.json"
+    selection.write_text('{"families": []}\n', encoding="utf-8")
+
+    with pytest.raises(perf.PerfMatrixError, match="matches no release entries"):
+        perf.select_entries(
+            [{"id": "a", "family": "alpha", "model": "model-a"}], model_selection=selection
+        )
+
+
+@pytest.mark.parametrize("entry_id", (".", ".."))
+def test_entry_slug_cannot_escape_its_root(entry_id: str) -> None:
+    assert perf._entry_slug(entry_id) == "entry"
 
 
 def test_release_suite_expands_profiles_and_covers_ready_catalog() -> None:
@@ -317,6 +470,284 @@ def test_comparison_preserves_output_gate_and_three_performance_states(
     assert perf.compare(entry, candidate, reference)[0] == "contract-mismatch"
 
 
+@pytest.mark.parametrize(
+    ("samples", "status"),
+    (
+        ([100.0, 101.0, 99.0, 100.0, 100.0, 101.0, 100.0, 99.0, 100.0, 100.0], "stable"),
+        ([3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0], "unstable"),
+        ([10.0, 11.0], "not_evaluated"),
+    ),
+)
+def test_timing_stability_preserves_the_ten_sample_contract(samples, status) -> None:
+    assert perf._timing_stability(samples)["status"] == status
+
+
+@pytest.mark.parametrize(
+    ("second_samples", "expected_status", "stability_status"),
+    (([10.0] * 10, "yellow", "stable_after_retry"), (None, "white", "measurement_inconclusive")),
+)
+def test_unstable_measurement_is_retried_once(
+    tmp_path: Path,
+    monkeypatch,
+    second_samples,
+    expected_status,
+    stability_status,
+) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(entry for entry in entries if entry["id"] == "gpt2.generate")
+    entry = perf.resolve_entries((spec,), environment)[0]
+    falling = [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
+    second = falling if second_samples is None else second_samples
+    state, run_command = _fake_measurement_runner(
+        environment,
+        entry,
+        candidate_samples=(falling, second),
+    )
+    monkeypatch.setattr(perf, "run_command", run_command)
+    row = perf._execute_entry(
+        entry,
+        environment,
+        tmp_path / "run",
+        no_build=True,
+        verbose=False,
+        attempt=1,
+    )
+
+    assert len(state["commands"]) == 4
+    assert row["status"] == expected_status
+    assert row["measurement_stability"]["status"] == stability_status
+    assert set(row["commands"]) == {
+        "candidate",
+        "reference",
+        "candidate_measurement_2",
+        "reference_measurement_2",
+    }
+
+
+def test_scratch_is_run_scoped_and_success_cleans_all_entry_attempts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _, environment = _environment(tmp_path)
+    environment = replace(
+        environment,
+        hf_cache_mode="per_entry",
+        hf_cache_retention="delete_on_pass",
+    )
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(value for value in entries if value["id"] == "gpt2.generate")
+    entry = perf.resolve_entries((spec,), environment)[0]
+    run = tmp_path / "run-a"
+    entry_work = environment.scratch_root / "run-a" / "gpt2.generate"
+    (entry_work / "attempt-1" / "hf-cache").mkdir(parents=True)
+    state, run_command = _fake_measurement_runner(environment, entry)
+    monkeypatch.setattr(perf, "run_command", run_command)
+
+    row = perf._execute_entry(
+        entry,
+        environment,
+        run,
+        no_build=True,
+        verbose=False,
+        attempt=2,
+    )
+
+    assert row["status"] == "yellow"
+    assert not entry_work.exists()
+    expected_cache = str((entry_work / "attempt-2" / "hf-cache").resolve())
+    assert {value["HF_HOME"] for value in state["environments"]} == {expected_cache}
+
+
+def test_existing_artifact_attempt_is_skipped_in_one_execution(tmp_path: Path, monkeypatch) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(value for value in entries if value["id"] == "gpt2.generate")
+    entry = perf.resolve_entries((spec,), environment)[0]
+    run = tmp_path / "run"
+    (run / "artifacts" / "gpt2.generate" / "attempt-1").mkdir(parents=True)
+    _, run_command = _fake_measurement_runner(environment, entry)
+    monkeypatch.setattr(perf, "run_command", run_command)
+
+    row = perf._execute_entry(
+        entry,
+        environment,
+        run,
+        no_build=True,
+        verbose=False,
+        attempt=1,
+    )
+
+    assert row["attempts"] == 2
+    assert row["artifact_dir"] == "artifacts/gpt2.generate/attempt-2"
+
+
+def test_failed_command_records_the_scanned_artifact_attempt(tmp_path: Path, monkeypatch) -> None:
+    entry = SimpleNamespace(
+        spec={"id": "first", "operation": "generate"},
+        model=SimpleNamespace(name="model", family="family"),
+        case=SimpleNamespace(testcase_name="case"),
+    )
+    run = tmp_path / "run"
+    artifact_root = run / "artifacts" / "first"
+    (artifact_root / "attempt-1").mkdir(parents=True)
+    attempts = []
+
+    def execute(_entry, _environment, _run, *, attempt, **_kwargs):
+        attempts.append(attempt)
+        (artifact_root / f"attempt-{attempt}").mkdir(exist_ok=True)
+        raise perf.PerfMatrixError("candidate command failed")
+
+    results = {
+        "schema_version": perf.RESULT_SCHEMA,
+        "status": "running",
+        "selected_entry_ids": ["first"],
+        "rows": [],
+    }
+    monkeypatch.setattr(perf, "_execute_entry", execute)
+    monkeypatch.setattr(perf, "_write_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(perf, "write_report", lambda *_args, **_kwargs: {})
+
+    assert (
+        perf._run_rows(
+            run,
+            results,
+            (entry,),
+            SimpleNamespace(),
+            no_build=True,
+            verbose=False,
+        )
+        == 1
+    )
+    assert results["rows"][0]["attempts"] == 2
+
+    assert (
+        perf._run_rows(
+            run,
+            results,
+            (entry,),
+            SimpleNamespace(),
+            no_build=True,
+            verbose=False,
+        )
+        == 1
+    )
+    assert attempts == [2, 3]
+    assert results["rows"][0]["attempts"] == 3
+
+
+def test_second_measurement_contract_mismatch_discards_first_stability(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(value for value in entries if value["id"] == "gpt2.generate")
+    entry = perf.resolve_entries((spec,), environment)[0]
+    falling = [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
+    _, run_command = _fake_measurement_runner(
+        environment,
+        entry,
+        candidate_samples=(falling, [10.0] * 10),
+        candidate_tokens=([1, 2], [9]),
+    )
+    monkeypatch.setattr(perf, "run_command", run_command)
+
+    row = perf._execute_entry(
+        entry,
+        environment,
+        tmp_path / "run",
+        no_build=True,
+        verbose=False,
+        attempt=1,
+    )
+
+    assert row["status"] == "contract-mismatch"
+    assert "measurement_stability" not in row
+
+
+def test_failed_remeasurement_is_not_treated_as_a_pass(tmp_path: Path, monkeypatch) -> None:
+    _, environment = _environment(tmp_path)
+    environment = replace(environment, bundle_retention="delete_on_pass")
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(value for value in entries if value["id"] == "gpt2.generate")
+    entry = perf.resolve_entries((spec,), environment)[0]
+    entry.case.bundle_path.parent.mkdir(parents=True)
+    entry.case.bundle_path.write_bytes(b"bundle")
+    falling = [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
+    _, run_command = _fake_measurement_runner(
+        environment,
+        entry,
+        candidate_samples=(falling,),
+        candidate_exit_codes=(0, 1),
+        record_bundle=True,
+    )
+    monkeypatch.setattr(perf, "run_command", run_command)
+
+    with pytest.raises(perf.PerfMatrixError, match="candidate command failed"):
+        perf._execute_entry(
+            entry,
+            environment,
+            tmp_path / "run",
+            no_build=True,
+            verbose=False,
+            attempt=1,
+        )
+
+    assert entry.case.bundle_path.is_file()
+
+
+def test_delete_always_cleans_declared_bundle_when_candidate_process_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _, environment = _environment(tmp_path)
+    environment = replace(environment, bundle_retention="delete_always")
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(value for value in entries if value["id"] == "gpt2.generate")
+    entry = perf.resolve_entries((spec,), environment)[0]
+    entry.case.bundle_path.parent.mkdir(parents=True)
+    entry.case.bundle_path.write_bytes(b"bundle")
+    _, run_command = _fake_measurement_runner(
+        environment,
+        entry,
+        candidate_exit_codes=(1,),
+    )
+    monkeypatch.setattr(perf, "run_command", run_command)
+
+    with pytest.raises(perf.PerfMatrixError, match="candidate command failed"):
+        perf._execute_entry(
+            entry,
+            environment,
+            tmp_path / "run",
+            no_build=True,
+            verbose=False,
+            attempt=1,
+        )
+
+    assert not entry.case.bundle_path.exists()
+
+    external_bundle = tmp_path / "external.bundle"
+    external_bundle.write_bytes(b"external")
+    external_entry = replace(
+        entry,
+        case=entry.case.with_values(bundle_path=external_bundle),
+    )
+    _, run_command = _fake_measurement_runner(
+        environment,
+        external_entry,
+        candidate_exit_codes=(1,),
+    )
+    monkeypatch.setattr(perf, "run_command", run_command)
+    with pytest.raises(perf.PerfMatrixError, match="candidate command failed"):
+        perf._execute_entry(
+            external_entry,
+            environment,
+            tmp_path / "external-run",
+            no_build=True,
+            verbose=False,
+            attempt=1,
+        )
+    assert external_bundle.is_file()
+
+
 def test_prepare_aggregates_public_builder_receipts(tmp_path: Path, monkeypatch) -> None:
     _, environment = _environment(tmp_path)
     _, entries, _ = perf.load_suite(SUITE)
@@ -356,7 +787,7 @@ def test_prepare_aggregates_public_builder_receipts(tmp_path: Path, monkeypatch)
     assert len(receipt["bundles"]) == 1
 
 
-def test_report_is_derived_from_rows(tmp_path: Path) -> None:
+def test_report_uses_selected_ids_and_shows_pending_and_stability(tmp_path: Path) -> None:
     run = tmp_path / "run"
     run.mkdir()
     results = {
@@ -364,12 +795,14 @@ def test_report_is_derived_from_rows(tmp_path: Path) -> None:
         "status": "completed",
         "suite": "test",
         "environment": "test",
+        "selected_entry_ids": ["gpt2.generate", "pending.generate"],
         "rows": [
             {
                 "id": "gpt2.generate",
                 "model": "distilgpt2",
                 "operation": "generate",
                 "status": "yellow",
+                "measurement_stability": {"status": "stable_after_retry"},
                 "comparison": {
                     "candidate_p50_ms": 1.0,
                     "reference_p50_ms": 1.01,
@@ -379,8 +812,109 @@ def test_report_is_derived_from_rows(tmp_path: Path) -> None:
     }
     report = perf.write_report(run, results)
     assert report["summary"]["comparable"] == 1
+    assert report["summary"]["selected"] == 2
+    assert report["summary"]["pending"] == 1
     assert (run / "report.json").is_file()
-    assert (run / "report.html").is_file()
+    html = (run / "report.html").read_text(encoding="utf-8")
+    assert "pending: 1" in html
+    assert "stable_after_retry" in html
+
+
+def test_multi_entry_progress_publishes_only_completed_rows(tmp_path: Path, monkeypatch) -> None:
+    entries = tuple(
+        SimpleNamespace(
+            spec={"id": entry_id, "operation": "generate"},
+            model=SimpleNamespace(name=entry_id, family="gpt2"),
+            case=SimpleNamespace(testcase_name=entry_id),
+        )
+        for entry_id in ("first", "second")
+    )
+    results = {
+        "schema_version": perf.RESULT_SCHEMA,
+        "status": "running",
+        "selected_entry_ids": ["first", "second"],
+        "rows": [],
+    }
+    snapshots = []
+
+    def execute(entry, *_args, attempt, **_kwargs):
+        return {"id": entry.spec["id"], "status": "green", "attempts": attempt}
+
+    def write_json(path, value):
+        if path.name == "results.json":
+            snapshots.append([row["id"] for row in value["rows"]])
+
+    monkeypatch.setattr(perf, "_execute_entry", execute)
+    monkeypatch.setattr(perf, "_write_json", write_json)
+    monkeypatch.setattr(perf, "write_report", lambda *_args, **_kwargs: {})
+
+    assert (
+        perf._run_rows(
+            tmp_path / "run",
+            results,
+            entries,
+            SimpleNamespace(),
+            no_build=True,
+            verbose=False,
+        )
+        == 0
+    )
+    assert snapshots[:2] == [["first"], ["first", "second"]]
+
+
+def test_contract_mismatch_is_finished_but_keeps_run_non_green(tmp_path: Path, monkeypatch) -> None:
+    entry = SimpleNamespace(spec={"id": "first"})
+    results = {
+        "schema_version": perf.RESULT_SCHEMA,
+        "status": "running",
+        "selected_entry_ids": ["first"],
+        "rows": [{"id": "first", "status": "contract-mismatch", "attempts": 1}],
+    }
+    monkeypatch.setattr(
+        perf,
+        "_execute_entry",
+        lambda *_args, **_kwargs: pytest.fail("finished contract mismatch was rerun"),
+    )
+    monkeypatch.setattr(perf, "_write_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(perf, "write_report", lambda *_args, **_kwargs: {})
+
+    assert (
+        perf._run_rows(
+            tmp_path / "run",
+            results,
+            (entry,),
+            SimpleNamespace(),
+            no_build=True,
+            verbose=False,
+        )
+        == 1
+    )
+    assert results["status"] == "failed"
+
+
+@pytest.mark.parametrize("stored_ids", (None, ["removed.entry"]))
+def test_resume_fails_when_stored_selection_is_missing(tmp_path: Path, capsys, stored_ids) -> None:
+    environment_path, _ = _environment(tmp_path)
+    run = tmp_path / "resume-run"
+    run.mkdir()
+    results = {
+        "schema_version": perf.RESULT_SCHEMA,
+        "status": "failed",
+        "suite_path": str(SUITE),
+        "environment_path": str(environment_path),
+        "rows": [],
+    }
+    if stored_ids is not None:
+        results["selected_entry_ids"] = stored_ids
+    (run / "results.json").write_text(json.dumps(results), encoding="utf-8")
+
+    assert perf.main(["resume", str(run)]) == 2
+    expected = (
+        "matrix results has no selected entry IDs"
+        if stored_ids is None
+        else "selected entries are missing from the suite: removed.entry"
+    )
+    assert expected in capsys.readouterr().err
 
 
 def test_run_executes_candidate_then_reference_and_publishes_report(
@@ -405,6 +939,7 @@ def test_run_executes_candidate_then_reference_and_publishes_report(
                             {
                                 "status": "completed",
                                 "metrics": {"latency_ms": {"p50": 10.0}},
+                                "samples_ms": [10.0] * 10,
                                 "output_summary": {
                                     "token_ids": [1, 2],
                                     "output_tokens": 2,
@@ -424,6 +959,7 @@ def test_run_executes_candidate_then_reference_and_publishes_report(
                         "status": "completed",
                         "precision": "fp32",
                         "metrics": {"latency_ms": {"p50": 10.1}},
+                        "samples_ms": [10.1] * 10,
                         "output_summary": {
                             "token_ids": [1, 2],
                             "output_tokens": 2,
@@ -585,11 +1121,13 @@ def test_qwen3_omni_preserves_thinker_and_talker_limits(tmp_path: Path) -> None:
 
 
 def test_sana_reference_reports_materialized_video_shape() -> None:
-    frames = [
-        np.zeros((24, 32, 3), dtype=np.uint8),
-        np.ones((24, 32, 3), dtype=np.uint8),
-    ]
-    summary = sana_wm_reference.media_summary(SimpleNamespace(frames=[frames]))
+    video = np.stack(
+        [
+            np.zeros((24, 32, 3), dtype=np.uint8),
+            np.ones((24, 32, 3), dtype=np.uint8),
+        ]
+    )
+    summary = sana_wm_reference.media_summary(video)
     assert summary == {
         "media_type": "video",
         "media_count": 2,
@@ -605,6 +1143,173 @@ def test_sana_reference_reports_materialized_video_shape() -> None:
     assert 'request.get("action"' in source
 
 
+def test_sana_world_request_preserves_official_camera_controls(tmp_path: Path) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    selected = [entry for entry in entries if entry["id"] == "sana_wm.generate_image"]
+    request = perf.resolve_entries(selected, environment)[0].case.request
+    assert request["translation_speed"] == 0.055
+    assert request["rotation_speed_deg"] == 1.2
+    assert request["fps"] == 16
+    assert request["flow_shift"] == 9.8
+    assert request["no_action_overlay"] is True
+
+
+def test_sana_reference_calls_official_pipeline_with_exact_workload(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {"generate": []}
+    reference_repo = tmp_path / "Sana"
+    reference_repo.mkdir()
+    model_dir = tmp_path / "model"
+    (model_dir / "dit").mkdir(parents=True)
+    (model_dir / "refiner/text_encoder").mkdir(parents=True)
+    (model_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
+    (model_dir / "dit/sana_wm_1600m_720p.safetensors").write_bytes(b"weights")
+    image = tmp_path / "image.png"
+    image.write_bytes(b"image")
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("drive forward", encoding="utf-8")
+    intrinsics = tmp_path / "intrinsics.npy"
+    intrinsics.write_bytes(b"intrinsics")
+    output = tmp_path / "result.json"
+
+    class FakeImage:
+        def convert(self, mode):
+            captured["image_mode"] = mode
+            return self
+
+    pil = ModuleType("PIL")
+    pil.Image = SimpleNamespace(open=lambda path: FakeImage())
+    monkeypatch.setitem(sys.modules, "PIL", pil)
+
+    synchronize_calls = []
+    torch = ModuleType("torch")
+    torch.cuda = SimpleNamespace(
+        is_available=lambda: True,
+        synchronize=lambda: synchronize_calls.append(True),
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    pyrallis = ModuleType("pyrallis")
+
+    def parse_config(**kwargs):
+        captured["parse"] = kwargs
+        return "config"
+
+    pyrallis.parse = parse_config
+    monkeypatch.setitem(sys.modules, "pyrallis", pyrallis)
+
+    class RefinerSettings:
+        def __init__(self, **kwargs):
+            captured["refiner"] = kwargs
+
+    class GenerationParams:
+        def __init__(self, **kwargs):
+            captured["generation"] = kwargs
+
+    class Pipeline:
+        def __init__(self, **kwargs):
+            captured["pipeline"] = kwargs
+
+        def generate(self, *args):
+            captured["generate"].append(args)
+            return {
+                "video": np.zeros((321, 24, 32, 3), dtype=np.uint8),
+                "c2w": "camera",
+            }
+
+    trajectory = np.zeros((321, 4, 4), dtype=np.float32)
+    official = SimpleNamespace(
+        InferenceConfig=object,
+        RefinerSettings=RefinerSettings,
+        GenerationParams=GenerationParams,
+        SanaWMPipeline=Pipeline,
+        action_string_to_c2w=lambda action, **kwargs: (
+            captured.update(action=(action, kwargs)) or trajectory
+        ),
+        _snap_num_frames=lambda value, **kwargs: value,
+        resize_and_center_crop=lambda value: ("cropped", (1, 1), (2, 2), (0, 0)),
+        load_intrinsics=lambda path, frames: (
+            captured.update(load_intrinsics=(path, frames)) or "raw-intrinsics"
+        ),
+        transform_intrinsics_for_crop=lambda value, *sizes: (
+            captured.update(transform_intrinsics=(value, sizes)) or "intrinsics"
+        ),
+        apply_overlay=lambda *_: (_ for _ in ()).throw(
+            AssertionError("no-action-overlay must skip overlay")
+        ),
+    )
+    monkeypatch.setattr(sana_wm_reference, "_official_module", lambda path: official)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sana_wm_reference.py",
+            "--reference-repo",
+            str(reference_repo),
+            "--image",
+            str(image),
+            "--model-dir",
+            str(model_dir),
+            "--prompt",
+            str(prompt),
+            "--action",
+            "w-320",
+            "--intrinsics",
+            str(intrinsics),
+            "--num_frames",
+            "321",
+            "--fps",
+            "16",
+            "--step",
+            "60",
+            "--cfg_scale",
+            "5.0",
+            "--flow_shift",
+            "9.8",
+            "--seed",
+            "42",
+            "--refiner_seed",
+            "42",
+            "--translation_speed",
+            "0.055",
+            "--rotation_speed_deg",
+            "1.2",
+            "--no_action_overlay",
+            "--warmup",
+            "1",
+            "--iterations",
+            "2",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert sana_wm_reference.main() == 0
+    assert captured["action"] == (
+        "w-320",
+        {"translation_speed": 0.055, "rotation_speed_deg": 1.2},
+    )
+    assert captured["refiner"] == {
+        "root": model_dir / "refiner",
+        "gemma_root": model_dir / "refiner/text_encoder",
+        "seed": 42,
+    }
+    assert captured["generation"] == {
+        "num_frames": 321,
+        "fps": 16,
+        "step": 60,
+        "cfg_scale": 5.0,
+        "flow_shift": 9.8,
+        "seed": 42,
+    }
+    assert len(captured["generate"]) == 3
+    assert len(synchronize_calls) == 5
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert result["output_summary"]["num_frames"] == 321
+
+
 def test_sana_reference_requires_action_from_current_request(tmp_path: Path) -> None:
     checkout = tmp_path / "Sana"
     checkout.mkdir()
@@ -617,6 +1322,82 @@ def test_sana_reference_requires_action_from_current_request(tmp_path: Path) -> 
             {"prompt": "drive", "image_path": "assets/demo_0.png"},
             {"reference_repo": str(checkout)},
         )
+
+
+def test_sana_task_reference_uses_one_explicit_official_command(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "Sana"
+    checkout.mkdir()
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    captured = {}
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "samples_ms": [1.0, 2.0],
+                    "output_summary": {
+                        "media_type": "video",
+                        "media_count": 321,
+                        "num_frames": 321,
+                        "height": 704,
+                        "width": 1280,
+                        "channels": 3,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(task_reference.subprocess, "run", run)
+    arguments = SimpleNamespace(
+        manifest=REPO / "families/sana_wm/tests/manifests/sana-wm-bidirectional.json",
+        warmup=1,
+        iterations=2,
+    )
+    result = task_reference._run_sana_wm(
+        arguments,
+        {
+            "prompt": "drive forward",
+            "image_path": "assets/demo_0.png",
+            "action": "w-80,jw-40,w-40,lw-60,w-100",
+            "translation_speed": 0.055,
+            "rotation_speed_deg": 1.2,
+            "num_frames": 321,
+            "fps": 16,
+            "num_steps": 60,
+            "cfg_scale": 5.0,
+            "flow_shift": 9.8,
+            "seed": 42,
+            "no_action_overlay": True,
+        },
+        {
+            "reference_repo": str(checkout),
+            "model_dir": str(model_dir),
+            "intrinsics": "assets/demo_0_intrinsics.npy",
+        },
+    )
+
+    command = captured["command"]
+    assert command[command.index("--reference-repo") + 1] == str(checkout.resolve())
+    assert command[command.index("--translation_speed") + 1] == "0.055"
+    assert command[command.index("--rotation_speed_deg") + 1] == "1.2"
+    assert command[command.index("--num_frames") + 1] == "321"
+    assert command[command.index("--fps") + 1] == "16"
+    assert command[command.index("--flow_shift") + 1] == "9.8"
+    assert command[command.index("--refiner_seed") + 1] == "42"
+    assert command[command.index("--warmup") + 1] == "1"
+    assert command[command.index("--iterations") + 1] == "2"
+    assert "--no_action_overlay" in command
+    assert "env" not in captured["kwargs"]
+    assert result[0] == [1.0, 2.0]
+    assert result[1]["num_frames"] == 321
 
 
 def test_output_contracts_are_closed_and_semantic(tmp_path: Path) -> None:

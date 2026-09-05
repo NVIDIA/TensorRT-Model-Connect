@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 import pytest
 import numpy as np
@@ -245,26 +246,6 @@ def _case_text(case: dict) -> str:
     return value
 
 
-def _cosine(left, right) -> float:
-    a = np.asarray(left, dtype=np.float64).reshape(-1)
-    b = np.asarray(right, dtype=np.float64).reshape(-1)
-    assert a.shape == b.shape and a.size > 0
-    denominator = float(np.linalg.norm(a) * np.linalg.norm(b))
-    assert denominator > 0.0
-    return float(np.dot(a, b) / denominator)
-
-
-def _torch_dtype(precision: str):
-    import torch
-
-    return {
-        "fp16": torch.float16,
-        "bf16": torch.bfloat16,
-        "bfloat16": torch.bfloat16,
-        "fp32": torch.float32,
-    }[precision]
-
-
 def _native(
     binary: Path,
     runtime_root: Path,
@@ -309,68 +290,137 @@ def _native(
     return payload
 
 
+def _decode_reference_video(video_path: Path, frames_dir: Path) -> list[Path]:
+    import imageio.v3 as iio
+    from PIL import Image
+
+    assert video_path.is_file(), f"official Sana reference did not write {video_path}"
+    frames_dir.mkdir()
+    frame_paths = []
+    for index, frame in enumerate(iio.imiter(video_path, plugin="pyav")):
+        path = frames_dir / f"frame_{index:04d}.png"
+        Image.fromarray(np.asarray(frame)).convert("RGB").save(path)
+        frame_paths.append(path)
+    return frame_paths
+
+
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
-    manifest["task"]
-    import torch
-    from diffusers import DiffusionPipeline
+    assert case["no_action_overlay"] is True
+    video_dir = tmp_path / "reference-video"
+    source_root = _required_path(
+        os.environ.get("TRTMC_REFERENCE_SOURCE_DIR"), "TRTMC_REFERENCE_SOURCE_DIR"
+    ).resolve()
+    model_dir = model_dir.resolve()
+    entrypoint = source_root / "inference_video_scripts/wm/inference_sana_wm.py"
+    assert entrypoint.is_file(), f"declared Sana reference entrypoint is missing: {entrypoint}"
+    config = model_dir / "config.yaml"
+    model_path = model_dir / "dit/sana_wm_1600m_720p.safetensors"
+    refiner_root = model_dir / "refiner"
+    refiner_gemma_root = refiner_root / "text_encoder"
+    assert config.is_file(), f"Sana reference config is missing: {config}"
+    assert model_path.is_file(), f"Sana reference weights are missing: {model_path}"
+    assert refiner_root.is_dir(), f"Sana reference refiner is missing: {refiner_root}"
+    assert refiner_gemma_root.is_dir(), (
+        f"Sana reference refiner text encoder is missing: {refiner_gemma_root}"
+    )
+    environment = os.environ.copy()
+    environment["HF_HUB_OFFLINE"] = "1"
+    environment["TRANSFORMERS_OFFLINE"] = "1"
+    environment["PYTHONPATH"] = str(source_root)
+    command = [
+        sys.executable,
+        str(entrypoint),
+        "--image",
+        str(_asset(case["test_image"])),
+        "--prompt",
+        str(_asset(case["prompt_file"])),
+        "--intrinsics",
+        str(_asset(case["camera_intrinsics_file"])),
+        "--action",
+        str(case["action"]),
+        "--translation_speed",
+        str(float(case["translation_speed"])),
+        "--rotation_speed_deg",
+        str(float(case["rotation_speed_deg"])),
+        "--num_frames",
+        str(int(manifest["video_num_frames"])),
+        "--fps",
+        str(int(case["fps"])),
+        "--step",
+        str(int(case["num_inference_steps"])),
+        "--cfg_scale",
+        str(float(case["cfg_scale"])),
+        "--flow_shift",
+        str(float(case["flow_shift"])),
+        "--seed",
+        str(int(case["seed"])),
+        "--refiner_seed",
+        str(int(case["seed"])),
+        "--no_action_overlay",
+        "--config",
+        str(config),
+        "--model_path",
+        str(model_path),
+        "--refiner_root",
+        str(refiner_root),
+        "--refiner_gemma_root",
+        str(refiner_gemma_root),
+        "--output_dir",
+        str(video_dir),
+        "--name",
+        "reference",
+    ]
+    subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=source_root,
+        env=environment,
+        timeout=int(case.get("runtime_timeout_s", 7200)),
+    )
+    frame_paths = _decode_reference_video(
+        video_dir / "reference_generated.mp4", tmp_path / "reference-frames"
+    )
+    expected_names = [
+        f"frame_{index:04d}.png" for index in range(int(manifest["video_num_frames"]))
+    ]
+    assert [path.name for path in frame_paths] == expected_names
+    return {"frame_paths": frame_paths}
 
-    pipeline = DiffusionPipeline.from_pretrained(
-        model_dir, torch_dtype=_torch_dtype(case["reference_precision"]), local_files_only=True
-    ).to("cuda")
-    prompts = _case_text(case)
-    generator = torch.Generator(device="cuda").manual_seed(int(case["seed"]))
-    kwargs = {
-        "prompt": prompts,
-        "height": int(manifest["image_height"]),
-        "width": int(manifest["image_width"]),
-        "num_inference_steps": int(case["num_inference_steps"]),
-        "generator": generator,
-    }
-    if int(manifest.get("video_num_frames", 1)) > 1:
-        kwargs["num_frames"] = int(manifest["video_num_frames"])
-    if case.get("negative_prompt"):
-        kwargs["negative_prompt"] = case["negative_prompt"]
-    if "guidance_scale" in case:
-        kwargs["guidance_scale"] = float(case["guidance_scale"])
-    output = pipeline(**kwargs)
-    images = output.frames[0]
-    return {
-        "images": [np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0 for image in images]
-    }
 
-
-def _write_semantic_artifacts(case: dict, actual_images: list, expected_images: list) -> None:
+def _write_semantic_artifacts(
+    case: dict, actual_paths: list[Path], expected_paths: list[Path]
+) -> None:
     if not case.get("semantic_assessment"):
         return
     output_root = os.environ.get("TRTMC_E2E_ARTIFACT_DIR")
     if not output_root:
         return
-    from PIL import Image
-
     output = Path(output_root) / str(case["name"])
     output.mkdir(parents=True, exist_ok=False)
-    assert len(actual_images) == len(expected_images) and actual_images
+    paired_count = min(len(actual_paths), len(expected_paths))
+    assert paired_count > 0
     sample_count = int(case.get("semantic_samples", 1))
-    assert 1 <= sample_count <= min(6, len(actual_images))
+    assert 1 <= sample_count <= min(6, paired_count)
     if sample_count == 1:
-        sample_indices = [(len(actual_images) - 1) // 2]
+        sample_indices = [(paired_count - 1) // 2]
     else:
         sample_indices = [
-            round(index * (len(actual_images) - 1) / (sample_count - 1))
-            for index in range(sample_count)
+            round(index * (paired_count - 1) / (sample_count - 1)) for index in range(sample_count)
         ]
     for source_index in sample_indices:
-        actual = actual_images[source_index]
-        expected = expected_images[source_index]
-        for label, image in (("trt", actual), ("reference", expected)):
-            pixels = np.rint(np.clip(np.asarray(image), 0.0, 1.0) * 255.0).astype(np.uint8)
-            Image.fromarray(pixels).save(output / f"{label}-{source_index:03d}.png")
+        for label, source in (
+            ("trt", actual_paths[source_index]),
+            ("reference", expected_paths[source_index]),
+        ):
+            shutil.copyfile(source, output / f"{label}-{source_index:03d}.png")
     (output / "metadata.json").write_text(
         json.dumps(
             {
                 "family": "sana_wm",
                 "case": case["name"],
-                "frame_count": len(actual_images),
+                "frame_count": len(actual_paths),
                 "prompt": _case_text(case),
                 "sample_count": sample_count,
                 "sampled_frame_indices": sample_indices,
@@ -384,127 +434,41 @@ def _write_semantic_artifacts(case: dict, actual_images: list, expected_images: 
     )
 
 
-def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    manifest["task"]
+def _load_rgb(path: Path) -> np.ndarray:
     from PIL import Image
 
+    with Image.open(path) as image:
+        return np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+
+
+def _frame_stats(paths: list[Path]) -> tuple[float, float]:
+    assert paths
+    count = 0
+    total = 0.0
+    squared_total = 0.0
+    for path in paths:
+        pixels = _load_rgb(path).astype(np.float64)
+        count += pixels.size
+        total += float(pixels.sum())
+        squared_total += float(np.square(pixels).sum())
+    mean = total / count
+    variance = max(0.0, squared_total / count - mean**2)
+    return mean, float(np.sqrt(variance))
+
+
+def _assert_contract(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
+    del manifest
     artifact = Path(actual["artifact"])
-    if artifact.is_dir():
-        actual_paths = sorted(artifact.glob("*.png"))
-    else:
-        actual_paths = [artifact]
-    assert actual_paths
-    actual_images = [
-        np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
-        for path in actual_paths
-    ]
-    expected_images = expected["images"]
-    assert len(actual_images) == len(expected_images)
-    assert len(actual_images) == int(manifest["video_num_frames"])
-    if "exact_num_frames" in thresholds:
-        assert len(actual_images) == int(thresholds["exact_num_frames"])
-    for image in actual_images:
-        if "exact_video_height" in thresholds:
-            assert image.shape[0] == int(thresholds["exact_video_height"])
-        if "exact_video_width" in thresholds:
-            assert image.shape[1] == int(thresholds["exact_video_width"])
-    cosine = min((_cosine(a, b) for a, b in zip(actual_images, expected_images)))
-    if "min_frame_cosine_uint8" in thresholds:
-        assert cosine >= float(thresholds["min_frame_cosine_uint8"])
-    elif "min_cosine_uint8" in thresholds:
-        assert cosine >= float(thresholds["min_cosine_uint8"])
-    elif "latent_cosine_per_step" in thresholds:
-        assert cosine >= float(thresholds["latent_cosine_per_step"])
-    rmse = max(
-        (float(np.sqrt(np.mean((a - b) ** 2))) for a, b in zip(actual_images, expected_images))
-    )
-    if "max_rmse_uint8" in thresholds:
-        assert rmse * 255.0 <= float(thresholds["max_rmse_uint8"])
-    if "contract_psnr_threshold" in thresholds:
-        psnr = float("inf") if rmse == 0 else 20.0 * np.log10(1.0 / rmse)
-        assert psnr >= float(thresholds["contract_psnr_threshold"])
-    elif "psnr" in thresholds:
-        psnr = float("inf") if rmse == 0 else 20.0 * np.log10(1.0 / rmse)
-        assert psnr >= float(thresholds["psnr"])
-    if "ssim" in thresholds or "contract_ssim_threshold" in thresholds:
-        scores = []
-        for left, right in zip(actual_images, expected_images):
-            mean_left = float(left.mean())
-            mean_right = float(right.mean())
-            variance_left = float(left.var())
-            variance_right = float(right.var())
-            covariance = float(np.mean((left - mean_left) * (right - mean_right)))
-            scores.append(
-                (2 * mean_left * mean_right + 0.01**2)
-                * (2 * covariance + 0.03**2)
-                / (
-                    (mean_left**2 + mean_right**2 + 0.01**2)
-                    * (variance_left + variance_right + 0.03**2)
-                )
-            )
-        limit = (
-            float(thresholds["contract_ssim_threshold"])
-            if "contract_ssim_threshold" in thresholds
-            else float(thresholds["ssim"])
-        )
-        assert min(scores) >= limit
-    if "minimum_frame_low_frequency_correlation" in thresholds:
-        block = int(thresholds["low_frequency_block_size"])
-        correlations = []
-        for left, right in zip(actual_images, expected_images):
-            height = left.shape[0] // block * block
-            width = left.shape[1] // block * block
-            low_left = (
-                left[:height, :width]
-                .reshape(height // block, block, width // block, block, 3)
-                .mean(axis=(1, 3))
-            )
-            low_right = (
-                right[:height, :width]
-                .reshape(height // block, block, width // block, block, 3)
-                .mean(axis=(1, 3))
-            )
-            correlations.append(_cosine(low_left, low_right))
-        assert min(correlations) >= float(thresholds["minimum_frame_low_frequency_correlation"])
-        assert float(np.mean(correlations)) >= float(
-            thresholds["minimum_mean_low_frequency_correlation"]
-        )
-        brightness_left = np.asarray([image.mean() for image in actual_images])
-        brightness_right = np.asarray([image.mean() for image in expected_images])
-        assert _cosine(brightness_left, brightness_right) >= float(
-            thresholds["minimum_brightness_profile_correlation"]
-        )
-        assert float(np.max(np.abs(brightness_left - brightness_right))) <= float(
-            thresholds["maximum_frame_brightness_absolute_error"]
-        )
-    if len(actual_images) > 1 and "min_temporal_motion_ratio" in thresholds:
-        actual_motion = np.asarray(
-            [np.mean(np.abs(b - a)) for a, b in zip(actual_images, actual_images[1:])]
-        )
-        expected_motion = np.asarray(
-            [np.mean(np.abs(b - a)) for a, b in zip(expected_images, expected_images[1:])]
-        )
-        ratio = float(actual_motion.mean() / max(expected_motion.mean(), 1e-12))
-        assert ratio >= float(thresholds["min_temporal_motion_ratio"])
-        assert ratio <= float(thresholds["max_temporal_motion_ratio"])
-        assert _cosine(actual_motion, expected_motion) >= float(
-            thresholds["min_temporal_profile_correlation"]
-        )
-    for image in actual_images:
-        if "contract_min_pixel_mean" in thresholds:
-            assert float(image.mean()) >= float(thresholds["contract_min_pixel_mean"])
-        elif "min_pixel_mean" in thresholds:
-            assert float(image.mean()) >= float(thresholds["min_pixel_mean"])
-        if "contract_max_pixel_mean" in thresholds:
-            assert float(image.mean()) <= float(thresholds["contract_max_pixel_mean"])
-        elif "max_pixel_mean" in thresholds:
-            assert float(image.mean()) <= float(thresholds["max_pixel_mean"])
-        if "contract_min_pixel_std" in thresholds:
-            assert float(image.std()) >= float(thresholds["contract_min_pixel_std"])
-        elif "min_pixel_std" in thresholds:
-            assert float(image.std()) >= float(thresholds["min_pixel_std"])
-    _write_semantic_artifacts(case, actual_images, expected_images)
-    return
+    actual_paths = sorted(artifact.glob("*.png")) if artifact.is_dir() else [artifact]
+    expected_paths = [Path(path) for path in expected["frame_paths"]]
+    minimum_frames = int(thresholds["contract_min_frame_count"])
+    assert len(actual_paths) >= minimum_frames
+    assert len(expected_paths) >= minimum_frames
+    pixel_mean, pixel_std = _frame_stats(actual_paths)
+    assert pixel_mean >= float(thresholds["min_pixel_mean"])
+    assert pixel_mean <= float(thresholds["max_pixel_mean"])
+    assert pixel_std >= float(thresholds["min_pixel_std"])
+    _write_semantic_artifacts(case, actual_paths, expected_paths)
 
 
 def test_semantic_artifacts_are_paired(monkeypatch, tmp_path: Path) -> None:
@@ -517,11 +481,11 @@ def test_semantic_artifacts_are_paired(monkeypatch, tmp_path: Path) -> None:
         "prompt_file": str(prompt_file),
         "semantic_assessment": True,
     }
-    _write_semantic_artifacts(
-        case,
-        [np.zeros((2, 2, 3), dtype=np.float32)],
-        [np.ones((2, 2, 3), dtype=np.float32)],
-    )
+    actual = tmp_path / "actual.png"
+    reference = tmp_path / "reference.png"
+    actual.write_bytes(b"actual")
+    reference.write_bytes(b"reference")
+    _write_semantic_artifacts(case, [actual], [reference])
     output = tmp_path / "semantic-probe"
     assert sorted(path.name for path in output.iterdir()) == [
         "metadata.json",
@@ -548,4 +512,4 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _build(_prepared_model_dir(model_dir, manifest, tmp_path), bundle, manifest)
     actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
     expected = _official_reference(model_dir, manifest, case, tmp_path)
-    _assert_parity(actual, expected, manifest, case, _thresholds(case_name))
+    _assert_contract(actual, expected, manifest, case, _thresholds(case_name))

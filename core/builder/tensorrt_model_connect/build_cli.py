@@ -22,6 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--task", help="Override the family-owned default task")
     build_parser.add_argument("--revision", help="Hugging Face model revision")
     build_parser.add_argument("--precision", choices=("fp16", "bf16", "fp32"), default="fp32")
+    build_parser.add_argument("--backend", choices=("trt", "trt_rtx"), default="trt")
     build_parser.add_argument("--max-sequence-length", type=int)
     build_parser.add_argument("--image-height", type=int)
     build_parser.add_argument("--image-width", type=int)
@@ -31,6 +32,7 @@ def _parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--context-parallel-size", type=int, default=1)
     build_parser.add_argument("--quantization")
     build_parser.add_argument("--fp32-layer", type=int, action="append", default=[])
+    build_parser.add_argument("--dynamic-kv-cache", action="store_true")
     build_parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -52,6 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model_dir=model_dir,
             output_path=args.output,
             precision=args.precision,
+            backend=args.backend,
             family=family,
             task=task,
             max_sequence_length=args.max_sequence_length,
@@ -63,6 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             context_parallel_size=args.context_parallel_size,
             quantization=args.quantization,
             fp32_layers=tuple(args.fp32_layer),
+            dynamic_kv_cache=args.dynamic_kv_cache,
             verbose=args.verbose,
         )
     )

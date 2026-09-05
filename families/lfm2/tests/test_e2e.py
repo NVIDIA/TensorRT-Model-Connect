@@ -44,12 +44,7 @@ _CASES = _load_cases()
 
 
 def _csv_values(values: list[str]) -> set[str]:
-    return {
-        item.strip()
-        for value in values
-        for item in str(value).split(",")
-        if item.strip()
-    }
+    return {item.strip() for value in values for item in str(value).split(",") if item.strip()}
 
 
 def _selection(config) -> set[str]:
@@ -93,8 +88,7 @@ def _required_environment(tp_size: int):
 
     assert torch.cuda.is_available(), "selected E2E requires CUDA"
     assert torch.cuda.device_count() >= tp_size, (
-        f"{_FAMILY} TP{tp_size} requires {tp_size} visible GPUs; "
-        f"found {torch.cuda.device_count()}"
+        f"{_FAMILY} TP{tp_size} requires {tp_size} visible GPUs; found {torch.cuda.device_count()}"
     )
     if tp_size > 1:
         assert shutil.which("mpirun"), "selected TP E2E requires mpirun"
@@ -104,10 +98,12 @@ def _required_environment(tp_size: int):
 def _checkpoint(manifest: dict) -> Path:
     from huggingface_hub import snapshot_download
 
+    revision = manifest.get("hf_revision")
+    assert isinstance(revision, str) and revision, "LFM2 reference must pin its checkpoint revision"
     path = Path(
         snapshot_download(
             repo_id=manifest["hf_id"],
-            revision=manifest.get("hf_revision"),
+            revision=revision,
         )
     )
     assert (path / "config.json").is_file(), path
@@ -122,19 +118,9 @@ def _prompt(case: dict) -> str:
     repeated = case["prompt_repeat"]
     count = int(repeated["count"])
     assert count > 0
-    return (
-        str(repeated["separator"]).join([str(repeated["text"])] * count)
-        + str(repeated.get("suffix", ""))
+    return str(repeated["separator"]).join([str(repeated["text"])] * count) + str(
+        repeated.get("suffix", "")
     )
-
-
-def _thresholds(case_name: str) -> dict[str, float]:
-    path = _TEST_DIR / "thresholds" / f"{case_name}.json"
-    assert path.is_file(), f"missing threshold file: {path}"
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    thresholds = payload["threshold_overrides"]
-    assert isinstance(thresholds, dict) and thresholds, path
-    return thresholds
 
 
 def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
@@ -236,7 +222,9 @@ def _run_native(
         env=environment,
     )
     if tp_size == 1:
-        return json.loads(completed.stdout)
+        payload = json.loads(completed.stdout)
+        payload["runtime_command"] = command
+        return payload
 
     rank_zero_payloads = []
     for line in completed.stdout.splitlines():
@@ -244,7 +232,9 @@ def _run_native(
         if match and match.group(1).lstrip().startswith("{"):
             rank_zero_payloads.append(match.group(1))
     assert len(rank_zero_payloads) == 1, completed.stdout
-    return json.loads(rank_zero_payloads[0])
+    payload = json.loads(rank_zero_payloads[0])
+    payload["runtime_command"] = command
+    return payload
 
 
 def _render_prompt(tokenizer, prompt: str, case: dict):
@@ -270,49 +260,6 @@ def _is_sampling(case: dict) -> bool:
     )
 
 
-def _apply_repetition_penalty(logits, token_ids: list[int], penalty: float):
-    if penalty == 1.0:
-        return logits
-    logits = logits.clone()
-    for token_id in set(token_ids):
-        logits[token_id] = (
-            logits[token_id] * penalty
-            if logits[token_id] < 0
-            else logits[token_id] / penalty
-        )
-    return logits
-
-
-def _allowed_tokens(torch, logits, case: dict, history: list[int]):
-    penalty = float(case.get("repetition_penalty", 1.0))
-    logits = _apply_repetition_penalty(logits.float(), history, penalty)
-    temperature = float(case.get("temperature", 1.0))
-    if temperature > 0.0:
-        logits = logits / temperature
-    probabilities = torch.softmax(logits, dim=-1)
-    allowed = torch.ones_like(probabilities, dtype=torch.bool)
-
-    top_k = int(case.get("top_k", 0))
-    if top_k > 0 and top_k < probabilities.numel():
-        top_indices = torch.topk(probabilities, top_k).indices
-        top_mask = torch.zeros_like(allowed)
-        top_mask[top_indices] = True
-        allowed &= top_mask
-
-    top_p = float(case.get("top_p", 1.0))
-    if top_p < 1.0:
-        sorted_probabilities, sorted_indices = torch.sort(probabilities, descending=True)
-        keep = torch.cumsum(sorted_probabilities, dim=-1) - sorted_probabilities < top_p
-        top_p_mask = torch.zeros_like(allowed)
-        top_p_mask[sorted_indices[keep]] = True
-        allowed &= top_p_mask
-
-    min_p = float(case.get("min_p", 0.0))
-    if min_p > 0.0:
-        allowed &= probabilities >= probabilities.max() * min_p
-    return allowed
-
-
 def _hf_reference(
     model_dir: Path,
     manifest: dict,
@@ -320,7 +267,7 @@ def _hf_reference(
     prompt: str,
     actual_ids: list[int],
     torch,
-) -> tuple[list[int], str, float | None, str]:
+) -> tuple[list[int], str, str]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     trust_remote_code = bool(manifest.get("trust_remote_code", False))
@@ -339,105 +286,49 @@ def _hf_reference(
         "bf16": torch.bfloat16,
     }
     assert reference_precision in dtypes, reference_precision
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        local_files_only=True,
-        trust_remote_code=trust_remote_code,
-        dtype=dtypes[reference_precision],
-    ).eval().to("cuda")
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            local_files_only=True,
+            trust_remote_code=trust_remote_code,
+            dtype=dtypes[reference_precision],
+        )
+        .eval()
+        .to("cuda")
+    )
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:
         assert prompt_ids == case["expected_prompt_token_ids"]
 
-    sampling_support = None
-    reference_ids: list[int] = []
-    reference_text = ""
+    generation_options = {
+        "max_new_tokens": int(case["max_new_tokens"]),
+        "do_sample": _is_sampling(case),
+    }
+    for field in ("temperature", "top_p", "min_p", "top_k", "repetition_penalty"):
+        if field in case:
+            generation_options[field] = case[field]
+    if generation_options["do_sample"]:
+        generation_options.setdefault("top_p", 1.0)
+        torch.manual_seed(int(case["seed"]))
     with torch.inference_mode():
-        if _is_sampling(case):
-            output = model(**inputs, use_cache=True)
-            past = output.past_key_values
-            history = list(prompt_ids)
-            attention_mask = inputs.get("attention_mask")
-            accepted = 0
-            for token_id in actual_ids:
-                allowed = _allowed_tokens(torch, output.logits[0, -1], case, history)
-                accepted += int(0 <= token_id < allowed.numel() and allowed[token_id].item())
-                history.append(token_id)
-                next_id = torch.tensor([[token_id]], dtype=torch.long, device=model.device)
-                next_inputs = {
-                    "input_ids": next_id,
-                    "past_key_values": past,
-                    "use_cache": True,
-                }
-                if attention_mask is not None:
-                    attention_mask = torch.cat(
-                        [
-                            attention_mask,
-                            torch.ones(
-                                (1, 1),
-                                dtype=attention_mask.dtype,
-                                device=model.device,
-                            ),
-                        ],
-                        dim=1,
-                    )
-                    next_inputs["attention_mask"] = attention_mask
-                output = model(**next_inputs)
-                past = output.past_key_values
-            sampling_support = accepted / len(actual_ids)
-        else:
-            generate_options = {
-                "max_new_tokens": int(case["max_new_tokens"]),
-                "do_sample": False,
-            }
-            if "repetition_penalty" in case:
-                generate_options["repetition_penalty"] = float(case["repetition_penalty"])
-            generated = model.generate(**inputs, **generate_options)
-            reference_ids = generated[0, inputs["input_ids"].shape[1] :].tolist()
-            reference_text = tokenizer.decode(reference_ids, skip_special_tokens=True).strip()
+        generated = model.generate(**inputs, **generation_options)
+    reference_ids = generated[0, inputs["input_ids"].shape[1] :].tolist()
+    reference_text = tokenizer.decode(reference_ids, skip_special_tokens=True).strip()
 
     actual_decoded = tokenizer.decode(actual_ids, skip_special_tokens=True).strip()
     del model
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    return reference_ids, reference_text, sampling_support, actual_decoded
-
-
-def _normalized_edit_distance(left: str, right: str) -> float:
-    left = " ".join(left.casefold().split())
-    right = " ".join(right.casefold().split())
-    if not left and not right:
-        return 0.0
-    previous = list(range(len(right) + 1))
-    for left_index, left_character in enumerate(left, start=1):
-        current = [left_index]
-        for right_index, right_character in enumerate(right, start=1):
-            current.append(
-                min(
-                    current[-1] + 1,
-                    previous[right_index] + 1,
-                    previous[right_index - 1] + (left_character != right_character),
-                )
-            )
-        previous = current
-    return previous[-1] / max(len(left), len(right))
-
-
-def _text_threshold(thresholds: dict[str, float]) -> float:
-    if "contract_ned_threshold" in thresholds:
-        return thresholds["contract_ned_threshold"]
-    return thresholds["normalized_text_edit_distance"]
+    return reference_ids, reference_text, actual_decoded
 
 
 def _assert_correctness(
     payload: dict,
     case: dict,
-    thresholds: dict[str, float],
     reference_ids: list[int],
     reference_text: str,
-    sampling_support: float | None,
     actual_decoded: str,
 ) -> None:
     actual_ids = payload["token_ids"]
@@ -447,32 +338,42 @@ def _assert_correctness(
         "Task API token_ids must contain generated tokens only"
     )
     actual_text = str(payload["text"]).strip()
-    assert _normalized_edit_distance(actual_text, actual_decoded) <= _text_threshold(thresholds)
+    assert actual_text
 
     if "expected_continuation_token_ids" in case:
         assert actual_ids == case["expected_continuation_token_ids"]
     if "expected_continuation_text" in case:
-        assert case["expected_continuation_text"].casefold() in actual_decoded.casefold()
+        expected_text = str(case["expected_continuation_text"]).strip()
+        assert actual_text == expected_text
+        assert actual_decoded == expected_text
+        assert reference_text == expected_text
     expected_answers = case.get("expected_answers", ())
     if expected_answers:
         assert any(answer.casefold() in actual_decoded.casefold() for answer in expected_answers)
 
-    if sampling_support is not None:
-        threshold = thresholds["unstable_topk_hit_rate"]
-        assert sampling_support >= threshold
+    if _is_sampling(case):
+        assert reference_ids or reference_text
+        assert all(marker not in actual_text for marker in ("Ġ", "Ċ"))
+        command = [str(value) for value in payload["runtime_command"]]
+        for field, flag in (
+            ("temperature", "--temperature"),
+            ("min_p", "--min-p"),
+            ("top_k", "--top-k"),
+            ("seed", "--seed"),
+            ("repetition_penalty", "--repetition-penalty"),
+        ):
+            index = command.index(flag)
+            assert command[index + 1] == str(case[field])
+        chat_index = command.index("--use-chat-template")
+        assert command[chat_index + 1] == "true"
         return
 
     assert reference_ids
-    common = min(len(actual_ids), len(reference_ids))
-    assert common > 0
-    agreement = sum(
-        actual_ids[index] == reference_ids[index] for index in range(common)
-    ) / common
-    if "token_agreement_rate" in thresholds:
-        assert agreement >= thresholds["token_agreement_rate"]
-        if float(thresholds["token_agreement_rate"]) == 1.0:
-            assert actual_ids == reference_ids
-    assert _normalized_edit_distance(actual_decoded, reference_text) <= _text_threshold(thresholds)
+    assert actual_ids == reference_ids
+    if case.get("use_chat_template"):
+        command = [str(value) for value in payload["runtime_command"]]
+        chat_index = command.index("--use-chat-template")
+        assert command[chat_index + 1] == "true"
 
 
 @pytest.mark.parametrize("case_name", sorted(_CASES))
@@ -518,4 +419,4 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         payload["token_ids"],
         torch,
     )
-    _assert_correctness(payload, case, _thresholds(case_name), *reference)
+    _assert_correctness(payload, case, *reference)

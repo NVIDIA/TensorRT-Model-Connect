@@ -9,10 +9,10 @@
       "name": "canary-1b-v2-tp4",
       "max_new_tokens": 50,
       "test_input_audio": "data/Recording.wav",
-      "reference_precision": "fp16"
+      "reference_precision": "fp32"
     }
   ],
   "tensor_parallel_size": 4,
-  "precision": "fp16",
+  "precision": "fp32",
   "max_sequence_length": 128
 }

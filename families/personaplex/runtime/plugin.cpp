@@ -3,12 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/personaplex/runtime/distributed_runtime.h"
 #include "families/personaplex/runtime/pipeline.h"
 #include "families/personaplex/runtime/plugin_helpers.h"
 #include "trtmc/runtime/family_factory.h"
 
-#include <cstdlib>
-#include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -22,31 +21,6 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     if (section == nullptr || section->length == 0)
         throw std::runtime_error("bundle section is missing or empty: " + std::string(name));
     return bundle.read_section(name);
-}
-
-void require_nccl(std::int32_t tensor_parallel_size) {
-    if (tensor_parallel_size <= 1)
-        return;
-    static void* const handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("tensor-parallel runtime requires NCCL: " +
-                                 std::string(error == nullptr ? "unknown loader error" : error));
-    }
-}
-
-std::int32_t require_rank(std::int32_t size) {
-    require_nccl(size);
-    if (size == 1)
-        return 0;
-    const char* text = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (text == nullptr || *text == '\0')
-        throw std::runtime_error("PersonaPlex TP runtime requires OMPI_COMM_WORLD_RANK");
-    char* end = nullptr;
-    const long rank = std::strtol(text, &end, 10);
-    if (*end != '\0' || rank < 0 || rank >= size)
-        throw std::runtime_error("PersonaPlex RANK is outside tensor_parallel_size");
-    return static_cast<std::int32_t>(rank);
 }
 
 SpeechConfig parse_config(const BundleReader& bundle, const nlohmann::json& json) {
@@ -114,6 +88,8 @@ SpeechConfig parse_config(const BundleReader& bundle, const nlohmann::json& json
 } // namespace trtmc::personaplex_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("personaplex does not support --kv-cache-size");
     using namespace trtmc;
     const auto& runtime = personaplex_factory::require_section(context.reader, "runtime.json");
     const auto document = nlohmann::json::parse(runtime.begin(), runtime.end());
@@ -121,14 +97,19 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto tp_size = document.at("tensor_parallel_size").get<std::int32_t>();
     if (tp_size <= 0)
         throw std::runtime_error("PersonaPlex tensor_parallel_size must be positive");
-    const auto rank = personaplex_factory::require_rank(tp_size);
+    const auto group = personaplex::initialize_tensor_parallel_group(tp_size);
     const std::string temporal_section =
-        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(rank) + ".plan";
+        tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(group.rank) + ".plan";
     ModuleCreateOptions options{};
+    ModuleCreateOptions temporal_options{};
+    if (tp_size > 1) {
+        temporal_options.distributed_communicator = group.communicator;
+        temporal_options.distributed_owner = group.owner;
+    }
     const auto& temporal_plan =
         personaplex_factory::require_section(context.reader, temporal_section.c_str());
     auto temporal = load_trt_module_from_plan(&context.backend, &temporal_plan,
-                                              temporal_section.c_str(), options);
+                                              temporal_section.c_str(), temporal_options);
     options.stream = temporal.module->stream();
     const auto load = [&](const char* name) {
         const auto& plan = personaplex_factory::require_section(context.reader, name);

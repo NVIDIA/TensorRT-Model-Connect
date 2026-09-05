@@ -14,10 +14,6 @@
         "left_image": "data/office_left.png",
         "right_image": "data/office_right.png"
       }
-    },
-    {
-      "name": "fast-foundation-stereo-middlebury-q",
-      "premerge": true
     }
   ],
   "tensor_parallel_size": 1

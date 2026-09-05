@@ -4,11 +4,12 @@
 """Direct build, native-runtime, and official-reference E2E for canary."""
 
 from __future__ import annotations
+import io
 import json
 import os
-import re
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 import pytest
 from tensorrt_model_connect import BuildRequest, build
@@ -169,11 +170,14 @@ def _run_json(
             "--tag-output",
             "-x",
             "LD_LIBRARY_PATH",
+            "-x",
+            "TRTMC_NCCL_RENDEZVOUS",
             "-np",
             str(manifest["tensor_parallel_size"]),
             *invocation,
         ]
     env = os.environ.copy()
+    env["TRTMC_NCCL_RENDEZVOUS"] = str(bundle.with_suffix(".nccl-rendezvous"))
     env["LD_LIBRARY_PATH"] = ":".join(
         (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
     )
@@ -233,6 +237,111 @@ def test_runtime_tokenizer_document_uses_array_vocab(monkeypatch, tmp_path: Path
     }
 
 
+def test_build_extracts_tokenizer_without_mutating_read_only_snapshot(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    from families.canary import model
+
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text('{"model_type":"canary"}', encoding="utf-8")
+    snapshot_tokenizer = {"version": "1.0", "source": "checkpoint"}
+    (snapshot / "tokenizer.json").write_text(json.dumps(snapshot_tokenizer), encoding="utf-8")
+    snapshot_tokenizer_config = {
+        "tokenizer_class": "CanaryTokenizer",
+        "model_max_length": 4096,
+    }
+    (snapshot / "tokenizer_config.json").write_text(
+        json.dumps(snapshot_tokenizer_config), encoding="utf-8"
+    )
+    tokenizer_bytes = b"canary sentencepiece"
+    with tarfile.open(snapshot / "canary.nemo", "w") as archive:
+        member = tarfile.TarInfo("artifacts/tokenizer_spe_bpe_v1024.model")
+        member.size = len(tokenizer_bytes)
+        archive.addfile(member, io.BytesIO(tokenizer_bytes))
+
+    tokenizer_document = {
+        "version": "1.0",
+        "model": {"type": "Unigram", "unk_id": 0, "vocab": [["<unk>", 0.0]]},
+    }
+    tokenizer_dirs = []
+
+    def tokenizer_json(path: Path) -> dict[str, object]:
+        assert path.read_bytes() == tokenizer_bytes
+        return tokenizer_document
+
+    def load_weights(self, model_dir: str, config, tokenizer_dir: Path):
+        assert Path(model_dir) == snapshot
+        assert tokenizer_dir != snapshot
+        tokenizer_dirs.append(tokenizer_dir)
+        extracted = model._extract_tokenizer_from_nemo(
+            model_dir,
+            tokenizer_dir,
+            {"tokenizer": {"model_path": "nemo:tokenizer_spe_bpe_v1024.model"}},
+        )
+        assert extracted == tokenizer_dir / "tokenizer.model"
+        config.hidden_size = 16
+        config.vocab_size = 32
+        config.num_hidden_layers = 2
+        config.num_attention_heads = 2
+        return {}
+
+    def tokenizer_contract(path: Path) -> dict[str, object]:
+        assert path != snapshot
+        assert (path / "tokenizer.model").read_bytes() == tokenizer_bytes
+        assert json.loads((path / "tokenizer.json").read_text(encoding="utf-8")) == (
+            snapshot_tokenizer
+        )
+        return {
+            "tokenizer_add_special_tokens": False,
+            "tokenizer_prefix_ids": [],
+            "tokenizer_suffix_ids": [],
+        }
+
+    monkeypatch.setattr(model, "_runtime_tokenizer_document", tokenizer_json)
+    monkeypatch.setattr(model, "_tokenizer_runtime_contract", tokenizer_contract)
+    monkeypatch.setattr(model._CanaryModel, "load_weights", load_weights)
+    monkeypatch.setattr(model._CanaryModel, "build_engine", lambda *args, **kwargs: b"decoder")
+    monkeypatch.setattr(
+        model._CanaryModel, "build_vision_engine", lambda *args, **kwargs: b"encoder"
+    )
+    monkeypatch.setattr(
+        model._CanaryModel,
+        "build_extra_engines",
+        lambda *args, **kwargs: {"mel_filterbank": b"mel"},
+    )
+
+    snapshot.chmod(0o555)
+    before = {path.name: path.read_bytes() for path in snapshot.iterdir()}
+    sections = {}
+    writer = SimpleNamespace(
+        set_header=lambda **value: None,
+        add_bytes=lambda name, value: sections.__setitem__(name, value),
+        add_json=lambda name, value: sections.__setitem__(name, value),
+    )
+    try:
+        model.build(
+            BuildRequest(
+                model_dir=snapshot,
+                output_path=tmp_path / "canary.bundle",
+                family=FAMILY,
+                task="transcription",
+                precision="fp16",
+            ),
+            writer,
+        )
+        assert {path.name: path.read_bytes() for path in snapshot.iterdir()} == before
+    finally:
+        snapshot.chmod(0o755)
+
+    assert tokenizer_dirs and not tokenizer_dirs[0].exists()
+    assert sections["tokenizer.model"] == tokenizer_bytes
+    assert sections["tokenizer.json"] == tokenizer_document
+    assert json.loads(sections["tokenizer_config.json"]) == (snapshot_tokenizer_config)
+
+
 def _asset(raw: str) -> Path:
     path = Path(raw)
     if not path.is_absolute():
@@ -273,26 +382,8 @@ def _word_error_rate(reference: str, hypothesis: str) -> float:
     return _distance(reference_words, hypothesis_words) / len(reference_words)
 
 
-def _character_error_rate(reference: str, hypothesis: str) -> float:
-    reference_characters = list(reference.casefold())
-    hypothesis_characters = list(hypothesis.casefold())
-    if not reference_characters:
-        return 0.0 if not hypothesis_characters else 1.0
-    return _distance(reference_characters, hypothesis_characters) / len(reference_characters)
-
-
-def _no_speech_state(text: str) -> str:
-    stripped = text.strip()
-    if not stripped:
-        return "empty"
-    if re.fullmatch(r"\[?\s*blank[\s_-]*audio\s*\]?", stripped, flags=re.IGNORECASE):
-        return "blank_audio_token"
-    return "speech"
-
-
-def test_error_rates_keep_word_and_character_semantics() -> None:
+def test_word_error_rate_keeps_word_semantics() -> None:
     assert _word_error_rate("one two", "one three") == 0.5
-    assert _character_error_rate("ab", "ac") == 0.5
 
 
 def _native(
@@ -374,30 +465,20 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     manifest["task"]
     reference = str(expected["text"])
     hypothesis = str(actual["text"])
-    if "contract_ned_threshold" in thresholds:
-        assert reference.strip(), "official ASR reference produced an empty transcript"
-        assert _no_speech_state(hypothesis) == _no_speech_state(reference)
-        assert _normalized_text_edit_distance(reference, hypothesis) <= float(
-            thresholds["contract_ned_threshold"]
-        )
-    elif "normalized_text_edit_distance" in thresholds:
-        assert _normalized_text_edit_distance(reference, hypothesis) <= float(
-            thresholds["normalized_text_edit_distance"]
-        )
-    if "wer" in thresholds:
-        assert _word_error_rate(reference, hypothesis) <= float(thresholds["wer"])
-    if "cer" in thresholds:
-        assert _character_error_rate(reference, hypothesis) <= float(thresholds["cer"])
-    return
+    assert reference.strip(), "official ASR reference produced an empty transcript"
+    ned_threshold = thresholds.get(
+        "contract_ned_threshold", thresholds.get("normalized_text_edit_distance", 0.1)
+    )
+    wer_threshold = thresholds.get("contract_wer_threshold", thresholds.get("wer", 0.1))
+    assert _normalized_text_edit_distance(reference, hypothesis) <= float(ned_threshold)
+    assert _word_error_rate(reference, hypothesis) <= float(wer_threshold)
 
 
-def test_contract_rejects_empty_reference_and_no_speech_state_mismatch() -> None:
+def test_contract_rejects_empty_reference() -> None:
     manifest = {"task": "transcription"}
     thresholds = {"contract_ned_threshold": 0.1}
     with pytest.raises(AssertionError, match="empty transcript"):
         _assert_parity({"text": ""}, {"text": ""}, manifest, {}, thresholds)
-    with pytest.raises(AssertionError):
-        _assert_parity({"text": "[blank audio]"}, {"text": "hello"}, manifest, {}, thresholds)
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:

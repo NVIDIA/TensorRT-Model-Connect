@@ -61,10 +61,15 @@ def test_mask_parity_uses_the_sam_logit_boundary() -> None:
         "masks": np.array([-4.0, 2.0, -0.5, 0.25, -2.0, 3.0], dtype=np.float32),
         "iou_scores": [0.1, 0.9, 0.5],
         "num_masks": 3,
+        "height": 1,
+        "width": 2,
     }
     expected = {
         "masks": np.array([-3.0, 1.0, -0.1, 4.0, -1.0, 2.0], dtype=np.float32),
         "iou_scores": [0.2, 0.8, 0.4],
+        "num_masks": 3,
+        "height": 1,
+        "width": 2,
     }
 
     assert _semantic_masks(actual["masks"]).tolist() == [
@@ -83,8 +88,6 @@ def test_mask_parity_uses_the_sam_logit_boundary() -> None:
         {},
         {
             "iou_per_prompt": 1.0,
-            "mask_rank_consistency": 1.0,
-            "num_expected_masks": 3,
             "num_masks_consistency": True,
         },
     )
@@ -92,13 +95,18 @@ def test_mask_parity_uses_the_sam_logit_boundary() -> None:
 
 def test_mask_parity_rejects_a_missing_mask() -> None:
     actual = {
-        "masks": [-1.0, 1.0],
+        "masks": [-1.0, 1.0, 1.0, -1.0],
         "iou_scores": [0.1, 0.9],
         "num_masks": 2,
+        "height": 1,
+        "width": 2,
     }
     expected = {
-        "masks": [-1.0, 1.0],
+        "masks": [-1.0, 1.0, 1.0, -1.0, -1.0, 1.0],
         "iou_scores": [0.2, 0.8, 0.4],
+        "num_masks": 3,
+        "height": 1,
+        "width": 2,
     }
 
     with pytest.raises(AssertionError):
@@ -109,8 +117,6 @@ def test_mask_parity_rejects_a_missing_mask() -> None:
             {},
             {
                 "iou_per_prompt": 0.7,
-                "mask_rank_consistency": 0.8,
-                "num_expected_masks": 3,
                 "num_masks_consistency": True,
             },
         )

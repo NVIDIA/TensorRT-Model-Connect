@@ -128,23 +128,29 @@ def _runtime(manifest: dict) -> tuple[Path, Path]:
 
 
 def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
-    build(
-        BuildRequest(
-            model_dir=model_dir,
-            output_path=bundle,
-            family=FAMILY,
-            task=manifest["task"],
-            precision=manifest["precision"],
-            max_sequence_length=manifest.get("max_sequence_length"),
-            image_height=manifest.get("image_height"),
-            image_width=manifest.get("image_width"),
-            video_num_frames=manifest.get("video_num_frames"),
-            max_batch_size=int(manifest.get("max_batch_size", 1)),
-            tensor_parallel_size=int(manifest["tensor_parallel_size"]),
-            quantization=manifest.get("quantization"),
-            fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
-        )
+    image_height = manifest.get("image_height")
+    image_width = manifest.get("image_width")
+    if manifest["task"] == "image_edit":
+        from PIL import Image
+
+        with Image.open(_asset(manifest["testcases"][0]["test_image"])) as image:
+            image_width, image_height = image.size
+    request = BuildRequest(
+        model_dir=model_dir,
+        output_path=bundle,
+        family=FAMILY,
+        task=manifest["task"],
+        precision=manifest["precision"],
+        max_sequence_length=manifest.get("max_sequence_length"),
+        image_height=image_height,
+        image_width=image_width,
+        video_num_frames=manifest.get("video_num_frames"),
+        max_batch_size=int(manifest.get("max_batch_size", 1)),
+        tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+        quantization=manifest.get("quantization"),
+        fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
     )
+    build(request)
 
 
 def _thresholds(case_name: str) -> dict:

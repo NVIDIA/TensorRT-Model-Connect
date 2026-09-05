@@ -51,6 +51,8 @@ Parallel parse_parallel(const nlohmann::json& json) {
 } // namespace trtmc::flux_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("flux does not support --kv-cache-size");
     using namespace trtmc;
     const auto& data = flux_factory::require_section(context.reader, "runtime.json");
     const std::string runtime(data.begin(), data.end());
