@@ -1396,7 +1396,6 @@ def _perf_command(
     resolved_environment: Path,
     *,
     bindings: Sequence[Mapping[str, Any]] | None = None,
-    require_prebuilt: bool = False,
 ) -> list[str] | None:
     bindings = list(bindings) if bindings is not None else _task_bindings(plan, "perf")
     if not bindings:
@@ -1412,16 +1411,13 @@ def _perf_command(
     ]
     for binding in bindings:
         command.extend(["--entry", str(binding["entry"])])
-    if require_prebuilt:
-        command.append("--no-build")
     return command
 
 
-def _perf_prepare_command(
+def _perf_check_command(
     plan: Mapping[str, Any],
     environment: Mapping[str, Any],
     resolved_environment: Path,
-    receipt: Path,
     *,
     bindings: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[str] | None:
@@ -1432,12 +1428,10 @@ def _perf_prepare_command(
     command = [
         str(config["runner_python"]),
         str(REPOSITORY / "tools" / "perf_matrix.py"),
-        "prepare",
+        "check",
         str(config["suite"]),
         "--environment",
         str(resolved_environment),
-        "--output",
-        str(receipt),
     ]
     for binding in bindings:
         command.extend(["--entry", str(binding["entry"])])
@@ -1447,8 +1441,6 @@ def _perf_prepare_command(
 def _perf_resume_command(
     environment: Mapping[str, Any],
     results_root: Path,
-    *,
-    require_prebuilt: bool = False,
 ) -> list[str] | None:
     if not results_root.is_dir():
         return None
@@ -1468,8 +1460,6 @@ def _perf_resume_command(
         "resume",
         str(candidates[0]),
     ]
-    if require_prebuilt:
-        command.append("--no-build")
     return command
 
 
@@ -1959,7 +1949,6 @@ def _prepare_qualification_dependencies(
     *,
     task_bindings: Mapping[str, Sequence[Mapping[str, Any]]],
     perf_environment: Path | None,
-    perf_preparation_receipt: Path | None,
     model_reference_cache_root: Path,
 ) -> dict[str, str]:
     print("\nPreparing qualification dependencies", flush=True)
@@ -1978,12 +1967,11 @@ def _prepare_qualification_dependencies(
         contracts,
         model_reference_cache_root,
     )
-    if perf_environment is not None and perf_preparation_receipt is not None:
-        command = _perf_prepare_command(
+    if perf_environment is not None:
+        command = _perf_check_command(
             plan,
             environment,
             perf_environment,
-            perf_preparation_receipt,
             bindings=task_bindings.get("perf", ()),
         )
         if command is not None:
@@ -1998,8 +1986,11 @@ def _prepare_qualification_dependencies(
                 ),
             )
             if completed.returncode:
-                raise ModelCheckError("Perf bundle preparation failed")
-    print("Qualification dependencies prepared; starting frozen measurement", flush=True)
+                raise ModelCheckError("Perf dependency preflight failed")
+    print(
+        "Qualification dependencies prepared; starting per-case build and measurement",
+        flush=True,
+    )
     return reference_environment
 
 
@@ -2143,9 +2134,6 @@ def _run(arguments: argparse.Namespace) -> int:
             scratch_root=execution_root / "work" / "perf",
             bundle_cache=(execution_root / "cache" / "perf" if shard else None),
         )
-    perf_preparation_receipt = (
-        execution_root / "perf-bundle-preparation.json" if perf_environment is not None else None
-    )
     commands: list[tuple[str, list[str] | None]] = []
     for task in plan["execution"]["task_order"]:
         if task == "accuracy":
@@ -2163,7 +2151,6 @@ def _run(arguments: argparse.Namespace) -> int:
                     environment,
                     perf_environment,
                     bindings=task_bindings[task],
-                    require_prebuilt=arguments.intent == "qualification",
                 )
                 if perf_environment is not None
                 else None
@@ -2236,7 +2223,6 @@ def _run(arguments: argparse.Namespace) -> int:
                 resume_command = _perf_resume_command(
                     environment,
                     execution_root / "perf" / "results",
-                    require_prebuilt=arguments.intent == "qualification",
                 )
                 resumed = resume_command or command
                 if resume_command is not None:
@@ -2307,7 +2293,6 @@ def _run(arguments: argparse.Namespace) -> int:
             arguments,
             task_bindings=preparation_bindings,
             perf_environment=perf_environment,
-            perf_preparation_receipt=perf_preparation_receipt,
             model_reference_cache_root=model_reference_cache_root,
         )
         _revalidate_qualification_source(arguments.revision, source_identity)
@@ -2350,23 +2335,6 @@ def _run(arguments: argparse.Namespace) -> int:
         )
         if arguments.intent == "qualification":
             _revalidate_qualification_source(arguments.revision, source_identity)
-        if (
-            task == "perf"
-            and completed.returncode == 0
-            and preparation_bindings.get("perf")
-            and perf_preparation_receipt is not None
-            and perf_preparation_receipt.is_file()
-        ):
-            perf_output = _perf_shard_output(execution_root)
-            if perf_output is None:
-                raise ModelCheckError("cannot locate completed Perf output")
-            try:
-                perf_matrix.write_report(
-                    perf_output,
-                    preparation_receipt=perf_preparation_receipt,
-                )
-            except perf_matrix.PerfMatrixError as error:
-                raise ModelCheckError(str(error)) from error
         task_results[task] = completed.returncode
         status = "PASSED" if completed.returncode == 0 else "FAILED"
         print(f"[{index}/{len(runnable)}] {label}: {status}", flush=True)
