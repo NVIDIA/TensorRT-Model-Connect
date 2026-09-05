@@ -24,8 +24,6 @@ from .model_config import (
     FEATURES,
     QUERY,
     STRUCTURE_METADATA,
-    prepare_ci_package,
-    resolve_ci_package_root,
     resolve_package_root,
 )
 from .provenance import PINNED_OPENFOLD3
@@ -124,8 +122,6 @@ class OpenFold3Plugin:
     ) -> dict[str, Any]:
         self._require_precision(precision)
         root = resolve_package_root(model_dir)
-        if root is None and resolve_ci_package_root(model_dir) is not None:
-            root = prepare_ci_package(Path(model_dir))
         if root is None:
             raise ValueError(f"unsupported OpenFold3 package: {model_dir}")
         validate_structure_checkpoint(root / CHECKPOINT)

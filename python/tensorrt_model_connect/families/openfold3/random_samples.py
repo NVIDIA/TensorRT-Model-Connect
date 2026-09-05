@@ -16,6 +16,31 @@ MAGIC: Final = b"OF3R"
 VERSION: Final = 1
 
 
+def _quaternion_rotation_coefficients() -> np.ndarray:
+    """Return the OpenFold3 scalar-first quaternion convention."""
+
+    matrix = np.zeros((4, 4, 3, 3), dtype=np.float32)
+    terms = {
+        (0, 0): ((0, 0, 1), (1, 1, 1), (2, 2, -1), (3, 3, -1)),
+        (0, 1): ((1, 2, 2), (0, 3, -2)),
+        (0, 2): ((1, 3, 2), (0, 2, 2)),
+        (1, 0): ((1, 2, 2), (0, 3, 2)),
+        (1, 1): ((0, 0, 1), (1, 1, -1), (2, 2, 1), (3, 3, -1)),
+        (1, 2): ((2, 3, 2), (0, 1, -2)),
+        (2, 0): ((1, 3, 2), (0, 2, -2)),
+        (2, 1): ((2, 3, 2), (0, 1, 2)),
+        (2, 2): ((0, 0, 1), (1, 1, -1), (2, 2, -1), (3, 3, 1)),
+    }
+    for (row, column), coefficients in terms.items():
+        for left, right, value in coefficients:
+            matrix[left, right, row, column] = value
+    matrix.setflags(write=False)
+    return matrix
+
+
+_QUATERNION_ROTATION_COEFFICIENTS: Final = _quaternion_rotation_coefficients()
+
+
 def serialize_random_arrays(
     initial: np.ndarray,
     rotations: np.ndarray,
@@ -53,11 +78,9 @@ def serialize_pinned_random_samples(
     seed: int = 42,
     sampling_steps: int = 200,
 ) -> bytes:
-    """Resolve Algorithm 18/19 random tensors with the upstream CUDA RNG."""
+    """Resolve Algorithm 18/19 random tensors with the pinned CUDA RNG."""
 
     import torch
-
-    from openfold3.core.model.structure.augmentation import centre_random_augmentation
 
     if not torch.cuda.is_available():
         raise RuntimeError("OpenFold3 bundle construction requires CUDA")
@@ -80,31 +103,23 @@ def serialize_pinned_random_samples(
     # append zero slots required by the static TensorRT atom-window profile.
     shape = (1, 1, atom_count, 3)
     initial = torch.randn(shape, device=device, dtype=torch.float32)
-    atom_mask_tensor = torch.ones((1, atom_count), device=device, dtype=torch.float32)
+    rotation_coefficients = torch.tensor(
+        _QUATERNION_ROTATION_COEFFICIENTS,
+        dtype=torch.float32,
+        device=device,
+    )
     rotations = []
     translations = []
     noises = []
-    # Capture Algorithm 19's resolved transform by augmenting a basis. This
-    # avoids duplicating upstream quaternion conventions in the native runtime.
-    basis = torch.zeros(shape, device=device)
-    basis[0, 0, :3] = torch.eye(3, device=device)
     for _ in range(sampling_steps):
-        before = torch.cuda.get_rng_state()
-        augmented = centre_random_augmentation(basis, atom_mask_tensor)
-        torch.cuda.set_rng_state(before)
-        from openfold3.core.model.structure.augmentation import sample_rotations
-
-        rotation = sample_rotations((1, 1), torch.float32, device)
-        translation = torch.randn((1, 1, 3), device=device, dtype=torch.float32)
-        # The basis call above is solely a convention assertion.
-        mean = (basis * atom_mask_tensor[..., None]).sum(dim=-2, keepdim=True) / (
-            atom_mask_tensor[..., None].sum(dim=-2, keepdim=True).clamp(min=1)
+        quaternion = torch.randn((1, 1, 4), dtype=torch.float32, device=device)
+        quaternion = quaternion / torch.linalg.norm(quaternion, dim=-1, keepdim=True)
+        products = quaternion[..., None] * quaternion[..., None, :]
+        rotation = torch.sum(
+            products[..., None, None] * rotation_coefficients,
+            dim=(-3, -4),
         )
-        expected = (
-            (basis - mean) @ rotation.transpose(-1, -2) + translation[..., None, :]
-        ) * atom_mask_tensor[..., None]
-        if not torch.allclose(augmented, expected, atol=1.0e-6, rtol=1.0e-6):
-            raise RuntimeError("OpenFold3 augmentation convention changed upstream")
+        translation = torch.randn((1, 1, 3), device=device, dtype=torch.float32)
         rotations.append(rotation[0, 0])
         translations.append(translation[0, 0])
         noises.append(torch.randn(shape, device=device, dtype=torch.float32)[0, 0])
