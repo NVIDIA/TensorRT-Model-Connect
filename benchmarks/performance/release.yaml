@@ -978,6 +978,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: timm_inception.classify
+    family: timm_inception
+    operation: classify
+    model: inception-v3-tv-in1k
+    workload:
+      testcase: inception-v3-tv-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_mnasnet.classify
     family: timm_mnasnet
     operation: classify

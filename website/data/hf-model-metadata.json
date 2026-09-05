@@ -1367,6 +1367,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/inception_v3.tv_in1k",
+      "revision": "393d84cc85c467d8fbc0dc81a65c04e87a32572c",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "inception_v3"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",
