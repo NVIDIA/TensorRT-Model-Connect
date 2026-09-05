@@ -1,0 +1,4814 @@
+{
+  "atom_count": 601,
+  "atoms": [
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 1,
+      "residue_name": "MET"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 1,
+      "residue_name": "MET"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 1,
+      "residue_name": "MET"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 1,
+      "residue_name": "MET"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 1,
+      "residue_name": "MET"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 1,
+      "residue_name": "MET"
+    },
+    {
+      "chain_id": "A",
+      "element": "S",
+      "hetero": false,
+      "name": "SD",
+      "residue_index": 1,
+      "residue_name": "MET"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE",
+      "residue_index": 1,
+      "residue_name": "MET"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 2,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 2,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 2,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 2,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 2,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 2,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 2,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 2,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE2",
+      "residue_index": 2,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 3,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 3,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 3,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 3,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 3,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 3,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 3,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 3,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE1",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE2",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CZ",
+      "residue_index": 4,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 5,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 5,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 5,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 5,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 5,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 5,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 5,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 6,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 6,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 6,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 6,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 6,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 6,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 6,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE",
+      "residue_index": 6,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NZ",
+      "residue_index": 6,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 7,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 7,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 7,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 7,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 7,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG1",
+      "residue_index": 7,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 7,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 8,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 8,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 8,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 8,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 8,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 8,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 8,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 8,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 9,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 9,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 9,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 9,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 9,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG1",
+      "residue_index": 9,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 9,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 10,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 10,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 10,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 10,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 11,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 11,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 11,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 11,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 11,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 11,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 11,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE",
+      "residue_index": 11,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NZ",
+      "residue_index": 11,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 12,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 12,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 12,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 12,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 12,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG1",
+      "residue_index": 12,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 12,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 13,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 13,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 13,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 13,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 13,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 13,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 13,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 13,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 14,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 14,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 14,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 14,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 14,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG1",
+      "residue_index": 14,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 14,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 15,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 15,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 15,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 15,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 15,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 15,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 15,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 15,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 16,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 16,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 16,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 16,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 16,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 16,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 16,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 16,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE2",
+      "residue_index": 16,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 17,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 17,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 17,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 17,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 17,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 17,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 17,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 18,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 18,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 18,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 18,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 18,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 18,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 18,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 18,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE2",
+      "residue_index": 18,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 19,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 19,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 19,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 19,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 19,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 19,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 19,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 20,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 20,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 20,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 20,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 20,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG",
+      "residue_index": 20,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 21,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 21,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 21,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 21,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 21,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 21,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD1",
+      "residue_index": 21,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD2",
+      "residue_index": 21,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 22,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 22,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 22,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 22,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 22,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG1",
+      "residue_index": 22,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 22,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 23,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 23,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 23,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 23,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 23,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 23,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 23,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 23,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 24,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 24,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 24,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 24,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 24,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 24,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 24,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 24,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE2",
+      "residue_index": 24,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 25,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 25,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 25,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 25,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 25,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 25,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD1",
+      "residue_index": 25,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "ND2",
+      "residue_index": 25,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 26,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 26,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 26,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 26,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 26,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 26,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 26,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 27,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 27,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 27,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 27,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 27,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 27,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 27,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE",
+      "residue_index": 27,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NZ",
+      "residue_index": 27,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 28,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 28,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 28,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 28,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 28,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 29,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 29,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 29,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 29,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 29,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 29,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 29,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE",
+      "residue_index": 29,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NZ",
+      "residue_index": 29,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 30,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 30,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 30,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 30,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 30,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 30,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 30,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 30,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 31,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 31,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 31,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 31,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 31,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 31,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 31,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 31,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE2",
+      "residue_index": 31,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 32,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 32,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 32,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 32,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 32,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 32,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD1",
+      "residue_index": 32,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD2",
+      "residue_index": 32,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 33,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 33,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 33,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 33,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 33,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 33,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 33,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE",
+      "residue_index": 33,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NZ",
+      "residue_index": 33,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 34,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 34,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 34,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 34,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 34,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 34,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 34,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 34,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE2",
+      "residue_index": 34,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 35,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 35,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 35,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 35,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 36,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 36,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 36,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 36,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 36,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 36,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 36,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 36,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 37,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 37,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 37,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 37,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 37,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 37,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 37,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 38,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 38,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 38,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 38,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 38,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 38,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 38,
+      "residue_name": "PRO"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 39,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 39,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 39,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 39,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 39,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 39,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD1",
+      "residue_index": 39,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD2",
+      "residue_index": 39,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 40,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 40,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 40,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 40,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 40,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 40,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 40,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 40,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE2",
+      "residue_index": 40,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 41,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 41,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 41,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 41,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 41,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 41,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 41,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 41,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE2",
+      "residue_index": 41,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CZ",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NH1",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NH2",
+      "residue_index": 42,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 43,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 43,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 43,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 43,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 43,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 43,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 43,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 43,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 44,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 44,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 44,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 44,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 44,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 44,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 44,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 44,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE1",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE2",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CZ",
+      "residue_index": 45,
+      "residue_name": "PHE"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 46,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 46,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 46,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 46,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 46,
+      "residue_name": "ALA"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 47,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 47,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 47,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 47,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 48,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 48,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 48,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 48,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 48,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 48,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 48,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE",
+      "residue_index": 48,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NZ",
+      "residue_index": 48,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 49,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 49,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 49,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 49,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 49,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 49,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 49,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 49,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE2",
+      "residue_index": 49,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 50,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 50,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 50,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 50,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 50,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 50,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 50,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 50,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 51,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 51,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 51,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 51,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 51,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 51,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 51,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 51,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE2",
+      "residue_index": 51,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 52,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 52,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 52,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 52,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 52,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 52,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD1",
+      "residue_index": 52,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD2",
+      "residue_index": 52,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 53,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 53,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 53,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 53,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CZ",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NH1",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NH2",
+      "residue_index": 54,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 55,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 55,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 55,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 55,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 55,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG1",
+      "residue_index": 55,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 55,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 56,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 56,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 56,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 56,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 56,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 56,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 56,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 56,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 57,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 57,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 57,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 57,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 57,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG",
+      "residue_index": 57,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 58,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 58,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 58,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 58,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 58,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 58,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD1",
+      "residue_index": 58,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD2",
+      "residue_index": 58,
+      "residue_name": "ASP"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE1",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE2",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CZ",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OH",
+      "residue_index": 59,
+      "residue_name": "TYR"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 60,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 60,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 60,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 60,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 60,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 60,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OD1",
+      "residue_index": 60,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "ND2",
+      "residue_index": 60,
+      "residue_name": "ASN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 61,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 61,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 61,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 61,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 61,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 61,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 61,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 61,
+      "residue_name": "ILE"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 62,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 62,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 62,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 62,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 62,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 62,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 62,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 62,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE2",
+      "residue_index": 62,
+      "residue_name": "GLN"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 63,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 63,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 63,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 63,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 63,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 63,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 63,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE",
+      "residue_index": 63,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NZ",
+      "residue_index": 63,
+      "residue_name": "LYS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 64,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 64,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 64,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 64,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 64,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 64,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 64,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE1",
+      "residue_index": 64,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OE2",
+      "residue_index": 64,
+      "residue_name": "GLU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 65,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 65,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 65,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 65,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 65,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG",
+      "residue_index": 65,
+      "residue_name": "SER"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 66,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 66,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 66,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 66,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 66,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "OG1",
+      "residue_index": 66,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 66,
+      "residue_name": "THR"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 67,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 67,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 67,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 67,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 67,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 67,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 67,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 67,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "ND1",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CE1",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE2",
+      "residue_index": 68,
+      "residue_name": "HIS"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 69,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 69,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 69,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 69,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 69,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 69,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 69,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 69,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 70,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 70,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 70,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 70,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 70,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG1",
+      "residue_index": 70,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG2",
+      "residue_index": 70,
+      "residue_name": "VAL"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 71,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 71,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 71,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 71,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 71,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 71,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 71,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 71,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CZ",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NH1",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NH2",
+      "residue_index": 72,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 73,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 73,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 73,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 73,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 73,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 73,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD1",
+      "residue_index": 73,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD2",
+      "residue_index": 73,
+      "residue_name": "LEU"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CB",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CG",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CD",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NE",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CZ",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NH1",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "NH2",
+      "residue_index": 74,
+      "residue_name": "ARG"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 75,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 75,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 75,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 75,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "N",
+      "hetero": false,
+      "name": "N",
+      "residue_index": 76,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "CA",
+      "residue_index": 76,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "C",
+      "hetero": false,
+      "name": "C",
+      "residue_index": 76,
+      "residue_name": "GLY"
+    },
+    {
+      "chain_id": "A",
+      "element": "O",
+      "hetero": false,
+      "name": "O",
+      "residue_index": 76,
+      "residue_name": "GLY"
+    }
+  ],
+  "schema_version": 1
+}
