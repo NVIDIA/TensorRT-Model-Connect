@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "openfold3"
+runtime_library = "libtrtmc_model_openfold3.so"
+runtime_plugins = ["plugin.cpp|register_openfold3_plugin"]
+runtime_strategies = ["openfold3_structure_prediction"]
+runtime_tests = [
+  "test_openfold3_sections|test_openfold3_sections.cpp|trtmc_model_openfold3|_|_",
+]
