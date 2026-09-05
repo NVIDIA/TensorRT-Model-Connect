@@ -70,6 +70,8 @@ models:
     workloads: [stsbenchmark_encoder_embedding_parity]
   bark-large:
     workloads: [seedtts_en_tts_intelligibility]
+  crossvit-9-240-in1k:
+    workloads: [imagenette_image_classification]
   bark-small:
     workloads: [seedtts_en_tts_intelligibility]
   bart-base:

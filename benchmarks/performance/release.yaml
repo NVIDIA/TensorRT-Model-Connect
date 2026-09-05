@@ -978,6 +978,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: timm_crossvit.classify
+    family: timm_crossvit
+    operation: classify
+    model: crossvit-9-240-in1k
+    workload:
+      testcase: crossvit-9-240-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_repvgg.classify
     family: timm_repvgg
     operation: classify
