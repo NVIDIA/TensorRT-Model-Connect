@@ -30,6 +30,18 @@ def _reference_dtype(case: E2ECase) -> str:
     return _TORCH_DTYPE.get(precision, "torch.bfloat16")
 
 
+def _chat_reasoning_effort(case: E2ECase) -> str:
+    contract_config = case.metadata.get("contract_config", {})
+    if not isinstance(contract_config, dict) or not contract_config.get("use_chat_template", False):
+        return ""
+    reasoning_effort = contract_config.get("reasoning_effort")
+    if reasoning_effort != "high":
+        raise ValueError(
+            "K2-Horizon chat reference supports only contract_config.reasoning_effort='high'"
+        )
+    return reasoning_effort
+
+
 class K2HorizonHfTransformersReference:
     """Run the exact checkpoint revision with native Transformers K2-Horizon code."""
 
@@ -63,6 +75,7 @@ class K2HorizonHfTransformersReference:
         use_chat_template = bool(
             isinstance(contract_config, dict) and contract_config.get("use_chat_template", False)
         )
+        reasoning_effort = _chat_reasoning_effort(case)
         trust_remote_code = bool(case.metadata.get("trust_remote_code", False))
 
         script = textwrap.dedent(
@@ -84,6 +97,7 @@ class K2HorizonHfTransformersReference:
             repetition_penalty = {repetition_penalty!r}
             seed = {seed!r}
             use_chat_template = {use_chat_template!r}
+            reasoning_effort = {reasoning_effort!r}
             trust_remote_code = {trust_remote_code!r}
             logits_path = {str(logits_path)!r}
 
@@ -111,6 +125,7 @@ class K2HorizonHfTransformersReference:
                     tokenize=True,
                     return_dict=True,
                     return_tensors="pt",
+                    reasoning_effort=reasoning_effort,
                 )
             else:
                 inputs = tokenizer(prompt, return_tensors="pt")
@@ -164,6 +179,7 @@ class K2HorizonHfTransformersReference:
                     "seed": seed,
                     "max_new_tokens": max_new_tokens,
                     "use_chat_template": use_chat_template,
+                    "reasoning_effort": reasoning_effort,
                 }},
             }}))
             """
