@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_seresnet"
+runtime_library = "libtrtmc_model_timm_seresnet.so"
+runtime_plugins = ["plugin.cpp|register_timm_seresnet_plugin"]
+runtime_strategies = ["timm_seresnet_image_classification"]
+runtime_tests = [
+  "test_timm_seresnet_image_preprocess_seam|test_timm_seresnet_image_preprocess_seam.cpp|trtmc_model_timm_seresnet|_|_",
+]
