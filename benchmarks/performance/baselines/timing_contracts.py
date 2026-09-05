@@ -31,6 +31,7 @@ MODEL_CALL_FAMILIES = {
     "timm_mnasnet",
     "timm_inception",
     "timm_repvgg",
+    "timm_resnest",
     "timm_resnet",
     "timm_vgg",
     "timm_vit",

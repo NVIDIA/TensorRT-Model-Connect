@@ -1389,6 +1389,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "timm/resnest50d.in1k",
+      "revision": "2239b0d822126dee3bc7a5357514de35b8f42092",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "resnest50d"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",

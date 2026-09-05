@@ -80,6 +80,8 @@ models:
     workloads: [stsbenchmark_encoder_embedding_parity]
   bloom-560m:
     workloads: [mmlu_continuation_parity]
+  resnest50d-in1k:
+    workloads: [imagenette_image_classification]
   camembert-base:
     workloads: [stsbenchmark_encoder_embedding_parity]
   canary-1b-v2:
