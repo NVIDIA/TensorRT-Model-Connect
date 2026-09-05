@@ -319,6 +319,8 @@ models:
     workloads: [librispeech_clean_asr]
   whisper-tiny-fp16:
     workloads: [librispeech_clean_asr]
+  inception-resnet-v2-tf-in1k:
+    workloads: [imagenette_image_classification]
   xglm-564m:
     workloads: [mmlu_continuation_parity]
   xlm-roberta-base:
