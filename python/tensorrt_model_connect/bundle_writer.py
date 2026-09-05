@@ -398,3 +398,104 @@ def write_bundle(
         f.write(header_json)
         for s in sections:
             f.write(s.data)
+
+
+class BundleReader:
+    """Read a .bundle artifact file with strict validation."""
+    
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        if not self.path.is_file():
+            raise ValueError(f"Bundle file does not exist or is not a file: {self.path}")
+        
+        self.file_size = self.path.stat().st_size
+        
+        with open(self.path, "rb") as f:
+            magic = f.read(8)
+            if magic != BUNDLE_MAGIC:
+                raise ValueError("Invalid bundle magic signature")
+            
+            try:
+                header_len_bytes = f.read(8)
+                if len(header_len_bytes) < 8:
+                    raise ValueError("Truncated bundle header size")
+                
+                header_len = struct.unpack("<Q", header_len_bytes)[0]
+                if header_len > _MAX_BUNDLE_HEADER_SIZE or header_len <= 0:
+                    raise ValueError(f"Invalid bundle JSON header length: {header_len}")
+                
+                header_data = f.read(header_len)
+                if len(header_data) < header_len:
+                    raise ValueError("Truncated bundle JSON header")
+                
+                header_str = header_data.decode("utf-8")
+                
+                # Check for duplicate keys in sections manually or rely on json decoder
+                def dict_raise_on_duplicates(ordered_pairs):
+                    d = {}
+                    for k, v in ordered_pairs:
+                        if k in d:
+                            raise ValueError(f"Duplicate section name found: {k}")
+                        d[k] = v
+                    return d
+                
+                self.header = json.loads(header_str, object_pairs_hook=dict_raise_on_duplicates)
+                
+                if "sections" not in self.header:
+                    raise ValueError("Bundle header is missing 'sections' key")
+                if not isinstance(self.header["sections"], dict):
+                    raise ValueError("'sections' in bundle header must be a dictionary")
+                
+                self.sections = self.header["sections"]
+                
+                # Validate sections
+                # Extract regions (offset, size, name)
+                regions = []
+                for name, s in self.sections.items():
+                    if not isinstance(s, dict):
+                        raise ValueError(f"Section '{name}' must be a dictionary")
+                    if "offset" not in s or "size" not in s:
+                        raise ValueError(f"Section '{name}' missing 'offset' or 'size'")
+                    
+                    offset = s["offset"]
+                    size = s["size"]
+                    
+                    if not isinstance(offset, int) or not isinstance(size, int):
+                        raise ValueError(f"Section '{name}' offset and size must be integers")
+                    
+                    if offset < 0 or size < 0:
+                        raise ValueError(f"Section '{name}' offset and size must be non-negative")
+                    
+                    # Absolute offset in file is 16 + header_len + relative_offset
+                    abs_offset = 16 + header_len + offset
+                    if abs_offset + size > self.file_size:
+                        raise ValueError(f"Section '{name}' goes out-of-file range (offset {abs_offset}, size {size}, file_size {self.file_size})")
+                    
+                    regions.append((abs_offset, abs_offset + size, name))
+                
+                # Check for overlaps
+                regions.sort(key=lambda x: x[0])
+                for i in range(len(regions) - 1):
+                    if regions[i][1] > regions[i+1][0]:
+                        raise ValueError(f"Sections overlap: '{regions[i][2]}' and '{regions[i+1][2]}'")
+                
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in bundle header: {e}")
+            except struct.error as e:
+                raise ValueError(f"Malformed bundle header size: {e}")
+
+    def read_section(self, name: str) -> bytes:
+        if name not in self.sections:
+            raise ValueError(f"Section not found: {name}")
+        
+        s = self.sections[name]
+        offset = s["offset"]
+        size = s["size"]
+        
+        with open(self.path, "rb") as f:
+            # Need actual header_len to jump exactly
+            # Re-read it for exactness since header string might differ from json.dumps due to spaces
+            f.seek(8)
+            header_len = struct.unpack("<Q", f.read(8))[0]
+            f.seek(16 + header_len + offset)
+            return f.read(size)
