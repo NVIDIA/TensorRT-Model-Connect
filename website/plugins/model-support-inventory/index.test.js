@@ -34,6 +34,37 @@ test('rejects hf_revision for external model sources regardless of its value', (
   }
 });
 
+test('accepts a digest-pinned S3 model source', () => {
+  const manifest = {
+    hf_id: '/work/model-artifacts/openfold3/openbind-v0.5.0-ubiquitin',
+    model_source: {
+      kind: 's3',
+      id: 's3://openfold3-data/openfold3-parameters/of3-ob-2025-06-30-174k.pt',
+      revision: 'bd43301c011d5f87580d3e8b548658869433e4488399feb03035ba248f8e29e4',
+    },
+  };
+
+  assert.deepEqual(externalModelSource(manifest, 'manifest.json'), {
+    hfId: manifest.model_source.id,
+    revision: manifest.model_source.revision,
+    sourceKind: 's3',
+    buildInput: manifest.hf_id,
+    hfModelType: 'not applicable',
+    hfArchitectures: [],
+    hfArchitectureSource: 'not applicable',
+    hfMetadataRevision: manifest.model_source.revision,
+    hfMetadataRevisionSource: 's3',
+    hfMetadataFile: 'not applicable',
+  });
+  assert.throws(
+    () => externalModelSource({
+      ...manifest,
+      model_source: {...manifest.model_source, revision: 'mutable'},
+    }, 'manifest.json'),
+    /Malformed external model_source/
+  );
+});
+
 function writeFixture(repoRoot, relativePath, content = '') {
   const fixturePath = path.join(repoRoot, relativePath);
   fs.mkdirSync(path.dirname(fixturePath), {recursive: true});
@@ -533,5 +564,25 @@ test('publishes the external NGC FoundationPose recipe without HF metadata', () 
     inventory.familyRecipes.find((candidate) => candidate.family === 'foundationpose')
       ?.commandContracts,
     []
+  );
+});
+
+test('publishes the external S3 OpenFold3 protein-folding recipe', () => {
+  const repoRoot = path.resolve(__dirname, '..', '..', '..');
+  const inventory = collectModelSupportInventory(repoRoot);
+  const profile = inventory.modelProfiles.find(
+    (candidate) => candidate.profile === 'openfold3-ubiquitin-fp16-l0'
+  );
+
+  assert.ok(profile, 'missing OpenFold3 profile');
+  assert.equal(profile.sourceKind, 's3');
+  assert.deepEqual(profile.hfTasks, ['protein-folding']);
+  assert.deepEqual(profile.cliCommands, ['predict-structure']);
+  const family = inventory.familyRecipes.find(
+    (candidate) => candidate.family === 'openfold3'
+  );
+  assert.equal(
+    family?.commandContracts[0].syntax,
+    'trtmc predict-structure <bundle.bundle> --input <request.json> --output <structure.cif>'
   );
 });

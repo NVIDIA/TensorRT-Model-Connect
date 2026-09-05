@@ -147,6 +147,13 @@ const HF_TASKS = [
     description: 'Policies that map robot observations and state to control actions.',
     hfUrl: 'https://huggingface.co/models?pipeline_tag=robotics',
   },
+  {
+    slug: 'protein-folding',
+    label: 'Protein Folding',
+    category: 'Biology',
+    description: 'Models that predict three-dimensional biomolecular structures from sequences.',
+    hfUrl: 'https://huggingface.co/tasks/protein-folding',
+  },
 ];
 
 const CLI_COMMANDS_BY_TASK_STRATEGY = {
@@ -166,6 +173,7 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   speech_to_speech: ['speak'],
   speech_to_text: ['transcribe'],
   stereo_disparity: ['disparity'],
+  structure_prediction: ['predict-structure'],
   text_generation_causal: ['run'],
   text_to_audio: ['generate-audio'],
   vision_language_generation: ['run'],
@@ -245,15 +253,18 @@ function hfMetadataFields(metadata) {
 function externalModelSource(manifest, manifestPath) {
   const source = manifest.model_source;
   if (source === undefined) return null;
+  const externalKinds = new Set(['ngc', 's3']);
   if (
     !source ||
     typeof source !== 'object' ||
     Array.isArray(source) ||
-    source.kind !== 'ngc' ||
+    !externalKinds.has(source.kind) ||
     typeof source.id !== 'string' ||
     !source.id ||
     typeof source.revision !== 'string' ||
     !source.revision ||
+    (source.kind === 's3' &&
+      (!source.id.startsWith('s3://') || !/^[0-9a-f]{64}$/.test(source.revision))) ||
     !path.isAbsolute(manifest.hf_id) ||
     Object.hasOwn(manifest, 'hf_revision')
   ) {
@@ -377,6 +388,8 @@ function hfTasksForManifest(manifest) {
       return ['robotics'];
     case 'pose_hypothesis_refinement':
       return ['robotics'];
+    case 'structure_prediction':
+      return ['protein-folding'];
     case 'diffusion_media_generation': {
       const tasks = new Set();
       for (const testcase of testcases.length > 0 ? testcases : [{}]) {
@@ -1280,6 +1293,23 @@ function commandContractForProfile(profile, capability) {
           option('--field-input <CSV>', 'One input mode', 'Single numerical field input.'),
           option('--branch-input <CSV>', 'One input mode', 'Branch input for operator-style recipes.'),
           option('--trunk-input <CSV>', 'Optional with --branch-input', 'Trunk input for operator-style recipes.'),
+        ],
+        evidence,
+      };
+    case 'structure_prediction':
+      return {
+        command: 'predict-structure',
+        purpose: 'Predict a biomolecular structure from a JSON request.',
+        syntax: 'trtmc predict-structure <bundle.bundle> --input <request.json> --output <structure.cif>',
+        options: [
+          option('--input <PATH>', 'Required', 'JSON structure-prediction request.'),
+          option('--output <PATH>', 'Required', 'Predicted mmCIF structure output.'),
+          option('--output-json <PATH>', 'Optional', 'Confidence and runtime metadata output.'),
+          option('--num-steps <N>', 'Optional', 'Diffusion sampling steps.'),
+          option('--num-samples <N>', 'Optional', 'Number of diffusion samples.'),
+          option('--seed <N>', 'Optional', 'Diffusion random seed.'),
+          option('--benchmark <N>', 'Optional', 'Timed structure-prediction iterations.'),
+          option('--warmup <N>', 'Optional with --benchmark', 'Warmup iterations before timing.'),
         ],
         evidence,
       };
