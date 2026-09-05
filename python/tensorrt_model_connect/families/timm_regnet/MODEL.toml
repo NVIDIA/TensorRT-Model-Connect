@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_regnet"
+plugin = "timm_regnet"
+module = "plugin"
+python_profile_specs = [
+  "timm_regnet_reference|families/timm_regnet/python_profile_requirements/timm_regnet_reference.lock.txt|families/timm_regnet/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_regnet_reference",
+]
+aliases = [
+  "timm_regnet",
+  "regnet",
+  "regnety_040",
+]
+prefixes = [
+  "timm_regnet",
+  "regnet",
+]
