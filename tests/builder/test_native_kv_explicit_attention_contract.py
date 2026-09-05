@@ -14,6 +14,7 @@ _FAMILIES = _ROOT / "python" / "tensorrt_model_connect" / "families"
 _FIXED_KV_OWNERS = {
     _FAMILIES / "qwen" / "graph_ops.py",
     _FAMILIES / "llama" / "graph_ops.py",
+    _FAMILIES / "smollm3" / "graph_ops.py",
     _FAMILIES / "lfm2" / "model.py",
     _FAMILIES / "k2_horizon" / "model" / "model.py",
 }

@@ -295,6 +295,8 @@ models:
     workloads: [sana_wm_benchmark_diffusion_video]
   segformer-b0-ade:
     workloads: [ade20k_semantic_segmentation]
+  smollm3-3b:
+    workloads: [mmlu_continuation_parity]
   stablelm2-1.6b:
     workloads: [mmlu_continuation_parity]
   starcoder2-3b:
