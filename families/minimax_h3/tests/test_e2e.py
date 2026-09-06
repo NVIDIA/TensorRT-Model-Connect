@@ -329,12 +329,8 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         kwargs["negative_prompt"] = case["negative_prompt"]
     if "guidance_scale" in case:
         kwargs["guidance_scale"] = float(case["guidance_scale"])
-    output = pipeline(output="videos", output_type="np", **kwargs)
-    videos = output.get("videos")
-    if isinstance(videos, torch.Tensor):
-        frames = videos.detach().float().cpu().numpy()
-    else:
-        frames = np.asarray(videos[0])
+    videos = pipeline(output="videos", output_type="np", **kwargs)
+    frames = np.asarray(videos[0])
     assert frames.shape == (
         int(manifest["video_num_frames"]),
         int(manifest["image_height"]),

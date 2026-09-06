@@ -57,7 +57,7 @@ def _framework(monkeypatch) -> tuple[dict, object]:
 
         def __call__(self, **kwargs):
             calls["kwargs"] = kwargs
-            return {"videos": [np.zeros((3, 2, 2, 3), dtype=np.float32)]}
+            return np.zeros((1, 3, 2, 2, 3), dtype=np.float32)
 
     diffusers = ModuleType("diffusers")
     diffusers.ModularPipeline = Pipeline
