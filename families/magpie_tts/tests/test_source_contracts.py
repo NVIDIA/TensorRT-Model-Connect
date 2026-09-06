@@ -44,3 +44,20 @@ def test_long_form_build_keeps_the_complete_pipeline_in_fp32() -> None:
         testcase for testcase in manifest["testcases"] if testcase["name"] == "magpie-tts-357m"
     )
     assert long_form["max_new_tokens"] == 750
+
+
+def test_reference_declares_checkpoint_g2p_dependencies() -> None:
+    requirements = {
+        line.strip()
+        for line in (Path(__file__).parent.parent / "requirements.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+
+    assert {
+        "jieba==0.42.1",
+        "pypinyin==0.55.0",
+        "pypinyin-dict==0.9.0",
+        "pyopenjtalk==0.4.1",
+    } <= requirements
