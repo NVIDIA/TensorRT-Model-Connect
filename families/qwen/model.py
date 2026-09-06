@@ -185,7 +185,6 @@ class _QwenModel:
 _BUNDLE_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
-    "chat_template.jinja",
     "vocab.json",
     "merges.txt",
     "special_tokens_map.json",

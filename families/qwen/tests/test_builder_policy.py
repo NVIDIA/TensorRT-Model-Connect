@@ -18,3 +18,13 @@ def test_qwen_builders_preserve_mainline_optimization_level() -> None:
         source = (FAMILY_ROOT / filename).read_text(encoding="utf-8")
         assert source.count("create_builder_config()") == 1
         assert source.count("builder_optimization_level = 3") == 1
+
+
+def test_qwen_runtime_uses_the_checkpoint_chat_template_without_fallback() -> None:
+    plugin = (FAMILY_ROOT / "runtime/plugin.cpp").read_text(encoding="utf-8")
+    model = (FAMILY_ROOT / "model.py").read_text(encoding="utf-8")
+
+    assert 'require_text_section(bundle, "tokenizer_config.json")' in plugin
+    assert 'config.find("chat_template")' in plugin
+    assert "chat_template.jinja" not in plugin
+    assert '"chat_template.jinja"' not in model

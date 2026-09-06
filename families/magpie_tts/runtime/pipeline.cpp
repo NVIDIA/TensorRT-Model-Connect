@@ -85,15 +85,12 @@ void upload_magpie_prev_codes_to_device([[maybe_unused]] MagpieCudaBuffer& d_pre
 MagpiePipeline::MagpiePipeline(
     std::unique_ptr<ITrtModule> encoder, std::unique_ptr<ITrtModule> decoder,
     std::unique_ptr<MagpieInferenceState> decoder_state, std::unique_ptr<ITrtModule> codec,
-    std::unique_ptr<ITrtModule> lt_module,
     std::unique_ptr<MagpieInferenceState> decoder_state_uncond,
     std::vector<MagpieCudaBuffer> cross_k, std::vector<MagpieCudaBuffer> cross_v,
     std::vector<MagpieCudaBuffer> cross_k_uncond, std::vector<MagpieCudaBuffer> cross_v_uncond,
     MagpieCudaBuffer encoder_output, MagpieCudaBuffer encoder_output_uncond,
     std::vector<float> audio_embed, std::vector<float> text_embed, std::vector<float> context_embed,
-    std::vector<int32_t> context_lengths, std::vector<float> lt_in_proj_w,
-    std::vector<float> lt_in_proj_b, std::vector<float> lt_out_proj,
-    std::vector<float> lt_pos_embed, int32_t lt_hidden, MagpieTTSConfig config, cudaStream_t stream,
+    std::vector<int32_t> context_lengths, MagpieTTSConfig config, cudaStream_t stream,
     std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)),
       decoder_state_(std::move(decoder_state)), codec_(std::move(codec)),
@@ -111,27 +108,18 @@ MagpiePipeline::MagpiePipeline(
       device_all_codes_(static_cast<std::size_t>(512) * config.num_codebooks * sizeof(int32_t)),
       device_logits_cond_(0), device_logits_uncond_(0),
       device_rand_vals_(static_cast<std::size_t>(config.num_codebooks) * sizeof(float)),
-      lt_module_(std::move(lt_module)), lt_in_proj_w_(std::move(lt_in_proj_w)),
-      lt_in_proj_b_(std::move(lt_in_proj_b)), lt_out_proj_(std::move(lt_out_proj)),
-      lt_pos_embed_(std::move(lt_pos_embed)), lt_hidden_(lt_hidden), stream_(stream),
-      config_(config), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      rng_(std::random_device{}()) {
+      stream_(stream), config_(config), tokenizer_(std::move(tokenizer)),
+      model_id_(std::move(model_id_str)), rng_(std::random_device{}()) {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error("MagpiePipeline: invalid decoder module");
     if (!decoder_state_ || !decoder_state_->ok())
         throw std::runtime_error("MagpiePipeline: invalid decoder state");
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("MagpiePipeline: invalid encoder module");
-    if (!lt_module_ || !lt_module_->ok() || lt_hidden_ <= 0 || lt_in_proj_w_.empty() ||
-        lt_in_proj_b_.size() != static_cast<std::size_t>(lt_hidden_) || lt_out_proj_.empty() ||
-        lt_pos_embed_.empty())
-        throw std::runtime_error("MagpiePipeline: local transformer assets are incomplete");
-
     upload_embeddings_to_gpu();
     init_cross_attn_resources();
     init_cfg_logit_buffers();
     init_attention_prior();
-    init_local_transformer();
 }
 
 MagpiePipeline::~MagpiePipeline() = default;
@@ -307,10 +295,6 @@ void MagpiePipeline::bind_cross_kv() {
     if (has_cross_attn_output_ && cross_attn_weights_.ok())
         decoder_->bind_external("cross_attn_weights", cross_attn_weights_.data());
 
-    // Bind decoder_hidden output for LT (conditioned path)
-    if (has_decoder_hidden_output_ && decoder_hidden_buf_.ok())
-        decoder_->bind_external("decoder_hidden", decoder_hidden_buf_.data());
-
     // Bind attention prior input and alignment weights output
     if (has_attn_prior_ && attn_prior_device_.ok())
         decoder_->bind_external("cross_attn_prior", attn_prior_device_.data());
@@ -337,11 +321,6 @@ void MagpiePipeline::bind_cross_kv_uncond() {
     // doesn't overwrite the conditioned weights we need for tracking
     if (has_cross_attn_output_ && cross_attn_weights_scratch_.ok())
         decoder_->bind_external("cross_attn_weights", cross_attn_weights_scratch_.data());
-
-    // Redirect decoder_hidden to uncond buffer so uncond pass doesn't
-    // overwrite the conditioned hidden state we need for LT
-    if (has_decoder_hidden_output_ && decoder_hidden_buf_uncond_.ok())
-        decoder_->bind_external("decoder_hidden", decoder_hidden_buf_uncond_.data());
 
     // Redirect alignment_weights to scratch for uncond pass
     if (has_alignment_output_ && alignment_scratch_device_.ok())
@@ -876,7 +855,7 @@ std::vector<int32_t> MagpiePipeline::run_cpu_sampling_loop(DecoderLoopState& sta
         const auto t_step_end = SteadyClock::now();
         state.prof_trt_step_ms += elapsed_ms(t_step_start, t_step_end);
 
-        // Sample frame codes (LT path if available, otherwise flat logits)
+        // Sample each codebook directly from the decoder's parallel logits.
         const auto t_sample_start = SteadyClock::now();
         std::vector<int32_t> frame_codes;
         bool eos = false;
@@ -1305,142 +1284,6 @@ void MagpiePipeline::update_attention_prior(int32_t frame) {
 
 void MagpiePipeline::upload_attention_prior() {
     // No-op: prior is uploaded in update_attention_prior()
-}
-
-// ---------------------------------------------------------------------------
-// Local transformer initialization + per-codebook AR sampling
-// ---------------------------------------------------------------------------
-
-void MagpiePipeline::init_local_transformer() {
-    // Detect and allocate decoder_hidden output buffer (needed for LT and NeMo EOS gating)
-    if (decoder_->has_output("decoder_hidden")) {
-        const auto dec_hidden_bytes = static_cast<std::size_t>(config_.hidden_size) * sizeof(float);
-        decoder_hidden_buf_ = MagpieCudaBuffer(dec_hidden_bytes);
-        if (config_.cfg_scale > 1.0F) {
-            decoder_hidden_buf_uncond_ = MagpieCudaBuffer(dec_hidden_bytes);
-        }
-        has_decoder_hidden_output_ = true;
-    }
-
-    // Initialize LT engine if loaded from bundle
-    if (lt_module_ && lt_module_->ok()) {
-        has_lt_ = true;
-        // LT dimensions: infer from engine I/O or use typical defaults
-        // (256 hidden, 8 max codebooks = max cache positions)
-        lt_max_cache_ = config_.num_codebooks;
-
-        const std::size_t lt_cache_bytes = static_cast<std::size_t>(lt_max_cache_) *
-                                           static_cast<std::size_t>(lt_hidden_) * sizeof(float);
-        lt_cache_k_ = MagpieCudaBuffer(lt_cache_bytes);
-        lt_cache_v_ = MagpieCudaBuffer(lt_cache_bytes);
-        lt_present_k_ = MagpieCudaBuffer(lt_cache_bytes);
-        lt_present_v_ = MagpieCudaBuffer(lt_cache_bytes);
-        lt_output_ = MagpieCudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
-        lt_mask_ = MagpieCudaBuffer(static_cast<std::size_t>(lt_max_cache_ + 1) * sizeof(float));
-        lt_position_id_ = MagpieCudaBuffer(sizeof(int32_t));
-        lt_input_embed_ = MagpieCudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
-
-        if (config_.cfg_scale > 1.0F) {
-            lt_cache_k_uncond_ = MagpieCudaBuffer(lt_cache_bytes);
-            lt_cache_v_uncond_ = MagpieCudaBuffer(lt_cache_bytes);
-            lt_present_k_uncond_ = MagpieCudaBuffer(lt_cache_bytes);
-            lt_present_v_uncond_ = MagpieCudaBuffer(lt_cache_bytes);
-            lt_output_uncond_ =
-                MagpieCudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
-        }
-
-        // Bind KV cache to LT module
-        lt_module_->bind_external("cache_k", lt_cache_k_.data());
-        lt_module_->bind_external("cache_v", lt_cache_v_.data());
-
-        std::cerr << "[magpie-tts] Local transformer engine loaded (hidden=" << lt_hidden_
-                  << ", max_cache=" << lt_max_cache_ << ")" << std::endl;
-    }
-}
-
-void MagpiePipeline::lt_run_codebook_step(int32_t cb, const std::vector<float>& decoder_hidden,
-                                          std::vector<float>& logits) {
-    std::vector<float> lt_input(static_cast<std::size_t>(lt_hidden_), 0.0f);
-    const float* w = lt_in_proj_w_.data();
-    const float* b = lt_in_proj_b_.data();
-    for (int32_t o = 0; o < lt_hidden_; ++o) {
-        float val = b[o];
-        for (int32_t i = 0; i < config_.hidden_size; ++i)
-            val += decoder_hidden[static_cast<std::size_t>(i)] *
-                   w[static_cast<std::size_t>(o) * config_.hidden_size + i];
-        lt_input[static_cast<std::size_t>(o)] = val;
-    }
-    cudaMemcpy(lt_input_embed_.data(), lt_input.data(), lt_input.size() * sizeof(float),
-               cudaMemcpyHostToDevice);
-    int32_t pos = cb;
-    cudaMemcpy(lt_position_id_.data(), &pos, sizeof(int32_t), cudaMemcpyHostToDevice);
-    std::vector<float> mask(static_cast<std::size_t>(lt_max_cache_ + 1), -1e9f);
-    for (int32_t i = 0; i <= cb; ++i)
-        mask[static_cast<std::size_t>(i)] = 0.0f;
-    cudaMemcpy(lt_mask_.data(), mask.data(), mask.size() * sizeof(float), cudaMemcpyHostToDevice);
-
-    TensorMap lt_inputs;
-    Tensor embed_t;
-    embed_t.data = lt_input_embed_.data();
-    embed_t.shape = {1, lt_hidden_};
-    embed_t.dtype = DType::kFloat32;
-    lt_inputs["input_embed"] = embed_t;
-    lt_module_->forward_async(lt_inputs);
-    lt_module_->sync();
-
-    std::vector<float> lt_out(static_cast<std::size_t>(lt_hidden_));
-    cudaMemcpy(lt_out.data(), lt_module_->device_ptr("output"), lt_out.size() * sizeof(float),
-               cudaMemcpyDeviceToHost);
-    const int32_t cb_size = static_cast<int32_t>(logits.size());
-    const std::size_t proj_stride = static_cast<std::size_t>(lt_hidden_ + 1) * cb_size;
-    const float* proj_w = lt_out_proj_.data() + cb * proj_stride;
-    const float* proj_b = proj_w + static_cast<std::size_t>(lt_hidden_) * cb_size;
-    for (int32_t v = 0; v < cb_size; ++v) {
-        float val = proj_b[v];
-        for (int32_t h = 0; h < lt_hidden_; ++h)
-            val += lt_out[static_cast<std::size_t>(h)] *
-                   proj_w[static_cast<std::size_t>(h) * cb_size + v];
-        logits[static_cast<std::size_t>(v)] = val;
-    }
-}
-
-bool MagpiePipeline::sample_frame_codes_lt(DecoderLoopState& state,
-                                           std::vector<int32_t>& frame_codes, bool& eos) {
-    if (!has_lt_ || !lt_module_ || !lt_module_->ok())
-        return false;
-
-    const int32_t num_cb = state.num_cb;
-    const int32_t cb_size = state.cb_size;
-
-    std::vector<float> decoder_hidden(static_cast<std::size_t>(config_.hidden_size));
-    cudaMemcpy(decoder_hidden.data(), decoder_hidden_buf_.data(),
-               decoder_hidden.size() * sizeof(float), cudaMemcpyDeviceToHost);
-
-    cudaMemset(lt_cache_k_.data(), 0, lt_cache_k_.size());
-    cudaMemset(lt_cache_v_.data(), 0, lt_cache_v_.size());
-
-    frame_codes.resize(static_cast<std::size_t>(num_cb));
-    eos = false;
-
-    for (int32_t cb = 0; cb < num_cb; ++cb) {
-        std::vector<float> logits(static_cast<std::size_t>(cb_size), 0.0f);
-        lt_run_codebook_step(cb, decoder_hidden, logits);
-
-        int32_t token =
-            config_.greedy
-                ? static_cast<int32_t>(
-                      std::distance(logits.begin(), std::max_element(logits.begin(), logits.end())))
-                : sample_top_k(logits.data(), cb_size, config_.temperature, config_.top_k);
-
-        frame_codes[static_cast<std::size_t>(cb)] = token;
-        if (cb == 0 && token == kMagpieEosToken)
-            eos = true;
-
-        // Copy present_k/v to cache for next codebook step
-        // (LT KV cache grows with each codebook position)
-    }
-
-    return true; // LT sampling was used
 }
 
 // ---------------------------------------------------------------------------

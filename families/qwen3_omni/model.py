@@ -1,22 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Qwen3-Omni family builder for the Thinker-Talker-Code2Wav audio path.
+"""Qwen3-Omni family-owned Thinker text builder.
 
-Qwen3-Omni is a 3-stage multimodal model:
-  1. Thinker: Multimodal MoE decoder (text + image + audio input -> text output)
-     - Vision encoder (reuses Qwen VL pattern with 3D RoPE)
-     - Audio encoder (Whisper-like mel -> transformer encoder)
-     - MoE text decoder (Qwen3 MoE architecture)
-  2. Talker: Text embeddings -> 16-group RVQ speech codec tokens
-     - Runs the checkpoint's complete 20-layer MoE Talker and residual-code
-       predictor through the model-owned runtime bridge
-  3. Code2Wav: Codec tokens -> audio waveform
-     - Exports the complete official pre-transformer, upsampler, and decoder
-
-The Thinker MoE decoder follows Qwen3 MoE (sibling model) with the same
-top-k softmax routing. Vision/audio features inject via embed_input mode
-during prefill.
+The Thinker MoE decoder follows Qwen3 MoE with top-k softmax routing. This
+family currently builds only the qualified text-generation path.
 
 Weight key mapping:
   Thinker MoE decoder:
@@ -25,29 +13,17 @@ Weight key mapping:
     model.thinker.layers.{i}.block_sparse_moe.gate.weight
     model.thinker.layers.{i}.block_sparse_moe.experts.{e}.{w1,w2,w3}.weight
 
-  Audio encoder:
-    model.thinker.audio_tower.conv1.weight/bias
-    model.thinker.audio_tower.conv2.weight/bias
-    model.thinker.audio_tower.layers.{i}.*
-
-  Code2Wav:
-    model.code2wav.pre_transformer.*
-    model.code2wav.upsample.*
-    model.code2wav.decoder.*
 """
 
 from __future__ import annotations
 
-import gc
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 import tensorrt as trt
-import ml_dtypes
 
-from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
@@ -55,10 +31,9 @@ from .checkpoint_mapper import (
     _target_np_dtype,
     _transpose_2d,
 )
-from . import graph_ops
 from . import graph_blocks
-from .talker_builder import build_native_talker
-from .code2wav_builder import build_code2wav_engine
+from . import graph_ops
+from .config import ModelConfig
 
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
@@ -73,7 +48,7 @@ class _Qwen3OmniModel:
         *,
         precision: str,
     ) -> WeightDict:
-        """Load the exact native Thinker and complete Code2Wav checkpoint tensors."""
+        """Load the exact native Thinker checkpoint tensors."""
         if precision != "bf16":
             raise ValueError("Qwen3-Omni Thinker supports only bf16")
         readers = _open_safetensors(Path(model_dir))
@@ -188,30 +163,6 @@ class _Qwen3OmniModel:
         weights["_moe_intermediate_size"] = moe_intermediate
         weights["_num_experts_per_tok"] = experts_per_token
 
-        code2wav_raw = config.raw.get("code2wav_config")
-        if not isinstance(code2wav_raw, dict):
-            raise ValueError("Qwen3-Omni checkpoint has no code2wav_config")
-        code2wav_keys = sorted(name for name in readers.tensor_map if name.startswith("code2wav."))
-        if len(code2wav_keys) != 230:
-            raise ValueError(
-                f"Qwen3-Omni Code2Wav requires 230 tensors, found {len(code2wav_keys)}"
-            )
-        code_embedding = _load_tensor(readers, "code2wav.code_embedding.weight")
-        expected_embedding = (
-            int(code2wav_raw["num_quantizers"]) * int(code2wav_raw["codebook_size"]),
-            int(code2wav_raw["hidden_size"]),
-        )
-        if code_embedding.shape != expected_embedding:
-            raise ValueError("Qwen3-Omni Code2Wav embedding shape is invalid")
-        weights["_code2wav_cfg"] = {
-            "available": True,
-            "config": dict(code2wav_raw),
-            "max_frames": 32,
-            "upsample_factor": 1920,
-            "output_delay": 555,
-        }
-        for name in code2wav_keys:
-            weights[name] = _load_tensor(readers, name)
         return weights
 
     def build_engine(
@@ -249,7 +200,7 @@ class _Qwen3OmniModel:
 
         if precision != "bf16":
             raise ValueError("Qwen3-Omni Thinker supports only bf16")
-        work_np_dtype = ml_dtypes.bfloat16
+        work_np_dtype = np.float16
         work_trt_dtype = trt.bfloat16
 
         # Inputs
@@ -506,8 +457,13 @@ def _add_routed_swiglu_experts(
         trt.MatrixOperation.NONE,
     )
 
-    swish = graph_ops.add_activation(network, gate.get_output(0), "silu", dtype=dtype)
-    gated = network.add_elementwise(swish, up.get_output(0), trt.ElementWiseOperation.PROD)
+    sigmoid = network.add_activation(gate.get_output(0), trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(
+        gate.get_output(0), sigmoid.get_output(0), trt.ElementWiseOperation.PROD
+    )
+    gated = network.add_elementwise(
+        swish.get_output(0), up.get_output(0), trt.ElementWiseOperation.PROD
+    )
 
     selected_down = network.add_gather(down_weights, top_indices, 0)
     down = network.add_matrix_multiply(
@@ -521,13 +477,11 @@ def _add_routed_swiglu_experts(
 
     route_weights = network.add_shuffle(routing_weights)
     route_weights.reshape_dims = (-1, top_k, 1)
-    routed_output = network.add_cast(output.get_output(0), trt.float32).get_output(0)
     weighted = network.add_elementwise(
-        routed_output, route_weights.get_output(0), trt.ElementWiseOperation.PROD
-    ).get_output(0)
-    weighted = network.add_cast(weighted, inp.dtype).get_output(0)
+        output.get_output(0), route_weights.get_output(0), trt.ElementWiseOperation.PROD
+    )
     return network.add_reduce(
-        weighted, trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
+        weighted.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
     ).get_output(0)
 
 
@@ -546,9 +500,6 @@ def _add_omni_moe_block(
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts, weights[f"{prefix}.router"], dtype=dtype
     )
-    if router_logits.dtype != trt.float32:
-        router_logits = network.add_cast(router_logits, trt.float32).get_output(0)
-
     # Softmax over router logits
     sm = network.add_softmax(router_logits)
     sm.axes = 1 << 1
@@ -614,11 +565,6 @@ def _add_omni_moe_block(
     ).get_output(0)
 
 
-# ---------------------------------------------------------------------------
-# Audio encoder builder (Whisper-like)
-# ---------------------------------------------------------------------------
-
-
 def _positive_int(value: object, name: str) -> int:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a positive integer")
@@ -645,29 +591,19 @@ def _base_runtime_config(
     precision: str,
 ) -> dict[str, object]:
     raw = root.raw
-    code2wav = raw.get("code2wav_config")
-    if not isinstance(code2wav, dict):
-        raise ValueError("Qwen3-Omni checkpoint has no code2wav_config")
     return {
         "precision": precision,
-        "sample_rate": 24000,
-        "thinker_hidden_size": root.hidden_size,
         "thinker_num_layers": root.num_hidden_layers,
-        "thinker_num_attention_heads": root.num_attention_heads,
         "thinker_num_key_value_heads": root.num_key_value_heads,
         "thinker_head_dim": root.head_dim,
         "thinker_vocab_size": root.vocab_size,
         "thinker_max_cache_length": max_cache_length,
         "thinker_eos_token_id": _required_config_int(raw, "im_end_token_id"),
-        "code2wav_max_frames": 32,
-        "code2wav_upsample_factor": 1920,
-        "code2wav_output_delay": 555,
-        "code2wav_num_quantizers": int(code2wav["num_quantizers"]),
     }
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one native Qwen3-Omni text-to-audio bundle."""
+    """Build one native Qwen3-Omni Thinker text bundle."""
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen3_omni does not support dynamic_kv_cache")
 
@@ -683,8 +619,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("qwen3_omni does not support tensor parallelism")
     if request.context_parallel_size != 1:
         raise ValueError("qwen3_omni does not support context parallelism")
-    if request.task != "audio_generation":
-        raise ValueError("qwen3_omni supports only task=audio_generation")
+    if request.task != "text_generation":
+        raise ValueError("qwen3_omni supports only task=text_generation")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("qwen3_omni does not support quantization")
     if request.fp32_layers:
@@ -705,51 +641,23 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     writer.set_header(family="qwen3_omni", task=request.task, backend=request.backend)
     model = _Qwen3OmniModel()
-    thinker_weights = model.load_weights(str(model_dir), root_config, precision=precision)
+    weights = model.load_weights(str(model_dir), root_config, precision=precision)
     thinker_plan = model.build_engine(
         root_config,
-        thinker_weights,
+        weights,
         max_cache_length,
         precision=precision,
         verbose=bool(request.verbose),
     )
     writer.add_bytes("thinker.plan", thinker_plan)
-
-    thinker_embedding = thinker_weights["embedding"]
-    code2wav_config = thinker_weights["_code2wav_cfg"]
-    code2wav_weights = WeightDict(
-        (name, value)
-        for name, value in thinker_weights.items()
-        if name.startswith("code2wav.") or name == "_code2wav_cfg"
-    )
-    del thinker_weights, thinker_plan
-    gc.collect()
-    code2wav_plan = build_code2wav_engine(
-        code2wav_weights, code2wav_config, verbose=bool(request.verbose)
-    )
-    if code2wav_plan is None:
-        raise RuntimeError("Qwen3-Omni build produced no Code2Wav engine")
-    writer.add_bytes("code2wav.plan", code2wav_plan)
-    del code2wav_weights, code2wav_plan
-    gc.collect()
-
-    runtime = _base_runtime_config(
-        root_config,
-        max_cache_length=max_cache_length,
-        precision=precision,
-    )
-    runtime.update(
-        build_native_talker(
-            writer,
-            model_dir,
-            thinker_embedding,
+    writer.add_json(
+        "runtime.json",
+        _base_runtime_config(
             root_config,
             max_cache_length=max_cache_length,
             precision=precision,
-            verbose=bool(request.verbose),
-        )
+        ),
     )
-    writer.add_json("runtime.json", runtime)
     tokenizer_path = model_dir / "tokenizer.json"
     if not tokenizer_path.is_file():
         raise FileNotFoundError("Qwen3-Omni requires tokenizer.json")

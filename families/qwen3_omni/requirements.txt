@@ -3,4 +3,3 @@
 
 # Used by the Transformers reference loader.
 accelerate>=1.0
-soundfile>=0.12

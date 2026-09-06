@@ -315,7 +315,6 @@ def _native(
         if key in case:
             arguments.extend((option, str(float(case[key]))))
     payload = _run_json(binary, runtime_root, bundle, manifest, case, command, *arguments)
-    payload["artifact"] = str(output)
     return payload
 
 
@@ -419,12 +418,8 @@ def _frame_stats(paths: list[Path]) -> dict[str, float | int | bool]:
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
     assert manifest["task"] == "image_generation"
-    artifact = Path(actual["artifact"])
-    if artifact.is_dir():
-        actual_paths = sorted(artifact.glob("frame_*.png"))
-    else:
-        actual_paths = [artifact]
-    assert actual_paths
+    actual_paths = [Path(path) for path in actual["frames"]]
+    assert actual_paths and all(path.is_file() for path in actual_paths)
     stats = _frame_stats(actual_paths)
     if "exact_num_frames" in thresholds:
         assert len(actual_paths) == int(thresholds["exact_num_frames"])

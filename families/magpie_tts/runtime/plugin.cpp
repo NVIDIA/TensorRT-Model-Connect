@@ -67,7 +67,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("Magpie decoder plan must contain prefill and decode profiles");
     decoder_profiles.decode->keep_alive(stream_owner);
     auto codec = load("codec.plan");
-    auto local_transformer = load("local_transformer.plan");
 
     auto config = build_magpie_config(runtime);
     const auto max_cache = document.at("max_cache_length").get<std::int32_t>();
@@ -113,35 +112,11 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         context_lengths.empty())
         throw std::runtime_error("Magpie embedding sections are invalid");
 
-    auto in_projection = floats("local_transformer.in_projection");
-    auto out_projections = floats("local_transformer.out_projections");
-    auto position_embedding = floats("local_transformer.position_embedding");
-    const auto lt_shape = local_transformer->tensor_shape("input_embed");
-    if (lt_shape.empty() || lt_shape.back() <= 0)
-        throw std::runtime_error("Magpie local transformer input shape is invalid");
-    const auto lt_hidden = static_cast<std::int32_t>(lt_shape.back());
-    const auto in_weight_count = static_cast<std::size_t>(config.hidden_size) * lt_hidden;
-    if (in_projection.size() != in_weight_count + static_cast<std::size_t>(lt_hidden))
-        throw std::runtime_error("Magpie local transformer in_projection size is invalid");
-    std::vector<float> in_weight(in_projection.begin(),
-                                 in_projection.begin() +
-                                     static_cast<std::ptrdiff_t>(in_weight_count));
-    std::vector<float> in_bias(in_projection.begin() + static_cast<std::ptrdiff_t>(in_weight_count),
-                               in_projection.end());
-    const auto out_count = static_cast<std::size_t>(config.num_codebooks) *
-                           static_cast<std::size_t>(lt_hidden + 1) * config.codebook_size;
-    const auto position_count =
-        static_cast<std::size_t>(config.num_codebooks) * static_cast<std::size_t>(lt_hidden);
-    if (out_projections.size() != out_count || position_embedding.size() != position_count)
-        throw std::runtime_error("Magpie local transformer projection assets have invalid sizes");
-
     return new MagpiePipeline(
         std::move(encoder), std::move(decoder_profiles.decode), std::move(state), std::move(codec),
-        std::move(local_transformer), std::move(unconditional_state), std::move(cross_k),
-        std::move(cross_v), std::move(unconditional_k), std::move(unconditional_v),
-        std::move(encoder_output), std::move(unconditional_output), std::move(audio_embed),
-        std::move(text_embed), std::move(context_embed), std::move(context_lengths),
-        std::move(in_weight), std::move(in_bias), std::move(out_projections),
-        std::move(position_embedding), lt_hidden, std::move(config), options.stream,
+        std::move(unconditional_state), std::move(cross_k), std::move(cross_v),
+        std::move(unconditional_k), std::move(unconditional_v), std::move(encoder_output),
+        std::move(unconditional_output), std::move(audio_embed), std::move(text_embed),
+        std::move(context_embed), std::move(context_lengths), std::move(config), options.stream,
         make_ipa_tok(context.reader));
 }

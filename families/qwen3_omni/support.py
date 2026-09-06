@@ -8,6 +8,6 @@ from tensorrt_model_connect.model_support import family_support
 
 describe = family_support(
     model_types=("qwen3_omni", "qwen3_omni_moe", "qwen3omni"),
-    tasks=("audio_generation",),
-    default_task="audio_generation",
+    tasks=("text_generation",),
+    default_task="text_generation",
 )

@@ -1105,19 +1105,26 @@ def test_timeseries_entries_use_current_forecast_request_schema(tmp_path: Path) 
     assert '_numeric_values(request, "field_input")' not in source
 
 
-def test_qwen3_omni_preserves_thinker_and_talker_limits(tmp_path: Path) -> None:
+def test_qwen3_omni_uses_the_text_generation_contract(tmp_path: Path) -> None:
     _, environment = _environment(tmp_path)
     _, entries, _ = perf.load_suite(SUITE)
-    selected = [entry for entry in entries if entry["id"] == "qwen3_omni.generate_audio"]
+    selected = [entry for entry in entries if entry["id"] == "qwen3_omni.generate"]
     resolved = perf.resolve_entries(selected, environment)[0]
+    assert resolved.spec["operation"] == "generate"
+    assert resolved.spec["baseline"]["output_contract"] == "exact-text"
     assert resolved.case.request["max_new_tokens"] == 16
-    assert resolved.case.request["talker_max_new_tokens"] == 32
+    assert "talker_max_new_tokens" not in resolved.case.request
     command = perf.baseline_command(resolved, environment, tmp_path / "reference.json")
+    assert command[command.index("--adapter") + 1] == "hf-qwen3-omni"
+    assert command[command.index("--operation") + 1] == "generate"
     request = json.loads(command[command.index("--request-json") + 1])
     assert request["max_new_tokens"] == 16
-    assert request["talker_max_new_tokens"] == 32
-    worker = (REPO / "apps/benchmark/native/benchmark_worker.cpp").read_text(encoding="utf-8")
-    assert 'optional_value<std::int32_t>(request, "talker_max_new_tokens", 0)' in worker
+    assert "talker_max_new_tokens" not in request
+    source = (REPO / "apps/benchmark/performance/baselines/task_reference.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"enable_audio_output": False' in source
+    assert "return_audio=False" in source
 
 
 def test_sana_reference_reports_materialized_video_shape() -> None:

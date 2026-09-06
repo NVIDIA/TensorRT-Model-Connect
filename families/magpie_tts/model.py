@@ -99,25 +99,10 @@ def _validate_supported_checkpoint_architecture(state_dict) -> None:
         for key in state_dict
         if (match := re.fullmatch(r"audio_embeddings\.(\d+)\.weight", key))
     }
-    local_layers = {
-        int(match.group(1))
-        for key in state_dict
-        if (match := re.match(r"local_transformer\.layers\.(\d+)\.", key))
-    }
-    projection_keys = {
-        "local_transformer_in_projection.weight",
-        "local_transformer_in_projection.bias",
-    }
-    if (
-        codebooks != set(range(8))
-        or local_layers != {0}
-        or not projection_keys.issubset(state_dict)
-    ):
+    if codebooks != set(range(8)):
         raise ValueError(
-            "This Magpie runtime supports 8 codebooks and one local-transformer "
-            "layer with an input projection; the selected checkpoint has "
-            f"{len(codebooks)} codebooks and local-transformer layers "
-            f"{sorted(local_layers)}. Pin a compatible checkpoint with the "
+            "This Magpie runtime supports 8 codebooks; the selected checkpoint has "
+            f"{len(codebooks)}. Pin a compatible checkpoint with the "
             "model manifest hf_revision field or trtmc build --revision."
         )
 
@@ -509,37 +494,6 @@ class _MagpieTTSModel:
         for cb in range(num_codebooks):
             weights[f"audio_embedding_{cb}"] = _to_np(state_dict[f"audio_embeddings.{cb}.weight"])
 
-        # --- Local transformer weights (codebook AR sampling) ---
-        if "local_transformer.position_embeddings.weight" in state_dict:
-            weights["lt_pos_embedding"] = _to_np(
-                state_dict["local_transformer.position_embeddings.weight"]
-            )
-            weights["lt_in_proj_w"] = _to_np(state_dict["local_transformer_in_projection.weight"]).T
-            weights["lt_in_proj_b"] = _to_np(state_dict["local_transformer_in_projection.bias"])
-            lt_src = "local_transformer.layers.0"
-            weights["lt_norm_self"] = _to_np(state_dict[f"{lt_src}.norm_self.weight"])
-            weights["lt_qkv_net"] = _to_np(state_dict[f"{lt_src}.self_attention.qkv_net.weight"]).T
-            weights["lt_o_net"] = _to_np(state_dict[f"{lt_src}.self_attention.o_net.weight"]).T
-            weights["lt_norm_ff"] = _to_np(state_dict[f"{lt_src}.norm_pos_ff.weight"])
-            weights["lt_ff_proj"] = (
-                _to_np(state_dict[f"{lt_src}.pos_ff.proj.conv.weight"]).squeeze(-1).T
-            )
-            weights["lt_ff_out"] = (
-                _to_np(state_dict[f"{lt_src}.pos_ff.o_net.conv.weight"]).squeeze(-1).T
-            )
-            for cb in range(num_codebooks):
-                weights[f"lt_out_proj_w_{cb}"] = _to_np(
-                    state_dict[f"local_transformer_out_projections.{cb}.weight"]
-                ).T
-                weights[f"lt_out_proj_b_{cb}"] = _to_np(
-                    state_dict[f"local_transformer_out_projections.{cb}.bias"]
-                )
-            lt_hidden = weights["lt_pos_embedding"].shape[1]
-            weights["_lt_hidden"] = lt_hidden
-            weights["_lt_max_positions"] = weights["lt_pos_embedding"].shape[0]
-            weights["_lt_d_head"] = lt_hidden
-            weights["_lt_ffn_dim"] = weights["lt_ff_proj"].shape[1]
-
         # Baked speaker context embedding
         if "baked_context_embedding.weight" in state_dict:
             weights["baked_context_embedding"] = _to_np(
@@ -890,9 +844,6 @@ class _MagpieTTSModel:
             dtype=work_np_dtype,
         )
 
-        # Output pre-logits hidden state for local transformer
-        _mark_debug_output(network, hidden_state, "decoder_hidden")
-
         # Output logits: [seq_len, output_size]
         logits = graph_ops.add_matmul_rhs_constant(
             network, hidden_state, hidden, output_size, weights["w_out"], dtype=work_np_dtype
@@ -996,43 +947,6 @@ class _MagpieTTSModel:
         if "baked_context_lengths" in weights:
             result["context.lengths"] = (
                 np.asarray(weights["baked_context_lengths"], dtype=np.int32).ravel().tobytes()
-            )
-
-        # Build local transformer TRT engine (codebook AR sampling)
-        if "_lt_hidden" in weights:
-            lt_hidden = weights["_lt_hidden"]
-            num_cb = weights["_num_codebooks"]
-            if verbose:
-                print(
-                    f"[trtmc build]   Building local transformer engine "
-                    f"(hidden={lt_hidden}, 1 layer, {num_cb} codebooks) ...",
-                    file=sys.stderr,
-                )
-            lt_plan = _build_local_transformer_engine(
-                weights,
-                precision=("fp32" if 13 in selected_fp32_components else precision),
-                verbose=verbose,
-            )
-            result["local_transformer.plan"] = lt_plan
-            result["local_transformer.in_projection"] = (
-                np.concatenate(
-                    [
-                        weights["lt_in_proj_w"].ravel(),
-                        weights["lt_in_proj_b"].ravel(),
-                    ]
-                )
-                .astype(np.float32)
-                .tobytes()
-            )
-            out_proj_parts = []
-            for cb in range(num_cb):
-                out_proj_parts.append(weights[f"lt_out_proj_w_{cb}"].ravel())
-                out_proj_parts.append(weights[f"lt_out_proj_b_{cb}"].ravel())
-            result["local_transformer.out_projections"] = (
-                np.concatenate(out_proj_parts).astype(np.float32).tobytes()
-            )
-            result["local_transformer.position_embedding"] = (
-                weights["lt_pos_embedding"].astype(np.float32).ravel().tobytes()
             )
 
         # Build NanoCodec (HiFi-GAN) TRT engine
@@ -1607,148 +1521,6 @@ def _add_magpie_decoder_layer(
 
 
 # ---------------------------------------------------------------------------
-# Local transformer engine builder (1-layer, codebook AR sampling)
-# ---------------------------------------------------------------------------
-
-
-def _build_local_transformer_engine(  # pragma: no cover
-    weights: WeightDict,
-    *,
-    precision: str = "fp32",
-    verbose: bool = False,
-) -> bytes:
-    """Build TRT engine for the local transformer (AR codebook sampling).
-
-    Tiny 1-layer transformer with KV cache. Called 8 times per frame
-    (once per codebook). Input is projected decoder hidden [1, lt_hidden].
-    Output is hidden state [1, lt_hidden] (out_proj applied externally).
-    """
-    lt_hidden = weights["_lt_hidden"]
-    lt_d_head = weights["_lt_d_head"]
-    lt_ffn_dim = weights["_lt_ffn_dim"]
-    lt_max_cache = 8
-    attention_window = lt_max_cache + 1
-    if precision == "fp16":
-        work_np_dtype, work_trt_dtype = np.float16, trt.float16
-    elif precision == "fp32":
-        work_np_dtype, work_trt_dtype = np.float32, trt.float32
-    else:
-        raise ValueError(f"Unsupported Magpie local precision {precision!r}; expected fp32 or fp16")
-
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    trt_config = builder.create_builder_config()
-    trt_config.builder_optimization_level = 1
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
-
-    input_embed = network.add_input("input_embed", trt.float32, (1, lt_hidden))
-    position_id = network.add_input("position_id", trt.int32, (1,))
-    attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
-    cache_k = network.add_input("cache_k_0", trt.float32, (lt_max_cache, lt_hidden))
-    cache_v = network.add_input("cache_v_0", trt.float32, (lt_max_cache, lt_hidden))
-    if work_trt_dtype != trt.float32:
-        input_embed = network.add_cast(input_embed, work_trt_dtype).get_output(0)
-        attention_mask = network.add_cast(attention_mask, work_trt_dtype).get_output(0)
-        cache_k = network.add_cast(cache_k, work_trt_dtype).get_output(0)
-        cache_v = network.add_cast(cache_v, work_trt_dtype).get_output(0)
-
-    pos_np = weights["lt_pos_embedding"]
-    pos_table = graph_ops.add_constant(network, pos_np.shape, pos_np, dtype=work_np_dtype)
-    pos_embed = network.add_gather(pos_table, position_id, 0)
-
-    hidden_state = network.add_elementwise(
-        input_embed, pos_embed.get_output(0), trt.ElementWiseOperation.SUM
-    ).get_output(0)
-
-    eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([1e-5], dtype=work_np_dtype), dtype=work_np_dtype
-    )
-
-    # Self-attention (1 head, d_head=lt_hidden, causal)
-    normed = graph_ops.add_layer_norm(
-        network,
-        hidden_state,
-        lt_hidden,
-        weights["lt_norm_self"],
-        np.zeros(lt_hidden, dtype=np.float32),
-        eps_tensor,
-        dtype=work_np_dtype,
-    )
-
-    qkv = graph_ops.add_matmul_rhs_constant(
-        network, normed, lt_hidden, 3 * lt_hidden, weights["lt_qkv_net"], dtype=work_np_dtype
-    )
-
-    q_slice = network.add_slice(qkv, (0, 0), (1, lt_hidden), (1, 1))
-    k_slice = network.add_slice(qkv, (0, lt_hidden), (1, lt_hidden), (1, 1))
-    v_slice = network.add_slice(qkv, (0, 2 * lt_hidden), (1, lt_hidden), (1, 1))
-
-    present_k = k_slice.get_output(0)
-    present_v = v_slice.get_output(0)
-
-    ak = network.add_concatenation([cache_k, present_k])
-    ak.axis = 0
-    av = network.add_concatenation([cache_v, present_v])
-    av.axis = 0
-
-    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
-    cf = graph_ops.add_attention_from_rows(
-        network,
-        q_slice.get_output(0),
-        ak.get_output(0),
-        av.get_output(0),
-        num_heads=1,
-        head_dim=lt_d_head,
-        q_seq=1,
-        kv_seq=attention_window,
-        mask=mask_4d,
-    )
-
-    sa = graph_ops.add_matmul_rhs_constant(
-        network, cf, lt_hidden, lt_hidden, weights["lt_o_net"], dtype=work_np_dtype
-    )
-    psa = network.add_elementwise(hidden_state, sa, trt.ElementWiseOperation.SUM).get_output(0)
-
-    # FFN (GELU MLP)
-    fn = graph_ops.add_layer_norm(
-        network,
-        psa,
-        lt_hidden,
-        weights["lt_norm_ff"],
-        np.zeros(lt_hidden, dtype=np.float32),
-        eps_tensor,
-        dtype=work_np_dtype,
-    )
-
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, fn, lt_hidden, lt_ffn_dim, weights["lt_ff_proj"], dtype=work_np_dtype
-    )
-    act = graph_ops.add_activation(network, fc1, "gelu_new", dtype=work_np_dtype)
-    fc2 = graph_ops.add_matmul_rhs_constant(
-        network, act, lt_ffn_dim, lt_hidden, weights["lt_ff_out"], dtype=work_np_dtype
-    )
-
-    out = network.add_elementwise(psa, fc2, trt.ElementWiseOperation.SUM).get_output(0)
-
-    if out.dtype != trt.float32:
-        out = network.add_cast(out, trt.float32).get_output(0)
-        present_k = network.add_cast(present_k, trt.float32).get_output(0)
-        present_v = network.add_cast(present_v, trt.float32).get_output(0)
-    out.name = "lt_output"
-    network.mark_output(out)
-    present_k.name = "present_k_0"
-    network.mark_output(present_k)
-    present_v.name = "present_v_0"
-    network.mark_output(present_v)
-
-    plan = builder.build_serialized_network(network, trt_config)
-    if plan is None:
-        raise RuntimeError("TensorRT local transformer engine build failed")
-    return bytes(plan)
-
-
-# ---------------------------------------------------------------------------
 # Debug output helper
 # ---------------------------------------------------------------------------
 
@@ -1845,10 +1617,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     required = {
         "codec.plan",
-        "local_transformer.plan",
-        "local_transformer.in_projection",
-        "local_transformer.out_projections",
-        "local_transformer.position_embedding",
         "audio.embed",
         "text.embed",
         "context.embed",

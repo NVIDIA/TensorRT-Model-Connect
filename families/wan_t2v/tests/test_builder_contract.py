@@ -276,9 +276,13 @@ def test_serialize_preprocessor_weights_transforms_patch_weight() -> None:
 
     index, payload = _decode_blob(model._serialize_preprocessor_weights(dit_weights))
 
-    assert "patch_embedding.weight" in index
+    assert set(index) == {
+        "patch_embedding.weight",
+        "patch_embedding.bias",
+        "condition_embedder.time_embedding.0.weight",
+        "condition_embedder.text_embedding_2.bias",
+    }
     assert index["patch_embedding.weight"]["shape"] == [12, 2]
-    assert "condition_embedder.time_embedding.2.weight" not in index
     max_end = 0
     for info in index.values():
         nbytes = int(np.prod(info["shape"])) * 4

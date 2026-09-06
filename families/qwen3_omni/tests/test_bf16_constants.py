@@ -13,7 +13,6 @@ import pytest
 trt = pytest.importorskip("tensorrt")
 
 from .. import graph_ops  # noqa: E402
-from ..talker_builder import _build_text_projection_plan  # noqa: E402
 
 
 def test_fp32_input_with_bf16_target_uses_exact_fp32_carrier() -> None:
@@ -25,6 +24,16 @@ def test_fp32_input_with_bf16_target_uses_exact_fp32_carrier() -> None:
     assert carrier.flags.c_contiguous
     np.testing.assert_array_equal(carrier, expected)
     assert not np.array_equal(carrier, values)
+
+
+def test_thinker_rope_table_matches_hf_float32_rounding() -> None:
+    cosine = graph_ops.make_rope_table_half_dim(256, 128, 1_000_000.0, True)
+    sine = graph_ops.make_rope_table_half_dim(256, 128, 1_000_000.0, False)
+
+    assert cosine.shape == sine.shape == (256, 64)
+    assert cosine.dtype == sine.dtype == np.float32
+    assert cosine.astype(ml_dtypes.bfloat16)[64, 7] == ml_dtypes.bfloat16(0.01409912109375)
+    assert sine.astype(ml_dtypes.bfloat16)[132, 9] == ml_dtypes.bfloat16(0.06640625)
 
 
 @pytest.mark.gpu
@@ -53,58 +62,3 @@ def test_bf16_target_serializes_in_strongly_typed_network(values_dtype) -> None:
     plan = builder.build_serialized_network(network, build_config)
     assert plan is not None
     assert bytes(plan)
-
-
-@pytest.mark.gpu
-@pytest.mark.trt
-def test_text_projection_matches_fused_bf16_silu_boundaries() -> None:
-    torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for TensorRT execution")
-
-    rng = np.random.default_rng(7)
-    embedding = rng.normal(0.0, 0.1, (64, 16)).astype(ml_dtypes.bfloat16)
-    projection = {
-        "fc1": rng.normal(0.0, 0.1, (16, 32)).astype(ml_dtypes.bfloat16),
-        "fc1_bias": rng.normal(0.0, 0.1, (32,)).astype(ml_dtypes.bfloat16),
-        "fc2": rng.normal(0.0, 0.1, (32, 16)).astype(ml_dtypes.bfloat16),
-        "fc2_bias": rng.normal(0.0, 0.1, (16,)).astype(ml_dtypes.bfloat16),
-    }
-    plan = _build_text_projection_plan(
-        embedding,
-        projection,
-        max_tokens=8,
-        precision="bf16",
-        verbose=False,
-    )
-
-    logger = trt.Logger(trt.Logger.ERROR)
-    runtime = trt.Runtime(logger)
-    engine = runtime.deserialize_cuda_engine(plan)
-    assert engine is not None
-    context = engine.create_execution_context()
-    token_ids = torch.tensor([3, 5, 8, 13, 21, 34, 55], device="cuda", dtype=torch.int32)
-    assert context.set_input_shape("token_id", (token_ids.numel(),))
-    actual = torch.empty((token_ids.numel(), 16), device="cuda", dtype=torch.float32)
-    assert context.set_tensor_address("token_id", token_ids.data_ptr())
-    assert context.set_tensor_address("embeddings", actual.data_ptr())
-    stream = torch.cuda.current_stream()
-    assert context.execute_async_v3(stream.cuda_stream)
-    stream.synchronize()
-
-    def bf16_tensor(value: np.ndarray):
-        return torch.from_numpy(value.astype(np.float32)).to(device="cuda", dtype=torch.bfloat16)
-
-    selected = bf16_tensor(embedding)[token_ids.to(torch.int64)]
-    hidden = torch.nn.functional.linear(
-        selected,
-        bf16_tensor(projection["fc1"]).T,
-        bf16_tensor(projection["fc1_bias"]),
-    )
-    hidden = torch.nn.functional.silu(hidden)
-    expected = torch.nn.functional.linear(
-        hidden,
-        bf16_tensor(projection["fc2"]).T,
-        bf16_tensor(projection["fc2_bias"]),
-    )
-    torch.testing.assert_close(actual, expected.float(), rtol=0.0, atol=0.0)

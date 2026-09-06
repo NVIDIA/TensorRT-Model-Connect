@@ -290,7 +290,6 @@ def build_magpie_tp_decoder_engine(
         np.zeros(hidden, dtype=np.float32),
         eps_tensor,
     )
-    _mark_debug_output(network, hidden_state, "decoder_hidden")
 
     logits = graph_ops.add_matmul_rhs_constant(
         network, hidden_state, hidden, output_size, rank_weights["w_out"]

@@ -1511,7 +1511,7 @@ def _load_qwen3_omni(
     load_options.update(
         {
             "device_map": str(options.get("device_map", "cuda:0")),
-            "enable_audio_output": True,
+            "enable_audio_output": False,
         }
     )
     model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
@@ -1523,24 +1523,22 @@ def _load_qwen3_omni(
     ]
     inputs = _qwen3_omni_chat_inputs(processor, conversation).to(model.device)
     thinker_tokens = int(request.get("max_new_tokens", 16))
-    talker_tokens = int(request.get("talker_max_new_tokens", 32))
-    seed = _request_seed(request)
 
     def invoke() -> Mapping[str, Any]:
-        _seed_all(torch, seed)
         with torch.inference_mode():
-            text_ids, audio = model.generate(
+            text_ids = model.generate(
                 **inputs,
                 thinker_max_new_tokens=thinker_tokens,
-                talker_max_new_tokens=talker_tokens,
                 thinker_do_sample=False,
-                talker_do_sample=False,
-                speaker=str(options.get("speaker", "Ethan")),
+                return_audio=False,
             )
+        input_length = int(inputs["input_ids"].shape[-1])
+        generated = text_ids[:, input_length:]
+        token_ids = [int(token) for token in generated[0].detach().cpu().tolist()]
         return {
-            "text": processor.batch_decode(text_ids, skip_special_tokens=True)[0],
-            "audio_samples": int(audio.numel()),
-            "sample_rate": 24_000,
+            "text": processor.batch_decode(generated, skip_special_tokens=True)[0].strip(),
+            "token_ids": token_ids,
+            "output_tokens": len(token_ids),
         }
 
     return Session(invoke, "transformers")

@@ -88,3 +88,12 @@ def test_model_card_native_route_uses_the_batch_baseline_probe() -> None:
     assert "create_batch_speech_session" in baseline_path
     assert "if (baseline_only)" in baseline_path
     assert "write_wav(baseline_audio, output_wav)" in baseline_path
+
+
+def test_recognition_builders_keep_the_mainline_tactic_policy() -> None:
+    family = Path(__file__).resolve().parents[1]
+    perception = (family / "streaming_perception.py").read_text(encoding="utf-8")
+    core = (family / "native_core.py").read_text(encoding="utf-8")
+
+    assert perception.count("builder_optimization_level = 3") == 1
+    assert core.count("builder_config.builder_optimization_level = 3") == 2

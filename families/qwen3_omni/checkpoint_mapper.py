@@ -66,21 +66,5 @@ def _get_tensor(readers: _ReaderCollection, name: str):
     return reader.get_tensor(name)
 
 
-def _load_tensor_as_dtype(readers: _ReaderCollection, name: str, dtype: np.dtype) -> np.ndarray:
-    return np.array(_get_tensor(readers, name), dtype=dtype, order="C", copy=True)
-
-
-def _load_transposed_tensor(
-    readers: _ReaderCollection,
-    name: str,
-    transpose_name: str,
-    dtype: np.dtype,
-) -> np.ndarray:
-    source = np.asarray(_get_tensor(readers, name))
-    if source.ndim != 2:
-        raise ValueError(f"Qwen3-Omni tensor {transpose_name} must be rank 2")
-    return np.array(source.T, dtype=dtype, order="C", copy=True)
-
-
 def _load_tensor(readers: _ReaderCollection, name: str) -> np.ndarray:
     return np.asarray(_get_tensor(readers, name), dtype=np.float32)

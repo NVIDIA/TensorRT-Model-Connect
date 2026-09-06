@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       gnupg \
       libgl1 \
+      libglib2.0-0t64 \
       ninja-build \
       nlohmann-json3-dev \
       openmpi-bin \

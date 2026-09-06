@@ -322,15 +322,11 @@ def add_activation(
         )
         return sq.get_output(0)
     elif activation_type == "silu":
-        output_dtype = inp.dtype
-        opmath = inp
-        if output_dtype != trt.float32:
-            opmath = network.add_cast(inp, trt.float32).get_output(0)
-        sigmoid = network.add_activation(opmath, trt.ActivationType.SIGMOID)
+        sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
         swish = network.add_elementwise(
-            opmath, sigmoid.get_output(0), trt.ElementWiseOperation.PROD
+            inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD
         ).get_output(0)
-        return _cast_back_to_trt_dtype(network, swish, output_dtype)
+        return swish
     else:
         raise ValueError(f"Unsupported activation: {activation_type}")
 
@@ -523,17 +519,21 @@ def make_rope_table_half_dim(
     default = 1.0 if cosine else 0.0
     if max_cache_length <= 0 or rope_theta <= 0.0:
         return np.full((max(max_cache_length, 1), max(half, 1)), default, dtype=np.float32)
-    table = np.full((max_cache_length, half), default, dtype=np.float32)
-    for pos in range(max_cache_length):
-        for d in range(half):
-            # For both interleaved and rotate-half the frequency index is d
-            # (the distinction only affects which input pair is rotated; the
-            # freq assignment per half-dim is the same).
-            exponent = (2.0 * d) / rotary_ndims
-            inv_freq = rope_theta ** (-exponent)
-            angle = pos * inv_freq
-            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
-    return table
+    # HF constructs the inverse frequencies and angles in float32 before the
+    # table is rounded to the model dtype.  Keep those exact boundaries: a
+    # Python-float loop drifts by one BF16 ULP at supported positions.
+    exponents = np.arange(0, rotary_ndims, 2, dtype=np.float32) / np.float32(rotary_ndims)
+    inv_freq = np.reciprocal(
+        np.power(np.float32(rope_theta), exponents, dtype=np.float32),
+        dtype=np.float32,
+    )
+    angles = np.multiply(
+        np.arange(max_cache_length, dtype=np.float32)[:, None],
+        inv_freq[None, :],
+        dtype=np.float32,
+    )
+    operation = np.cos if cosine else np.sin
+    return operation(angles, dtype=np.float32)
 
 
 def reshape_rows_to_heads_4d(
@@ -766,13 +766,8 @@ def add_attention_core(
     causal: bool = False,
     mask: trt.ITensor | None = None,
     scale: float | None = None,
-    fp32_accumulation: bool = False,
 ) -> trt.ITensor:
-    """Scaled dot-product attention with an explicit FP32 opmath option.
-
-    The default path uses TRT native IAttention. ``fp32_accumulation=True``
-    builds Q@K^T → scale → mask → softmax → @V explicitly so BF16 inputs
-    match the checkpoint's FP32 SDPA opmath boundary.
+    """Scaled dot-product attention.
 
     NOTE: TRT IAttention computes raw BMM1 = Q @ K^T without any built-in
     1/sqrt(D) scaling.  We pre-scale Q by 1/sqrt(D) so that the fused kernel
@@ -788,73 +783,14 @@ def add_attention_core(
                  to scaled logits before softmax.  Cannot be used with
                  causal=True.
         scale:   Optional Q pre-scale factor.  Defaults to 1/sqrt(D).
-        fp32_accumulation:
-                 Execute the attention primitives in FP32, then cast the
-                 context back to the original Q dtype.
-
     Returns:
         Context tensor [B, H, q_seq, D].
     """
     output_dtype = q_4d.dtype
-    if fp32_accumulation and output_dtype != trt.float32:
-        q_4d = network.add_cast(q_4d, trt.float32).get_output(0)
-        k_4d = network.add_cast(k_4d, trt.float32).get_output(0)
-        v_4d = network.add_cast(v_4d, trt.float32).get_output(0)
-        if mask is not None and mask.dtype != trt.float32:
-            mask = network.add_cast(mask, trt.float32).get_output(0)
 
     if scale is None:
         head_dim = q_4d.shape[-1]
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-
-    if fp32_accumulation:
-        if causal:
-            raise NotImplementedError("FP32 attention requires an explicit additive mask")
-        num_heads = int(q_4d.shape[1])
-        num_kv_heads = int(k_4d.shape[1])
-        head_dim = int(q_4d.shape[-1])
-        k_4d = _repeat_kv_heads_4d(
-            network,
-            k_4d,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-        )
-        v_4d = _repeat_kv_heads_4d(
-            network,
-            v_4d,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-        )
-        scores = network.add_matrix_multiply(
-            q_4d,
-            trt.MatrixOperation.NONE,
-            k_4d,
-            trt.MatrixOperation.TRANSPOSE,
-        ).get_output(0)
-        scale_t = add_constant(
-            network,
-            (1, 1, 1, 1),
-            np.array([[[[scale]]]], dtype=np.float32),
-            dtype=np.float32,
-        )
-        scores = network.add_elementwise(scores, scale_t, trt.ElementWiseOperation.PROD).get_output(
-            0
-        )
-        if mask is not None:
-            scores = network.add_elementwise(scores, mask, trt.ElementWiseOperation.SUM).get_output(
-                0
-            )
-        probabilities = network.add_softmax(scores)
-        probabilities.axes = 1 << 3
-        context = network.add_matrix_multiply(
-            probabilities.get_output(0),
-            trt.MatrixOperation.NONE,
-            v_4d,
-            trt.MatrixOperation.NONE,
-        ).get_output(0)
-        return _cast_back_to_trt_dtype(network, context, output_dtype)
 
     # Pre-scale Q: TRT IAttention does not apply score scaling itself.
     # Match the scale constant's dtype to Q's dtype: in strongly-typed networks
@@ -1021,7 +957,6 @@ def add_attention_from_rows(
     mask: trt.ITensor | None = None,
     scale: float | None = None,
     logit_softcap: float | None = None,
-    fp32_accumulation: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -1082,7 +1017,6 @@ def add_attention_from_rows(
             causal=causal,
             mask=mask,
             scale=scale,
-            fp32_accumulation=fp32_accumulation,
         )
     return reshape_heads_4d_to_rows(
         network,

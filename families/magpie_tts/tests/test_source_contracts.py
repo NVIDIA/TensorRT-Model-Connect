@@ -16,14 +16,11 @@ from families.magpie_tts.model import _validate_supported_checkpoint_architectur
 def test_latest_upstream_architecture_fails_with_actionable_revision_error() -> None:
     latest_checkpoint = {
         **{f"audio_embeddings.{index}.weight": object() for index in range(16)},
-        "local_transformer.position_embeddings.weight": object(),
-        "local_transformer.layers.0.norm_self.weight": object(),
-        "local_transformer.layers.1.norm_self.weight": object(),
     }
 
     with pytest.raises(
         ValueError,
-        match=r"supports 8 codebooks and one local-transformer layer.*hf_revision",
+        match=r"supports 8 codebooks.*hf_revision",
     ):
         _validate_supported_checkpoint_architecture(latest_checkpoint)
 
@@ -31,10 +28,6 @@ def test_latest_upstream_architecture_fails_with_actionable_revision_error() -> 
 def test_pinned_checkpoint_architecture_is_supported() -> None:
     supported_checkpoint = {
         **{f"audio_embeddings.{index}.weight": object() for index in range(8)},
-        "local_transformer.position_embeddings.weight": object(),
-        "local_transformer_in_projection.weight": object(),
-        "local_transformer_in_projection.bias": object(),
-        "local_transformer.layers.0.norm_self.weight": object(),
     }
 
     _validate_supported_checkpoint_architecture(supported_checkpoint)

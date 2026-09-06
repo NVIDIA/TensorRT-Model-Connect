@@ -139,11 +139,19 @@ DType state_dtype(const std::string& precision) {
 }
 
 std::string chat_template(const BundleReader& bundle) {
-    const auto* section = bundle.find_section("chat_template.jinja");
-    if (section == nullptr || section->length == 0)
-        return {};
-    const auto data = bundle.read_section("chat_template.jinja");
-    return {data.begin(), data.end()};
+    const std::string text = require_text_section(bundle, "tokenizer_config.json");
+    try {
+        const auto config = nlohmann::json::parse(text);
+        const auto template_value = config.find("chat_template");
+        if (template_value == config.end() || !template_value->is_string() ||
+            template_value->get_ref<const std::string&>().empty()) {
+            throw std::runtime_error("nemotron_h tokenizer_config.json has no chat_template");
+        }
+        return template_value->get<std::string>();
+    } catch (const nlohmann::json::exception& error) {
+        throw std::runtime_error("nemotron_h invalid tokenizer_config.json: " +
+                                 std::string(error.what()));
+    }
 }
 
 } // namespace

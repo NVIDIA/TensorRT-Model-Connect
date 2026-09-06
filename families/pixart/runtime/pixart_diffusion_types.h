@@ -45,7 +45,6 @@ struct PixArtDiffusionConfig {
     float rope_theta{10000.0F};
     std::string vae_model_id;
 
-    bool guidance_embeds{false};
     bool use_rope{true};
     float vae_scaling_factor{0.0F};
     int32_t pos_embed_base_size{64};
@@ -79,17 +78,6 @@ struct PixArtPreprocessorWeights {
     std::vector<float> text_proj_bias;
     std::vector<float> text_proj_2_weight;
     std::vector<float> text_proj_2_bias;
-
-    std::vector<float> context_embed_weight;
-    std::vector<float> context_embed_bias;
-
-    std::vector<float> guidance_emb_0_weight;
-    std::vector<float> guidance_emb_0_bias;
-    std::vector<float> guidance_emb_2_weight;
-    std::vector<float> guidance_emb_2_bias;
-
-    std::vector<float> vae_bn_mean;
-    std::vector<float> vae_bn_var;
 
     bool valid{false};
 };

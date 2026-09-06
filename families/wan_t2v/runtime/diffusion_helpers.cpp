@@ -130,29 +130,6 @@ void load_preprocessor_weights(const nlohmann::json& index_json, const char* blo
     wan_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
                                                        "condition_embedder.text_embedding_2.bias",
                                                        w.text_proj_2_bias);
-
-    wan_preprocessor_weights::load_preprocessor_floats(
-        index_json, blob, blob_size, "context_embedder.weight", w.context_embed_weight);
-    wan_preprocessor_weights::load_preprocessor_floats(
-        index_json, blob, blob_size, "context_embedder.bias", w.context_embed_bias);
-
-    wan_preprocessor_weights::load_preprocessor_floats(
-        index_json, blob, blob_size, "condition_embedder.guidance_embedding.0.weight",
-        w.guidance_emb_0_weight);
-    wan_preprocessor_weights::load_preprocessor_floats(
-        index_json, blob, blob_size, "condition_embedder.guidance_embedding.0.bias",
-        w.guidance_emb_0_bias);
-    wan_preprocessor_weights::load_preprocessor_floats(
-        index_json, blob, blob_size, "condition_embedder.guidance_embedding.2.weight",
-        w.guidance_emb_2_weight);
-    wan_preprocessor_weights::load_preprocessor_floats(
-        index_json, blob, blob_size, "condition_embedder.guidance_embedding.2.bias",
-        w.guidance_emb_2_bias);
-
-    wan_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
-                                                       "vae_bn.running_mean", w.vae_bn_mean);
-    wan_preprocessor_weights::load_preprocessor_floats(index_json, blob, blob_size,
-                                                       "vae_bn.running_var", w.vae_bn_var);
 }
 
 void finalize_preprocessor_weights(WanPreprocessorWeights& w) {
@@ -215,7 +192,6 @@ WanDiffusionConfig make_diffusion_config(const std::string& json) {
     dc.axes_dims_rope = optional_int_array(document, "axes_dims_rope");
     dc.rope_theta = optional_number(document, "rope_theta", 10000.0F);
     dc.vae_model_id = require_string(document, "vae_model_id");
-    dc.guidance_embeds = optional_int_flag(document, "guidance_embeds", false);
     dc.use_rope = optional_int_flag(document, "use_rope", true);
     dc.vae_scaling_factor = optional_number(document, "vae_scaling_factor", 0.0F);
     dc.diffusion_backend_type = require_string(document, "diffusion_backend_type");

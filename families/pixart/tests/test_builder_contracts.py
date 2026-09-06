@@ -294,6 +294,85 @@ def test_get_diffusion_config_uses_transformer_overrides() -> None:
     assert dc["pos_embed_interpolation_scale"] == 2
 
 
+def test_build_writes_the_same_transformer_geometry_used_by_the_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    model_dir = tmp_path / "pixart"
+    model_dir.mkdir()
+    (model_dir / "model_index.json").write_text(
+        json.dumps({"_class_name": "PixArtSigmaPipeline"}), encoding="utf-8"
+    )
+    transformer_config = {
+        "num_attention_heads": 5,
+        "attention_head_dim": 6,
+        "num_layers": 3,
+        "patch_size": 4,
+        "sample_size": 48,
+        "interpolation_scale": 3,
+    }
+    captured = {}
+
+    def load_weights(_self, _model_dir, _config):
+        return {"_transformer_config": transformer_config}
+
+    def build_components(_self, _model_dir, config, _weights, **_options):
+        captured["plan_config"] = dict(config.raw["_transformer_config"])
+        return {
+            "text_encoders": [("t5", b"t5")],
+            "denoiser": b"dit",
+            "vae_decoder": b"vae",
+            "preprocessor_weights": b"preprocessor",
+        }
+
+    class Writer:
+        def __init__(self):
+            self.runtime = None
+
+        def set_header(self, **_header):
+            pass
+
+        def add_bytes(self, _name, _data):
+            pass
+
+        def add_json(self, name, data):
+            assert name == "runtime.json"
+            self.runtime = data
+
+    monkeypatch.setattr(pixart_mod._PixArtModel, "load_weights", load_weights)
+    monkeypatch.setattr(pixart_mod._PixArtModel, "build_components", build_components)
+    monkeypatch.setattr(pixart_mod, "_tokenizer_json_bytes", lambda _path: b"tokenizer")
+    request = types.SimpleNamespace(
+        backend="trt",
+        context_parallel_size=1,
+        dynamic_kv_cache=False,
+        fp32_layers=(),
+        image_height=256,
+        image_width=384,
+        max_batch_size=1,
+        max_sequence_length=None,
+        model_dir=model_dir,
+        precision="fp16",
+        quantization=None,
+        task="image_generation",
+        tensor_parallel_size=1,
+        verbose=False,
+        video_num_frames=None,
+    )
+    writer = Writer()
+
+    pixart_mod.build(request, writer)
+
+    assert captured["plan_config"] == transformer_config
+    assert writer.runtime is not None
+    assert writer.runtime["dit_dim"] == 30
+    assert writer.runtime["dit_num_heads"] == 5
+    assert writer.runtime["dit_num_layers"] == 3
+    assert writer.runtime["patch_size"] == [1, 4, 4]
+    assert writer.runtime["pos_embed_base_size"] == 12
+    assert writer.runtime["pos_embed_interpolation_scale"] == 3
+
+
 def test_get_diffusion_config_keeps_pixart_alpha_text_length() -> None:
     """PixArt Alpha retains the 120-token Diffusers pipeline contract."""
     dc = pixart_mod._PixArtModel().get_diffusion_config(_cfg(_class_name="PixArtAlphaPipeline"))
@@ -365,10 +444,13 @@ def test_serialize_preprocessor_weights_flattens_patch_conv() -> None:
     blob = pixart_mod._serialize_preprocessor_weights(dit_weights, t5_dim=4096, dit_dim=1152)
     index, payload = _decode_blob(blob)
 
-    assert "patch_embedding.weight" in index
+    assert set(index) == {
+        "patch_embedding.weight",
+        "patch_embedding.bias",
+        "condition_embedder.time_embedding.0.weight",
+        "condition_embedder.text_embedding_2.bias",
+    }
     assert index["patch_embedding.weight"]["shape"] == [8, 3]
-    assert "condition_embedder.time_embedding.0.weight" in index
-    assert "condition_embedder.text_embedding_2.bias" in index
 
     max_end = 0
     for info in index.values():

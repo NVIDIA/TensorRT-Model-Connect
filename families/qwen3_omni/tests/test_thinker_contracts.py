@@ -3,12 +3,100 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import ml_dtypes
 import numpy as np
 import tensorrt as trt
 
 from .. import model as model_module
 from ..config import ModelConfig
+
+
+def test_build_writes_only_the_thinker_text_bundle(monkeypatch, tmp_path) -> None:
+    config = SimpleNamespace(
+        model_type="qwen3_omni_moe",
+        architectures=["Qwen3OmniMoeForConditionalGeneration"],
+        max_position_embeddings=512,
+        num_hidden_layers=48,
+        num_key_value_heads=4,
+        head_dim=128,
+        vocab_size=151936,
+        raw={"im_end_token_id": 151645},
+    )
+
+    class FakeModel:
+        @staticmethod
+        def load_weights(model_dir, loaded_config, *, precision):
+            assert model_dir == str(tmp_path)
+            assert loaded_config is config
+            assert precision == "bf16"
+            return {"thinker": True}
+
+        @staticmethod
+        def build_engine(loaded_config, weights, max_cache_length, **options):
+            assert loaded_config is config
+            assert weights == {"thinker": True}
+            assert max_cache_length == 256
+            assert options == {"precision": "bf16", "verbose": False}
+            return b"thinker"
+
+    class Writer:
+        def __init__(self):
+            self.header = None
+            self.sections = {}
+
+        def set_header(self, **header):
+            self.header = header
+
+        def add_bytes(self, name, value):
+            self.sections[name] = value
+
+        def add_json(self, name, value):
+            self.sections[name] = value
+
+    monkeypatch.setattr(model_module.ModelConfig, "from_dir", lambda _path: config)
+    monkeypatch.setattr(model_module, "_Qwen3OmniModel", FakeModel)
+    (tmp_path / "tokenizer.json").write_text("{}", encoding="utf-8")
+    request = SimpleNamespace(
+        model_dir=tmp_path,
+        backend="trt",
+        dynamic_kv_cache=False,
+        task="text_generation",
+        precision="bf16",
+        max_sequence_length=256,
+        image_height=None,
+        image_width=None,
+        video_num_frames=None,
+        max_batch_size=1,
+        tensor_parallel_size=1,
+        context_parallel_size=1,
+        quantization=None,
+        fp32_layers=(),
+        verbose=False,
+    )
+    writer = Writer()
+
+    model_module.build(request, writer)
+
+    assert writer.header == {
+        "family": "qwen3_omni",
+        "task": "text_generation",
+        "backend": "trt",
+    }
+    assert writer.sections == {
+        "thinker.plan": b"thinker",
+        "runtime.json": {
+            "precision": "bf16",
+            "thinker_num_layers": 48,
+            "thinker_num_key_value_heads": 4,
+            "thinker_head_dim": 128,
+            "thinker_vocab_size": 151936,
+            "thinker_max_cache_length": 256,
+            "thinker_eos_token_id": 151645,
+        },
+        "tokenizer.json": b"{}",
+    }
 
 
 def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> None:
@@ -21,20 +109,12 @@ def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> N
                     "num_experts_per_tok": 2,
                     "moe_intermediate_size": 32,
                 }
-            },
-            "code2wav_config": {
-                "num_quantizers": 16,
-                "codebook_size": 8,
-                "hidden_size": 4,
-            },
+            }
         },
     )
-    code2wav_keys = ["code2wav.code_embedding.weight"] + [
-        f"code2wav.tensor_{index:03d}" for index in range(229)
-    ]
 
     class FakeReaders:
-        tensor_map = {name: object() for name in code2wav_keys}
+        pass
 
     def load_tensor(_readers, key: str) -> np.ndarray:
         hidden = config.hidden_size
@@ -60,10 +140,6 @@ def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> N
             shape = (32, hidden)
         elif key.endswith("down_proj.weight"):
             shape = (hidden, 32)
-        elif key == "code2wav.code_embedding.weight":
-            shape = (16 * 8, 4)
-        elif key.startswith("code2wav."):
-            shape = (1,)
         else:
             raise AssertionError(f"unexpected tensor request: {key}")
         return np.ones(shape, dtype=np.float32)
@@ -81,8 +157,6 @@ def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> N
     assert weights["layer.0.experts.w_down"].shape == (8, 32, 16)
     assert weights["w_out"].dtype.name == "bfloat16"
     assert weights["final_norm"].dtype == np.float32
-    assert len([name for name in weights if name.startswith("code2wav.")]) == 230
-    assert weights["_code2wav_cfg"]["available"] is True
 
 
 def test_thinker_moe_batches_only_routed_expert_multiplies(monkeypatch) -> None:

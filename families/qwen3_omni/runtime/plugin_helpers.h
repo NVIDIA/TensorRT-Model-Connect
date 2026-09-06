@@ -7,7 +7,6 @@
 
 #include "families/qwen3_omni/runtime/tokenizer.h"
 #include "trtmc/bundle.h"
-#include "trtmc/runtime/trt_backend.h"
 
 #include <memory>
 #include <string>
@@ -18,8 +17,6 @@ namespace trtmc::qwen3_omni {
 
 std::vector<char> require_section(const BundleReader& bundle, std::string_view name);
 std::string require_text_section(const BundleReader& bundle, std::string_view name);
-std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<char>& plan,
-                                        const char* label);
 std::shared_ptr<ITokenizer> create_tokenizer(const BundleReader& bundle);
 
 } // namespace trtmc::qwen3_omni

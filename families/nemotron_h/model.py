@@ -312,7 +312,7 @@ class _NemotronHModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.builder_optimization_level = 1
+        trt_config.builder_optimization_level = 3
 
         # --- Inputs ---
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -927,7 +927,6 @@ def _add_mlp_layer(
 _BUNDLE_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
-    "chat_template.jinja",
     "vocab.json",
     "merges.txt",
     "special_tokens_map.json",

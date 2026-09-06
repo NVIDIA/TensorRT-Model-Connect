@@ -16,7 +16,7 @@ namespace trtmc {
 
 class ITrtModule;
 
-// Fixed-capacity causal KV cache for the three Qwen3-Omni decoders.
+// Fixed-capacity causal KV cache for the Qwen3-Omni Thinker.
 class Qwen3OmniKvCache {
   public:
     Qwen3OmniKvCache(std::int32_t num_layers, std::int32_t max_length, std::int32_t kv_dim,

@@ -31,16 +31,14 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
   public:
     MagpiePipeline(std::unique_ptr<ITrtModule> encoder, std::unique_ptr<ITrtModule> decoder,
                    std::unique_ptr<MagpieInferenceState> decoder_state,
-                   std::unique_ptr<ITrtModule> codec, std::unique_ptr<ITrtModule> lt_module,
+                   std::unique_ptr<ITrtModule> codec,
                    std::unique_ptr<MagpieInferenceState> decoder_state_uncond,
                    std::vector<MagpieCudaBuffer> cross_k, std::vector<MagpieCudaBuffer> cross_v,
                    std::vector<MagpieCudaBuffer> cross_k_uncond,
                    std::vector<MagpieCudaBuffer> cross_v_uncond, MagpieCudaBuffer encoder_output,
                    MagpieCudaBuffer encoder_output_uncond, std::vector<float> audio_embed,
                    std::vector<float> text_embed, std::vector<float> context_embed,
-                   std::vector<int32_t> context_lengths, std::vector<float> lt_in_proj_w,
-                   std::vector<float> lt_in_proj_b, std::vector<float> lt_out_proj,
-                   std::vector<float> lt_pos_embed, int32_t lt_hidden, MagpieTTSConfig config,
+                   std::vector<int32_t> context_lengths, MagpieTTSConfig config,
                    cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
                    std::string model_id_str = "");
 
@@ -159,15 +157,6 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
 
     bool prefill_context_sequential(DecoderLoopState& state, int32_t ctx_frames);
 
-    // Local transformer (codebook AR sampling)
-    void init_local_transformer();
-    bool sample_frame_codes_lt(DecoderLoopState& state, std::vector<int32_t>& frame_codes,
-                               bool& eos);
-
-    // Extracted helpers (CCN reduction)
-    void lt_run_codebook_step(int32_t cb, const std::vector<float>& decoder_hidden,
-                              std::vector<float>& logits);
-
     // Constructor helpers
     void upload_embeddings_to_gpu();
     void init_cross_attn_resources();
@@ -217,27 +206,6 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
     bool has_alignment_output_{false};
     int32_t last_attended_pos_{0};
     std::vector<int32_t> attended_count_; // per-position visit count
-
-    // Local transformer ITrtModule (codebook AR sampling)
-    std::unique_ptr<ITrtModule> lt_module_; // secondary engine for 1-layer LT
-    MagpieCudaBuffer lt_cache_k_{0}, lt_cache_v_{0};
-    MagpieCudaBuffer lt_present_k_{0}, lt_present_v_{0};
-    MagpieCudaBuffer lt_output_{0}, lt_mask_{0}, lt_position_id_{0}, lt_input_embed_{0};
-    // CFG: duplicate LT KV caches for unconditional path
-    MagpieCudaBuffer lt_cache_k_uncond_{0}, lt_cache_v_uncond_{0};
-    MagpieCudaBuffer lt_present_k_uncond_{0}, lt_present_v_uncond_{0};
-    MagpieCudaBuffer lt_output_uncond_{0};
-    std::vector<float> lt_in_proj_w_; // [decoder_hidden, lt_hidden] in_projection weight
-    std::vector<float> lt_in_proj_b_; // [lt_hidden] bias
-    std::vector<float> lt_out_proj_;  // packed: 8 x (weight [lt_hidden, cb_size] + bias [cb_size])
-    std::vector<float> lt_pos_embed_; // [lt_max_pos, lt_hidden] position embeddings
-    int32_t lt_hidden_{0};            // 256 typically
-    int32_t lt_max_cache_{8};
-    bool has_lt_{false}; // true if LT engine was loaded
-    // Device buffer for decoder_hidden output from main decoder engine
-    MagpieCudaBuffer decoder_hidden_buf_{0};        // [1, decoder_hidden] conditioned
-    MagpieCudaBuffer decoder_hidden_buf_uncond_{0}; // [1, decoder_hidden] unconditional (CFG)
-    bool has_decoder_hidden_output_{false};
 
     cudaStream_t stream_;
     MagpieTTSConfig config_;

@@ -34,3 +34,18 @@ def test_hf_reference_reuses_the_native_step_prover_tokenizer() -> None:
     assert "use_fast=False" not in source
     assert "torch_dtype=dtypes[reference_precision]" in source
     assert "\n            dtype=dtypes[reference_precision]" not in source
+
+
+def test_native_keeps_the_checkpoint_prompt_and_builder_policies() -> None:
+    family = Path(__file__).resolve().parents[1]
+    plugin = (family / "runtime/plugin.cpp").read_text(encoding="utf-8")
+    model = (family / "model.py").read_text(encoding="utf-8")
+    assert 'require_text_section(bundle, "tokenizer_config.json")' in plugin
+    assert 'config.find("chat_template")' in plugin
+    assert "chat_template.jinja" not in plugin
+    assert '"chat_template.jinja"' not in model
+
+    for path in (family / "utils.py", family / "dual_profile_decoder_tp_builder.py"):
+        source = path.read_text(encoding="utf-8")
+        assert "builder_optimization_level = 3" in source
+        assert "builder_optimization_level = 1" not in source

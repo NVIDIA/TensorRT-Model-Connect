@@ -646,6 +646,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     model = _PixArtModel()
     weights = model.load_weights(str(model_dir), config)
+    config.raw["_transformer_config"] = weights["_transformer_config"]
     components = model.build_components(
         str(model_dir),
         config,

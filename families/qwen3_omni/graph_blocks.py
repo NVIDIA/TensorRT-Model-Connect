@@ -167,7 +167,6 @@ def add_attention_block(
     q = matmul(normed, hidden_size, attention_size, weights[f"{prefix}.w_q"], f"{prefix}.w_q")
     k = matmul(normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"], f"{prefix}.w_k")
     v = matmul(normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"], f"{prefix}.w_v")
-
     # Optional QKV biases
     q_bias = weights.get(f"{prefix}.q_bias")
     if q_bias is not None:
@@ -245,24 +244,20 @@ def add_attention_block(
     present_k = k
     present_v = v
 
-    # Reshape current K, V for concatenation
+    # ------------------------------------------------------------------ #
+    # Attention core                                                       #
+    # ------------------------------------------------------------------ #
+    if alibi_slopes_tensor is not None or alibi_indices_tensor is not None:
+        raise ValueError("qwen3_omni does not use ALiBi")
     seq_dim = -1 if sequence_length is None else sequence_length
     k_reshape = network.add_shuffle(k)
     k_reshape.reshape_dims = (seq_dim, kv_attention_size)
     v_reshape = network.add_shuffle(v)
     v_reshape.reshape_dims = (seq_dim, kv_attention_size)
-
-    # Concatenate with cache
     all_k = network.add_concatenation([cache_k, k_reshape.get_output(0)])
     all_k.axis = 0
     all_v = network.add_concatenation([cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
-
-    # ------------------------------------------------------------------ #
-    # Attention core — explicit FP32 SDPA                                 #
-    # ------------------------------------------------------------------ #
-    if alibi_slopes_tensor is not None or alibi_indices_tensor is not None:
-        raise ValueError("qwen3_omni does not use ALiBi")
     mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
     context = graph_ops.add_attention_from_rows(
         network,
@@ -277,7 +272,6 @@ def add_attention_block(
         causal=False,
         mask=mask_4d,
         scale=attention_scale,
-        fp32_accumulation=True,
     )
 
     # Output projection

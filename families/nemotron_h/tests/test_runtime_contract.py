@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -38,3 +39,18 @@ def test_runtime_keeps_a_scalar_eos_and_every_declared_stop_token(tmp_path) -> N
 def test_stop_token_contract_rejects_invalid_values(value) -> None:
     with pytest.raises(ValueError, match="eos_token_id"):
         _stop_token_ids(value, 32)
+
+
+def test_runtime_keeps_checkpoint_prompt_and_builder_policies() -> None:
+    family = Path(__file__).resolve().parents[1]
+    plugin = (family / "runtime/plugin.cpp").read_text(encoding="utf-8")
+    model = (family / "model.py").read_text(encoding="utf-8")
+    assert 'require_text_section(bundle, "tokenizer_config.json")' in plugin
+    assert 'config.find("chat_template")' in plugin
+    assert "chat_template.jinja" not in plugin
+    assert '"chat_template.jinja"' not in model
+
+    for path in (family / "model.py", family / "tp_builder.py"):
+        source = path.read_text(encoding="utf-8")
+        assert "builder_optimization_level = 3" in source
+        assert "builder_optimization_level = 1" not in source

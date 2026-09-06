@@ -13,10 +13,9 @@ int main() {
     config.num_codebooks = 0;
     bool rejected = false;
     try {
-        trtmc::MagpiePipeline pipeline(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {}, {},
-                                       {}, {}, trtmc::MagpieCudaBuffer(0),
-                                       trtmc::MagpieCudaBuffer(0), {}, {}, {}, {}, {}, {}, {}, {},
-                                       0, config, nullptr, nullptr, "test");
+        trtmc::MagpiePipeline pipeline(nullptr, nullptr, nullptr, nullptr, nullptr, {}, {}, {}, {},
+                                       trtmc::MagpieCudaBuffer(0), trtmc::MagpieCudaBuffer(0), {},
+                                       {}, {}, {}, config, nullptr, nullptr, "test");
     } catch (const std::exception&) {
         rejected = true;
     }

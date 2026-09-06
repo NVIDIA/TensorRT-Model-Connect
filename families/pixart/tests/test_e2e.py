@@ -210,8 +210,7 @@ def _run_json(
 
 def _thresholds(case_name: str) -> dict:
     path = THRESHOLD_ROOT / f"{case_name}.json"
-    if not path.is_file():
-        return {}
+    assert path.is_file(), f"selected {FAMILY} E2E requires exact thresholds: {path}"
     return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
 
 
@@ -273,6 +272,14 @@ def _reference_pipeline(model_dir: Path):
     return pipeline.to("cuda")
 
 
+def _initial_latents(manifest: dict, case: dict) -> np.ndarray:
+    height = int(manifest["image_height"])
+    width = int(manifest["image_width"])
+    assert height % 8 == 0 and width % 8 == 0
+    shape = (1, 4, height // 8, width // 8)
+    return np.random.default_rng(int(case["seed"])).standard_normal(shape, dtype=np.float32)
+
+
 def _native(
     binary: Path,
     runtime_root: Path,
@@ -281,6 +288,7 @@ def _native(
     manifest: dict,
     case: dict,
     tmp_path: Path,
+    initial_latents: np.ndarray,
 ):
     manifest["task"]
     frames = int(manifest["video_num_frames"]) if "video_num_frames" in manifest else 1
@@ -306,12 +314,21 @@ def _native(
     for key, option in (("guidance_scale", "--guidance-scale"), ("cfg_scale", "--cfg-scale")):
         if key in case:
             arguments.extend((option, str(float(case[key]))))
+    latents_path = tmp_path / "initial-latents.raw"
+    np.ascontiguousarray(initial_latents, dtype=np.float32).tofile(latents_path)
+    arguments.extend(("--initial-latents-raw", str(latents_path)))
     payload = _run_json(binary, runtime_root, bundle, manifest, case, command, *arguments)
     payload["artifact"] = str(output)
     return payload
 
 
-def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
+def _official_reference(
+    model_dir: Path,
+    manifest: dict,
+    case: dict,
+    tmp_path: Path,
+    initial_latents: np.ndarray,
+):
     task = manifest["task"]
     import torch
 
@@ -324,6 +341,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         "width": int(manifest["image_width"]),
         "num_inference_steps": int(case["num_inference_steps"]),
         "generator": generator,
+        "latents": torch.from_numpy(initial_latents.copy()).to("cuda"),
     }
     if int(manifest.get("video_num_frames", 1)) > 1:
         kwargs["num_frames"] = int(manifest["video_num_frames"])
@@ -386,6 +404,27 @@ def _write_semantic_artifacts(case: dict, actual_images: list, expected_images: 
     )
 
 
+def _psnr(actual: np.ndarray, expected: np.ndarray) -> float:
+    mse = float(np.mean((actual.astype(np.float64) - expected.astype(np.float64)) ** 2))
+    return 100.0 if mse < 1.0e-12 else float(10.0 * np.log10(1.0 / mse))
+
+
+def _ssim(actual: np.ndarray, expected: np.ndarray) -> float:
+    left = actual.astype(np.float64)
+    right = expected.astype(np.float64)
+    left_mean = float(left.mean())
+    right_mean = float(right.mean())
+    left_variance = float(left.var())
+    right_variance = float(right.var())
+    covariance = float(np.mean((left - left_mean) * (right - right_mean)))
+    c1 = 0.01**2
+    c2 = 0.03**2
+    return float(
+        ((2.0 * left_mean * right_mean + c1) * (2.0 * covariance + c2))
+        / ((left_mean**2 + right_mean**2 + c1) * (left_variance + right_variance + c2))
+    )
+
+
 def _assert_contract(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
     del manifest
     from PIL import Image
@@ -401,11 +440,35 @@ def _assert_contract(actual, expected, manifest: dict, case: dict, thresholds: d
         for path in actual_paths
     ]
     expected_images = expected["images"]
-    assert expected_images
-    pixels = np.asarray(actual_images)
-    assert float(pixels.mean()) >= float(thresholds.get("min_pixel_mean", 0.15))
-    assert float(pixels.mean()) <= float(thresholds.get("max_pixel_mean", 0.85))
-    assert float(pixels.std()) >= float(thresholds.get("min_pixel_std", 0.05))
+    assert len(actual_images) == len(expected_images) and actual_images
+    expected_images = [np.asarray(image, dtype=np.float32) for image in expected_images]
+    assert all(
+        actual.shape == reference.shape
+        for actual, reference in zip(actual_images, expected_images, strict=True)
+    )
+    pixels = np.asarray(actual_images, dtype=np.float32)
+    reference_pixels = np.asarray(expected_images, dtype=np.float32)
+    for values in (pixels, reference_pixels):
+        assert float(values.mean()) >= float(thresholds["min_pixel_mean"])
+        assert float(values.mean()) <= float(thresholds["max_pixel_mean"])
+        assert float(values.std()) >= float(thresholds["min_pixel_std"])
+    reference_std = float(reference_pixels.std())
+    if reference_std >= float(thresholds["reference_min_pixel_std_for_ratio"]):
+        assert float(pixels.std()) / reference_std >= float(thresholds["min_reference_std_ratio"])
+    psnr = np.mean(
+        [
+            _psnr(actual, reference)
+            for actual, reference in zip(actual_images, expected_images, strict=True)
+        ]
+    )
+    ssim = np.mean(
+        [
+            _ssim(actual, reference)
+            for actual, reference in zip(actual_images, expected_images, strict=True)
+        ]
+    )
+    assert float(psnr) >= float(thresholds["psnr"])
+    assert float(ssim) >= float(thresholds["ssim"])
     _write_semantic_artifacts(case, actual_images, expected_images)
 
 
@@ -544,12 +607,47 @@ def test_semantic_artifacts_are_paired(monkeypatch, tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.parametrize("threshold_case", sorted(CASES))
+def test_reference_metrics_reject_rearranged_pixels(
+    threshold_case: str, tmp_path: Path
+) -> None:
+    from PIL import Image
+
+    actual_pixels = np.array(
+        [[[0, 0, 0], [255, 255, 255]], [[255, 255, 255], [0, 0, 0]]], dtype=np.uint8
+    )
+    reference = (
+        np.array([[[255, 255, 255], [0, 0, 0]], [[0, 0, 0], [255, 255, 255]]], dtype=np.float32)
+        / 255.0
+    )
+    actual_path = tmp_path / "actual.png"
+    Image.fromarray(actual_pixels).save(actual_path)
+    with pytest.raises(AssertionError):
+        _assert_contract(
+            {"artifact": str(actual_path)},
+            {"images": [reference]},
+            {},
+            {"name": "adversarial"},
+            _thresholds(threshold_case),
+        )
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     _build(model_dir, bundle, manifest)
-    actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
-    expected = _official_reference(model_dir, manifest, case, tmp_path)
+    initial_latents = _initial_latents(manifest, case)
+    actual = _native(
+        binary,
+        runtime_root,
+        bundle,
+        model_dir,
+        manifest,
+        case,
+        tmp_path,
+        initial_latents,
+    )
+    expected = _official_reference(model_dir, manifest, case, tmp_path, initial_latents)
     _assert_contract(actual, expected, manifest, case, _thresholds(case_name))
