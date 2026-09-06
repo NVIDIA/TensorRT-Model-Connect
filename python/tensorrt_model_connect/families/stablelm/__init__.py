@@ -26,6 +26,19 @@ def _load_plugin_module():
 def __getattr__(name: str) -> Any:
     if name.startswith("__"):
         raise AttributeError(name)
+    if name != "plugin":
+        # ``from . import <submodule>`` consults this hook before the import
+        # system falls back to importing the submodule itself. Answering it by
+        # loading the plugin makes a submodule's own import re-enter that
+        # submodule through the plugin, which fails while it is half-built.
+        # A real submodule therefore has to resolve as itself first.
+        try:
+            return importlib.import_module(f"{__name__}.{name}")
+        except ModuleNotFoundError as exc:
+            # Only "there is no such submodule" falls through to the plugin; a
+            # failure raised from inside an existing submodule is a real error.
+            if exc.name != f"{__name__}.{name}":
+                raise
     plugin_module = _load_plugin_module()
     if name == "plugin":
         return getattr(plugin_module, "plugin")
