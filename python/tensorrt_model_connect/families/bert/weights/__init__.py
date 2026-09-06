@@ -168,27 +168,22 @@ def load_bert_weights(model_dir: str | Path, config: ModelConfig) -> WeightDict:
     weights = WeightDict()
 
     embedding = _load_tensor(readers, _prefixed(root, "embeddings.word_embeddings.weight"))
-    assert embedding.shape == (config.vocab_size, hidden), (
-        f"Embedding shape {embedding.shape} != ({config.vocab_size}, {hidden})"
-    )
+    if embedding.shape != (config.vocab_size, hidden):
+        raise ValueError(f'Embedding shape {embedding.shape} != ({config.vocab_size}, {hidden})')
     weights["embedding"] = embedding.astype(np.float32)
 
     position_embedding = _load_tensor(
         readers, _prefixed(root, "embeddings.position_embeddings.weight")
     )
-    assert position_embedding.shape == (config.max_position_embeddings, hidden), (
-        f"Position embedding shape {position_embedding.shape} != "
-        f"({config.max_position_embeddings}, {hidden})"
-    )
+    if position_embedding.shape != (config.max_position_embeddings, hidden):
+        raise ValueError(f'Position embedding shape {position_embedding.shape} != ({config.max_position_embeddings}, {hidden})')
     weights["position_embedding"] = position_embedding.astype(np.float32)
 
     token_type_key = _prefixed(root, "embeddings.token_type_embeddings.weight")
     if _has_tensor(readers, token_type_key):
         token_type_embedding = _load_tensor(readers, token_type_key)
-        assert token_type_embedding.shape == (type_vocab_size, hidden), (
-            f"Token type embedding shape {token_type_embedding.shape} != "
-            f"({type_vocab_size}, {hidden})"
-        )
+        if token_type_embedding.shape != (type_vocab_size, hidden):
+            raise ValueError(f'Token type embedding shape {token_type_embedding.shape} != ({type_vocab_size}, {hidden})')
         weights["token_type_embedding"] = token_type_embedding.astype(np.float32)
     else:
         weights["token_type_embedding"] = np.zeros((type_vocab_size, hidden), dtype=np.float32)

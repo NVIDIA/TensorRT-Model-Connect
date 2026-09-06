@@ -79,8 +79,8 @@ class InternLMPlugin:
 
         # Embedding — InternLM2 uses "model.tok_embeddings.weight"
         embedding = _load_tensor(readers, "model.tok_embeddings.weight")
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {hidden})')
         weights["embedding"] = embedding.astype(np.float32)
 
         mlp_size = 0
@@ -106,9 +106,8 @@ class InternLMPlugin:
                 readers, f"{hf_prefix}.attention.wqkv.weight")
             total_qkv = wqkv_raw.shape[0]
             expected_qkv = q_dim + 2 * kv_dim
-            assert total_qkv == expected_qkv, (
-                f"Layer {layer_idx} wqkv rows {total_qkv} != "
-                f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})")
+            if total_qkv != expected_qkv:
+                raise ValueError(f'Layer {layer_idx} wqkv rows {total_qkv} != expected {expected_qkv} (q={q_dim}, kv={kv_dim})')
 
             group_size = num_heads // num_kv_heads
             rows_per_group = group_size * head_dim + 2 * head_dim

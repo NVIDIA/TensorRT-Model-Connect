@@ -126,8 +126,8 @@ def _infer_config_from_weights(readers) -> dict:
     # Infer attention config from in_proj_weight [3*hidden, hidden]
     in_proj = _load_tensor(readers, "transformer.layers.0.self_attn.in_proj_weight")
     total_qkv = in_proj.shape[0]  # 12288 = 3 * 4096
-    assert total_qkv == 3 * hidden, (
-        f"in_proj_weight dim 0 ({total_qkv}) != 3 * hidden ({3 * hidden})")
+    if total_qkv != 3 * hidden:
+        raise ValueError(f'in_proj_weight dim 0 ({total_qkv}) != 3 * hidden ({3 * hidden})')
     # Moshi uses 32 heads with head_dim=128 for hidden=4096
     num_heads = 32
     head_dim = hidden // num_heads  # 128
@@ -175,7 +175,8 @@ def _infer_config_from_weights(readers) -> dict:
     dep_total_qkv = dep_in_proj.shape[0]  # 49152
     # 49152 / 1024 = 48 = 16 codebooks * 3 (Q,K,V)
     dep_qkv_per_cb = dep_total_qkv // num_codebooks  # 3072 = 3 * 1024
-    assert dep_qkv_per_cb == 3 * depth_hidden
+    if dep_qkv_per_cb != 3 * depth_hidden:
+        raise ValueError(f"Depth QKV width {dep_qkv_per_cb} != {3 * depth_hidden}")
     # Each codebook attention has 16 heads with head_dim=64
     depth_num_heads = 16
     depth_head_dim = depth_hidden // depth_num_heads  # 64

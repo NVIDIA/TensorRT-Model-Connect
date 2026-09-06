@@ -151,7 +151,7 @@ def test_load_weights_raises_for_pattern_length_mismatch(
 ):
     """Intent: ensure malformed hybrid patterns fail fast.
     Preconditions: pattern maps to fewer layer markers than num_hidden_layers.
-    Postconditions: load_weights raises AssertionError before tensor mapping proceeds.
+    Postconditions: load_weights raises ValueError before tensor mapping proceeds.
     """
     cfg = ModelConfig(
         model_type="nemotron_h",
@@ -165,7 +165,7 @@ def test_load_weights_raises_for_pattern_length_mismatch(
     )
     monkeypatch.setattr(nemotron_h, "_open_safetensors", lambda _: ["reader"])
 
-    with pytest.raises(AssertionError, match="Pattern length"):
+    with pytest.raises(ValueError, match="Pattern length"):
         plugin.load_weights("/unused", cfg)
 
 

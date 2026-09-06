@@ -458,8 +458,8 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     if not _has_tensor(readers, embed_key):
         embed_key = "model.embed_tokens.weight"
     embedding = _load_tensor(readers, embed_key)
-    assert embedding.shape == (vocab, hidden), (
-        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+    if embedding.shape != (vocab, hidden):
+        raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {hidden})')
     weights["embedding"] = embedding.astype(np.float32)
 
     attention_size = 0

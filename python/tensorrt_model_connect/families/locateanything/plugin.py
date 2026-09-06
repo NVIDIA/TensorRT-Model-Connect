@@ -217,8 +217,8 @@ def _load_locateanything_text_weights(
         "text token embedding",
     )
     embedding = _load_tensor(readers, embed_key)
-    assert embedding.shape == (vocab, hidden), (
-        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+    if embedding.shape != (vocab, hidden):
+        raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {hidden})')
     weights["embedding"] = embedding.astype(np.float32)
 
     layer_prefix = _detect_layer_prefix(readers)

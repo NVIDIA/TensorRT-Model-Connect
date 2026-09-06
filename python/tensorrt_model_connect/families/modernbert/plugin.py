@@ -74,7 +74,8 @@ class ModernbertPlugin:
 
         # Word embedding
         embedding = _load_tensor(readers, "model.embeddings.tok_embeddings.weight")
-        assert embedding.shape == (config.vocab_size, hidden)
+        if embedding.shape != (config.vocab_size, hidden):
+            raise ValueError(f"Embedding shape {embedding.shape} != ({config.vocab_size}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         # Embedding LayerNorm (no bias)
@@ -108,7 +109,8 @@ class ModernbertPlugin:
 
             # Fused QKV: [3*hidden, hidden] -> split into Q, K, V
             wqkv = _load_tensor(readers, f"{hf_prefix}.attn.Wqkv.weight")
-            assert wqkv.shape == (3 * hidden, hidden)
+            if wqkv.shape != (3 * hidden, hidden):
+                raise ValueError(f"QKV weight shape {wqkv.shape} != ({3 * hidden}, {hidden})")
             q_w, k_w, v_w = np.split(wqkv, 3, axis=0)
             weights[f"{prefix}.w_q"] = np.ascontiguousarray(q_w.T.astype(np.float32))
             weights[f"{prefix}.w_k"] = np.ascontiguousarray(k_w.T.astype(np.float32))
@@ -125,7 +127,8 @@ class ModernbertPlugin:
 
             # GeGLU MLP: Wi [2*intermediate, hidden] -> split into input, gate
             wi = _load_tensor(readers, f"{hf_prefix}.mlp.Wi.weight")
-            assert wi.shape == (2 * intermediate, hidden)
+            if wi.shape != (2 * intermediate, hidden):
+                raise ValueError(f"MLP input weight shape {wi.shape} != ({2 * intermediate}, {hidden})")
             input_w, gate_w = np.split(wi, 2, axis=0)
             weights[f"{prefix}.w_mlp_input"] = np.ascontiguousarray(input_w.T.astype(np.float32))
             weights[f"{prefix}.w_mlp_gate"] = np.ascontiguousarray(gate_w.T.astype(np.float32))

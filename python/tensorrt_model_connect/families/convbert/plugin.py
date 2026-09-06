@@ -97,20 +97,20 @@ class ConvBertPlugin:
 
         # Word embedding
         embedding = _load_tensor(readers, _pfx("embeddings.word_embeddings.weight"))
-        assert embedding.shape == (vocab, embedding_size), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {embedding_size})")
+        if embedding.shape != (vocab, embedding_size):
+            raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {embedding_size})')
         weights["embedding"] = embedding.astype(np.float32)
 
         # Position embedding
         pos_embed = _load_tensor(readers, _pfx("embeddings.position_embeddings.weight"))
-        assert pos_embed.shape == (max_pos, embedding_size), (
-            f"Position embedding shape {pos_embed.shape} != ({max_pos}, {embedding_size})")
+        if pos_embed.shape != (max_pos, embedding_size):
+            raise ValueError(f'Position embedding shape {pos_embed.shape} != ({max_pos}, {embedding_size})')
         weights["position_embedding"] = pos_embed.astype(np.float32)
 
         # Token type embedding
         tt_embed = _load_tensor(readers, _pfx("embeddings.token_type_embeddings.weight"))
-        assert tt_embed.shape == (type_vocab_size, embedding_size), (
-            f"Token type embedding shape {tt_embed.shape} != ({type_vocab_size}, {embedding_size})")
+        if tt_embed.shape != (type_vocab_size, embedding_size):
+            raise ValueError(f'Token type embedding shape {tt_embed.shape} != ({type_vocab_size}, {embedding_size})')
         weights["token_type_embedding"] = tt_embed.astype(np.float32)
 
         # Embedding LayerNorm

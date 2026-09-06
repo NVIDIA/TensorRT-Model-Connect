@@ -73,7 +73,8 @@ class XlnetPlugin:
 
         # Word embedding
         embedding = _load_tensor(readers, _pfx(root, "word_embedding.weight"))
-        assert embedding.shape == (vocab, hidden)
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         # mask_emb

@@ -62,14 +62,14 @@ class DistilBertPlugin:
 
         # Word embedding
         embedding = _load_tensor(readers, "distilbert.embeddings.word_embeddings.weight")
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f'Embedding shape {embedding.shape} != ({vocab}, {hidden})')
         weights["embedding"] = embedding.astype(np.float32)
 
         # Position embedding (learned absolute)
         pos_embed = _load_tensor(readers, "distilbert.embeddings.position_embeddings.weight")
-        assert pos_embed.shape == (max_pos, hidden), (
-            f"Position embedding shape {pos_embed.shape} != ({max_pos}, {hidden})")
+        if pos_embed.shape != (max_pos, hidden):
+            raise ValueError(f'Position embedding shape {pos_embed.shape} != ({max_pos}, {hidden})')
         weights["position_embedding"] = pos_embed.astype(np.float32)
 
         # DistilBERT has no token_type_embeddings. The encoder builder expects
