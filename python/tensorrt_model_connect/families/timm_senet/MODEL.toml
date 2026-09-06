@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_senet"
+plugin = "timm_senet"
+module = "plugin"
+python_profile_specs = [
+  "timm_senet_reference|families/timm_senet/python_profile_requirements/timm_senet_reference.lock.txt|families/timm_senet/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_senet_reference",
+]
+aliases = [
+  "timm_senet",
+  "senet154",
+]
+prefixes = [
+  "timm_senet",
+  "senet",
+]

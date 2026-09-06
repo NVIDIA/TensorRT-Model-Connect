@@ -74,6 +74,8 @@ models:
     workloads: [seedtts_en_tts_intelligibility]
   bart-base:
     workloads: [mmlu_continuation_parity]
+  senet154-gluon-in1k:
+    workloads: [imagenette_image_classification]
   bert-base-uncased:
     workloads: [stsbenchmark_encoder_embedding_parity]
   bge-small-en-v1.5:
