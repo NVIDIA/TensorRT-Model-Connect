@@ -5,8 +5,9 @@
 
 #pragma once
 
-// K2-Horizon-owned plain-completion pipeline. The initial family contract is
-// intentionally narrow: one native fixed-KV decoder and host greedy sampling.
+// K2-Horizon-owned text pipeline. The initial family contract is intentionally
+// narrow: plain completion plus pinned single-user chat on one native fixed-KV
+// decoder with host greedy sampling.
 
 #include "runtime/models/k2_horizon/kv_cache.h"
 #include "runtime/models/k2_horizon/sampler.h"
@@ -26,12 +27,15 @@ struct K2HorizonTextGenConfig {
     std::vector<int32_t> eos_token_ids;
     std::string token_id_name{"token_id"};
     std::string logits_output_name{"logits"};
+    std::string chat_template_format;
     bool enable_cuda_graph{false};
     bool log_runtime_stats{false};
+    bool emit_prompt_token_ids{false};
 };
 
 // Validate the family-owned request boundary before any engine execution.
 void k2_horizon_validate_generate_config(const GenerateConfig& config);
+void k2_horizon_validate_generate_ids_config(const GenerateConfig& config);
 void k2_horizon_validate_generation_inputs(const std::vector<int32_t>& token_ids,
                                            int32_t max_new_tokens, int32_t vocab_size);
 
@@ -68,6 +72,7 @@ class K2HorizonTextGenerationPipeline final : public IPipeline {
     int32_t run_decode_loop(K2HorizonISampler& sampler, const K2HorizonSamplingParams& params,
                             std::vector<int32_t>& output, std::vector<float>& logits,
                             int32_t max_new_tokens);
+    void log_prompt_token_ids(const std::vector<int32_t>& token_ids) const;
     void log_decode_summary(int32_t steps, double milliseconds) const;
 
     std::unique_ptr<TrtModule> decoder_;

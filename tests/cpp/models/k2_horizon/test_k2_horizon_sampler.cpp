@@ -137,7 +137,29 @@ void test_unsupported_generation_controls_fail_closed() {
 
     config = valid;
     config.use_chat_template = true;
-    check(request_is_rejected(config), "chat template request is rejected");
+    check(!request_is_rejected(config), "single-user high-reasoning chat is accepted");
+
+    config.enable_thinking = false;
+    check(request_is_rejected(config), "chat without high reasoning is rejected");
+
+    config = valid;
+    config.enable_thinking = false;
+    check(!request_is_rejected(config), "plain completion preserves its no-thinking no-op");
+
+    config = valid;
+    config.use_chat_template = true;
+    config.eos_token_id = 1;
+    check(request_is_rejected(config), "chat EOS override is rejected");
+
+    config = valid;
+    config.use_chat_template = true;
+    bool tokenized_chat_rejected = false;
+    try {
+        trtmc::k2_horizon_validate_generate_ids_config(config);
+    } catch (const std::invalid_argument&) {
+        tokenized_chat_rejected = true;
+    }
+    check(tokenized_chat_rejected, "chat over pre-tokenized input is rejected");
 
     config = valid;
     config.lora_adapter_id = "adapter";

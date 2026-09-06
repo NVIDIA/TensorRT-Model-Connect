@@ -31,7 +31,42 @@
       "contract_config": {
         "use_chat_template": false
       },
-      "notes": "Pinned BF16 plain-completion parity for the publisher-documented Transformers path. Native chat, sampling, reasoning/tool parsing, and the full 524288-token context are outside this minimal checkpoint contract."
+      "notes": "Pinned BF16 plain-completion parity for the publisher-documented Transformers path. Sampling, reasoning/tool parsing, and the full 524288-token context are outside this minimal checkpoint contract."
+    },
+    {
+      "name": "k2-horizon-7b-chat-high",
+      "trace_id": "IT-E2E-K2H7B-02",
+      "reference_backend": "hf_transformers",
+      "oracle_level": "L1_external_reference",
+      "reference_family": "k2_horizon_high_reasoning_chat",
+      "reference_precision": "bf16",
+      "user_contract": "chat_prefix_parity",
+      "prompt": "Reply with the word OK.",
+      "max_new_tokens": 48,
+      "temperature": 0.0,
+      "top_k": 1,
+      "inputs": {
+        "do_sample": false
+      },
+      "expected_prompt_token_ids": [
+        0, 250018, 2672, 200, 42035, 458, 293, 5512, 19677, 15, 250019, 250018,
+        142036, 200, 250029, 200
+      ],
+      "expected_continuation_token_ids": [
+        864, 3318, 4943, 27, 322, 42035, 458, 293, 5512, 19677, 2818, 2953, 627,
+        1767, 9359, 458, 322, 8228, 2338, 2515, 4791, 3343, 15, 250030, 8228, 250019
+      ],
+      "expected_continuation_text": "The user says: \"Reply with the word OK.\" So we should respond with \"OK\". No extra text.</ifm|think>OK",
+      "contract_config": {
+        "use_chat_template": true,
+        "reasoning_effort": "high"
+      },
+      "runtime_config": {
+        "k2_horizon": {
+          "emit_prompt_token_ids": true
+        }
+      },
+      "notes": "Pinned single-user, high-reasoning chat-template parity within the qualified 256-token deterministic smoke. System messages, history, tools, alternate reasoning levels, and sampling are not supported."
     }
   ]
 }

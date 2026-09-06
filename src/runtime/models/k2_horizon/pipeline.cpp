@@ -5,6 +5,8 @@
 
 #include "runtime/models/k2_horizon/pipeline.h"
 
+#include "runtime/models/k2_horizon/chat_template.h"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -48,6 +50,17 @@ bool has_non_text_inputs(const GenerateConfig& cfg) {
            has_conditioning_inputs(cfg) || has_media_controls(cfg);
 }
 
+void validate_reasoning_and_chat_controls(const GenerateConfig& cfg) {
+    if (cfg.use_chat_template && !cfg.enable_thinking) {
+        throw std::invalid_argument(
+            "K2-Horizon does not support disabling its high-reasoning mode");
+    }
+    if (cfg.use_chat_template && cfg.eos_token_id >= 0) {
+        throw std::invalid_argument(
+            "K2-Horizon chat requires the publisher EOS token set from the bundle");
+    }
+}
+
 } // namespace
 
 void k2_horizon_validate_generate_config(const GenerateConfig& cfg) {
@@ -57,10 +70,7 @@ void k2_horizon_validate_generate_config(const GenerateConfig& cfg) {
     if (mode != "auto" && mode != "ar" && mode != "autoregressive") {
         throw std::invalid_argument("K2-Horizon currently supports autoregressive generation only");
     }
-    if (cfg.use_chat_template) {
-        throw std::invalid_argument(
-            "K2-Horizon currently supports plain completion only; chat templates are disabled");
-    }
+    validate_reasoning_and_chat_controls(cfg);
     if (cfg.stop_on_boxed_answer) {
         throw std::invalid_argument(
             "K2-Horizon does not support reasoning-specific answer-stop parsing");
@@ -69,7 +79,15 @@ void k2_horizon_validate_generate_config(const GenerateConfig& cfg) {
         throw std::invalid_argument("K2-Horizon does not support LoRA adapters");
     if (has_non_text_inputs(cfg)) {
         throw std::invalid_argument(
-            "K2-Horizon received generation controls outside its plain-completion contract");
+            "K2-Horizon received generation controls outside its text-generation contract");
+    }
+}
+
+void k2_horizon_validate_generate_ids_config(const GenerateConfig& cfg) {
+    k2_horizon_validate_generate_config(cfg);
+    if (cfg.use_chat_template) {
+        throw std::invalid_argument(
+            "K2-Horizon cannot apply a chat template to pre-tokenized input IDs");
     }
 }
 
@@ -106,7 +124,11 @@ TextResult K2HorizonTextGenerationPipeline::generate(const std::string& prompt,
     if (!tokenizer_)
         throw std::runtime_error("K2HorizonTextGenerationPipeline: no tokenizer configured");
 
-    const auto input_ids = tokenizer_->encode(prompt);
+    const std::string effective_prompt =
+        cfg.use_chat_template
+            ? k2_horizon_apply_chat_template(config_.chat_template_format, prompt, "high")
+            : prompt;
+    const auto input_ids = tokenizer_->encode(effective_prompt);
     const int32_t max_new_tokens = cfg.max_new_tokens;
     const auto params = k2_horizon_sampling_params_from_config(cfg, config_.eos_token_ids);
 
@@ -126,7 +148,7 @@ TextResult K2HorizonTextGenerationPipeline::generate(const std::string& prompt,
 K2HorizonTextGenerationPipeline::GenerationResult
 K2HorizonTextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
                                               const GenerateConfig& cfg) {
-    k2_horizon_validate_generate_config(cfg);
+    k2_horizon_validate_generate_ids_config(cfg);
     const auto params = k2_horizon_sampling_params_from_config(cfg, config_.eos_token_ids);
     return GenerationResult{
         generate_from_ids(input_ids, cfg.max_new_tokens, params, cfg).token_ids};
@@ -148,9 +170,13 @@ K2HorizonTextGenerationPipeline::TimedGenResult K2HorizonTextGenerationPipeline:
     const auto capacity = static_cast<std::size_t>(cache_->max_length());
     if (input_ids.size() > capacity ||
         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size()) {
-        throw std::invalid_argument(
-            "K2-Horizon prompt and generation exceed the fixed KV cache capacity");
+        throw std::invalid_argument("K2-Horizon prompt tokens (" +
+                                    std::to_string(input_ids.size()) + ") plus max_new_tokens (" +
+                                    std::to_string(max_new_tokens) + ") exceed KV capacity (" +
+                                    std::to_string(capacity) + ")");
     }
+    if (cfg.use_chat_template)
+        log_prompt_token_ids(input_ids);
 
     reset_generation_context();
     std::vector<float> logits;
@@ -221,6 +247,19 @@ int32_t K2HorizonTextGenerationPipeline::run_decode_loop(K2HorizonISampler& samp
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     log_decode_summary(steps, elapsed);
     return steps;
+}
+
+void K2HorizonTextGenerationPipeline::log_prompt_token_ids(
+    const std::vector<int32_t>& token_ids) const {
+    if (!config_.emit_prompt_token_ids)
+        return;
+    std::cerr << "[trtmc.k2_horizon.prompt] token_ids=[";
+    for (std::size_t index = 0; index < token_ids.size(); ++index) {
+        if (index != 0)
+            std::cerr << ',';
+        std::cerr << token_ids[index];
+    }
+    std::cerr << "]\n";
 }
 
 void K2HorizonTextGenerationPipeline::log_decode_summary(int32_t steps, double milliseconds) const {
