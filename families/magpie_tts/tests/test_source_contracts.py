@@ -59,5 +59,5 @@ def test_reference_declares_checkpoint_g2p_dependencies() -> None:
         "jieba==0.42.1",
         "pypinyin==0.55.0",
         "pypinyin-dict==0.9.0",
-        "pyopenjtalk==0.4.1",
+        "pyopenjtalk-plus==0.4.1.post9",
     } <= requirements

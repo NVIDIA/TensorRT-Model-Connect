@@ -25,7 +25,7 @@ pyannote.core==6.0.1
 pyannote.metrics==4.1
 pypinyin==0.55.0
 pypinyin-dict==0.9.0
-pyopenjtalk==0.4.1
+pyopenjtalk-plus==0.4.1.post9
 soundfile==0.13.1
 torchmetrics==1.9.0
 transformers==4.57.6
