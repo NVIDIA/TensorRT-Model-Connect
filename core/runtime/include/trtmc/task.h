@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -107,6 +108,15 @@ struct AudioResult {
     std::vector<float> samples;
     std::int32_t num_samples{0};
     std::int32_t sample_rate{24000};
+    // Interleaved channel count. Existing mono producers keep the default.
+    std::int32_t channels{1};
+};
+
+// Synchronized decoded video and audio produced by an audiovisual model.
+struct VideoResult {
+    ImageResult frames;
+    AudioResult audio;
+    std::int32_t fps{0};
 };
 
 struct TranscriptionStreamConfig {
@@ -322,6 +332,67 @@ struct ImageGenerationConfig {
     std::string negative_prompt;
     std::int32_t height{0};
     std::int32_t width{0};
+    // Requested video frame count. Zero selects the family/bundle default.
+    std::int32_t video_num_frames{0};
+};
+
+// Decoded host-resident inputs for native video conditioning. Image pixels are
+// contiguous HWC float32 in [0, 1]; video pixels are contiguous THWC.
+struct VideoImageInput {
+    std::vector<float> pixels;
+    std::int32_t height{0};
+    std::int32_t width{0};
+    std::int32_t channels{3};
+};
+
+struct VideoClipInput {
+    std::vector<float> pixels;
+    std::int32_t num_frames{0};
+    std::int32_t height{0};
+    std::int32_t width{0};
+    std::int32_t channels{3};
+    std::int32_t fps_numerator{0};
+    std::int32_t fps_denominator{1};
+    AudioResult soundtrack;
+};
+
+struct ReferenceMediaDecodePolicy {
+    std::uint32_t maximum_duration_seconds{0};
+    std::uint32_t target_video_fps{0};
+    std::uint32_t maximum_source_video_fps{0};
+    std::uint32_t canvas_short_edge{0};
+    std::uint64_t canvas_max_pixels{0};
+    std::uint32_t canvas_multiple{0};
+    double minimum_aspect_ratio{0.0};
+    double maximum_aspect_ratio{0.0};
+};
+
+enum class VideoReferenceKind {
+    kImage,
+    kVideo,
+    kAudio,
+};
+
+struct VideoReferenceInput {
+    VideoReferenceKind kind{VideoReferenceKind::kImage};
+    VideoImageInput image;
+    VideoClipInput video;
+    AudioResult audio;
+};
+
+enum class VideoGenerationMode {
+    kTextToVideoAudio,
+    kFirstLastFrameToVideoAudio,
+    kReferenceToVideoAudio,
+};
+
+struct VideoGenerationRequest {
+    std::string prompt;
+    ImageGenerationConfig config;
+    VideoGenerationMode mode{VideoGenerationMode::kTextToVideoAudio};
+    std::optional<VideoImageInput> first_frame;
+    std::optional<VideoImageInput> last_frame;
+    std::vector<VideoReferenceInput> references;
 };
 
 struct WorldModelRequest {
@@ -465,6 +536,19 @@ class IImageGeneration : public virtual ITask {
     const char* task() const noexcept override { return kTask; }
     virtual ImageResult generate_image(const std::string& prompt,
                                        const ImageGenerationConfig& config = {}) = 0;
+};
+
+// Optional capability for image-generation families that return synchronized
+// video and audio or accept structured video-conditioning inputs.
+class IVideoGeneration {
+  public:
+    virtual ~IVideoGeneration() = default;
+    virtual VideoResult generate_video(const std::string& prompt,
+                                       const ImageGenerationConfig& config = {}) = 0;
+    virtual VideoResult generate_video(const VideoGenerationRequest& request) = 0;
+    virtual std::optional<ReferenceMediaDecodePolicy> reference_media_decode_policy() const {
+        return std::nullopt;
+    }
 };
 
 class IImageEditing : public virtual ITask {

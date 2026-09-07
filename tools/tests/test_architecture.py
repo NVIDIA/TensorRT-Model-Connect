@@ -285,6 +285,8 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tensorrt/trt_module_impl.cpp",
         "core/runtime/tensorrt/trt_module_impl.h",
         "core/runtime/tensorrt/rtx_backend.cpp",
+        "core/runtime/tensorrt/runtime_cache_persistence.cpp",
+        "core/runtime/tensorrt/runtime_cache_persistence.h",
         "core/runtime/byok/byok.cpp",
         "core/runtime/byok/tvm_ffi_function.cpp",
         "core/runtime/byok/tvm_ffi_function.h",
@@ -297,6 +299,8 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/primitives/trt_common.cpp",
         "core/runtime/primitives/trt_common.h",
         "core/runtime/loader/family_loader.cpp",
+        "core/runtime/platform/dynamic_library.cpp",
+        "core/runtime/platform/dynamic_library.h",
         "core/runtime/include/trtmc/byok.h",
         "core/runtime/include/trtmc/bundle.h",
         "core/runtime/include/trtmc/task.h",
@@ -310,7 +314,9 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tests/fake_family.cpp",
         "core/runtime/tests/test_bundle_format_v1.cpp",
         "core/runtime/tests/test_byok_shape_spec.cpp",
+        "core/runtime/tests/test_dynamic_library.cpp",
         "core/runtime/tests/test_family_loader.cpp",
+        "core/runtime/tests/test_runtime_cache_persistence.cpp",
         "core/runtime/tests/test_task_api.cpp",
         "core/runtime/tests/test_trt_module_dynamic_input.cpp",
     }
@@ -546,6 +552,7 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
     # selected family's build function, including explicit unsupported checks.
     family_owned_fields = request_fields - {
         "family",
+        "family_options",
         "output_path",
         "graph_transform",
     }
@@ -616,7 +623,10 @@ def test_runtime_sized_kv_budget_is_direct_and_family_owned() -> None:
     )
     loader = (REPO / "core/runtime/loader/family_loader.cpp").read_text(encoding="utf-8")
     assert "std::uint64_t kv_cache_size_bytes{0};" in factory
-    assert "FamilyContext context{reader, configured_backend, kv_cache_size_bytes};" in loader
+    assert (
+        "FamilyContext context{reader, configured_backend, kv_cache_size_bytes, runtime_cache_path,"
+        in loader
+    )
     assert "LoadOptions" not in factory
 
     handlers: list[str] = []
@@ -1093,11 +1103,15 @@ def test_rtx_backend_is_an_explicit_optional_dso() -> None:
         assert method in source
     assert 'return "trt_rtx"' in source
     assert "engine->createRuntimeConfig()" in source
-    assert "engine->createExecutionContext(runtime_config.get())" in source
+    assert "engine->createExecutionContext(config.get())" in source
     assert "runtime_cache_path" in source
     assert "setRuntimeCache" in source
     assert "CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE" in source
-    assert "external_bindings, true" in source
+    assert "create_module_from_file(" in source
+    assert "BoundedPlanStreamReader" in source
+    assert "apply_weight_streaming_budget" in source
+    assert "retained_engines_" in source
+    assert "RtxActivationArena" in source
     for retired_surface in (
         "create_profile_modules(",
         "create_context_modules(",
@@ -1165,13 +1179,20 @@ def test_family_factory_receives_only_direct_runtime_inputs() -> None:
     assert "const BundleReader& reader;" in context_body
     assert "IBackend& backend;" in context_body
     assert "std::uint64_t kv_cache_size_bytes{0};" in context_body
+    assert "std::string runtime_cache_path;" in context_body
+    assert "bool cuda_graphs{false};" in context_body
     assert "BundleFile" not in context_body
-    assert context_body.count(";") == 3
+    assert context_body.count(";") == 5
 
     loader = (REPO / "core/runtime/loader/family_loader.cpp").read_text(encoding="utf-8")
     load_task = loader.split("std::unique_ptr<ITask> load_task", 1)[1]
     assert "const BundleReader reader(bundle_path);" in load_task
-    assert "FamilyContext context{reader, configured_backend, kv_cache_size_bytes};" in load_task
+    assert "IBackend& configured_backend =" in load_task
+    assert "cached_configured_backend(" in load_task
+    assert (
+        "FamilyContext context{reader, configured_backend, kv_cache_size_bytes, runtime_cache_path,"
+        in load_task
+    )
     assert "BundleFile" not in load_task
     assert "ReadBundleFile" not in load_task
 

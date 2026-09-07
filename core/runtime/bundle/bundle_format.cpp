@@ -190,12 +190,18 @@ const BundleSectionInfo* BundleReader::find_section(std::string_view name) const
     return nullptr;
 }
 
+std::uint64_t BundleReader::section_file_offset(std::string_view name) const {
+    const auto* section = find_section(name);
+    if (section == nullptr)
+        throw std::runtime_error("Bundle section not found: " + std::string(name));
+    return checked_section_file_offset(*section, data_offset_, file_size_, path_);
+}
+
 std::vector<char> BundleReader::read_section(std::string_view name) const {
     const auto* section = find_section(name);
     if (section == nullptr)
         throw std::runtime_error("Bundle section not found: " + std::string(name));
-    const std::uint64_t file_offset =
-        checked_section_file_offset(*section, data_offset_, file_size_, path_);
+    const std::uint64_t file_offset = section_file_offset(name);
     if (file_offset > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()))
         throw std::runtime_error("Bundle section '" + section->name +
                                  "' has an unsupported file offset: " + path_);

@@ -124,8 +124,9 @@ class TrtBackend final : public IBackend {
             stream_owner = owned;
         }
 
-        auto module = std::make_unique<TrtModuleImpl>(
-            engine, ctx, stream, 0, options.distributed_communicator, external_bindings);
+        auto module =
+            std::make_unique<TrtModuleImpl>(engine, ctx, stream, options.optimization_profile,
+                                            options.distributed_communicator, external_bindings);
         if (!module->ok()) {
             delete engine;
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");

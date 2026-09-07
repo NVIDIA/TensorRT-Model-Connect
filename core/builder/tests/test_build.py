@@ -40,6 +40,7 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
     assert request.context_parallel_size == 3
     assert request.backend == "trt"
     assert request.dynamic_kv_cache is False
+    assert request.family_options == ()
 
 
 @pytest.mark.parametrize(
@@ -57,6 +58,10 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
         ("dynamic_kv_cache", 1),
         ("graph_transform", object()),
         ("backend", "unknown"),
+        ("family_options", [("option", True)]),
+        ("family_options", (("bad-name", True),)),
+        ("family_options", (("option", []),)),
+        ("family_options", (("option", True), ("option", False))),
     ],
 )
 def test_build_request_rejects_invalid_direct_inputs(
