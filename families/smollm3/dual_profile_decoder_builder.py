@@ -403,6 +403,7 @@ def build_dual_profile_decoder_engine(
             rope_position_id = None
         else:
             kmax = max_cache_length + max_prefill_length
+            rope_scaling = graph_ops.resolve_rope_scaling(config.raw)
             cos_half_np = graph_ops.make_rope_table_half_dim(
                 kmax,
                 head_dim,
@@ -410,7 +411,7 @@ def build_dual_profile_decoder_engine(
                 True,
                 partial_rotary_factor,
                 interleaved=interleaved_rope,
-                rope_scaling=config.raw.get("rope_scaling"),
+                rope_scaling=rope_scaling,
             )
             sin_half_np = graph_ops.make_rope_table_half_dim(
                 kmax,
@@ -419,7 +420,7 @@ def build_dual_profile_decoder_engine(
                 False,
                 partial_rotary_factor,
                 interleaved=interleaved_rope,
-                rope_scaling=config.raw.get("rope_scaling"),
+                rope_scaling=rope_scaling,
             )
             # BF16 must round directly from the FP32 indexed table. Routing
             # through FP16 storage would introduce FP16 -> BF16 double rounding.

@@ -20,6 +20,14 @@ from .native_kv_attention_builder import (
 )
 
 
+def resolve_rope_scaling(raw_config: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the Hugging Face RoPE block across old and new config keys."""
+    parameters = raw_config.get("rope_parameters")
+    if parameters is not None:
+        return parameters
+    return raw_config.get("rope_scaling")
+
+
 def _cast_back_to_trt_dtype(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -38,9 +46,10 @@ def _add_matrix_multiply_with_fp32_accumulation(
     rhs: trt.ITensor,
     rhs_op: trt.MatrixOperation,
 ) -> trt.ITensor:
-    """Request TensorRT's fused FP16 GEMM with FP32 accumulation."""
+    """Request TensorRT's fused low-precision GEMM with FP32 accumulation."""
     output_dtype = lhs.dtype
-    if lhs.dtype == trt.float16 and rhs.dtype == trt.float16:
+    low_precision = {trt.float16, trt.bfloat16}
+    if lhs.dtype in low_precision and rhs.dtype in low_precision:
         lhs = network.add_cast(lhs, trt.float32).get_output(0)
         rhs = network.add_cast(rhs, trt.float32).get_output(0)
     output = network.add_matrix_multiply(lhs, lhs_op, rhs, rhs_op).get_output(0)

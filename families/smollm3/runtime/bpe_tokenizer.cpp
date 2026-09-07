@@ -209,9 +209,13 @@ inline bool is_digit(char32_t cp) {
 
 inline bool is_whitespace(char32_t cp) {
     return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
+           || cp == 0x85                     // next line
+           || cp == 0xA0                     // non-breaking space
+           || cp == 0x1680                   // Ogham space mark
+           || (cp >= 0x2000 && cp <= 0x200A) // en quad through hair space
+           || cp == 0x2028 || cp == 0x2029   // line/paragraph separator
+           || cp == 0x202F || cp == 0x205F   // narrow/medium mathematical space
+           || cp == 0x3000;                  // ideographic space
 }
 
 // BLOOM punctuation set: .,!?...

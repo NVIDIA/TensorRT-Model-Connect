@@ -297,6 +297,18 @@ void test_argmax() {
     check(sampler->sample(nullptr, 0, params).token_id == 0, "empty argmax returns token zero");
 }
 
+void test_min_p_uses_the_full_distribution_without_top_k() {
+    trtmc::SmolLM3SamplingParams params;
+    params.min_p = 0.5F;
+    params.seed = 2;
+    const std::vector<float> logits = {1.0F, 0.9F, 0.8F};
+    auto sampler = trtmc::create_smollm3_sampler(params);
+    check(
+        sampler->sample(logits.data(), static_cast<std::int32_t>(logits.size()), params).token_id ==
+            1,
+        "min-p with default top-k samples beyond the argmax");
+}
+
 void test_zero_max_tokens() {
     StreamFixture fixture;
     auto pipeline = make_pipeline(fixture.stream, make_config());
@@ -402,6 +414,7 @@ void test_stop_on_boxed_answer() {
 
 int main() {
     test_argmax();
+    test_min_p_uses_the_full_distribution_without_top_k();
     test_pipeline_construction();
     test_generate_stops_at_eos();
     test_generate_stops_at_any_default_eos();

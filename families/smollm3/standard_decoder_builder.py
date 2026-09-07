@@ -244,6 +244,7 @@ def build_standard_decoder_engine(
 
     if position_type == "rope":
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
+        rope_scaling = graph_ops.resolve_rope_scaling(config.raw)
         cos_half_np = graph_ops.make_rope_table_half_dim(
             attention_window,
             head_dim,
@@ -251,7 +252,7 @@ def build_standard_decoder_engine(
             True,
             partial_rotary_factor,
             interleaved=interleaved_rope,
-            rope_scaling=config.raw.get("rope_scaling"),
+            rope_scaling=rope_scaling,
         )
         sin_half_np = graph_ops.make_rope_table_half_dim(
             attention_window,
@@ -260,7 +261,7 @@ def build_standard_decoder_engine(
             False,
             partial_rotary_factor,
             interleaved=interleaved_rope,
-            rope_scaling=config.raw.get("rope_scaling"),
+            rope_scaling=rope_scaling,
         )
         cos_half_tensor = graph_ops.add_constant(
             network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype

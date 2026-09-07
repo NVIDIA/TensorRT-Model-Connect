@@ -484,8 +484,15 @@ void SmolLM3KvCache::advance(int32_t n_tokens) {
             auto li = static_cast<std::size_t>(i);
             auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
             auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            // CUDA memcpy does not permit overlapping ranges. Shift toward the
+            // front one row at a time so every individual copy is disjoint;
+            // stream ordering preserves the original source rows.
+            for (int32_t row = 0; row + 1 < max_length_; ++row) {
+                const auto dst = static_cast<std::size_t>(row) * row_bytes;
+                const auto src = dst + row_bytes;
+                cudaMemcpyAsync(ck + dst, ck + src, row_bytes, cudaMemcpyDeviceToDevice, stream_);
+                cudaMemcpyAsync(cv + dst, cv + src, row_bytes, cudaMemcpyDeviceToDevice, stream_);
+            }
             cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
                             cudaMemcpyDeviceToDevice, stream_);
             cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,

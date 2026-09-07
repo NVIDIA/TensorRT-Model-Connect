@@ -479,11 +479,23 @@ def _assert_correctness(
     if expected_answers:
         assert any(answer.casefold() in actual_decoded.casefold() for answer in expected_answers)
 
-    del sampling_support
     assert actual_text
+    if sampling_support is not None:
+        assert sampling_support >= float(thresholds.get("unstable_topk_hit_rate", 0.8))
+        return
     assert _normalized_edit_distance(actual_text, reference_text) <= _text_threshold(
         case, thresholds
     )
+
+
+def test_sampling_correctness_uses_support_instead_of_empty_reference() -> None:
+    payload = {"token_ids": [7, 8], "text": "sampled text"}
+    case = {"max_new_tokens": 2, "temperature": 0.7}
+
+    _assert_correctness(payload, case, {"unstable_topk_hit_rate": 0.8}, [], "", 1.0, "")
+
+    with pytest.raises(AssertionError):
+        _assert_correctness(payload, case, {"unstable_topk_hit_rate": 0.8}, [], "", 0.5, "")
 
 
 @pytest.mark.parametrize("case_name", sorted(_CASES))
@@ -532,7 +544,6 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
 
         prompt_tokens = _raw_prompt_token_count(model_dir, manifest, prompt)
         assert_native_kv_receipt(payload, case, prompt_tokens)
-        return
 
     reference = _hf_reference(
         model_dir,

@@ -157,9 +157,9 @@ static FilteredDistribution build_filtered_distribution(const float* logits, int
     const float temperature = sanitized_temperature(params.temperature);
     const float top_p = sanitized_top_p(params.top_p);
     const float min_p = sanitized_min_p(params.min_p);
-    const bool full_vocab_for_top_p = top_p_enabled(top_p) && params.top_k <= 1;
+    const bool full_vocab_filter = (top_p_enabled(top_p) || min_p > 0.0F) && params.top_k <= 1;
     const int32_t k =
-        (params.top_k <= 0 || full_vocab_for_top_p) ? n : std::min(std::max(params.top_k, 1), n);
+        (params.top_k <= 0 || full_vocab_filter) ? n : std::min(std::max(params.top_k, 1), n);
     FilteredDistribution dist;
     topk_indices_and_softmax(dist, logits, n, k, temperature);
     int32_t keep = apply_min_p(dist, k, min_p);

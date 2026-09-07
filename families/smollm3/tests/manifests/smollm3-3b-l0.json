@@ -14,6 +14,11 @@
       "reference_precision": "fp32",
       "prompt": "What is the capital of France? Answer in one word.",
       "max_new_tokens": 10,
+      "expected_prompt_tokens": 12,
+      "expected_runtime_prefill_tokens": 80,
+      "expected_kv_cache_rows": 256,
+      "expected_prefill_chunks": 2,
+      "expected_prefill_chunk_limit": 64,
       "use_chat_template": true,
       "enable_thinking": false
     }

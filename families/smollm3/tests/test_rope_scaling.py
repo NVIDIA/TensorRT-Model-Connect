@@ -22,6 +22,59 @@ import pytest
 from families.smollm3 import graph_ops
 
 
+def test_resolve_rope_scaling_accepts_the_transformers_rope_parameters_key() -> None:
+    parameters = {"rope_type": "yarn", "factor": 2.0}
+    assert graph_ops.resolve_rope_scaling({"rope_parameters": parameters}) is parameters
+
+
+def test_resolve_rope_scaling_keeps_the_legacy_rope_scaling_key() -> None:
+    scaling = {"rope_type": "llama3", "factor": 8.0}
+    assert graph_ops.resolve_rope_scaling({"rope_scaling": scaling}) is scaling
+
+
+def test_bf16_gemm_casts_operands_to_fp32_for_accumulation() -> None:
+    class Tensor:
+        def __init__(self, dtype) -> None:
+            self.dtype = dtype
+
+    class Layer:
+        def __init__(self, output) -> None:
+            self.output = output
+
+        def get_output(self, _index: int):
+            return self.output
+
+    class Network:
+        def __init__(self) -> None:
+            self.cast_targets = []
+            self.matmul_dtypes = None
+
+        def add_cast(self, _tensor, target):
+            self.cast_targets.append(target)
+            return Layer(Tensor(target))
+
+        def add_matrix_multiply(self, lhs, _lhs_op, rhs, _rhs_op):
+            self.matmul_dtypes = (lhs.dtype, rhs.dtype)
+            return Layer(Tensor(graph_ops.trt.float32))
+
+    network = Network()
+    output = graph_ops._add_matrix_multiply_with_fp32_accumulation(
+        network,
+        Tensor(graph_ops.trt.bfloat16),
+        None,
+        Tensor(graph_ops.trt.bfloat16),
+        None,
+    )
+
+    assert network.matmul_dtypes == (graph_ops.trt.float32, graph_ops.trt.float32)
+    assert network.cast_targets == [
+        graph_ops.trt.float32,
+        graph_ops.trt.float32,
+        graph_ops.trt.bfloat16,
+    ]
+    assert output.dtype == graph_ops.trt.bfloat16
+
+
 YARN_SCALING = {
     "rope_type": "yarn",
     "factor": 2.0,

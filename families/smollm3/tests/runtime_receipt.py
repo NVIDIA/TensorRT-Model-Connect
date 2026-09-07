@@ -40,7 +40,7 @@ def assert_native_kv_receipt(payload: dict, case: dict, prompt_tokens: int) -> N
     assert observed_tokens == runtime_tokens
     assert observed_launches == expected_launches
     assert 0 < observed_max_chunk <= expected_limit
-    assert f"KV cache rows={expected_rows} (bundle max={expected_rows}" in stderr
+    assert f"KV cache rows={expected_rows} (bundle max={expected_rows})" in stderr
     assert not _RUNTIME_ERROR.search(stderr)
     assert len(payload["token_ids"]) == int(case["max_new_tokens"])
     assert float(payload["decode_ms"]) > 0.0

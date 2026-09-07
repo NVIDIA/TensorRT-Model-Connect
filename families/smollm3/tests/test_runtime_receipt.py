@@ -69,3 +69,14 @@ def test_receipt_rejects_missing_decode_step() -> None:
     payload["decode_ms"] = 0.0
     with pytest.raises(AssertionError):
         assert_native_kv_receipt(payload, _case(), 65)
+
+
+def test_receipt_rejects_a_bundle_max_numeric_prefix() -> None:
+    stderr = "\n".join(
+        [
+            "[trtmc] KV cache rows=256 (bundle max=2560)",
+            "[trtmc.prefill] tokens=66 launches=2 max_chunk=64",
+        ]
+    )
+    with pytest.raises(AssertionError):
+        assert_native_kv_receipt(_payload(stderr), _case(), 65)
