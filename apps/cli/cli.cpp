@@ -262,12 +262,13 @@ std::string read_build_cohort(const fs::path& library) {
             const std::size_t id_begin = position + sizeof(prefix) - 1;
             const std::size_t marker_end = id_begin + id_size;
             if (marker_end < strings.size() && strings[marker_end] == '\0' &&
-                std::all_of(strings.begin() + static_cast<std::ptrdiff_t>(id_begin),
-                            strings.begin() + static_cast<std::ptrdiff_t>(marker_end),
-                            [](const unsigned char character) {
-                                return (character >= '0' && character <= '9') ||
-                                       (character >= 'a' && character <= 'f');
-                            })) {
+                std::all_of(
+                    strings.begin() + static_cast<std::ptrdiff_t>(id_begin),
+                    strings.begin() + static_cast<std::ptrdiff_t>(marker_end),
+                    [](const unsigned char character) {
+                        return (character >= '0' && character <= '9') ||
+                               (character >= 'a' && character <= 'f');
+                    })) {
                 return strings.substr(id_begin, id_size);
             }
             position = strings.find(prefix, position + 1);
