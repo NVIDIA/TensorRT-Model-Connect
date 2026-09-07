@@ -284,6 +284,23 @@ void test_generate_max_tokens() {
           "generation respects max_new_tokens");
 }
 
+void test_decode_rejects_logits_wider_than_the_vocabulary() {
+    StreamFixture fixture;
+    auto config = make_config();
+    config.vocab_size = 3;
+    config.id_eos = 99;
+    auto pipeline = make_pipeline(fixture.stream, config, {2}, {2});
+    trtmc::TextGenerationConfig request;
+    request.max_new_tokens = 2;
+    bool rejected = false;
+    try {
+        (void)pipeline->generate_ids({1}, request);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    check(rejected, "decode rejects logits wider than the configured vocabulary");
+}
+
 void test_argmax() {
     trtmc::SmolLM3SamplingParams params;
     auto sampler = trtmc::create_smollm3_sampler(params);
@@ -420,6 +437,7 @@ int main() {
     test_generate_stops_at_any_default_eos();
     test_explicit_eos_override_replaces_default_set();
     test_generate_max_tokens();
+    test_decode_rejects_logits_wider_than_the_vocabulary();
     test_zero_max_tokens();
     test_kv_reset_is_logical_and_masks_stale_rows();
     test_generation_reset_reuses_execution_context();

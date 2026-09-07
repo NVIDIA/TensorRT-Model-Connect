@@ -396,12 +396,12 @@ void SmolLM3TextGenerationPipeline::run_step(int32_t token_id, std::vector<float
 
     const auto& logits_tensor = it->second;
     auto num_logits = logits_tensor.numel();
-    if (num_logits < config_.vocab_size) {
+    if (num_logits != config_.vocab_size) {
         throw std::runtime_error(
-            "SmolLM3TextGenerationPipeline: decoder logits are smaller than vocabulary");
+            "SmolLM3TextGenerationPipeline: decoder logits do not match vocabulary size");
     }
-    logits.resize(static_cast<std::size_t>(num_logits));
-    std::memcpy(logits.data(), logits_tensor.data, num_logits * sizeof(float));
+    logits.resize(static_cast<std::size_t>(config_.vocab_size));
+    std::memcpy(logits.data(), logits_tensor.data, logits.size() * sizeof(float));
 
     state_->advance();
 }
