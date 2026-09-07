@@ -11009,7 +11009,6 @@ def compare_model_plugin_prediction_sets(
         manifest,
         repo_root=REPO_ROOT,
     )
-    min_sample_pass_rate = float(gates.get("min_sample_pass_rate", 1.0))
     threshold_overrides = {
         str(name): float(value)
         for name, value in gates.items()
@@ -11181,6 +11180,32 @@ def compare_model_plugin_prediction_sets(
         if not isinstance(raw_aggregate, Mapping):
             raise TypeError("model-plugin comparator aggregate() must return a mapping")
         plugin_aggregate = dict(raw_aggregate)
+    plugin_gates_raw = plugin_aggregate.get("gates", {})
+    if not isinstance(plugin_gates_raw, Mapping):
+        raise TypeError("model-plugin comparator aggregate gates must be a mapping")
+    plugin_gates = dict(plugin_gates_raw)
+    configured_min_pass_rate = gates.get("min_sample_pass_rate")
+    plugin_min_pass_rate = plugin_gates.get("min_sample_pass_rate")
+    if configured_min_pass_rate is not None and plugin_min_pass_rate is not None:
+        if not math.isclose(
+            float(configured_min_pass_rate),
+            float(plugin_min_pass_rate),
+            rel_tol=0.0,
+            abs_tol=0.0,
+        ):
+            raise ValueError(
+                "workload and model-plugin comparator define conflicting "
+                "min_sample_pass_rate gates"
+            )
+    min_sample_pass_rate = float(
+        configured_min_pass_rate
+        if configured_min_pass_rate is not None
+        else plugin_min_pass_rate
+        if plugin_min_pass_rate is not None
+        else 1.0
+    )
+    if not 0.0 <= min_sample_pass_rate <= 1.0:
+        raise ValueError("min_sample_pass_rate must be between 0.0 and 1.0")
     aggregate_passed = bool(plugin_aggregate.get("passed", True))
     status = (
         "passed"
@@ -11208,8 +11233,8 @@ def compare_model_plugin_prediction_sets(
         "sample_pass_rate": sample_pass_rate,
         "metrics": metrics_summary,
         "gates": {
+            **plugin_gates,
             "min_sample_pass_rate": min_sample_pass_rate,
-            **dict(plugin_aggregate.get("gates", {})),
         },
         "cases": cases,
         "execution_errors": execution_errors,

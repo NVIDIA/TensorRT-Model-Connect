@@ -1955,7 +1955,8 @@ suites:
       124-frame, 50-step profile over ten task-diverse prompts from VBench.
       The versioned NAS asset carries the pinned Apache-2.0 source, license,
       prompt files, and checksums. This is not an official VBench aggregate
-      score; the model-owned visual comparator gates every generated sample.
+      score; the model-owned visual comparator evaluates every generated
+      sample and accepts the workload when at least eight of ten pass.
     user_contract: diffusion_video
     default_model_names: [minimax-h3-768p]
     dataset:
@@ -1974,8 +1975,7 @@ suites:
           reference_source_revision: current
     scoring:
       scorer: model_plugin_parity
-    gates:
-      min_sample_pass_rate: 0.8
+    gate_policy: model_plugin
     ci:
       eligible: false
       lane: local_only

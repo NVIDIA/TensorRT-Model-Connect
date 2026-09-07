@@ -709,7 +709,7 @@ def test_default_suites_classify_every_empty_gate_policy() -> None:
         for suite in suites
         if not suite.get("gates")
         and not suite.get("sample_acceptance")
-        and suite.get("gate_policy") != "observation_only"
+        and suite.get("gate_policy") not in {"model_plugin", "observation_only"}
     ]
 
     assert unclassified == []
@@ -2445,30 +2445,40 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
 
     class Comparator:
         def compare(self, trt, ref, threshold, selected_stage):
-            assert trt.text == ref.text == "same"
+            assert ref.text == "same"
             assert threshold.metrics["score"] == 0.9
             assert selected_stage.name == "full_generation"
+            passed = trt.text == "same"
             return CompareResult(
                 stage_name=selected_stage.name,
-                status=StageStatus.PASSED.value,
+                status=(
+                    StageStatus.PASSED.value
+                    if passed
+                    else StageStatus.FAILED.value
+                ),
                 metrics={
                     "score": MetricResult(
-                        value=1.0,
+                        value=1.0 if passed else 0.0,
                         threshold=0.9,
                         operator=">=",
-                        passed=True,
+                        passed=passed,
                     )
                 },
             )
 
         def aggregate(self, cases, gates):
             assert cases[0]["metrics"]["score"]["value"] == 1.0
-            assert gates == {"min_sample_pass_rate": 1.0}
+            assert len(cases) == 10
+            assert sum(case["passed"] for case in cases) == 8
+            assert gates == {}
             return {
                 "evaluated": True,
                 "passed": True,
-                "task_accuracy": {"weighted_score": 1.0},
-                "gates": {"weighted_score_min": 0.9},
+                "task_accuracy": {"weighted_score": 0.8},
+                "gates": {
+                    "min_sample_pass_rate": 0.8,
+                    "weighted_score_min": 0.9,
+                },
                 "gate_failures": [],
             }
 
@@ -2477,43 +2487,62 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
         "get_comparator",
         lambda _strategy: Comparator(),
     )
-    output = StageOutput(stage_name="full_generation", text="same")
-    serialized = serialize_stage_output(
-        output,
-        artifact_dir=tmp_path / "artifacts",
-        sample_id="sample-1",
-    )
-    response = {
-        "sample_id": "sample-1",
-        "testcase": "custom-case",
-        "stage": "full_generation",
-        "stage_output": serialized,
-    }
+    reference_responses = []
+    candidate_responses = []
+    requests = []
+    for index in range(10):
+        sample_id = f"sample-{index}"
+        reference_responses.append(
+            {
+                "sample_id": sample_id,
+                "testcase": "custom-case",
+                "stage": "full_generation",
+                "stage_output": serialize_stage_output(
+                    StageOutput(stage_name="full_generation", text="same"),
+                    artifact_dir=tmp_path / "artifacts",
+                    sample_id=f"{sample_id}-reference",
+                ),
+            }
+        )
+        candidate_responses.append(
+            {
+                "sample_id": sample_id,
+                "testcase": "custom-case",
+                "stage": "full_generation",
+                "stage_output": serialize_stage_output(
+                    StageOutput(
+                        stage_name="full_generation",
+                        text="same" if index < 8 else "different",
+                    ),
+                    artifact_dir=tmp_path / "artifacts",
+                    sample_id=f"{sample_id}-candidate",
+                ),
+            }
+        )
+        requests.append(
+            {
+                "sample_id": sample_id,
+                "testcase": "custom-case",
+                "stage": "full_generation",
+                "inputs": {},
+            }
+        )
 
     summary = validation_engine.compare_model_plugin_prediction_sets(
-        {"responses": [response]},
-        {"responses": [response]},
-        {
-            "requests": [
-                {
-                    "sample_id": "sample-1",
-                    "testcase": "custom-case",
-                    "stage": "full_generation",
-                    "inputs": {},
-                }
-            ]
-        },
+        {"responses": reference_responses},
+        {"responses": candidate_responses},
+        {"requests": requests},
         work_dir=work_dir,
-        gates={"min_sample_pass_rate": 1.0},
+        gates={},
     )
 
     assert summary["status"] == "passed"
-    assert summary["sample_pass_rate"] == 1.0
-    assert summary["metrics"]["score"]["mean"] == 1.0
+    assert summary["sample_pass_rate"] == 0.8
+    assert summary["metrics"]["score"]["mean"] == 0.8
     assert summary["cases"][0]["passed"] is True
-    assert summary["task_accuracy"] == {"weighted_score": 1.0}
+    assert summary["task_accuracy"] == {"weighted_score": 0.8}
     assert summary["gates"] == {
-        "min_sample_pass_rate": 1.0,
+        "min_sample_pass_rate": 0.8,
         "weighted_score_min": 0.9,
     }
 
@@ -2532,23 +2561,14 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
         lambda _strategy: FailingAggregateComparator(),
     )
     failed = validation_engine.compare_model_plugin_prediction_sets(
-        {"responses": [response]},
-        {"responses": [response]},
-        {
-            "requests": [
-                {
-                    "sample_id": "sample-1",
-                    "testcase": "custom-case",
-                    "stage": "full_generation",
-                    "inputs": {},
-                }
-            ]
-        },
+        {"responses": reference_responses},
+        {"responses": candidate_responses},
+        {"requests": requests},
         work_dir=work_dir,
-        gates={"min_sample_pass_rate": 1.0},
+        gates={},
     )
     assert failed["status"] == "failed"
-    assert failed["sample_pass_rate"] == 1.0
+    assert failed["sample_pass_rate"] == 0.8
     assert failed["gate_failures"] == ["pixel-weighted task gate failed"]
 
 
@@ -7491,15 +7511,6 @@ def test_eval_resolves_reference_source_revision_before_preparing_cache_inputs(
 
     assert captured["reference_source_revision"] == revision
     assert captured["model_manifest"] == model["manifest"]
-
-
-def test_minimax_h3_reference_parity_accepts_eight_of_ten_samples() -> None:
-    suite = validation_engine.suite_by_id(
-        validation_engine.load_suites(),
-        "minimax_h3_vbench_reference_parity",
-    )
-
-    assert suite["gates"]["min_sample_pass_rate"] == 0.8
 
 
 def test_flux_validation_build_command_preserves_diffusion_shape(tmp_path: Path) -> None:

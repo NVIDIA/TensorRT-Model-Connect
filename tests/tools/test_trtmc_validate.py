@@ -143,7 +143,8 @@ def test_minimax_h3_catalog_uses_vbench_profile() -> None:
         "input_asset_fields": ["prompt_file"],
     }
     assert vbench_suite["scoring"] == {"scorer": "model_plugin_parity"}
-    assert vbench_suite["gates"] == {"min_sample_pass_rate": 1.0}
+    assert "gates" not in vbench_suite
+    assert vbench_suite["gate_policy"] == "model_plugin"
 
 
 def test_dataset_path_keeps_repository_owned_default_with_dataset_root(
@@ -441,6 +442,7 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
         "bindings": 3,
         "variants": 5,
         "blocking_variants": 4,
+        "model_plugin_variants": 0,
         "observation_only_variants": 1,
         "invalid_variants": 1,
         "review_required_suites": 1,

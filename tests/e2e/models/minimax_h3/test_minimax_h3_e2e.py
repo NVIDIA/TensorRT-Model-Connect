@@ -94,6 +94,30 @@ def test_minimax_h3_plugins_cover_native_reference_and_comparison() -> None:
     assert get_comparator("diffusion_media_generation") is not None
 
 
+@pytest.mark.parametrize(
+    ("passed_count", "expected_passed"),
+    [(8, True), (7, False)],
+)
+def test_minimax_h3_comparator_owns_sample_acceptance_boundary(
+    passed_count: int,
+    expected_passed: bool,
+) -> None:
+    cases = [
+        {
+            "sample_id": f"sample-{index}",
+            "status": "passed" if index < passed_count else "failed",
+            "passed": index < passed_count,
+        }
+        for index in range(10)
+    ]
+
+    aggregate = comparator.aggregate(cases, {})
+
+    assert aggregate["passed"] is expected_passed
+    assert aggregate["sample_pass_rate"] == pytest.approx(passed_count / 10)
+    assert aggregate["gates"] == {"min_sample_pass_rate": 0.8}
+
+
 def test_family_registry_loads_native_plugin_for_public_pipelines() -> None:
     plugin = load_plugin_by_id("minimax_h3")
     assert plugin is not None
