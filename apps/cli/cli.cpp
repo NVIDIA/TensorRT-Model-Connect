@@ -21,7 +21,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -224,8 +223,6 @@ void append_python_package_runtime_roots(std::vector<fs::path>& candidates,
 
 RuntimeRootSearchContext runtime_root_search_context() {
     RuntimeRootSearchContext context;
-    std::error_code error;
-    context.current_directory = fs::current_path(error);
     context.loaded_runtime_root = loaded_runtime_root();
 
     std::vector<char> executable(4096, '\0');
@@ -815,12 +812,10 @@ std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& ex
     if (!matches)
         throw std::logic_error("runtime-root discovery requires a candidate matcher");
 
-    std::vector<fs::path> current_candidates;
     std::vector<fs::path> installed_candidates;
     std::vector<fs::path> wheel_candidates;
     std::vector<fs::path> configured_candidates;
     std::set<std::string> seen;
-    append_candidate(current_candidates, seen, context.current_directory);
     append_candidate(installed_candidates, seen, context.loaded_runtime_root);
 
     if (!context.executable.empty()) {
@@ -837,13 +832,6 @@ std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& ex
     append_path_list(configured_candidates, seen, context.runtime_path);
 
     std::vector<fs::path> searched;
-    if (!current_candidates.empty()) {
-        const auto& current = current_candidates.front();
-        searched.push_back(current);
-        if (matches(bundle, current, require_byok)) {
-            return current.string();
-        }
-    }
     for (const auto& candidate : installed_candidates) {
         searched.push_back(candidate);
         if (matches(bundle, candidate, require_byok))
@@ -1783,10 +1771,10 @@ void print_usage(std::ostream& output) {
               "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
               "Task SDK options: [--task TASK_ID] [--set NAME=VALUE]...\n"
               "Task SDK families default to the installed runtime directory.\n"
-              "Existing bundle runtime discovery: current directory, the active trtmc\n"
-              "installation, then TRTMC_RUNTIME_PATH. LD_LIBRARY_PATH can select the\n"
-              "active cohort before startup.\n"
-              "--runtime-root overrides discovery.\n";
+              "Existing bundle runtime discovery: the active trtmc installation, then\n"
+              "TRTMC_RUNTIME_PATH.\n"
+              "The current directory is not searched; use TRTMC_RUNTIME_PATH=. explicitly.\n"
+              "--runtime-root selects one exact root without fallback.\n";
 }
 
 int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
@@ -1836,13 +1824,15 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
                 resolve_runtime_root(bundle, {}, has_byok_library, runtime_root_search_context(),
                                      [](const BundleInfo& candidate_bundle,
                                         const fs::path& candidate, bool require_byok) {
-                                         return runtime_root_matches_loaded_build(
+                                         return runtime_root_contains_bundle(
                                              candidate_bundle, candidate.string(), require_byok);
                                      });
             error << "Using TRTMC runtime: " << command.runtime_root << '\n';
         }
         if (has_byok_library)
-            load_byok_extension(command);
+            load_byok_kernel_from_runtime(
+                command.runtime_root, command.options.at("--byok-library"),
+                command.options.at("--byok-function"), command.options.at("--byok-name"));
         std::unique_ptr<ITask> task =
             load_task(command.bundle, command.runtime_root, command.kv_cache_size_bytes,
                       command.runtime_cache_path, command.cuda_graphs);

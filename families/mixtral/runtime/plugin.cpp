@@ -214,6 +214,8 @@ ITask* create(const FamilyContext& context) {
 
 } // namespace trtmc::mixtral
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("mixtral")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("mixtral does not support --kv-cache-size");

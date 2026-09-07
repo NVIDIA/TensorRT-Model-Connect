@@ -44,6 +44,8 @@ class FakeForecast final : public trtmc::ITimeSeriesForecast {
 
 } // namespace
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("fake")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "fake")
         throw std::runtime_error("unexpected family");

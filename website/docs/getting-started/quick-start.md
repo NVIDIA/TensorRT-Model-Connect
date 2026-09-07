@@ -50,23 +50,27 @@ trtmc run gpt2.bundle \
 ```
 
 The CLI reads the bundle family and backend, then selects the first complete,
-single-directory runtime in this order:
+single-directory plugin root in this order:
 
-1. the current directory, when all required libraries match the active build
-   cohort;
-2. the runtime belonging to the active `trtmc` selected through `PATH`,
+1. the directory containing the active `libtrtmc_runtime.so`;
+2. the installation belonging to the active `trtmc` selected through `PATH`,
    including native CMake and wheel install layouts;
 3. colon-separated directories in `TRTMC_RUNTIME_PATH`.
 
-A complete GPT-2 TensorRT runtime contains matching `libtrtmc_core.so`,
-`libtrtmc_runtime.so`, `libtrtmc_backend_trt.so`, and
-`libtrtmc_model_gpt2.so` files. Candidates are never combined across
-directories: the CLI enumerates paths, and the Runtime Loader contract validates
-each candidate without loading it. The CLI prints the automatically selected
-directory. If more than one installed wheel runtime matches, select one with
-`--runtime-root DIR`. An explicit root bypasses discovery.
+A complete GPT-2 TensorRT plugin root contains root-local
+`libtrtmc_backend_trt.so` and `libtrtmc_model_gpt2.so` files. Candidates are
+never combined across directories, and discovery never loads a candidate just
+to inspect it. After selection, the Runtime Loader loads those exact paths and
+requires their descriptors to match the active product build, plugin kinds,
+and bundle IDs before it calls either factory. A mismatched selected root fails
+immediately without falling back to another installation.
 
-Every native artifact carries a build-cohort identity, and automatic discovery
-accepts a directory only when the identity matches the core and runtime already
-loaded by `trtmc`. The platform loader evaluates `LD_LIBRARY_PATH` before the
-CLI starts, so it can determine that active cohort before the search above.
+The Runtime Loader also verifies that its already loaded Core belongs to the
+same product build before reading the bundle.
+
+The CLI prints the automatically selected directory. If more than one installed
+wheel root matches structurally, select one with `--runtime-root DIR`. An
+explicit root bypasses discovery but not build and identity validation. The
+current directory is not searched implicitly; use `TRTMC_RUNTIME_PATH=.` when
+that behavior is intended. `LD_LIBRARY_PATH` remains a platform-loader setting
+evaluated before the CLI starts.
