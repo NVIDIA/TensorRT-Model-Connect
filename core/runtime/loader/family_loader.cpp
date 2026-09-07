@@ -7,10 +7,16 @@
 
 #include "runtime/bundle/bundle_format.h"
 #include "trtmc/runtime/family_factory.h"
+#include "trtmc/runtime/runtime_root.h"
 #include "trtmc/runtime/trt_backend.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <dlfcn.h>
+#include <elf.h>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -27,6 +33,95 @@ namespace fs = std::filesystem;
 
 using CreateBackendFn = IBackend* (*)();
 using DestroyBackendFn = void (*)(IBackend*);
+
+std::string backend_library_name(const std::string& backend_id) {
+    return "libtrtmc_backend_" + backend_id + ".so";
+}
+
+std::string family_library_name(const std::string& family_id) {
+    return "libtrtmc_model_" + family_id + ".so";
+}
+
+constexpr std::uint64_t kMaxElfStringTableSize = 16ULL * 1024ULL * 1024ULL;
+
+bool read_at(std::ifstream& input, std::uintmax_t file_size, std::uint64_t offset,
+             void* destination, std::size_t size) {
+    if (offset > file_size || size > file_size - offset)
+        return false;
+    input.clear();
+    input.seekg(static_cast<std::streamoff>(offset));
+    input.read(static_cast<char*>(destination), static_cast<std::streamsize>(size));
+    return input.good();
+}
+
+bool has_supported_elf_identity(const Elf64_Ehdr& header) {
+    return header.e_ident[EI_MAG0] == ELFMAG0 && header.e_ident[EI_MAG1] == ELFMAG1 &&
+           header.e_ident[EI_MAG2] == ELFMAG2 && header.e_ident[EI_MAG3] == ELFMAG3 &&
+           header.e_ident[EI_CLASS] == ELFCLASS64 && header.e_ident[EI_DATA] == ELFDATA2LSB;
+}
+
+bool has_valid_section_table(const Elf64_Ehdr& header, std::uintmax_t file_size) {
+    return header.e_shentsize == sizeof(Elf64_Shdr) && header.e_shnum != 0 &&
+           header.e_shstrndx < header.e_shnum && header.e_shoff <= file_size &&
+           header.e_shnum <= (file_size - header.e_shoff) / sizeof(Elf64_Shdr);
+}
+
+bool read_section_header(std::ifstream& input, std::uintmax_t file_size, const Elf64_Ehdr& header,
+                         std::size_t index, Elf64_Shdr& section) {
+    const std::uint64_t offset = header.e_shoff + index * sizeof(Elf64_Shdr);
+    return read_at(input, file_size, offset, &section, sizeof(section));
+}
+
+bool read_string_table(std::ifstream& input, std::uintmax_t file_size, const Elf64_Shdr& section,
+                       std::string& contents) {
+    if (section.sh_size > kMaxElfStringTableSize)
+        return false;
+    contents.assign(static_cast<std::size_t>(section.sh_size), '\0');
+    return read_at(input, file_size, section.sh_offset, contents.data(), contents.size());
+}
+
+bool section_has_name(const Elf64_Shdr& section, const std::string& names, const char* expected) {
+    if (section.sh_name >= names.size())
+        return false;
+    const auto end = names.find('\0', section.sh_name);
+    return end != std::string::npos &&
+           names.compare(section.sh_name, end - section.sh_name, expected) == 0;
+}
+
+bool is_lower_hex(unsigned char character) {
+    return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f');
+}
+
+bool read_named_string_table(std::ifstream& input, std::uintmax_t file_size,
+                             const Elf64_Ehdr& header, const std::string& section_names,
+                             const char* expected_name, std::string& contents) {
+    for (std::size_t index = 0; index < header.e_shnum; ++index) {
+        Elf64_Shdr section{};
+        if (!read_section_header(input, file_size, header, index, section))
+            return false;
+        if (!section_has_name(section, section_names, expected_name))
+            continue;
+        return read_string_table(input, file_size, section, contents);
+    }
+    return false;
+}
+
+std::string find_build_cohort(const std::string& strings) {
+    static constexpr char prefix[] = "trtmc_build_cohort_";
+    static constexpr std::size_t id_size = 32;
+    std::size_t position = strings.find(prefix);
+    while (position != std::string::npos) {
+        const std::size_t id_begin = position + sizeof(prefix) - 1;
+        const std::size_t marker_end = id_begin + id_size;
+        if (marker_end < strings.size() && strings[marker_end] == '\0' &&
+            std::all_of(strings.begin() + static_cast<std::ptrdiff_t>(id_begin),
+                        strings.begin() + static_cast<std::ptrdiff_t>(marker_end), is_lower_hex)) {
+            return strings.substr(id_begin, id_size);
+        }
+        position = strings.find(prefix, position + 1);
+    }
+    return {};
+}
 
 bool is_safe_id(const std::string& value) {
     if (value.empty() || value.front() < 'a' || value.front() > 'z')
@@ -57,6 +152,72 @@ fs::path explicit_runtime_root(const std::string& runtime_root) {
         throw std::runtime_error("Unable to resolve runtime_root '" + runtime_root +
                                  "': " + error.message());
     return root.lexically_normal();
+}
+
+std::string read_build_cohort(const fs::path& library) {
+    std::ifstream input(library, std::ios::binary);
+    if (!input)
+        return {};
+
+    std::error_code error;
+    const std::uintmax_t file_size = fs::file_size(library, error);
+    if (error || file_size < sizeof(Elf64_Ehdr))
+        return {};
+
+    Elf64_Ehdr header{};
+    if (!read_at(input, file_size, 0, &header, sizeof(header)) ||
+        !has_supported_elf_identity(header) || !has_valid_section_table(header, file_size)) {
+        return {};
+    }
+
+    Elf64_Shdr names_header{};
+    if (!read_section_header(input, file_size, header, header.e_shstrndx, names_header))
+        return {};
+    std::string names;
+    if (!read_string_table(input, file_size, names_header, names))
+        return {};
+
+    std::string strings;
+    if (!read_named_string_table(input, file_size, header, names, ".dynstr", strings))
+        return {};
+    return find_build_cohort(strings);
+}
+
+fs::path loaded_library_path(const void* symbol) {
+    Dl_info info{};
+    if (dladdr(symbol, &info) == 0 || info.dli_fname == nullptr)
+        return {};
+    std::error_code error;
+    fs::path path = fs::absolute(info.dli_fname, error);
+    if (error)
+        return info.dli_fname;
+    fs::path normalized = fs::weakly_canonical(path, error);
+    return error ? path.lexically_normal() : normalized;
+}
+
+struct LoadedBuild {
+    fs::path runtime_library;
+    std::string cohort_id;
+};
+
+const LoadedBuild& loaded_build() {
+    static const LoadedBuild build = [] {
+        using InspectBundleFn = BundleInfo (*)(const std::string&);
+        using LoadTaskFn = std::unique_ptr<ITask> (*)(const std::string&, const std::string&,
+                                                      std::uint64_t, const std::string&, bool);
+        const auto inspect_bundle_function = static_cast<InspectBundleFn>(&InspectBundle);
+        const auto load_task_function = static_cast<LoadTaskFn>(&load_task);
+        const fs::path core_library =
+            loaded_library_path(reinterpret_cast<const void*>(inspect_bundle_function));
+        const fs::path runtime_library =
+            loaded_library_path(reinterpret_cast<const void*>(load_task_function));
+        const std::string core_cohort = read_build_cohort(core_library);
+        const std::string runtime_cohort = read_build_cohort(runtime_library);
+        return LoadedBuild{runtime_library, !core_cohort.empty() && core_cohort == runtime_cohort
+                                                ? core_cohort
+                                                : std::string{}};
+    }();
+    return build;
 }
 
 class SharedLibrary {
@@ -98,7 +259,7 @@ class SharedLibrary {
 class BackendLibrary {
   public:
     BackendLibrary(const fs::path& runtime_root, const std::string& backend_id)
-        : library_(runtime_root / ("libtrtmc_backend_" + backend_id + ".so")) {
+        : library_(runtime_root / backend_library_name(backend_id)) {
         const auto create =
             reinterpret_cast<CreateBackendFn>(library_.require_symbol("trtmc_create_backend"));
         destroy_ =
@@ -136,7 +297,7 @@ class BackendLibrary {
 class FamilyLibrary {
   public:
     FamilyLibrary(const fs::path& runtime_root, const std::string& family_id)
-        : library_(runtime_root / ("libtrtmc_model_" + family_id + ".so")),
+        : library_(runtime_root / family_library_name(family_id)),
           create_(reinterpret_cast<CreateFamilyFn>(library_.require_symbol(kCreateFamilySymbol))) {}
 
     FamilyLibrary(const FamilyLibrary&) = delete;
@@ -228,7 +389,7 @@ RuntimeLibraryCache& runtime_library_cache() {
 }
 
 IBackend& cached_backend(const fs::path& runtime_root, const std::string& backend_id) {
-    const std::string path = (runtime_root / ("libtrtmc_backend_" + backend_id + ".so")).string();
+    const std::string path = (runtime_root / backend_library_name(backend_id)).string();
     auto& cache = runtime_library_cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
     const auto found = cache.backends.find(path);
@@ -258,7 +419,7 @@ IBackend& cached_configured_backend(IBackend& backend, const std::string& runtim
 }
 
 FamilyLibrary& cached_family(const fs::path& runtime_root, const std::string& family_id) {
-    const std::string path = (runtime_root / ("libtrtmc_model_" + family_id + ".so")).string();
+    const std::string path = (runtime_root / family_library_name(family_id)).string();
     auto& cache = runtime_library_cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
     const auto found = cache.families.find(path);
@@ -282,6 +443,43 @@ void require_matching_task(const BundleInfo& info, const ITask& task) {
 }
 
 } // namespace
+
+std::string loaded_runtime_root() {
+    const fs::path& runtime_library = loaded_build().runtime_library;
+    if (runtime_library.empty())
+        throw std::runtime_error("Unable to locate the active TRTMC runtime loader");
+    return runtime_library.parent_path().string();
+}
+
+bool runtime_root_matches_loaded_build(const BundleInfo& bundle, const std::string& runtime_root,
+                                       bool require_byok) {
+    require_safe_id("family", bundle.family);
+    require_safe_id("backend", bundle.backend);
+    const std::string& cohort_id = loaded_build().cohort_id;
+    if (runtime_root.empty() || cohort_id.empty())
+        return false;
+
+    std::error_code error;
+    fs::path root = fs::absolute(runtime_root, error);
+    if (error)
+        return false;
+    root = root.lexically_normal();
+
+    std::vector<std::string> required{
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        backend_library_name(bundle.backend),
+        family_library_name(bundle.family),
+    };
+    if (require_byok)
+        required.emplace_back("libtrtmc_byok_tvm_ffi.so");
+
+    return std::all_of(required.begin(), required.end(), [&](const std::string& library) {
+        std::error_code library_error;
+        const fs::path path = root / library;
+        return fs::is_regular_file(path, library_error) && read_build_cohort(path) == cohort_id;
+    });
+}
 
 std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::string& runtime_root,
                                  std::uint64_t kv_cache_size_bytes,

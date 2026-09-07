@@ -399,6 +399,19 @@ if(TRTMC_BUILD_TESTS)
   )
   add_dependencies(test_cli trtmc_test_backend_fake trtmc_test_family_fake)
 
+  add_executable(test_runtime_root core/runtime/tests/test_runtime_root.cpp)
+  target_include_directories(test_runtime_root PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_link_libraries(test_runtime_root PRIVATE trtmc_runtime)
+  target_compile_options(test_runtime_root PRIVATE -Wall -Wextra -Wpedantic)
+  add_dependencies(test_runtime_root trtmc_test_backend_fake trtmc_test_family_fake)
+  add_test(NAME runtime_root COMMAND test_runtime_root
+    "${CMAKE_BINARY_DIR}/tests/runtime-root-validator"
+    $<TARGET_FILE:trtmc_core>
+    $<TARGET_FILE:trtmc_runtime>
+    $<TARGET_FILE:trtmc_test_backend_fake>
+    $<TARGET_FILE:trtmc_test_family_fake>
+  )
+
   add_executable(test_family_loader core/runtime/tests/test_family_loader.cpp)
   target_include_directories(test_family_loader PRIVATE
     ${PROJECT_SOURCE_DIR}/core/runtime/include
@@ -564,6 +577,7 @@ install(FILES
   core/runtime/include/trtmc/runtime/device_tensor.h
   core/runtime/include/trtmc/runtime/family_factory.h
   core/runtime/include/trtmc/runtime/family_loader.h
+  core/runtime/include/trtmc/runtime/runtime_root.h
   core/runtime/include/trtmc/runtime/tensor.h
   core/runtime/include/trtmc/runtime/trt_backend.h
   core/runtime/include/trtmc/runtime/trt_module.h

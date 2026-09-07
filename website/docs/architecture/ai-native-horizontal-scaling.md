@@ -120,7 +120,7 @@ After each transfer, core no longer participates in model behavior.
 | Component | Owns | Explicitly does not own |
 | --- | --- | --- |
 | Native Core (`libtrtmc_core.so`) | bounded bundle reads, device tensors, stable engine primitives | `dlopen`, model config, weight mapping, preprocessing, request loops |
-| Runtime Loader (`libtrtmc_runtime.so`) | safe family/backend names, explicit runtime root, exact `dlopen`, one control transfer | model pipelines, preprocessing, policy dispatch, family fallback |
+| Runtime Loader (`libtrtmc_runtime.so`) | safe family/backend names, explicit runtime root, runtime-root/build-cohort validation, exact `dlopen`, one control transfer | path search policy, model pipelines, preprocessing, policy dispatch, family fallback |
 | Family | checkpoint identity, tasks/default, graph build, weights, section semantics, native pipeline, dispatch, bindings, pre/postprocessing | sibling families, shared model policy |
 | Bundle | header and named byte sections with bounded streaming I/O | model schema, section semantics, content hashes |
 | Task API | user behavior such as text, image, audio, embedding, and segmentation | family names, TensorRT objects, backend details |
@@ -518,15 +518,21 @@ Runtime dispatch occurs once:
 Core, family, and backend DSOs are produced by one product build. There is no
 ABI negotiation, version translation, old-symbol alias, or compatibility shim.
 The human-facing `trtmc` CLI may discover a complete runtime cohort before this
-control transfer. It prefers the current directory, then the runtime belonging
-to the running CLI installation, followed by explicitly configured runtime
-library paths. The public C++ load API still receives one explicit root, and
-the loader never combines or falls back across roots. Every native artifact
-carries the build-cohort identity generated when CMake configures the build.
-Automatic
-candidates must contain that same identity in core, runtime, backend, family,
-and optional BYOK DSOs, preventing another build cohort from being selected
-implicitly.
+control transfer. The CLI owns only candidate enumeration and search order: it
+prefers the current directory, then the runtime belonging to the running CLI
+installation, followed by explicitly configured runtime library paths. For
+each candidate, it asks the model-agnostic Runtime Loader contract to validate
+the safe bundle identifiers, required DSO set, and build cohort. The CLI does
+not derive DSO names or parse native artifact metadata. The public C++ load API
+still receives one explicit root, and the loader never combines or falls back
+across roots.
+
+Every native artifact carries the build-cohort identity generated when CMake
+configures the build. Automatic candidates must contain that same identity in
+core, runtime, backend, family, and optional BYOK DSOs, preventing another
+build cohort from being selected implicitly. This is strict product-build
+identity, not ABI compatibility negotiation: there is no compatible-version
+selection, translation, or fallback.
 
 ### Task API
 
