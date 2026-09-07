@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from functools import cache
 from pathlib import Path
 
@@ -743,3 +744,96 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         assert_native_kv_receipt(payload, case, reference[-1])
     thresholds = {} if _is_sampling(case) else _thresholds(case_name)
     _assert_correctness(payload, case, thresholds, *reference[:-1])
+
+
+def _required_edge_path(name: str, *, directory: bool = False) -> Path:
+    value = os.environ.get(name)
+    assert value, f"selected Qwen Edge-LLM E2E requires {name}"
+    path = Path(value)
+    assert path.is_dir() if directory else path.is_file(), path
+    return path
+
+
+def test_qwen3_0_6b_edge_llm_build_inspect_and_run(tmp_path: Path) -> None:
+    """Opt-in single-GPU entry; normal Qwen E2E does not select this backend."""
+
+    if os.environ.get("TRTMC_QWEN_EDGE_LLM_E2E") != "1":
+        pytest.skip("Qwen Edge-LLM E2E was not explicitly selected")
+    model_dir = _required_edge_path("TRTMC_EDGE_LLM_QWEN3_0_6B_DIR", directory=True)
+    binary = _required_edge_path("TRTMC_BINARY")
+    runtime_root = _required_edge_path("TRTMC_RUNTIME_ROOT", directory=True)
+    for name in (
+        "libtrtmc_model_qwen.so",
+        "libtrtmc_qwen_edge_llm.so",
+        "libNvInfer_edgellm_plugin.so",
+    ):
+        assert (runtime_root / name).is_file(), runtime_root / name
+
+    bundle = tmp_path / "qwen3-0.6b-edge-llm.bundle"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tensorrt_model_connect",
+            "build",
+            str(model_dir),
+            "--backend",
+            "edge_llm",
+            "--precision",
+            "fp16",
+            "--max-sequence-length",
+            "4096",
+            "--output",
+            str(bundle),
+        ],
+        check=True,
+        timeout=21600,
+    )
+
+    inspected = subprocess.run(
+        [str(binary), "inspect", str(bundle)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    info = json.loads(inspected.stdout)
+    assert info["family"] == "qwen"
+    assert info["task"] == "text_generation"
+    assert info["backend"] == "edge_llm"
+    assert "edge_llm/llm.engine" in info["sections"]
+    assert all(".so" not in name for name in info["sections"])
+
+    environment = os.environ.copy()
+    environment["LD_LIBRARY_PATH"] = ":".join(
+        value for value in (str(runtime_root), environment.get("LD_LIBRARY_PATH", "")) if value
+    )
+    completed = subprocess.run(
+        [
+            str(binary),
+            "run",
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            "--prompt",
+            "What is the capital of France? Answer in one word.",
+            "--max-new-tokens",
+            "16",
+            "--temperature",
+            "0",
+            "--top-k",
+            "1",
+            "--use-chat-template",
+            "true",
+            "--enable-thinking",
+            "false",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=600,
+    )
+    result = json.loads(completed.stdout)
+    assert isinstance(result["text"], str) and "Paris" in result["text"]
+    assert isinstance(result["token_ids"], list) and result["token_ids"]

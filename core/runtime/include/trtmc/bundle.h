@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -43,6 +44,7 @@ class BundleReader {
     const BundleInfo& info() const noexcept { return info_; }
     const BundleSectionInfo* find_section(std::string_view name) const noexcept;
     std::vector<char> read_section(std::string_view name) const;
+    void copy_section(std::string_view name, std::ostream& output) const;
 
   private:
     std::string path_;

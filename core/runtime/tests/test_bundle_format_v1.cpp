@@ -5,11 +5,13 @@
 
 #include "runtime/bundle/bundle_format.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 #include <unistd.h>
 
@@ -52,6 +54,21 @@ bool read_throws(const std::filesystem::path& path) {
     }
 }
 
+class BoundedSink final : public std::streambuf {
+  public:
+    std::size_t total{0};
+    std::size_t largest_write{0};
+    bool valid{true};
+
+  protected:
+    std::streamsize xsputn(const char* data, std::streamsize count) override {
+        largest_write = std::max(largest_write, static_cast<std::size_t>(count));
+        total += static_cast<std::size_t>(count);
+        valid = valid && std::all_of(data, data + count, [](char value) { return value == 'x'; });
+        return count;
+    }
+};
+
 } // namespace
 
 int main() {
@@ -82,6 +99,21 @@ int main() {
     const auto lazy_plan = reader.read_section("engine.plan");
     check(std::string(lazy_plan.begin(), lazy_plan.end()) == "PLAN",
           "file-backed reader owns an absolute path");
+
+    const auto large = directory / "large.bundle";
+    const std::string large_payload(2 * 1024 * 1024 + 17, 'x');
+    write_bundle(large,
+                 "{\"format\":1,\"family\":\"fake\",\"task\":\"time_series_forecast\","
+                 "\"backend\":\"fake\",\"sections\":{\"engine.plan\":{\"offset\":0,\"length\":" +
+                     std::to_string(large_payload.size()) + "}}}",
+                 large_payload);
+    const trtmc::BundleReader large_reader(large.string());
+    BoundedSink buffer;
+    std::ostream sink(&buffer);
+    large_reader.copy_section("engine.plan", sink);
+    check(buffer.total == large_payload.size(), "streaming copy writes the complete section");
+    check(buffer.largest_write <= 1024 * 1024, "streaming copy uses bounded chunks");
+    check(buffer.valid, "streaming copy preserves section bytes");
 
     const auto old_size = directory / "old-size.bundle";
     write_bundle(

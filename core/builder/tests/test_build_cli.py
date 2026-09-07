@@ -92,6 +92,52 @@ def test_build_command_uses_the_family_owned_default_task(monkeypatch, tmp_path:
     assert captured[0].task == "text_generation"
 
 
+def test_build_command_accepts_explicit_edge_llm_backend(monkeypatch, tmp_path: Path) -> None:
+    captured = []
+    monkeypatch.setattr(build_cli, "build", captured.append)
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"qwen3"}', encoding="utf-8")
+
+    assert (
+        build_cli.main(
+            [
+                "build",
+                str(model),
+                "--output",
+                str(tmp_path / "out.bundle"),
+                "--backend",
+                "edge_llm",
+                "--precision",
+                "fp16",
+            ]
+        )
+        == 0
+    )
+
+    assert captured[0].family == "qwen"
+    assert captured[0].backend == "edge_llm"
+
+
+def test_build_command_rejects_edge_llm_for_another_family(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(build_cli, "build", lambda _request: None)
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not support backend 'edge_llm'"):
+        build_cli.main(
+            [
+                "build",
+                str(model),
+                "--output",
+                str(tmp_path / "out.bundle"),
+                "--backend",
+                "edge_llm",
+            ]
+        )
+
+
 def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_path: Path) -> None:
     calls = []
 

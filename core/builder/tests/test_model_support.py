@@ -43,6 +43,10 @@ def test_family_support_rejects_invalid_declarations() -> None:
         FamilySupport(tasks=("generation",), default_task="editing")
     with pytest.raises(ValueError, match="lowercase identifiers"):
         FamilySupport(tasks=("not-valid",), default_task="not-valid")
+    with pytest.raises(ValueError, match="backends must be non-empty"):
+        FamilySupport(tasks=("generation",), default_task="generation", backends=())
+    with pytest.raises(ValueError, match="backends must be lowercase"):
+        FamilySupport(tasks=("generation",), default_task="generation", backends=("not-valid",))
 
 
 def test_load_model_metadata_reads_only_standard_identity_files(tmp_path: Path) -> None:
@@ -192,6 +196,15 @@ def test_qwen38_marker_has_one_owner() -> None:
     )
     assert family == "qwen3_8"
     assert support.default_task == "text_generation"
+
+
+def test_only_qwen_declares_the_edge_llm_backend() -> None:
+    family, qwen = resolve_family(ModelMetadata({"model_type": "qwen3"}, {}))
+    _, gpt2 = resolve_family(ModelMetadata({"model_type": "gpt2"}, {}))
+
+    assert family == "qwen"
+    assert qwen.backends == ("trt", "trt_rtx", "edge_llm")
+    assert gpt2.backends == ("trt", "trt_rtx")
 
 
 @pytest.mark.parametrize(

@@ -10,4 +10,5 @@ describe = family_support(
     model_types=("qwen", "Qwen2", "qwen2", "qwen3", "qwq"),
     tasks=("text_generation",),
     default_task="text_generation",
+    backends=("trt", "trt_rtx", "edge_llm"),
 )

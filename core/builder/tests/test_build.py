@@ -29,6 +29,10 @@ def _request(tmp_path: Path, *, family: str = "example") -> BuildRequest:
     )
 
 
+def _accept_backend(monkeypatch) -> None:
+    monkeypatch.setattr(build_core, "_require_supported_backend", lambda _request: None)
+
+
 def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
     request = _request(tmp_path)
 
@@ -114,6 +118,36 @@ def test_rtx_backend_is_bound_before_family_import(monkeypatch) -> None:
     assert sys.modules["tensorrt"] is rtx
 
 
+def test_edge_llm_backend_does_not_bind_a_python_tensorrt_module(monkeypatch) -> None:
+    imported: list[str] = []
+    monkeypatch.setattr(importlib, "import_module", lambda name: imported.append(name))
+
+    build_core._select_backend("edge_llm")
+
+    assert imported == []
+
+
+def test_low_level_build_support_rejects_edge_llm_outside_qwen(tmp_path: Path) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")
+    request = BuildRequest(
+        model_dir=model,
+        output_path=tmp_path / "model.bundle",
+        family="gpt2",
+        task="text_generation",
+        precision="fp16",
+        backend="edge_llm",
+    )
+
+    with pytest.raises(ValueError, match="does not support backend 'edge_llm'"):
+        build_core._require_supported_backend(request)
+
+    (model / "config.json").write_text('{"model_type":"qwen3"}', encoding="utf-8")
+    qwen = replace(request, family="qwen")
+    assert build_core._require_supported_backend(qwen) is None
+
+
 def test_backend_cannot_switch_after_tensor_rt_is_loaded(monkeypatch) -> None:
     standard = object()
     rtx = object()
@@ -158,6 +192,7 @@ def test_family_internal_module_not_found_error_is_not_wrapped(monkeypatch) -> N
 
 
 def test_build_finishes_after_family_returns(monkeypatch, tmp_path: Path) -> None:
+    _accept_backend(monkeypatch)
     events: list[object] = []
 
     class FakeWriter:
@@ -188,6 +223,7 @@ def test_build_finishes_after_family_returns(monkeypatch, tmp_path: Path) -> Non
 def test_build_runs_graph_transform_before_family_engine_serialization(
     monkeypatch, tmp_path: Path
 ) -> None:
+    _accept_backend(monkeypatch)
     events: list[object] = []
 
     class FakeTrtBuilder:
@@ -236,6 +272,7 @@ def test_build_runs_graph_transform_before_family_engine_serialization(
 
 
 def test_build_aborts_and_preserves_family_error(monkeypatch, tmp_path: Path) -> None:
+    _accept_backend(monkeypatch)
     events: list[str] = []
     family_error = RuntimeError("family failed")
 
@@ -264,6 +301,7 @@ def test_build_aborts_and_preserves_family_error(monkeypatch, tmp_path: Path) ->
 
 
 def test_build_aborts_if_finish_fails(monkeypatch, tmp_path: Path) -> None:
+    _accept_backend(monkeypatch)
     events: list[str] = []
 
     class FakeWriter:

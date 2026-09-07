@@ -230,6 +230,12 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _QwenModel, **u
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen bundle through family-owned code."""
+    if request.backend == "edge_llm":
+        from .edge_llm.build import build as build_edge_llm
+
+        build_edge_llm(request, writer)
+        return
+
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen does not support dynamic_kv_cache")
 

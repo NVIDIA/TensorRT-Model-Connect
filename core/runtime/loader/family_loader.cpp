@@ -90,6 +90,12 @@ class SharedLibrary {
         return symbol;
     }
 
+    void* find_symbol(const char* name) const noexcept {
+        dlerror();
+        void* symbol = dlsym(handle_, name);
+        return dlerror() == nullptr ? symbol : nullptr;
+    }
+
   private:
     std::string path_;
     void* handle_{nullptr};
@@ -137,16 +143,24 @@ class FamilyLibrary {
   public:
     FamilyLibrary(const fs::path& runtime_root, const std::string& family_id)
         : library_(runtime_root / ("libtrtmc_model_" + family_id + ".so")),
-          create_(reinterpret_cast<CreateFamilyFn>(library_.require_symbol(kCreateFamilySymbol))) {}
+          create_(reinterpret_cast<CreateFamilyFn>(library_.require_symbol(kCreateFamilySymbol))),
+          create_without_backend_(
+              reinterpret_cast<CreateFamilyOnlyFn>(library_.find_symbol(kCreateFamilyOnlySymbol))) {
+    }
 
     FamilyLibrary(const FamilyLibrary&) = delete;
     FamilyLibrary& operator=(const FamilyLibrary&) = delete;
 
     ITask* create(const FamilyContext& context) const { return create_(context); }
 
+    ITask* create_without_backend(const FamilyOnlyContext& context) const {
+        return create_without_backend_ != nullptr ? create_without_backend_(context) : nullptr;
+    }
+
   private:
     SharedLibrary library_;
     CreateFamilyFn create_{nullptr};
+    CreateFamilyOnlyFn create_without_backend_{nullptr};
 };
 
 class RuntimeOptionsBackend final : public IBackend {
@@ -297,8 +311,14 @@ std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::stri
     }
 
     const fs::path root = explicit_runtime_root(runtime_root);
-    IBackend& backend = cached_backend(root, info.backend);
     FamilyLibrary& family = cached_family(root, info.family);
+    if (std::unique_ptr<ITask> task(family.create_without_backend({reader, kv_cache_size_bytes}));
+        task != nullptr) {
+        require_matching_task(info, *task);
+        return task;
+    }
+
+    IBackend& backend = cached_backend(root, info.backend);
     IBackend& configured_backend =
         cached_configured_backend(backend, runtime_cache_path, cuda_graphs);
     FamilyContext context{reader, configured_backend, kv_cache_size_bytes};

@@ -14,6 +14,7 @@ from types import ModuleType
 
 from .bundle_writer import BundleWriter
 from .graph_transform import GraphTransform, graph_transform
+from .model_support import FamilySupport, load_model_metadata
 
 
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -47,8 +48,8 @@ class BuildRequest:
             raise ValueError("precision must be non-empty")
         _validate_id("family", self.family)
         _validate_id("task", self.task)
-        if self.backend not in {"trt", "trt_rtx"}:
-            raise ValueError("backend must be 'trt' or 'trt_rtx'")
+        if self.backend not in {"trt", "trt_rtx", "edge_llm"}:
+            raise ValueError("backend must be 'trt', 'trt_rtx', or 'edge_llm'")
         if self.max_sequence_length is not None and self.max_sequence_length < 1:
             raise ValueError("max_sequence_length must be positive")
         for field in ("image_height", "image_width", "video_num_frames"):
@@ -102,8 +103,25 @@ def _load_family(family: str) -> ModuleType:
         raise
 
 
+def _require_supported_backend(request: BuildRequest) -> None:
+    """Require the selected family to own the requested backend."""
+
+    module = importlib.import_module(f"families.{request.family}.support")
+    describe = getattr(module, "describe", None)
+    if not callable(describe):
+        raise RuntimeError(f"family {request.family!r} does not define support.describe()")
+    support = describe(load_model_metadata(request.model_dir))
+    if not isinstance(support, FamilySupport):
+        raise ValueError(f"family {request.family!r} does not support this model")
+    if request.backend not in support.backends:
+        raise ValueError(f"family {request.family!r} does not support backend {request.backend!r}")
+
+
 def _select_backend(backend: str) -> None:
     """Bind the explicit build backend before importing a family builder."""
+
+    if backend == "edge_llm":
+        return
 
     loaded = sys.modules.get("tensorrt")
     if backend == "trt":
@@ -121,6 +139,7 @@ def build(request: BuildRequest) -> None:
     """Run one family builder and publish its bundle on success."""
 
     family = _resolve_family(request)
+    _require_supported_backend(request)
     _select_backend(request.backend)
     family_module = _load_family(family)
     writer = BundleWriter(request.output_path)

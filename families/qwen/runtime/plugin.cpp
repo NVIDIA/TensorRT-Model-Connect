@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/qwen/edge_llm/runtime/adapter.h"
 #include "families/qwen/runtime/chat_templates.h"
 #include "families/qwen/runtime/distributed_runtime.h"
 #include "families/qwen/runtime/kv_cache.h"
@@ -237,4 +238,14 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("qwen does not support --kv-cache-size");
     return trtmc::qwen::create(context);
+}
+
+extern "C" trtmc::ITask*
+trtmc_create_family_without_backend(const trtmc::FamilyOnlyContext& context) {
+    const std::string& backend = context.reader.info().backend;
+    if (backend == "trt" || backend == "trt_rtx")
+        return nullptr;
+    if (backend != "edge_llm")
+        throw std::invalid_argument("qwen does not support the requested external backend");
+    return trtmc::qwen::edge_llm::create(context);
 }

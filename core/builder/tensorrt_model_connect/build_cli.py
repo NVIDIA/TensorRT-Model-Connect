@@ -22,7 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--task", help="Override the family-owned default task")
     build_parser.add_argument("--revision", help="Hugging Face model revision")
     build_parser.add_argument("--precision", choices=("fp16", "bf16", "fp32"), default="fp32")
-    build_parser.add_argument("--backend", choices=("trt", "trt_rtx"), default="trt")
+    build_parser.add_argument("--backend", choices=("trt", "trt_rtx", "edge_llm"), default="trt")
     build_parser.add_argument("--max-sequence-length", type=int)
     build_parser.add_argument("--image-height", type=int)
     build_parser.add_argument("--image-width", type=int)
@@ -48,6 +48,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(
             f"family {family!r} does not support task {task!r}; "
             f"choose one of: {', '.join(support.tasks)}"
+        )
+    if args.backend not in support.backends:
+        raise ValueError(
+            f"family {family!r} does not support backend {args.backend!r}; "
+            f"choose one of: {', '.join(support.backends)}"
         )
     build(
         BuildRequest(

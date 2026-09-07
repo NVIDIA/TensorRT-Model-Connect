@@ -55,6 +55,7 @@ class FamilySupport:
 
     tasks: tuple[str, ...]
     default_task: str
+    backends: tuple[str, ...] = ("trt", "trt_rtx")
 
     def __post_init__(self) -> None:
         if not self.tasks or len(set(self.tasks)) != len(self.tasks):
@@ -63,6 +64,10 @@ class FamilySupport:
             raise ValueError("family support tasks must be lowercase identifiers")
         if self.default_task not in self.tasks:
             raise ValueError("default_task must be one of the supported tasks")
+        if not self.backends or len(set(self.backends)) != len(self.backends):
+            raise ValueError("family support backends must be non-empty and unique")
+        if any(_ID.fullmatch(backend) is None for backend in self.backends):
+            raise ValueError("family support backends must be lowercase identifiers")
 
 
 DescribeSupport = Callable[[ModelMetadata], FamilySupport | None]
@@ -80,6 +85,7 @@ def family_support(
     required_files: tuple[str, ...] = (),
     tasks: tuple[str, ...],
     default_task: str,
+    backends: tuple[str, ...] = ("trt", "trt_rtx"),
 ) -> DescribeSupport:
     """Create one exact, family-owned support function."""
 
@@ -93,7 +99,7 @@ def family_support(
     file_keys = frozenset(value for value in required_files if value)
     if not model_type_keys and not architecture_keys and not pipeline_keys and not file_keys:
         raise ValueError("family support must declare at least one model identity")
-    support = FamilySupport(tasks=tasks, default_task=default_task)
+    support = FamilySupport(tasks=tasks, default_task=default_task, backends=backends)
 
     def describe(metadata: ModelMetadata) -> FamilySupport | None:
         if _key(metadata.model_type) in model_type_keys:

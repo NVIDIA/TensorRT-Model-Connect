@@ -6,6 +6,7 @@
 #include "runtime/bundle/bundle_format.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -213,6 +214,36 @@ std::vector<char> BundleReader::read_section(std::string_view name) const {
                                  "' from: " + path_);
     }
     return data;
+}
+
+void BundleReader::copy_section(std::string_view name, std::ostream& output) const {
+    const auto* section = find_section(name);
+    if (section == nullptr)
+        throw std::runtime_error("Bundle section not found: " + std::string(name));
+    const std::uint64_t file_offset =
+        checked_section_file_offset(*section, data_offset_, file_size_, path_);
+    if (file_offset > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()))
+        throw std::runtime_error("Bundle section '" + section->name +
+                                 "' has an unsupported file offset: " + path_);
+
+    std::ifstream input(path_, std::ios::binary);
+    if (!input)
+        throw std::runtime_error("Failed to open bundle file: " + path_);
+    input.seekg(static_cast<std::streamoff>(file_offset));
+    std::array<char, 1024 * 1024> buffer{};
+    std::uint64_t remaining = section->length;
+    while (remaining != 0) {
+        const auto count =
+            static_cast<std::streamsize>(std::min<std::uint64_t>(remaining, buffer.size()));
+        input.read(buffer.data(), count);
+        if (input.gcount() != count)
+            throw std::runtime_error("Failed to read bundle section '" + section->name +
+                                     "' from: " + path_);
+        output.write(buffer.data(), count);
+        if (!output)
+            throw std::runtime_error("Failed to write bundle section '" + section->name + "'");
+        remaining -= static_cast<std::uint64_t>(count);
+    }
 }
 
 BundleInfo InspectBundle(const std::string& bundle_path) {

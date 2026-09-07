@@ -36,6 +36,11 @@ install(TARGETS trtmc_model_qwen
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+add_subdirectory(
+  ${PROJECT_SOURCE_DIR}/families/qwen/edge_llm/runtime
+  ${CMAKE_CURRENT_BINARY_DIR}/edge_llm
+)
+
 if(TRTMC_BUILD_TESTS)
   foreach(test_name IN ITEMS
       test_qwen_native_kv_cache
