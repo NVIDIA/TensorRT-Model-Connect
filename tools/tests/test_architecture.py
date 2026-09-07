@@ -323,6 +323,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/runtime/device_tensor.h",
         "core/runtime/include/trtmc/runtime/family_factory.h",
         "core/runtime/include/trtmc/runtime/family_loader.h",
+        "core/runtime/include/trtmc/runtime/runtime_root.h",
         "core/runtime/include/trtmc/runtime/span.h",
         "core/runtime/include/trtmc/runtime/tensor.h",
         "core/runtime/include/trtmc/runtime/trt_backend.h",
@@ -333,6 +334,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tests/test_byok_shape_spec.cpp",
         "core/runtime/tests/test_family_loader.cpp",
         "core/runtime/tests/test_internal_config.cpp",
+        "core/runtime/tests/test_runtime_root.cpp",
         "core/runtime/tests/test_task_api.cpp",
         "core/runtime/tests/test_trt_module_dynamic_input.cpp",
     }
