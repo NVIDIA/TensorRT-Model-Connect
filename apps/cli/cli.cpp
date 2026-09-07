@@ -1330,10 +1330,9 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
                                      {"task", bundle.task},
                                      {"backend", bundle.backend},
                                      {"sections", std::move(sections)}};
-            if (reader.find_section("provenance.json") != nullptr) {
-                const std::vector<char> provenance = reader.read_section("provenance.json");
-                result["provenance"] = nlohmann::json::parse(provenance.begin(), provenance.end());
-            }
+            const std::string provenance = InspectBundleProvenance(command.bundle);
+            if (!provenance.empty())
+                result["provenance"] = nlohmann::json::parse(provenance);
             write_json(output, result);
             return EXIT_SUCCESS;
         }

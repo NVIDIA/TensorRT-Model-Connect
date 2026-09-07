@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from tensorrt_model_connect import read_bundle_json, resolve_source_revision
+from tensorrt_model_connect import read_bundle_provenance, resolve_source_revision
 from tensorrt_model_connect.build_cli import _resolve_model
 
 from .types import BenchmarkError, ModelDescriptor, ResolvedCase
@@ -157,6 +157,16 @@ class BundleBuilder:
             raise BenchmarkError(f"model directory does not exist: {explicit}")
         if explicit is None and not model.hf_id:
             raise BenchmarkError(f"{model.name} has no hf_id; pass --model-dir")
+        if explicit is not None and model.hf_id:
+            resolved_explicit = explicit.resolve()
+            if (
+                resolved_explicit.parent.name != "snapshots"
+                or resolved_explicit.name.lower() != model.hf_revision.lower()
+            ):
+                raise BenchmarkError(
+                    f"explicit model directory for {model.name} must be the exact Hugging Face "
+                    f"snapshot ending in /snapshots/{model.hf_revision}"
+                )
         try:
             model_dir = _resolve_model(
                 str(explicit) if explicit is not None else model.hf_id,
@@ -258,10 +268,8 @@ def _build_command(
         "--precision",
         model.precision,
     ]
-    if model.hf_id:
-        command.extend(("--checkpoint-id", model.hf_id))
-    if model.hf_revision:
-        command.extend(("--revision", model.hf_revision))
+    command.extend(("--checkpoint-id", model.checkpoint_id))
+    command.extend(("--revision", model.checkpoint_revision))
     flags = (
         ("max_sequence_length", "--max-sequence-length"),
         ("image_height", "--image-height"),
@@ -334,7 +342,7 @@ def _bundle_matches_model(
     except ValueError:
         return False
     try:
-        provenance = read_bundle_json(bundle, "provenance.json")
+        provenance = read_bundle_provenance(bundle)
     except (OSError, UnicodeDecodeError, ValueError):
         return False
     if not isinstance(provenance, dict) or provenance.get("format") != 1:
@@ -350,8 +358,8 @@ def _bundle_matches_model(
     elif isinstance(expected_request["fp32_layers"], tuple):
         expected_request["fp32_layers"] = list(expected_request["fp32_layers"])
     return provenance.get("checkpoint") == {
-        "id": model.hf_id,
-        "revision": model.hf_revision,
+        "id": model.checkpoint_id,
+        "revision": model.checkpoint_revision,
     } and provenance.get("build") == {
         "source_revision": source_revision
     } and provenance.get("request") == expected_request

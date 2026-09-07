@@ -146,8 +146,8 @@ def test_bundle_builder_keeps_explicit_model_dir_cli_behavior(
 ) -> None:
     model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
     case = resolve_case(model, tmp_path / "model.bundle")
-    checkpoint = tmp_path / "checkpoint"
-    checkpoint.mkdir()
+    checkpoint = tmp_path / "models--distilbert--distilgpt2" / "snapshots" / model.hf_revision
+    checkpoint.mkdir(parents=True)
     calls = []
 
     def resolve_model(value: str, revision: str | None) -> Path:
@@ -160,6 +160,20 @@ def test_bundle_builder_keeps_explicit_model_dir_cli_behavior(
 
     assert calls == [(str(checkpoint.resolve()), None)]
     assert plan.model_dir == checkpoint.resolve()
+
+
+def test_bundle_builder_rejects_an_unverified_explicit_hugging_face_directory(
+    tmp_path: Path,
+) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "model.bundle")
+    checkpoint = tmp_path / "arbitrary-checkpoint"
+    checkpoint.mkdir()
+
+    with pytest.raises(BenchmarkError, match="exact Hugging Face snapshot"):
+        BundleBuilder(
+            tmp_path / "cache", model_dirs={model.name: checkpoint}
+        )._plan(model, (case,))
 
 
 def test_bundle_builder_has_no_second_model_resolver() -> None:
@@ -180,8 +194,7 @@ def test_bundle_cache_rejects_mismatched_provenance_when_build_is_disabled(
     bundle.parent.mkdir(parents=True)
     writer = BundleWriter(bundle)
     writer.set_header(family=model.family, task=model.task, backend="trt")
-    writer.add_json(
-        "provenance.json",
+    writer.set_provenance(
         {
             "format": 1,
             "checkpoint": {"id": model.hf_id, "revision": "c" * 40},
@@ -210,8 +223,7 @@ def test_bundle_cache_rejects_a_different_build_request(tmp_path: Path, monkeypa
     bundle.parent.mkdir(parents=True)
     writer = BundleWriter(bundle)
     writer.set_header(family=model.family, task=model.task, backend="trt")
-    writer.add_json(
-        "provenance.json",
+    writer.set_provenance(
         {
             "format": 1,
             "checkpoint": {"id": model.hf_id, "revision": model.hf_revision},
@@ -245,8 +257,7 @@ def test_bundle_cache_reuses_an_exact_build_identity(tmp_path: Path, monkeypatch
     bundle.parent.mkdir(parents=True)
     writer = BundleWriter(bundle)
     writer.set_header(family=model.family, task=model.task, backend="trt")
-    writer.add_json(
-        "provenance.json",
+    writer.set_provenance(
         {
             "format": 1,
             "checkpoint": {"id": model.hf_id, "revision": model.hf_revision},
@@ -379,8 +390,7 @@ def test_cli_dry_run_uses_explicit_bundle_without_runtime(
     bundle = tmp_path / "model.bundle"
     writer = BundleWriter(bundle)
     writer.set_header(family=model.family, task=model.task, backend="trt")
-    writer.add_json(
-        "provenance.json",
+    writer.set_provenance(
         {
             "format": 1,
             "checkpoint": {"id": model.hf_id, "revision": model.hf_revision},

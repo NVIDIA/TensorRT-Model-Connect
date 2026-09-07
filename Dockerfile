@@ -56,6 +56,7 @@ RUN python3.12 -m venv "$VIRTUAL_ENV" \
       "ml_dtypes==0.5.4" \
       "numpy==1.26.4" \
       "onnx==1.21.0" \
+      "packaging==26.2" \
       "Pillow==12.2.0" \
       "protobuf==7.35.0" \
       "pybind11==2.13.6" \

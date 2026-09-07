@@ -21,6 +21,9 @@ from .graph_transform import GraphTransform, graph_transform
 
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 _EXACT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
+_IMMUTABLE_CHECKPOINT_REVISION = re.compile(
+    r"(?:[0-9a-f]{40}|[a-z][a-z0-9_.-]*:[A-Za-z0-9][A-Za-z0-9_.-]*)\Z"
+)
 
 
 @dataclass(frozen=True)
@@ -48,14 +51,20 @@ class BuildRequest:
     dynamic_kv_cache: bool = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
+    graph_transform_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.precision:
             raise ValueError("precision must be non-empty")
-        for field in ("checkpoint_revision", "source_revision"):
-            revision = getattr(self, field)
-            if revision and _EXACT_REVISION.fullmatch(revision) is None:
-                raise ValueError(f"{field} must be an exact 40-character Git SHA")
+        if (
+            self.checkpoint_revision
+            and _IMMUTABLE_CHECKPOINT_REVISION.fullmatch(self.checkpoint_revision) is None
+        ):
+            raise ValueError(
+                "checkpoint_revision must be an exact Git SHA or namespaced immutable revision"
+            )
+        if self.source_revision and _EXACT_REVISION.fullmatch(self.source_revision) is None:
+            raise ValueError("source_revision must be an exact 40-character Git SHA")
         _validate_id("family", self.family)
         _validate_id("task", self.task)
         if self.backend not in {"trt", "trt_rtx"}:
@@ -80,6 +89,15 @@ class BuildRequest:
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
             raise ValueError("graph_transform must be callable when provided")
+        if (self.graph_transform is not None) != bool(self.graph_transform_id.strip()):
+            raise ValueError("graph_transform and graph_transform_id must be provided together")
+        if (
+            self.graph_transform_id
+            and _IMMUTABLE_CHECKPOINT_REVISION.fullmatch(self.graph_transform_id) is None
+        ):
+            raise ValueError(
+                "graph_transform_id must be an exact Git SHA or namespaced immutable revision"
+            )
 
 
 def _validate_id(field: str, value: object) -> str:
@@ -149,9 +167,9 @@ def build(request: BuildRequest) -> None:
     writer = BundleWriter(request.output_path)
     try:
         provenance = _build_provenance(request)
+        writer.set_provenance(provenance)
         with graph_transform(request.graph_transform):
             family_module.build(request, writer)
-        writer.add_json("provenance.json", provenance)
         writer.finish()
     except BaseException:
         writer.abort()
@@ -174,9 +192,10 @@ def resolve_source_revision(explicit: str = "") -> str:
             raise ValueError(f"{field} must be an exact 40-character Git SHA")
         return revision
 
+    repository = str(Path(__file__).resolve().parent)
     try:
         completed = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+            ["git", "-C", repository, "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -186,7 +205,23 @@ def resolve_source_revision(explicit: str = "") -> str:
         completed = None
     revision = completed.stdout.strip().lower() if completed and completed.returncode == 0 else ""
     if _EXACT_REVISION.fullmatch(revision):
-        return revision
+        try:
+            status = subprocess.run(
+                ["git", "-C", repository, "status", "--porcelain", "--untracked-files=normal"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            status = None
+        if status and status.returncode == 0:
+            if status.stdout:
+                raise ValueError(
+                    "source checkout is dirty; commit the changes or set "
+                    "TRTMC_ENGINE_BUILD_REVISION from a controlled build"
+                )
+            return revision
     raise ValueError(
         "source revision is unavailable; set TRTMC_ENGINE_BUILD_REVISION to the exact Git SHA"
     )
@@ -215,6 +250,8 @@ def _build_provenance(request: BuildRequest) -> dict[str, object]:
         options["quantization"] = request.quantization
     if request.fp32_layers:
         options["fp32_layers"] = list(request.fp32_layers)
+    if request.graph_transform_id:
+        options["graph_transform_id"] = request.graph_transform_id
     return {
         "format": 1,
         "checkpoint": {

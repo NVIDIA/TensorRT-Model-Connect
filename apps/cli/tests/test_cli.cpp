@@ -48,9 +48,9 @@ void write_inspect_bundle(const std::filesystem::path& path) {
     const std::string provenance =
         R"({"format":1,"checkpoint":{"id":"openai-community/gpt2","revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"build":{"source_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"request":{}})";
     const std::string header =
-        R"({"format":1,"family":"gpt2","task":"text_generation","backend":"trt","sections":{"provenance.json":{"offset":0,"length":)" +
-        std::to_string(provenance.size()) + "}}}";
+        R"({"format":1,"family":"gpt2","task":"text_generation","backend":"trt","sections":{}})";
     constexpr unsigned char magic[8] = {'B', 'U', 'N', 'D', 'L', 'E', '\x01', '\0'};
+    constexpr unsigned char provenance_magic[8] = {'P', 'R', 'O', 'V', '\x01', '\0', '\0', '\0'};
     std::ofstream output(path, std::ios::binary);
     output.write(reinterpret_cast<const char*>(magic), 8);
     const std::uint64_t length = header.size();
@@ -58,6 +58,10 @@ void write_inspect_bundle(const std::filesystem::path& path) {
         output.put(static_cast<char>((length >> shift) & 0xffU));
     output.write(header.data(), static_cast<std::streamsize>(header.size()));
     output.write(provenance.data(), static_cast<std::streamsize>(provenance.size()));
+    const std::uint64_t provenance_length = provenance.size();
+    for (int shift = 0; shift < 64; shift += 8)
+        output.put(static_cast<char>((provenance_length >> shift) & 0xffU));
+    output.write(reinterpret_cast<const char*>(provenance_magic), 8);
 }
 
 bool parse_throws(std::vector<std::string> arguments) {

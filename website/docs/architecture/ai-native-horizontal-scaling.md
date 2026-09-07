@@ -312,8 +312,8 @@ Engine backend -> concrete family
 The closed shared set consists of model-support and build contracts, family
 resolver/loader mechanics, bundle container I/O, Core Load API, abstract Task
 and Engine APIs, stable device/engine primitives, one graph-transform callback,
-and the already exercised model-agnostic BYOK bridge. Everything else remains
-family-local or application-local.
+the model-agnostic provenance trailer, and the already exercised BYOK bridge.
+Everything else remains family-local or application-local.
 
 ## Minimal repository ownership
 
@@ -372,6 +372,9 @@ pinned base image
 Rules:
 
 - `requirements/base.txt` contains only genuinely shared build/test tools.
+- `pyproject.toml` is an installation compatibility contract, not a central
+  environment lock. Its bounds must admit every exact version selected by a
+  family; the pinned base image supplies the default shared versions.
 - A family declares extra build, reference, or test packages in its own plain
   `requirements.txt`.
 - A family with no extra dependency omits the file.
@@ -485,6 +488,10 @@ The shared header is intentionally small:
 The container additionally stores section name, offset, and length. A family
 owns section names, order, schema, and semantics. `BundleWriter` supports
 streaming large sections without requiring another complete host copy.
+
+The core may append its bounded provenance trailer after all family sections.
+The trailer is not a named section, cannot be read through `BundleReader`'s
+family section API, and does not change the fixed header or section offsets.
 
 The runtime creates a bounded, read-only `BundleReader` and transfers it to the
 selected family factory. A pipeline that needs deferred section loading copies

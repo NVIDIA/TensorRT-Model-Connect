@@ -10,7 +10,8 @@
 //   Bytes 0-7:    Magic "BUNDLE\x01\x00"
 //   Bytes 8-15:   uint64_t json_header_length (LE)
 //   Bytes 16..N:  JSON metadata header (UTF-8)
-//   Bytes N..EOF: Binary sections referenced by offset in the header
+//   Bytes N..M:   Family-owned binary sections referenced by offset in the header
+//   Optional:     provenance JSON, uint64_t provenance length (LE), provenance magic
 
 #include "trtmc/bundle.h"
 
@@ -22,6 +23,8 @@ namespace trtmc {
 
 // Magic bytes for .bundle files.
 static constexpr unsigned char kBundleMagic[8] = {'B', 'U', 'N', 'D', 'L', 'E', '\x01', '\0'};
+static constexpr unsigned char kBundleProvenanceMagic[8] = {'P',    'R',  'O',  'V',
+                                                            '\x01', '\0', '\0', '\0'};
 static constexpr std::size_t kBundleHeaderOffset = 16; // 8 magic + 8 length
 
 } // namespace trtmc

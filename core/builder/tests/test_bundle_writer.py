@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC, BundleWriter
+from tensorrt_model_connect.bundle_writer import (
+    BUNDLE_MAGIC,
+    BUNDLE_PROVENANCE_MAGIC,
+    BundleWriter,
+    read_bundle_provenance,
+)
 
 
 def _read_bundle(path: Path) -> tuple[dict, bytes]:
@@ -48,6 +53,44 @@ def test_writer_streams_sections_and_emits_only_the_fixed_header(tmp_path: Path)
         },
     }
     assert payload == b'engine-bytes{"size":7}tokens'
+
+
+def test_writer_appends_provenance_outside_family_sections(tmp_path: Path) -> None:
+    destination = tmp_path / "model.bundle"
+    provenance = {
+        "format": 1,
+        "checkpoint": {"id": "example/model", "revision": "b" * 40},
+        "build": {"source_revision": "a" * 40},
+        "request": {},
+    }
+    writer = BundleWriter(destination)
+    writer.set_header(family="family", task="text_generation", backend="trt")
+    writer.add_bytes("engine.plan", b"plan")
+    writer.set_provenance(provenance)
+
+    writer.finish()
+
+    header, payload_and_trailer = _read_bundle(destination)
+    raw_provenance = json.dumps(provenance, separators=(",", ":")).encode()
+    assert header["sections"] == {"engine.plan": {"offset": 0, "length": 4}}
+    assert "provenance.json" not in header["sections"]
+    assert payload_and_trailer == (
+        b"plan"
+        + raw_provenance
+        + struct.pack("<Q", len(raw_provenance))
+        + BUNDLE_PROVENANCE_MAGIC
+    )
+    assert read_bundle_provenance(destination) == provenance
+
+
+def test_provenance_must_be_one_json_object(tmp_path: Path) -> None:
+    writer = BundleWriter(tmp_path / "model.bundle")
+    with pytest.raises(TypeError, match="JSON object"):
+        writer.set_provenance([])
+    writer.set_provenance({"format": 1})
+    with pytest.raises(RuntimeError, match="already set"):
+        writer.set_provenance({"format": 1})
+    writer.abort()
 
 
 def test_writer_rejects_duplicate_and_empty_section_names(tmp_path: Path) -> None:

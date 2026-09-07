@@ -11,7 +11,13 @@ import re
 from pathlib import Path
 from typing import Sequence
 
-from .build import BuildRequest, _load_family, build, resolve_source_revision
+from .build import (
+    BuildRequest,
+    _IMMUTABLE_CHECKPOINT_REVISION,
+    _load_family,
+    build,
+    resolve_source_revision,
+)
 from .model_support import load_model_metadata, resolve_family
 
 
@@ -77,11 +83,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command != "build":
         raise AssertionError(f"unhandled command: {args.command}")
     source_is_local = Path(args.model).is_dir()
-    checkpoint_revision = _checkpoint_revision(
-        model_dir,
-        requested=args.revision,
-        require_exact=not source_is_local,
-    )
+    if source_is_local and not args.checkpoint_id:
+        raise ValueError("--checkpoint-id is required when MODEL is a local directory")
+    checkpoint_revision = _checkpoint_revision(model_dir, requested=args.revision)
     task = args.task or support.default_task
     if task not in support.tasks:
         raise ValueError(
@@ -127,22 +131,18 @@ def _resolve_model(model: str, revision: str | None) -> Path:
     return Path(snapshot_download(repo_id=model, revision=revision))
 
 
-def _checkpoint_revision(
-    model_dir: Path, *, requested: str | None, require_exact: bool
-) -> str:
+def _checkpoint_revision(model_dir: Path, *, requested: str | None) -> str:
     resolved = model_dir.name.lower() if model_dir.parent.name == "snapshots" else ""
     if _EXACT_REVISION.fullmatch(resolved):
         return resolved
     requested = (requested or "").strip().lower()
-    if _EXACT_REVISION.fullmatch(requested):
+    if _IMMUTABLE_CHECKPOINT_REVISION.fullmatch(requested):
         return requested
     if requested:
-        raise ValueError("checkpoint revision must be an exact 40-character Git SHA")
-    if require_exact:
         raise ValueError(
-            "Hugging Face model resolution did not produce an exact 40-character commit SHA"
+            "checkpoint revision must be an exact Git SHA or namespaced immutable revision"
         )
-    return requested
+    raise ValueError("checkpoint revision is required and must identify immutable content")
 
 
 def _source_revision() -> str:

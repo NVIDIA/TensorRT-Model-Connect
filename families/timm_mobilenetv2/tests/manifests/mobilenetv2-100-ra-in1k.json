@@ -1,6 +1,7 @@
 {
   "name": "mobilenetv2-100-ra-in1k",
   "hf_id": "timm/mobilenetv2_100.ra_in1k",
+  "hf_revision": "5afa12513b048c79b9147a5d210e9bdc50035481",
   "bundle": "mobilenetv2-100-ra-in1k.bundle",
   "family": "timm_mobilenetv2",
   "task": "classification",

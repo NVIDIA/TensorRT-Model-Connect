@@ -17,6 +17,7 @@ from typing import Any, BinaryIO, Iterator
 
 
 BUNDLE_MAGIC = b"BUNDLE\x01\x00"
+BUNDLE_PROVENANCE_MAGIC = b"PROV\x01\x00\x00\x00"
 _FORMAT = 1
 _MAX_UINT64 = (1 << 64) - 1
 _MAX_HEADER_SIZE = 100 * 1024 * 1024
@@ -38,8 +39,8 @@ def _validate_nonempty_string(field: str, value: object) -> str:
     return value
 
 
-def read_bundle_section(path: str | Path, name: str) -> bytes:
-    """Read one named section from a validated bundle file."""
+def read_bundle_provenance(path: str | Path) -> Any:
+    """Read the core-owned provenance trailer from a bundle file."""
 
     bundle_path = Path(path)
     with bundle_path.open("rb") as bundle:
@@ -55,29 +56,29 @@ def read_bundle_section(path: str | Path, name: str) -> bytes:
         if len(raw_header) != header_size:
             raise ValueError(f"{bundle_path} has a truncated header")
         header = json.loads(raw_header)
-        sections = header.get("sections") if isinstance(header, dict) else None
-        location = sections.get(name) if isinstance(sections, dict) else None
-        if not isinstance(location, dict):
-            raise ValueError(f"{bundle_path} has no {name!r} section")
-        offset = location.get("offset")
-        length = location.get("length")
-        if not isinstance(offset, int) or not isinstance(length, int):
-            raise ValueError(f"{bundle_path} has an invalid {name!r} section")
-        data_start = len(BUNDLE_MAGIC) + 8 + header_size
+        if not isinstance(header, dict):
+            raise ValueError(f"{bundle_path} has an invalid header")
+        minimum_start = len(BUNDLE_MAGIC) + 8 + header_size
         file_size = bundle_path.stat().st_size
-        if offset < 0 or length < 0 or data_start + offset + length > file_size:
-            raise ValueError(f"{bundle_path} has an invalid {name!r} section range")
-        bundle.seek(data_start + offset)
-        data = bundle.read(length)
-        if len(data) != length:
-            raise ValueError(f"{bundle_path} has a truncated {name!r} section")
-        return data
-
-
-def read_bundle_json(path: str | Path, name: str) -> Any:
-    """Read one named JSON section from a validated bundle file."""
-
-    return json.loads(read_bundle_section(path, name).decode("utf-8"))
+        footer_size = 8 + len(BUNDLE_PROVENANCE_MAGIC)
+        if file_size < minimum_start + footer_size:
+            raise ValueError(f"{bundle_path} has no provenance trailer")
+        bundle.seek(file_size - len(BUNDLE_PROVENANCE_MAGIC))
+        if bundle.read(len(BUNDLE_PROVENANCE_MAGIC)) != BUNDLE_PROVENANCE_MAGIC:
+            raise ValueError(f"{bundle_path} has no provenance trailer")
+        bundle.seek(file_size - footer_size)
+        provenance_size = struct.unpack("<Q", bundle.read(8))[0]
+        provenance_start = file_size - footer_size - provenance_size
+        if provenance_size > _MAX_HEADER_SIZE or provenance_start < minimum_start:
+            raise ValueError(f"{bundle_path} has an invalid provenance trailer")
+        bundle.seek(provenance_start)
+        raw_provenance = bundle.read(provenance_size)
+        if len(raw_provenance) != provenance_size:
+            raise ValueError(f"{bundle_path} has a truncated provenance trailer")
+        provenance = json.loads(raw_provenance.decode("utf-8"))
+        if not isinstance(provenance, dict):
+            raise ValueError(f"{bundle_path} provenance must be a JSON object")
+        return provenance
 
 
 class BundleWriter:
@@ -90,6 +91,7 @@ class BundleWriter:
                 f"bundle output directory does not exist: {self._destination.parent}"
             )
         self._header: dict[str, Any] | None = None
+        self._provenance: bytes | None = None
         self._sections: list[tuple[str, Path]] = []
         self._section_names: set[str] = set()
         self._staging_dir: Path | None = None
@@ -130,6 +132,20 @@ class BundleWriter:
             "task": _validate_id("task", task),
             "backend": _validate_id("backend", backend),
         }
+
+    def set_provenance(self, value: Any) -> None:
+        """Set the core-owned provenance trailer exactly once."""
+
+        self._ensure_writable()
+        if self._provenance is not None:
+            raise RuntimeError("bundle provenance is already set")
+        if not isinstance(value, dict):
+            raise TypeError("bundle provenance must be a JSON object")
+        self._provenance = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        if len(self._provenance) > _MAX_HEADER_SIZE:
+            raise ValueError("bundle provenance exceeds the 100 MiB runtime limit")
 
     @contextmanager
     def open_section(self, name: str) -> Iterator[BinaryIO]:
@@ -207,6 +223,10 @@ class BundleWriter:
                 for _, section_path in self._sections:
                     with section_path.open("rb") as section:
                         shutil.copyfileobj(section, output)
+                if self._provenance is not None:
+                    output.write(self._provenance)
+                    output.write(struct.pack("<Q", len(self._provenance)))
+                    output.write(BUNDLE_PROVENANCE_MAGIC)
             os.replace(temporary_path, self._destination)
             temporary_path = None
         finally:

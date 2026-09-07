@@ -31,10 +31,13 @@ resolved API directly.
 `model_dir` is already local at this boundary. The selected family alone
 decides whether that directory is a Hugging Face snapshot or a prepared
 checkpoint; `BuildRequest` does not perform another discovery pass.
-Callers of this low-level API should pass the canonical checkpoint ID and exact
-checkpoint revision. `resolve_source_revision()` accepts an explicit SHA,
+Callers of this low-level API must pass the canonical checkpoint ID and an
+immutable checkpoint revision. Hugging Face inputs use an exact commit SHA;
+other stores use a namespaced immutable revision such as `ngc:1.0.1_onnx`.
+`resolve_source_revision()` accepts an explicit SHA,
 `TRTMC_ENGINE_BUILD_REVISION`, `GITHUB_SHA`, or a Git checkout and fails when
-none yields an exact source commit.
+none yields an exact source commit. Automatic checkout resolution also rejects
+a dirty worktree.
 
 ## Optional graph transform
 
@@ -61,6 +64,7 @@ build(BuildRequest(
     task="text_generation",
     precision="fp16",
     graph_transform=replace_subgraph,
+    graph_transform_id="example:replace-subgraph-v1",
 ))
 ```
 
@@ -69,6 +73,9 @@ subgraph TensorRT can express. It must reconnect the replacement in place and
 raise on an invalid graph; a failure stops serialization and aborts bundle
 publication. Normal builds do not install the hook. There is no graph IR,
 registry, fingerprint, hash, fallback, or runtime Python path.
+`graph_transform_id` is a required stable identity for the callback and is part
+of provenance, so two transform implementations cannot silently share a cache
+identity.
 
 `tensor_parallel_size` and `context_parallel_size` are direct request fields,
 not an options bag. Every family must either implement the requested value or

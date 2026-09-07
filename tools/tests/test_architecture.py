@@ -10,6 +10,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 
 REPO = Path(__file__).resolve().parents[2]
 FAMILIES = REPO / "families"
@@ -552,6 +554,7 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
         "family",
         "output_path",
         "graph_transform",
+        "graph_transform_id",
         "source_revision",
     }
 
@@ -768,16 +771,20 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
     project_metadata = tomllib.loads(pyproject)
     assert 'requires-python = ">=3.12"' in pyproject
     assert "tomli" not in pyproject
-    declared_dependencies = [
+    locked_metadata_dependencies = [
         *project_metadata["build-system"]["requires"],
-        *project_metadata["project"]["dependencies"],
         *(
             requirement
             for requirements_group in project_metadata["project"]["optional-dependencies"].values()
             for requirement in requirements_group
         ),
     ]
-    assert all(exact_requirement.fullmatch(line) for line in declared_dependencies)
+    assert all(exact_requirement.fullmatch(line) for line in locked_metadata_dependencies)
+    project_dependencies = {
+        Requirement(line).name.lower().replace("-", "_"): Requirement(line)
+        for line in project_metadata["project"]["dependencies"]
+    }
+    assert all(requirement.specifier for requirement in project_dependencies.values())
     optional = pyproject.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
     assert set(re.findall(r"^([a-z][a-z0-9_-]*)\s*=", optional, re.MULTILINE)) == {
         "cutedsl",
@@ -794,6 +801,20 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
             assert exact_requirement.fullmatch(line), (
                 f"family dependency must use one exact version: {path.relative_to(REPO)}:{line}"
             )
+            family_requirement = Requirement(line)
+            shared_requirement = project_dependencies.get(
+                family_requirement.name.lower().replace("-", "_")
+            )
+            if shared_requirement is not None:
+                family_version = next(
+                    specifier.version
+                    for specifier in family_requirement.specifier
+                    if specifier.operator == "=="
+                )
+                assert shared_requirement.specifier.contains(family_version), (
+                    f"family dependency conflicts with project compatibility contract: "
+                    f"{path.relative_to(REPO)}:{line} vs {shared_requirement}"
+                )
             assert not normalized.startswith(("-r", "--requirement", "-c", "--constraint"))
             assert not normalized.startswith(("-e", "--editable", "./", "../", "/", "file:"))
             assert " @ file:" not in normalized
@@ -817,6 +838,7 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
         "ml_dtypes==0.5.4",
         "numpy==1.26.4",
         "onnx==1.21.0",
+        "packaging==26.2",
         "Pillow==12.2.0",
         "protobuf==7.35.0",
         "pytest==8.4.2",
