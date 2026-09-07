@@ -27,6 +27,25 @@ def _read_bundle(path: Path) -> tuple[dict, bytes]:
     return json.loads(data[header_start:header_end]), data[header_end:]
 
 
+def _write_raw_bundle(
+    path: Path, header: object, *, payload: bytes = b"", provenance: object | None = None
+) -> None:
+    raw_header = json.dumps(header, separators=(",", ":")).encode()
+    raw_provenance = json.dumps(
+        provenance if provenance is not None else {"format": 1},
+        separators=(",", ":"),
+    ).encode()
+    path.write_bytes(
+        BUNDLE_MAGIC
+        + struct.pack("<Q", len(raw_header))
+        + raw_header
+        + payload
+        + raw_provenance
+        + struct.pack("<Q", len(raw_provenance))
+        + BUNDLE_PROVENANCE_MAGIC
+    )
+
+
 def test_writer_streams_sections_and_emits_only_the_fixed_header(tmp_path: Path) -> None:
     destination = tmp_path / "model.bundle"
     writer = BundleWriter(destination)
@@ -81,6 +100,68 @@ def test_writer_appends_provenance_outside_family_sections(tmp_path: Path) -> No
         + BUNDLE_PROVENANCE_MAGIC
     )
     assert read_bundle_provenance(destination) == provenance
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {
+            "format": 1,
+            "family": "family",
+            "task": "text_generation",
+            "backend": "trt",
+        },
+        {
+            "format": 1,
+            "family": "family",
+            "task": "text_generation",
+            "backend": "trt",
+            "sections": {},
+            "model_id": "legacy",
+        },
+        {
+            "format": 1,
+            "family": "family",
+            "task": "text_generation",
+            "backend": "trt",
+            "sections": {"engine.plan": {"offset": 0}},
+        },
+        {
+            "format": 1,
+            "family": "family",
+            "task": "text_generation",
+            "backend": "trt",
+            "sections": {"engine.plan": {"offset": 0, "length": 1}},
+        },
+    ],
+    ids=("missing-sections", "unsupported-field", "incomplete-section", "section-bounds"),
+)
+def test_provenance_reader_rejects_headers_the_runtime_rejects(
+    tmp_path: Path, header: object
+) -> None:
+    destination = tmp_path / "model.bundle"
+    _write_raw_bundle(destination, header)
+
+    with pytest.raises(ValueError):
+        read_bundle_provenance(destination)
+
+
+def test_provenance_reader_rejects_a_non_object_trailer(tmp_path: Path) -> None:
+    destination = tmp_path / "model.bundle"
+    _write_raw_bundle(
+        destination,
+        {
+            "format": 1,
+            "family": "family",
+            "task": "text_generation",
+            "backend": "trt",
+            "sections": {},
+        },
+        provenance=[],
+    )
+
+    with pytest.raises(ValueError, match="JSON object"):
+        read_bundle_provenance(destination)
 
 
 def test_provenance_must_be_one_json_object(tmp_path: Path) -> None:

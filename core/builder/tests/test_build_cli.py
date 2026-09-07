@@ -246,11 +246,32 @@ def test_build_command_forwards_resolved_source_revision(
 
 
 def test_local_checkpoint_rejects_a_non_exact_requested_revision(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="namespaced immutable revision"):
+    with pytest.raises(ValueError, match="resolved provider version"):
         build_cli._checkpoint_revision(
             tmp_path / "local-checkpoint",
             requested="main",
         )
+
+
+@pytest.mark.parametrize("revision", ["hf:main", "ngc:version:latest"])
+def test_local_checkpoint_rejects_a_mutable_namespaced_revision(
+    tmp_path: Path, revision: str
+) -> None:
+    with pytest.raises(ValueError, match="resolved provider version"):
+        build_cli._checkpoint_revision(
+            tmp_path / "local-checkpoint",
+            requested=revision,
+        )
+
+
+def test_local_checkpoint_accepts_a_resolved_provider_version(tmp_path: Path) -> None:
+    assert (
+        build_cli._checkpoint_revision(
+            tmp_path / "local-checkpoint",
+            requested="ngc:version:1.0.1_onnx",
+        )
+        == "ngc:version:1.0.1_onnx"
+    )
 
 
 def test_local_checkpoint_requires_canonical_id_and_revision(tmp_path: Path) -> None:

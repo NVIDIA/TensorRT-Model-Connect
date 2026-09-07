@@ -5,7 +5,7 @@
   "task": "pose_hypothesis_refinement",
   "precision": "fp16",
   "checkpoint_id": "nvidia/isaac/foundationpose",
-  "checkpoint_revision": "ngc:1.0.1_onnx",
+  "checkpoint_revision": "ngc:version:1.0.1_onnx",
   "external_files": [
     {
       "path": "refine_model.onnx",

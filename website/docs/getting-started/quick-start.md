@@ -44,8 +44,9 @@ only the selected `families.gpt2.model` and calls `build(request, writer)` once.
 A prepared local snapshot can be passed in place of the model ID. Pass its
 canonical model name with `--checkpoint-id` and its exact commit with
 `--revision`; both are required so the resulting provenance is equivalent to a
-direct download. Non-Hugging-Face stores may use a namespaced immutable revision
-such as `ngc:1.0.1_onnx`.
+direct download. Non-Hugging-Face stores may use a resolved provider
+version-object ID such as `ngc:version:1.0.1_onnx`; mutable aliases such as
+`latest` are rejected.
 
 For a wheel install, resolve its native runtime directory directly from the
 installed package:

@@ -30,8 +30,9 @@ trailer followed by its unsigned little-endian 64-bit length and the eight-byte
 it does not reserve a family section name or change the fixed v1 header. It
 records the canonical checkpoint ID, its immutable revision, the exact TRTMC
 source commit, and every build-affecting request option. A Hugging Face revision
-is an exact commit; another source uses a namespaced immutable revision such as
-`ngc:1.0.1_onnx`.
+is an exact commit; another source uses the provider's resolved version-object
+ID, for example `ngc:version:1.0.1_onnx`. Mutable branches, channels, and aliases
+are not valid provenance identities.
 
 `trtmc inspect BUNDLE` returns the trailer alongside the fixed header and
 section table. The CLI fails instead of publishing a bundle when checkpoint

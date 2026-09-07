@@ -21,9 +21,32 @@ from .graph_transform import GraphTransform, graph_transform
 
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 _EXACT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
-_IMMUTABLE_CHECKPOINT_REVISION = re.compile(
-    r"(?:[0-9a-f]{40}|[a-z][a-z0-9_.-]*:[A-Za-z0-9][A-Za-z0-9_.-]*)\Z"
+_PROVIDER_VERSION_REVISION = re.compile(
+    r"[a-z][a-z0-9_.-]*:version:(?P<version>[A-Za-z0-9][A-Za-z0-9_.-]*)\Z"
 )
+_MUTABLE_REVISION_ALIASES = frozenset(
+    {"dev", "head", "latest", "main", "master", "nightly", "release", "stable"}
+)
+
+
+def _is_exact_artifact_revision(value: str) -> bool:
+    if _EXACT_REVISION.fullmatch(value):
+        return True
+    match = _PROVIDER_VERSION_REVISION.fullmatch(value)
+    return bool(
+        match and match.group("version").lower() not in _MUTABLE_REVISION_ALIASES
+    )
+
+
+def validate_checkpoint_revision(value: object) -> str:
+    """Return one resolved checkpoint identity or reject mutable labels."""
+
+    if not isinstance(value, str) or not _is_exact_artifact_revision(value):
+        raise ValueError(
+            "checkpoint revision must be an exact Git SHA or resolved provider version "
+            "ID formatted as '<provider>:version:<id>'"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -56,13 +79,8 @@ class BuildRequest:
     def __post_init__(self) -> None:
         if not self.precision:
             raise ValueError("precision must be non-empty")
-        if (
-            self.checkpoint_revision
-            and _IMMUTABLE_CHECKPOINT_REVISION.fullmatch(self.checkpoint_revision) is None
-        ):
-            raise ValueError(
-                "checkpoint_revision must be an exact Git SHA or namespaced immutable revision"
-            )
+        if self.checkpoint_revision:
+            validate_checkpoint_revision(self.checkpoint_revision)
         if self.source_revision and _EXACT_REVISION.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character Git SHA")
         _validate_id("family", self.family)
@@ -93,10 +111,11 @@ class BuildRequest:
             raise ValueError("graph_transform and graph_transform_id must be provided together")
         if (
             self.graph_transform_id
-            and _IMMUTABLE_CHECKPOINT_REVISION.fullmatch(self.graph_transform_id) is None
+            and not _is_exact_artifact_revision(self.graph_transform_id)
         ):
             raise ValueError(
-                "graph_transform_id must be an exact Git SHA or namespaced immutable revision"
+                "graph_transform_id must be an exact Git SHA or resolved provider version "
+                "ID formatted as '<provider>:version:<id>'"
             )
 
 

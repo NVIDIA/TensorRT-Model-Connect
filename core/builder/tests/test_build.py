@@ -45,6 +45,14 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
     assert request.dynamic_kv_cache is False
 
 
+def test_build_request_accepts_a_resolved_provider_version(tmp_path: Path) -> None:
+    request = replace(
+        _request(tmp_path), checkpoint_revision="ngc:version:1.0.1_onnx"
+    )
+
+    assert request.checkpoint_revision == "ngc:version:1.0.1_onnx"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -61,6 +69,8 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
         ("graph_transform", object()),
         ("backend", "unknown"),
         ("checkpoint_revision", "main"),
+        ("checkpoint_revision", "hf:main"),
+        ("checkpoint_revision", "ngc:version:latest"),
         ("source_revision", "dirty"),
     ],
 )
@@ -84,7 +94,7 @@ def test_graph_transform_requires_a_stable_identity(tmp_path: Path) -> None:
         replace(_request(tmp_path), graph_transform=lambda _network, _index: None)
     with pytest.raises(ValueError, match="provided together"):
         replace(_request(tmp_path), graph_transform_id="example:transform-v1")
-    with pytest.raises(ValueError, match="namespaced immutable revision"):
+    with pytest.raises(ValueError, match="resolved provider version"):
         replace(
             _request(tmp_path),
             graph_transform=lambda _network, _index: None,
@@ -370,7 +380,7 @@ def test_build_runs_graph_transform_before_family_engine_serialization(
     request = replace(
         _request(tmp_path),
         graph_transform=transform,
-        graph_transform_id="example:replace-subgraph-v1",
+        graph_transform_id="c" * 40,
     )
     monkeypatch.setattr(build_core, "BundleWriter", FakeWriter)
     monkeypatch.setattr(

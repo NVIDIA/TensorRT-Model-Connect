@@ -40,6 +40,18 @@ def test_catalog_reads_family_owned_manifests_without_a_registry() -> None:
     assert distilgpt2.status == "ready"
 
 
+def test_catalog_rejects_a_mutable_checkpoint_revision(tmp_path: Path) -> None:
+    manifest = json.loads(
+        (REPO / "families/gpt2/tests/manifests/distilgpt2.json").read_text()
+    )
+    manifest["hf_revision"] = "main"
+    manifest_path = tmp_path / "model.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(BenchmarkError, match="mutable checkpoint_revision"):
+        ManifestCatalog(tmp_path).resolve(str(manifest_path))
+
+
 def test_case_resolves_current_task_and_manifest_fields(tmp_path: Path) -> None:
     model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
     case = resolve_case(model, tmp_path / "model.bundle")
@@ -284,6 +296,10 @@ def test_bundle_cache_reuses_an_exact_build_identity(tmp_path: Path, monkeypatch
 
     assert resolved[0].bundle_path == bundle
     assert records[0].status == "reused"
+
+    bundle.write_bytes(bundle.read_bytes().replace(b'"sections"', b'"sectionz"', 1))
+    with pytest.raises(BenchmarkError, match="bundle provenance does not match"):
+        builder.prepare((case,), allow_build=False, rebuild=False, dry_run=False)
 
 
 def _worker(tmp_path: Path) -> Path:

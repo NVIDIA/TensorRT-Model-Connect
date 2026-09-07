@@ -39,6 +39,66 @@ def _validate_nonempty_string(field: str, value: object) -> str:
     return value
 
 
+def _require_exact_keys(
+    value: object, expected: frozenset[str], *, context: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be a JSON object")
+    actual = set(value)
+    unsupported = sorted(actual - expected)
+    if unsupported:
+        raise ValueError(f"{context} contains unsupported field {unsupported[0]!r}")
+    missing = sorted(expected - actual)
+    if missing:
+        raise ValueError(f"{context} missing required field {missing[0]!r}")
+    return value
+
+
+def _require_uint64(value: object, *, field: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= _MAX_UINT64
+    ):
+        raise ValueError(f"{field} must be a non-negative uint64 integer")
+    return value
+
+
+def _validate_bundle_header(
+    header: object, *, data_start: int, payload_end: int, path: Path
+) -> None:
+    parsed = _require_exact_keys(
+        header,
+        frozenset({"format", "family", "task", "backend", "sections"}),
+        context="bundle header",
+    )
+    if _require_uint64(parsed["format"], field="bundle format") != _FORMAT:
+        raise ValueError(f"{path} has an unsupported bundle format")
+    for field in ("family", "task", "backend"):
+        _validate_nonempty_string(f"bundle header {field}", parsed[field])
+    sections = parsed["sections"]
+    if not isinstance(sections, dict):
+        raise ValueError("bundle header sections must be a JSON object")
+    if data_start > payload_end:
+        raise ValueError(f"{path} has an invalid section payload range")
+    payload_size = payload_end - data_start
+    for name, raw_descriptor in sections.items():
+        _validate_nonempty_string("bundle section name", name)
+        descriptor = _require_exact_keys(
+            raw_descriptor,
+            frozenset({"offset", "length"}),
+            context=f"bundle section {name!r}",
+        )
+        offset = _require_uint64(
+            descriptor["offset"], field=f"bundle section {name!r} offset"
+        )
+        length = _require_uint64(
+            descriptor["length"], field=f"bundle section {name!r} length"
+        )
+        if offset > payload_size or length > payload_size - offset:
+            raise ValueError(f"bundle section {name!r} extends outside {path}")
+
+
 def read_bundle_provenance(path: str | Path) -> Any:
     """Read the core-owned provenance trailer from a bundle file."""
 
@@ -56,10 +116,9 @@ def read_bundle_provenance(path: str | Path) -> Any:
         if len(raw_header) != header_size:
             raise ValueError(f"{bundle_path} has a truncated header")
         header = json.loads(raw_header)
-        if not isinstance(header, dict):
-            raise ValueError(f"{bundle_path} has an invalid header")
         minimum_start = len(BUNDLE_MAGIC) + 8 + header_size
-        file_size = bundle_path.stat().st_size
+        bundle.seek(0, os.SEEK_END)
+        file_size = bundle.tell()
         footer_size = 8 + len(BUNDLE_PROVENANCE_MAGIC)
         if file_size < minimum_start + footer_size:
             raise ValueError(f"{bundle_path} has no provenance trailer")
@@ -71,6 +130,12 @@ def read_bundle_provenance(path: str | Path) -> Any:
         provenance_start = file_size - footer_size - provenance_size
         if provenance_size > _MAX_HEADER_SIZE or provenance_start < minimum_start:
             raise ValueError(f"{bundle_path} has an invalid provenance trailer")
+        _validate_bundle_header(
+            header,
+            data_start=minimum_start,
+            payload_end=provenance_start,
+            path=bundle_path,
+        )
         bundle.seek(provenance_start)
         raw_provenance = bundle.read(provenance_size)
         if len(raw_provenance) != provenance_size:

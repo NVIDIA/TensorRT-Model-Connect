@@ -13,10 +13,10 @@ from typing import Sequence
 
 from .build import (
     BuildRequest,
-    _IMMUTABLE_CHECKPOINT_REVISION,
     _load_family,
     build,
     resolve_source_revision,
+    validate_checkpoint_revision,
 )
 from .model_support import load_model_metadata, resolve_family
 
@@ -135,13 +135,9 @@ def _checkpoint_revision(model_dir: Path, *, requested: str | None) -> str:
     resolved = model_dir.name.lower() if model_dir.parent.name == "snapshots" else ""
     if _EXACT_REVISION.fullmatch(resolved):
         return resolved
-    requested = (requested or "").strip().lower()
-    if _IMMUTABLE_CHECKPOINT_REVISION.fullmatch(requested):
-        return requested
+    requested = (requested or "").strip()
     if requested:
-        raise ValueError(
-            "checkpoint revision must be an exact Git SHA or namespaced immutable revision"
-        )
+        return validate_checkpoint_revision(requested)
     raise ValueError("checkpoint revision is required and must identify immutable content")
 
 

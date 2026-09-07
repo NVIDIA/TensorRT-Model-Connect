@@ -33,7 +33,9 @@ decides whether that directory is a Hugging Face snapshot or a prepared
 checkpoint; `BuildRequest` does not perform another discovery pass.
 Callers of this low-level API must pass the canonical checkpoint ID and an
 immutable checkpoint revision. Hugging Face inputs use an exact commit SHA;
-other stores use a namespaced immutable revision such as `ngc:1.0.1_onnx`.
+other stores use the provider's resolved version-object ID, explicitly tagged
+as such, for example `ngc:version:1.0.1_onnx`. Branches, channels, and aliases
+such as `main` or `latest` are rejected.
 `resolve_source_revision()` accepts an explicit SHA,
 `TRTMC_ENGINE_BUILD_REVISION`, `GITHUB_SHA`, or a Git checkout and fails when
 none yields an exact source commit. Automatic checkout resolution also rejects
@@ -64,7 +66,7 @@ build(BuildRequest(
     task="text_generation",
     precision="fp16",
     graph_transform=replace_subgraph,
-    graph_transform_id="example:replace-subgraph-v1",
+    graph_transform_id="94f6e5764b3ae57f775c759ca16e617adcdd28ee",
 ))
 ```
 
