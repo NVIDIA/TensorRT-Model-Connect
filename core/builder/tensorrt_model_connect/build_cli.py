@@ -136,6 +136,8 @@ def _checkpoint_revision(
     requested = (requested or "").strip().lower()
     if _EXACT_REVISION.fullmatch(requested):
         return requested
+    if requested:
+        raise ValueError("checkpoint revision must be an exact 40-character Git SHA")
     if require_exact:
         raise ValueError(
             "Hugging Face model resolution did not produce an exact 40-character commit SHA"

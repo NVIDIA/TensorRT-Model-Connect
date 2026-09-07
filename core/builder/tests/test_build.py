@@ -198,12 +198,12 @@ def test_build_embeds_checkpoint_and_source_provenance(monkeypatch, tmp_path: Pa
     request = BuildRequest(
         model_dir=tmp_path / "model",
         output_path=tmp_path / "model.bundle",
-        checkpoint_id="openai-community/gpt2",
+        checkpoint_id="example-org/example-model",
         checkpoint_revision=checkpoint_revision,
         source_revision=source_revision,
         precision="fp16",
-        family="gpt2",
-        task="text_generation",
+        family="example",
+        task="example_task",
         max_sequence_length=128,
     )
 
@@ -233,13 +233,13 @@ def test_build_embeds_checkpoint_and_source_provenance(monkeypatch, tmp_path: Pa
     assert provenance == {
         "format": 1,
         "checkpoint": {
-            "id": "openai-community/gpt2",
+            "id": "example-org/example-model",
             "revision": checkpoint_revision,
         },
         "build": {"source_revision": source_revision},
         "request": {
-            "family": "gpt2",
-            "task": "text_generation",
+            "family": "example",
+            "task": "example_task",
             "backend": "trt",
             "precision": "fp16",
             "max_sequence_length": 128,
@@ -249,6 +249,48 @@ def test_build_embeds_checkpoint_and_source_provenance(monkeypatch, tmp_path: Pa
             "dynamic_kv_cache": False,
         },
     }
+
+
+def test_build_freezes_source_revision_before_family_build(
+    monkeypatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    source_revision = "a" * 40
+    request = BuildRequest(
+        model_dir=tmp_path / "model",
+        output_path=tmp_path / "model.bundle",
+        checkpoint_id="example-org/example-model",
+        checkpoint_revision="b" * 40,
+        source_revision=source_revision,
+        precision="fp16",
+        family="example",
+        task="example_task",
+    )
+
+    def resolve_source_revision(explicit: str = "") -> str:
+        assert explicit == source_revision
+        events.append("resolve_source_revision")
+        return source_revision
+
+    def family_build(seen_request: BuildRequest, writer) -> None:
+        events.append("family_build")
+        writer.set_header(
+            family=seen_request.family,
+            task=seen_request.task,
+            backend=seen_request.backend,
+        )
+        writer.add_bytes("engine.plan", b"plan")
+
+    monkeypatch.setattr(build_core, "resolve_source_revision", resolve_source_revision)
+    monkeypatch.setattr(
+        build_core,
+        "_load_family",
+        lambda _family: SimpleNamespace(build=family_build),
+    )
+
+    build_core.build(request)
+
+    assert events == ["resolve_source_revision", "family_build"]
 
 
 def test_build_runs_graph_transform_before_family_engine_serialization(

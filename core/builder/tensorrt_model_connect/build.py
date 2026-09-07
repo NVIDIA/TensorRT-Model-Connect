@@ -148,9 +148,10 @@ def build(request: BuildRequest) -> None:
     family_module = _load_family(family)
     writer = BundleWriter(request.output_path)
     try:
+        provenance = _build_provenance(request)
         with graph_transform(request.graph_transform):
             family_module.build(request, writer)
-        writer.add_json("provenance.json", _build_provenance(request))
+        writer.add_json("provenance.json", provenance)
         writer.finish()
     except BaseException:
         writer.abort()

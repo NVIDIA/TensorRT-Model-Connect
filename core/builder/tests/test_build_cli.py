@@ -14,6 +14,16 @@ import pytest
 from tensorrt_model_connect import build_cli
 
 
+def _stub_family_resolution(monkeypatch) -> None:
+    support = SimpleNamespace(tasks=("example_task",), default_task="example_task")
+    monkeypatch.setattr(build_cli, "load_model_metadata", lambda _model_dir: object())
+    monkeypatch.setattr(
+        build_cli,
+        "resolve_family",
+        lambda _metadata: ("example", support),
+    )
+
+
 def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) -> None:
     captured = []
     monkeypatch.setattr(build_cli, "build", captured.append)
@@ -117,9 +127,9 @@ def test_build_command_preserves_resolved_checkpoint_and_source_revisions(
 ) -> None:
     checkpoint_revision = "b" * 40
     source_revision = "a" * 40
-    snapshot = tmp_path / "models--openai-community--gpt2" / "snapshots" / checkpoint_revision
+    snapshot = tmp_path / "models--example-org--example-model" / "snapshots" / checkpoint_revision
     snapshot.mkdir(parents=True)
-    (snapshot / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")
+    (snapshot / "metadata.json").write_text("{}", encoding="utf-8")
     captured = []
 
     monkeypatch.setitem(
@@ -129,12 +139,13 @@ def test_build_command_preserves_resolved_checkpoint_and_source_revisions(
     )
     monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", source_revision)
     monkeypatch.setattr(build_cli, "build", captured.append)
+    _stub_family_resolution(monkeypatch)
 
     assert (
         build_cli.main(
             [
                 "build",
-                "openai-community/gpt2",
+                "example-org/example-model",
                 "--revision",
                 "main",
                 "--output",
@@ -145,7 +156,7 @@ def test_build_command_preserves_resolved_checkpoint_and_source_revisions(
     )
     request = captured[0]
     assert request.model_dir == snapshot
-    assert request.checkpoint_id == "openai-community/gpt2"
+    assert request.checkpoint_id == "example-org/example-model"
     assert request.checkpoint_revision == checkpoint_revision
     assert request.source_revision == source_revision
 
@@ -157,11 +168,12 @@ def test_local_snapshot_can_preserve_a_canonical_checkpoint_id(
     source_revision = "a" * 40
     snapshot = tmp_path / "downloaded-checkpoint"
     snapshot.mkdir()
-    (snapshot / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")
+    (snapshot / "metadata.json").write_text("{}", encoding="utf-8")
     captured = []
 
     monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", source_revision)
     monkeypatch.setattr(build_cli, "build", captured.append)
+    _stub_family_resolution(monkeypatch)
 
     assert (
         build_cli.main(
@@ -169,7 +181,7 @@ def test_local_snapshot_can_preserve_a_canonical_checkpoint_id(
                 "build",
                 str(snapshot),
                 "--checkpoint-id",
-                "openai-community/gpt2",
+                "example-org/example-model",
                 "--revision",
                 checkpoint_revision,
                 "--output",
@@ -180,7 +192,7 @@ def test_local_snapshot_can_preserve_a_canonical_checkpoint_id(
     )
     request = captured[0]
     assert request.model_dir == snapshot
-    assert request.checkpoint_id == "openai-community/gpt2"
+    assert request.checkpoint_id == "example-org/example-model"
     assert request.checkpoint_revision == checkpoint_revision
 
 
@@ -189,11 +201,12 @@ def test_build_command_derives_source_revision_from_the_checkout(
 ) -> None:
     model = tmp_path / "model"
     model.mkdir()
-    (model / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")
+    (model / "metadata.json").write_text("{}", encoding="utf-8")
     captured = []
     monkeypatch.delenv("TRTMC_ENGINE_BUILD_REVISION", raising=False)
     monkeypatch.delenv("GITHUB_SHA", raising=False)
     monkeypatch.setattr(build_cli, "build", captured.append)
+    _stub_family_resolution(monkeypatch)
 
     assert build_cli.main(["build", str(model), "-o", str(tmp_path / "out.bundle")]) == 0
 
@@ -202,6 +215,15 @@ def test_build_command_derives_source_revision_from_the_checkout(
         ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
     ).strip()
     assert captured[0].source_revision == expected
+
+
+def test_local_checkpoint_rejects_a_non_exact_requested_revision(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="exact 40-character Git SHA"):
+        build_cli._checkpoint_revision(
+            tmp_path / "local-checkpoint",
+            requested="main",
+            require_exact=False,
+        )
 
 
 def test_build_command_rejects_a_task_the_family_does_not_own(monkeypatch, tmp_path: Path) -> None:
