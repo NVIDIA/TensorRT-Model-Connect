@@ -9,6 +9,7 @@
 #include "trtmc/task.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <iosfwd>
 #include <string>
 #include <unordered_map>
@@ -60,7 +61,17 @@ struct Command {
     bool cuda_graphs{false};
 };
 
+struct RuntimeRootSearchContext {
+    std::filesystem::path current_directory;
+    std::filesystem::path runtime_library;
+    std::filesystem::path executable;
+    std::string cohort_id;
+    std::string runtime_path;
+};
+
 Command parse_args(int argc, char** argv);
+std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& explicit_root,
+                                 bool require_byok, const RuntimeRootSearchContext& context);
 int dispatch(const Command& command, ITask& task, std::ostream& output);
 void print_usage(std::ostream& output);
 int run(int argc, char** argv, std::ostream& output, std::ostream& error);

@@ -41,29 +41,31 @@ selecting another task supported by the same family. The build then imports
 only the selected `families.gpt2.model` and calls `build(request, writer)` once.
 A prepared local snapshot can be passed in place of the model ID.
 
-For a wheel install, resolve its native runtime directory directly from the
-installed package:
+Run the bundle directly:
 
 ```bash
-TRTMC_RUNTIME_ROOT="$(python -c 'import pathlib, tensorrt_model_connect as m; print(pathlib.Path(m.__file__).parent / "bin")')"
 trtmc run gpt2.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --prompt "Hello" \
   --max-new-tokens 32
 ```
 
-For a native CMake install, point the loader at the directory containing the matching
-`libtrtmc_core.so`, `libtrtmc_runtime.so`, `libtrtmc_backend_trt.so`, and
-`libtrtmc_model_gpt2.so`. The loader reads the bundle header, loads exactly
-those DSOs, and returns the abstract task interface declared by the bundle.
+The CLI reads the bundle family and backend, then selects the first complete,
+single-directory runtime in this order:
 
-```bash
-trtmc run gpt2.bundle \
-  --runtime-root /opt/trtmc/lib \
-  --prompt "Hello" \
-  --max-new-tokens 32
-```
+1. the current directory, when all required libraries match the active build
+   cohort;
+2. the runtime belonging to the active `trtmc` selected through `PATH`,
+   including native CMake and wheel install layouts;
+3. colon-separated directories in `TRTMC_RUNTIME_PATH`.
 
-The shell variable above is only a convenient explicit argument. The CLI never
-searches environment variables, the current directory, or an installed
-fallback runtime.
+A complete GPT-2 TensorRT runtime contains matching `libtrtmc_core.so`,
+`libtrtmc_runtime.so`, `libtrtmc_backend_trt.so`, and
+`libtrtmc_model_gpt2.so` files. Candidates are never combined across
+directories, and the CLI prints the automatically selected directory. If more
+than one installed wheel runtime matches, select one with `--runtime-root DIR`.
+An explicit root bypasses discovery.
+
+Every native artifact carries a build-cohort identity, and automatic discovery
+accepts a directory only when the identity matches the core and runtime already
+loaded by `trtmc`. The platform loader evaluates `LD_LIBRARY_PATH` before the
+CLI starts, so it can determine that active cohort before the search above.

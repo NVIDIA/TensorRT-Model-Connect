@@ -12,6 +12,20 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 
+if(NOT TRTMC_BUILD_COHORT_ID)
+  string(RANDOM LENGTH 32 ALPHABET 0123456789abcdef TRTMC_BUILD_COHORT_ID)
+endif()
+string(LENGTH "${TRTMC_BUILD_COHORT_ID}" _trtmc_build_cohort_id_length)
+if(NOT _trtmc_build_cohort_id_length EQUAL 32 OR
+   NOT TRTMC_BUILD_COHORT_ID MATCHES "^[0-9a-f]+$")
+  message(FATAL_ERROR "TRTMC_BUILD_COHORT_ID must contain exactly 32 lowercase hex characters")
+endif()
+set(_trtmc_build_cohort_symbol "trtmc_build_cohort_${TRTMC_BUILD_COHORT_ID}")
+add_link_options(
+  "LINKER:--defsym=${_trtmc_build_cohort_symbol}=0"
+  "LINKER:--export-dynamic-symbol=${_trtmc_build_cohort_symbol}"
+)
+
 include(GNUInstallDirs)
 find_package(CUDAToolkit REQUIRED)
 find_package(nlohmann_json 3.11 REQUIRED)
@@ -244,6 +258,8 @@ endif()
 option(TRTMC_BUILD_TESTS "Build tests" ON)
 option(TRTMC_BUILD_EXAMPLES "Build examples" ON)
 if(TRTMC_BUILD_TESTS)
+  set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
+
   enable_testing()
 endif()
 
@@ -346,9 +362,12 @@ if(TRTMC_BUILD_TESTS)
   )
   target_link_libraries(test_cli PRIVATE trtmc_cli)
   target_compile_options(test_cli PRIVATE -Wall -Wextra -Wpedantic)
-  add_test(NAME cli COMMAND test_cli)
+  add_test(NAME cli COMMAND test_cli
+    "${_trtmc_test_runtime_root}"
+    $<TARGET_FILE:trtmc_core>
+    $<TARGET_FILE:trtmc_runtime>
+  )
 
-  set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
   add_library(trtmc_test_backend_fake SHARED core/runtime/tests/fake_backend.cpp)
   target_include_directories(trtmc_test_backend_fake PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
   target_link_libraries(trtmc_test_backend_fake PRIVATE CUDA::cudart)
@@ -378,6 +397,7 @@ if(TRTMC_BUILD_TESTS)
     LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
     BUILD_RPATH "\$ORIGIN/../.."
   )
+  add_dependencies(test_cli trtmc_test_backend_fake trtmc_test_family_fake)
 
   add_executable(test_family_loader core/runtime/tests/test_family_loader.cpp)
   target_include_directories(test_family_loader PRIVATE

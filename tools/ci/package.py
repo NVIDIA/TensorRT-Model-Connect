@@ -378,7 +378,7 @@ print(json.dumps({
                     "from pathlib import Path; "
                     "from tensorrt_model_connect.bundle_writer import BundleWriter; "
                     "writer = BundleWriter(Path(__import__('sys').argv[1])); "
-                    "writer.set_header(family='inspect', task='text_generation', backend='trt'); "
+                    "writer.set_header(family='gpt2', task='text_generation', backend='trt'); "
                     "writer.finish()",
                     bundle,
                 ],
@@ -395,8 +395,18 @@ print(json.dumps({
                 env=environment,
             )
             metadata = json.loads(inspected.stdout)
-            if metadata.get("family") != "inspect" or metadata.get("backend") != "trt":
+            if metadata.get("family") != "gpt2" or metadata.get("backend") != "trt":
                 raise CiError("installed trtmc CLI failed bundle inspection")
+            executed = subprocess.run(
+                [executable, "run", bundle],
+                capture_output=True,
+                text=True,
+                cwd=Path("/tmp"),
+                env=environment,
+            )
+            selected = f"Using TRTMC runtime: {bin_dir}\n"
+            if executed.returncode == 0 or selected not in executed.stderr:
+                raise CiError("installed trtmc CLI failed automatic wheel runtime discovery")
         print(f"installed wheel={wheel} trtmc={executable} families={len(packaged)}")
 
 

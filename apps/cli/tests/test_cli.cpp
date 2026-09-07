@@ -7,6 +7,8 @@
 #include "cli/io.h"
 
 #include <cmath>
+#include <cstring>
+#include <elf.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -20,6 +22,8 @@
 namespace {
 
 int failures = 0;
+constexpr char kRuntimeCohort[] = "0123456789abcdef0123456789abcdef";
+constexpr char kForeignCohort[] = "fedcba9876543210fedcba9876543210";
 
 void check(bool condition, const char* name) {
     if (!condition) {
@@ -41,6 +45,137 @@ bool parse_throws(std::vector<std::string> arguments) {
         (void)parse(std::move(arguments));
         return false;
     } catch (const std::invalid_argument&) {
+        return true;
+    }
+}
+
+void touch(const std::filesystem::path& path, const char* contents = "test") {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream file(path);
+    file << contents;
+}
+
+void make_runtime_library(const std::filesystem::path& path, const char* cohort = kRuntimeCohort) {
+    std::filesystem::create_directories(path.parent_path());
+    const std::string section_names{"\0.shstrtab\0.dynstr\0", 19};
+    std::string dynamic_strings(1, '\0');
+    dynamic_strings += "trtmc_build_cohort_";
+    dynamic_strings += cohort;
+    dynamic_strings.push_back('\0');
+
+    const std::size_t section_names_offset = sizeof(Elf64_Ehdr);
+    const std::size_t dynamic_strings_offset = section_names_offset + section_names.size();
+    const std::size_t section_headers_offset =
+        (dynamic_strings_offset + dynamic_strings.size() + 7U) & ~std::size_t{7U};
+    std::vector<char> image(section_headers_offset + 3 * sizeof(Elf64_Shdr), '\0');
+
+    Elf64_Ehdr header{};
+    std::memcpy(header.e_ident, ELFMAG, SELFMAG);
+    header.e_ident[EI_CLASS] = ELFCLASS64;
+    header.e_ident[EI_DATA] = ELFDATA2LSB;
+    header.e_ident[EI_VERSION] = EV_CURRENT;
+    header.e_type = ET_DYN;
+    header.e_machine = EM_X86_64;
+    header.e_version = EV_CURRENT;
+    header.e_ehsize = sizeof(Elf64_Ehdr);
+    header.e_shoff = section_headers_offset;
+    header.e_shentsize = sizeof(Elf64_Shdr);
+    header.e_shnum = 3;
+    header.e_shstrndx = 1;
+    std::memcpy(image.data(), &header, sizeof(header));
+    std::memcpy(image.data() + section_names_offset, section_names.data(), section_names.size());
+    std::memcpy(image.data() + dynamic_strings_offset, dynamic_strings.data(),
+                dynamic_strings.size());
+
+    Elf64_Shdr section_names_header{};
+    section_names_header.sh_name = 1;
+    section_names_header.sh_type = SHT_STRTAB;
+    section_names_header.sh_offset = section_names_offset;
+    section_names_header.sh_size = section_names.size();
+    std::memcpy(image.data() + section_headers_offset + sizeof(Elf64_Shdr), &section_names_header,
+                sizeof(section_names_header));
+    Elf64_Shdr dynamic_strings_header{};
+    dynamic_strings_header.sh_name = 11;
+    dynamic_strings_header.sh_type = SHT_STRTAB;
+    dynamic_strings_header.sh_offset = dynamic_strings_offset;
+    dynamic_strings_header.sh_size = dynamic_strings.size();
+    std::memcpy(image.data() + section_headers_offset + 2 * sizeof(Elf64_Shdr),
+                &dynamic_strings_header, sizeof(dynamic_strings_header));
+
+    std::ofstream file(path, std::ios::binary);
+    file.write(image.data(), static_cast<std::streamsize>(image.size()));
+}
+
+void make_runtime_root(const std::filesystem::path& root, bool with_byok = false,
+                       const char* cohort = kRuntimeCohort) {
+    make_runtime_library(root / "libtrtmc_core.so", cohort);
+    make_runtime_library(root / "libtrtmc_runtime.so", cohort);
+    make_runtime_library(root / "libtrtmc_backend_trt.so", cohort);
+    make_runtime_library(root / "libtrtmc_model_gpt2.so", cohort);
+    if (with_byok)
+        make_runtime_library(root / "libtrtmc_byok_tvm_ffi.so", cohort);
+}
+
+void write_fake_bundle(const std::filesystem::path& path) {
+    static constexpr unsigned char magic[8] = {'B', 'U', 'N', 'D', 'L', 'E', '\x01', '\0'};
+    const std::string header =
+        "{\"format\":1,\"family\":\"fake\",\"task\":\"time_series_forecast\","
+        "\"backend\":\"fake\",\"sections\":{\"runtime.json\":{\"offset\":0,\"length\":2},"
+        "\"engine.plan\":{\"offset\":2,\"length\":4}}}";
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(magic), 8);
+    const std::uint64_t length = header.size();
+    for (int shift = 0; shift < 64; shift += 8)
+        output.put(static_cast<char>((length >> shift) & 0xffU));
+    output.write(header.data(), static_cast<std::streamsize>(header.size()));
+    output.write("{}PLAN", 6);
+}
+
+void check_cli_runtime_discovery(const std::filesystem::path& runtime_root,
+                                 const std::filesystem::path& core_library,
+                                 const std::filesystem::path& runtime_library) {
+    std::filesystem::copy_file(core_library, runtime_root / "libtrtmc_core.so",
+                               std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(runtime_library, runtime_root / "libtrtmc_runtime.so",
+                               std::filesystem::copy_options::overwrite_existing);
+    const auto bundle = runtime_root / "cli-fake.bundle";
+    const auto input = runtime_root / "cli-fake-input.f32";
+    write_fake_bundle(bundle);
+    {
+        const float values[] = {1.0F, 2.0F, 3.0F};
+        std::ofstream output(input, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(values), sizeof(values));
+    }
+
+    const auto previous_directory = std::filesystem::current_path();
+    std::filesystem::current_path(runtime_root);
+    std::vector<std::string> arguments{"trtmc", "forecast", bundle.string(), "--input",
+                                       input.string()};
+    std::vector<char*> argv;
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    std::ostringstream output;
+    std::ostringstream error;
+    const int result = trtmc::cli::run(static_cast<int>(argv.size()), argv.data(), output, error);
+    std::filesystem::current_path(previous_directory);
+    check(result == 0 && error.str() == "Using TRTMC runtime: " + runtime_root.string() + "\n",
+          "CLI executes with a runtime discovered from the current directory");
+    check(output.str().find("\"shape\":[1,3]") != std::string::npos,
+          "automatically discovered runtime dispatches the bundle task");
+
+    std::filesystem::remove(bundle);
+    std::filesystem::remove(input);
+    std::filesystem::remove(runtime_root / "libtrtmc_core.so");
+    std::filesystem::remove(runtime_root / "libtrtmc_runtime.so");
+}
+
+bool resolve_throws(const trtmc::BundleInfo& bundle,
+                    const trtmc::cli::RuntimeRootSearchContext& context, std::string& message) {
+    try {
+        (void)trtmc::cli::resolve_runtime_root(bundle, {}, false, context);
+        return false;
+    } catch (const std::runtime_error& error) {
+        message = error.what();
         return true;
     }
 }
@@ -254,7 +389,7 @@ bool dispatch_throws(const trtmc::cli::Command& command, trtmc::ITask& task) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     const std::vector<std::string> execution_commands{
         "run",
         "encode",
@@ -287,11 +422,120 @@ int main() {
         check(command.runtime_root == "lib", "runtime root is retained");
     }
 
-    check(parse_throws({"trtmc", "run", "model.bundle"}),
-          "execution command requires runtime root");
+    check(parse({"trtmc", "run", "model.bundle"}).runtime_root.empty(),
+          "execution command permits automatic runtime discovery");
     check(parse_throws(
               {"trtmc", "run", "model.bundle", "--runtime-root", "a", "--runtime-root", "b"}),
           "duplicate runtime root rejected");
+
+    const std::filesystem::path runtime_test_root =
+        argc == 4 ? std::filesystem::path(argv[1]).parent_path() / "cli-runtime-root-test"
+                  : std::filesystem::temp_directory_path() / "trtmc-cli-runtime-root-test";
+    std::filesystem::remove_all(runtime_test_root);
+    const trtmc::BundleInfo runtime_bundle{1, "gpt2", "text_generation", "trt", {}};
+    const auto current_root = runtime_test_root / "current";
+    const auto loaded_runtime_root = runtime_test_root / "loaded-runtime";
+    const auto optional_root = runtime_test_root / "optional";
+    make_runtime_root(current_root);
+    make_runtime_root(loaded_runtime_root);
+    make_runtime_root(optional_root);
+
+    trtmc::cli::RuntimeRootSearchContext runtime_context;
+    runtime_context.current_directory = current_root;
+    runtime_context.runtime_library = loaded_runtime_root / "libtrtmc_runtime.so";
+    runtime_context.cohort_id = kRuntimeCohort;
+    runtime_context.runtime_path = optional_root.string();
+    check(trtmc::cli::resolve_runtime_root(runtime_bundle, {}, false, runtime_context) ==
+              current_root.string(),
+          "current directory wins automatic runtime discovery");
+
+    std::filesystem::remove(current_root / "libtrtmc_model_gpt2.so");
+    check(trtmc::cli::resolve_runtime_root(runtime_bundle, {}, false, runtime_context) ==
+              loaded_runtime_root.string(),
+          "incomplete current directory is skipped as a whole runtime cohort");
+
+    const auto malformed_root = runtime_test_root / "malformed";
+    touch(malformed_root / "libtrtmc_core.so", "not an ELF file");
+    std::filesystem::resize_file(malformed_root / "libtrtmc_core.so", 64ULL * 1024ULL * 1024ULL);
+    runtime_context.current_directory = malformed_root;
+    check(trtmc::cli::resolve_runtime_root(runtime_bundle, {}, false, runtime_context) ==
+              loaded_runtime_root.string(),
+          "large malformed candidates are rejected without an unbounded scan");
+
+    const auto wheel_prefix = runtime_test_root / "wheel";
+    const auto wheel_bin = wheel_prefix / "bin";
+    const auto wheel_runtime =
+        wheel_prefix / "lib" / "python3.12" / "dist-packages" / "tensorrt_model_connect" / "bin";
+    touch(wheel_bin / "trtmc");
+    make_runtime_library(wheel_bin / "libtrtmc_core.so");
+    make_runtime_library(wheel_bin / "libtrtmc_runtime.so");
+    make_runtime_root(wheel_runtime);
+    std::filesystem::create_directory_symlink("lib", wheel_prefix / "lib64");
+    runtime_context = {};
+    runtime_context.executable = wheel_bin / "trtmc";
+    runtime_context.runtime_library = wheel_bin / "libtrtmc_runtime.so";
+    runtime_context.cohort_id = kRuntimeCohort;
+    check(trtmc::cli::resolve_runtime_root(runtime_bundle, {}, false, runtime_context) ==
+              wheel_runtime.string(),
+          "wheel runtime is discovered once when lib64 aliases lib");
+
+    const auto second_wheel_runtime =
+        wheel_prefix / "lib" / "python3.13" / "site-packages" / "tensorrt_model_connect" / "bin";
+    make_runtime_root(second_wheel_runtime);
+    std::string discovery_error;
+    check(resolve_throws(runtime_bundle, runtime_context, discovery_error) &&
+              discovery_error.find("Multiple installed TRTMC runtimes") != std::string::npos,
+          "ambiguous matching wheel runtimes require an explicit selection");
+    std::filesystem::remove_all(second_wheel_runtime);
+
+    const auto first_optional = runtime_test_root / "first-optional";
+    const auto second_optional = runtime_test_root / "second-optional";
+    const auto loaded_libraries = runtime_test_root / "loaded-libraries";
+    touch(first_optional / "libtrtmc_backend_trt.so");
+    make_runtime_root(second_optional);
+    make_runtime_library(loaded_libraries / "libtrtmc_runtime.so");
+    runtime_context = {};
+    runtime_context.runtime_library = loaded_libraries / "libtrtmc_runtime.so";
+    runtime_context.cohort_id = kRuntimeCohort;
+    runtime_context.runtime_path = first_optional.string() + ":" + second_optional.string();
+    check(trtmc::cli::resolve_runtime_root(runtime_bundle, {}, false, runtime_context) ==
+              second_optional.string(),
+          "dedicated runtime path preserves directory order");
+
+    const auto byok_root = runtime_test_root / "byok";
+    make_runtime_root(byok_root, true);
+    runtime_context.runtime_path = second_optional.string() + ":" + byok_root.string();
+    check(trtmc::cli::resolve_runtime_root(runtime_bundle, {}, true, runtime_context) ==
+              byok_root.string(),
+          "BYOK discovery requires the extension in the selected runtime cohort");
+
+    const auto explicit_root = runtime_test_root / "explicit-missing";
+    check(trtmc::cli::resolve_runtime_root(runtime_bundle, explicit_root.string(), false,
+                                           runtime_context) == explicit_root.string(),
+          "explicit runtime root bypasses automatic fallback");
+
+    const auto foreign_root = runtime_test_root / "foreign-build";
+    make_runtime_root(foreign_root);
+    make_runtime_library(foreign_root / "libtrtmc_model_gpt2.so", kForeignCohort);
+    runtime_context.runtime_path = foreign_root.string();
+    check(resolve_throws(runtime_bundle, runtime_context, discovery_error),
+          "automatic discovery rejects a foreign family with matching core/runtime files");
+
+    runtime_context = {};
+    runtime_context.current_directory = first_optional;
+    runtime_context.runtime_library = loaded_libraries / "libtrtmc_runtime.so";
+    runtime_context.cohort_id = kRuntimeCohort;
+    runtime_context.runtime_path = (runtime_test_root / "family-only").string();
+    touch(runtime_test_root / "family-only" / "libtrtmc_model_gpt2.so");
+    check(resolve_throws(runtime_bundle, runtime_context, discovery_error),
+          "runtime discovery never combines partial roots");
+    check(discovery_error.find("libtrtmc_backend_trt.so") != std::string::npos &&
+              discovery_error.find("libtrtmc_model_gpt2.so") != std::string::npos &&
+              discovery_error.find("--runtime-root") != std::string::npos,
+          "runtime discovery failure identifies required files and explicit override");
+    std::filesystem::remove_all(runtime_test_root);
+    if (argc == 4)
+        check_cli_runtime_discovery(argv[1], argv[2], argv[3]);
     const auto dynamic_kv =
         parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--kv-cache-size", "1GiB"});
     check(dynamic_kv.kv_cache_size_bytes == 1024ULL * 1024ULL * 1024ULL,
