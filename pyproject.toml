@@ -75,6 +75,7 @@ testpaths = [
     "apps/benchmark/trtmc_benchmark/tests",
     "examples/audio_streaming/test_audio_streaming.py",
     "examples/models/cosmos3/dual_spark/test_cosmos3_dual_spark_source.py",
+    "examples/models/lerobot_act/recorded_control/test_recorded_control_source.py",
     "examples/models/nemotron_voicechat/full_duplex/test_voicechat_full_duplex_source.py",
     "tools/tests",
 ]

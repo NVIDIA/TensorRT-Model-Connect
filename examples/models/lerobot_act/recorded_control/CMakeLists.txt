@@ -17,6 +17,13 @@ set(TRTMC_ENABLE_BYOK OFF CACHE BOOL "" FORCE)
 
 add_subdirectory("${TRTMC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/trtmc")
 
+# load_task resolves the backend and family DSO from one runtime root. The
+# nested Model Connect build already writes the core/backend libraries here;
+# keep this example's family DSO beside them.
+set_target_properties(trtmc_model_lerobot_act PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/trtmc"
+)
+
 add_executable(trtmc_lerobot_act_recorded_control main.cpp)
 target_compile_features(trtmc_lerobot_act_recorded_control PRIVATE cxx_std_17)
 target_compile_options(trtmc_lerobot_act_recorded_control PRIVATE -Wall -Wextra -Wpedantic)
