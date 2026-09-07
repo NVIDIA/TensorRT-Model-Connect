@@ -162,6 +162,10 @@ def build_gate_census(
                 variant["policy"]["policy_mode"] == "blocking"
                 for variant in variants
             ),
+            "model_plugin_variants": sum(
+                variant["policy"]["policy_mode"] == "model_plugin"
+                for variant in variants
+            ),
             "observation_only_variants": sum(
                 variant["policy"]["policy_mode"] == "observation_only"
                 for variant in variants

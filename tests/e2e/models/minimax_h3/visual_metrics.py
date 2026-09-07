@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Streaming decoded-video metrics for the MiniMax-H3 visual quality contract.
+"""Decoded-video metrics for the MiniMax-H3 visual parity contract.
 
-The acceptance contract deliberately compares low-frequency structure and motion
-instead of requiring pixel identity.  Diffusion implementations can differ in
-high-frequency texture while producing the same coherent scene.  Pixel-space
-PSNR and MAE are still reported to aid debugging, but never gate acceptance.
+The acceptance contract compares low-frequency scene layout, chroma, and motion
+instead of requiring pixel identity. Diffusion
+implementations can differ in high-frequency texture while producing the same
+coherent scene. Pixel-space PSNR and MAE remain diagnostic only.
 """
 
 from __future__ import annotations
@@ -27,14 +27,13 @@ REQUIRED_VISUAL_THRESHOLDS = frozenset(
         "low_frequency_block_size",
         "minimum_frame_low_frequency_correlation",
         "minimum_mean_low_frequency_correlation",
-        "minimum_brightness_profile_correlation",
         "maximum_frame_brightness_absolute_error",
-        "minimum_temporal_activity_correlation",
         "maximum_temporal_activity_absolute_error",
         "minimum_temporal_activity_ratio",
         "maximum_temporal_activity_ratio",
         "minimum_frame_std_ratio",
         "maximum_frame_std_ratio",
+        "maximum_chroma_absolute_error_p95",
     }
 )
 
@@ -57,6 +56,9 @@ class DecodedVisualMetrics:
     temporal_activity_ratio: float
     frame_std_ratio_minimum: float
     frame_std_ratio_maximum: float
+    chroma_absolute_error_mean: float
+    chroma_absolute_error_p95: float
+    chroma_absolute_error_maximum: float
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,7 @@ def compute_decoded_visual_metrics(
     reference_activity: list[float] = []
     candidate_activity: list[float] = []
     std_ratios: list[float] = []
+    chroma_errors: list[float] = []
     previous_reference_blocks: np.ndarray | None = None
     previous_candidate_blocks: np.ndarray | None = None
 
@@ -186,6 +189,19 @@ def compute_decoded_visual_metrics(
         frame_correlations.append(_correlation(reference_blocks, candidate_blocks))
         reference_brightness.append(float(reference_blocks.mean()))
         candidate_brightness.append(float(candidate_blocks.mean()))
+
+        luma_weights = np.asarray((0.2126, 0.7152, 0.0722), dtype=np.float32)
+        reference_luma = np.sum(reference_blocks * luma_weights, axis=-1)
+        candidate_luma = np.sum(candidate_blocks * luma_weights, axis=-1)
+        reference_chroma = np.stack(
+            (reference_blocks[..., 2] - reference_luma, reference_blocks[..., 0] - reference_luma),
+            axis=-1,
+        )
+        candidate_chroma = np.stack(
+            (candidate_blocks[..., 2] - candidate_luma, candidate_blocks[..., 0] - candidate_luma),
+            axis=-1,
+        )
+        chroma_errors.append(float(np.mean(np.abs(candidate_chroma - reference_chroma))))
 
         reference_std = float(reference_frame.std(dtype=np.float64))
         candidate_std = float(candidate_frame.std(dtype=np.float64))
@@ -243,6 +259,9 @@ def compute_decoded_visual_metrics(
         temporal_activity_ratio=activity_ratio,
         frame_std_ratio_minimum=float(min(std_ratios)),
         frame_std_ratio_maximum=float(max(std_ratios)),
+        chroma_absolute_error_mean=float(np.mean(chroma_errors)),
+        chroma_absolute_error_p95=float(np.quantile(chroma_errors, 0.95)),
+        chroma_absolute_error_maximum=float(np.max(chroma_errors)),
     )
 
 
@@ -268,6 +287,9 @@ def evaluate_visual_quality(
         raise ValueError("invalid MiniMax-H3 temporal activity ratio interval")
     if not (0.0 < minimum_std_ratio <= maximum_std_ratio):
         raise ValueError("invalid MiniMax-H3 frame standard-deviation ratio interval")
+    maximum_chroma_error = float(thresholds["maximum_chroma_absolute_error_p95"])
+    if not math.isfinite(maximum_chroma_error) or maximum_chroma_error <= 0.0:
+        raise ValueError("maximum_chroma_absolute_error_p95 must be positive and finite")
 
     gates = {
         "num_frames": VisualGateResult(
@@ -289,6 +311,14 @@ def evaluate_visual_quality(
             float(metrics.shape[3]), 3.0, "==", metrics.shape[3] == 3
         ),
         "finite_pixels": VisualGateResult(1.0, 1.0, "==", True),
+        "chroma_absolute_error_p95": VisualGateResult(
+            metrics.chroma_absolute_error_p95,
+            float(thresholds["maximum_chroma_absolute_error_p95"]),
+            "<=",
+            metrics.chroma_absolute_error_p95
+            <= float(thresholds["maximum_chroma_absolute_error_p95"]),
+            "Mean absolute error in aligned B-Y and R-Y channels.",
+        ),
         "frame_low_frequency_correlation_minimum": VisualGateResult(
             metrics.frame_low_frequency_correlation_minimum,
             float(thresholds["minimum_frame_low_frequency_correlation"]),
@@ -305,10 +335,10 @@ def evaluate_visual_quality(
         ),
         "brightness_profile_correlation": VisualGateResult(
             metrics.brightness_profile_correlation,
-            float(thresholds["minimum_brightness_profile_correlation"]),
-            ">=",
-            metrics.brightness_profile_correlation
-            >= float(thresholds["minimum_brightness_profile_correlation"]),
+            None,
+            "diagnostic",
+            True,
+            "Pearson correlation is unstable for nearly constant brightness profiles.",
         ),
         "frame_brightness_absolute_error_maximum": VisualGateResult(
             metrics.frame_brightness_absolute_error_maximum,
@@ -319,10 +349,10 @@ def evaluate_visual_quality(
         ),
         "temporal_activity_correlation": VisualGateResult(
             metrics.temporal_activity_correlation,
-            float(thresholds["minimum_temporal_activity_correlation"]),
-            ">=",
-            metrics.temporal_activity_correlation
-            >= float(thresholds["minimum_temporal_activity_correlation"]),
+            None,
+            "diagnostic",
+            True,
+            "Pearson correlation is unstable for low-amplitude activity profiles.",
         ),
         "temporal_activity_absolute_error_maximum": VisualGateResult(
             metrics.temporal_activity_absolute_error_maximum,
@@ -371,6 +401,12 @@ def evaluate_visual_quality(
         ),
         "maximum_absolute_error": VisualGateResult(
             metrics.maximum_absolute_error, None, "diagnostic", True
+        ),
+        "chroma_absolute_error_mean": VisualGateResult(
+            metrics.chroma_absolute_error_mean, None, "diagnostic", True
+        ),
+        "chroma_absolute_error_maximum": VisualGateResult(
+            metrics.chroma_absolute_error_maximum, None, "diagnostic", True
         ),
     }
     return gates

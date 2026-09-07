@@ -76,17 +76,43 @@ def infer_user_contract(raw: dict[str, Any], reference_family: str) -> str:
     return str(raw.get("user_contract", "") or "")
 
 
-def _model_reference_cache(path: Path) -> dict[str, Any]:
-    owner_path = (
+def _model_owner_path(path: Path) -> Path:
+    return (
         path.parent.parent / "MODEL.toml"
         if path.parent.name == "manifests"
         else path.parent / "MODEL.toml"
     )
+
+
+def _model_owner_config(path: Path) -> dict[str, Any]:
+    owner_path = _model_owner_path(path)
     if not owner_path.is_file():
         return {}
-    owner = tomllib.loads(owner_path.read_text(encoding="utf-8"))
+    return tomllib.loads(owner_path.read_text(encoding="utf-8"))
+
+
+def _model_reference_cache(path: Path) -> dict[str, Any]:
+    owner = _model_owner_config(path)
     contract = owner.get("model_reference_cache", {})
     return copy.deepcopy(contract) if isinstance(contract, dict) else {}
+
+
+def _model_validation_datasets(path: Path) -> dict[str, dict[str, Any]]:
+    owner_path = _model_owner_path(path)
+    datasets = _model_owner_config(path).get("validation_datasets", {})
+    if not isinstance(datasets, dict):
+        raise TypeError(f"{owner_path}: validation_datasets must be a mapping")
+    for workload_id, dataset in datasets.items():
+        if not isinstance(dataset, dict):
+            raise TypeError(
+                f"{owner_path}: validation_datasets.{workload_id} must be a mapping"
+            )
+        if "kind" in dataset:
+            raise ValueError(
+                f"{owner_path}: validation_datasets.{workload_id} must not override "
+                "the shared dataset kind"
+            )
+    return copy.deepcopy(datasets)
 
 
 def manifest_record(path: Path) -> dict[str, Any]:
@@ -178,6 +204,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         ),
         "max_new_tokens": raw.get("max_new_tokens"),
         "model_reference_cache": _model_reference_cache(path),
+        "validation_datasets": _model_validation_datasets(path),
     }
 
 
@@ -240,6 +267,27 @@ def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bo
 def resolve_suite_for_model(suite: dict[str, Any], model: dict[str, Any]) -> dict[str, Any]:
     """Resolve manifest dimensions and family/model profiles for one run."""
     resolved = copy.deepcopy(suite)
+    validation_datasets = model.get("validation_datasets", {})
+    if not isinstance(validation_datasets, dict):
+        raise ValueError(
+            f"Model {model.get('name', '<unknown>')} validation_datasets must be a mapping"
+        )
+    model_dataset = validation_datasets.get(str(suite.get("id", "")), {})
+    if not isinstance(model_dataset, dict):
+        raise ValueError(
+            f"Model {model.get('name', '<unknown>')} validation dataset for "
+            f"{suite.get('id', '<unknown>')} must be a mapping"
+        )
+    dataset = resolved.get("dataset", {})
+    if not isinstance(dataset, dict):
+        raise ValueError(f"Suite {suite['id']} dataset must be a mapping")
+    if "kind" in model_dataset:
+        raise ValueError(
+            f"Model {model.get('name', '<unknown>')} validation dataset for "
+            f"{suite['id']} must not override the shared dataset kind"
+        )
+    resolved["dataset"] = {**dataset, **copy.deepcopy(model_dataset)}
+
     generation = dict(resolved.get("generation", {}))
     for key in (
         "image_height",

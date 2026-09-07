@@ -20,7 +20,7 @@ The suite contains one row for every release-relevant single-process model
 profile marked `ready` in the benchmark catalog. Profiles whose names contain an
 `l0` segment are shorter PR-smoke duplicates and are deliberately excluded.
 Other temporary omissions must be named under `excluded_profiles` with a reason.
-The suite currently has 107 model-profile comparisons across 77 families and 78
+The suite currently has 111 model-profile comparisons across 79 families and 81
 `(family, operation)` contracts because some families expose multiple profiles
 and `eagle_vlm` exposes both `embed` and `rerank`. Catalog profiles marked
 `distributed` require their own multi-process launch and are not silently
@@ -247,9 +247,15 @@ Reference-specific upstream checkout paths remain process environment inputs:
 ```text
 TRTMC_ELF_REFERENCE_REPO
 TRTMC_LANCE_REFERENCE_REPO
+TRTMC_MINIMAX_H3_DIFFUSERS_REPO
+TRTMC_MINIMAX_H3_TRANSFORMERS_REPO
 TRTMC_SANA_WM_REFERENCE_REPO
 PERSONAPLEX_OFFICIAL_REPO
 ```
+
+Task-reference baselines declare the mapping from adapter option to environment
+variable with `baseline.adapter_environment`. This keeps model checkout names in
+the suite entry while the shared runner only resolves the declared mapping.
 
 CI should prebuild the selected Python profiles and set
 `TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1`. Dependency installation is outside the

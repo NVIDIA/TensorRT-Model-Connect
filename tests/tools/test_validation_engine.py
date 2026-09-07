@@ -709,7 +709,7 @@ def test_default_suites_classify_every_empty_gate_policy() -> None:
         for suite in suites
         if not suite.get("gates")
         and not suite.get("sample_acceptance")
-        and suite.get("gate_policy") != "observation_only"
+        and suite.get("gate_policy") not in {"model_plugin", "observation_only"}
     ]
 
     assert unclassified == []
@@ -2445,30 +2445,40 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
 
     class Comparator:
         def compare(self, trt, ref, threshold, selected_stage):
-            assert trt.text == ref.text == "same"
+            assert ref.text == "same"
             assert threshold.metrics["score"] == 0.9
             assert selected_stage.name == "full_generation"
+            passed = trt.text == "same"
             return CompareResult(
                 stage_name=selected_stage.name,
-                status=StageStatus.PASSED.value,
+                status=(
+                    StageStatus.PASSED.value
+                    if passed
+                    else StageStatus.FAILED.value
+                ),
                 metrics={
                     "score": MetricResult(
-                        value=1.0,
+                        value=1.0 if passed else 0.0,
                         threshold=0.9,
                         operator=">=",
-                        passed=True,
+                        passed=passed,
                     )
                 },
             )
 
         def aggregate(self, cases, gates):
             assert cases[0]["metrics"]["score"]["value"] == 1.0
-            assert gates == {"min_sample_pass_rate": 1.0}
+            assert len(cases) == 10
+            assert sum(case["passed"] for case in cases) == 8
+            assert gates == {}
             return {
                 "evaluated": True,
                 "passed": True,
-                "task_accuracy": {"weighted_score": 1.0},
-                "gates": {"weighted_score_min": 0.9},
+                "task_accuracy": {"weighted_score": 0.8},
+                "gates": {
+                    "min_sample_pass_rate": 0.8,
+                    "weighted_score_min": 0.9,
+                },
                 "gate_failures": [],
             }
 
@@ -2477,43 +2487,62 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
         "get_comparator",
         lambda _strategy: Comparator(),
     )
-    output = StageOutput(stage_name="full_generation", text="same")
-    serialized = serialize_stage_output(
-        output,
-        artifact_dir=tmp_path / "artifacts",
-        sample_id="sample-1",
-    )
-    response = {
-        "sample_id": "sample-1",
-        "testcase": "custom-case",
-        "stage": "full_generation",
-        "stage_output": serialized,
-    }
+    reference_responses = []
+    candidate_responses = []
+    requests = []
+    for index in range(10):
+        sample_id = f"sample-{index}"
+        reference_responses.append(
+            {
+                "sample_id": sample_id,
+                "testcase": "custom-case",
+                "stage": "full_generation",
+                "stage_output": serialize_stage_output(
+                    StageOutput(stage_name="full_generation", text="same"),
+                    artifact_dir=tmp_path / "artifacts",
+                    sample_id=f"{sample_id}-reference",
+                ),
+            }
+        )
+        candidate_responses.append(
+            {
+                "sample_id": sample_id,
+                "testcase": "custom-case",
+                "stage": "full_generation",
+                "stage_output": serialize_stage_output(
+                    StageOutput(
+                        stage_name="full_generation",
+                        text="same" if index < 8 else "different",
+                    ),
+                    artifact_dir=tmp_path / "artifacts",
+                    sample_id=f"{sample_id}-candidate",
+                ),
+            }
+        )
+        requests.append(
+            {
+                "sample_id": sample_id,
+                "testcase": "custom-case",
+                "stage": "full_generation",
+                "inputs": {},
+            }
+        )
 
     summary = validation_engine.compare_model_plugin_prediction_sets(
-        {"responses": [response]},
-        {"responses": [response]},
-        {
-            "requests": [
-                {
-                    "sample_id": "sample-1",
-                    "testcase": "custom-case",
-                    "stage": "full_generation",
-                    "inputs": {},
-                }
-            ]
-        },
+        {"responses": reference_responses},
+        {"responses": candidate_responses},
+        {"requests": requests},
         work_dir=work_dir,
-        gates={"min_sample_pass_rate": 1.0},
+        gates={},
     )
 
     assert summary["status"] == "passed"
-    assert summary["sample_pass_rate"] == 1.0
-    assert summary["metrics"]["score"]["mean"] == 1.0
+    assert summary["sample_pass_rate"] == 0.8
+    assert summary["metrics"]["score"]["mean"] == 0.8
     assert summary["cases"][0]["passed"] is True
-    assert summary["task_accuracy"] == {"weighted_score": 1.0}
+    assert summary["task_accuracy"] == {"weighted_score": 0.8}
     assert summary["gates"] == {
-        "min_sample_pass_rate": 1.0,
+        "min_sample_pass_rate": 0.8,
         "weighted_score_min": 0.9,
     }
 
@@ -2532,23 +2561,14 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
         lambda _strategy: FailingAggregateComparator(),
     )
     failed = validation_engine.compare_model_plugin_prediction_sets(
-        {"responses": [response]},
-        {"responses": [response]},
-        {
-            "requests": [
-                {
-                    "sample_id": "sample-1",
-                    "testcase": "custom-case",
-                    "stage": "full_generation",
-                    "inputs": {},
-                }
-            ]
-        },
+        {"responses": reference_responses},
+        {"responses": candidate_responses},
+        {"requests": requests},
         work_dir=work_dir,
-        gates={"min_sample_pass_rate": 1.0},
+        gates={},
     )
     assert failed["status"] == "failed"
-    assert failed["sample_pass_rate"] == 1.0
+    assert failed["sample_pass_rate"] == 0.8
     assert failed["gate_failures"] == ["pixel-weighted task gate failed"]
 
 
@@ -3298,6 +3318,48 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
     assert validation_engine.load_jsonl(work_dir / "prompts.jsonl")[0]["images"] == [
         str(dataset_dir / "images" / "sample.jpg")
     ]
+
+
+@pytest.mark.parametrize(
+    "model_selector",
+    [
+        "minimax-h3-768p",
+        "MiniMaxAI/MiniMax-H3",
+        "minimax-h3-768p.bundle",
+    ],
+)
+def test_prepare_cli_resolves_model_owned_validation_dataset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_selector: str,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_prepare(**kwargs: Any) -> dict[str, Path]:
+        captured.update(kwargs)
+        return {"answers": tmp_path / "answers.json"}
+
+    monkeypatch.setattr(validation_engine, "prepare_task_dataset", fake_prepare)
+
+    rc = validation_engine.cmd_prepare(
+        argparse.Namespace(
+            suites=str(validation_engine.DEFAULT_SUITES),
+            suite="minimax_h3_vbench_reference_parity",
+            dataset=None,
+            model=model_selector,
+            models_dir=str(validation_engine.DEFAULT_MODELS_DIR),
+            work_dir=str(tmp_path / "work"),
+            limit=10,
+            subject="",
+            sample_seed=None,
+        )
+    )
+
+    assert rc == 0
+    assert captured["dataset_path"] == Path(
+        "/mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json"
+    )
+    assert captured["suite"]["dataset"]["input_asset_fields"] == ["prompt_file"]
 
 
 def test_continuation_parity_reports_divergence_severity() -> None:
@@ -7450,7 +7512,7 @@ def test_eval_resolves_reference_source_revision_before_preparing_cache_inputs(
     revision = "a" * 40
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(),
-        "minimax_h3_official_profile_parity",
+        "minimax_h3_vbench_reference_parity",
     )
     model = {
         "name": "minimax-h3-768p",
@@ -9276,7 +9338,10 @@ def test_public_ci_artifacts_omit_private_runner_paths(tmp_path: Path) -> None:
     assert "/private" not in numeric_public.read_text(encoding="utf-8")
 
 
-def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> None:
+def test_prepare_vbench_selects_ten_unique_review_dimensions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = tmp_path / "VBench_full_info.json"
     source.write_text(
         json.dumps(
@@ -9290,6 +9355,11 @@ def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> 
         ),
         encoding="utf-8",
     )
+    monkeypatch.setattr(
+        prepare_media,
+        "VBENCH_INFO_SHA256",
+        prepare_media._sha256(source),
+    )
 
     output = prepare_media.prepare_vbench(source, tmp_path / "out")
     payload = json.loads(output.read_text(encoding="utf-8"))
@@ -9301,6 +9371,68 @@ def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> 
     assert len({row["prompt"] for row in payload["requests"]}) == 10
     assert payload["source_info_sha256"]
     assert payload["license"] == "Apache-2.0"
+    assert payload["source_revision"] == prepare_media.VBENCH_REVISION
+
+
+def test_prepare_vbench_rejects_source_from_another_revision(tmp_path: Path) -> None:
+    source = tmp_path / "VBench_full_info.json"
+    source.write_text("[]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match the pinned revision"):
+        prepare_media.prepare_vbench(source, tmp_path / "out")
+
+
+def test_prepare_vbench_model_plugin_dataset_is_portable_and_pinned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "VBench_full_info.json"
+    source.write_text(
+        json.dumps(
+            [
+                {
+                    "prompt_en": f"official prompt {index}",
+                    "dimension": [dimension],
+                }
+                for index, dimension in enumerate(prepare_media.VBENCH_DIMENSIONS)
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        prepare_media,
+        "VBENCH_INFO_SHA256",
+        prepare_media._sha256(source),
+    )
+
+    outputs = prepare_media.prepare_media_datasets(
+        output_root=tmp_path / "out",
+        vbench_info=source,
+        vbench_model_plugin=True,
+    )
+    assert len(outputs) == 1
+    dataset = outputs[0]
+    assert not (tmp_path / "out" / "VBench").exists()
+    payload = json.loads(dataset.read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (dataset.parent / "DATASET_MANIFEST.json").read_text(encoding="utf-8")
+    )
+
+    assert payload["request_count"] == 10
+    assert payload["license"] == "Apache-2.0"
+    assert payload["source_revision"] == prepare_media.VBENCH_REVISION
+    assert [row["category"] for row in payload["requests"]] == list(
+        prepare_media.VBENCH_DIMENSIONS
+    )
+    for row in payload["requests"]:
+        prompt_file = dataset.parent / row["inputs"]["prompt_file"]
+        prompt = json.loads(prompt_file.read_text(encoding="utf-8"))
+        assert prompt == {"prompt": row["prompt"], "seed": 0}
+    assert manifest["request_count"] == 10
+    assert manifest["source"]["license"] == "Apache-2.0"
+    assert {record["path"] for record in manifest["files"]} >= {
+        "dataset.json",
+    }
 
 
 def test_prepare_gedit_writes_task_diverse_static_condition_images(tmp_path: Path) -> None:

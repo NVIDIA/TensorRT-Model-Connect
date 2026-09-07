@@ -11009,7 +11009,6 @@ def compare_model_plugin_prediction_sets(
         manifest,
         repo_root=REPO_ROOT,
     )
-    min_sample_pass_rate = float(gates.get("min_sample_pass_rate", 1.0))
     threshold_overrides = {
         str(name): float(value)
         for name, value in gates.items()
@@ -11181,6 +11180,32 @@ def compare_model_plugin_prediction_sets(
         if not isinstance(raw_aggregate, Mapping):
             raise TypeError("model-plugin comparator aggregate() must return a mapping")
         plugin_aggregate = dict(raw_aggregate)
+    plugin_gates_raw = plugin_aggregate.get("gates", {})
+    if not isinstance(plugin_gates_raw, Mapping):
+        raise TypeError("model-plugin comparator aggregate gates must be a mapping")
+    plugin_gates = dict(plugin_gates_raw)
+    configured_min_pass_rate = gates.get("min_sample_pass_rate")
+    plugin_min_pass_rate = plugin_gates.get("min_sample_pass_rate")
+    if configured_min_pass_rate is not None and plugin_min_pass_rate is not None:
+        if not math.isclose(
+            float(configured_min_pass_rate),
+            float(plugin_min_pass_rate),
+            rel_tol=0.0,
+            abs_tol=0.0,
+        ):
+            raise ValueError(
+                "workload and model-plugin comparator define conflicting "
+                "min_sample_pass_rate gates"
+            )
+    min_sample_pass_rate = float(
+        configured_min_pass_rate
+        if configured_min_pass_rate is not None
+        else plugin_min_pass_rate
+        if plugin_min_pass_rate is not None
+        else 1.0
+    )
+    if not 0.0 <= min_sample_pass_rate <= 1.0:
+        raise ValueError("min_sample_pass_rate must be between 0.0 and 1.0")
     aggregate_passed = bool(plugin_aggregate.get("passed", True))
     status = (
         "passed"
@@ -11208,8 +11233,8 @@ def compare_model_plugin_prediction_sets(
         "sample_pass_rate": sample_pass_rate,
         "metrics": metrics_summary,
         "gates": {
+            **plugin_gates,
             "min_sample_pass_rate": min_sample_pass_rate,
-            **dict(plugin_aggregate.get("gates", {})),
         },
         "cases": cases,
         "execution_errors": execution_errors,
@@ -11335,9 +11360,10 @@ def eval_one_model(
     suite = resolve_suite_for_model(suite, model)
     work_root = Path(args.work_root)
     work_dir = work_root / suite["id"] / str(model["name"])
-    dataset_path = Path(args.dataset or suite.get("dataset", {}).get("default_path", ""))
-    if not dataset_path:
+    dataset_value = args.dataset or suite.get("dataset", {}).get("default_path", "")
+    if not dataset_value:
         raise ValueError(f"Suite {suite['id']} has no dataset path; pass --dataset")
+    dataset_path = Path(dataset_value)
     scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
     dataset_kind = str(suite.get("dataset", {}).get("kind", ""))
     reference_mode = str(suite.get("reference", {}).get("mode", "") or "")
@@ -12672,6 +12698,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--suites", default=str(DEFAULT_SUITES))
     p.add_argument("--suite", default="mmlu_five_shot_mcq")
     p.add_argument("--dataset")
+    p.add_argument("--model", default="")
+    p.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
     p.add_argument("--work-dir", required=True)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--subject", default="")
@@ -12714,6 +12742,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("prepare-media")
     p.add_argument("--output-root", type=Path, required=True)
     p.add_argument("--vbench-info", type=Path)
+    p.add_argument("--vbench-model-plugin", action="store_true")
     p.add_argument("--gedit-source", default="")
     p.add_argument("--sana-wm-root", type=Path)
     p.add_argument("--limit", type=int, default=10)
@@ -12894,9 +12923,28 @@ def cmd_plan(args: argparse.Namespace) -> int:
 def cmd_prepare(args: argparse.Namespace) -> int:
     suites = load_suites(Path(args.suites))
     suite = suite_by_id(suites, args.suite)
-    dataset_path = Path(args.dataset or suite.get("dataset", {}).get("default_path", ""))
-    if not dataset_path:
+    model_name = str(getattr(args, "model", "") or "")
+    if not model_name:
+        default_models = suite.get("default_model_names", [])
+        if isinstance(default_models, list) and len(default_models) == 1:
+            model_name = str(default_models[0])
+    if model_name:
+        models = load_manifest_records(
+            Path(getattr(args, "models_dir", DEFAULT_MODELS_DIR))
+        )
+        model = next(
+            (item for item in models if model_matches_selector(item, model_name)),
+            None,
+        )
+        if model is None:
+            raise ValueError(
+                f"Unknown model {model_name!r} for suite {args.suite}"
+            )
+        suite = resolve_suite_for_model(suite, model)
+    dataset_value = args.dataset or suite.get("dataset", {}).get("default_path", "")
+    if not dataset_value:
         raise ValueError(f"Suite {args.suite} has no dataset path; pass --dataset")
+    dataset_path = Path(dataset_value)
     outputs = prepare_task_dataset(
         dataset_path=dataset_path,
         work_dir=Path(args.work_dir),
@@ -13202,6 +13250,7 @@ def cmd_prepare_media(args: argparse.Namespace) -> int:
     outputs = prepare_media_datasets(
         output_root=args.output_root,
         vbench_info=args.vbench_info,
+        vbench_model_plugin=args.vbench_model_plugin,
         gedit_source=args.gedit_source,
         sana_wm_root=args.sana_wm_root,
         limit=args.limit,

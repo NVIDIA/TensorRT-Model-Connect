@@ -57,6 +57,7 @@ _REFERENCE_PLUS_GATE_SPECS = {
 }
 
 _METRIC_KINDS = {"continuous", "proportion", "proportion_drop"}
+_POLICY_MODES = {"blocking", "model_plugin", "observation_only"}
 
 
 def _gate_spec(gate: str) -> tuple[str, str] | None:
@@ -313,7 +314,7 @@ def describe_shadow_gate_policy(
 
     gates: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
-    if policy_mode not in {"blocking", "observation_only"}:
+    if policy_mode not in _POLICY_MODES:
         issues.append({"code": "unsupported_policy_mode", "value": policy_mode})
     if policy_mode == "blocking" and not configured_gates:
         issues.append({"code": "empty_gate_policy"})
@@ -404,7 +405,7 @@ def evaluate_shadow_gates(
     """Explain the effective sample-level meaning of existing gate values."""
     checks: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
-    if policy_mode not in {"blocking", "observation_only"}:
+    if policy_mode not in _POLICY_MODES:
         issues.append({"code": "unsupported_policy_mode", "value": policy_mode})
     if policy_mode == "blocking" and not configured_gates:
         issues.append({"code": "empty_gate_policy"})
@@ -541,8 +542,8 @@ def evaluate_shadow_gates(
         "status": (
             "invalid"
             if issues
-            else "observation_only"
-            if policy_mode == "observation_only"
+            else policy_mode
+            if policy_mode in {"model_plugin", "observation_only"}
             else "fail"
             if any(check["verdict"] == "fail" for check in checks)
             else "pass"

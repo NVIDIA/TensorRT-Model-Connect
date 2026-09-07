@@ -12,6 +12,7 @@ its output contract matches.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import sys
 from typing import Any, Callable, Mapping
@@ -276,6 +277,17 @@ def _prompt_from_file(testcase: Mapping[str, Any], model_root: Path) -> tuple[st
         raise BenchmarkError(f"cannot read generate_image prompt file {resolved}: {exc}") from exc
     if not value:
         raise BenchmarkError(f"generate_image prompt file is empty: {resolved}")
+    try:
+        structured = json.loads(value)
+    except json.JSONDecodeError:
+        structured = None
+    if isinstance(structured, Mapping):
+        prompt = structured.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise BenchmarkError(
+                f"generate_image JSON prompt file requires a non-empty prompt: {resolved}"
+            )
+        value = prompt.strip()
     return value, str(portable)
 
 

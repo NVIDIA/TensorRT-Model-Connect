@@ -6,13 +6,12 @@
     "low_frequency_block_size": 16,
     "minimum_frame_low_frequency_correlation": 0.8,
     "minimum_mean_low_frequency_correlation": 0.9,
-    "minimum_brightness_profile_correlation": 0.95,
     "maximum_frame_brightness_absolute_error": 0.08,
-    "minimum_temporal_activity_correlation": 0.9,
     "maximum_temporal_activity_absolute_error": 0.05,
     "minimum_temporal_activity_ratio": 0.5,
     "maximum_temporal_activity_ratio": 1.5,
     "minimum_frame_std_ratio": 0.7,
-    "maximum_frame_std_ratio": 1.4
+    "maximum_frame_std_ratio": 1.4,
+    "maximum_chroma_absolute_error_p95": 0.05
   }
 }

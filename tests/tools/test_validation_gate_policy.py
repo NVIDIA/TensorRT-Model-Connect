@@ -70,6 +70,34 @@ def test_policy_description_expands_threshold_without_runtime_metrics() -> None:
     }
 
 
+def test_policy_description_accepts_model_plugin_owned_gates() -> None:
+    description = describe_shadow_gate_policy(
+        configured_gates={},
+        sample_count=10,
+        policy_mode="model_plugin",
+    )
+
+    assert description == {
+        "schema_version": "trtmc.validation-gate-policy-description/v1",
+        "policy_mode": "model_plugin",
+        "sample_count": 10,
+        "gates": [],
+        "issues": [],
+    }
+
+
+def test_model_plugin_gate_evaluation_reports_delegated_status() -> None:
+    evaluation = evaluate_shadow_gates(
+        metrics={},
+        configured_gates={},
+        sample_count=10,
+        policy_mode="model_plugin",
+    )
+
+    assert evaluation["status"] == "model_plugin"
+    assert evaluation["issues"] == []
+
+
 def test_policy_description_preserves_continuous_override() -> None:
     description = describe_shadow_gate_policy(
         configured_gates={"min_prediction_agreement": 0.9},

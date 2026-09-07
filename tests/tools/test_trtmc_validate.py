@@ -117,10 +117,12 @@ def test_lerobot_act_catalog_binds_recorded_control_parity() -> None:
     }
 
 
-def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
+def test_minimax_h3_catalog_uses_vbench_profile() -> None:
     catalog = trtmc_validate.load_catalog()
     suites = validation_catalog.load_suites()
-    suite = next(value for value in suites if value["id"] == "minimax_h3_official_profile_parity")
+    suites_by_id = {value["id"]: value for value in suites}
+    vbench_suite = suites_by_id["minimax_h3_vbench_reference_parity"]
+    assert "minimax_h3_official_profile_parity" not in suites_by_id
     model = next(
         value
         for value in validation_catalog.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
@@ -128,37 +130,24 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     )
 
     assert catalog["models"]["minimax-h3-768p"] == {
-        "workloads": ["minimax_h3_official_profile_parity"],
+        "workloads": ["minimax_h3_vbench_reference_parity"],
     }
-    assert validation_catalog.suite_match_reason(suite, model) == (
+    assert catalog["sample_limits"]["minimax_h3_vbench_reference_parity"] == 10
+    assert validation_catalog.suite_match_reason(vbench_suite, model) == (
         True,
         "selected",
     )
-    assert suite["dataset"] == {
+    assert vbench_suite["dataset"] == {"kind": "model_plugin_json"}
+    assert validation_catalog.resolve_suite_for_model(vbench_suite, model)[
+        "dataset"
+    ] == {
         "kind": "model_plugin_json",
-        "default_path": ("tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"),
+        "default_path": "/mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json",
+        "input_asset_fields": ["prompt_file"],
     }
-    assert suite["scoring"] == {"scorer": "model_plugin_parity"}
-    assert suite["gates"] == {"min_sample_pass_rate": 1.0}
-
-    dataset_path = trtmc_validate.REPO_ROOT / suite["dataset"]["default_path"]
-    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
-    assert dataset["requests"] == [
-        {
-            "sample_id": "minimax-h3-768p-official-profile",
-            "testcase": "minimax-h3-768p",
-            "stage": "end_to_end",
-            "category": "official-profile",
-            "inputs": {},
-        }
-    ]
-    resolved = validation_catalog.resolve_suite_for_model(suite, model)
-    assert resolved["generation"] == {
-        "video_num_frames": 124,
-        "video_height": 768,
-        "video_width": 1344,
-        "num_inference_steps": 50,
-    }
+    assert vbench_suite["scoring"] == {"scorer": "model_plugin_parity"}
+    assert "gates" not in vbench_suite
+    assert vbench_suite["gate_policy"] == "model_plugin"
 
 
 def test_dataset_path_keeps_repository_owned_default_with_dataset_root(
@@ -231,7 +220,6 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         "foundationpose_preprocessed_pose_refinement_fp32_parity",
         "lfm2_model_card_sampling_parity",
         "lerobot_act_recorded_control_fp32_parity",
-        "minimax_h3_official_profile_parity",
         "moge_monocular_geometry_fp32_parity",
         "nemotron_voicechat_model_card_general_conversation",
         "seedtts_en_omni_audio_parity",
@@ -457,6 +445,7 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
         "bindings": 3,
         "variants": 5,
         "blocking_variants": 4,
+        "model_plugin_variants": 0,
         "observation_only_variants": 1,
         "invalid_variants": 1,
         "review_required_suites": 1,
@@ -3461,6 +3450,59 @@ def test_run_binding_records_missing_default_dataset_as_preflight_failure(
     assert result["reproduce"]["dataset"]["sample_limit"] == 50
     assert result["reproduce"]["dataset"]["prepared_input_count"] == 0
     assert "missing/data.jsonl" in result["raw_result"]["error"]
+
+
+def test_run_binding_resolves_model_owned_default_dataset_before_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = tmp_path / "datasets" / "minimax" / "dataset.json"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text('{"requests": []}\n', encoding="utf-8")
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "model-a",
+            "suite-a",
+            "--output",
+            str(tmp_path / "results"),
+            "--dataset-root",
+            str(tmp_path / "datasets"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+
+    class DatasetResolved(Exception):
+        pass
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_environments",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(DatasetResolved),
+    )
+
+    with pytest.raises(DatasetResolved):
+        trtmc_validate.run_binding(
+            trtmc_validate.Binding("model-a", "suite-a"),
+            arguments=arguments,
+            task_models={
+                "model-a": {
+                    "name": "model-a",
+                    "family": "demo",
+                    "task_strategy": "demo_task",
+                    "execution_profiles": {},
+                    "validation_datasets": {
+                        "suite-a": {"default_path": "/mnt/data/minimax/dataset.json"}
+                    },
+                }
+            },
+            suites={
+                "suite-a": {
+                    "id": "suite-a",
+                    "dataset": {"kind": "model_plugin_json"},
+                }
+            },
+        )
 
 
 def test_diffusion_report_flattens_nested_reference_metrics():

@@ -33,6 +33,8 @@ def _checkpoint_inventory_sha256(receipt: dict) -> str | None:
 
 
 class MiniMaxH3DecodedVideoComparator:
+    min_sample_pass_rate = 0.8
+
     @property
     def task_strategy(self) -> str:
         return "diffusion_media_generation"
@@ -141,19 +143,51 @@ class MiniMaxH3DecodedVideoComparator:
             status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
             composite_rule=(
-                "exact finite decoded RGB shape AND low-frequency frame structure AND "
-                "brightness profile AND temporal activity/profile AND non-degenerate "
-                "frame contrast; PSNR/MAE are diagnostic only"
+                "exact finite decoded RGB shape AND aligned chroma AND "
+                "low-frequency scene structure AND bounded motion/"
+                "contrast; Pearson profile correlations and PSNR/MAE are diagnostic only"
             ),
             message=(
-                f"{'PASS' if passed else 'FAIL'}: low_frequency_correlation="
+                f"{'PASS' if passed else 'FAIL'}: chroma MAE p95="
+                f"{decoded.chroma_absolute_error_p95:.4f}, low_frequency_correlation="
                 f"{decoded.frame_low_frequency_correlation_minimum:.4f}/"
                 f"{decoded.frame_low_frequency_correlation_mean:.4f} (min/mean), "
-                f"temporal_correlation={decoded.temporal_activity_correlation:.4f}, "
                 f"PSNR={decoded.psnr_db:.4f} dB (diagnostic), "
                 f"MAE={decoded.mean_absolute_error:.8f} (diagnostic)"
             ),
         )
+
+    def aggregate(self, cases: list[dict], gates: dict) -> dict:
+        """Apply the family-owned acceptance rate across generated videos."""
+        min_sample_pass_rate = float(
+            gates.get("min_sample_pass_rate", self.min_sample_pass_rate)
+        )
+        valid_statuses = {StageStatus.PASSED.value, StageStatus.FAILED.value}
+        valid_cases = [case for case in cases if case.get("status") in valid_statuses]
+        passed_count = sum(
+            case.get("status") == StageStatus.PASSED.value for case in valid_cases
+        )
+        sample_pass_rate = passed_count / len(valid_cases) if valid_cases else 0.0
+        all_cases_valid = len(valid_cases) == len(cases)
+        passed = all_cases_valid and sample_pass_rate >= min_sample_pass_rate
+        failures = []
+        if not all_cases_valid:
+            failures.append("one or more MiniMax-H3 samples did not complete comparison")
+        if sample_pass_rate < min_sample_pass_rate:
+            failures.append(
+                "MiniMax-H3 decoded-video pass rate "
+                f"{sample_pass_rate:.3f} is below {min_sample_pass_rate:.3f}"
+            )
+        return {
+            "evaluated": True,
+            "passed": passed,
+            "sample_count": len(cases),
+            "valid_count": len(valid_cases),
+            "passed_count": passed_count,
+            "sample_pass_rate": sample_pass_rate,
+            "gates": {"min_sample_pass_rate": min_sample_pass_rate},
+            "gate_failures": failures,
+        }
 
 
 comparator = MiniMaxH3DecodedVideoComparator()

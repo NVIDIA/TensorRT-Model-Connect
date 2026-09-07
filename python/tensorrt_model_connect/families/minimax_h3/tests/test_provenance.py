@@ -440,7 +440,9 @@ def test_file_identity_detects_same_size_replacement(tmp_path: Path) -> None:
     artifact = tmp_path / "artifact.bin"
     artifact.write_bytes(b"old")
     identity = file_identity(artifact)
-    artifact.write_bytes(b"new")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"new")
+    replacement.replace(artifact)
     with pytest.raises(ValueError, match="changed while it was in use"):
         validate_file_identity(artifact, identity, "artifact")
 

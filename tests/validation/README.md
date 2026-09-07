@@ -253,6 +253,23 @@ reference, TRTMC runner, and comparator are invoked directly without calling
 the E2E orchestrator. Array-valued outputs are persisted as artifacts so a
 cached reference can be compared in later runs.
 
+MiniMax-H3 reference consistency uses a ten-prompt, task-diverse slice of the
+Apache-2.0 VBench prompt suite. Prepare the versioned prompt-file asset from
+the pinned upstream files before publishing it to NAS:
+
+```bash
+python tools/validation/engine.py prepare-media \
+  --vbench-info /path/to/VBench/vbench/VBench_full_info.json \
+  --vbench-model-plugin \
+  --output-root /mnt/data \
+  --limit 10
+```
+
+Publish `VBench-fd18b3d-model-plugin-v1` without changing its relative layout.
+A validation machine mounts the same directory at `/mnt/data`. This asset
+contains prompts and source provenance only; it contains no generated model
+output or external evaluator.
+
 Prepare the fixed task datasets from public benchmark sources already staged
 on the validation machine:
 
@@ -461,7 +478,16 @@ variants with the same reference computation can reuse an entry.
 2. Add that workload under the model's `workloads` in `model_workloads.yaml`
    when model and all-model runs should include it. Leave it unmapped for an
    explicit-only experiment.
-3. Add its workload-owned limit to the top-level `sample_limits`; one value
+3. Keep family-specific dataset locations and input-asset fields in the
+   owning family's `MODEL.toml`. The shared workload declares the parser kind;
+   the model-owned table supplies the mounted dataset contract:
+
+   ```toml
+   [validation_datasets.example_workload]
+   default_path = "/mnt/data/example/dataset.json"
+   input_asset_fields = ["image"]
+   ```
+4. Add its workload-owned limit to the top-level `sample_limits`; one value
    is shared by every model using that dataset/workload contract.
 
 A model may list multiple workloads; selecting that model runs all of them as
