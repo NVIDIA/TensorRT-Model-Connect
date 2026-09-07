@@ -117,6 +117,7 @@ def build_standard_decoder_engine(
     #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
     #   - hidden_state_output=True     (speech / Bark hidden output)
     #
+    dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
     _dual_profile_disabled_for = (
         embed_input
         or debug_layer_outputs
@@ -126,7 +127,14 @@ def build_standard_decoder_engine(
         raise NotImplementedError(
             "split prefill engine is not supported for this standard decoder "
             "configuration")
-    if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
+    if dynamic_kv_cache and _dual_profile_disabled_for:
+        raise NotImplementedError(
+            "runtime-sized Qwen KV cache does not support specialized decoder inputs")
+    use_dynamic_sequence_builder = (
+        decoder_engine_role in ("dual_profile", "prefill")
+        or (dynamic_kv_cache and decoder_engine_role == "decode")
+    )
+    if not _dual_profile_disabled_for and use_dynamic_sequence_builder:
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
@@ -140,8 +148,9 @@ def build_standard_decoder_engine(
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
             verbose=verbose,
-            profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
+            profile_mode=decoder_engine_role,
             full_logits_output=full_logits_output,
+            runtime_sized_kv_cache=dynamic_kv_cache,
         )
 
     if full_logits_output:

@@ -44,9 +44,11 @@ class NativeKvModuleStub final : public ITrtModule {
     NativeKvModuleStub(cudaStream_t stream, int32_t layers, int32_t capacity, int32_t kv_heads,
                        int32_t head_dim, DType dtype, bool native = true,
                        std::shared_ptr<NativeKvTrace> trace = nullptr, int32_t profile_limit = 4,
-                       int32_t vocab_size = 16, std::vector<int32_t> token_profile_max_lengths = {})
+                       int32_t vocab_size = 16, std::vector<int32_t> token_profile_max_lengths = {},
+                       bool dynamic_cache = false, bool dynamic_mask = false)
         : stream_(stream), native_(native), trace_(std::move(trace)), vocab_size_(vocab_size),
-          token_profile_max_lengths_(std::move(token_profile_max_lengths)) {
+          token_profile_max_lengths_(std::move(token_profile_max_lengths)),
+          dynamic_cache_(dynamic_cache), dynamic_mask_(dynamic_mask) {
         if (native_) {
             add("cache_write_indices", {1}, DType::kInt32, true);
             add("key_value_lengths", {1}, DType::kInt32, true);
@@ -77,6 +79,8 @@ class NativeKvModuleStub final : public ITrtModule {
         entry.shape = std::move(shape);
         entry.dtype = dtype;
     }
+
+    void set_dynamic(const std::string& name, bool value) { dynamic_overrides_[name] = value; }
 
     TensorMap forward(const TensorMap& inputs) override {
         if (!trace_)
@@ -120,6 +124,12 @@ class NativeKvModuleStub final : public ITrtModule {
                     : token_profile_max_lengths_.at(static_cast<std::size_t>(profile_idx));
             return {tokens};
         }
+        if (dynamic_cache_ && (name.rfind("cache_k_", 0) == 0 || name.rfind("cache_v_", 0) == 0)) {
+            auto shape = tensor_shape(name);
+            if (selector == ProfileShapeSelector::kMin && shape.size() == 2)
+                shape[0] = 1;
+            return shape;
+        }
         return tensor_shape(name);
     }
     int32_t optimization_profile_count() const override {
@@ -150,7 +160,14 @@ class NativeKvModuleStub final : public ITrtModule {
     int32_t input_rank(const std::string& name) const override {
         return has_input(name) ? static_cast<int32_t>(tensor_shape(name).size()) : 0;
     }
-    bool input_is_dynamic(const std::string&) const override { return false; }
+    bool input_is_dynamic(const std::string& name) const override {
+        const auto override = dynamic_overrides_.find(name);
+        if (override != dynamic_overrides_.end())
+            return override->second;
+        if (name == "attention_mask")
+            return dynamic_mask_;
+        return dynamic_cache_ && (name.rfind("cache_k_", 0) == 0 || name.rfind("cache_v_", 0) == 0);
+    }
     void reset_execution_context() override {}
     void set_timing_label(std::string) override {}
     bool ok() const override { return stream_ != nullptr; }
@@ -185,10 +202,13 @@ class NativeKvModuleStub final : public ITrtModule {
     std::shared_ptr<NativeKvTrace> trace_;
     int32_t vocab_size_;
     std::vector<int32_t> token_profile_max_lengths_;
+    bool dynamic_cache_{false};
+    bool dynamic_mask_{false};
     std::vector<float> logits_;
     std::unordered_map<std::string, Entry> tensors_;
     std::unordered_map<std::string, void*> bindings_;
     std::unordered_map<std::string, std::vector<int64_t>> binding_shapes_;
+    std::unordered_map<std::string, bool> dynamic_overrides_;
     std::vector<std::shared_ptr<void>> keep_alive_;
 };
 
@@ -287,6 +307,62 @@ int run_native_kv_contract_tests(const char* model) {
         check(cache.needs_attention_mask() && inputs.count("attention_mask") == 1 &&
                   inputs.count("cache_write_indices") == 0 && cache.position() == 1,
               "standard attention-mask cache path still advances normally");
+    }
+
+    {
+        Cache cache(1, 7, 2, stream, DType::kFloat16);
+        NativeKvModuleStub prefill(stream, 1, 11, 1, 2, DType::kFloat16, false, nullptr, 4, 16, {},
+                                   true, true);
+        NativeKvModuleStub decode(stream, 1, 11, 1, 2, DType::kFloat16, false, nullptr, 4, 16, {},
+                                  true, true);
+
+        cache.bind_cache_inputs(prefill);
+        TensorMap prefill_inputs;
+        cache.prepare_step(prefill_inputs, 3);
+        const auto* prefill_positions =
+            static_cast<const std::int32_t*>(prefill_inputs.at("position_id").data);
+        check(prefill.bound_shape("cache_k_0") == std::vector<int64_t>({7, 2}) &&
+                  prefill.bound_shape("cache_v_0") == std::vector<int64_t>({7, 2}) &&
+                  prefill_inputs.at("attention_mask").shape == std::vector<int64_t>({3, 10}) &&
+                  prefill_inputs.at("position_id").shape == std::vector<int64_t>({3}) &&
+                  prefill_positions[0] == 0 && prefill_positions[2] == 2,
+              "runtime-sized prefill binds rows, mask, and positions");
+
+        cache.bind_to(decode);
+        TensorMap decode_inputs;
+        cache.prepare_step(decode_inputs);
+        const auto* decode_position =
+            static_cast<const std::int32_t*>(decode_inputs.at("position_id").data);
+        check(decode.bound_shape("cache_k_0") == std::vector<int64_t>({7, 2}) &&
+                  decode.bound_shape("cache_v_0") == std::vector<int64_t>({7, 2}) &&
+                  decode_inputs.at("attention_mask").shape == std::vector<int64_t>({1, 8}) &&
+                  decode_inputs.at("position_id").shape == std::vector<int64_t>({1}) &&
+                  decode_position[0] == 0 && decode.device_ptr("present_k_0") != nullptr &&
+                  decode.device_ptr("present_v_0") != nullptr,
+              "runtime-sized decode binds rows, mask, positions, and present outputs");
+    }
+
+    {
+        Cache cache(1, 7, 2, stream, DType::kFloat16);
+        NativeKvModuleStub malformed(stream, 1, 11, 1, 2, DType::kFloat16, false, nullptr, 4, 16,
+                                     {}, true, false);
+        bool rejected = false;
+        try {
+            cache.bind_to(malformed);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        check(rejected, "runtime-sized cache rejects a static attention mask");
+    }
+
+    {
+        Cache cache(1, 11, 2, stream, DType::kFloat16);
+        NativeKvModuleStub prefill(stream, 1, 11, 1, 2, DType::kFloat16, false, nullptr, 4, 16, {},
+                                   false, true);
+        cache.bind_cache_inputs(prefill);
+        check(prefill.device_ptr("cache_k_0") == cache.cache_k(0).data() &&
+                  prefill.bound_shape("cache_k_0").empty(),
+              "static cache accepts the dynamic batched-prefill mask contract");
     }
 
     const auto make_config = [] {

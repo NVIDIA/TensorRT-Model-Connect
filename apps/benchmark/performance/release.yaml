@@ -1203,6 +1203,10 @@ additional_profiles:
     inherit: qwen_image.generate_image
   - model: qwen-image-edit-2511
     inherit: qwen_image.generate_image
+  - model: qwen2.5-0.5b-dynamic-kv
+    inherit: qwen.generate
+    workload:
+      testcase: qwen2.5-0.5b-dynamic-kv
   - model: qwen25vl-3b
     inherit: qwen_vl.generate
   - model: qwen3-0.6b-fp8

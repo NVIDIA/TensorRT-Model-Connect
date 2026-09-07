@@ -571,6 +571,21 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
     assert violations == []
 
 
+def _assigns_true_to_subscript(tree: ast.AST, key: str) -> bool:
+    return any(
+        isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and node.value.value is True
+        and any(
+            isinstance(target, ast.Subscript)
+            and isinstance(target.slice, ast.Constant)
+            and target.slice.value == key
+            for target in node.targets
+        )
+        for node in ast.walk(tree)
+    )
+
+
 def test_runtime_sized_kv_build_flag_is_direct_and_family_owned() -> None:
     build_api = REPO / "core/builder/tensorrt_model_connect/build.py"
     build_tree = ast.parse(build_api.read_text(encoding="utf-8"), filename=str(build_api))
@@ -590,6 +605,7 @@ def test_runtime_sized_kv_build_flag_is_direct_and_family_owned() -> None:
     assert isinstance(field.value, ast.Constant) and field.value.value is False
 
     owners: list[str] = []
+    implementations: list[str] = []
     for family in family_dirs():
         model = family / "model.py"
         source = model.read_text(encoding="utf-8")
@@ -602,12 +618,18 @@ def test_runtime_sized_kv_build_flag_is_direct_and_family_owned() -> None:
             for node in ast.walk(tree)
         ):
             owners.append(family.name)
-        if family.name != "llama":
-            assert (
-                f'raise NotImplementedError("{family.name} does not support dynamic_kv_cache")'
-                in source
-            )
+        rejection = (
+            f'raise NotImplementedError("{family.name} does not support dynamic_kv_cache")'
+            in source
+        )
+        implementation = _assigns_true_to_subscript(tree, "dynamic_kv_cache")
+        assert rejection != implementation, (
+            f"{family.name} must either reject dynamic_kv_cache or write its runtime contract"
+        )
+        if implementation:
+            implementations.append(family.name)
     assert owners == [family.name for family in family_dirs()]
+    assert implementations
 
 
 def test_runtime_sized_kv_budget_is_direct_and_family_owned() -> None:
@@ -619,18 +641,38 @@ def test_runtime_sized_kv_budget_is_direct_and_family_owned() -> None:
     assert "FamilyContext context{reader, configured_backend, kv_cache_size_bytes};" in loader
     assert "LoadOptions" not in factory
 
-    handlers: list[str] = []
+    implementations: list[str] = []
     for family in family_dirs():
-        plugin = family / "runtime/plugin.cpp"
-        source = plugin.read_text(encoding="utf-8")
-        if "context.kv_cache_size_bytes" in source:
-            handlers.append(family.name)
-        if family.name != "llama":
-            assert (
-                f'throw std::invalid_argument("{family.name} does not support --kv-cache-size")'
-                in source
+        source = "\n".join(
+            path.read_text(encoding="utf-8", errors="ignore")
+            for path in (family / "runtime").rglob("*")
+            if path.is_file() and path.suffix in {".h", ".hpp", ".cpp", ".cu"}
+        )
+        rejection = (
+            f'throw std::invalid_argument("{family.name} does not support --kv-cache-size")'
+            in source
+        )
+        implementation = all(
+            token in source
+            for token in (
+                'json.contains("dynamic_kv_cache")',
+                "context.kv_cache_size_bytes",
+                "input_is_dynamic",
+                "--kv-cache-size requires a bundle built with --dynamic-kv-cache",
             )
-    assert handlers == [family.name for family in family_dirs()]
+        )
+        assert rejection != implementation, (
+            f"{family.name} must either reject --kv-cache-size or implement the dynamic contract"
+        )
+        if implementation:
+            implementations.append(family.name)
+
+    build_implementations = []
+    for family in family_dirs():
+        tree = ast.parse((family / "model.py").read_text(encoding="utf-8"))
+        if _assigns_true_to_subscript(tree, "dynamic_kv_cache"):
+            build_implementations.append(family.name)
+    assert implementations == build_implementations
 
 
 def test_family_python_has_no_sibling_or_shared_model_imports() -> None:

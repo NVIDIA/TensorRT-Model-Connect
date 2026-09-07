@@ -230,9 +230,6 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _QwenModel, **u
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen bundle through family-owned code."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("qwen does not support dynamic_kv_cache")
-
     if request.image_height is not None:
         raise NotImplementedError("qwen does not support image_height")
 
@@ -262,6 +259,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if unsupported_variant or not (model_type.startswith("qwen") or model_type.startswith("qwq")):
         raise ValueError(f"Qwen does not support model_type={config.model_type!r}")
+    if request.dynamic_kv_cache and model_type == "qwen3":
+        raise NotImplementedError(
+            "Qwen3 does not support dynamic_kv_cache; use its fixed-capacity native KV path"
+        )
     precision = str(request.precision).lower()
     if precision not in {"fp32", "fp16", "bf16"}:
         raise ValueError("Qwen precision must be fp32, fp16, or bf16")
@@ -281,6 +282,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if request.dynamic_kv_cache and parallel.enabled:
+        raise NotImplementedError("Qwen dynamic_kv_cache does not support tensor parallelism")
+    if request.dynamic_kv_cache and quantized:
+        raise NotImplementedError("Qwen dynamic_kv_cache does not support quantization")
     if quantized:
         qualified_route = model_type == "qwen3" and (
             (not parallel.enabled and precision == "fp16")
@@ -292,6 +297,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
     config.raw["_quantized_build_requested"] = quantized
+    config.raw["dynamic_kv_cache"] = request.dynamic_kv_cache
     quant_ctx = None
     if quantized:
         from . import graph_ops
@@ -301,7 +307,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         quant_ctx = calibrate_qwen_fp8(model_dir, config, graph_ops)
     weights = model.load_weights(str(model_dir), config, precision=precision)
     writer.set_header(family="qwen", task=request.task, backend=request.backend)
-    if quantized and parallel.enabled:
+    if request.dynamic_kv_cache:
+        config.raw["_decoder_engine_role"] = "dual_profile"
+        plan = model.build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            quant_ctx=None,
+            verbose=bool(request.verbose),
+            debug_layer_outputs=False,
+            parallel_config=parallel,
+        )
+        writer.add_bytes("engine.plan", plan)
+        layout = "dual_profile"
+    elif quantized and parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(
                 config,
@@ -369,19 +389,20 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         writer.add_bytes("engine.plan", decode)
         writer.add_bytes("prefill.plan", prefill)
         layout = "split"
-    writer.add_json(
-        "runtime.json",
-        _runtime_config(
-            model_dir,
-            config,
-            model,
-            precision=precision,
-            max_cache_length=max_sequence_length,
-            decoder_engine_layout=layout,
-            tensor_parallel_size=parallel.tp_size,
-            tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
-        ),
+    config.raw.pop("_decoder_engine_role", None)
+    runtime = _runtime_config(
+        model_dir,
+        config,
+        model,
+        precision=precision,
+        max_cache_length=max_sequence_length,
+        decoder_engine_layout=layout,
+        tensor_parallel_size=parallel.tp_size,
+        tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
     )
+    if request.dynamic_kv_cache:
+        runtime["dynamic_kv_cache"] = True
+    writer.add_json("runtime.json", runtime)
     for filename in _BUNDLE_FILES:
         path = model_dir / filename
         if path.is_file():

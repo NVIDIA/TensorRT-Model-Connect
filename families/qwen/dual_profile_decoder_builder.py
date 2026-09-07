@@ -295,6 +295,7 @@ def build_dual_profile_decoder_engine(
     profile_mode: str = "dual_profile",
     full_logits_output: bool = False,
     native_kv_cache: bool = False,
+    runtime_sized_kv_cache: bool = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -319,6 +320,9 @@ def build_dual_profile_decoder_engine(
     a platform-independent primitive attention graph with an explicit BOOL
     active-prefix causal mask. The dense-mask graph remains available
     for non-Qwen3 models handled by this family.
+
+    ``runtime_sized_kv_cache`` makes the standard cache row dimension dynamic
+    from one row through the bundle capacity.
     """
     _supports_config(config, weights)
     if profile_mode not in ("dual_profile", "prefill", "decode"):
@@ -328,10 +332,14 @@ def build_dual_profile_decoder_engine(
     if native_kv_cache and position_type == "alibi":
         raise NotImplementedError(
             "TensorRT native KV cache prototype does not support ALiBi")
-    # Physical KV capacity and one TensorRT enqueue's query length are
-    # separate limits. Keep the complete model context in the cache while
-    # bounding activation/workspace pressure for very long prompts; the
-    # family runtime transparently advances through multiple chunks.
+    if runtime_sized_kv_cache and position_type == "alibi":
+        raise NotImplementedError(
+            "runtime-sized Qwen KV cache does not support ALiBi")
+    if native_kv_cache and runtime_sized_kv_cache:
+        raise ValueError("native Qwen KV cache has one fixed physical capacity")
+    # Native KV bounds one enqueue's activation pressure and transparently
+    # advances through chunks. Standard runtime-sized KV has no chunk fallback,
+    # so it retains the complete requested prefill profile.
     opt_prefill_length, max_prefill_length = _resolve_prefill_lengths(
         max_cache_length,
         opt_prefill_length,
@@ -416,6 +424,8 @@ def build_dual_profile_decoder_engine(
     cache_shape: tuple[int, ...]
     if native_kv_cache:
         cache_shape = (1, num_kv_heads, max_cache_length, head_dim)
+    elif runtime_sized_kv_cache:
+        cache_shape = (-1, kv_attention_size)
     else:
         cache_shape = (max_cache_length, kv_attention_size)
     cache_k_inputs: list[trt.ITensor] = []
@@ -440,14 +450,24 @@ def build_dual_profile_decoder_engine(
     def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False):
         prof = builder.create_optimization_profile()
         min_sq = opt_sq if fixed else 1
+        opt_cache_rows = max_cache_length
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
         if not native_kv_cache:
             prof.set_shape(
                 "attention_mask",
-                (min_sq, max_cache_length + min_sq),
-                (opt_sq, max_cache_length + opt_sq),
+                (min_sq, (1 if runtime_sized_kv_cache else max_cache_length) + min_sq),
+                (opt_sq,
+                 (opt_cache_rows if runtime_sized_kv_cache else max_cache_length) + opt_sq),
                 (max_sq, max_cache_length + max_sq))
+        if runtime_sized_kv_cache:
+            for i in range(num_layers):
+                for prefix in ("cache_k", "cache_v"):
+                    prof.set_shape(
+                        graph_ops.layer_tensor_name(prefix, i),
+                        (1, kv_attention_size),
+                        (opt_cache_rows, kv_attention_size),
+                        (max_cache_length, kv_attention_size))
         trt_config.add_optimization_profile(prof)
 
     if profile_mode == "prefill":

@@ -38,6 +38,7 @@ struct RuntimeConfig {
     std::string tensor_parallel_mode;
     std::string precision;
     std::string decoder_engine_layout;
+    bool dynamic_kv_cache;
 };
 
 template <typename T>
@@ -72,13 +73,19 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (!json.is_object())
         throw std::runtime_error("qwen runtime.json must be an object");
-    if (json.size() != 14 && json.size() != 16)
+    const bool native_kv_cache = json.contains("native_kv_cache");
+    const bool dynamic_kv_cache = json.contains("dynamic_kv_cache");
+    const std::size_t expected_fields = 14 + (native_kv_cache ? 2 : 0) + (dynamic_kv_cache ? 1 : 0);
+    if (json.size() != expected_fields)
         throw std::runtime_error("qwen runtime.json has an unexpected field set");
-    if (json.size() == 16 &&
-        (!require_value<bool>(json, "native_kv_cache") ||
-         require_value<std::int32_t>(json, "native_kv_contract_version") != 1)) {
+    if (native_kv_cache && (!require_value<bool>(json, "native_kv_cache") ||
+                            require_value<std::int32_t>(json, "native_kv_contract_version") != 1)) {
         throw std::runtime_error("qwen runtime.json has an invalid native KV contract");
     }
+    if (dynamic_kv_cache && !require_value<bool>(json, "dynamic_kv_cache"))
+        throw std::runtime_error("qwen runtime.json has an invalid dynamic KV contract");
+    if (dynamic_kv_cache && native_kv_cache)
+        throw std::runtime_error("qwen runtime.json declares incompatible KV contracts");
 
     RuntimeConfig config{
         require_value<std::int32_t>(json, "hidden_size"),
@@ -95,6 +102,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::string>(json, "tensor_parallel_mode"),
         require_value<std::string>(json, "precision"),
         require_value<std::string>(json, "decoder_engine_layout"),
+        dynamic_kv_cache,
     };
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 || config.vocab_size <= 0 ||
@@ -112,6 +120,11 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (config.decoder_engine_layout == "split" && config.tensor_parallel_size != 1)
         throw std::runtime_error("qwen split engines require tensor_parallel_size=1");
+    if (config.dynamic_kv_cache && config.decoder_engine_layout != "dual_profile") {
+        throw std::runtime_error("runtime-sized Qwen KV cache requires a dual-profile engine");
+    }
+    if (config.dynamic_kv_cache && config.tensor_parallel_size != 1)
+        throw std::runtime_error("runtime-sized Qwen KV cache requires single-device execution");
     const std::string expected_mode =
         config.tensor_parallel_size > 1 ? "tensor_parallel" : "single";
     if (config.tensor_parallel_mode != expected_mode)
@@ -169,6 +182,14 @@ std::int32_t prefill_token_limit(const ITrtModule& module) {
     return static_cast<std::int32_t>(shape.front());
 }
 
+std::int32_t runtime_cache_rows(const FamilyContext& context, const RuntimeConfig& config) {
+    if (context.kv_cache_size_bytes == 0)
+        return config.max_cache_length;
+    return qwen::runtime_cache_rows(context.kv_cache_size_bytes, config.max_cache_length,
+                                    config.num_layers, config.num_key_value_heads, config.head_dim,
+                                    cache_dtype(config.precision));
+}
+
 DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& config) {
     DistributedRuntimeGroup group = initialize_tensor_parallel_group(config.tensor_parallel_size);
     DecoderModules modules;
@@ -204,16 +225,25 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
 
 ITask* create(const FamilyContext& context) {
     const RuntimeConfig config = parse_runtime_config(context.reader);
+    if (context.kv_cache_size_bytes != 0 && !config.dynamic_kv_cache) {
+        throw std::invalid_argument(
+            "--kv-cache-size requires a bundle built with --dynamic-kv-cache");
+    }
     DecoderModules modules = load_modules(context, config);
     const cudaStream_t stream = modules.decode->stream();
     const std::int32_t kv_dim =
         (config.num_key_value_heads / config.tensor_parallel_size) * config.head_dim;
-    auto state = std::make_unique<QwenKvCache>(config.num_layers, config.max_cache_length, kv_dim,
-                                               stream, cache_dtype(config.precision),
+    validate_kv_row_contract(*modules.prefill, config.dynamic_kv_cache, config.num_layers, kv_dim,
+                             config.max_cache_length, "qwen prefill");
+    validate_kv_row_contract(*modules.decode, config.dynamic_kv_cache, config.num_layers, kv_dim,
+                             config.max_cache_length, "qwen decode");
+    const std::int32_t cache_rows = runtime_cache_rows(context, config);
+    auto state = std::make_unique<QwenKvCache>(config.num_layers, cache_rows, kv_dim, stream,
+                                               cache_dtype(config.precision),
                                                make_kv_names(config.num_layers));
     if (!state->ok())
         throw std::runtime_error("qwen failed to create KV cache");
-    std::cerr << "[trtmc] KV cache rows=" << config.max_cache_length
+    std::cerr << "[trtmc] KV cache rows=" << cache_rows
               << " (bundle max=" << config.max_cache_length << ")\n";
 
     QwenTextGenConfig text_config;
@@ -234,7 +264,5 @@ ITask* create(const FamilyContext& context) {
 } // namespace trtmc::qwen
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
-    if (context.kv_cache_size_bytes != 0)
-        throw std::invalid_argument("qwen does not support --kv-cache-size");
     return trtmc::qwen::create(context);
 }

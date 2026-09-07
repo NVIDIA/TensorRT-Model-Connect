@@ -152,6 +152,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             tensor_parallel_size=manifest["tensor_parallel_size"],
             quantization=quantization,
             fp32_layers=fp32_layers,
+            dynamic_kv_cache=bool(manifest.get("dynamic_kv_cache", False)),
         )
     )
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
@@ -205,6 +206,8 @@ def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict)
         if isinstance(value, bool):
             value = "true" if value else "false"
         arguments.extend([option, str(value)])
+    if "kv_cache_size" in case:
+        arguments.extend(["--kv-cache-size", str(case["kv_cache_size"])])
     return arguments
 
 
@@ -251,6 +254,20 @@ def _run_native(
     payload["runtime_stderr"] = completed.stderr
     payload["runtime_command"] = command
     return payload
+
+
+def _assert_runtime_sized_kv_receipt(payload: dict, manifest: dict, case: dict) -> None:
+    if "expected_runtime_kv_cache_rows" not in case:
+        return
+    expected = int(case["expected_runtime_kv_cache_rows"])
+    assert manifest.get("dynamic_kv_cache") is True
+    command = payload["runtime_command"]
+    option = command.index("--kv-cache-size")
+    assert command[option + 1] == str(case["kv_cache_size"])
+    assert (
+        f"KV cache rows={expected} (bundle max={manifest['max_sequence_length']})"
+        in payload["runtime_stderr"]
+    )
 
 
 def _raw_prompt_token_count(model_dir: Path, manifest: dict, prompt: str) -> int:
@@ -689,6 +706,10 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     binary, runtime_root, torch = _required_environment(tp_size)
     model_dir = _checkpoint(manifest)
     prompt = _prompt(case)
+    if "minimum_prompt_tokens" in case:
+        assert _raw_prompt_token_count(model_dir, manifest, prompt) >= int(
+            case["minimum_prompt_tokens"]
+        )
     bundle = tmp_path / manifest["bundle"]
 
     _build_bundle(manifest, model_dir, bundle)
@@ -702,6 +723,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         tp_size,
         tmp_path,
     )
+    _assert_runtime_sized_kv_receipt(payload, manifest, case)
     if case_name in _LOGIT_ORACLES:
         payload["logits_trace"] = _native_logits_trace(bundle, prompt, case, tp_size, tmp_path)
     reruns = int(case.get("determinism_reruns", 0))
