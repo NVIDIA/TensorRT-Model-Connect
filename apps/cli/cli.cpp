@@ -46,6 +46,9 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"run",
          {CommandKind::kRun,
           {"--prompt",
+           "--prompts-file",
+           "--num-samples",
+           "--output",
            "--image",
            "--max-new-tokens",
            "--source-language-token-id",
@@ -312,6 +315,25 @@ std::vector<std::string> read_nonempty_lines(const std::string& path) {
     return lines;
 }
 
+std::vector<std::string> read_prompt_lines(const std::string& path) {
+    std::ifstream input(path);
+    if (!input)
+        throw std::runtime_error("unable to open prompts file: " + path);
+    std::vector<std::string> prompts;
+    for (std::string prompt; std::getline(input, prompt);) {
+        if (!prompt.empty() && prompt.back() == '\r')
+            prompt.pop_back();
+        prompts.push_back(std::move(prompt));
+    }
+    if (input.bad())
+        throw std::runtime_error("failed to read prompts file: " + path);
+    while (!prompts.empty() && prompts.back().empty())
+        prompts.pop_back();
+    if (prompts.empty())
+        throw std::runtime_error("prompts file has no prompts: " + path);
+    return prompts;
+}
+
 std::vector<std::uint32_t> parse_seeds(const std::string& text) {
     std::vector<std::uint32_t> seeds;
     std::istringstream input(text);
@@ -394,6 +416,14 @@ nlohmann::json text_json(const TextResult& result) {
         }
     }
     return value;
+}
+
+nlohmann::json text_sample_json(std::int32_t id, const std::string& prompt,
+                                const TextResult& result) {
+    return {{"id", id},
+            {"prompt", prompt},
+            {"generated", result.text},
+            {"token_ids", result.token_ids}};
 }
 
 nlohmann::json stream_result_json(const TranscriptionStreamResult& result) {
@@ -573,8 +603,10 @@ const char* event_kind_name(SpeechSessionEventKind kind) {
 }
 
 int dispatch_run(const Command& command, ITask& task, std::ostream& output) {
-    if (!has_option(command, "--prompt") && !has_option(command, "--initial-latents-raw")) {
-        throw std::invalid_argument("run requires --prompt or --initial-latents-raw");
+    if (!has_option(command, "--prompt") && !has_option(command, "--prompts-file") &&
+        !has_option(command, "--initial-latents-raw")) {
+        throw std::invalid_argument(
+            "run requires --prompt, --prompts-file, or --initial-latents-raw");
     }
     const std::string prompt =
         has_option(command, "--prompt") ? command.options.at("--prompt") : std::string{};
@@ -641,7 +673,64 @@ int dispatch_run(const Command& command, ITask& task, std::ostream& output) {
         auto& interface = require_interface<ITextGeneration>(task);
         config.max_new_tokens =
             int_option(command, "--max-new-tokens", interface.default_max_new_tokens(), 1);
-        write_json(output, text_json(interface.generate(prompt, config)));
+        const std::int32_t samples_per_prompt = int_option(command, "--num-samples", 1, 1);
+        const bool batch_requested = has_option(command, "--prompts-file") ||
+                                     samples_per_prompt > 1 || has_option(command, "--output");
+        if (!batch_requested) {
+            write_json(output, text_json(interface.generate(prompt, config)));
+            return EXIT_SUCCESS;
+        }
+
+        const std::vector<std::string> prompts =
+            has_option(command, "--prompts-file")
+                ? read_prompt_lines(command.options.at("--prompts-file"))
+                : std::vector<std::string>{prompt};
+        if (prompts.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max() /
+                                                      samples_per_prompt)) {
+            throw std::invalid_argument("text batch has too many samples");
+        }
+        const std::int32_t total_samples =
+            static_cast<std::int32_t>(prompts.size()) * samples_per_prompt;
+        if (!config.initial_latents.empty() && total_samples > 1) {
+            throw std::invalid_argument(
+                "--initial-latents-raw can only be used with one text sample");
+        }
+        if (config.seed >= 0 &&
+            total_samples - 1 > std::numeric_limits<std::int32_t>::max() - config.seed) {
+            throw std::invalid_argument("--seed plus the text sample index is outside its valid "
+                                        "integer range");
+        }
+
+        std::ofstream output_file;
+        std::ostream* jsonl_output = &output;
+        if (has_option(command, "--output")) {
+            const fs::path output_path(command.options.at("--output"));
+            const fs::path parent = output_path.parent_path();
+            if (!parent.empty())
+                fs::create_directories(parent);
+            output_file.open(output_path, std::ios::out | std::ios::trunc);
+            if (!output_file)
+                throw std::runtime_error("failed to create output: " + output_path.string());
+            jsonl_output = &output_file;
+        }
+
+        std::int32_t sample_id = 0;
+        for (const auto& text_prompt : prompts) {
+            for (std::int32_t sample = 0; sample < samples_per_prompt; ++sample, ++sample_id) {
+                TextGenerationConfig sample_config = config;
+                if (config.seed >= 0)
+                    sample_config.seed = config.seed + sample_id;
+                write_json(*jsonl_output,
+                           text_sample_json(sample_id, text_prompt,
+                                            interface.generate(text_prompt, sample_config)));
+            }
+        }
+        if (!*jsonl_output)
+            throw std::runtime_error("failed to write text batch output");
+        if (output_file.is_open()) {
+            output << "Saved " << command.options.at("--output") << " (" << total_samples
+                   << " samples)\n";
+        }
         return EXIT_SUCCESS;
     }
     const io::LoadedImage image = read_image(require_option(command, "--image"));
@@ -729,6 +818,18 @@ Command parse_args(int argc, char** argv) {
     if (byok_option_count != 0 && byok_option_count != 3) {
         throw std::invalid_argument(
             "--byok-library, --byok-function, and --byok-name must be used together");
+    }
+    if (command.kind == CommandKind::kRun) {
+        if (has_option(command, "--prompt") && has_option(command, "--prompts-file"))
+            throw std::invalid_argument("--prompt and --prompts-file are mutually exclusive");
+        if (has_option(command, "--num-samples"))
+            (void)parse_int32(command.options.at("--num-samples"), "--num-samples", 1);
+        if (has_option(command, "--image") &&
+            (has_option(command, "--prompts-file") || has_option(command, "--num-samples") ||
+             has_option(command, "--output"))) {
+            throw std::invalid_argument(
+                "--prompts-file, --num-samples, and --output are text-only run options");
+        }
     }
     return command;
 }
@@ -1221,7 +1322,8 @@ void print_usage(std::ostream& output) {
               "  [--sde-noise-raw PATH] [--num-steps N] [--guidance-scale S]\n"
               "  [--cfg-scale S] [--sde-gamma S]\n\n"
               "Text generation options:\n"
-              "  [--source-language-token-id N] [--forced-bos-token-id N]\n\n"
+              "  [--source-language-token-id N] [--forced-bos-token-id N]\n"
+              "  [--prompts-file PATH] [--num-samples N] [--output PATH]\n\n"
               "Offline transcription options:\n"
               "  [--beam-size N] [--length-penalty F] [--punctuation true|false]\n"
               "  [--max-input-seconds F] [--segment-length-seconds F]\n"

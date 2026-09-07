@@ -339,16 +339,18 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_task_api PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME task_api COMMAND test_task_api)
 
+  set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
+
   add_executable(test_cli apps/cli/tests/test_cli.cpp)
   target_include_directories(test_cli PRIVATE
     ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${PROJECT_SOURCE_DIR}/core
     ${PROJECT_SOURCE_DIR}/apps
   )
-  target_link_libraries(test_cli PRIVATE trtmc_cli)
+  target_link_libraries(test_cli PRIVATE trtmc_cli nlohmann_json::nlohmann_json)
   target_compile_options(test_cli PRIVATE -Wall -Wextra -Wpedantic)
-  add_test(NAME cli COMMAND test_cli)
+  add_test(NAME cli COMMAND test_cli "${_trtmc_test_runtime_root}")
 
-  set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
   add_library(trtmc_test_backend_fake SHARED core/runtime/tests/fake_backend.cpp)
   target_include_directories(trtmc_test_backend_fake PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
   target_link_libraries(trtmc_test_backend_fake PRIVATE CUDA::cudart)
@@ -365,6 +367,18 @@ if(TRTMC_BUILD_TESTS)
     LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
     BUILD_RPATH "\$ORIGIN/../.."
   )
+
+  add_library(trtmc_test_family_cli_text_fake SHARED apps/cli/tests/fake_text_family.cpp)
+  target_include_directories(trtmc_test_family_cli_text_fake PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(trtmc_test_family_cli_text_fake PRIVATE trtmc_core)
+  set_target_properties(trtmc_test_family_cli_text_fake PROPERTIES
+    OUTPUT_NAME trtmc_model_cli_text_fake
+    LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
+    BUILD_RPATH "\$ORIGIN/../.."
+  )
+  add_dependencies(test_cli trtmc_test_backend_fake trtmc_test_family_cli_text_fake)
 
   add_executable(test_family_loader core/runtime/tests/test_family_loader.cpp)
   target_include_directories(test_family_loader PRIVATE

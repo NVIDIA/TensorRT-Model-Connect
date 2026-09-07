@@ -5,12 +5,14 @@
 
 #include "cli/cli.h"
 #include "cli/io.h"
+#include "runtime/bundle/bundle_format.h"
 
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -43,6 +45,38 @@ bool parse_throws(std::vector<std::string> arguments) {
     } catch (const std::invalid_argument&) {
         return true;
     }
+}
+
+int invoke_cli(std::vector<std::string> arguments, std::ostream& output, std::ostream& error) {
+    std::vector<char*> argv;
+    argv.reserve(arguments.size());
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    return trtmc::cli::run(static_cast<int>(argv.size()), argv.data(), output, error);
+}
+
+void write_text_bundle(const std::filesystem::path& path) {
+    const std::string header =
+        "{\"format\":1,\"family\":\"cli_text_fake\",\"task\":\"text_generation\","
+        "\"backend\":\"fake\",\"sections\":{\"runtime.json\":{\"offset\":0,\"length\":2},"
+        "\"engine.plan\":{\"offset\":2,\"length\":4}}}";
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(trtmc::kBundleMagic), 8);
+    const std::uint64_t header_length = header.size();
+    for (int shift = 0; shift < 64; shift += 8)
+        output.put(static_cast<char>((header_length >> shift) & 0xffU));
+    output.write(header.data(), static_cast<std::streamsize>(header.size()));
+    output.write("{}PLAN", 6);
+}
+
+std::vector<nlohmann::json> read_jsonl(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    if (!input)
+        throw std::runtime_error("unable to read JSONL test output");
+    std::vector<nlohmann::json> records;
+    for (std::string line; std::getline(input, line);)
+        records.push_back(nlohmann::json::parse(line));
+    return records;
 }
 
 class FakeText final : public trtmc::ITextGeneration,
@@ -254,7 +288,12 @@ bool dispatch_throws(const trtmc::cli::Command& command, trtmc::ITask& task) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        std::cerr << "usage: test_cli RUNTIME_ROOT\n";
+        return 2;
+    }
+    const std::filesystem::path runtime_root(argv[1]);
     const std::vector<std::string> execution_commands{
         "run",
         "encode",
@@ -322,6 +361,25 @@ int main() {
     check(parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--prompt", "a",
                         "--prompt", "b"}),
           "duplicate command option rejected");
+    const auto text_batch =
+        parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--prompts-file",
+               "prompts.txt", "--num-samples", "2", "--output", "samples.jsonl"});
+    check(text_batch.options.at("--prompts-file") == "prompts.txt" &&
+              text_batch.options.at("--num-samples") == "2" &&
+              text_batch.options.at("--output") == "samples.jsonl",
+          "text batch options are retained");
+    check(parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--prompt", "a",
+                        "--prompts-file", "prompts.txt"}),
+          "prompt and prompts file are mutually exclusive");
+    check(parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--prompt", "a",
+                        "--num-samples", "0"}),
+          "zero text sample count is rejected");
+    check(parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--prompt", "a",
+                        "--num-samples", "many"}),
+          "non-integer text sample count is rejected");
+    check(parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--prompt", "a",
+                        "--image", "image.png", "--num-samples", "2"}),
+          "text batch options cannot be combined with an image");
     check(parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--prompt", "a",
                         "--generation-mode"}),
           "generation mode requires a value");
@@ -500,6 +558,73 @@ int main() {
               text.seen.text_generation_mode == "auto" && text.seen.block_length == 0 &&
               text.seen.confidence_threshold == -1.0F && text.seen.temperature == 1.0F,
           "text diffusion options preserve Task API defaults");
+
+    auto one_sample_run = default_run;
+    one_sample_run.options.emplace("--num-samples", "1");
+    one_sample_run.options.emplace("--seed", "17");
+    std::ostringstream one_sample_output;
+    check(trtmc::cli::dispatch(one_sample_run, text, one_sample_output) == 0 &&
+              text.seen.seed == 17 &&
+              one_sample_output.str().find("\"text\"") != std::string::npos &&
+              one_sample_output.str().find("\"generated\"") == std::string::npos,
+          "one prompt and one sample preserve the existing result and seed semantics");
+
+    const auto empty_prompts_path = runtime_root / "cli-text-empty-prompts.txt";
+    {
+        std::ofstream empty_prompts(empty_prompts_path, std::ios::trunc);
+    }
+    trtmc::cli::Command empty_batch;
+    empty_batch.kind = trtmc::cli::CommandKind::kRun;
+    empty_batch.name = "run";
+    empty_batch.options.emplace("--prompts-file", empty_prompts_path.string());
+    check(dispatch_throws(empty_batch, text), "empty prompts file is rejected");
+    std::filesystem::remove(empty_prompts_path);
+
+    const auto prompts_path = runtime_root / "cli-text-prompts.txt";
+    const auto bundle_path = runtime_root / "cli-text.bundle";
+    const auto output_path = runtime_root / "cli-text-samples.jsonl";
+    {
+        std::ofstream prompts(prompts_path, std::ios::binary | std::ios::trunc);
+        prompts << "first\r\n\r\nthird\r\n\r\n";
+    }
+    write_text_bundle(bundle_path);
+    std::ostringstream batch_output;
+    std::ostringstream batch_error;
+    const int batch_status =
+        invoke_cli({"trtmc", "run", bundle_path.string(), "--runtime-root", runtime_root.string(),
+                    "--prompts-file", prompts_path.string(), "--num-samples", "2", "--seed", "40",
+                    "--output", output_path.string()},
+                   batch_output, batch_error);
+    check(batch_status == 0 && batch_error.str().empty(),
+          "batch run loads the fake text family once");
+    std::vector<nlohmann::json> records;
+    try {
+        records = read_jsonl(output_path);
+    } catch (const std::exception& exception) {
+        std::cerr << "FAIL: text batch output is valid JSONL: " << exception.what() << '\n';
+        ++failures;
+    }
+    check(records.size() == 6, "text batch writes one JSONL record per prompt and sample");
+    const std::vector<std::string> expected_prompts{"first", "first", "", "", "third", "third"};
+    for (std::size_t index = 0; index < records.size() && index < expected_prompts.size();
+         ++index) {
+        const auto& record = records[index];
+        const auto expected_id = static_cast<std::int32_t>(index);
+        const auto expected_seed = 40 + expected_id;
+        check(record.value("id", -1) == expected_id &&
+                  record.value("prompt", std::string{"missing"}) == expected_prompts[index] &&
+                  record.value("generated", std::string{}) ==
+                      expected_prompts[index] + ":" + std::to_string(expected_seed) &&
+                  record.value("token_ids", std::vector<std::int32_t>{}) ==
+                      std::vector<std::int32_t>{expected_id},
+              "text batch preserves prompt order and derives deterministic seeds");
+    }
+    check(batch_output.str().find("6 samples") != std::string::npos,
+          "text batch reports the output sample count");
+    std::filesystem::remove(prompts_path);
+    std::filesystem::remove(bundle_path);
+    std::filesystem::remove(output_path);
+
     const std::filesystem::path unsupported_image_path = "/tmp/trtmc-cli-unsupported.ppm";
     {
         std::ofstream image_file(unsupported_image_path, std::ios::binary);

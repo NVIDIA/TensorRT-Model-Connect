@@ -64,6 +64,23 @@ trtmc run gpt2.bundle \
   --max-new-tokens 32
 ```
 
+For ordered batch text generation, put one prompt on each line and reuse the
+same loaded task for every sample:
+
+```bash
+trtmc run gpt2.bundle \
+  --runtime-root /opt/trtmc/lib \
+  --prompts-file prompts.txt \
+  --num-samples 2 \
+  --seed 100 \
+  --output samples.jsonl
+```
+
+`--prompt` and `--prompts-file` are mutually exclusive. Batch records are
+written in prompt order, with one JSONL object per prompt and sample. Interior
+blank lines are empty prompts; blank lines at the end of the file are ignored.
+Without `--output`, the JSONL records are written to standard output.
+
 The shell variable above is only a convenient explicit argument. The CLI never
 searches environment variables, the current directory, or an installed
 fallback runtime.
