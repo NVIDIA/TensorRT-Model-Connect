@@ -1,0 +1,37 @@
+{
+  "name": "k2-horizon-7b",
+  "hf_id": "IFM/K2-Horizon-7B",
+  "hf_revision": "586b03f0fd1fbbf2f13eeafc33749e95ae34dd10",
+  "bundle": "k2-horizon-7b.bundle",
+  "family": "k2_horizon",
+  "runtime_strategy": "k2_horizon_decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
+  "precision": "bf16",
+  "max_cache_length": 256,
+  "trust_remote_code": true,
+  "execution_profiles": {
+    "reference": "k2_horizon_reference"
+  },
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_timeout_s": 7200,
+  "testcases": [
+    {
+      "name": "k2-horizon-7b",
+      "trace_id": "IT-E2E-K2H7B-01",
+      "reference_backend": "hf_transformers",
+      "oracle_level": "L1_external_reference",
+      "reference_family": "k2_horizon_greedy_continuation",
+      "reference_precision": "bf16",
+      "user_contract": "continuation_parity",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 4,
+      "temperature": 0.0,
+      "top_k": 1,
+      "expected_continuation_token_ids": [11511, 15, 589, 7169],
+      "contract_config": {
+        "use_chat_template": false
+      },
+      "notes": "Pinned BF16 plain-completion parity for the publisher-documented Transformers path. Native chat, sampling, reasoning/tool parsing, and the full 524288-token context are outside this minimal checkpoint contract."
+    }
+  ]
+}

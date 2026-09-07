@@ -92,6 +92,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "IFM/K2-Horizon-7B",
+      "revision": "586b03f0fd1fbbf2f13eeafc33749e95ae34dd10",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "k2_horizon",
+      "architectures": [
+        "K2HorizonForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "Lightricks/LTX-Video",
       "revision": "8984fa25007f376c1a299016d0957a37a2f797bb",
       "revision_source": "resolved",
@@ -1312,6 +1323,72 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "timm/mobilenetv3_large_100.ra_in1k",
+      "revision": "96f46a1c52932f27492dff66c72378eb99b443a7",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "mobilenetv3_large_100"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
+      "hf_id": "timm/efficientnet_b0.ra_in1k",
+      "revision": "1b5383e5f79cc0f7fc067e372f8f26a5fa73f26a",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "efficientnet_b0"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
+      "hf_id": "timm/densenet121.ra_in1k",
+      "revision": "92007b6200e0b4a4fe68cb4e3947022a928aaaae",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "densenet121"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
+      "hf_id": "timm/mnasnet_100.rmsp_in1k",
+      "revision": "a30af72360c7a4871b0156cc11d7b767208273d7",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "mnasnet_100"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
+      "hf_id": "timm/inception_v3.tv_in1k",
+      "revision": "393d84cc85c467d8fbc0dc81a65c04e87a32572c",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "inception_v3"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
+      "hf_id": "timm/repvgg_a2.rvgg_in1k",
+      "revision": "87d4d383cb45031cb9fa2fc8ddca73fd6649240f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "repvgg_a2"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/resnet50.a1_in1k",
       "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
       "revision_source": "resolved",
@@ -1319,6 +1396,17 @@
       "model_type": null,
       "architectures": [
         "resnet50"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
+      "hf_id": "timm/vgg16.tv_in1k",
+      "revision": "b8d8aa2dd860af9233c8c67385a8097fd6c35d3f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "vgg16"
       ],
       "architecture_source": "config.architecture"
     },

@@ -60,6 +60,30 @@ class DummyPipeline final : public trtmc::IPipeline {
     const char* pipeline_type() const override { return "DummyPipeline"; }
 };
 
+// A pipeline that supports text generation but not images. This is the shape
+// every text-only family has (llama, qwen, mistral, ...), and the shape that
+// DummyPipeline cannot exercise: because DummyPipeline supports nothing, the
+// image overloads appear to throw when they merely delegate to a throwing
+// text-only path.
+class TextOnlyPipeline final : public trtmc::IPipeline {
+  public:
+    const char* model_id() const override { return "text-only-model"; }
+    const char* pipeline_type() const override { return "TextOnlyPipeline"; }
+
+    trtmc::TextResult generate(const std::string& prompt,
+                               const trtmc::GenerateConfig& cfg = {}) override {
+        (void)cfg;
+        return {prompt, {}};
+    }
+
+    trtmc::ImageResult generate_image(const std::string& prompt,
+                                      const trtmc::GenerateConfig& cfg = {}) override {
+        (void)prompt;
+        (void)cfg;
+        return {};
+    }
+};
+
 class RecordingTranscriptionPipeline final : public trtmc::IPipeline {
   public:
     const char* model_id() const override { return "recording"; }
@@ -674,6 +698,49 @@ static void test_pipeline_pool_leases_and_adapter_maintenance() {
     check(pool.loaded_lora_adapters().empty(), "pipeline pool unloads adapter across lanes");
 }
 
+// A pipeline that cannot consume an image must reject one, not silently drop
+// it. Every other unsupported capability on IPipeline throws; these two
+// overloads used to discard the image and fall through to the no-image path,
+// so `trtmc run <text-only>.bundle --image cat.png` answered from the prompt
+// alone with no diagnostic.
+static void test_ipipeline_rejects_unconsumable_image() {
+    TextOnlyPipeline concrete;
+    // Call through the base interface, as the CLI does: it holds a
+    // std::unique_ptr<IPipeline>. Naming generate() in the derived class hides
+    // the base image overloads, so a concrete-typed call would not compile.
+    trtmc::IPipeline& pipeline = concrete;
+    const std::vector<float> pixels(2 * 2 * 3, 0.5F);
+
+    bool threw = false;
+    try {
+        pipeline.generate("describe this", pixels.data(), 2, 2);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "text-only generate(string,image) rejects a supplied image");
+
+    // Passing no image must still reach the text-only path.
+    const trtmc::TextResult text = pipeline.generate("describe this", nullptr, 0, 0);
+    check(text.text == "describe this",
+          "generate(string,image) forwards when no image is supplied");
+
+    threw = false;
+    try {
+        pipeline.generate_image("make it night", pixels.data(), 2, 2);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "text-to-image generate_image(string,image) rejects a supplied image");
+
+    bool image_threw = false;
+    try {
+        (void)pipeline.generate_image("make it night", nullptr, 0, 0);
+    } catch (const std::runtime_error&) {
+        image_threw = true;
+    }
+    check(!image_threw, "generate_image(string,image) forwards when no image is supplied");
+}
+
 int main() {
     test_null_input_returns_null();
     test_invalid_path_returns_null();
@@ -682,6 +749,7 @@ int main() {
     test_sizeof_ipipeline_is_vtable();
     test_delete_null_safe();
     test_ipipeline_default_virtuals();
+    test_ipipeline_rejects_unconsumable_image();
     test_speech_session_value_contract();
     test_speech_batch_session_optional_interface();
     test_speech_session_virtual_interface();

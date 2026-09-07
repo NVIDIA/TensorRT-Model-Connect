@@ -619,11 +619,28 @@ the producing class remains the source of truth for optional evidence fields.
   network. Bulk nightly warming and selected premerge first-use warming share
   the same validation and atomic publication path.
 
+### `model_artifact_cache.py`
+
+- **Functionality / units:** validates a suite-selected
+  `[model_artifact_cache]`, downloads each declared public NGC file once, and
+  admits it only when its exact byte size and SHA-256 digest match.
+- **Inputs:** a family-owned relative destination, an environment-variable
+  name, and one to eight HTTPS file declarations under the allowlisted NGC API
+  origin. The host cache uses `TRTMC_MODEL_ARTIFACT_CACHE_ROOT`, falling back to
+  `TRTMC_MODEL_REFERENCE_CACHE_ROOT` for existing model-proof deployments.
+- **Outputs:** verified host-cache files and a private
+  `/work/model-artifacts/<family>/...` copy plus
+  `model-artifact-cache.json` evidence for the selected proof.
+- **Boundary:** only the trusted host phase has network access. The proof
+  container receives no shared cache paths or undeclared files and rechecks
+  every size and digest before build and inference.
+
 ### `model_proof_selection.py`
 
 - **Functionality / units:** `ModelProofSelector` validates a positive
   one-model projection and resolves runtime/Python/E2E owners, tests, reference
-  cache contract, and required GPU resource class.
+  source-reference and binary-artifact cache contracts, and required GPU
+  resource class.
 - **Inputs:** `model`, `suite`, pinned `revision`, projected source path
   containing `.trtmc-model-projection.json` and one owner manifest per layer,
   plus optional lease evidence.

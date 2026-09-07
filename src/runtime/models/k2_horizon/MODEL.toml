@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "k2_horizon"
+runtime_library = "libtrtmc_model_k2_horizon.so"
+runtime_plugins = ["plugin.cpp|register_k2_horizon_plugin"]
+runtime_strategies = ["k2_horizon_decoder_kv_cache"]
+runtime_tests = [
+  "test_k2_horizon_sampler|test_k2_horizon_sampler.cpp|trtmc_model_k2_horizon|_|_",
+]
+[validation_profiles]
+decoder_debug = ["k2_horizon_decoder_kv_cache"]

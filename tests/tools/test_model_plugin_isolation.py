@@ -97,6 +97,11 @@ def test_targets_resolve_e2e_model_to_runtime_plugin_owner(tmp_path: Path) -> No
 @pytest.mark.parametrize(
     ("family", "strategy", "target"),
     [
+        (
+            "k2_horizon",
+            "k2_horizon_decoder_kv_cache",
+            "trtmc_model_k2_horizon",
+        ),
         ("qwen", "qwen_decoder_kv_cache", "trtmc_model_qwen"),
         ("deepseek_v2", "deepseek_v2_decoder_kv_cache", "trtmc_model_deepseek_v2"),
         ("olmo2", "olmo2_decoder_kv_cache", "trtmc_model_olmo2"),

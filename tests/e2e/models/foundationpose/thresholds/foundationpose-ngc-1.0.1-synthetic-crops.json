@@ -1,0 +1,13 @@
+{
+  "threshold_overrides": {
+    "pose_max_abs_error": 0.005,
+    "score_max_abs_error": 0.05,
+    "ranking_agreement": 1.0,
+    "rigid_pose_fraction": 1.0,
+    "tracking_throughput_hz": 10.0,
+    "tracking_latency_p95_ms": 100.0,
+    "tracking_jitter_ms": 25.0,
+    "startup_ms": 10000.0,
+    "gpu_memory_delta_mib": 4096.0
+  }
+}

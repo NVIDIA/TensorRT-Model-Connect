@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_vgg"
+runtime_library = "libtrtmc_model_timm_vgg.so"
+runtime_plugins = ["plugin.cpp|register_timm_vgg_plugin"]
+runtime_strategies = ["timm_vgg_image_classification"]
+runtime_tests = [
+  "test_timm_vgg_image_preprocess_seam|test_timm_vgg_image_preprocess_seam.cpp|trtmc_model_timm_vgg|_|_",
+]

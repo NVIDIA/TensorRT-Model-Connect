@@ -213,6 +213,50 @@ struct RobotAction {
     double inference_ms{0.0};
 };
 
+// A model-based pose refiner can request caller-produced rendered/observed
+// feature crops. Layout and feature semantics are owned by the model bundle;
+// rendering and segmentation remain outside this model-agnostic contract.
+enum class PoseCropStage {
+    kRefinement,
+    kScoring,
+};
+
+struct PoseCropBatch {
+    std::vector<float> rendered_features;
+    std::vector<float> observed_features;
+    int32_t num_hypotheses{0};
+    int32_t height{0};
+    int32_t width{0};
+    int32_t channels{0};
+};
+
+using PoseCropProvider =
+    std::function<PoseCropBatch(const std::vector<float>& current_object_to_camera_poses,
+                                PoseCropStage stage, int32_t refinement_iteration)>;
+
+struct PoseEstimationRequest {
+    // Row-major [num_hypotheses, 4, 4] object-to-camera rigid transforms.
+    // Leave empty with use_tracked_pose=true to refine the last selected pose.
+    std::vector<float> candidate_poses;
+    int32_t num_hypotheses{0};
+    float mesh_diameter{0.0F};
+    int32_t refinement_iterations{1};
+    bool score_hypotheses{true};
+    bool use_tracked_pose{false};
+    bool update_tracking_state{true};
+    PoseCropProvider crop_provider;
+};
+
+struct PoseEstimationResult {
+    std::vector<float> refined_poses; // row-major [num_hypotheses, 4, 4]
+    std::vector<float> scores;        // one confidence logit per hypothesis
+    int32_t num_hypotheses{0};
+    int32_t best_index{-1};
+    bool all_poses_rigid{false};
+    double refinement_ms{0.0};
+    double scoring_ms{0.0};
+};
+
 struct TextEmbedding {
     std::vector<float> data;
     std::vector<int64_t> shape;
@@ -430,12 +474,16 @@ class IPipeline {
     }
 
     // -- Text generation with image --
+    // A pipeline that cannot consume an image must reject one rather than
+    // answer from the prompt alone. Forwarding is reserved for the case where
+    // the caller supplied no image at all.
     virtual TextResult generate(const std::string& prompt, const float* image_pixels,
                                 int32_t image_height, int32_t image_width,
                                 const GenerateConfig& cfg = {}) {
-        (void)image_pixels;
-        (void)image_height;
-        (void)image_width;
+        if (image_pixels != nullptr || image_height > 0 || image_width > 0) {
+            throw std::runtime_error(std::string(pipeline_type()) +
+                                     " does not accept an input image");
+        }
         return generate(prompt, cfg);
     }
 
@@ -458,9 +506,10 @@ class IPipeline {
     virtual ImageResult generate_image(const std::string& prompt, const float* image_pixels,
                                        int32_t image_height, int32_t image_width,
                                        const GenerateConfig& cfg = {}) {
-        (void)image_pixels;
-        (void)image_height;
-        (void)image_width;
+        if (image_pixels != nullptr || image_height > 0 || image_width > 0) {
+            throw std::runtime_error(std::string(pipeline_type()) +
+                                     " does not accept an input image");
+        }
         return generate_image(prompt, cfg);
     }
 
@@ -750,6 +799,14 @@ class IPipeline {
     // Clear model-owned request/episode state while retaining reusable engine
     // allocations. Stateless pipelines may keep the default no-op.
     virtual void reset() {}
+
+    // -- Model-based object pose refinement and scoring --
+    // Added after all pre-existing virtuals to retain their ABI slots.
+    virtual PoseEstimationResult estimate_pose_hypotheses(const PoseEstimationRequest& request) {
+        (void)request;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support estimate_pose_hypotheses()");
+    }
 };
 
 // --- Factory ---

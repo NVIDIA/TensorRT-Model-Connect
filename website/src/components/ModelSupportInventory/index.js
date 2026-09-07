@@ -17,6 +17,7 @@ const TASK_LABELS = {
   monocular_geometry: 'Monocular geometry',
   neural_operator: 'Time-series / neural operator',
   omni_multimodal: 'Omni multimodal',
+  pose_hypothesis_refinement: 'Pose hypothesis refinement',
   prompted_segmentation: 'Prompted segmentation',
   reranking: 'Reranking',
   segmentation: 'Segmentation',
@@ -63,7 +64,7 @@ function ModelProfileTable({profiles, taskGroup}) {
         <table>
           <thead>
             <tr>
-              <th>Hugging Face checkpoint</th>
+              <th>Model source / build input</th>
               <th>Manifest profile</th>
               <th>Task</th>
               <th>Family / runtime</th>
@@ -78,6 +79,7 @@ function ModelProfileTable({profiles, taskGroup}) {
                   <code>{profile.hfId}</code>
                   <br />
                   <small>Revision: {profile.revision}</small>
+                  {profile.buildInput && <><br /><small>Local build input: <code>{profile.buildInput}</code></small></>}
                 </td>
                 <td>
                   <code>{profile.profile}</code>

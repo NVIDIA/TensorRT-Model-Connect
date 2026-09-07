@@ -26,6 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
 from .context import CiContext
 from .gpu_lease import GpuLease
 from .model_reference_cache import ModelReferenceCacheWarmer, ModelReferenceContract
+from .model_artifact_cache import ModelArtifactCache
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
 from .selected_wheel import (
@@ -315,6 +316,9 @@ class ModelProofRunner:
         ModelReferenceCache(self.context, self.request).prepare(
             selection.reference_cache, work, self.artifacts_dir
         )
+        ModelArtifactCache(self.context, self.request.model).prepare(
+            selection.artifact_cache, work, self.artifacts_dir
+        )
         expected = self.context.env.get("TRTMC_MODEL_PROOF_EXPECTED_RESOURCE_CLASS", "")
         if expected and expected not in {"shared", "exclusive_gpu"}:
             raise CiError(
@@ -354,7 +358,13 @@ class ModelProofRunner:
             validation_container,
             self._job_labels(),
         ).prepare()
-        private_hub = self._prepare_hf_cache(projection, work, image, models_file)
+        private_hub = self._prepare_hf_cache(
+            projection,
+            work,
+            image,
+            models_file,
+            allow_empty=bool(selection.artifact_cache),
+        )
         (self.artifacts_dir / "gpu-lease-requested.txt").write_text(
             selection.resource_class + "\n", encoding="utf-8"
         )
@@ -795,7 +805,13 @@ class ModelProofRunner:
         return value.replace("_", "-")
 
     def _prepare_hf_cache(
-        self, projection: Path, work: Path, image: str, models_file: Path
+        self,
+        projection: Path,
+        work: Path,
+        image: str,
+        models_file: Path,
+        *,
+        allow_empty: bool = False,
     ) -> Path:
         assert self.artifacts_dir is not None
         root = self.context.env.get(
@@ -872,6 +888,7 @@ class ModelProofRunner:
             "--strict",
             "--emit-cache-repos",
             "/artifacts/hf-cache-repos.json",
+            *(["--allow-empty-cache-repos"] if allow_empty else []),
         ]
         result = self._run_logged(command, self.artifacts_dir / "cache-check.log")
         if result:
@@ -964,8 +981,8 @@ class ModelProofRunner:
         if payload.get("schema_version") != 1 or payload.get("hub_cache") != "/hf-cache/hub":
             raise CiError("selected Hugging Face cache evidence has an unsupported schema")
         repositories = payload.get("repositories")
-        if not isinstance(repositories, list) or not repositories:
-            raise CiError("selected HF cache evidence contains no repositories")
+        if not isinstance(repositories, list):
+            raise CiError("selected HF cache evidence repositories must be a list")
         result = []
         seen = set()
         resolved_hub = hub.resolve(strict=True)
@@ -1076,7 +1093,9 @@ class ModelProofRunner:
             "/src",
             "--tmpfs",
             "/tmp:rw,exec,nosuid,nodev,size=4g",
-            *self._proof_environment(slots, selection.reference_cache, selected_wheel),
+            *self._proof_environment(
+                slots, selection.reference_cache, selection.artifact_cache, selected_wheel
+            ),
             image,
             "python3",
             "-m",
@@ -1100,6 +1119,7 @@ class ModelProofRunner:
         self,
         slots: str,
         reference: dict[str, str] | None,
+        artifact: dict[str, object] | None = None,
         selected_wheel: SelectedWheelContract | None = None,
     ) -> list[str]:
         assert self.lease and self.lease.gpu_id is not None
@@ -1142,6 +1162,11 @@ class ModelProofRunner:
                 values[environment_variable] = (
                     f"/work/reference-private/{reference['relative_path']}"
                 )
+        if artifact:
+            environment_variable = str(artifact["environment_variable"])
+            values[environment_variable] = (
+                f"/work/model-artifacts/{artifact['relative_path']}"
+            )
         if selected_wheel is not None:
             values.update(
                 {

@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "foundationpose"
+runtime_library = "libtrtmc_model_foundationpose.so"
+runtime_plugins = ["plugin.cpp|register_foundationpose_plugin"]
+runtime_strategies = ["foundationpose_pose_refinement"]
+runtime_tests = [
+  "test_foundationpose_pipeline|test_foundationpose_pipeline.cpp|trtmc_model_foundationpose|_|_",
+]
+task_strategy = "pose_hypothesis_refinement"

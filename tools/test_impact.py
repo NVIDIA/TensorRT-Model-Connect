@@ -1884,6 +1884,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_lerobot_act_recorded_control_example_is_model_owned",),
         ),
         ClassificationRule(
+            priority=452,
+            name="foundationpose_preprocessed_refinement_example",
+            matcher=_regex_rule(r"examples/models/(foundationpose)/preprocessed_refinement/.+$"),
+            resolver=_match_result(
+                "foundationpose_preprocessed_refinement_example",
+                _family_models,
+                ["cpp", "tools"],
+                True,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_foundationpose_preprocessed_refinement_example_is_model_owned",
+            ),
+        ),
+        ClassificationRule(
             priority=456,
             name="cpp_example_tool",
             matcher=_regex_rule(r"examples/.+\.cpp$"),
@@ -2049,9 +2063,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=491,
             name="devtoolkit_contract",
-            matcher=_path_startswith_any(
-                ("configs/environment-cohorts/", "scripts/devToolkit/")
-            ),
+            matcher=_path_startswith("scripts/devToolkit/"),
             resolver=_match_result(
                 "devtoolkit_contract", _no_models, ["tools"], False
             ),

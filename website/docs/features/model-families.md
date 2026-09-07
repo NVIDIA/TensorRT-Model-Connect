@@ -31,7 +31,8 @@ python3 tools/model_ci.py validate
 
 Common native TensorRT groups:
 
-- Decoder-only: Qwen, LLaMA, Mistral, GPT, OPT, Bloom, Gemma, Falcon, Granite, OLMo.
+- Decoder-only: K2-Horizon, Qwen, LLaMA, Mistral, GPT, OPT, Bloom, Gemma,
+  Falcon, Granite, OLMo.
 - MoE: Mixtral, Phi-MoE, Qwen-MoE, GPT-OSS, DeepSeek-V2.
 - Recurrent and hybrid: Mamba, RWKV, Nemotron-H, Qwen3.5 hybrid, Qwen3.8 hybrid.
 - Encoder-only: BERT, RoBERTa, DeBERTa, ModernBERT, DistilBERT, ConvBERT, FNet, XLNet, MPNet, DPR.
@@ -41,7 +42,7 @@ Common native TensorRT groups:
 - Audio and speech: Whisper, Canary, Bark, Magpie, PersonaPlex, Nemotron streaming.
 - Diffusion: FLUX, Wan 2.1/2.2, LTX-Video, Qwen-Image, SANA-WM, Z-Image,
   PixArt.
-- Perception: MoGe monocular geometry, SegFormer, SAM, SAM3, timm ViT, and timm ResNet
+- Perception: MoGe monocular geometry, SegFormer, SAM, SAM3, timm ViT, timm ResNet, and timm VGG
   classification.
 - Time-series/operators: Chronos-Bolt, PatchTSMixer, PatchTST, and TimesFM.
 

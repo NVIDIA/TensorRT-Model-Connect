@@ -1259,6 +1259,8 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     )
     assert "Dockerfile.dev.aarch64" in source_build
     assert "Dockerfile.dev.x86" in source_build
+    assert "TrtmcBuildRecipe" in source_build
+    assert "BuildSpec" not in source_build
     assert "trtmc_model_qwen" in source_build
     assert "trtmc_model_plugins" not in source_build
     assert "TRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF" in source_build

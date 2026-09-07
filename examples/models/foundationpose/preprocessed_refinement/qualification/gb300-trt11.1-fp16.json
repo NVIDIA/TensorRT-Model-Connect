@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "qualified_at": "2026-09-03",
+  "target": {
+    "gpu": "NVIDIA GB300",
+    "gpu_count_used": 1,
+    "gpu_memory_total_mib": 283136.0,
+    "driver": "580.105.08",
+    "cuda_toolkit": "13.3.0",
+    "tensorrt": "11.1.0.106",
+    "container": "trtmc-ci:trt11.1",
+    "precision": "fp16",
+    "precision_notes": "FP16 graph with FP32 normalization accumulation, external I/O, scorer cross-hypothesis attention, and score projection."
+  },
+  "pins": {
+    "source_repository": "https://github.com/NVlabs/FoundationPose.git",
+    "source_revision": "a1b694b83e633c2cb6115b9063d940a687759392",
+    "ngc_model": "nvidia/isaac/foundationpose",
+    "ngc_version": "1.0.1_onnx",
+    "refiner_sha256": "dcc695a19c4bcfe5e1d909a22d8f652d8ec8bab1e19bd1544c6b45f2d3595cf7",
+    "scorer_sha256": "0bf1026c0db7320ebf9a548ecf0d3c810c8dbd377948630bd3e5af1d49440503"
+  },
+  "build": {
+    "total_seconds": 189.6,
+    "refiner_seconds": 97.7,
+    "scorer_seconds": 88.2,
+    "bundle_size_mib": 66.44,
+    "bundle_sha256": "a6e11bca226a8c532c6db60c6c6c8fb3e997e191a248f61b08c9dfc407568579"
+  },
+  "native_runtime": {
+    "registration_hypotheses": 3,
+    "registration_refinement_iterations": 2,
+    "tracking_hypotheses": 1,
+    "tracking_refinement_iterations": 1,
+    "warmup_runs": 20,
+    "timed_runs": 200,
+    "repeated_trials": 5,
+    "startup_ms": 409.942144,
+    "tracking_latency_p50_ms": 2.950846,
+    "tracking_latency_p95_ms": 2.990735,
+    "tracking_jitter_ms": 1.551768,
+    "tracking_throughput_hz": 338.885865,
+    "gpu_memory_delta_mib": 1209.8125,
+    "registration_refinement_ms": 16.967594,
+    "registration_scoring_ms": 7.893051,
+    "all_poses_rigid": true
+  },
+  "external_reference_parity": {
+    "backend": "onnxruntime-1.29.0-cpu",
+    "pose_max_abs_error": 0.0003729574382305145,
+    "score_max_abs_error": 0.02972412109375,
+    "ranking_agreement": 1.0,
+    "rigid_pose_fraction": 1.0
+  },
+  "qualification_limits": {
+    "pose_max_abs_error": 0.005,
+    "score_max_abs_error": 0.05,
+    "ranking_agreement": 1.0,
+    "rigid_pose_fraction": 1.0,
+    "tracking_throughput_hz_min": 10.0,
+    "tracking_latency_p95_ms": 100.0,
+    "tracking_jitter_ms": 25.0,
+    "startup_ms": 10000.0,
+    "gpu_memory_delta_mib": 4096.0
+  },
+  "includes_segmentation": false,
+  "includes_cad_rendering": false,
+  "robotics_safety_validated": false
+}

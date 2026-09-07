@@ -230,7 +230,7 @@ def test_model_proof_mounts_selected_wheels_read_only_and_forwards_contract(
         tmp_path / "work",
         tmp_path / "hf",
         "fixture-image",
-        SimpleNamespace(reference_cache=None),
+        SimpleNamespace(reference_cache=None, artifact_cache=None),
         None,
         python_profiles,
     )

@@ -264,11 +264,18 @@ parser.add_argument(
     help="Stop after the first failed item. Requires --strict or "
          "--emit-cache-repos so the early stop cannot report success.",
 )
+parser.add_argument(
+    "--allow-empty-cache-repos",
+    action="store_true",
+    help="Allow empty --emit-cache-repos evidence for a separately verified non-Hub artifact model.",
+)
 args = parser.parse_args()
 if args.attempt_timeout_seconds <= 0:
     parser.error("--attempt-timeout-seconds must be greater than zero")
 if args.fail_fast and not (args.strict or args.emit_cache_repos):
     parser.error("--fail-fast requires --strict or --emit-cache-repos")
+if args.allow_empty_cache_repos and not args.emit_cache_repos:
+    parser.error("--allow-empty-cache-repos requires --emit-cache-repos")
 
 models_dir = ROOT / "tests" / "e2e" / "models"
 manifests = sorted({
@@ -310,6 +317,10 @@ for m in manifests:
     if not d.get("hf_id"):
         continue
     if filter_names is not None and name not in filter_names:
+        continue
+    # Digest-pinned non-Hub model artifacts are provisioned by the model proof
+    # host into this private absolute path. They must never be sent to the Hub.
+    if str(d["hf_id"]).startswith("/work/model-artifacts/"):
         continue
     entries.append(
         (
@@ -710,6 +721,7 @@ def _cache_repository_manifest(
     repo_ids: list[str],
     *,
     hub_cache: pathlib.Path,
+    allow_empty: bool = False,
 ) -> dict[str, object]:
     """Return a fail-closed manifest for selected repositories in one HF cache."""
     try:
@@ -759,7 +771,7 @@ def _cache_repository_manifest(
             }
         )
 
-    if not repositories:
+    if not repositories and not allow_empty:
         raise RuntimeError("no selected Hugging Face repositories were resolved")
     return {
         "schema_version": 1,
@@ -771,10 +783,13 @@ def _cache_repository_manifest(
 def _write_cache_repository_manifest(
     output: pathlib.Path,
     repo_ids: list[str],
+    *,
+    allow_empty: bool = False,
 ) -> None:
     payload = _cache_repository_manifest(
         repo_ids,
         hub_cache=pathlib.Path(hf_constants.HF_HUB_CACHE),
+        allow_empty=allow_empty,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.tmp-{os.getpid()}")
@@ -897,6 +912,7 @@ if args.emit_cache_repos and not warned:
         _write_cache_repository_manifest(
             pathlib.Path(args.emit_cache_repos),
             selected_repo_ids,
+            allow_empty=args.allow_empty_cache_repos,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: could not emit selected cache repositories: {exc}", file=sys.stderr)

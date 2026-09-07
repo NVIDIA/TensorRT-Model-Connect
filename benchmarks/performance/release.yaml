@@ -30,6 +30,11 @@ excluded_profiles:
     reason: *lfm2_performance_exclusion
   - model: lfm2-700m
     reason: *lfm2_performance_exclusion
+  - model: k2-horizon-7b
+    reason: >-
+      Pinned BF16 build and Hugging Face parity qualification are present, but
+      no matching release-performance workload or receipt has been collected.
+
 entries:
   - id: albert.encode
     family: albert
@@ -986,6 +991,97 @@ entries:
     model: resnet50-a1-in1k
     workload:
       testcase: resnet50-a1-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_repvgg.classify
+    family: timm_repvgg
+    operation: classify
+    model: repvgg-a2-rvgg-in1k
+    workload:
+      testcase: repvgg-a2-rvgg-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_inception.classify
+    family: timm_inception
+    operation: classify
+    model: inception-v3-tv-in1k
+    workload:
+      testcase: inception-v3-tv-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_mnasnet.classify
+    family: timm_mnasnet
+    operation: classify
+    model: mnasnet-100-rmsp-in1k
+    workload:
+      testcase: mnasnet-100-rmsp-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_densenet.classify
+    family: timm_densenet
+    operation: classify
+    model: densenet121-ra-in1k
+    workload:
+      testcase: densenet121-ra-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_efficientnet.classify
+    family: timm_efficientnet
+    operation: classify
+    model: efficientnet-b0-ra-in1k
+    workload:
+      testcase: efficientnet-b0-ra-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_mobilenetv3.classify
+    family: timm_mobilenetv3
+    operation: classify
+    model: mobilenetv3-large-100-ra-in1k
+    workload:
+      testcase: mobilenetv3-large-100-ra-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_vgg.classify
+    family: timm_vgg
+    operation: classify
+    model: vgg16-tv-in1k
+    workload:
+      testcase: vgg16-tv-in1k
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision

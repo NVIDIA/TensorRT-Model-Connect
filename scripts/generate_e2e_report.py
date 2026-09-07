@@ -103,6 +103,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     "embedding": "numeric",
     "reranking": "reranking",
     "robot_action_chunk": "numeric",
+    "pose_hypothesis_refinement": "numeric",
     "neural_operator": "neural_operator",
     "omni_multimodal": "omni",
     # Kept explicit for forward-compatible manifests.  Unknown strategies
@@ -3822,6 +3823,31 @@ def validate_evidence(
                     and reference_path.stat().st_size > 0,
                     "missing reference geometry artifact",
                 )
+        elif strategy == "pose_hypothesis_refinement":
+            art_dir = Path(result.get("_artifact_dir") or ".")
+            count = inputs.get("num_hypotheses")
+            count_valid = type(count) is int and 1 <= count <= 252
+            require(count_valid, "missing valid hypothesis count")
+            for filename, values_per_hypothesis in (
+                ("candidate_poses.f32", 16),
+                ("trt_refined_poses.f32", 16),
+                ("trt_scores.f32", 1),
+            ):
+                path = _path_within(art_dir / "native" / filename, art_dir)
+                require(
+                    path is not None
+                    and path.name == filename
+                    and count_valid
+                    and path.stat().st_size == count * values_per_hypothesis * 4,
+                    f"missing or malformed TRT/base {filename}",
+                )
+            reference_index = _first_stage_data(result, "ref").get("best_index")
+            require(
+                type(reference_index) is int
+                and count_valid
+                and 0 <= reference_index < count,
+                "missing or invalid reference best_index",
+            )
         elif strategy == "reranking":
             require(bool(_first_stage_value(result, "trt", ("scores",))),
                     "missing TRT/base reranking scores")

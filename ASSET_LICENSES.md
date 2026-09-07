@@ -192,4 +192,15 @@ parquet and video paths and their SHA-256 digests.
 - `recorded_observation.json`; SHA-256
   `aecd4e0c5123d2e7fb632b32772c60c4175fa37e6425393f182b53e76bd1278f`
 
+## FoundationPose external model artifacts
+
+FoundationPose qualification downloads no model artifact into this repository.
+The model-proof cache fetches the official `refine_model.onnx` and
+`score_model.onnx` files from NVIDIA NGC model
+`nvidia/isaac/foundationpose:1.0.1_onnx`, verifies their exact sizes and
+SHA-256 digests, and exposes only private ephemeral copies to the offline proof
+container. Users remain responsible for the license terms presented by NGC.
+The deterministic RGB+XYZ qualification crops are generated locally by
+project-owned Apache-2.0 code and are not derived from the upstream demo data.
+
 <!-- Collaborative review anchor: batch 2. -->

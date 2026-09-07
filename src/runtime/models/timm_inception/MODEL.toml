@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_inception"
+runtime_library = "libtrtmc_model_timm_inception.so"
+runtime_plugins = ["plugin.cpp|register_timm_inception_plugin"]
+runtime_strategies = ["timm_inception_image_classification"]
+runtime_tests = [
+  "test_timm_inception_image_preprocess_seam|test_timm_inception_image_preprocess_seam.cpp|trtmc_model_timm_inception|_|_",
+]

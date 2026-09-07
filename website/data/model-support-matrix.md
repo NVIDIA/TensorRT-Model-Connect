@@ -42,6 +42,7 @@ SPDX-License-Identifier: Apache-2.0
 | `openai-community/gpt2` | `gpt2-125m` | `FP32` | None | — | 🟢 Green |
 | `ibm-granite/granite-3.1-2b-base` | `granite-3.1-2b` | `FP16` | None | — | 🟢 Green |
 | `internlm/internlm2-math-plus-1_8b` | `internlm2-1.8b` | `FP16` | None | — | 🟢 Green |
+| `IFM/K2-Horizon-7B`<br />Revision: `586b03f0fd1fbbf2f13eeafc33749e95ae34dd10` | `k2-horizon-7b` | `BF16` | None | — | 🟢 Green |
 | `OpenGVLab/InternVL3-2B-hf` | `internvl3-2b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `OpenGVLab/InternVL3-8B-hf` | `internvl3-8b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `bytedance-research/Lance` | `lance-3b-x2t-image` | `BF16` | None | — | 🟢 Green |
@@ -103,7 +104,14 @@ SPDX-License-Identifier: Apache-2.0
 | `bigcode/starcoder2-3b` | `starcoder2-3b` | `FP16` | None | — | 🟢 Green |
 | `google-t5/t5-small` | `t5-small` | `FP16` | None | — | 🟢 Green |
 | `google/timesfm-2.0-500m-pytorch` | `timesfm-2.0-500m-official` | `FP32` | None | — | 🟢 Green |
+| `timm/mobilenetv3_large_100.ra_in1k` | `mobilenetv3-large-100-ra-in1k` | `FP16` | None | — | 🟢 Green |
+| `timm/efficientnet_b0.ra_in1k` | `efficientnet-b0-ra-in1k` | `FP16` | None | — | 🟢 Green |
+| `timm/densenet121.ra_in1k` | `densenet121-ra-in1k` | `FP16` | None | — | 🟢 Green |
+| `timm/mnasnet_100.rmsp_in1k` | `mnasnet-100-rmsp-in1k` | `FP16` | None | — | 🟢 Green |
+| `timm/inception_v3.tv_in1k` | `inception-v3-tv-in1k` | `FP16` | None | — | 🟢 Green |
+| `timm/repvgg_a2.rvgg_in1k` | `repvgg-a2-rvgg-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/resnet50.a1_in1k` | `resnet50-a1-in1k` | `FP16` | None | — | 🟢 Green |
+| `timm/vgg16.tv_in1k` | `vgg16-tv-in1k` | `FP16` | None | — | 🟢 Green |
 | `timm/vit_base_patch16_224.augreg_in21k_ft_in1k` | `timm-vit-base-p16-224-augreg-in21k-ft-in1k` | `FP16` | None | — | 🟢 Green |
 | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | `tinyllama-1.1b` | `FP16` | None | — | 🟢 Green |
 | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | `wan21-t2v-1.3b` | `FP16`<br />FP32 layers: `24` | None | — | 🟢 Green |

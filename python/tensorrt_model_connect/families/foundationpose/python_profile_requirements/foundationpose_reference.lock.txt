@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+onnxruntime==1.29.0
+flatbuffers==24.3.25
+numpy==1.26.4
+packaging==24.2
+protobuf==5.29.5

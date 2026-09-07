@@ -4,6 +4,7 @@
 """Composable development-environment toolkit for TensorRT-Model-Connect."""
 
 from .api import DevToolkit
+from .builtin_registry import builtin_provider_registry
 from .building import BuildArtifact, BuildResult, SourceSnapshot
 from .catalogs import JsonToolchainCatalog, NvidiaPackageIndexCatalog
 from .commands import (
@@ -30,9 +31,23 @@ from .resolution import (
     IncompatibleCombination,
     ResolutionError,
 )
+from .docker_target import (
+    DockerGpuRequest,
+    DockerImageBuild,
+    DockerImageRef,
+    DockerMount,
+    DockerTarget,
+    DockerTargetPolicy,
+    PullPolicy,
+)
+from .target_contracts import (
+    ProvisionedTarget,
+    TargetPlan,
+)
 
 __all__ = [
     "DevToolkit",
+    "builtin_provider_registry",
     "ArtifactPin",
     "ArtifactUnavailable",
     "AttestationFailed",
@@ -44,6 +59,12 @@ __all__ = [
     "CommandSpec",
     "CudaPolicy",
     "DevToolkitError",
+    "DockerGpuRequest",
+    "DockerImageBuild",
+    "DockerImageRef",
+    "DockerMount",
+    "DockerTarget",
+    "DockerTargetPolicy",
     "EnvironmentLock",
     "EnvironmentPath",
     "EnvironmentRequest",
@@ -53,12 +74,15 @@ __all__ = [
     "JsonToolchainCatalog",
     "NvidiaPackageIndexCatalog",
     "ProvisionedEnvironment",
+    "ProvisionedTarget",
     "ProvisionPolicy",
     "QualificationRef",
     "ResolutionError",
     "SourceSnapshot",
     "ToolchainObservation",
     "ToolchainRuntime",
+    "PullPolicy",
+    "TargetPlan",
     "TrtmcBuildRecipe",
     "repository_path",
     "state_path",

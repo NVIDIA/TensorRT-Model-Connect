@@ -17,6 +17,7 @@ sample_limits:
   etth1_time_series_parity: 10
   fast_foundation_stereo_synthetic_parity: 1
   fast_foundation_stereo_middlebury_q_task_accuracy: 15
+  foundationpose_preprocessed_pose_refinement_fp32_parity: 1
   flores200_en_fr_riva_translation_parity: 10
   gedit_bench_image_edit: 5
   humaneval_code_continuation_parity: 10
@@ -101,12 +102,16 @@ models:
     workloads: [dinov3_image_feature_extraction_parity]
   dinov3-vits16-pretrain-lvd1689m:
     workloads: [dinov3_image_feature_extraction_parity]
+  densenet121-ra-in1k:
+    workloads: [imagenette_image_classification]
   distilbert-base-uncased:
     workloads: [stsbenchmark_encoder_embedding_parity]
   distilgpt2:
     workloads: [wikitext103_distilgpt2_continuation_parity]
   dpr-ctx-encoder:
     workloads: [stsbenchmark_encoder_embedding_parity]
+  efficientnet-b0-ra-in1k:
+    workloads: [imagenette_image_classification]
   electra-base-discriminator:
     workloads: [stsbenchmark_encoder_embedding_parity]
   elf-b-de-en-l0:
@@ -123,6 +128,8 @@ models:
     workloads:
       - fast_foundation_stereo_synthetic_parity
       - fast_foundation_stereo_middlebury_q_task_accuracy
+  foundationpose-ngc-1.0.1:
+    workloads: [foundationpose_preprocessed_pose_refinement_fp32_parity]
   flux-2-dev:
     workloads: [dpg_bench_diffusion_image]
     reference_cache_identity: flux-2-dev-dpg-v2
@@ -145,10 +152,14 @@ models:
     workloads: [mmlu_continuation_parity]
   granite-3.1-2b:
     workloads: [mmlu_continuation_parity]
+  inception-v3-tv-in1k:
+    workloads: [imagenette_image_classification]
   internlm2-1.8b:
     workloads: [mmlu_five_shot_mcq]
   internvl3-8b:
     workloads: [vlm_mmmu_pro_vision_fixed_mcq]
+  k2-horizon-7b:
+    workloads: [mmlu_continuation_parity]
   lance-3b-x2t-image:
     workloads: [mmmu_pro_vision_square_plugin_parity]
   lfm2-1.2b:
@@ -179,6 +190,10 @@ models:
     workloads: [mmlu_continuation_parity]
   moge-2-vitl:
     workloads: [moge_monocular_geometry_fp32_parity]
+  mobilenetv3-large-100-ra-in1k:
+    workloads: [imagenette_image_classification]
+  mnasnet-100-rmsp-in1k:
+    workloads: [imagenette_image_classification]
   modernbert-base:
     workloads: [stsbenchmark_encoder_embedding_parity]
   multilingual-e5-small:
@@ -262,6 +277,8 @@ models:
     workloads: [mmlu_five_shot_mcq]
   resnet50-a1-in1k:
     workloads: [imagenette_image_classification]
+  repvgg-a2-rvgg-in1k:
+    workloads: [imagenette_image_classification]
   riva-translate-4b:
     workloads: [flores200_en_fr_riva_translation_parity]
   roberta-base:
@@ -290,6 +307,8 @@ models:
     workloads: [imagenette_image_classification]
   tinyllama-1.1b:
     workloads: [mmlu_five_shot_mcq]
+  vgg16-tv-in1k:
+    workloads: [imagenette_image_classification]
   wan21-t2v-1.3b:
     workloads: [vbench_t2v_diffusion_video]
   wan22-ti2v-5b:
