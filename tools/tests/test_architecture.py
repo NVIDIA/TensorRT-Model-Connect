@@ -297,12 +297,14 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/primitives/trt_common.cpp",
         "core/runtime/primitives/trt_common.h",
         "core/runtime/loader/family_loader.cpp",
+        "core/runtime/task_pool.cpp",
         "core/runtime/include/trtmc/byok.h",
         "core/runtime/include/trtmc/bundle.h",
         "core/runtime/include/trtmc/task.h",
         "core/runtime/include/trtmc/runtime/device_tensor.h",
         "core/runtime/include/trtmc/runtime/family_factory.h",
         "core/runtime/include/trtmc/runtime/family_loader.h",
+        "core/runtime/include/trtmc/runtime/task_pool.h",
         "core/runtime/include/trtmc/runtime/tensor.h",
         "core/runtime/include/trtmc/runtime/trt_backend.h",
         "core/runtime/include/trtmc/runtime/trt_module.h",
@@ -312,6 +314,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tests/test_byok_shape_spec.cpp",
         "core/runtime/tests/test_family_loader.cpp",
         "core/runtime/tests/test_task_api.cpp",
+        "core/runtime/tests/test_task_pool.cpp",
         "core/runtime/tests/test_trt_module_dynamic_input.cpp",
     }
     expected_tools = {

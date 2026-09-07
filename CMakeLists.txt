@@ -15,6 +15,7 @@ set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 include(GNUInstallDirs)
 find_package(CUDAToolkit REQUIRED)
 find_package(nlohmann_json 3.11 REQUIRED)
+find_package(Threads REQUIRED)
 
 set(_trtmc_dependency_roots
   /usr
@@ -107,6 +108,7 @@ set_target_properties(trtmc_core PROPERTIES
 
 add_library(trtmc_runtime SHARED
   core/runtime/loader/family_loader.cpp
+  core/runtime/task_pool.cpp
 )
 target_include_directories(trtmc_runtime
   PUBLIC
@@ -119,6 +121,7 @@ target_link_libraries(trtmc_runtime
   PRIVATE
     trtmc_core
     ${CMAKE_DL_LIBS}
+    Threads::Threads
 )
 target_compile_options(trtmc_runtime PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(trtmc_runtime PROPERTIES
@@ -393,6 +396,19 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
 
+  add_executable(test_task_pool core/runtime/tests/test_task_pool.cpp)
+  target_include_directories(test_task_pool PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${PROJECT_SOURCE_DIR}/core
+  )
+  target_link_libraries(test_task_pool PRIVATE trtmc_runtime Threads::Threads)
+  target_compile_options(test_task_pool PRIVATE -Wall -Wextra -Wpedantic)
+  add_dependencies(test_task_pool
+    trtmc_test_backend_fake
+    trtmc_test_family_fake
+  )
+  add_test(NAME task_pool COMMAND test_task_pool "${_trtmc_test_runtime_root}")
+
   add_executable(test_trt_module_dynamic_input
     core/runtime/tests/test_trt_module_dynamic_input.cpp
   )
@@ -544,6 +560,7 @@ install(FILES
   core/runtime/include/trtmc/runtime/device_tensor.h
   core/runtime/include/trtmc/runtime/family_factory.h
   core/runtime/include/trtmc/runtime/family_loader.h
+  core/runtime/include/trtmc/runtime/task_pool.h
   core/runtime/include/trtmc/runtime/tensor.h
   core/runtime/include/trtmc/runtime/trt_backend.h
   core/runtime/include/trtmc/runtime/trt_module.h
