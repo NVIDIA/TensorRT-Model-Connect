@@ -11,6 +11,7 @@
 
 #include <dlfcn.h>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -150,9 +151,9 @@ class FamilyLibrary {
 
 class RuntimeOptionsBackend final : public IBackend {
   public:
-    RuntimeOptionsBackend(IBackend& backend, const std::string& runtime_cache_path,
-                          bool cuda_graphs)
-        : backend_(backend), runtime_cache_path_(runtime_cache_path), cuda_graphs_(cuda_graphs) {}
+    RuntimeOptionsBackend(IBackend& backend, std::string runtime_cache_path, bool cuda_graphs)
+        : backend_(backend), runtime_cache_path_(std::move(runtime_cache_path)),
+          cuda_graphs_(cuda_graphs) {}
 
     std::unique_ptr<ITrtModule> create_module(const void* plan_data, size_t plan_size,
                                               const ModuleCreateOptions& options) override {
@@ -184,20 +185,44 @@ class RuntimeOptionsBackend final : public IBackend {
     }
 
     IBackend& backend_;
-    const std::string& runtime_cache_path_;
+    std::string runtime_cache_path_;
     bool cuda_graphs_;
+};
+
+struct ConfiguredBackendKey {
+    IBackend* backend{nullptr};
+    std::string runtime_cache_path;
+    bool cuda_graphs{false};
+
+    bool operator==(const ConfiguredBackendKey& other) const noexcept {
+        return backend == other.backend && runtime_cache_path == other.runtime_cache_path &&
+               cuda_graphs == other.cuda_graphs;
+    }
+};
+
+struct ConfiguredBackendKeyHash {
+    std::size_t operator()(const ConfiguredBackendKey& key) const noexcept {
+        std::size_t value = std::hash<IBackend*>{}(key.backend);
+        value ^= std::hash<std::string>{}(key.runtime_cache_path) + 0x9e3779b9U + (value << 6U) +
+                 (value >> 2U);
+        value ^= std::hash<bool>{}(key.cuda_graphs) + 0x9e3779b9U + (value << 6U) + (value >> 2U);
+        return value;
+    }
 };
 
 struct RuntimeLibraryCache {
     std::mutex mutex;
     std::unordered_map<std::string, std::unique_ptr<BackendLibrary>> backends;
     std::unordered_map<std::string, std::unique_ptr<FamilyLibrary>> families;
+    std::unordered_map<ConfiguredBackendKey, std::unique_ptr<RuntimeOptionsBackend>,
+                       ConfiguredBackendKeyHash>
+        configured_backends;
 };
 
 RuntimeLibraryCache& runtime_library_cache() {
-    // The cache deliberately lives until process exit. Task objects can be
-    // destroyed without a task-specific proxy because their code and backend
-    // are never unloaded underneath them.
+    // The cache deliberately lives until process exit. Family tasks may defer
+    // module creation, so their code, backend, and immutable runtime-options
+    // adapter must never be unloaded underneath them.
     static RuntimeLibraryCache* cache = new RuntimeLibraryCache();
     return *cache;
 }
@@ -214,6 +239,22 @@ IBackend& cached_backend(const fs::path& runtime_root, const std::string& backen
     IBackend& backend = library->get();
     cache.backends.emplace(path, std::move(library));
     return backend;
+}
+
+IBackend& cached_configured_backend(IBackend& backend, const std::string& runtime_cache_path,
+                                    bool cuda_graphs) {
+    ConfiguredBackendKey key{&backend, runtime_cache_path, cuda_graphs};
+    auto& cache = runtime_library_cache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    const auto found = cache.configured_backends.find(key);
+    if (found != cache.configured_backends.end())
+        return *found->second;
+
+    auto configured =
+        std::make_unique<RuntimeOptionsBackend>(backend, runtime_cache_path, cuda_graphs);
+    IBackend& result = *configured;
+    cache.configured_backends.emplace(std::move(key), std::move(configured));
+    return result;
 }
 
 FamilyLibrary& cached_family(const fs::path& runtime_root, const std::string& family_id) {
@@ -258,7 +299,8 @@ std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::stri
     const fs::path root = explicit_runtime_root(runtime_root);
     IBackend& backend = cached_backend(root, info.backend);
     FamilyLibrary& family = cached_family(root, info.family);
-    RuntimeOptionsBackend configured_backend(backend, runtime_cache_path, cuda_graphs);
+    IBackend& configured_backend =
+        cached_configured_backend(backend, runtime_cache_path, cuda_graphs);
     FamilyContext context{reader, configured_backend, kv_cache_size_bytes};
     std::unique_ptr<ITask> task(family.create(context));
     if (task == nullptr)

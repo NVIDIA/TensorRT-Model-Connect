@@ -6,16 +6,27 @@
 #include "trtmc/runtime/trt_backend.h"
 
 #include <memory>
+#include <string>
 #include <vector>
+
+#ifndef TRTMC_FAKE_BACKEND_NAME
+#define TRTMC_FAKE_BACKEND_NAME "fake"
+#endif
 
 namespace {
 
 int create_count = 0;
+std::string last_runtime_cache_path;
+bool last_cuda_graphs = false;
 
 class FakeBackend final : public trtmc::IBackend {
   public:
-    std::unique_ptr<trtmc::ITrtModule> create_module(const void*, std::size_t,
-                                                     const trtmc::ModuleCreateOptions&) override {
+    std::unique_ptr<trtmc::ITrtModule>
+    create_module(const void*, std::size_t, const trtmc::ModuleCreateOptions& options) override {
+        last_runtime_cache_path = options.runtime_cache_path != nullptr
+                                      ? std::string(options.runtime_cache_path)
+                                      : std::string();
+        last_cuda_graphs = options.cuda_graphs;
         return nullptr;
     }
 
@@ -31,7 +42,7 @@ class FakeBackend final : public trtmc::IBackend {
         return {};
     }
 
-    const char* name() const override { return "fake"; }
+    const char* name() const override { return TRTMC_FAKE_BACKEND_NAME; }
 };
 
 } // namespace
@@ -45,4 +56,12 @@ extern "C" trtmc::IBackend* trtmc_create_backend() {
 
 extern "C" void trtmc_destroy_backend(trtmc::IBackend* backend) {
     delete backend;
+}
+
+extern "C" const char* trtmc_test_backend_last_runtime_cache_path() {
+    return last_runtime_cache_path.c_str();
+}
+
+extern "C" bool trtmc_test_backend_last_cuda_graphs() {
+    return last_cuda_graphs;
 }

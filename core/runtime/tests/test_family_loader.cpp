@@ -7,6 +7,7 @@
 #include "trtmc/runtime/family_loader.h"
 
 #include <cstdint>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -25,9 +26,11 @@ void check(bool condition, const char* name) {
 }
 
 void write_bundle(const std::filesystem::path& path, const std::string& family,
-                  const std::string& task = "time_series_forecast") {
+                  const std::string& task = "time_series_forecast",
+                  const std::string& backend = "fake") {
     const std::string header = "{\"format\":1,\"family\":\"" + family + "\",\"task\":\"" + task +
-                               "\",\"backend\":\"fake\","
+                               "\",\"backend\":\"" + backend +
+                               "\","
                                "\"sections\":{\"runtime.json\":{\"offset\":0,\"length\":2},"
                                "\"engine.plan\":{\"offset\":2,\"length\":4}}}";
     std::ofstream output(path, std::ios::binary);
@@ -55,6 +58,30 @@ bool rtx_options_throw(const std::filesystem::path& bundle, const std::string& r
     } catch (const std::invalid_argument&) {
         return true;
     }
+}
+
+void check_rtx_options(const std::filesystem::path& runtime_root,
+                       const std::string& expected_cache_path, bool expected_cuda_graphs) {
+    const auto library_path = runtime_root / "libtrtmc_backend_trt_rtx.so";
+    void* handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    check(handle != nullptr, "fake RTX backend remains loaded");
+    if (handle == nullptr)
+        return;
+
+    using CachePathFn = const char* (*)();
+    using CudaGraphsFn = bool (*)();
+    const auto cache_path =
+        reinterpret_cast<CachePathFn>(dlsym(handle, "trtmc_test_backend_last_runtime_cache_path"));
+    const auto cuda_graphs =
+        reinterpret_cast<CudaGraphsFn>(dlsym(handle, "trtmc_test_backend_last_cuda_graphs"));
+    check(cache_path != nullptr, "fake RTX cache-path probe is exported");
+    check(cuda_graphs != nullptr, "fake RTX CUDA-graphs probe is exported");
+    if (cache_path != nullptr)
+        check(expected_cache_path == cache_path(), "runtime cache path remains owned by value");
+    if (cuda_graphs != nullptr)
+        check(cuda_graphs() == expected_cuda_graphs,
+              "CUDA-graphs option reaches delayed module creation");
+    dlclose(handle);
 }
 
 } // namespace
@@ -89,6 +116,33 @@ int main(int argc, char** argv) {
     check(rtx_options_throw(bundle_path, runtime_root.string()),
           "TensorRT-RTX options reject a non-RTX bundle");
 
+    const auto rtx_bundle = runtime_root / "fake-rtx.bundle";
+    write_bundle(rtx_bundle, "fake", "time_series_forecast", "trt_rtx");
+    const std::string expected_cache_path = (runtime_root / std::string(256, 'r')).string();
+    std::unique_ptr<trtmc::ITask> rtx_task;
+    {
+        std::string caller_owned_cache_path = expected_cache_path;
+        rtx_task = trtmc::load_task(rtx_bundle.string(), runtime_root.string(), 0,
+                                    caller_owned_cache_path, true);
+    }
+    auto* rtx_forecast = dynamic_cast<trtmc::ITimeSeriesForecast*>(rtx_task.get());
+    check(rtx_forecast != nullptr, "RTX load returns forecast interface");
+    if (rtx_forecast != nullptr)
+        (void)rtx_forecast->forecast({values, mask});
+    check_rtx_options(runtime_root, expected_cache_path, true);
+
+    const std::string second_cache_path = (runtime_root / std::string(256, 's')).string();
+    auto second_rtx_task =
+        trtmc::load_task(rtx_bundle.string(), runtime_root.string(), 0, second_cache_path, false);
+    auto* second_rtx_forecast = dynamic_cast<trtmc::ITimeSeriesForecast*>(second_rtx_task.get());
+    check(second_rtx_forecast != nullptr, "second RTX load returns forecast interface");
+    if (second_rtx_forecast != nullptr)
+        (void)second_rtx_forecast->forecast({values, mask});
+    check_rtx_options(runtime_root, second_cache_path, false);
+    if (rtx_forecast != nullptr)
+        (void)rtx_forecast->forecast({values, mask});
+    check_rtx_options(runtime_root, expected_cache_path, true);
+
     check(load_throws(bundle_path, ""), "empty runtime root rejected");
     check(load_throws(bundle_path, (runtime_root / "missing").string()),
           "loader does not search outside explicit root");
@@ -105,6 +159,7 @@ int main(int argc, char** argv) {
     std::filesystem::remove(bundle_path);
     std::filesystem::remove(unsafe_bundle);
     std::filesystem::remove(mismatch_bundle);
+    std::filesystem::remove(rtx_bundle);
     std::cerr << (failures == 0 ? "ALL PASSED\n" : "SOME FAILED\n");
     return failures;
 }

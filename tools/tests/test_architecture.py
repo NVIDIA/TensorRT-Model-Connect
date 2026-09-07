@@ -1171,7 +1171,6 @@ def test_family_factory_receives_only_direct_runtime_inputs() -> None:
     loader = (REPO / "core/runtime/loader/family_loader.cpp").read_text(encoding="utf-8")
     load_task = loader.split("std::unique_ptr<ITask> load_task", 1)[1]
     assert "const BundleReader reader(bundle_path);" in load_task
-    assert "RuntimeOptionsBackend configured_backend" in load_task
     assert "FamilyContext context{reader, configured_backend, kv_cache_size_bytes};" in load_task
     assert "BundleFile" not in load_task
     assert "ReadBundleFile" not in load_task

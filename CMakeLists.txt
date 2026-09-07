@@ -357,6 +357,19 @@ if(TRTMC_BUILD_TESTS)
     LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
   )
 
+  add_library(trtmc_test_backend_fake_rtx SHARED core/runtime/tests/fake_backend.cpp)
+  target_include_directories(trtmc_test_backend_fake_rtx PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(trtmc_test_backend_fake_rtx PRIVATE CUDA::cudart)
+  target_compile_definitions(trtmc_test_backend_fake_rtx PRIVATE
+    TRTMC_FAKE_BACKEND_NAME="trt_rtx"
+  )
+  set_target_properties(trtmc_test_backend_fake_rtx PROPERTIES
+    OUTPUT_NAME trtmc_backend_trt_rtx
+    LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
+  )
+
   add_library(trtmc_test_family_fake SHARED core/runtime/tests/fake_family.cpp)
   target_include_directories(trtmc_test_family_fake PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
   target_link_libraries(trtmc_test_family_fake PRIVATE trtmc_core)
@@ -373,7 +386,11 @@ if(TRTMC_BUILD_TESTS)
   )
   target_link_libraries(test_family_loader PRIVATE trtmc_runtime)
   target_compile_options(test_family_loader PRIVATE -Wall -Wextra -Wpedantic)
-  add_dependencies(test_family_loader trtmc_test_backend_fake trtmc_test_family_fake)
+  add_dependencies(test_family_loader
+    trtmc_test_backend_fake
+    trtmc_test_backend_fake_rtx
+    trtmc_test_family_fake
+  )
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
 
   add_executable(test_trt_module_dynamic_input

@@ -12,10 +12,17 @@ namespace {
 
 class FakeForecast final : public trtmc::ITimeSeriesForecast {
   public:
-    explicit FakeForecast(std::uint64_t kv_cache_size_bytes)
-        : kv_cache_size_bytes_(kv_cache_size_bytes) {}
+    FakeForecast(trtmc::IBackend& backend, std::uint64_t kv_cache_size_bytes)
+        : backend_(backend), kv_cache_size_bytes_(kv_cache_size_bytes) {}
 
     trtmc::ForecastResult forecast(const trtmc::ForecastRequest& request) override {
+        const char* backend_name = backend_.name();
+        if (backend_name == nullptr ||
+            (std::string(backend_name) != "fake" && std::string(backend_name) != "trt_rtx")) {
+            throw std::runtime_error("backend lifetime did not extend to task execution");
+        }
+        if (std::string(backend_name) == "trt_rtx")
+            (void)backend_.create_module(nullptr, 0, {});
         if (!request.observed_mask.empty() &&
             request.observed_mask.size() != request.past_values.size()) {
             throw std::invalid_argument("observed_mask length must match past_values");
@@ -31,6 +38,7 @@ class FakeForecast final : public trtmc::ITimeSeriesForecast {
     }
 
   private:
+    trtmc::IBackend& backend_;
     std::uint64_t kv_cache_size_bytes_;
 };
 
@@ -39,10 +47,13 @@ class FakeForecast final : public trtmc::ITimeSeriesForecast {
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "fake")
         throw std::runtime_error("unexpected family");
-    if (context.backend.name() == nullptr || std::string(context.backend.name()) != "fake")
+    const char* backend_name = context.backend.name();
+    if (backend_name == nullptr ||
+        (std::string(backend_name) != "fake" && std::string(backend_name) != "trt_rtx")) {
         throw std::runtime_error("unexpected backend");
+    }
     const auto plan = context.reader.read_section("engine.plan");
     if (std::string(plan.begin(), plan.end()) != "PLAN")
         throw std::runtime_error("unexpected engine plan");
-    return new FakeForecast(context.kv_cache_size_bytes);
+    return new FakeForecast(context.backend, context.kv_cache_size_bytes);
 }
