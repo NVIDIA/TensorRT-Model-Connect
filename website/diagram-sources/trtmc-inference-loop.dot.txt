@@ -1,0 +1,42 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Text generation prefill and decode loop
+// @description: Prompt text is tokenized and processed once during prefill; decoding then reuses the KV cache to produce logits, sample one token, append it, and repeat until a stop condition returns TextResult.
+digraph InferenceLoop {
+  graph [bgcolor="#fbfcfe", pad="0.35", rankdir="TB", nodesep="0.28", ranksep="0.62", splines="ortho", compound=true, fontname="Arial", labelloc="t", label=<<B>generate() has two execution phases</B><BR/><FONT POINT-SIZE="17">Prefill reads the prompt once; decode reuses cached attention state one token at a time.</FONT>>, fontsize="30", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", color="#64748b", penwidth="2.2", fillcolor="#ffffff", fontname="Arial", fontsize="18", fontcolor="#111827", margin="0.18,0.13"];
+  edge [color="#64748b", penwidth="2.5", arrowsize="0.8"];
+
+  subgraph cluster_prefill {
+    label=<<FONT POINT-SIZE="18"><B>1 · PREFILL — process the complete prompt</B></FONT>>;
+    labelloc="t"; labeljust="l"; color="#2563eb"; fillcolor="#eff6ff"; style="rounded,filled"; penwidth="2.2";
+    prompt [label=<<FONT POINT-SIZE="20"><B>Prompt</B></FONT><BR/><FONT POINT-SIZE="16">input text</FONT>>];
+    tokenizer [label=<<FONT POINT-SIZE="20"><B>Tokenizer</B></FONT><BR/><FONT POINT-SIZE="16">token IDs</FONT>>];
+    prefill [fillcolor="#eff6ff", color="#2563eb", label=<<FONT POINT-SIZE="20"><B>Prefill</B></FONT><BR/><FONT POINT-SIZE="16">all prompt tokens</FONT>>];
+    cache0 [fillcolor="#fffbeb", color="#b45309", label=<<FONT POINT-SIZE="20"><B>KV cache</B></FONT><BR/><FONT POINT-SIZE="16">prompt context</FONT>>];
+    prompt -> tokenizer -> prefill -> cache0;
+    {rank=same; prompt; tokenizer; prefill; cache0;}
+  }
+
+  subgraph cluster_decode {
+    label=<<FONT POINT-SIZE="18"><B>2 · DECODE LOOP — repeat until EOS or max_new_tokens</B></FONT>>;
+    labelloc="t"; labeljust="l"; color="#7c3aed"; fillcolor="#f5f3ff"; style="rounded,filled"; penwidth="2.2";
+    cache [fillcolor="#fffbeb", color="#b45309", label=<<FONT POINT-SIZE="20"><B>KV cache</B></FONT><BR/><FONT POINT-SIZE="16">previous context</FONT>>];
+    decode [fillcolor="#fef2f2", color="#b91c1c", label=<<FONT POINT-SIZE="20"><B>Decode step</B></FONT><BR/><FONT POINT-SIZE="16">one position</FONT>>];
+    logits [label=<<FONT POINT-SIZE="20"><B>Logits</B></FONT><BR/><FONT POINT-SIZE="16">token scores</FONT>>];
+    sampler [fillcolor="#ecfeff", color="#0e7490", label=<<FONT POINT-SIZE="20"><B>Sampler</B></FONT><BR/><FONT POINT-SIZE="16">choose next token</FONT>>];
+    token [fillcolor="#ecfccb", color="#4d7c0f", label=<<FONT POINT-SIZE="20"><B>Append token</B></FONT><BR/><FONT POINT-SIZE="16">advance state</FONT>>];
+    cache -> decode -> logits [constraint=false];
+    logits -> sampler;
+    sampler -> token [constraint=false];
+    token -> cache [style=dashed, constraint=false];
+    {rank=same; cache; decode; logits;}
+    {rank=same; token; sampler;}
+    cache -> token [style=invis, weight=20];
+    decode -> sampler [style=invis, weight=20];
+  }
+
+  result [fillcolor="#ecfccb", color="#4d7c0f", label=<<FONT POINT-SIZE="20"><B>TextResult</B></FONT><BR/><FONT POINT-SIZE="16">decode generated token IDs</FONT>>];
+  cache0 -> cache [ltail=cluster_prefill, lhead=cluster_decode];
+  token -> result;
+}

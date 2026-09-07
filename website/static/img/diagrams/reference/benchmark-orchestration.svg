@@ -1,0 +1,139 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="1026" height="624" role="img" aria-labelledby="reference-benchmark-orchestration-svg-title reference-benchmark-orchestration-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 1026.00 624.00" xmlns="http://www.w3.org/2000/svg">
+<title id="reference-benchmark-orchestration-svg-title">Benchmark case and bundle orchestration</title>
+<desc id="reference-benchmark-orchestration-svg-description">The benchmark CLI resolves catalog metadata and a task adapter into a concrete case, uses an explicitly resolved or managed-cache bundle path when present or builds a managed entry, then starts the Python run service and C++ measurement worker with optional low-rate telemetry.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(21.6 601.96)">
+<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-601.96 1004.16,-601.96 1004.16,21.6 -21.6,21.6"/>
+<text xml:space="preserve" text-anchor="start" x="216.67" y="-553.06" font-family="Arial" font-weight="bold" font-size="27.00" fill="#111827">Resolve one reproducible benchmark case</text>
+<text xml:space="preserve" text-anchor="start" x="217.78" y="-535.96" font-family="Arial" font-size="16.00" fill="#111827">Python owns catalog lookup, bundle reuse or build, and worker orchestration.</text>
+<!-- cli -->
+<g id="node1" class="node">
+<title>cli</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M162.47,-524.26C162.47,-524.26 12,-524.26 12,-524.26 6,-524.26 0,-518.26 0,-512.26 0,-512.26 0,-493.3 0,-493.3 0,-487.3 6,-481.3 12,-481.3 12,-481.3 162.47,-481.3 162.47,-481.3 168.47,-481.3 174.47,-487.3 174.47,-493.3 174.47,-493.3 174.47,-512.26 174.47,-512.26 174.47,-518.26 168.47,-524.26 162.47,-524.26"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-498.08" font-family="Arial" font-weight="bold" font-size="19.00" fill="#111827">trtmc&#45;bench run</text>
+</g>
+<!-- catalog -->
+<g id="node2" class="node">
+<title>catalog</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M368.68,-529.36C368.68,-529.36 245.79,-529.36 245.79,-529.36 239.79,-529.36 233.79,-523.36 233.79,-517.36 233.79,-517.36 233.79,-488.2 233.79,-488.2 233.79,-482.2 239.79,-476.2 245.79,-476.2 245.79,-476.2 368.68,-476.2 368.68,-476.2 374.68,-476.2 380.68,-482.2 380.68,-488.2 380.68,-488.2 380.68,-517.36 380.68,-517.36 380.68,-523.36 374.68,-529.36 368.68,-529.36"/>
+<text xml:space="preserve" text-anchor="start" x="248.19" y="-504.98" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family catalog</text>
+<text xml:space="preserve" text-anchor="start" x="255.66" y="-488.88" font-family="Arial" font-size="16.00" fill="#111827">E2E manifests</text>
+</g>
+<!-- cli&#45;&gt;catalog -->
+<g id="edge1" class="edge">
+<title>cli&#45;&gt;catalog</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M175.06,-502.78C188.68,-502.78 208.83,-502.78 221.66,-502.78"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="221.63,-505.58 229.63,-502.78 221.63,-499.98 221.63,-505.58"/>
+</g>
+<!-- adapter -->
+<g id="node3" class="node">
+<title>adapter</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M562.08,-523.06C562.08,-523.06 452.4,-523.06 452.4,-523.06 446.4,-523.06 440.4,-517.06 440.4,-511.06 440.4,-511.06 440.4,-494.5 440.4,-494.5 440.4,-488.5 446.4,-482.5 452.4,-482.5 452.4,-482.5 562.08,-482.5 562.08,-482.5 568.08,-482.5 574.08,-488.5 574.08,-494.5 574.08,-494.5 574.08,-511.06 574.08,-511.06 574.08,-517.06 568.08,-523.06 562.08,-523.06"/>
+<text xml:space="preserve" text-anchor="start" x="454.8" y="-498.68" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Task adapter</text>
+</g>
+<!-- catalog&#45;&gt;adapter -->
+<g id="edge2" class="edge">
+<title>catalog&#45;&gt;adapter</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M381.55,-502.78C392.96,-502.78 414.54,-502.78 428.21,-502.78"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="428.2,-505.58 436.2,-502.78 428.2,-499.98 428.2,-505.58"/>
+</g>
+<!-- request -->
+<g id="node4" class="node">
+<title>request</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" d="M588.51,-433.2C588.51,-433.2 425.96,-433.2 425.96,-433.2 419.96,-433.2 413.96,-427.2 413.96,-421.2 413.96,-421.2 413.96,-392.04 413.96,-392.04 413.96,-386.04 419.96,-380.04 425.96,-380.04 425.96,-380.04 588.51,-380.04 588.51,-380.04 594.51,-380.04 600.51,-386.04 600.51,-392.04 600.51,-392.04 600.51,-421.2 600.51,-421.2 600.51,-427.2 594.51,-433.2 588.51,-433.2"/>
+<text xml:space="preserve" text-anchor="start" x="428.36" y="-408.82" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Resolved operation</text>
+<text xml:space="preserve" text-anchor="start" x="432.08" y="-392.72" font-family="Arial" font-size="16.00" fill="#111827">and concrete request</text>
+</g>
+<!-- adapter&#45;&gt;request -->
+<g id="edge3" class="edge">
+<title>adapter&#45;&gt;request</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M507.24,-481.81C507.24,-471.15 507.24,-457.67 507.24,-445.14"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="510.04,-445.33 507.24,-437.33 504.44,-445.33 510.04,-445.33"/>
+</g>
+<!-- bundle -->
+<g id="node5" class="node">
+<title>bundle</title>
+<polygon fill="#fffbeb" stroke="#b45309" stroke-width="1.8" points="507.24,-337.04 311.27,-282.88 507.24,-228.72 703.21,-282.88 507.24,-337.04"/>
+<text xml:space="preserve" text-anchor="start" x="423.65" y="-285.58" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Existing bundle path</text>
+<text xml:space="preserve" text-anchor="start" x="467.08" y="-268.58" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">resolved?</text>
+</g>
+<!-- request&#45;&gt;bundle -->
+<g id="edge4" class="edge">
+<title>request&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M507.24,-379.2C507.24,-370.17 507.24,-359.63 507.24,-348.92"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="510.04,-349.08 507.24,-341.08 504.44,-349.08 510.04,-349.08"/>
+</g>
+<!-- build -->
+<g id="node6" class="node">
+<title>build</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M361.98,-161.22C361.98,-161.22 198.5,-161.22 198.5,-161.22 192.5,-161.22 186.5,-155.22 186.5,-149.22 186.5,-149.22 186.5,-132.66 186.5,-132.66 186.5,-126.66 192.5,-120.66 198.5,-120.66 198.5,-120.66 361.98,-120.66 361.98,-120.66 367.98,-120.66 373.98,-126.66 373.98,-132.66 373.98,-132.66 373.98,-149.22 373.98,-149.22 373.98,-155.22 367.98,-161.22 361.98,-161.22"/>
+<text xml:space="preserve" text-anchor="start" x="200.9" y="-136.84" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Existing trtmc build</text>
+</g>
+<!-- bundle&#45;&gt;build -->
+<g id="edge6" class="edge">
+<title>bundle&#45;&gt;build</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M446.7,-244.56C407.45,-220.36 357.29,-189.44 322.34,-167.9"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="324.02,-165.64 315.74,-163.83 321.08,-170.41 324.02,-165.64"/>
+<text xml:space="preserve" text-anchor="middle" x="395.83" y="-193.32" font-family="Arial" font-size="16.00" fill="#334155">no</text>
+</g>
+<!-- service -->
+<g id="node8" class="node">
+<title>service</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M814.16,-161.22C814.16,-161.22 656.31,-161.22 656.31,-161.22 650.31,-161.22 644.31,-155.22 644.31,-149.22 644.31,-149.22 644.31,-132.66 644.31,-132.66 644.31,-126.66 650.31,-120.66 656.31,-120.66 656.31,-120.66 814.16,-120.66 814.16,-120.66 820.16,-120.66 826.16,-126.66 826.16,-132.66 826.16,-132.66 826.16,-149.22 826.16,-149.22 826.16,-155.22 820.16,-161.22 814.16,-161.22"/>
+<text xml:space="preserve" text-anchor="start" x="658.71" y="-136.84" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Python run service</text>
+</g>
+<!-- bundle&#45;&gt;service -->
+<g id="edge5" class="edge">
+<title>bundle&#45;&gt;service</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M567.74,-244.75C607.29,-220.47 657.96,-189.37 693.16,-167.77"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="694.46,-170.25 699.82,-163.68 691.53,-165.48 694.46,-170.25"/>
+<text xml:space="preserve" text-anchor="middle" x="667.43" y="-193.32" font-family="Arial" font-size="16.00" fill="#334155">yes</text>
+</g>
+<!-- cache -->
+<g id="node7" class="node">
+<title>cache</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="1.8" d="M573.05,-167.52C573.05,-167.52 445.43,-167.52 445.43,-167.52 439.43,-167.52 433.43,-161.52 433.43,-155.52 433.43,-155.52 433.43,-126.36 433.43,-126.36 433.43,-120.36 439.43,-114.36 445.43,-114.36 445.43,-114.36 573.05,-114.36 573.05,-114.36 579.05,-114.36 585.05,-120.36 585.05,-126.36 585.05,-126.36 585.05,-155.52 585.05,-155.52 585.05,-161.52 579.05,-167.52 573.05,-167.52"/>
+<text xml:space="preserve" text-anchor="start" x="447.83" y="-143.14" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Platform&#45;aware</text>
+<text xml:space="preserve" text-anchor="start" x="461.64" y="-127.04" font-family="Arial" font-size="16.00" fill="#111827">bundle cache</text>
+</g>
+<!-- build&#45;&gt;cache -->
+<g id="edge7" class="edge">
+<title>build&#45;&gt;cache</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M374.66,-140.94C389.18,-140.94 409.12,-140.94 421.5,-140.94"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="421.47,-143.74 429.47,-140.94 421.47,-138.14 421.47,-143.74"/>
+</g>
+<!-- cache&#45;&gt;service -->
+<g id="edge8" class="edge">
+<title>cache&#45;&gt;service</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M585.88,-140.94C591.45,-140.94 613.78,-140.94 632.47,-140.94"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="632.41,-143.74 640.41,-140.94 632.41,-138.14 632.41,-143.74"/>
+</g>
+<!-- worker -->
+<g id="node9" class="node">
+<title>worker</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M709.57,-46.86C709.57,-46.86 496.9,-46.86 496.9,-46.86 490.9,-46.86 484.9,-40.86 484.9,-34.86 484.9,-34.86 484.9,-18.3 484.9,-18.3 484.9,-12.3 490.9,-6.3 496.9,-6.3 496.9,-6.3 709.57,-6.3 709.57,-6.3 715.57,-6.3 721.57,-12.3 721.57,-18.3 721.57,-18.3 721.57,-34.86 721.57,-34.86 721.57,-40.86 715.57,-46.86 709.57,-46.86"/>
+<text xml:space="preserve" text-anchor="start" x="499.3" y="-22.48" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">C++ measurement worker</text>
+</g>
+<!-- service&#45;&gt;worker -->
+<g id="edge9" class="edge">
+<title>service&#45;&gt;worker</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M711.64,-119.85C690.33,-101.72 658.81,-74.88 635.24,-54.82"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="637.07,-52.71 629.17,-49.65 633.44,-56.97 637.07,-52.71"/>
+</g>
+<!-- telemetry -->
+<g id="node10" class="node">
+<title>telemetry</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="1.8" d="M970.56,-53.16C970.56,-53.16 763.91,-53.16 763.91,-53.16 757.91,-53.16 751.91,-47.16 751.91,-41.16 751.91,-41.16 751.91,-12 751.91,-12 751.91,-6 757.91,0 763.91,0 763.91,0 970.56,0 970.56,0 976.56,0 982.56,-6 982.56,-12 982.56,-12 982.56,-41.16 982.56,-41.16 982.56,-47.16 976.56,-53.16 970.56,-53.16"/>
+<text xml:space="preserve" text-anchor="start" x="792.61" y="-28.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Optional telemetry</text>
+<text xml:space="preserve" text-anchor="start" x="766.31" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">low&#45;rate nvidia&#45;smi sampling</text>
+</g>
+<!-- service&#45;&gt;telemetry -->
+<g id="edge10" class="edge">
+<title>service&#45;&gt;telemetry</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" stroke-dasharray="5,2" d="M758.84,-119.85C778.04,-103.51 805.54,-80.1 828.04,-60.95"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="829.57,-63.32 833.85,-56 825.94,-59.05 829.57,-63.32"/>
+<text xml:space="preserve" text-anchor="middle" x="874.95" y="-78.96" font-family="Arial" font-size="16.00" fill="#334155">outside timed calls</text>
+</g>
+</g>
+</svg>

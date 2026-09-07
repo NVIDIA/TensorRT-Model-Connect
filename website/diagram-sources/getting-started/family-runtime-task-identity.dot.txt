@@ -1,0 +1,49 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Family, runtime strategy, and task strategy are different identities
+// @description: Qwen, Llama, and Whisper examples show that Python build ownership maps to a model-owned native runtime strategy, while multiple implementations can satisfy the same shared task contract.
+digraph IdentityLayers {
+  graph [
+    bgcolor="#fbfcfe",
+    pad="0.30",
+    nodesep="0.34",
+    ranksep="0.72",
+    rankdir="LR",
+    splines="ortho",
+    fontname="Arial",
+    labelloc="t",
+    label=<<B>Three identities answer three different questions</B><BR/><FONT POINT-SIZE="16">Who builds it? Which native implementation runs it? Which shared behavior does it provide?</FONT>>,
+    fontsize="28",
+    fontcolor="#101828"
+  ];
+  node [
+    shape="rect",
+    style="rounded,filled",
+    color="#64748b",
+    penwidth="1.6",
+    fillcolor="#ffffff",
+    fontname="Arial",
+    fontsize="17",
+    fontcolor="#101828",
+    margin="0.18,0.13"
+  ];
+  edge [color="#64748b", penwidth="2.2", arrowsize="0.8"];
+
+  qwen [fillcolor="#eff6ff", color="#2563eb", label=<<B>qwen family</B><BR/><FONT POINT-SIZE="16">Python build owner</FONT>>];
+  llama [fillcolor="#eff6ff", color="#2563eb", label=<<B>llama family</B><BR/><FONT POINT-SIZE="16">Python build owner</FONT>>];
+  whisper [fillcolor="#eff6ff", color="#2563eb", label=<<B>whisper family</B><BR/><FONT POINT-SIZE="16">Python build owner</FONT>>];
+
+  qwen_runtime [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>qwen_decoder_kv_cache</B><BR/><FONT POINT-SIZE="16">libtrtmc_model_qwen.so</FONT>>];
+  llama_runtime [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>llama_decoder_kv_cache</B><BR/><FONT POINT-SIZE="16">libtrtmc_model_llama.so</FONT>>];
+  whisper_runtime [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>whisper_speech_to_text</B><BR/><FONT POINT-SIZE="16">libtrtmc_model_whisper.so</FONT>>];
+
+  text_task [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>text_generation_causal</B><BR/><FONT POINT-SIZE="16">shared task contract</FONT>>];
+  speech_task [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>speech_to_text</B><BR/><FONT POINT-SIZE="16">shared task contract</FONT>>];
+
+  { rank=same; qwen; llama; whisper; }
+  { rank=same; qwen_runtime; llama_runtime; whisper_runtime; }
+  { rank=same; text_task; speech_task; }
+  qwen -> qwen_runtime -> text_task;
+  llama -> llama_runtime -> text_task;
+  whisper -> whisper_runtime -> speech_task;
+}

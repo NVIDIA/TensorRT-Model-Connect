@@ -1,0 +1,33 @@
+{
+  "title": "Load a native bundle",
+  "description": "PipelineFactory reads the header to rule out the optimized route, materializes the native bundle and config, resolves and normalizes its strategy, loads the declared model plugin and compatible backend, resolves session configuration, and returns the concrete public pipeline.",
+  "subtitle": "Native config is materialized only after the header does not claim the optimized route.",
+  "participants": [
+    {"id": "caller", "label": "Caller", "color": "api"},
+    {"id": "factory", "label": "Factory", "color": "neutral"},
+    {"id": "bundle", "label": "Bundle", "color": "artifact"},
+    {"id": "model", "label": "Model DSO", "color": "runtime"},
+    {"id": "registry", "label": "Registry", "color": "runtime"},
+    {"id": "backend", "label": "Backend", "color": "build"}
+  ],
+  "messages": [
+    {"kind": "section", "label": "1 · Claim the native route and materialize config"},
+    {"number": 1, "from": "caller", "to": "factory", "label": "from_bundle(...)"},
+    {"number": 2, "from": "factory", "to": "bundle", "label": "Read header"},
+    {"number": 3, "from": "bundle", "to": "factory", "label": "No optimized claim", "style": "return"},
+    {"number": 4, "from": "factory", "to": "bundle", "label": "Materialize bundle"},
+    {"number": 5, "from": "bundle", "to": "factory", "label": "Config + sections", "style": "return"},
+    {"number": 6, "from": "factory", "to": "factory", "label": "Resolve strategy"},
+    {"kind": "section", "label": "2 · Load declared implementations"},
+    {"number": 7, "from": "factory", "to": "model", "label": "Load owning model DSO"},
+    {"number": 8, "from": "model", "to": "registry", "label": "Register plugin"},
+    {"number": 9, "from": "factory", "to": "registry", "label": "Lookup strategy"},
+    {"number": 10, "from": "registry", "to": "factory", "label": "IPipelinePlugin", "style": "return"},
+    {"number": 11, "from": "factory", "to": "backend", "label": "Load compatible backend"},
+    {"number": 12, "from": "backend", "to": "factory", "label": "IBackend", "style": "return"},
+    {"kind": "section", "label": "3 · Construct the public task pipeline"},
+    {"number": 13, "from": "factory", "to": "factory", "label": "Resolve session config"},
+    {"number": 14, "from": "factory", "to": "factory", "label": "Create pipeline"},
+    {"number": 15, "from": "factory", "to": "caller", "label": "Concrete IPipeline", "style": "return"}
+  ]
+}

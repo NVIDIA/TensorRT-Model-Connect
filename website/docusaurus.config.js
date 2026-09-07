@@ -54,10 +54,12 @@ const config = {
         src: 'img/trtmc-mark.svg'
       },
       items: [
-        { to: '/getting-started/quick-start', label: 'Get Started', position: 'left' },
+        { to: '/getting-started/overview', label: 'Get Started', position: 'left' },
         { to: '/models-recipes/overview', label: 'Models', position: 'left' },
-        { to: '/architecture/ai-native-horizontal-scaling', label: 'Architecture', position: 'left' },
-        { to: '/extend/add-model-family', label: 'Add a Family', position: 'left' },
+        { to: '/user-guides/overview', label: 'User Guides', position: 'left' },
+        { to: '/learning-path', label: 'Tutorials', position: 'left' },
+        { to: '/developer-guide/overview', label: 'Developer', position: 'left' },
+        { to: '/api/overview', label: 'Reference', position: 'left' },
         { to: '/blog', label: 'Blog', position: 'left' },
         { href: `https://github.com/${repository}`, label: 'GitHub', position: 'right' }
       ]
@@ -68,24 +70,26 @@ const config = {
         {
           title: 'Use',
           items: [
-            { label: 'Getting Started', to: '/getting-started/quick-start' },
+            { label: 'Getting Started', to: '/getting-started/overview' },
             { label: 'Supported Models', to: '/models-recipes/overview' },
-            { label: 'Python API', to: '/api/python-builder' }
+            { label: 'User Guides', to: '/user-guides/overview' }
           ]
         },
         {
           title: 'Learn',
           items: [
+            { label: 'Tutorial Curriculum', to: '/learning-path' },
             { label: 'Blog', to: '/blog' },
             { label: 'Architecture', to: '/architecture/ai-native-horizontal-scaling' },
-            { label: 'C++ API', to: '/api/cpp-api' }
+            { label: 'Reference', to: '/api/overview' },
+            { label: 'Developer Guide', to: '/developer-guide/overview' }
           ]
         },
         {
           title: 'Project',
           items: [
-            { label: 'Contributing', to: '/extend/contributing' },
-            { label: 'Add a Family', to: '/extend/add-model-family' },
+            { label: 'AI and Agent Guide', to: '/agent-guide' },
+            { label: 'Release & Support', to: '/release-support/overview' },
             { label: 'GitHub', href: `https://github.com/${repository}` }
           ]
         }

@@ -1,0 +1,99 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Installed runtime library graph
+// @description: Applications link the shared core, which loads one model DSO and one compatible TensorRT backend DSO behind stable interfaces while the selected backend depends on its matching runtime.
+digraph BuildSystem {
+  graph [
+    bgcolor="#fbfcfe",
+    pad="0.35",
+    nodesep="0.52",
+    ranksep="0.70",
+    rankdir="TB",
+    splines="polyline",
+    fontname="Arial",
+    labelloc="t",
+    label=<<B>Runtime library graph</B><BR/><FONT POINT-SIZE="16">Core, model, and backend DSOs remain separately owned and replaceable.</FONT>>,
+    fontsize="28",
+    fontcolor="#111827"
+  ];
+  node [
+    shape="rect",
+    style="rounded,filled",
+    fillcolor="#ffffff",
+    color="#64748b",
+    penwidth="2",
+    fontname="Arial",
+    fontsize="17",
+    fontcolor="#111827",
+    margin="0.20,0.15"
+  ];
+  edge [
+    color="#64748b",
+    penwidth="2.4",
+    arrowsize="0.8",
+    fontname="Arial",
+    fontsize="16",
+    fontcolor="#334155"
+  ];
+
+  app [
+    fillcolor="#f5f3ff",
+    color="#7c3aed",
+    label=<<B>Application or trtmc CLI</B>>
+  ];
+  core [
+    fillcolor="#ffffff",
+    color="#64748b",
+    label=<<FONT POINT-SIZE="20"><B>trtmc_core</B></FONT><BR/><FONT POINT-SIZE="16">public API + bundle/plugin loaders</FONT>>
+  ];
+  model [
+    fillcolor="#ecfccb",
+    color="#4d7c0f",
+    label=<<B>libtrtmc_model_&lt;owner&gt;.so</B><BR/><FONT POINT-SIZE="16">model plugin + concrete pipeline</FONT>>
+  ];
+  backend_loader [
+    fillcolor="#eff6ff",
+    color="#2563eb",
+    label=<<B>BackendLoader</B><BR/><FONT POINT-SIZE="16">select compatible backend ABI</FONT>>
+  ];
+  trt [
+    fillcolor="#eff6ff",
+    color="#2563eb",
+    label=<<B>libtrtmc_backend_trt.so</B>>
+  ];
+  rtx [
+    fillcolor="#eff6ff",
+    color="#2563eb",
+    label=<<B>libtrtmc_backend_trt_rtx.so</B>>
+  ];
+  interfaces [
+    fillcolor="#fffbeb",
+    color="#b45309",
+    label=<<B>Stable execution interfaces</B><BR/><FONT POINT-SIZE="16">IBackend + ITrtModule</FONT>>
+  ];
+  tensorrt [
+    fillcolor="#fef2f2",
+    color="#b91c1c",
+    label=<<B>Compatible TensorRT runtime</B>>
+  ];
+  tensorrt_rtx [
+    fillcolor="#fef2f2",
+    color="#b91c1c",
+    label=<<B>TensorRT-RTX runtime</B>>
+  ];
+
+  { rank=same; model; backend_loader; }
+  { rank=same; trt; rtx; interfaces; }
+  { rank=same; tensorrt; tensorrt_rtx; }
+
+  app -> core;
+  core -> model;
+  core -> backend_loader;
+  backend_loader -> trt;
+  backend_loader -> rtx;
+  model -> interfaces;
+  trt -> interfaces;
+  rtx -> interfaces;
+  trt -> tensorrt;
+  rtx -> tensorrt_rtx;
+}

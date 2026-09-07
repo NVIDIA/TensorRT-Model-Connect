@@ -1,0 +1,127 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="1040" height="678" role="img" aria-labelledby="tutorials-advanced-knob-scopes-svg-title tutorials-advanced-knob-scopes-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 1040.00 678.00" xmlns="http://www.w3.org/2000/svg">
+<title id="tutorials-advanced-knob-scopes-svg-title">Build, load, and request knob boundaries</title>
+<desc id="tutorials-advanced-knob-scopes-svg-description">Build-time inputs produce a native or optimized bundle, load options help create the public pipeline from that bundle, and request options affect only the task operation invoked on the pipeline.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 653.2)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-653.2 1014.7,-653.2 1014.7,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="233.38" y="-599.8" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Knobs act at three different boundaries</text>
+<text xml:space="preserve" text-anchor="start" x="205.68" y="-582.6" font-family="Arial" font-size="16.00" fill="#111827">Build options shape the artifact; load and request options act after route selection.</text>
+<!-- build_flags -->
+<g id="node1" class="node">
+<title>build_flags</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M434.16,-576C434.16,-576 133.21,-576 133.21,-576 127.21,-576 121.21,-570 121.21,-564 121.21,-564 121.21,-533.4 121.21,-533.4 121.21,-527.4 127.21,-521.4 133.21,-521.4 133.21,-521.4 434.16,-521.4 434.16,-521.4 440.16,-521.4 446.16,-527.4 446.16,-533.4 446.16,-533.4 446.16,-564 446.16,-564 446.16,-570 440.16,-576 434.16,-576"/>
+<text xml:space="preserve" text-anchor="start" x="214.27" y="-550.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Build&#45;time inputs</text>
+<text xml:space="preserve" text-anchor="start" x="135.61" y="-534.8" font-family="Arial" font-size="16.00" fill="#111827">precision · quantization · target · profiles</text>
+</g>
+<!-- build -->
+<g id="node2" class="node">
+<title>build</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M442.61,-472.4C442.61,-472.4 124.76,-472.4 124.76,-472.4 118.76,-472.4 112.76,-466.4 112.76,-460.4 112.76,-460.4 112.76,-429.8 112.76,-429.8 112.76,-423.8 118.76,-417.8 124.76,-417.8 124.76,-417.8 442.61,-417.8 442.61,-417.8 448.61,-417.8 454.61,-423.8 454.61,-429.8 454.61,-429.8 454.61,-460.4 454.61,-460.4 454.61,-466.4 448.61,-472.4 442.61,-472.4"/>
+<text xml:space="preserve" text-anchor="start" x="227.96" y="-447.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Build pipeline</text>
+<text xml:space="preserve" text-anchor="start" x="127.16" y="-431.2" font-family="Arial" font-size="16.00" fill="#111827">family gate · native build or optimized probe</text>
+</g>
+<!-- build_flags&#45;&gt;build -->
+<g id="edge1" class="edge">
+<title>build_flags&#45;&gt;build</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M283.69,-520.47C283.69,-509.45 283.69,-496.53 283.69,-484.57"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="286.49,-484.68 283.69,-476.68 280.89,-484.68 286.49,-484.68"/>
+</g>
+<!-- native -->
+<g id="node3" class="node">
+<title>native</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M241.37,-368.8C241.37,-368.8 12,-368.8 12,-368.8 6,-368.8 0,-362.8 0,-356.8 0,-356.8 0,-326.2 0,-326.2 0,-320.2 6,-314.2 12,-314.2 12,-314.2 241.37,-314.2 241.37,-314.2 247.37,-314.2 253.37,-320.2 253.37,-326.2 253.37,-326.2 253.37,-356.8 253.37,-356.8 253.37,-362.8 247.37,-368.8 241.37,-368.8"/>
+<text xml:space="preserve" text-anchor="start" x="68.59" y="-343.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Native .bundle</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-327.6" font-family="Arial" font-size="16.00" fill="#111827">family + task + backend + plans</text>
+</g>
+<!-- build&#45;&gt;native -->
+<g id="edge2" class="edge">
+<title>build&#45;&gt;native</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M241.61,-416.87C222.09,-404.24 198.7,-389.1 178.13,-375.79"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="179.89,-373.59 171.65,-371.6 176.85,-378.3 179.89,-373.59"/>
+</g>
+<!-- optimized -->
+<g id="node4" class="node">
+<title>optimized</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M582.61,-368.8C582.61,-368.8 300.76,-368.8 300.76,-368.8 294.76,-368.8 288.76,-362.8 288.76,-356.8 288.76,-356.8 288.76,-326.2 288.76,-326.2 288.76,-320.2 294.76,-314.2 300.76,-314.2 300.76,-314.2 582.61,-314.2 582.61,-314.2 588.61,-314.2 594.61,-320.2 594.61,-326.2 594.61,-326.2 594.61,-356.8 594.61,-356.8 594.61,-362.8 588.61,-368.8 582.61,-368.8"/>
+<text xml:space="preserve" text-anchor="start" x="368.02" y="-343.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Optimized .bundle</text>
+<text xml:space="preserve" text-anchor="start" x="303.16" y="-327.6" font-family="Arial" font-size="16.00" fill="#111827">descriptor + embedded implementation</text>
+</g>
+<!-- build&#45;&gt;optimized -->
+<g id="edge3" class="edge">
+<title>build&#45;&gt;optimized</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M326.03,-416.87C345.68,-404.24 369.21,-389.1 389.91,-375.79"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="391.23,-378.27 396.45,-371.59 388.2,-373.56 391.23,-378.27"/>
+</g>
+<!-- load -->
+<g id="node6" class="node">
+<title>load</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M535.24,-258.9C535.24,-258.9 348.13,-258.9 348.13,-258.9 342.13,-258.9 336.13,-252.9 336.13,-246.9 336.13,-246.9 336.13,-228.9 336.13,-228.9 336.13,-222.9 342.13,-216.9 348.13,-216.9 348.13,-216.9 535.24,-216.9 535.24,-216.9 541.24,-216.9 547.24,-222.9 547.24,-228.9 547.24,-228.9 547.24,-246.9 547.24,-246.9 547.24,-252.9 541.24,-258.9 535.24,-258.9"/>
+<text xml:space="preserve" text-anchor="start" x="350.53" y="-233.8" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">trtmc::load → IPipeline</text>
+</g>
+<!-- native&#45;&gt;load -->
+<g id="edge4" class="edge">
+<title>native&#45;&gt;load</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M211.1,-313.27C259.27,-297.74 319.15,-278.42 365.82,-263.37"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="366.57,-266.07 373.32,-260.95 364.85,-260.74 366.57,-266.07"/>
+</g>
+<!-- optimized&#45;&gt;load -->
+<g id="edge5" class="edge">
+<title>optimized&#45;&gt;load</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M441.69,-313.27C441.69,-300.27 441.69,-284.62 441.69,-271.04"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="444.49,-271.39 441.69,-263.39 438.89,-271.39 444.49,-271.39"/>
+</g>
+<!-- load_flags -->
+<g id="node5" class="node">
+<title>load_flags</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M977.5,-368.8C977.5,-368.8 641.87,-368.8 641.87,-368.8 635.87,-368.8 629.87,-362.8 629.87,-356.8 629.87,-356.8 629.87,-326.2 629.87,-326.2 629.87,-320.2 635.87,-314.2 641.87,-314.2 641.87,-314.2 977.5,-314.2 977.5,-314.2 983.5,-314.2 989.5,-320.2 989.5,-326.2 989.5,-326.2 989.5,-356.8 989.5,-356.8 989.5,-362.8 983.5,-368.8 977.5,-368.8"/>
+<text xml:space="preserve" text-anchor="start" x="756.33" y="-343.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Load options</text>
+<text xml:space="preserve" text-anchor="start" x="644.27" y="-327.6" font-family="Arial" font-size="16.00" fill="#111827">cache budget · runtime cache · CUDA graphs</text>
+</g>
+<!-- load_flags&#45;&gt;load -->
+<g id="edge6" class="edge">
+<title>load_flags&#45;&gt;load</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M711.07,-313.27C654.2,-297.57 583.36,-278.01 528.59,-262.89"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="529.47,-260.23 521.01,-260.8 527.98,-265.63 529.47,-260.23"/>
+</g>
+<!-- operation -->
+<g id="node8" class="node">
+<title>operation</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M685.13,-161.6C685.13,-161.6 488.24,-161.6 488.24,-161.6 482.24,-161.6 476.24,-155.6 476.24,-149.6 476.24,-149.6 476.24,-103 476.24,-103 476.24,-97 482.24,-91 488.24,-91 488.24,-91 685.13,-91 685.13,-91 691.13,-91 697.13,-97 697.13,-103 697.13,-103 697.13,-149.6 697.13,-149.6 697.13,-155.6 691.13,-161.6 685.13,-161.6"/>
+<text xml:space="preserve" text-anchor="start" x="501.2" y="-136.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Typed task operation</text>
+<text xml:space="preserve" text-anchor="start" x="500.43" y="-120.4" font-family="Arial" font-size="16.00" fill="#111827">generate() · transcribe()</text>
+<text xml:space="preserve" text-anchor="start" x="490.64" y="-104.4" font-family="Arial" font-size="16.00" fill="#111827">generate_image() · solve()</text>
+</g>
+<!-- load&#45;&gt;operation -->
+<g id="edge7" class="edge">
+<title>load&#45;&gt;operation</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M469.3,-216.03C486.69,-202.88 509.77,-185.44 530.85,-169.5"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="532.47,-171.79 537.16,-164.73 529.09,-167.32 532.47,-171.79"/>
+</g>
+<!-- request_flags -->
+<g id="node7" class="node">
+<title>request_flags</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M871.15,-265.2C871.15,-265.2 594.22,-265.2 594.22,-265.2 588.22,-265.2 582.22,-259.2 582.22,-253.2 582.22,-253.2 582.22,-222.6 582.22,-222.6 582.22,-216.6 588.22,-210.6 594.22,-210.6 594.22,-210.6 871.15,-210.6 871.15,-210.6 877.15,-210.6 883.15,-216.6 883.15,-222.6 883.15,-222.6 883.15,-253.2 883.15,-253.2 883.15,-259.2 877.15,-265.2 871.15,-265.2"/>
+<text xml:space="preserve" text-anchor="start" x="666.1" y="-240.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Request options</text>
+<text xml:space="preserve" text-anchor="start" x="596.62" y="-224" font-family="Arial" font-size="16.00" fill="#111827">sampling · max tokens · steps · seed</text>
+</g>
+<!-- request_flags&#45;&gt;operation -->
+<g id="edge8" class="edge">
+<title>request_flags&#45;&gt;operation</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M696.6,-209.81C680.42,-197.66 660.95,-183.05 642.93,-169.52"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="644.65,-167.31 636.57,-164.75 641.29,-171.79 644.65,-167.31"/>
+</g>
+<!-- result -->
+<g id="node9" class="node">
+<title>result</title>
+<path fill="#f0fdf4" stroke="#15803d" stroke-width="2" d="M639.62,-42C639.62,-42 533.75,-42 533.75,-42 527.75,-42 521.75,-36 521.75,-30 521.75,-30 521.75,-12 521.75,-12 521.75,-6 527.75,0 533.75,0 533.75,0 639.62,0 639.62,0 645.62,0 651.62,-6 651.62,-12 651.62,-12 651.62,-30 651.62,-30 651.62,-36 645.62,-42 639.62,-42"/>
+<text xml:space="preserve" text-anchor="start" x="536.15" y="-16.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Typed result</text>
+</g>
+<!-- operation&#45;&gt;result -->
+<g id="edge9" class="edge">
+<title>operation&#45;&gt;result</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M586.69,-90.04C586.69,-78.54 586.69,-65.82 586.69,-54.53"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="589.49,-54.59 586.69,-46.59 583.89,-54.59 589.49,-54.59"/>
+</g>
+</g>
+</svg>
