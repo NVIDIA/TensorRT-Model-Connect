@@ -1,0 +1,23 @@
+{
+  "name": "smollm3-3b-l0",
+  "hf_id": "HuggingFaceTB/SmolLM3-3B",
+  "hf_revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+  "bundle": "smollm3-3b-l0.bundle",
+  "family": "smollm3",
+  "task": "text_generation",
+  "precision": "bf16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "smollm3-3b-l0",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}
