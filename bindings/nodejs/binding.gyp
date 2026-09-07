@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 {
   "targets": [
     {
@@ -29,7 +32,7 @@
       "conditions": [
         ['OS=="win"', {
           "libraries": [
-            "-ltensorrt_model_connect.lib"
+            "-ltrtmc_core.lib"
           ],
           "library_dirs": [
             "../../build/Release"
@@ -38,7 +41,7 @@
         ['OS!="win"', {
           "libraries": [
             "-L../../build",
-            "-ltensorrt_model_connect"
+            "-ltrtmc_core"
           ]
         }]
       ]

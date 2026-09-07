@@ -1,23 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
-let trtmc;
-try {
-    trtmc = require('./build/Release/trtmc_node.node');
-} catch (e) {
-    console.warn("[WARN] Native module not found. Using MOCK for demonstration purposes.");
-    trtmc = {
-        load: (path) => ({
-            generate: (prompt, config) => ({
-                text: "This is a simulated AI response from the Node.js bindings!",
-                token_ids: [101, 202, 303, 404],
-                prefill_ms: 12.5,
-                decode_ms: 45.2,
-                setup_ms: 1.0
-            })
-        })
-    };
-}
+const trtmc = require('./build/Release/trtmc_node.node');
 const path = require('path');
 const fs = require('fs');
 
