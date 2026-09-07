@@ -714,13 +714,8 @@ bool MagpiePipeline::gpu_greedy_frame_step(DecoderLoopState& state, int32_t fram
     if (mask_ptr) {
         const int32_t W = decoder_state_->max_length();
         const int32_t mask_len = W + 1;
-        // Build mask on host (small: ~1KB) and async upload
-        // TODO: replace with a CUDA kernel for zero-copy when perf matters
-        std::vector<float> mask(static_cast<std::size_t>(mask_len), -1e9F);
-        for (int32_t i = 0; i <= pos; ++i)
-            mask[static_cast<std::size_t>(i)] = 0.0F;
-        cudaMemcpyAsync(mask_ptr, mask.data(), static_cast<std::size_t>(mask_len) * sizeof(float),
-                        cudaMemcpyHostToDevice, stream_);
+        // Build mask directly on device (zero-copy)
+        magpie_build_attention_mask_device(static_cast<float*>(mask_ptr), pos, mask_len, stream_);
     }
 
     decoder_->forward_device_async({});
