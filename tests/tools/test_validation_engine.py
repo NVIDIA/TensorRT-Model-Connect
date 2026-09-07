@@ -3320,9 +3320,18 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "model_selector",
+    [
+        "minimax-h3-768p",
+        "MiniMaxAI/MiniMax-H3",
+        "minimax-h3-768p.bundle",
+    ],
+)
 def test_prepare_cli_resolves_model_owned_validation_dataset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    model_selector: str,
 ) -> None:
     captured: dict[str, Any] = {}
 
@@ -3337,7 +3346,7 @@ def test_prepare_cli_resolves_model_owned_validation_dataset(
             suites=str(validation_engine.DEFAULT_SUITES),
             suite="minimax_h3_vbench_reference_parity",
             dataset=None,
-            model="minimax-h3-768p",
+            model=model_selector,
             models_dir=str(validation_engine.DEFAULT_MODELS_DIR),
             work_dir=str(tmp_path / "work"),
             limit=10,

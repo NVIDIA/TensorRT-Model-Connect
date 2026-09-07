@@ -12933,7 +12933,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             Path(getattr(args, "models_dir", DEFAULT_MODELS_DIR))
         )
         model = next(
-            (item for item in models if item.get("name") == model_name),
+            (item for item in models if model_matches_selector(item, model_name)),
             None,
         )
         if model is None:
