@@ -1,0 +1,70 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="612" height="583" role="img" aria-labelledby="architecture-validation-evidence-ladder-svg-title architecture-validation-evidence-ladder-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 612.00 583.00" xmlns="http://www.w3.org/2000/svg">
+<title id="architecture-validation-evidence-ladder-svg-title">Validation evidence ladder</title>
+<desc id="architecture-validation-evidence-ladder-svg-description">Confidence grows from family ownership and source checks through focused units, bundle loading, exact model end-to-end behavior, and reproducible performance evidence.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 558.2)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-558.2 586.39,-558.2 586.39,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="173.21" y="-504.8" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Evidence ladder</text>
+<text xml:space="preserve" text-anchor="start" x="8" y="-487.6" font-family="Arial" font-size="16.00" fill="#111827">Each layer proves a different contract; run only layers relevant to the change.</text>
+<!-- ownership -->
+<g id="node1" class="node">
+<title>ownership</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M429.74,-481C429.74,-481 131.45,-481 131.45,-481 125.45,-481 119.45,-475 119.45,-469 119.45,-469 119.45,-438.4 119.45,-438.4 119.45,-432.4 125.45,-426.4 131.45,-426.4 131.45,-426.4 429.74,-426.4 429.74,-426.4 435.74,-426.4 441.74,-432.4 441.74,-438.4 441.74,-438.4 441.74,-469 441.74,-469 441.74,-475 435.74,-481 429.74,-481"/>
+<text xml:space="preserve" text-anchor="start" x="184.94" y="-455.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">1 · Ownership + source</text>
+<text xml:space="preserve" text-anchor="start" x="133.85" y="-439.8" font-family="Arial" font-size="16.00" fill="#111827">support · imports · dependency direction</text>
+</g>
+<!-- units -->
+<g id="node2" class="node">
+<title>units</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M362.19,-374.4C362.19,-374.4 198.99,-374.4 198.99,-374.4 192.99,-374.4 186.99,-368.4 186.99,-362.4 186.99,-362.4 186.99,-331.8 186.99,-331.8 186.99,-325.8 192.99,-319.8 198.99,-319.8 198.99,-319.8 362.19,-319.8 362.19,-319.8 368.19,-319.8 374.19,-325.8 374.19,-331.8 374.19,-331.8 374.19,-362.4 374.19,-362.4 374.19,-368.4 368.19,-374.4 362.19,-374.4"/>
+<text xml:space="preserve" text-anchor="start" x="208.8" y="-349.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">2 · Focused units</text>
+<text xml:space="preserve" text-anchor="start" x="209.01" y="-333.2" font-family="Arial" font-size="16.00" fill="#111827">family · core · apps</text>
+</g>
+<!-- ownership&#45;&gt;units -->
+<g id="edge1" class="edge">
+<title>ownership&#45;&gt;units</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M280.59,-425.49C280.59,-413.63 280.59,-399.5 280.59,-386.59"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="283.39,-386.81 280.59,-378.81 277.79,-386.81 283.39,-386.81"/>
+</g>
+<!-- integration -->
+<g id="node3" class="node">
+<title>integration</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M422.61,-267.8C422.61,-267.8 138.58,-267.8 138.58,-267.8 132.58,-267.8 126.58,-261.8 126.58,-255.8 126.58,-255.8 126.58,-225.2 126.58,-225.2 126.58,-219.2 132.58,-213.2 138.58,-213.2 138.58,-213.2 422.61,-213.2 422.61,-213.2 428.61,-213.2 434.61,-219.2 434.61,-225.2 434.61,-225.2 434.61,-255.8 434.61,-255.8 434.61,-261.8 428.61,-267.8 422.61,-267.8"/>
+<text xml:space="preserve" text-anchor="start" x="202.42" y="-242.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">3 · Bundle + loader</text>
+<text xml:space="preserve" text-anchor="start" x="140.98" y="-226.6" font-family="Arial" font-size="16.00" fill="#111827">header · backend · family DSO · Task</text>
+</g>
+<!-- units&#45;&gt;integration -->
+<g id="edge2" class="edge">
+<title>units&#45;&gt;integration</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M280.59,-318.89C280.59,-307.03 280.59,-292.9 280.59,-279.99"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="283.39,-280.21 280.59,-272.21 277.79,-280.21 283.39,-280.21"/>
+</g>
+<!-- e2e -->
+<g id="node4" class="node">
+<title>e2e</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M415.28,-161.2C415.28,-161.2 145.9,-161.2 145.9,-161.2 139.9,-161.2 133.9,-155.2 133.9,-149.2 133.9,-149.2 133.9,-118.6 133.9,-118.6 133.9,-112.6 139.9,-106.6 145.9,-106.6 145.9,-106.6 415.28,-106.6 415.28,-106.6 421.28,-106.6 427.28,-112.6 427.28,-118.6 427.28,-118.6 427.28,-149.2 427.28,-149.2 427.28,-155.2 421.28,-161.2 415.28,-161.2"/>
+<text xml:space="preserve" text-anchor="start" x="197.92" y="-136.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">4 · Exact model E2E</text>
+<text xml:space="preserve" text-anchor="start" x="148.3" y="-120" font-family="Arial" font-size="16.00" fill="#111827">family oracle + meaningful thresholds</text>
+</g>
+<!-- integration&#45;&gt;e2e -->
+<g id="edge3" class="edge">
+<title>integration&#45;&gt;e2e</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M280.59,-212.29C280.59,-200.43 280.59,-186.3 280.59,-173.39"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="283.39,-173.61 280.59,-165.61 277.79,-173.61 283.39,-173.61"/>
+</g>
+<!-- performance -->
+<g id="node5" class="node">
+<title>performance</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M394.38,-54.6C394.38,-54.6 166.81,-54.6 166.81,-54.6 160.81,-54.6 154.81,-48.6 154.81,-42.6 154.81,-42.6 154.81,-12 154.81,-12 154.81,-6 160.81,0 166.81,0 166.81,0 394.38,0 394.38,0 400.38,0 406.38,-6 406.38,-12 406.38,-12 406.38,-42.6 406.38,-42.6 406.38,-48.6 400.38,-54.6 394.38,-54.6"/>
+<text xml:space="preserve" text-anchor="start" x="214.45" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">5 · Performance</text>
+<text xml:space="preserve" text-anchor="start" x="169.21" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">exact workload + timing scopes</text>
+</g>
+<!-- e2e&#45;&gt;performance -->
+<g id="edge4" class="edge">
+<title>e2e&#45;&gt;performance</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M280.59,-105.69C280.59,-93.83 280.59,-79.7 280.59,-66.79"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="283.39,-67.01 280.59,-59.01 277.79,-67.01 283.39,-67.01"/>
+</g>
+</g>
+</svg>

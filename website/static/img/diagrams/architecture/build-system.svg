@@ -1,0 +1,113 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="966" height="409" role="img" aria-labelledby="architecture-build-system-svg-title architecture-build-system-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 966.00 409.00" xmlns="http://www.w3.org/2000/svg">
+<title id="architecture-build-system-svg-title">Build-system dependency boundaries</title>
+<desc id="architecture-build-system-svg-description">Solid arrows point from targets to their source dependencies; root CMake discovers family-owned runtime targets by directory convention without naming families.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 383.4)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-383.4 940.55,-383.4 940.55,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="281.08" y="-330" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Native build dependencies</text>
+<text xml:space="preserve" text-anchor="start" x="225.12" y="-312.8" font-family="Arial" font-size="16.00" fill="#111827">A → B means target A depends on B. Family discovery is dashed.</text>
+<!-- app -->
+<g id="node1" class="node">
+<title>app</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M253.94,-48.3C253.94,-48.3 117.8,-48.3 117.8,-48.3 111.8,-48.3 105.8,-42.3 105.8,-36.3 105.8,-36.3 105.8,-18.3 105.8,-18.3 105.8,-12.3 111.8,-6.3 117.8,-6.3 117.8,-6.3 253.94,-6.3 253.94,-6.3 259.94,-6.3 265.94,-12.3 265.94,-18.3 265.94,-18.3 265.94,-36.3 265.94,-36.3 265.94,-42.3 259.94,-48.3 253.94,-48.3"/>
+<text xml:space="preserve" text-anchor="start" x="120.2" y="-23.2" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">apps / examples</text>
+</g>
+<!-- loader -->
+<g id="node2" class="node">
+<title>loader</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M153.75,-180.4C153.75,-180.4 12,-180.4 12,-180.4 6,-180.4 0,-174.4 0,-168.4 0,-168.4 0,-137.8 0,-137.8 0,-131.8 6,-125.8 12,-125.8 12,-125.8 153.75,-125.8 153.75,-125.8 159.75,-125.8 165.75,-131.8 165.75,-137.8 165.75,-137.8 165.75,-168.4 165.75,-168.4 165.75,-174.4 159.75,-180.4 153.75,-180.4"/>
+<text xml:space="preserve" text-anchor="start" x="15.81" y="-155.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">libtrtmc_runtime</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-139.2" font-family="Arial" font-size="16.00" fill="#111827">explicit DSO loader</text>
+</g>
+<!-- app&#45;&gt;loader -->
+<g id="edge1" class="edge">
+<title>app&#45;&gt;loader</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M168.63,-49.02C153.33,-67.41 130.65,-94.68 112.45,-116.55"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="110.5,-114.51 107.54,-122.45 114.81,-118.1 110.5,-114.51"/>
+<text xml:space="preserve" text-anchor="middle" x="156.54" y="-85.4" font-family="Arial" font-size="16.00" fill="#334155">links</text>
+</g>
+<!-- core -->
+<g id="node5" class="node">
+<title>core</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M364.89,-306.2C364.89,-306.2 120.86,-306.2 120.86,-306.2 114.86,-306.2 108.86,-300.2 108.86,-294.2 108.86,-294.2 108.86,-263.6 108.86,-263.6 108.86,-257.6 114.86,-251.6 120.86,-251.6 120.86,-251.6 364.89,-251.6 364.89,-251.6 370.89,-251.6 376.89,-257.6 376.89,-263.6 376.89,-263.6 376.89,-294.2 376.89,-294.2 376.89,-300.2 370.89,-306.2 364.89,-306.2"/>
+<text xml:space="preserve" text-anchor="start" x="189.02" y="-281.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">libtrtmc_core</text>
+<text xml:space="preserve" text-anchor="start" x="123.26" y="-265" font-family="Arial" font-size="16.00" fill="#111827">Bundle · Task · Engine contracts</text>
+</g>
+<!-- app&#45;&gt;core -->
+<g id="edge2" class="edge">
+<title>app&#45;&gt;core</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M190.63,-49.15C200.23,-91.18 222.02,-186.58 234.21,-239.95"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="231.41,-240.27 235.92,-247.44 236.87,-239.02 231.41,-240.27"/>
+<text xml:space="preserve" text-anchor="middle" x="271.61" y="-148.3" font-family="Arial" font-size="16.00" fill="#334155">uses Task API</text>
+</g>
+<!-- loader&#45;&gt;core -->
+<g id="edge3" class="edge">
+<title>loader&#45;&gt;core</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M117.99,-181.27C141.74,-199.65 173.31,-224.08 198.77,-243.77"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="196.93,-245.89 204.97,-248.57 200.36,-241.46 196.93,-245.89"/>
+<text xml:space="preserve" text-anchor="middle" x="188.46" y="-211.2" font-family="Arial" font-size="16.00" fill="#334155">links</text>
+</g>
+<!-- family -->
+<g id="node3" class="node">
+<title>family</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M624.89,-180.4C624.89,-180.4 388.86,-180.4 388.86,-180.4 382.86,-180.4 376.86,-174.4 376.86,-168.4 376.86,-168.4 376.86,-137.8 376.86,-137.8 376.86,-131.8 382.86,-125.8 388.86,-125.8 388.86,-125.8 624.89,-125.8 624.89,-125.8 630.89,-125.8 636.89,-131.8 636.89,-137.8 636.89,-137.8 636.89,-168.4 636.89,-168.4 636.89,-174.4 630.89,-180.4 624.89,-180.4"/>
+<text xml:space="preserve" text-anchor="start" x="416.65" y="-155.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">libtrtmc_model_family</text>
+<text xml:space="preserve" text-anchor="start" x="391.26" y="-139.2" font-family="Arial" font-size="16.00" fill="#111827">family&#45;owned target and sources</text>
+</g>
+<!-- family&#45;&gt;core -->
+<g id="edge4" class="edge">
+<title>family&#45;&gt;core</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M417.01,-181.4C375.27,-194.08 334.72,-206.4 334.72,-206.4 334.72,-206.4 310.42,-225.32 286.82,-243.69"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="285.32,-241.31 280.72,-248.43 288.76,-245.73 285.32,-241.31"/>
+<text xml:space="preserve" text-anchor="middle" x="410.29" y="-211.2" font-family="Arial" font-size="16.00" fill="#334155">implements Task API</text>
+</g>
+<!-- trt -->
+<g id="node6" class="node">
+<title>trt</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M580.18,-299.9C580.18,-299.9 427.56,-299.9 427.56,-299.9 421.56,-299.9 415.56,-293.9 415.56,-287.9 415.56,-287.9 415.56,-269.9 415.56,-269.9 415.56,-263.9 421.56,-257.9 427.56,-257.9 427.56,-257.9 580.18,-257.9 580.18,-257.9 586.18,-257.9 592.18,-263.9 592.18,-269.9 592.18,-269.9 592.18,-287.9 592.18,-287.9 592.18,-293.9 586.18,-299.9 580.18,-299.9"/>
+<text xml:space="preserve" text-anchor="start" x="429.96" y="-274.8" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">TensorRT + CUDA</text>
+</g>
+<!-- family&#45;&gt;trt -->
+<g id="edge7" class="edge">
+<title>family&#45;&gt;trt</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M500.86,-181.17C498.03,-193.93 495.26,-206.4 495.26,-206.4 495.26,-206.4 495.26,-225.6 495.26,-225.6 495.26,-225.6 496.78,-234.84 498.55,-245.56"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="495.77,-245.91 499.83,-253.34 501.29,-245 495.77,-245.91"/>
+<text xml:space="preserve" text-anchor="middle" x="553.07" y="-211.2" font-family="Arial" font-size="16.00" fill="#334155">custom ops only</text>
+</g>
+<!-- backend -->
+<g id="node4" class="node">
+<title>backend</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M903.35,-174.1C903.35,-174.1 730.39,-174.1 730.39,-174.1 724.39,-174.1 718.39,-168.1 718.39,-162.1 718.39,-162.1 718.39,-144.1 718.39,-144.1 718.39,-138.1 724.39,-132.1 730.39,-132.1 730.39,-132.1 903.35,-132.1 903.35,-132.1 909.35,-132.1 915.35,-138.1 915.35,-144.1 915.35,-144.1 915.35,-162.1 915.35,-162.1 915.35,-168.1 909.35,-174.1 903.35,-174.1"/>
+<text xml:space="preserve" text-anchor="start" x="732.79" y="-149" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">libtrtmc_backend_trt</text>
+</g>
+<!-- backend&#45;&gt;core -->
+<g id="edge5" class="edge">
+<title>backend&#45;&gt;core</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M748.99,-175.07C701.88,-189.62 647.57,-206.4 647.57,-206.4 647.57,-206.4 615.87,-225.6 615.87,-225.6 615.87,-225.6 397.87,-251.6 397.87,-251.6 397.87,-251.6 394.61,-252.15 389.02,-253.1"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="388.61,-250.33 381.19,-254.43 389.55,-255.85 388.61,-250.33"/>
+<text xml:space="preserve" text-anchor="middle" x="730.72" y="-211.2" font-family="Arial" font-size="16.00" fill="#334155">implements Engine API</text>
+</g>
+<!-- backend&#45;&gt;trt -->
+<g id="edge6" class="edge">
+<title>backend&#45;&gt;trt</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M819.28,-175.07C820.95,-189.62 822.87,-206.4 822.87,-206.4 822.87,-206.4 822.87,-225.6 822.87,-225.6 822.87,-225.6 697.89,-246.09 604.39,-261.42"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="604.18,-258.62 596.74,-262.67 605.09,-264.14 604.18,-258.62"/>
+<text xml:space="preserve" text-anchor="middle" x="838.88" y="-211.2" font-family="Arial" font-size="16.00" fill="#334155">links</text>
+</g>
+<!-- cmake -->
+<g id="node7" class="node">
+<title>cmake</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M642.65,-54.6C642.65,-54.6 371.09,-54.6 371.09,-54.6 365.09,-54.6 359.09,-48.6 359.09,-42.6 359.09,-42.6 359.09,-12 359.09,-12 359.09,-6 365.09,0 371.09,0 371.09,0 642.65,0 642.65,0 648.65,0 654.65,-6 654.65,-12 654.65,-12 654.65,-42.6 654.65,-42.6 654.65,-48.6 648.65,-54.6 642.65,-54.6"/>
+<text xml:space="preserve" text-anchor="start" x="457.76" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Root CMake</text>
+<text xml:space="preserve" text-anchor="start" x="373.49" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">glob families/*/runtime/CMakeLists.txt</text>
+</g>
+<!-- cmake&#45;&gt;family -->
+<g id="edge8" class="edge">
+<title>cmake&#45;&gt;family</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M506.87,-55.47C506.87,-72.48 506.87,-94.67 506.87,-113.49"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="504.07,-113.36 506.87,-121.36 509.67,-113.36 504.07,-113.36"/>
+<text xml:space="preserve" text-anchor="middle" x="540.66" y="-85.4" font-family="Arial" font-size="16.00" fill="#334155">discovers</text>
+</g>
+</g>
+</svg>

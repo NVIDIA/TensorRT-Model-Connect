@@ -1,0 +1,81 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="747" height="507" role="img" aria-labelledby="getting-started-training-vs-inference-svg-title getting-started-training-vs-inference-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 747.00 507.00" xmlns="http://www.w3.org/2000/svg">
+<title id="getting-started-training-vs-inference-svg-title">Training produces weights; inference uses them</title>
+<desc id="getting-started-training-vs-inference-svg-description">Training updates model weights from data and loss, while inference keeps those weights fixed and applies them to a new request to produce an answer.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(23.04 483.64)">
+<polygon fill="#fbfcfe" stroke="none" points="-23.04,23.04 -23.04,-483.64 723.73,-483.64 723.73,23.04 -23.04,23.04"/>
+<text xml:space="preserve" text-anchor="start" x="8" y="-432.4" font-family="Arial" font-weight="bold" font-size="28.00" fill="#101828">Training creates the checkpoint; inference serves it</text>
+<text xml:space="preserve" text-anchor="start" x="144.49" y="-415.2" font-family="Arial" font-size="16.00" fill="#101828">TensorRT&#45;Model&#45;Connect starts after training is complete.</text>
+<!-- data -->
+<g id="node1" class="node">
+<title>data</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" d="M265.77,-408.6C265.77,-408.6 154.24,-408.6 154.24,-408.6 148.24,-408.6 142.24,-402.6 142.24,-396.6 142.24,-396.6 142.24,-380.04 142.24,-380.04 142.24,-374.04 148.24,-368.04 154.24,-368.04 154.24,-368.04 265.77,-368.04 265.77,-368.04 271.77,-368.04 277.77,-374.04 277.77,-380.04 277.77,-380.04 277.77,-396.6 277.77,-396.6 277.77,-402.6 271.77,-408.6 265.77,-408.6"/>
+<text xml:space="preserve" text-anchor="start" x="156.64" y="-384.22" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Training data</text>
+</g>
+<!-- train -->
+<g id="node2" class="node">
+<title>train</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" d="M305.33,-326.04C305.33,-326.04 114.68,-326.04 114.68,-326.04 108.68,-326.04 102.68,-320.04 102.68,-314.04 102.68,-314.04 102.68,-284.88 102.68,-284.88 102.68,-278.88 108.68,-272.88 114.68,-272.88 114.68,-272.88 305.33,-272.88 305.33,-272.88 311.33,-272.88 317.33,-278.88 317.33,-284.88 317.33,-284.88 317.33,-314.04 317.33,-314.04 317.33,-320.04 311.33,-326.04 305.33,-326.04"/>
+<text xml:space="preserve" text-anchor="start" x="156.18" y="-301.66" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Training loop</text>
+<text xml:space="preserve" text-anchor="start" x="117.08" y="-285.56" font-family="Arial" font-size="16.00" fill="#101828">forward · loss · backward</text>
+</g>
+<!-- data&#45;&gt;train -->
+<g id="edge1" class="edge">
+<title>data&#45;&gt;train</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M210,-367.26C210,-367.26 210,-338.1 210,-338.1"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="212.8,-338.1 210,-330.1 207.2,-338.1 212.8,-338.1"/>
+</g>
+<!-- checkpoint -->
+<g id="node3" class="node">
+<title>checkpoint</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="1.6" d="M310.23,-230.88C310.23,-230.88 109.78,-230.88 109.78,-230.88 103.78,-230.88 97.78,-224.88 97.78,-218.88 97.78,-218.88 97.78,-189.72 97.78,-189.72 97.78,-183.72 103.78,-177.72 109.78,-177.72 109.78,-177.72 310.23,-177.72 310.23,-177.72 316.23,-177.72 322.23,-183.72 322.23,-189.72 322.23,-189.72 322.23,-218.88 322.23,-218.88 322.23,-224.88 316.23,-230.88 310.23,-230.88"/>
+<text xml:space="preserve" text-anchor="start" x="140.57" y="-206.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Fixed checkpoint</text>
+<text xml:space="preserve" text-anchor="start" x="112.18" y="-190.4" font-family="Arial" font-size="16.00" fill="#101828">config · tensors · tokenizer</text>
+</g>
+<!-- train&#45;&gt;checkpoint -->
+<g id="edge2" class="edge">
+<title>train&#45;&gt;checkpoint</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M210,-272.19C210,-272.19 210,-242.9 210,-242.9"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="212.8,-242.9 210,-234.9 207.2,-242.9 212.8,-242.9"/>
+</g>
+<!-- inference -->
+<g id="node5" class="node">
+<title>inference</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.6" d="M464.81,-135.72C464.81,-135.72 225.2,-135.72 225.2,-135.72 219.2,-135.72 213.2,-129.72 213.2,-123.72 213.2,-123.72 213.2,-94.56 213.2,-94.56 213.2,-88.56 219.2,-82.56 225.2,-82.56 225.2,-82.56 464.81,-82.56 464.81,-82.56 470.81,-82.56 476.81,-88.56 476.81,-94.56 476.81,-94.56 476.81,-123.72 476.81,-123.72 476.81,-129.72 470.81,-135.72 464.81,-135.72"/>
+<text xml:space="preserve" text-anchor="start" x="307.21" y="-111.34" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Inference</text>
+<text xml:space="preserve" text-anchor="start" x="227.6" y="-95.24" font-family="Arial" font-size="16.00" fill="#101828">forward only · no weight updates</text>
+</g>
+<!-- checkpoint&#45;&gt;inference -->
+<g id="edge3" class="edge">
+<title>checkpoint&#45;&gt;inference</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M267.71,-177.03C267.71,-177.03 267.71,-147.74 267.71,-147.74"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="270.51,-147.74 267.71,-139.74 264.91,-147.74 270.51,-147.74"/>
+</g>
+<!-- request -->
+<g id="node4" class="node">
+<title>request</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6" d="M590.91,-230.88C590.91,-230.88 369.1,-230.88 369.1,-230.88 363.1,-230.88 357.1,-224.88 357.1,-218.88 357.1,-218.88 357.1,-189.72 357.1,-189.72 357.1,-183.72 363.1,-177.72 369.1,-177.72 369.1,-177.72 590.91,-177.72 590.91,-177.72 596.91,-177.72 602.91,-183.72 602.91,-189.72 602.91,-189.72 602.91,-218.88 602.91,-218.88 602.91,-224.88 596.91,-230.88 590.91,-230.88"/>
+<text xml:space="preserve" text-anchor="start" x="429.46" y="-206.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">New request</text>
+<text xml:space="preserve" text-anchor="start" x="371.5" y="-190.4" font-family="Arial" font-size="16.00" fill="#101828">prompt · image · audio · data</text>
+</g>
+<!-- request&#45;&gt;inference -->
+<g id="edge5" class="edge">
+<title>request&#45;&gt;inference</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M416.95,-177.03C416.95,-177.03 416.95,-147.74 416.95,-147.74"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="419.75,-147.74 416.95,-139.74 414.15,-147.74 419.75,-147.74"/>
+</g>
+<!-- answer -->
+<g id="node6" class="node">
+<title>answer</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="1.6" d="M471.6,-40.56C471.6,-40.56 218.4,-40.56 218.4,-40.56 212.4,-40.56 206.4,-34.56 206.4,-28.56 206.4,-28.56 206.4,-12 206.4,-12 206.4,-6 212.4,0 218.4,0 218.4,0 471.6,0 471.6,0 477.6,0 483.6,-6 483.6,-12 483.6,-12 483.6,-28.56 483.6,-28.56 483.6,-34.56 477.6,-40.56 471.6,-40.56"/>
+<text xml:space="preserve" text-anchor="start" x="220.8" y="-16.18" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Prediction or generated output</text>
+</g>
+<!-- inference&#45;&gt;answer -->
+<g id="edge4" class="edge">
+<title>inference&#45;&gt;answer</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M345,-82C345,-82 345,-52.67 345,-52.67"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="347.8,-52.67 345,-44.67 342.2,-52.67 347.8,-52.67"/>
+</g>
+</g>
+</svg>

@@ -1,0 +1,23 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: One family-owned build route
+// @description: Control-flow arrows show metadata loading, exact family resolution, one plain build call, and terminal errors for zero or multiple owners or build failure.
+digraph BuildRouteSelection {
+  graph [bgcolor="#fbfcfe", pad="0.35", nodesep="0.5", ranksep="0.7", rankdir="TB", splines="polyline", fontname="Arial", labelloc="t", label=<<B>Select exactly one family build</B><BR/><FONT POINT-SIZE="16">This is control flow; there is no provider probe, retry, or fallback.</FONT>>, fontsize="28", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", fillcolor="#ffffff", color="#64748b", penwidth="2", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.15"];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  request [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Model ID or local snapshot</B>>];
+  metadata [fillcolor="#eff6ff", color="#2563eb", label=<<B>Read standard metadata</B><BR/><FONT POINT-SIZE="16">config.json or model_index.json</FONT>>];
+  support [fillcolor="#eff6ff", color="#2563eb", label=<<B>Ask family support modules</B>>];
+  count [shape="diamond", fillcolor="#fffbeb", color="#b45309", label=<<B>Exactly one owner?</B>>];
+  build [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Import selected model.py</B><BR/><FONT POINT-SIZE="16">call build(request, writer) once</FONT>>];
+  bundle [fillcolor="#fffbeb", color="#b45309", label=<<B>Publish .bundle</B>>];
+  error [fillcolor="#fef2f2", color="#b91c1c", label=<<B>Terminal error</B><BR/><FONT POINT-SIZE="16">unsupported · ambiguous · build failed</FONT>>];
+
+  request -> metadata -> support -> count;
+  count -> build [label="yes"];
+  count -> error [label="zero or many"];
+  build -> bundle [label="success"];
+  build -> error [label="failure"];
+}

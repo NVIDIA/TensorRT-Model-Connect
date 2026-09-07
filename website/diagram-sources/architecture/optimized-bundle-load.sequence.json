@@ -1,0 +1,26 @@
+{
+  "title": "Load the optional TensorRT-RTX backend",
+  "description": "A bundle whose backend field is trt_rtx follows the same loader and family path while the backend consumes an optional runtime cache and CUDA graph setting.",
+  "subtitle": "TensorRT-RTX is an Engine API implementation, not a second model-runtime framework.",
+  "participants": [
+    {"id": "caller", "label": "Caller", "color": "api"},
+    {"id": "loader", "label": "Loader", "color": "runtime"},
+    {"id": "bundle", "label": "Bundle", "color": "artifact"},
+    {"id": "rtx", "label": "RTX Backend", "color": "build"},
+    {"id": "family", "label": "Family DSO", "color": "runtime"}
+  ],
+  "messages": [
+    {"kind": "section", "label": "1 · Read the selected backend"},
+    {"number": 1, "from": "caller", "to": "loader", "label": "load_task"},
+    {"number": 2, "from": "loader", "to": "bundle", "label": "Read header"},
+    {"number": 3, "from": "bundle", "to": "loader", "label": "trt_rtx", "style": "return"},
+    {"kind": "section", "label": "2 · Create the same Engine contract"},
+    {"number": 4, "from": "loader", "to": "rtx", "label": "Open DSO"},
+    {"number": 5, "from": "rtx", "to": "loader", "label": "IBackend", "style": "return"},
+    {"number": 6, "from": "loader", "to": "family", "label": "Open family"},
+    {"number": 7, "from": "loader", "to": "family", "label": "Call factory"},
+    {"number": 8, "from": "family", "to": "rtx", "label": "Create engine"},
+    {"number": 9, "from": "family", "to": "loader", "label": "Concrete ITask", "style": "return"},
+    {"number": 10, "from": "loader", "to": "caller", "label": "ITask", "style": "return"}
+  ]
+}

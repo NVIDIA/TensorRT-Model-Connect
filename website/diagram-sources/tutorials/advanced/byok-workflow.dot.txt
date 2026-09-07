@@ -1,0 +1,22 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Bring-your-own-kernel workflow
+// @description: A family builder or application graph transform inserts one explicit TVM-FFI kernel into a live TensorRT network before serialization, and runtime loads the named kernel DSO before the family task.
+digraph ByokWorkflow {
+  graph [bgcolor="#fbfcfe", pad="0.35", nodesep="0.5", ranksep="0.66", rankdir="TB", splines="polyline", fontname="Arial", labelloc="t", label=<<B>Bring your own kernel</B><BR/><FONT POINT-SIZE="16">One explicit build hook and one explicit runtime load; no graph framework or hash registry.</FONT>>, fontsize="28", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", fillcolor="#ffffff", color="#64748b", penwidth="2", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.15"];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8"];
+
+  kernel [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>TVM-FFI kernel DSO</B><BR/><FONT POINT-SIZE="16">explicit function + shape + dtype</FONT>>];
+  owner [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Family build or app transform</B>>];
+  network [fillcolor="#eff6ff", color="#2563eb", label=<<B>Live TensorRT network</B><BR/><FONT POINT-SIZE="16">insert layer and reconnect consumers</FONT>>];
+  bundle [fillcolor="#fffbeb", color="#b45309", label=<<B>Serialized .bundle</B>>];
+  runtime [fillcolor="#eff6ff", color="#2563eb", label=<<B>Explicit BYOK runtime load</B>>];
+  task [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Family Task execution</B>>];
+
+  kernel -> owner;
+  owner -> network -> bundle;
+  kernel -> runtime;
+  bundle -> task;
+  runtime -> task;
+}

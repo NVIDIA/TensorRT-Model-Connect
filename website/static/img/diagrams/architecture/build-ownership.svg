@@ -1,0 +1,147 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="828" height="383" role="img" aria-labelledby="architecture-build-ownership-svg-title architecture-build-ownership-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 828.00 383.00" xmlns="http://www.w3.org/2000/svg">
+<title id="architecture-build-ownership-svg-title">Build-time source dependencies and control transfer</title>
+<desc id="architecture-build-ownership-svg-description">Dependency arrows point from each consumer to its narrow contract; dashed arrows show discovery and the single runtime call into the selected family.</desc>
+<g id="graph0" class="graph" transform="scale(0.734014 0.734014) rotate(0) translate(25.2 497.2)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-497.2 1102.84,-497.2 1102.84,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="406.57" y="-443.8" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Build dependencies</text>
+<text xml:space="preserve" text-anchor="start" x="244.91" y="-426.6" font-family="Arial" font-size="16.00" fill="#111827">Solid A → B means A depends on B. Dashed arrows are runtime discovery or calls.</text>
+<!-- cli -->
+<g id="node1" class="node">
+<title>cli</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M633.89,-420C633.89,-420 381.85,-420 381.85,-420 375.85,-420 369.85,-414 369.85,-408 369.85,-408 369.85,-377.4 369.85,-377.4 369.85,-371.4 375.85,-365.4 381.85,-365.4 381.85,-365.4 633.89,-365.4 633.89,-365.4 639.89,-365.4 645.89,-371.4 645.89,-377.4 645.89,-377.4 645.89,-408 645.89,-408 645.89,-414 639.89,-420 633.89,-420"/>
+<text xml:space="preserve" text-anchor="start" x="470.57" y="-394.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Build CLI</text>
+<text xml:space="preserve" text-anchor="start" x="384.25" y="-378.8" font-family="Arial" font-size="16.00" fill="#111827">python &#45;m tensorrt_model_connect</text>
+</g>
+<!-- core -->
+<g id="node2" class="node">
+<title>core</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M601.87,-298.2C601.87,-298.2 413.88,-298.2 413.88,-298.2 407.88,-298.2 401.88,-292.2 401.88,-286.2 401.88,-286.2 401.88,-255.6 401.88,-255.6 401.88,-249.6 407.88,-243.6 413.88,-243.6 413.88,-243.6 601.87,-243.6 601.87,-243.6 607.87,-243.6 613.87,-249.6 613.87,-255.6 613.87,-255.6 613.87,-286.2 613.87,-286.2 613.87,-292.2 607.87,-298.2 601.87,-298.2"/>
+<text xml:space="preserve" text-anchor="start" x="466.31" y="-273.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Build core</text>
+<text xml:space="preserve" text-anchor="start" x="416.28" y="-257" font-family="Arial" font-size="16.00" fill="#111827">resolve exactly one family</text>
+</g>
+<!-- cli&#45;&gt;core -->
+<g id="edge1" class="edge">
+<title>cli&#45;&gt;core</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M507.87,-364.52C507.87,-348.51 507.87,-328.01 507.87,-310.36"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="510.67,-310.61 507.87,-302.61 505.07,-310.61 510.67,-310.61"/>
+<text xml:space="preserve" text-anchor="middle" x="549.69" y="-327" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- support -->
+<g id="node3" class="node">
+<title>support</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M438.36,-176.4C438.36,-176.4 153.38,-176.4 153.38,-176.4 147.38,-176.4 141.38,-170.4 141.38,-164.4 141.38,-164.4 141.38,-133.8 141.38,-133.8 141.38,-127.8 147.38,-121.8 153.38,-121.8 153.38,-121.8 438.36,-121.8 438.36,-121.8 444.36,-121.8 450.36,-127.8 450.36,-133.8 450.36,-133.8 450.36,-164.4 450.36,-164.4 450.36,-170.4 444.36,-176.4 438.36,-176.4"/>
+<text xml:space="preserve" text-anchor="start" x="225.03" y="-151.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">family/support.py</text>
+<text xml:space="preserve" text-anchor="start" x="155.78" y="-135.2" font-family="Arial" font-size="16.00" fill="#111827">dependency&#45;free ownership declaration</text>
+</g>
+<!-- core&#45;&gt;support -->
+<g id="edge9" class="edge">
+<title>core&#45;&gt;support</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M459.41,-242.69C438.31,-230.84 418.3,-219.6 418.3,-219.6 418.3,-219.6 385.37,-200.91 353.67,-182.91"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="355.4,-180.68 347.07,-179.16 352.64,-185.55 355.4,-180.68"/>
+<text xml:space="preserve" text-anchor="middle" x="452.08" y="-205.2" font-family="Arial" font-size="16.00" fill="#334155">discovers</text>
+</g>
+<!-- model -->
+<g id="node4" class="node">
+<title>model</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M963.31,-176.4C963.31,-176.4 774.43,-176.4 774.43,-176.4 768.43,-176.4 762.43,-170.4 762.43,-164.4 762.43,-164.4 762.43,-133.8 762.43,-133.8 762.43,-127.8 768.43,-121.8 774.43,-121.8 774.43,-121.8 963.31,-121.8 963.31,-121.8 969.31,-121.8 975.31,-127.8 975.31,-133.8 975.31,-133.8 975.31,-164.4 975.31,-164.4 975.31,-170.4 969.31,-176.4 963.31,-176.4"/>
+<text xml:space="preserve" text-anchor="start" x="804.63" y="-151.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">family/model.py</text>
+<text xml:space="preserve" text-anchor="start" x="776.83" y="-135.2" font-family="Arial" font-size="16.00" fill="#111827">plain build(request, writer)</text>
+</g>
+<!-- core&#45;&gt;model -->
+<g id="edge10" class="edge">
+<title>core&#45;&gt;model</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M596.59,-242.69C635.23,-230.84 671.87,-219.6 671.87,-219.6 671.87,-219.6 728.34,-199.68 780.81,-181.17"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="781.54,-183.88 788.15,-178.58 779.68,-178.6 781.54,-183.88"/>
+<text xml:space="preserve" text-anchor="middle" x="782.95" y="-205.2" font-family="Arial" font-size="16.00" fill="#334155">imports selected</text>
+</g>
+<!-- support_api -->
+<g id="node5" class="node">
+<title>support_api</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M153.75,-48.3C153.75,-48.3 12,-48.3 12,-48.3 6,-48.3 0,-42.3 0,-36.3 0,-36.3 0,-18.3 0,-18.3 0,-12.3 6,-6.3 12,-6.3 12,-6.3 153.75,-6.3 153.75,-6.3 159.75,-6.3 165.75,-12.3 165.75,-18.3 165.75,-18.3 165.75,-36.3 165.75,-36.3 165.75,-42.3 159.75,-48.3 153.75,-48.3"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-23.2" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Support contract</text>
+</g>
+<!-- core&#45;&gt;support_api -->
+<g id="edge2" class="edge">
+<title>core&#45;&gt;support_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M400.99,-248.39C263.79,-220.78 43.24,-176.4 43.24,-176.4 43.24,-176.4 43.24,-121.8 43.24,-121.8 43.24,-121.8 58.04,-86.88 69.55,-59.72"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="72.12,-60.85 72.66,-52.4 66.96,-58.67 72.12,-60.85"/>
+<text xml:space="preserve" text-anchor="middle" x="85.06" y="-144.3" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- build_api -->
+<g id="node6" class="node">
+<title>build_api</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M392.95,-48.3C392.95,-48.3 206.8,-48.3 206.8,-48.3 200.8,-48.3 194.8,-42.3 194.8,-36.3 194.8,-36.3 194.8,-18.3 194.8,-18.3 194.8,-12.3 200.8,-6.3 206.8,-6.3 206.8,-6.3 392.95,-6.3 392.95,-6.3 398.95,-6.3 404.95,-12.3 404.95,-18.3 404.95,-18.3 404.95,-36.3 404.95,-36.3 404.95,-42.3 398.95,-48.3 392.95,-48.3"/>
+<text xml:space="preserve" text-anchor="start" x="209.2" y="-23.2" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">BuildRequest contract</text>
+</g>
+<!-- core&#45;&gt;build_api -->
+<g id="edge3" class="edge">
+<title>core&#45;&gt;build_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M500.47,-242.83C495.14,-223.32 488.87,-200.4 488.87,-200.4 488.87,-200.4 464.87,-121.8 464.87,-121.8 464.87,-121.8 395.74,-82.62 346.97,-54.99"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="348.4,-52.58 340.06,-51.07 345.64,-57.45 348.4,-52.58"/>
+<text xml:space="preserve" text-anchor="middle" x="523" y="-144.3" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- writer -->
+<g id="node7" class="node">
+<title>writer</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M629.53,-48.3C629.53,-48.3 446.21,-48.3 446.21,-48.3 440.21,-48.3 434.21,-42.3 434.21,-36.3 434.21,-36.3 434.21,-18.3 434.21,-18.3 434.21,-12.3 440.21,-6.3 446.21,-6.3 446.21,-6.3 629.53,-6.3 629.53,-6.3 635.53,-6.3 641.53,-12.3 641.53,-18.3 641.53,-18.3 641.53,-36.3 641.53,-36.3 641.53,-42.3 635.53,-48.3 629.53,-48.3"/>
+<text xml:space="preserve" text-anchor="start" x="448.61" y="-23.2" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">BundleWriter contract</text>
+</g>
+<!-- core&#45;&gt;writer -->
+<g id="edge4" class="edge">
+<title>core&#45;&gt;writer</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M534.44,-242.6C561.3,-215.01 598.87,-176.4 598.87,-176.4 598.87,-176.4 598.87,-121.8 598.87,-121.8 598.87,-121.8 575.48,-85.94 557.67,-58.64"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="560.11,-57.26 553.4,-52.09 555.42,-60.32 560.11,-57.26"/>
+<text xml:space="preserve" text-anchor="middle" x="640.69" y="-144.3" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- support&#45;&gt;support_api -->
+<g id="edge5" class="edge">
+<title>support&#45;&gt;support_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M247.54,-120.92C212.35,-101.12 164.94,-74.46 130.03,-54.82"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="131.59,-52.49 123.24,-51.01 128.84,-57.37 131.59,-52.49"/>
+<text xml:space="preserve" text-anchor="middle" x="243.03" y="-83.4" font-family="Arial" font-size="16.00" fill="#334155">implements</text>
+</g>
+<!-- model&#45;&gt;build_api -->
+<g id="edge6" class="edge">
+<title>model&#45;&gt;build_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M761.44,-126.03C749.13,-123.5 740.87,-121.8 740.87,-121.8 740.87,-121.8 622.29,-97.8 622.29,-97.8 622.29,-97.8 419.87,-54.6 419.87,-54.6 419.87,-54.6 414.81,-53.49 406.75,-51.72"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="407.55,-49.03 399.14,-50.06 406.35,-54.5 407.55,-49.03"/>
+<text xml:space="preserve" text-anchor="middle" x="664.08" y="-83.4" font-family="Arial" font-size="16.00" fill="#334155">conforms to</text>
+</g>
+<!-- model&#45;&gt;writer -->
+<g id="edge7" class="edge">
+<title>model&#45;&gt;writer</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M799.29,-120.89C768.98,-109.04 740.24,-97.8 740.24,-97.8 740.24,-97.8 712.87,-78.6 712.87,-78.6 712.87,-78.6 666.76,-65.35 621.87,-52.44"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="622.78,-49.79 614.31,-50.27 621.23,-55.17 622.78,-49.79"/>
+<text xml:space="preserve" text-anchor="middle" x="782.06" y="-83.4" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- trt -->
+<g id="node8" class="node">
+<title>trt</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M845.13,-48.3C845.13,-48.3 682.61,-48.3 682.61,-48.3 676.61,-48.3 670.61,-42.3 670.61,-36.3 670.61,-36.3 670.61,-18.3 670.61,-18.3 670.61,-12.3 676.61,-6.3 682.61,-6.3 682.61,-6.3 845.13,-6.3 845.13,-6.3 851.13,-6.3 857.13,-12.3 857.13,-18.3 857.13,-18.3 857.13,-36.3 857.13,-36.3 857.13,-42.3 851.13,-48.3 845.13,-48.3"/>
+<text xml:space="preserve" text-anchor="start" x="685.01" y="-23.2" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">TensorRT build API</text>
+</g>
+<!-- model&#45;&gt;trt -->
+<g id="edge8" class="edge">
+<title>model&#45;&gt;trt</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M854.07,-121.03C843.4,-101.52 830.87,-78.6 830.87,-78.6 830.87,-78.6 816.26,-67.63 800.69,-55.94"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="802.5,-53.79 794.42,-51.23 799.13,-58.27 802.5,-53.79"/>
+<text xml:space="preserve" text-anchor="middle" x="882.88" y="-83.4" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- bundle -->
+<g id="node9" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M1065.64,-54.6C1065.64,-54.6 898.1,-54.6 898.1,-54.6 892.1,-54.6 886.1,-48.6 886.1,-42.6 886.1,-42.6 886.1,-12 886.1,-12 886.1,-6 892.1,0 898.1,0 898.1,0 1065.64,0 1065.64,0 1071.64,0 1077.64,-6 1077.64,-12 1077.64,-12 1077.64,-42.6 1077.64,-42.6 1077.64,-48.6 1071.64,-54.6 1065.64,-54.6"/>
+<text xml:space="preserve" text-anchor="start" x="951.65" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">.bundle</text>
+<text xml:space="preserve" text-anchor="start" x="900.5" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">family&#45;defined sections</text>
+</g>
+<!-- model&#45;&gt;bundle -->
+<g id="edge11" class="edge">
+<title>model&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M902.95,-120.89C917.8,-109.04 931.87,-97.8 931.87,-97.8 931.87,-97.8 943.61,-81.49 955.71,-64.67"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="957.88,-66.45 960.28,-58.32 953.33,-63.18 957.88,-66.45"/>
+<text xml:space="preserve" text-anchor="middle" x="966.17" y="-83.4" font-family="Arial" font-size="16.00" fill="#334155">writes</text>
+</g>
+</g>
+</svg>

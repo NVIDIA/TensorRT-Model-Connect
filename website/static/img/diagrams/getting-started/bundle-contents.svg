@@ -1,0 +1,77 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="614" height="482" role="img" aria-labelledby="getting-started-bundle-contents-svg-title getting-started-bundle-contents-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 614.00 482.00" xmlns="http://www.w3.org/2000/svg">
+<title id="getting-started-bundle-contents-svg-title">Minimal bundle contents and ownership</title>
+<desc id="getting-started-bundle-contents-svg-description">Core owns a bounded identity header while the selected family owns every named payload section and the runtime reads only what that family defines.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 456.96)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-456.96 589.24,-456.96 589.24,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="109.51" y="-401.76" font-family="Arial" font-weight="bold" font-size="30.00" fill="#111827">What a .bundle contains</text>
+<text xml:space="preserve" text-anchor="start" x="82.16" y="-383.46" font-family="Arial" font-size="17.00" fill="#111827">Small shared header; opaque family&#45;owned sections.</text>
+<!-- file -->
+<g id="node1" class="node">
+<title>file</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2.2" d="M337.48,-376.76C337.48,-376.76 237.68,-376.76 237.68,-376.76 231.68,-376.76 225.68,-370.76 225.68,-364.76 225.68,-364.76 225.68,-344.12 225.68,-344.12 225.68,-338.12 231.68,-332.12 237.68,-332.12 237.68,-332.12 337.48,-332.12 337.48,-332.12 343.48,-332.12 349.48,-338.12 349.48,-344.12 349.48,-344.12 349.48,-364.76 349.48,-364.76 349.48,-370.76 343.48,-376.76 337.48,-376.76"/>
+<text xml:space="preserve" text-anchor="start" x="240.08" y="-350.04" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">.bundle file</text>
+</g>
+<!-- header -->
+<g id="node2" class="node">
+<title>header</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2.2" d="M316.13,-289.12C316.13,-289.12 81.02,-289.12 81.02,-289.12 75.02,-289.12 69.02,-283.12 69.02,-277.12 69.02,-277.12 69.02,-228.08 69.02,-228.08 69.02,-222.08 75.02,-216.08 81.02,-216.08 81.02,-216.08 316.13,-216.08 316.13,-216.08 322.13,-216.08 328.13,-222.08 328.13,-228.08 328.13,-228.08 328.13,-277.12 328.13,-277.12 328.13,-283.12 322.13,-289.12 316.13,-289.12"/>
+<text xml:space="preserve" text-anchor="start" x="114.56" y="-262.4" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">Core&#45;owned header</text>
+<text xml:space="preserve" text-anchor="start" x="83.42" y="-246.2" font-family="Arial" font-size="16.00" fill="#111827">format · family · task · backend</text>
+<text xml:space="preserve" text-anchor="start" x="103.85" y="-230.2" font-family="Arial" font-size="16.00" fill="#111827">section offsets and lengths</text>
+</g>
+<!-- file&#45;&gt;header -->
+<g id="edge1" class="edge">
+<title>file&#45;&gt;header</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M267.82,-331.28C259.25,-321.67 248.89,-310.04 238.82,-298.74"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="241.14,-297.14 233.72,-293.03 236.96,-300.86 241.14,-297.14"/>
+</g>
+<!-- sections -->
+<g id="node3" class="node">
+<title>sections</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2.2" d="M552.04,-173.08C552.04,-173.08 323.11,-173.08 323.11,-173.08 317.11,-173.08 311.11,-167.08 311.11,-161.08 311.11,-161.08 311.11,-112.04 311.11,-112.04 311.11,-106.04 317.11,-100.04 323.11,-100.04 323.11,-100.04 552.04,-100.04 552.04,-100.04 558.04,-100.04 564.04,-106.04 564.04,-112.04 564.04,-112.04 564.04,-161.08 564.04,-161.08 564.04,-167.08 558.04,-173.08 552.04,-173.08"/>
+<text xml:space="preserve" text-anchor="start" x="338.55" y="-146.36" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">Family&#45;owned sections</text>
+<text xml:space="preserve" text-anchor="start" x="325.51" y="-130.16" font-family="Arial" font-size="16.00" fill="#111827">engine plans · tokenizer/assets</text>
+<text xml:space="preserve" text-anchor="start" x="375.32" y="-114.16" font-family="Arial" font-size="16.00" fill="#111827">runtime metadata</text>
+</g>
+<!-- file&#45;&gt;sections -->
+<g id="edge2" class="edge">
+<title>file&#45;&gt;sections</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M307.19,-331.3C323.68,-312.7 344.58,-289.12 344.58,-289.12 344.58,-289.12 381.92,-228.25 409.28,-183.67"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="411.52,-185.37 413.32,-177.09 406.75,-182.44 411.52,-185.37"/>
+</g>
+<!-- loader -->
+<g id="node4" class="node">
+<title>loader</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.2" d="M267.15,-165.08C267.15,-165.08 12,-165.08 12,-165.08 6,-165.08 0,-159.08 0,-153.08 0,-153.08 0,-120.04 0,-120.04 0,-114.04 6,-108.04 12,-108.04 12,-108.04 267.15,-108.04 267.15,-108.04 273.15,-108.04 279.15,-114.04 279.15,-120.04 279.15,-120.04 279.15,-153.08 279.15,-153.08 279.15,-159.08 273.15,-165.08 267.15,-165.08"/>
+<text xml:space="preserve" text-anchor="start" x="74.07" y="-138.36" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">Runtime loader</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-122.16" font-family="Arial" font-size="16.00" fill="#111827">opens exact backend + family DSO</text>
+</g>
+<!-- header&#45;&gt;loader -->
+<g id="edge3" class="edge">
+<title>header&#45;&gt;loader</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M179.75,-215.2C173.32,-202.78 166.11,-188.84 159.59,-176.24"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="162.21,-175.22 156.05,-169.4 157.24,-177.79 162.21,-175.22"/>
+</g>
+<!-- pipeline -->
+<g id="node5" class="node">
+<title>pipeline</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2.2" d="M421.72,-57.04C421.72,-57.04 155.43,-57.04 155.43,-57.04 149.43,-57.04 143.43,-51.04 143.43,-45.04 143.43,-45.04 143.43,-12 143.43,-12 143.43,-6 149.43,0 155.43,0 155.43,0 421.72,0 421.72,0 427.72,0 433.72,-6 433.72,-12 433.72,-12 433.72,-45.04 433.72,-45.04 433.72,-51.04 427.72,-57.04 421.72,-57.04"/>
+<text xml:space="preserve" text-anchor="start" x="200.54" y="-30.32" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">Family Task pipeline</text>
+<text xml:space="preserve" text-anchor="start" x="157.83" y="-14.12" font-family="Arial" font-size="16.00" fill="#111827">reads its named sections on demand</text>
+</g>
+<!-- sections&#45;&gt;pipeline -->
+<g id="edge5" class="edge">
+<title>sections&#45;&gt;pipeline</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M386.3,-99.07C370.68,-87.95 353.56,-75.76 338.06,-64.74"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="339.88,-62.59 331.73,-60.24 336.63,-67.16 339.88,-62.59"/>
+</g>
+<!-- loader&#45;&gt;pipeline -->
+<g id="edge4" class="edge">
+<title>loader&#45;&gt;pipeline</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M179.51,-107.14C197.79,-94.13 219.65,-78.57 238.98,-64.81"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="240.56,-67.13 245.45,-60.21 237.31,-62.57 240.56,-67.13"/>
+</g>
+</g>
+</svg>

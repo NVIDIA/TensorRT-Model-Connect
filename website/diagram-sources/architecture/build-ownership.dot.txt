@@ -1,0 +1,31 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Build-time source dependencies and control transfer
+// @description: Dependency arrows point from each consumer to its narrow contract; dashed arrows show discovery and the single runtime call into the selected family.
+digraph BuildOwnership {
+  graph [bgcolor="#fbfcfe", pad="0.35", nodesep="0.4", ranksep="0.65", rankdir="TB", splines="polyline", size="11.5,8", ratio="compress", fontname="Arial", labelloc="t", label=<<B>Build dependencies</B><BR/><FONT POINT-SIZE="16">Solid A → B means A depends on B. Dashed arrows are runtime discovery or calls.</FONT>>, fontsize="28", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", fillcolor="#ffffff", color="#64748b", penwidth="2", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.15"];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  cli [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Build CLI</B><BR/><FONT POINT-SIZE="16">python -m tensorrt_model_connect</FONT>>];
+  core [fillcolor="#eff6ff", color="#2563eb", label=<<B>Build core</B><BR/><FONT POINT-SIZE="16">resolve exactly one family</FONT>>];
+  support [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>family/support.py</B><BR/><FONT POINT-SIZE="16">dependency-free ownership declaration</FONT>>];
+  model [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>family/model.py</B><BR/><FONT POINT-SIZE="16">plain build(request, writer)</FONT>>];
+  support_api [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Support contract</B>>];
+  build_api [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>BuildRequest contract</B>>];
+  writer [fillcolor="#fffbeb", color="#b45309", label=<<B>BundleWriter contract</B>>];
+  trt [fillcolor="#eff6ff", color="#2563eb", label=<<B>TensorRT build API</B>>];
+  bundle [fillcolor="#fffbeb", color="#b45309", label=<<B>.bundle</B><BR/><FONT POINT-SIZE="16">family-defined sections</FONT>>];
+
+  cli -> core [label="depends on"];
+  core -> support_api [label="depends on"];
+  core -> build_api [label="depends on"];
+  core -> writer [label="depends on"];
+  support -> support_api [label="implements"];
+  model -> build_api [label="conforms to"];
+  model -> writer [label="depends on"];
+  model -> trt [label="depends on"];
+  core -> support [style="dashed", label="discovers"];
+  core -> model [style="dashed", label="imports selected"];
+  model -> bundle [style="dashed", label="writes"];
+}

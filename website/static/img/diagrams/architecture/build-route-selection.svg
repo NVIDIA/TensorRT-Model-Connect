@@ -1,0 +1,102 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="550" height="726" role="img" aria-labelledby="architecture-build-route-selection-svg-title architecture-build-route-selection-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 550.00 726.00" xmlns="http://www.w3.org/2000/svg">
+<title id="architecture-build-route-selection-svg-title">One family-owned build route</title>
+<desc id="architecture-build-route-selection-svg-description">Control-flow arrows show metadata loading, exact family resolution, one plain build call, and terminal errors for zero or multiple owners or build failure.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 700.4)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-700.4 524.93,-700.4 524.93,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="46.79" y="-647" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Select exactly one family build</text>
+<text xml:space="preserve" text-anchor="start" x="24.88" y="-629.8" font-family="Arial" font-size="16.00" fill="#111827">This is control flow; there is no provider probe, retry, or fallback.</text>
+<!-- request -->
+<g id="node1" class="node">
+<title>request</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M359.23,-623.2C359.23,-623.2 138.13,-623.2 138.13,-623.2 132.13,-623.2 126.13,-617.2 126.13,-611.2 126.13,-611.2 126.13,-593.2 126.13,-593.2 126.13,-587.2 132.13,-581.2 138.13,-581.2 138.13,-581.2 359.23,-581.2 359.23,-581.2 365.23,-581.2 371.23,-587.2 371.23,-593.2 371.23,-593.2 371.23,-611.2 371.23,-611.2 371.23,-617.2 365.23,-623.2 359.23,-623.2"/>
+<text xml:space="preserve" text-anchor="start" x="140.53" y="-598.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Model ID or local snapshot</text>
+</g>
+<!-- metadata -->
+<g id="node2" class="node">
+<title>metadata</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M363.14,-530.2C363.14,-530.2 134.21,-530.2 134.21,-530.2 128.21,-530.2 122.21,-524.2 122.21,-518.2 122.21,-518.2 122.21,-487.6 122.21,-487.6 122.21,-481.6 128.21,-475.6 134.21,-475.6 134.21,-475.6 363.14,-475.6 363.14,-475.6 369.14,-475.6 375.14,-481.6 375.14,-487.6 375.14,-487.6 375.14,-518.2 375.14,-518.2 375.14,-524.2 369.14,-530.2 363.14,-530.2"/>
+<text xml:space="preserve" text-anchor="start" x="149.95" y="-505.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Read standard metadata</text>
+<text xml:space="preserve" text-anchor="start" x="136.61" y="-489" font-family="Arial" font-size="16.00" fill="#111827">config.json or model_index.json</text>
+</g>
+<!-- request&#45;&gt;metadata -->
+<g id="edge1" class="edge">
+<title>request&#45;&gt;metadata</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M248.68,-580.57C248.68,-569.55 248.68,-555.62 248.68,-542.67"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="251.48,-542.79 248.68,-534.79 245.88,-542.79 251.48,-542.79"/>
+</g>
+<!-- support -->
+<g id="node3" class="node">
+<title>support</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M364.91,-424.6C364.91,-424.6 132.45,-424.6 132.45,-424.6 126.45,-424.6 120.45,-418.6 120.45,-412.6 120.45,-412.6 120.45,-394.6 120.45,-394.6 120.45,-388.6 126.45,-382.6 132.45,-382.6 132.45,-382.6 364.91,-382.6 364.91,-382.6 370.91,-382.6 376.91,-388.6 376.91,-394.6 376.91,-394.6 376.91,-412.6 376.91,-412.6 376.91,-418.6 370.91,-424.6 364.91,-424.6"/>
+<text xml:space="preserve" text-anchor="start" x="134.85" y="-399.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Ask family support modules</text>
+</g>
+<!-- metadata&#45;&gt;support -->
+<g id="edge2" class="edge">
+<title>metadata&#45;&gt;support</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M248.68,-474.8C248.68,-463.07 248.68,-449.26 248.68,-437"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="251.48,-437.02 248.68,-429.02 245.88,-437.02 251.48,-437.02"/>
+</g>
+<!-- count -->
+<g id="node4" class="node">
+<title>count</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M236.96,-328.99C236.96,-328.99 71.93,-292.21 71.93,-292.21 66.08,-290.91 66.08,-288.29 71.93,-286.99 71.93,-286.99 236.96,-250.21 236.96,-250.21 242.82,-248.91 254.53,-248.91 260.39,-250.21 260.39,-250.21 425.42,-286.99 425.42,-286.99 431.28,-288.29 431.28,-290.91 425.42,-292.21 425.42,-292.21 260.39,-328.99 260.39,-328.99 254.53,-330.29 242.82,-330.29 236.96,-328.99"/>
+<text xml:space="preserve" text-anchor="start" x="168.85" y="-285.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Exactly one owner?</text>
+</g>
+<!-- support&#45;&gt;count -->
+<g id="edge3" class="edge">
+<title>support&#45;&gt;count</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M248.68,-381.8C248.68,-370.92 248.68,-357.07 248.68,-343.47"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="251.48,-343.81 248.68,-335.81 245.88,-343.81 251.48,-343.81"/>
+</g>
+<!-- build -->
+<g id="node5" class="node">
+<title>build</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M261.79,-178.4C261.79,-178.4 43.57,-178.4 43.57,-178.4 37.57,-178.4 31.57,-172.4 31.57,-166.4 31.57,-166.4 31.57,-135.8 31.57,-135.8 31.57,-129.8 37.57,-123.8 43.57,-123.8 43.57,-123.8 261.79,-123.8 261.79,-123.8 267.79,-123.8 273.79,-129.8 273.79,-135.8 273.79,-135.8 273.79,-166.4 273.79,-166.4 273.79,-172.4 267.79,-178.4 261.79,-178.4"/>
+<text xml:space="preserve" text-anchor="start" x="50.18" y="-153.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Import selected model.py</text>
+<text xml:space="preserve" text-anchor="start" x="45.97" y="-137.2" font-family="Arial" font-size="16.00" fill="#111827">call build(request, writer) once</text>
+</g>
+<!-- count&#45;&gt;build -->
+<g id="edge4" class="edge">
+<title>count&#45;&gt;build</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M223.2,-252.38C209.36,-232.7 192.28,-208.41 178.4,-188.68"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="180.85,-187.3 173.96,-182.36 176.27,-190.52 180.85,-187.3"/>
+<text xml:space="preserve" text-anchor="middle" x="213.13" y="-208.2" font-family="Arial" font-size="16.00" fill="#334155">yes</text>
+</g>
+<!-- error -->
+<g id="node7" class="node">
+<title>error</title>
+<path fill="#fef2f2" stroke="#b91c1c" stroke-width="2" d="M487.73,-54.6C487.73,-54.6 203.63,-54.6 203.63,-54.6 197.63,-54.6 191.63,-48.6 191.63,-42.6 191.63,-42.6 191.63,-12 191.63,-12 191.63,-6 197.63,0 203.63,0 203.63,0 487.73,0 487.73,0 493.73,0 499.73,-6 499.73,-12 499.73,-12 499.73,-42.6 499.73,-42.6 499.73,-48.6 493.73,-54.6 487.73,-54.6"/>
+<text xml:space="preserve" text-anchor="start" x="288.04" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Terminal error</text>
+<text xml:space="preserve" text-anchor="start" x="206.03" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">unsupported · ambiguous · build failed</text>
+</g>
+<!-- count&#45;&gt;error -->
+<g id="edge5" class="edge">
+<title>count&#45;&gt;error</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M263.72,-250.06C276.12,-218.28 291.68,-178.4 291.68,-178.4 291.68,-178.4 316.03,-110.7 332.03,-66.23"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="334.59,-67.38 334.67,-58.9 329.33,-65.48 334.59,-67.38"/>
+<text xml:space="preserve" text-anchor="middle" x="357.37" y="-146.3" font-family="Arial" font-size="16.00" fill="#334155">zero or many</text>
+</g>
+<!-- bundle -->
+<g id="node6" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M143.35,-48.3C143.35,-48.3 12,-48.3 12,-48.3 6,-48.3 0,-42.3 0,-36.3 0,-36.3 0,-18.3 0,-18.3 0,-12.3 6,-6.3 12,-6.3 12,-6.3 143.35,-6.3 143.35,-6.3 149.35,-6.3 155.35,-12.3 155.35,-18.3 155.35,-18.3 155.35,-36.3 155.35,-36.3 155.35,-42.3 149.35,-48.3 143.35,-48.3"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-23.2" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Publish .bundle</text>
+</g>
+<!-- build&#45;&gt;bundle -->
+<g id="edge6" class="edge">
+<title>build&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M136.03,-123.07C124.35,-104.09 108.7,-78.68 96.55,-58.94"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="99.03,-57.64 92.46,-52.3 94.27,-60.58 99.03,-57.64"/>
+<text xml:space="preserve" text-anchor="middle" x="148.57" y="-84.4" font-family="Arial" font-size="16.00" fill="#334155">success</text>
+</g>
+<!-- build&#45;&gt;error -->
+<g id="edge7" class="edge">
+<title>build&#45;&gt;error</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M195.51,-123.07C224.27,-104.92 262.35,-80.88 292.97,-61.56"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="294.29,-64.04 299.56,-57.4 291.3,-59.31 294.29,-64.04"/>
+<text xml:space="preserve" text-anchor="middle" x="282.52" y="-84.4" font-family="Arial" font-size="16.00" fill="#334155">failure</text>
+</g>
+</g>
+</svg>

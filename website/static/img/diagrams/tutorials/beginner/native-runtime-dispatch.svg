@@ -1,0 +1,80 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="523" height="596" role="img" aria-labelledby="tutorials-beginner-native-runtime-dispatch-svg-title tutorials-beginner-native-runtime-dispatch-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 523.00 596.00" xmlns="http://www.w3.org/2000/svg">
+<title id="tutorials-beginner-native-runtime-dispatch-svg-title">Explicit family runtime dispatch</title>
+<desc id="tutorials-beginner-native-runtime-dispatch-svg-description">The loader reads family, task, and backend from the bundle, opens exactly those DSOs from the runtime root, calls the family factory, and returns the matching abstract Task interface.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(23.04 572.56)">
+<polygon fill="#fbfcfe" stroke="none" points="-23.04,23.04 -23.04,-572.56 499.54,-572.56 499.54,23.04 -23.04,23.04"/>
+<text xml:space="preserve" text-anchor="start" x="8" y="-521.32" font-family="Arial" font-weight="bold" font-size="28.00" fill="#101828">From bundle identity to a Task API</text>
+<text xml:space="preserve" text-anchor="start" x="20.38" y="-504.12" font-family="Arial" font-size="16.00" fill="#101828">This is load control flow; no registry search or fallback occurs.</text>
+<!-- load -->
+<g id="node1" class="node">
+<title>load</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" d="M333.19,-497.52C333.19,-497.52 143.31,-497.52 143.31,-497.52 137.31,-497.52 131.31,-491.52 131.31,-485.52 131.31,-485.52 131.31,-470.4 131.31,-470.4 131.31,-464.4 137.31,-458.4 143.31,-458.4 143.31,-458.4 333.19,-458.4 333.19,-458.4 339.19,-458.4 345.19,-464.4 345.19,-470.4 345.19,-470.4 345.19,-485.52 345.19,-485.52 345.19,-491.52 339.19,-497.52 333.19,-497.52"/>
+<text xml:space="preserve" text-anchor="start" x="144.27" y="-473.86" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">load_task(bundle, root)</text>
+</g>
+<!-- header -->
+<g id="node2" class="node">
+<title>header</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="1.8" d="M328.47,-413.4C328.47,-413.4 148.03,-413.4 148.03,-413.4 142.03,-413.4 136.03,-407.4 136.03,-401.4 136.03,-401.4 136.03,-373.68 136.03,-373.68 136.03,-367.68 142.03,-361.68 148.03,-361.68 148.03,-361.68 328.47,-361.68 328.47,-361.68 334.47,-361.68 340.47,-367.68 340.47,-373.68 340.47,-373.68 340.47,-401.4 340.47,-401.4 340.47,-407.4 334.47,-413.4 328.47,-413.4"/>
+<text xml:space="preserve" text-anchor="start" x="148.99" y="-389.74" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Read bounded header</text>
+<text xml:space="preserve" text-anchor="start" x="154.66" y="-373.64" font-family="Arial" font-size="16.00" fill="#101828">family · task · backend</text>
+</g>
+<!-- load&#45;&gt;header -->
+<g id="edge1" class="edge">
+<title>load&#45;&gt;header</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M238.25,-457.89C238.25,-457.89 238.25,-425.4 238.25,-425.4"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="241.05,-425.4 238.25,-417.4 235.45,-425.4 241.05,-425.4"/>
+</g>
+<!-- backend -->
+<g id="node3" class="node">
+<title>backend</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M318.56,-316.68C318.56,-316.68 157.94,-316.68 157.94,-316.68 151.94,-316.68 145.94,-310.68 145.94,-304.68 145.94,-304.68 145.94,-276.96 145.94,-276.96 145.94,-270.96 151.94,-264.96 157.94,-264.96 157.94,-264.96 318.56,-264.96 318.56,-264.96 324.56,-264.96 330.56,-270.96 330.56,-276.96 330.56,-276.96 330.56,-304.68 330.56,-304.68 330.56,-310.68 324.56,-316.68 318.56,-316.68"/>
+<text xml:space="preserve" text-anchor="start" x="158.9" y="-293.02" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Open backend DSO</text>
+<text xml:space="preserve" text-anchor="start" x="177.77" y="-276.92" font-family="Arial" font-size="16.00" fill="#101828">returns IBackend</text>
+</g>
+<!-- header&#45;&gt;backend -->
+<g id="edge2" class="edge">
+<title>header&#45;&gt;backend</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M238.25,-360.85C238.25,-360.85 238.25,-328.75 238.25,-328.75"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="241.05,-328.75 238.25,-320.75 235.45,-328.75 241.05,-328.75"/>
+</g>
+<!-- family -->
+<g id="node4" class="node">
+<title>family</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M323.23,-219.96C323.23,-219.96 153.26,-219.96 153.26,-219.96 147.26,-219.96 141.26,-213.96 141.26,-207.96 141.26,-207.96 141.26,-180.24 141.26,-180.24 141.26,-174.24 147.26,-168.24 153.26,-168.24 153.26,-168.24 323.23,-168.24 323.23,-168.24 329.23,-168.24 335.23,-174.24 335.23,-180.24 335.23,-180.24 335.23,-207.96 335.23,-207.96 335.23,-213.96 329.23,-219.96 323.23,-219.96"/>
+<text xml:space="preserve" text-anchor="start" x="168.82" y="-196.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Open family DSO</text>
+<text xml:space="preserve" text-anchor="start" x="154.22" y="-180.2" font-family="Arial" font-size="16.00" fill="#101828">call trtmc_create_family</text>
+</g>
+<!-- backend&#45;&gt;family -->
+<g id="edge3" class="edge">
+<title>backend&#45;&gt;family</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M238.25,-264.13C238.25,-264.13 238.25,-232.03 238.25,-232.03"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="241.05,-232.03 238.25,-224.03 235.45,-232.03 241.05,-232.03"/>
+</g>
+<!-- verify -->
+<g id="node5" class="node">
+<title>verify</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M314.79,-123.24C314.79,-123.24 161.71,-123.24 161.71,-123.24 155.71,-123.24 149.71,-117.24 149.71,-111.24 149.71,-111.24 149.71,-96.12 149.71,-96.12 149.71,-90.12 155.71,-84.12 161.71,-84.12 161.71,-84.12 314.79,-84.12 314.79,-84.12 320.79,-84.12 326.79,-90.12 326.79,-96.12 326.79,-96.12 326.79,-111.24 326.79,-111.24 326.79,-117.24 320.79,-123.24 314.79,-123.24"/>
+<text xml:space="preserve" text-anchor="start" x="162.67" y="-99.58" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Verify task identity</text>
+</g>
+<!-- family&#45;&gt;verify -->
+<g id="edge4" class="edge">
+<title>family&#45;&gt;verify</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M238.25,-167.46C238.25,-167.46 238.25,-135.44 238.25,-135.44"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="241.05,-135.44 238.25,-127.44 235.45,-135.44 241.05,-135.44"/>
+</g>
+<!-- task -->
+<g id="node6" class="node">
+<title>task</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" d="M326.13,-39.12C326.13,-39.12 150.37,-39.12 150.37,-39.12 144.37,-39.12 138.37,-33.12 138.37,-27.12 138.37,-27.12 138.37,-12 138.37,-12 138.37,-6 144.37,0 150.37,0 150.37,0 326.13,0 326.13,0 332.13,0 338.13,-6 338.13,-12 338.13,-12 338.13,-27.12 338.13,-27.12 338.13,-33.12 332.13,-39.12 326.13,-39.12"/>
+<text xml:space="preserve" text-anchor="start" x="151.33" y="-15.46" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Return abstract ITask</text>
+</g>
+<!-- verify&#45;&gt;task -->
+<g id="edge5" class="edge">
+<title>verify&#45;&gt;task</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M238.25,-83.32C238.25,-83.32 238.25,-51.07 238.25,-51.07"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="241.05,-51.07 238.25,-43.07 235.45,-51.07 241.05,-51.07"/>
+</g>
+</g>
+</svg>

@@ -2,8 +2,16 @@
 title: Bundle Format
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 A bundle contains eight magic bytes, an unsigned little-endian 64-bit JSON
 header length, the UTF-8 JSON header, and concatenated named sections.
+
+<Diagram
+  src="/img/diagrams/architecture/bundle-layout.svg"
+  alt="A minimal bundle contains a fixed prefix, bounded JSON header, and opaque family-owned sections"
+  caption="Core validates byte ranges; the selected family owns every section name and meaning."
+/>
 
 ```json
 {

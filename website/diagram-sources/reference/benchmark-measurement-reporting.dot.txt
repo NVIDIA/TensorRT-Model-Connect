@@ -1,0 +1,18 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Benchmark measurement and reporting
+// @description: The native worker loads one bundle through the public loader, invokes its abstract Task operation, preserves raw observations, and reports task-aware metrics with explicit timing scopes.
+digraph BenchmarkMeasurement {
+  graph [bgcolor="#fbfcfe", pad="0.30", nodesep="0.45", ranksep="0.62", rankdir="TB", splines="polyline", fontname="Arial", labelloc="t", label=<<B>Measure through the public Task API</B><BR/><FONT POINT-SIZE="16">Setup, prefill, decode, and end-to-end scopes stay distinct.</FONT>>, fontsize="27", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", color="#64748b", penwidth="1.8", fillcolor="#ffffff", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.14"];
+  edge [color="#64748b", penwidth="2.2", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  bundle [fillcolor="#fffbeb", color="#b45309", label=<<B>.bundle</B>>];
+  loader [fillcolor="#eff6ff", color="#2563eb", label=<<B>load_task</B><BR/><FONT POINT-SIZE="16">exact backend + family</FONT>>];
+  task [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Abstract Task operation</B>>];
+  samples [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Raw observations</B><BR/><FONT POINT-SIZE="16">latency · tokens · outputs</FONT>>];
+  metrics [fillcolor="#ecfeff", color="#0e7490", label=<<B>Task-aware metrics</B>>];
+  report [fillcolor="#ffffff", color="#64748b", label=<<B>JSON / HTML report</B><BR/><FONT POINT-SIZE="16">environment + exact workload</FONT>>];
+
+  bundle -> loader -> task -> samples -> metrics -> report;
+}

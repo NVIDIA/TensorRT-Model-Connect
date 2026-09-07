@@ -1,9 +1,9 @@
 ---
 title: Build from Source
-description: Build the CLI, TensorRT backend, and Qwen DSO for one selected GPU.
+description: Build the CLI, TensorRT backend, and GPT-2 DSO for one selected GPU.
 ---
 
-Use this path on Linux x86_64 or aarch64 for the first Qwen inference from
+Use this path on Linux x86_64 or aarch64 for the first GPT-2 inference from
 source. Start at the repository root.
 
 ## Automated environment preparation
@@ -39,7 +39,7 @@ sm = subprocess.run(
 
 toolkit = DevToolkit.from_checkout(repo)
 environment = toolkit.prepare_docker(
-    family="qwen",
+    family="gpt2",
     gpu=gpu,
     environment={"TRTMC_SM": sm},
     policy=DockerTargetPolicy.ENSURE,
@@ -115,9 +115,10 @@ cmake -S . -B "$TRTMC_BUILD_DIR" -G Ninja \
 cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
   trtmc \
   trtmc_backend_trt \
-  trtmc_model_qwen
+  trtmc_model_gpt2
 
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
+export TRTMC_RUNTIME_ROOT="$PWD/$TRTMC_BUILD_DIR"
 ```
 
 TensorRT-RTX is an explicit optional build. When its SDK is installed, enable
@@ -135,5 +136,3 @@ This path skips CI-only Python profiles and unrelated model DSOs. Continue to
 [Quick Start](quick-start.md) in the same container shell. Full-repository
 ownership and backend boundaries are documented in the
 [AI-Native Horizontal Scaling Architecture](../architecture/ai-native-horizontal-scaling.md).
-
-{/* Collaborative review anchor: batch 2. */}

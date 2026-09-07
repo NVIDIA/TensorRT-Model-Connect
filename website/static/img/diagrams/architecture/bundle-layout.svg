@@ -1,0 +1,86 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="539" height="828" role="img" aria-labelledby="architecture-bundle-layout-svg-title architecture-bundle-layout-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 539.00 828.00" xmlns="http://www.w3.org/2000/svg">
+<title id="architecture-bundle-layout-svg-title">Minimal bundle layout</title>
+<desc id="architecture-bundle-layout-svg-description">A bundle contains a bounded header with family, task, backend, and section ranges followed by opaque family-owned byte sections.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 802.6)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-802.6 513.43,-802.6 513.43,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="93.22" y="-749.2" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Minimal .bundle layout</text>
+<text xml:space="preserve" text-anchor="start" x="8" y="-732" font-family="Arial" font-size="16.00" fill="#111827">Core owns bounds; the family owns section names and semantics.</text>
+<!-- prefix -->
+<g id="node1" class="node">
+<title>prefix</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M29.54,-598.9C29.54,-598.9 138.32,-598.9 138.32,-598.9 144.32,-598.9 150.32,-604.9 150.32,-610.9 150.32,-610.9 150.32,-712.9 150.32,-712.9 150.32,-718.9 144.32,-724.9 138.32,-724.9 138.32,-724.9 29.54,-724.9 29.54,-724.9 23.54,-724.9 17.54,-718.9 17.54,-712.9 17.54,-712.9 17.54,-610.9 17.54,-610.9 17.54,-604.9 23.54,-598.9 29.54,-598.9"/>
+<text xml:space="preserve" text-anchor="middle" x="83.93" y="-698.8" font-family="Arial" font-size="17.00" fill="#111827">Fixed prefix</text>
+<polyline fill="none" stroke="#2563eb" stroke-width="2" points="17.54,-682.9 150.32,-682.9"/>
+<text xml:space="preserve" text-anchor="middle" x="83.93" y="-656.8" font-family="Arial" font-size="17.00" fill="#111827">magic</text>
+<polyline fill="none" stroke="#2563eb" stroke-width="2" points="17.54,-640.9 150.32,-640.9"/>
+<text xml:space="preserve" text-anchor="middle" x="83.93" y="-614.8" font-family="Arial" font-size="17.00" fill="#111827">header length</text>
+</g>
+<!-- header -->
+<g id="node2" class="node">
+<title>header</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M60.1,-278.7C60.1,-278.7 247.76,-278.7 247.76,-278.7 253.76,-278.7 259.76,-284.7 259.76,-290.7 259.76,-290.7 259.76,-518.7 259.76,-518.7 259.76,-524.7 253.76,-530.7 247.76,-530.7 247.76,-530.7 60.1,-530.7 60.1,-530.7 54.1,-530.7 48.1,-524.7 48.1,-518.7 48.1,-518.7 48.1,-290.7 48.1,-290.7 48.1,-284.7 54.1,-278.7 60.1,-278.7"/>
+<text xml:space="preserve" text-anchor="middle" x="153.93" y="-504.6" font-family="Arial" font-size="17.00" fill="#111827">UTF&#45;8 JSON header</text>
+<polyline fill="none" stroke="#b45309" stroke-width="2" points="48.1,-488.7 259.76,-488.7"/>
+<text xml:space="preserve" text-anchor="middle" x="153.93" y="-462.6" font-family="Arial" font-size="17.00" fill="#111827">format</text>
+<polyline fill="none" stroke="#b45309" stroke-width="2" points="48.1,-446.7 259.76,-446.7"/>
+<text xml:space="preserve" text-anchor="middle" x="153.93" y="-420.6" font-family="Arial" font-size="17.00" fill="#111827">family</text>
+<polyline fill="none" stroke="#b45309" stroke-width="2" points="48.1,-404.7 259.76,-404.7"/>
+<text xml:space="preserve" text-anchor="middle" x="153.93" y="-378.6" font-family="Arial" font-size="17.00" fill="#111827">task</text>
+<polyline fill="none" stroke="#b45309" stroke-width="2" points="48.1,-362.7 259.76,-362.7"/>
+<text xml:space="preserve" text-anchor="middle" x="153.93" y="-336.6" font-family="Arial" font-size="17.00" fill="#111827">backend</text>
+<polyline fill="none" stroke="#b45309" stroke-width="2" points="48.1,-320.7 259.76,-320.7"/>
+<text xml:space="preserve" text-anchor="middle" x="153.93" y="-294.6" font-family="Arial" font-size="17.00" fill="#111827">section offsets + lengths</text>
+</g>
+<!-- prefix&#45;&gt;header -->
+<g id="edge1" class="edge">
+<title>prefix&#45;&gt;header</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M99.21,-597.99C99.21,-597.99 99.21,-543.22 99.21,-543.22"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="102.01,-543.22 99.21,-535.22 96.41,-543.22 102.01,-543.22"/>
+<text xml:space="preserve" text-anchor="middle" x="143.97" y="-560" font-family="Arial" font-size="16.00" fill="#334155">contiguous bytes</text>
+</g>
+<!-- payload -->
+<g id="node3" class="node">
+<title>payload</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M149.83,-0.5C149.83,-0.5 336.03,-0.5 336.03,-0.5 342.03,-0.5 348.03,-6.5 348.03,-12.5 348.03,-12.5 348.03,-198.5 348.03,-198.5 348.03,-204.5 342.03,-210.5 336.03,-210.5 336.03,-210.5 149.83,-210.5 149.83,-210.5 143.83,-210.5 137.83,-204.5 137.83,-198.5 137.83,-198.5 137.83,-12.5 137.83,-12.5 137.83,-6.5 143.83,-0.5 149.83,-0.5"/>
+<text xml:space="preserve" text-anchor="middle" x="242.93" y="-184.4" font-family="Arial" font-size="17.00" fill="#111827">Opaque payload</text>
+<polyline fill="none" stroke="#4d7c0f" stroke-width="2" points="137.83,-168.5 348.03,-168.5"/>
+<text xml:space="preserve" text-anchor="middle" x="242.93" y="-142.4" font-family="Arial" font-size="17.00" fill="#111827">engine plans</text>
+<polyline fill="none" stroke="#4d7c0f" stroke-width="2" points="137.83,-126.5 348.03,-126.5"/>
+<text xml:space="preserve" text-anchor="middle" x="242.93" y="-100.4" font-family="Arial" font-size="17.00" fill="#111827">tokenizer or assets</text>
+<polyline fill="none" stroke="#4d7c0f" stroke-width="2" points="137.83,-84.5 348.03,-84.5"/>
+<text xml:space="preserve" text-anchor="middle" x="242.93" y="-58.4" font-family="Arial" font-size="17.00" fill="#111827">family runtime metadata</text>
+<polyline fill="none" stroke="#4d7c0f" stroke-width="2" points="137.83,-42.5 348.03,-42.5"/>
+<text xml:space="preserve" text-anchor="middle" x="242.93" y="-16.4" font-family="Arial" font-size="17.00" fill="#111827">other named sections</text>
+</g>
+<!-- header&#45;&gt;payload -->
+<g id="edge2" class="edge">
+<title>header&#45;&gt;payload</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M198.8,-277.81C198.8,-277.81 198.8,-222.99 198.8,-222.99"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="201.6,-222.99 198.8,-214.99 196,-222.99 201.6,-222.99"/>
+<text xml:space="preserve" text-anchor="middle" x="230.97" y="-239.8" font-family="Arial" font-size="16.00" fill="#334155">contiguous bytes</text>
+</g>
+<!-- reader -->
+<g id="node4" class="node">
+<title>reader</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M412.41,-689.2C412.41,-689.2 215.46,-689.2 215.46,-689.2 209.46,-689.2 203.46,-683.2 203.46,-677.2 203.46,-677.2 203.46,-646.6 203.46,-646.6 203.46,-640.6 209.46,-634.6 215.46,-634.6 215.46,-634.6 412.41,-634.6 412.41,-634.6 418.41,-634.6 424.41,-640.6 424.41,-646.6 424.41,-646.6 424.41,-677.2 424.41,-677.2 424.41,-683.2 418.41,-689.2 412.41,-689.2"/>
+<text xml:space="preserve" text-anchor="start" x="256.31" y="-664.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">BundleReader</text>
+<text xml:space="preserve" text-anchor="start" x="217.86" y="-648" font-family="Arial" font-size="16.00" fill="#111827">bounded on&#45;demand reads</text>
+</g>
+<!-- reader&#45;&gt;header -->
+<g id="edge3" class="edge">
+<title>reader&#45;&gt;header</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M231.61,-633.89C231.61,-633.89 231.61,-543.11 231.61,-543.11"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="234.41,-543.11 231.61,-535.11 228.81,-543.11 234.41,-543.11"/>
+<text xml:space="preserve" text-anchor="middle" x="276.51" y="-560" font-family="Arial" font-size="16.00" fill="#334155">validates</text>
+</g>
+<!-- reader&#45;&gt;payload -->
+<g id="edge4" class="edge">
+<title>reader&#45;&gt;payload</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M303.9,-633.93C303.9,-633.93 303.9,-222.86 303.9,-222.86"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="306.7,-222.86 303.9,-214.86 301.1,-222.86 306.7,-222.86"/>
+<text xml:space="preserve" text-anchor="middle" x="401.31" y="-399.9" font-family="Arial" font-size="16.00" fill="#334155">reads named range</text>
+</g>
+</g>
+</svg>

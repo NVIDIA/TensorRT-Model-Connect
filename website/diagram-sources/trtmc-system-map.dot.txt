@@ -1,0 +1,18 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: TensorRT-Model-Connect build and runtime system map
+// @description: A checkpoint resolves to exactly one family-owned build, becomes a minimal bundle, and loads through an explicit backend and family DSO into an abstract Task API.
+digraph SystemMap {
+  graph [bgcolor="#fbfcfe", pad="0.35", rankdir="TB", nodesep="0.34", ranksep="0.55", splines="ortho", fontname="Arial", labelloc="t", label=<<B>Checkpoint → family → bundle → Task API</B><BR/><FONT POINT-SIZE="17">One artifact contract connects Python build ownership to native C++ execution.</FONT>>, fontsize="30", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", color="#64748b", penwidth="2.2", fillcolor="#ffffff", fontname="Arial", fontsize="18", fontcolor="#111827", margin="0.18,0.14"];
+  edge [color="#64748b", penwidth="2.5", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  checkpoint [fillcolor="#eff6ff", color="#2563eb", label=<<B>Checkpoint</B><BR/><FONT POINT-SIZE="16">Hugging Face or local</FONT>>];
+  resolver [fillcolor="#eff6ff", color="#2563eb", label=<<B>Unique family resolver</B><BR/><FONT POINT-SIZE="16">dependency-free support.py</FONT>>];
+  family_build [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>family/model.py</B><BR/><FONT POINT-SIZE="16">plain build function</FONT>>];
+  bundle [fillcolor="#fffbeb", color="#b45309", penwidth="3", label=<<B>.bundle</B><BR/><FONT POINT-SIZE="16">family · task · backend · sections</FONT>>];
+  loader [fillcolor="#eff6ff", color="#2563eb", label=<<B>Runtime loader</B><BR/><FONT POINT-SIZE="16">exact backend + family DSO</FONT>>];
+  task [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Abstract Task API</B><BR/><FONT POINT-SIZE="16">text · image · audio · more</FONT>>];
+
+  checkpoint -> resolver -> family_build -> bundle -> loader -> task;
+}

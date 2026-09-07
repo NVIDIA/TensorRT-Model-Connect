@@ -1,0 +1,24 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: TensorRT-RTX backend path
+// @description: A bundle names the TensorRT-RTX backend, the loader opens that Engine API implementation, and the same family Task pipeline drives it with optional runtime cache and CUDA graph settings.
+digraph RtxRuntime {
+  graph [bgcolor="#fbfcfe", pad="0.35", nodesep="0.50", ranksep="0.68", rankdir="TB", splines="polyline", fontname="Arial", labelloc="t", label=<<B>TensorRT-RTX uses the same Task path</B><BR/><FONT POINT-SIZE="16">Only the abstract Engine implementation changes.</FONT>>, fontsize="28", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", fillcolor="#ffffff", color="#64748b", penwidth="2", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.15"];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8"];
+
+  bundle [fillcolor="#fffbeb", color="#b45309", label=<<B>backend = trt_rtx</B>>];
+  cache [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Runtime cache</B>>];
+  graphs [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>CUDA graphs opt-in</B>>];
+  loader [fillcolor="#eff6ff", color="#2563eb", label=<<B>Runtime loader</B>>];
+  backend [fillcolor="#eff6ff", color="#2563eb", label=<<B>TensorRT-RTX IBackend</B>>];
+  family [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Family Task pipeline</B>>];
+  engine [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>IEngine calls</B>>];
+
+  bundle -> loader -> backend;
+  cache -> backend;
+  graphs -> backend;
+  loader -> family;
+  family -> engine;
+  backend -> engine;
+}

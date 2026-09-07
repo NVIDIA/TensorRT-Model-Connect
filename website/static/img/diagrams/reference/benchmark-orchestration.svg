@@ -1,0 +1,88 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="608" height="649" role="img" aria-labelledby="reference-benchmark-orchestration-svg-title reference-benchmark-orchestration-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 608.00 649.00" xmlns="http://www.w3.org/2000/svg">
+<title id="reference-benchmark-orchestration-svg-title">Benchmark case and bundle orchestration</title>
+<desc id="reference-benchmark-orchestration-svg-description">The benchmark application resolves one family-owned manifest, reuses an explicit bundle or invokes the public Python build API, then measures through the native public Task API.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(21.6 627.52)">
+<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-627.52 586.82,-627.52 586.82,21.6 -21.6,21.6"/>
+<text xml:space="preserve" text-anchor="start" x="8" y="-578.62" font-family="Arial" font-weight="bold" font-size="27.00" fill="#111827">Resolve one reproducible benchmark case</text>
+<text xml:space="preserve" text-anchor="start" x="46.48" y="-561.52" font-family="Arial" font-size="16.00" fill="#111827">Benchmark code is an application over public build and Task APIs.</text>
+<!-- cli -->
+<g id="node1" class="node">
+<title>cli</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M346.05,-554.92C346.05,-554.92 243.02,-554.92 243.02,-554.92 237.02,-554.92 231.02,-548.92 231.02,-542.92 231.02,-542.92 231.02,-526.36 231.02,-526.36 231.02,-520.36 237.02,-514.36 243.02,-514.36 243.02,-514.36 346.05,-514.36 346.05,-514.36 352.05,-514.36 358.05,-520.36 358.05,-526.36 358.05,-526.36 358.05,-542.92 358.05,-542.92 358.05,-548.92 352.05,-554.92 346.05,-554.92"/>
+<text xml:space="preserve" text-anchor="start" x="245.42" y="-530.54" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">trtmc&#45;bench</text>
+</g>
+<!-- manifest -->
+<g id="node2" class="node">
+<title>manifest</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M397.87,-471.36C397.87,-471.36 191.2,-471.36 191.2,-471.36 185.2,-471.36 179.2,-465.36 179.2,-459.36 179.2,-459.36 179.2,-430.2 179.2,-430.2 179.2,-424.2 185.2,-418.2 191.2,-418.2 191.2,-418.2 397.87,-418.2 397.87,-418.2 403.87,-418.2 409.87,-424.2 409.87,-430.2 409.87,-430.2 409.87,-459.36 409.87,-459.36 409.87,-465.36 403.87,-471.36 397.87,-471.36"/>
+<text xml:space="preserve" text-anchor="start" x="200.54" y="-446.98" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family&#45;owned manifest</text>
+<text xml:space="preserve" text-anchor="start" x="193.6" y="-430.88" font-family="Arial" font-size="16.00" fill="#111827">model · task · build settings</text>
+</g>
+<!-- cli&#45;&gt;manifest -->
+<g id="edge1" class="edge">
+<title>cli&#45;&gt;manifest</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M294.53,-513.7C294.53,-504.63 294.53,-493.59 294.53,-483.07"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="297.33,-483.3 294.53,-475.3 291.73,-483.3 297.33,-483.3"/>
+</g>
+<!-- bundle -->
+<g id="node3" class="node">
+<title>bundle</title>
+<polygon fill="#fffbeb" stroke="#b45309" stroke-width="1.8" points="294.53,-375.2 123.13,-334.64 294.53,-294.08 465.94,-334.64 294.53,-375.2"/>
+<text xml:space="preserve" text-anchor="start" x="223.23" y="-330.54" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Bundle supplied?</text>
+</g>
+<!-- manifest&#45;&gt;bundle -->
+<g id="edge2" class="edge">
+<title>manifest&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M294.53,-417.33C294.53,-408.14 294.53,-397.51 294.53,-387"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="297.33,-387.07 294.53,-379.07 291.73,-387.07 297.33,-387.07"/>
+</g>
+<!-- build -->
+<g id="node4" class="node">
+<title>build</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M307.8,-232.88C307.8,-232.88 111.27,-232.88 111.27,-232.88 105.27,-232.88 99.27,-226.88 99.27,-220.88 99.27,-220.88 99.27,-204.32 99.27,-204.32 99.27,-198.32 105.27,-192.32 111.27,-192.32 111.27,-192.32 307.8,-192.32 307.8,-192.32 313.8,-192.32 319.8,-198.32 319.8,-204.32 319.8,-204.32 319.8,-220.88 319.8,-220.88 319.8,-226.88 313.8,-232.88 307.8,-232.88"/>
+<text xml:space="preserve" text-anchor="start" x="113.67" y="-208.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Public Python build API</text>
+</g>
+<!-- bundle&#45;&gt;build -->
+<g id="edge4" class="edge">
+<title>bundle&#45;&gt;build</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M270.18,-299.24C257.51,-281.35 242.2,-259.73 230.13,-242.68"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="232.63,-241.37 225.72,-236.46 228.06,-244.6 232.63,-241.37"/>
+<text xml:space="preserve" text-anchor="middle" x="258.38" y="-258.68" font-family="Arial" font-size="16.00" fill="#334155">no</text>
+</g>
+<!-- worker -->
+<g id="node5" class="node">
+<title>worker</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M400.4,-149.32C400.4,-149.32 188.67,-149.32 188.67,-149.32 182.67,-149.32 176.67,-143.32 176.67,-137.32 176.67,-137.32 176.67,-108.16 176.67,-108.16 176.67,-102.16 182.67,-96.16 188.67,-96.16 188.67,-96.16 400.4,-96.16 400.4,-96.16 406.4,-96.16 412.4,-102.16 412.4,-108.16 412.4,-108.16 412.4,-137.32 412.4,-137.32 412.4,-143.32 406.4,-149.32 400.4,-149.32"/>
+<text xml:space="preserve" text-anchor="start" x="191.07" y="-124.94" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Native benchmark worker</text>
+<text xml:space="preserve" text-anchor="start" x="238.96" y="-108.84" font-family="Arial" font-size="16.00" fill="#111827">public Task API</text>
+</g>
+<!-- bundle&#45;&gt;worker -->
+<g id="edge3" class="edge">
+<title>bundle&#45;&gt;worker</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M309.2,-296.69C320.62,-267.94 334.53,-232.88 334.53,-232.88 334.53,-232.88 334.53,-192.32 334.53,-192.32 334.53,-192.32 325.19,-176.3 315.54,-159.75"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="318.01,-158.43 311.56,-152.93 313.17,-161.26 318.01,-158.43"/>
+<text xml:space="preserve" text-anchor="middle" x="346.98" y="-207.8" font-family="Arial" font-size="16.00" fill="#334155">yes</text>
+</g>
+<!-- build&#45;&gt;worker -->
+<g id="edge5" class="edge">
+<title>build&#45;&gt;worker</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M228.82,-191.66C238.44,-181.72 250.34,-169.42 261.37,-158.02"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="263.33,-160.02 266.88,-152.33 259.3,-156.13 263.33,-160.02"/>
+</g>
+<!-- metrics -->
+<g id="node6" class="node">
+<title>metrics</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="1.8" d="M404.54,-53.16C404.54,-53.16 184.53,-53.16 184.53,-53.16 178.53,-53.16 172.53,-47.16 172.53,-41.16 172.53,-41.16 172.53,-12 172.53,-12 172.53,-6 178.53,0 184.53,0 184.53,0 404.54,0 404.54,0 410.54,0 416.54,-6 416.54,-12 416.54,-12 416.54,-41.16 416.54,-41.16 416.54,-47.16 410.54,-53.16 404.54,-53.16"/>
+<text xml:space="preserve" text-anchor="start" x="230.53" y="-28.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Metrics + report</text>
+<text xml:space="preserve" text-anchor="start" x="186.93" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">raw samples and timing scope</text>
+</g>
+<!-- worker&#45;&gt;metrics -->
+<g id="edge6" class="edge">
+<title>worker&#45;&gt;metrics</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M294.53,-95.26C294.53,-85.85 294.53,-75.08 294.53,-64.94"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="297.33,-65.19 294.53,-57.19 291.73,-65.19 297.33,-65.19"/>
+</g>
+</g>
+</svg>
