@@ -143,6 +143,8 @@ class TrtBackend final : public IBackend {
 
 } // namespace trtmc
 
+TRTMC_DEFINE_BACKEND_PLUGIN_V1("trt")
+
 extern "C" trtmc::IBackend* trtmc_create_backend() {
     try {
         return new trtmc::TrtBackend();

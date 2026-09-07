@@ -34,9 +34,14 @@ std::unique_ptr<ITask> load_task(const BundleReader& reader, const std::string& 
                                  const std::string& runtime_cache_path = {},
                                  bool cuda_graphs = false);
 
-// Register a kernel before model loading, using the existing optional TVM-FFI
-// extension. Successfully loaded extension DSOs remain resident until exit.
+// Register a kernel before model loading through the exact-build-checked
+// TVM-FFI extension. Successfully loaded extension DSOs remain resident until exit.
 void preload_byok_kernel(const std::string& runtime_root, const std::string& library,
                          const std::string& function, const std::string& kernel_name);
+
+// Load the exact-build-checked TVM-FFI runtime extension from runtime_root, then
+// publish one BYOK kernel. The extension remains resident for process lifetime.
+void load_byok_kernel_from_runtime(const std::string& runtime_root, const std::string& library,
+                                   const std::string& function, const std::string& kernel_name);
 
 } // namespace trtmc

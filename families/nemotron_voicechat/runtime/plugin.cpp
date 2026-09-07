@@ -144,6 +144,8 @@ VoiceChatTtsPrompt load_tts_prompt(const BundleReader& bundle,
 } // namespace
 } // namespace trtmc::voicechat_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("nemotron_voicechat")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("nemotron_voicechat does not support --kv-cache-size");

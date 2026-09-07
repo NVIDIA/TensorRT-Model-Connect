@@ -28,6 +28,8 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
 } // namespace
 } // namespace trtmc::canary_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("canary")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("canary does not support --kv-cache-size");

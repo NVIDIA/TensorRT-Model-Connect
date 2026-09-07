@@ -47,6 +47,17 @@ class FakeBackend final : public trtmc::IBackend {
 
 } // namespace
 
+#ifdef TRTMC_FAKE_INCOMPATIBLE_BUILD
+extern "C" const trtmc::PluginDescriptorV1* trtmc_plugin_descriptor_v1() noexcept {
+    static const trtmc::PluginDescriptorV1 descriptor{
+        sizeof(trtmc::PluginDescriptorV1), trtmc::kPluginDescriptorVersion,
+        trtmc::PluginKind::kBackend, TRTMC_FAKE_BACKEND_NAME, "00000000000000000000000000000000"};
+    return &descriptor;
+}
+#else
+TRTMC_DEFINE_BACKEND_PLUGIN_V1(TRTMC_FAKE_BACKEND_NAME)
+#endif
+
 extern "C" trtmc::IBackend* trtmc_create_backend() {
     ++create_count;
     if (create_count != 1)
