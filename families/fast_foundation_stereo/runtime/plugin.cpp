@@ -36,6 +36,8 @@ std::unique_ptr<ITrtModule> load_module(IBackend& backend, const std::vector<cha
 } // namespace
 } // namespace trtmc::fast_foundation_stereo
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("fast_foundation_stereo")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("fast_foundation_stereo does not support --kv-cache-size");

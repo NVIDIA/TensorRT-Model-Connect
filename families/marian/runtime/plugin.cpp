@@ -411,6 +411,8 @@ ITask* create_marian(const FamilyContext& context) {
 
 } // namespace trtmc
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("marian")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("marian does not support --kv-cache-size");

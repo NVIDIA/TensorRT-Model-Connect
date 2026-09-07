@@ -238,6 +238,8 @@ ITask* create(const FamilyContext& context) {
 
 } // namespace trtmc::llama
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("llama")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     return trtmc::llama::create(context);
 }

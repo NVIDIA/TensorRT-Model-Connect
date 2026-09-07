@@ -121,6 +121,8 @@ void load_kernel(const std::string& library, const std::string& function,
 
 } // namespace trtmc
 
+TRTMC_DEFINE_PLUGIN_DESCRIPTOR_V1(::trtmc::PluginKind::kRuntimeExtension, "tvm_ffi")
+
 extern "C" const char* trtmc_load_byok_kernel(const char* library, const char* function,
                                               const char* kernel_name) noexcept {
     static thread_local std::string error;

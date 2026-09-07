@@ -55,6 +55,8 @@ std::string require_task(const BundleInfo& info) {
 } // namespace
 } // namespace trtmc::eagle_vlm_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("eagle_vlm")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("eagle_vlm does not support --kv-cache-size");

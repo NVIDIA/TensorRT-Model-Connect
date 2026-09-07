@@ -76,6 +76,8 @@ LanceKvCacheNames build_kv_names(const nlohmann::json& config, std::int32_t num_
 } // namespace
 } // namespace trtmc::lance_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("lance")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("lance does not support --kv-cache-size");

@@ -26,6 +26,8 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
 } // namespace
 } // namespace trtmc::pixart_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("pixart")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("pixart does not support --kv-cache-size");
