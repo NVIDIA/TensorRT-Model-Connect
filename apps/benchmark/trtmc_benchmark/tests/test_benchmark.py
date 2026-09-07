@@ -18,7 +18,7 @@ from trtmc_benchmark.catalog import (
 )
 from trtmc_benchmark.cli import main
 from trtmc_benchmark.metrics import reduce_metrics
-from trtmc_benchmark.report import generate_collection_report
+from trtmc_benchmark.report import generate_collection_report, write_html_report
 from trtmc_benchmark.service import BenchmarkService
 from trtmc_benchmark.types import BenchmarkError
 from trtmc_benchmark.worker import find_worker
@@ -200,6 +200,89 @@ def test_service_runs_worker_and_writes_reports(tmp_path: Path) -> None:
     assert result["cells"][0]["samples_ms"] == [2.0, 2.0]
     assert (output / "result.json").is_file()
     assert (output / "report.html").is_file()
+    report_html = (output / "report.html").read_text(encoding="utf-8")
+    assert "Source runs: <strong>1</strong>" in report_html
+    assert "<th>p95</th>" in report_html
+    assert "2.000 ms" in report_html
+    assert "1500.000 token/s" in report_html
+    assert result["cells"][0]["artifact_dir"] in report_html
+
+
+def test_html_report_snapshot_is_readable_escaped_and_self_contained(tmp_path: Path) -> None:
+    path = tmp_path / "report.html"
+    write_html_report(
+        {
+            "status": "failed",
+            "summary": {"runs": 2},
+            "runs": [
+                {
+                    "run_id": "run<&",
+                    "status": "completed",
+                    "started_at": "2026-01-02T03:04:05Z",
+                    "finished_at": "2026-01-02T03:05:06Z",
+                    "result_path": "/absolute/source<&",
+                },
+                {"run_id": "run-two", "status": "failed"},
+            ],
+            "cells": [
+                {
+                    "run_id": "run<&",
+                    "model": "model<&",
+                    "name": '"case"',
+                    "operation": "generate",
+                    "status": "completed",
+                    "artifact_dir": "artifact<&",
+                    "metrics": {
+                        "latency_ms": {"p50": 1.23456, "p95": 9.87654},
+                        "output_tokens_per_s": 42.25,
+                        "request_throughput_per_s": 1.0,
+                    },
+                },
+                {
+                    "run_id": "run-two",
+                    "model": "audio",
+                    "name": "speech",
+                    "operation": "generate_audio",
+                    "status": "completed",
+                    "metrics": {
+                        "latency_ms": {"p50": 50.0, "p95": 75.0},
+                        "audio_seconds_per_s": 2.5,
+                    },
+                },
+                {
+                    "run_id": "run-two",
+                    "model": "failed",
+                    "name": "unsafe",
+                    "operation": "generate",
+                    "status": "failed",
+                    "artifact_dir": "/absolute/case-artifacts",
+                    "error": "<script>alert('unsafe')</script>",
+                },
+            ],
+            "warnings": ["skipped <unsafe> & evidence"],
+        },
+        path,
+    )
+
+    report_html = path.read_text(encoding="utf-8")
+    row_snapshot = (
+        "<tr><td>model&lt;&amp;</td><td>&quot;case&quot;</td><td>generate</td>"
+        "<td>1.235 ms</td><td>9.877 ms</td><td>42.250 token/s</td>"
+        "<td>completed</td><td>run <code>run&lt;&amp;</code><br>"
+        "artifacts <code>artifact&lt;&amp;</code></td></tr>"
+    )
+    assert row_snapshot in report_html
+    assert "2.500 audio-s/s" in report_html
+    assert "Source runs: <strong>2</strong>; cases: <strong>3</strong>" in report_html
+    assert "<td><code>result.json</code></td>" in report_html
+    assert "/absolute" not in report_html
+    assert "artifacts <code>case artifacts</code>" in report_html
+    assert "&lt;script&gt;alert(&#x27;unsafe&#x27;)&lt;/script&gt;" in report_html
+    assert "skipped &lt;unsafe&gt; &amp; evidence" in report_html
+    assert "Content-Security-Policy" in report_html
+    assert "<script>" not in report_html
+    assert " href=" not in report_html
+    assert " src=" not in report_html
 
 
 def test_case_resolution_rejects_unknown_telemetry_override(tmp_path: Path) -> None:
@@ -246,6 +329,125 @@ def test_collection_rejects_duplicate_run_id_without_content_fingerprints(
         )
     with pytest.raises(BenchmarkError, match="duplicate run_id"):
         generate_collection_report((tmp_path,), tmp_path / "report")
+
+
+def test_collection_report_serializes_existing_warnings(tmp_path: Path) -> None:
+    valid = tmp_path / "valid"
+    valid.mkdir()
+    (valid / "result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "trtmc.benchmark-run/v2",
+                "run_id": "run-one",
+                "status": "completed",
+                "cells": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    unreadable = tmp_path / "bad<&"
+    unreadable.mkdir()
+    (unreadable / "result.json").write_text("not JSON", encoding="utf-8")
+
+    report, warnings = generate_collection_report((tmp_path,), tmp_path / "report")
+
+    assert len(warnings) == 1
+    assert str(tmp_path) not in warnings[0]
+    assert report["warnings"] == list(warnings)
+    persisted = json.loads((tmp_path / "report/report.json").read_text(encoding="utf-8"))
+    assert persisted["warnings"] == list(warnings)
+    report_html = (tmp_path / "report/report.html").read_text(encoding="utf-8")
+    assert "<h2>Warnings</h2>" in report_html
+    assert "bad&lt;&amp;" in report_html
+    assert "bad<&" not in report_html
+    assert str(tmp_path) not in report_html
+
+
+def test_html_redacts_absolute_error_paths_without_changing_json(tmp_path: Path) -> None:
+    redacted_errors = [
+        "worker failed: /absolute/run/worker.log",
+        r"worker failed: C:\runner\work\worker.log",
+        "worker failed: file:///opt/runner/work/worker.log",
+        "worker failed: path:/opt/runner/work/worker.log",
+    ]
+    preserved_errors = [
+        "worker failed: retry limit reached",
+        "worker failed: https://example.com/public/errors",
+    ]
+    errors = [*redacted_errors, *preserved_errors]
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "trtmc.benchmark-run/v2",
+                "run_id": "failed-run",
+                "status": "failed",
+                "cells": [
+                    {
+                        "name": f"failure-{index}",
+                        "model": "model",
+                        "operation": "generate",
+                        "status": "failed",
+                        "error": error,
+                    }
+                    for index, error in enumerate(errors)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report, _ = generate_collection_report((source,), tmp_path / "report")
+
+    assert [cell["error"] for cell in report["cells"]] == errors
+    persisted = json.loads((tmp_path / "report/report.json").read_text(encoding="utf-8"))
+    assert [cell["error"] for cell in persisted["cells"]] == errors
+    report_html = (tmp_path / "report/report.html").read_text(encoding="utf-8")
+    assert report_html.count("[absolute path]") == len(redacted_errors)
+    assert all(error not in report_html for error in redacted_errors)
+    assert all(error in report_html for error in preserved_errors)
+    assert "path:[absolute path]" in report_html
+    assert "pat[absolute path]" not in report_html
+
+
+def test_html_rejects_cross_platform_absolute_artifact_labels(tmp_path: Path) -> None:
+    artifacts = [
+        r"C:\runner\work\case-artifacts",
+        "C:/runner/work/case-artifacts",
+        r"\\server\share\case-artifacts",
+    ]
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "trtmc.benchmark-run/v2",
+                "run_id": "artifact-run",
+                "status": "failed",
+                "cells": [
+                    {
+                        "name": f"failure-{index}",
+                        "model": "model",
+                        "operation": "generate",
+                        "status": "failed",
+                        "artifact_dir": artifact,
+                    }
+                    for index, artifact in enumerate(artifacts)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report, _ = generate_collection_report((source,), tmp_path / "report")
+
+    assert [cell["artifact_dir"] for cell in report["cells"]] == artifacts
+    persisted = json.loads((tmp_path / "report/report.json").read_text(encoding="utf-8"))
+    assert [cell["artifact_dir"] for cell in persisted["cells"]] == artifacts
+    report_html = (tmp_path / "report/report.html").read_text(encoding="utf-8")
+    assert report_html.count("artifacts <code>case artifacts</code>") == len(artifacts)
+    assert all(artifact not in report_html for artifact in artifacts)
 
 
 def test_cli_dry_run_uses_explicit_bundle_without_runtime(tmp_path: Path, capsys) -> None:
