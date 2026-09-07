@@ -1961,8 +1961,6 @@ suites:
     default_model_names: [minimax-h3-768p]
     dataset:
       kind: model_plugin_json
-      default_path: /mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json
-      input_asset_fields: [prompt_file]
     selectors:
       model_names: [minimax-h3-768p]
       task_strategies: [diffusion_media_generation]

@@ -478,7 +478,16 @@ variants with the same reference computation can reuse an entry.
 2. Add that workload under the model's `workloads` in `model_workloads.yaml`
    when model and all-model runs should include it. Leave it unmapped for an
    explicit-only experiment.
-3. Add its workload-owned limit to the top-level `sample_limits`; one value
+3. Keep family-specific dataset locations and input-asset fields in the
+   owning family's `MODEL.toml`. The shared workload declares the parser kind;
+   the model-owned table supplies the mounted dataset contract:
+
+   ```toml
+   [validation_datasets.example_workload]
+   default_path = "/mnt/data/example/dataset.json"
+   input_asset_fields = ["image"]
+   ```
+4. Add its workload-owned limit to the top-level `sample_limits`; one value
    is shared by every model using that dataset/workload contract.
 
 A model may list multiple workloads; selecting that model runs all of them as

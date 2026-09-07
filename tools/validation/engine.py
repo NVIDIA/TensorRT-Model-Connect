@@ -11360,9 +11360,10 @@ def eval_one_model(
     suite = resolve_suite_for_model(suite, model)
     work_root = Path(args.work_root)
     work_dir = work_root / suite["id"] / str(model["name"])
-    dataset_path = Path(args.dataset or suite.get("dataset", {}).get("default_path", ""))
-    if not dataset_path:
+    dataset_value = args.dataset or suite.get("dataset", {}).get("default_path", "")
+    if not dataset_value:
         raise ValueError(f"Suite {suite['id']} has no dataset path; pass --dataset")
+    dataset_path = Path(dataset_value)
     scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
     dataset_kind = str(suite.get("dataset", {}).get("kind", ""))
     reference_mode = str(suite.get("reference", {}).get("mode", "") or "")
@@ -12697,6 +12698,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--suites", default=str(DEFAULT_SUITES))
     p.add_argument("--suite", default="mmlu_five_shot_mcq")
     p.add_argument("--dataset")
+    p.add_argument("--model", default="")
+    p.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
     p.add_argument("--work-dir", required=True)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--subject", default="")
@@ -12920,9 +12923,28 @@ def cmd_plan(args: argparse.Namespace) -> int:
 def cmd_prepare(args: argparse.Namespace) -> int:
     suites = load_suites(Path(args.suites))
     suite = suite_by_id(suites, args.suite)
-    dataset_path = Path(args.dataset or suite.get("dataset", {}).get("default_path", ""))
-    if not dataset_path:
+    model_name = str(getattr(args, "model", "") or "")
+    if not model_name:
+        default_models = suite.get("default_model_names", [])
+        if isinstance(default_models, list) and len(default_models) == 1:
+            model_name = str(default_models[0])
+    if model_name:
+        models = load_manifest_records(
+            Path(getattr(args, "models_dir", DEFAULT_MODELS_DIR))
+        )
+        model = next(
+            (item for item in models if item.get("name") == model_name),
+            None,
+        )
+        if model is None:
+            raise ValueError(
+                f"Unknown model {model_name!r} for suite {args.suite}"
+            )
+        suite = resolve_suite_for_model(suite, model)
+    dataset_value = args.dataset or suite.get("dataset", {}).get("default_path", "")
+    if not dataset_value:
         raise ValueError(f"Suite {args.suite} has no dataset path; pass --dataset")
+    dataset_path = Path(dataset_value)
     outputs = prepare_task_dataset(
         dataset_path=dataset_path,
         work_dir=Path(args.work_dir),

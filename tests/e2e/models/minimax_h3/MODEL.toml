@@ -12,6 +12,10 @@ relative_path = "minimax_h3/reference/diffusers-abc5e9bf71fd"
 entrypoint = "src/diffusers/__init__.py"
 environment_variable = "TRTMC_MINIMAX_H3_DIFFUSERS_REPO"
 
+[validation_datasets.minimax_h3_vbench_reference_parity]
+default_path = "/mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json"
+input_asset_fields = ["prompt_file"]
+
 [e2e_defaults.diffusion_media_generation]
 reference_backend = "hf_diffusers"
 oracle_level = "L1_external_reference"

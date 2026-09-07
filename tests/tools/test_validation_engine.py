@@ -3320,6 +3320,39 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
     ]
 
 
+def test_prepare_cli_resolves_model_owned_validation_dataset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_prepare(**kwargs: Any) -> dict[str, Path]:
+        captured.update(kwargs)
+        return {"answers": tmp_path / "answers.json"}
+
+    monkeypatch.setattr(validation_engine, "prepare_task_dataset", fake_prepare)
+
+    rc = validation_engine.cmd_prepare(
+        argparse.Namespace(
+            suites=str(validation_engine.DEFAULT_SUITES),
+            suite="minimax_h3_vbench_reference_parity",
+            dataset=None,
+            model="minimax-h3-768p",
+            models_dir=str(validation_engine.DEFAULT_MODELS_DIR),
+            work_dir=str(tmp_path / "work"),
+            limit=10,
+            subject="",
+            sample_seed=None,
+        )
+    )
+
+    assert rc == 0
+    assert captured["dataset_path"] == Path(
+        "/mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json"
+    )
+    assert captured["suite"]["dataset"]["input_asset_fields"] == ["prompt_file"]
+
+
 def test_continuation_parity_reports_divergence_severity() -> None:
     hf = {
         "responses": [

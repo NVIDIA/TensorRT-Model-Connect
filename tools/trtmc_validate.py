@@ -1780,9 +1780,11 @@ def run_binding(
     case_dir = _case_directory(Path(arguments.output), binding)
     case_dir.mkdir(parents=True, exist_ok=True)
     dataset_command = shlex.join([sys.executable, *sys.argv])
-    suite = suites[workload]
-    task_type, user_contract = _suite_task_metadata(suite)
     model = task_models[binding.model]
+    unresolved_suite = dict(suites[workload])
+    unresolved_suite.setdefault("id", workload)
+    suite = validation_catalog.resolve_suite_for_model(unresolved_suite, model)
+    task_type, user_contract = _suite_task_metadata(suite)
     task_strategy = str(model.get("task_strategy", "") or "")
     dataset = (
         Path(arguments.dataset)
@@ -1858,7 +1860,7 @@ def run_binding(
     profiles = binding_profiles(
         binding,
         task_models=task_models,
-        suites=suites,
+        suites={**suites, workload: suite},
     )
     environment = ensure_environments(profiles, str(arguments.hf_python))
     reference_sources = ensure_reference_sources(

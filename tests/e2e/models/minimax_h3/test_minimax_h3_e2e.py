@@ -31,6 +31,7 @@ from tests.e2e_harness.registry import (
     get_reference,
     get_runner,
 )
+from tools.validation import catalog as validation_catalog
 
 
 _MODEL_DIR = Path(__file__).resolve().parent
@@ -116,6 +117,21 @@ def test_minimax_h3_comparator_owns_sample_acceptance_boundary(
     assert aggregate["passed"] is expected_passed
     assert aggregate["sample_pass_rate"] == pytest.approx(passed_count / 10)
     assert aggregate["gates"] == {"min_sample_pass_rate": 0.8}
+
+
+def test_minimax_h3_owns_validation_dataset_contract() -> None:
+    suite = validation_catalog.suite_by_id(
+        validation_catalog.load_suites(),
+        "minimax_h3_vbench_reference_parity",
+    )
+    model = validation_catalog.manifest_record(_MANIFEST_PATH)
+
+    assert suite["dataset"] == {"kind": "model_plugin_json"}
+    assert validation_catalog.resolve_suite_for_model(suite, model)["dataset"] == {
+        "kind": "model_plugin_json",
+        "default_path": "/mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json",
+        "input_asset_fields": ["prompt_file"],
+    }
 
 
 def test_family_registry_loads_native_plugin_for_public_pipelines() -> None:

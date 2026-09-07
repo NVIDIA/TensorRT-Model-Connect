@@ -137,7 +137,10 @@ def test_minimax_h3_catalog_uses_vbench_profile() -> None:
         True,
         "selected",
     )
-    assert vbench_suite["dataset"] == {
+    assert vbench_suite["dataset"] == {"kind": "model_plugin_json"}
+    assert validation_catalog.resolve_suite_for_model(vbench_suite, model)[
+        "dataset"
+    ] == {
         "kind": "model_plugin_json",
         "default_path": "/mnt/data/VBench-fd18b3d-model-plugin-v1/dataset.json",
         "input_asset_fields": ["prompt_file"],
@@ -3447,6 +3450,59 @@ def test_run_binding_records_missing_default_dataset_as_preflight_failure(
     assert result["reproduce"]["dataset"]["sample_limit"] == 50
     assert result["reproduce"]["dataset"]["prepared_input_count"] == 0
     assert "missing/data.jsonl" in result["raw_result"]["error"]
+
+
+def test_run_binding_resolves_model_owned_default_dataset_before_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = tmp_path / "datasets" / "minimax" / "dataset.json"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text('{"requests": []}\n', encoding="utf-8")
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "model-a",
+            "suite-a",
+            "--output",
+            str(tmp_path / "results"),
+            "--dataset-root",
+            str(tmp_path / "datasets"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+
+    class DatasetResolved(Exception):
+        pass
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_environments",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(DatasetResolved),
+    )
+
+    with pytest.raises(DatasetResolved):
+        trtmc_validate.run_binding(
+            trtmc_validate.Binding("model-a", "suite-a"),
+            arguments=arguments,
+            task_models={
+                "model-a": {
+                    "name": "model-a",
+                    "family": "demo",
+                    "task_strategy": "demo_task",
+                    "execution_profiles": {},
+                    "validation_datasets": {
+                        "suite-a": {"default_path": "/mnt/data/minimax/dataset.json"}
+                    },
+                }
+            },
+            suites={
+                "suite-a": {
+                    "id": "suite-a",
+                    "dataset": {"kind": "model_plugin_json"},
+                }
+            },
+        )
 
 
 def test_diffusion_report_flattens_nested_reference_metrics():
