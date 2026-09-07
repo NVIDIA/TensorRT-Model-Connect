@@ -36,7 +36,7 @@ Napi::Value PipelineWrapper::Load(const Napi::CallbackInfo& info) {
 
     try {
         // Load the actual TRTMC Pipeline
-        std::unique_ptr<trtmc::Pipeline> pipeline = trtmc::load(path);
+        std::unique_ptr<trtmc::IPipeline> pipeline = trtmc::load(path);
 
         Napi::FunctionReference* constructor = env.GetInstanceData<Napi::FunctionReference>();
         Napi::Object obj = constructor->New({});

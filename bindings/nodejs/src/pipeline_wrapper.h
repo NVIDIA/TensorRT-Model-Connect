@@ -19,5 +19,5 @@ class PipelineWrapper : public Napi::ObjectWrap<PipelineWrapper> {
   private:
     Napi::Value Generate(const Napi::CallbackInfo& info);
 
-    std::unique_ptr<trtmc::Pipeline> pipeline_;
+    std::unique_ptr<trtmc::IPipeline> pipeline_;
 };

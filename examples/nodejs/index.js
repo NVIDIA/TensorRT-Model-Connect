@@ -1,25 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 const express = require('express');
 
-let trtmc;
-try {
-    trtmc = require('tensorrt-model-connect-node/build/Release/trtmc_node.node');
-} catch (e) {
-    console.warn("[WARN] Native module not found. Using MOCK for demonstration.");
-    trtmc = {
-        load: (path) => ({
-            generate: (prompt, config) => ({
-                text: "This is a simulated AI response from the Node.js bindings via Express!",
-                token_ids: [101, 202, 303],
-                prefill_ms: 10.5,
-                decode_ms: 30.1,
-                setup_ms: 0.5
-            })
-        })
-    };
-}
+const trtmc = require('tensorrt-model-connect-node/build/Release/trtmc_node.node');
 
 const app = express();
 app.use(express.json());
