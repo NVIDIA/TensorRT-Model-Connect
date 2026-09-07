@@ -126,6 +126,22 @@ set_target_properties(trtmc_runtime PROPERTIES
   INSTALL_RPATH "\$ORIGIN"
 )
 
+add_library(trtmc_c SHARED
+  core/runtime/c_api/trtmc_c.cpp
+)
+target_include_directories(trtmc_c
+  PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/core/runtime/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(trtmc_c PRIVATE trtmc_runtime)
+target_compile_definitions(trtmc_c PRIVATE TRTMC_VERSION_STRING="${PROJECT_VERSION}")
+target_compile_options(trtmc_c PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(trtmc_c PROPERTIES
+  BUILD_RPATH "\$ORIGIN"
+  INSTALL_RPATH "\$ORIGIN"
+)
+
 add_library(trtmc_backend_trt SHARED
   core/runtime/tensorrt/trt_backend.cpp
   core/runtime/tensorrt/trt_logger.cpp
@@ -244,6 +260,9 @@ endif()
 option(TRTMC_BUILD_TESTS "Build tests" ON)
 option(TRTMC_BUILD_EXAMPLES "Build examples" ON)
 if(TRTMC_BUILD_TESTS)
+  enable_language(C)
+  find_package(Threads REQUIRED)
+
   enable_testing()
 endif()
 
@@ -379,6 +398,17 @@ if(TRTMC_BUILD_TESTS)
     BUILD_RPATH "\$ORIGIN/../.."
   )
 
+  add_library(trtmc_test_family_fake_c SHARED core/runtime/tests/fake_c_family.cpp)
+  target_include_directories(trtmc_test_family_fake_c PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(trtmc_test_family_fake_c PRIVATE trtmc_core)
+  set_target_properties(trtmc_test_family_fake_c PROPERTIES
+    OUTPUT_NAME trtmc_model_fake_c
+    LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
+    BUILD_RPATH "\$ORIGIN/../.."
+  )
+
   add_executable(test_family_loader core/runtime/tests/test_family_loader.cpp)
   target_include_directories(test_family_loader PRIVATE
     ${PROJECT_SOURCE_DIR}/core/runtime/include
@@ -392,6 +422,17 @@ if(TRTMC_BUILD_TESTS)
     trtmc_test_family_fake
   )
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
+
+  add_executable(test_c_api core/runtime/tests/test_c_api.c)
+  target_link_libraries(test_c_api PRIVATE trtmc_c Threads::Threads)
+  target_compile_options(test_c_api PRIVATE -Wall -Wextra -Wpedantic)
+  set_target_properties(test_c_api PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF
+  )
+  add_dependencies(test_c_api trtmc_test_backend_fake trtmc_test_family_fake_c)
+  add_test(NAME c_api COMMAND test_c_api "${_trtmc_test_runtime_root}")
 
   add_executable(test_trt_module_dynamic_input
     core/runtime/tests/test_trt_module_dynamic_input.cpp
@@ -506,7 +547,7 @@ endif()
 
 include(CMakePackageConfigHelpers)
 
-install(TARGETS trtmc_core trtmc_runtime
+install(TARGETS trtmc_core trtmc_runtime trtmc_c
   EXPORT trtmcTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -537,6 +578,7 @@ endif()
 install(FILES
   core/runtime/include/trtmc/byok.h
   core/runtime/include/trtmc/bundle.h
+  core/runtime/include/trtmc/c_api.h
   core/runtime/include/trtmc/task.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/trtmc
 )

@@ -254,7 +254,7 @@ def test_core_languages_are_strictly_separated() -> None:
     assert [
         path.relative_to(REPO)
         for path in runtime_files
-        if path.suffix not in {".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp"}
+        if path.suffix not in {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp"}
     ] == []
 
 
@@ -279,6 +279,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     expected_native = {
         "core/runtime/bundle/bundle_format.cpp",
         "core/runtime/bundle/bundle_format.h",
+        "core/runtime/c_api/trtmc_c.cpp",
         "core/runtime/tensorrt/trt_backend.cpp",
         "core/runtime/tensorrt/trt_logger.cpp",
         "core/runtime/tensorrt/trt_logger.h",
@@ -299,6 +300,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/loader/family_loader.cpp",
         "core/runtime/include/trtmc/byok.h",
         "core/runtime/include/trtmc/bundle.h",
+        "core/runtime/include/trtmc/c_api.h",
         "core/runtime/include/trtmc/task.h",
         "core/runtime/include/trtmc/runtime/device_tensor.h",
         "core/runtime/include/trtmc/runtime/family_factory.h",
@@ -307,9 +309,11 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/runtime/trt_backend.h",
         "core/runtime/include/trtmc/runtime/trt_module.h",
         "core/runtime/tests/fake_backend.cpp",
+        "core/runtime/tests/fake_c_family.cpp",
         "core/runtime/tests/fake_family.cpp",
         "core/runtime/tests/test_bundle_format_v1.cpp",
         "core/runtime/tests/test_byok_shape_spec.cpp",
+        "core/runtime/tests/test_c_api.c",
         "core/runtime/tests/test_family_loader.cpp",
         "core/runtime/tests/test_task_api.cpp",
         "core/runtime/tests/test_trt_module_dynamic_input.cpp",
@@ -1034,6 +1038,11 @@ def test_native_loader_and_preprocessing_stay_out_of_shared_core() -> None:
 
     runtime_sources = cmake.split("add_library(trtmc_runtime SHARED", 1)[1].split(")", 1)[0]
     assert "core/runtime/loader/family_loader.cpp" in runtime_sources
+    c_api_sources = cmake.split("add_library(trtmc_c SHARED", 1)[1].split(")", 1)[0]
+    assert "core/runtime/c_api/trtmc_c.cpp" in c_api_sources
+    c_api_links = cmake.split("target_link_libraries(trtmc_c PRIVATE", 1)[1].split(")", 1)[0]
+    assert "trtmc_runtime" in c_api_links
+    assert "families/" not in c_api_links
     cli_links = cmake.split("target_link_libraries(trtmc_cli", 1)[1].split(")", 1)[0]
     assert "trtmc_runtime" in cli_links
     assert "trtmc_core" in cli_links

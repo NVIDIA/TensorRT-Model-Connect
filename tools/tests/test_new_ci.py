@@ -636,6 +636,7 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
     wheel = tmp_path / "package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("tensorrt_model_connect/__init__.py", "")
+        archive.writestr("tensorrt_model_connect/include/trtmc/c_api.h", "")
         archive.writestr("trtmc_benchmark/__init__.py", "")
         archive.writestr("families/__init__.py", "")
         archive.writestr("tensorrt_model_connect/bin/trtmc", "")
@@ -643,6 +644,7 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         archive.writestr("tensorrt_model_connect/bin/trtmc_dataset_benchmark", "")
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_core.so", "")
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_runtime.so", "")
+        archive.writestr("tensorrt_model_connect/bin/libtrtmc_c.so", "")
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_backend_trt.so", "")
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_byok_tvm_ffi.so", "")
         archive.writestr(
@@ -720,6 +722,7 @@ def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> 
 
     compile_library("libtrtmc_core.so", "void core_symbol(void) {}\n")
     compile_library("libtrtmc_runtime.so", "void runtime_symbol(void) {}\n")
+    compile_library("libtrtmc_c.so", "void c_api_symbol(void) {}\n")
     compile_library("libtrtmc_backend_trt.so", "void backend_symbol(void) {}\n")
     compile_library("libtrtmc_byok_tvm_ffi.so", "void byok_symbol(void) {}\n")
     compile_library("libtrtmc_model_alpha.so", "void alpha_symbol(void) {}\n")

@@ -64,6 +64,7 @@ def load_native_libraries(bin_dir: Path, families: tuple[str, ...]) -> None:
     libraries = [
         bin_dir / "libtrtmc_core.so",
         bin_dir / "libtrtmc_runtime.so",
+        bin_dir / "libtrtmc_c.so",
         bin_dir / "libtrtmc_backend_trt.so",
         bin_dir / "libtrtmc_byok_tvm_ffi.so",
         *(bin_dir / f"libtrtmc_model_{family}.so" for family in families),
@@ -117,6 +118,8 @@ class WheelArchiveValidator:
                 raise CiError(f"{wheel}: generated Python cache files are packaged")
             if "tensorrt_model_connect/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python core package is missing")
+            if "tensorrt_model_connect/include/trtmc/c_api.h" not in names:
+                raise CiError(f"{wheel}: public C header is missing")
             if "trtmc_benchmark/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python benchmark application is missing")
             source_suffixes = {
@@ -234,6 +237,7 @@ class WheelArchiveValidator:
                 "trtmc",
                 "libtrtmc_core.so",
                 "libtrtmc_runtime.so",
+                "libtrtmc_c.so",
                 "libtrtmc_backend_trt.so",
                 "libtrtmc_byok_tvm_ffi.so",
                 "trtmc_benchmark_worker",
@@ -301,6 +305,7 @@ print(json.dumps({
         path.parent.name for path in Path(families.__file__).resolve().parent.glob("*/requirements.txt")
     ),
     "bin": str(Path(core.__file__).resolve().parent / "bin"),
+    "include": str(Path(core.__file__).resolve().parent / "include"),
     "scripts": sysconfig.get_path("scripts"),
 }))
 """
@@ -319,6 +324,7 @@ print(json.dumps({
         if any(path.is_relative_to(self.repository.resolve()) for path in imported):
             raise CiError("installed wheel validation imported the source checkout")
         bin_dir = Path(payload["bin"])
+        include_dir = Path(payload["include"])
         expected = set(family_ids(self.repository))
         expected_requirements = {
             path.parent.name for path in (self.repository / "families").glob("*/requirements.txt")
@@ -333,6 +339,7 @@ print(json.dumps({
             bin_dir / "trtmc",
             bin_dir / "libtrtmc_core.so",
             bin_dir / "libtrtmc_runtime.so",
+            bin_dir / "libtrtmc_c.so",
             bin_dir / "libtrtmc_backend_trt.so",
             bin_dir / "libtrtmc_byok_tvm_ffi.so",
             bin_dir / "trtmc_benchmark_worker",
@@ -340,6 +347,8 @@ print(json.dumps({
         )
         if not all(path.is_file() for path in required) or packaged != expected:
             raise CiError(f"installed wheel is incomplete: {wheel}")
+        if not (include_dir / "trtmc/c_api.h").is_file():
+            raise CiError(f"installed wheel has no public C header: {wheel}")
         load_native_libraries(bin_dir, tuple(sorted(expected)))
         executable = Path(payload["scripts"]) / "trtmc"
         if not executable.is_file() or not os.access(executable, os.X_OK):

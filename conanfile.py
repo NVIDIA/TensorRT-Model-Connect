@@ -75,6 +75,7 @@ class TensorRTModelConnectConan(ConanFile):
         build = Path(self.build_folder)
         package = Path(self.package_folder)
         module_bin = package / "tensorrt_model_connect" / "bin"
+        module_include = package / "tensorrt_model_connect" / "include" / "trtmc"
         script_bin = package / f"{self.name.replace('-', '_')}-{self.version}.data" / "scripts"
 
         copy(self, "trtmc", src=str(build), dst=str(module_bin), keep_path=False)
@@ -88,6 +89,20 @@ class TensorRTModelConnectConan(ConanFile):
                     dst=str(destination),
                     keep_path=False,
                 )
+        copy(
+            self,
+            "libtrtmc_c.so",
+            src=str(build),
+            dst=str(module_bin),
+            keep_path=False,
+        )
+        copy(
+            self,
+            "c_api.h",
+            src=str(source / "core/runtime/include/trtmc"),
+            dst=str(module_include),
+            keep_path=False,
+        )
         copy(
             self,
             "libtrtmc_backend_trt*.so",
@@ -153,6 +168,8 @@ class TensorRTModelConnectConan(ConanFile):
             for library in ("libtrtmc_core.so", "libtrtmc_runtime.so")
         ]
         backend = module_bin / "libtrtmc_backend_trt.so"
+        c_api = module_bin / "libtrtmc_c.so"
+        c_header = module_include / "c_api.h"
         backends = sorted(module_bin.glob("libtrtmc_backend_trt*.so"))
         byok = module_bin / "libtrtmc_byok_tvm_ffi.so"
         benchmark_worker = module_bin / "trtmc_benchmark_worker"
@@ -161,6 +178,8 @@ class TensorRTModelConnectConan(ConanFile):
             not native.is_file()
             or not installed.is_file()
             or not all(library.is_file() for library in shared_runtime)
+            or not c_api.is_file()
+            or not c_header.is_file()
             or not backend.is_file()
             or not byok.is_file()
             or not benchmark_worker.is_file()
@@ -173,6 +192,7 @@ class TensorRTModelConnectConan(ConanFile):
             _set_runpath(executable, "$ORIGIN")
         for library in shared_runtime:
             _set_runpath(library, "$ORIGIN:/usr/local/cuda/lib64")
+        _set_runpath(c_api, "$ORIGIN")
         _set_runpath(
             byok,
             "$ORIGIN:$ORIGIN/../../tensorrt_libs:$ORIGIN/../../tvm_ffi/lib:/usr/local/cuda/lib64",

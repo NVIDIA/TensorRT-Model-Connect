@@ -121,6 +121,7 @@ module.exports = {
         'api/cli-reference',
         'api/python-builder',
         'api/cpp-api',
+        'api/c-api',
         'architecture/bundle-format',
         'features/config-and-backends',
         'features/sampling',
