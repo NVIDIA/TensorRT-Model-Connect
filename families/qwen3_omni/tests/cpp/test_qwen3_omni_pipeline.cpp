@@ -202,6 +202,8 @@ void test_pipeline_construction() {
           "Qwen3-Omni implements the text-generation Task API");
     check(pipeline->default_max_new_tokens() == 128,
           "Qwen3-Omni preserves its default text token limit");
+    check(!pipeline->default_use_chat_template(),
+          "Qwen3-Omni keeps its fixed internal prompt instead of the generic chat option");
 }
 
 void test_validates_thinker() {

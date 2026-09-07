@@ -44,6 +44,7 @@ class K2HorizonTextGenerationPipeline final : public ITextGeneration {
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }
+    bool default_use_chat_template() const noexcept override { return false; }
 
     struct GenerationResult {
         std::vector<int32_t> token_ids;

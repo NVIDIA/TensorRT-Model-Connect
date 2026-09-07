@@ -9,6 +9,7 @@
 #include "trtmc/runtime/family_loader.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -35,6 +36,36 @@ namespace trtmc::cli {
 namespace {
 
 namespace fs = std::filesystem;
+
+bool is_safe_id(const std::string& value) {
+    if (value.empty() || value.front() < 'a' || value.front() > 'z')
+        return false;
+    return std::all_of(value.begin(), value.end(), [](const unsigned char character) {
+        return (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') ||
+               character == '_';
+    });
+}
+
+bool has_complete_runtime(const fs::path& root, const BundleInfo& bundle) {
+    if (root.empty())
+        return false;
+    const std::array<std::string, 4> files{
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_backend_" + bundle.backend + ".so",
+        "libtrtmc_model_" + bundle.family + ".so",
+    };
+    return std::all_of(files.begin(), files.end(), [&](const std::string& file) {
+        std::error_code error;
+        return fs::is_regular_file(root / file, error) && !error;
+    });
+}
+
+fs::path current_executable_path() {
+    std::error_code error;
+    const fs::path executable = fs::read_symlink("/proc/self/exe", error);
+    return error ? fs::path{} : executable;
+}
 
 struct CommandSpec {
     CommandKind kind;
@@ -639,6 +670,8 @@ int dispatch_run(const Command& command, ITask& task, std::ostream& output) {
     }
     if (!has_option(command, "--image")) {
         auto& interface = require_interface<ITextGeneration>(task);
+        if (!has_option(command, "--use-chat-template"))
+            config.use_chat_template = interface.default_use_chat_template();
         config.max_new_tokens =
             int_option(command, "--max-new-tokens", interface.default_max_new_tokens(), 1);
         write_json(output, text_json(interface.generate(prompt, config)));
@@ -653,6 +686,23 @@ int dispatch_run(const Command& command, ITask& task, std::ostream& output) {
 }
 
 } // namespace
+
+std::string resolve_runtime_root(const Command& command, const BundleInfo& bundle,
+                                 const fs::path& current_directory, const fs::path& executable) {
+    if (!command.runtime_root.empty())
+        return command.runtime_root;
+    if (!is_safe_id(bundle.family) || !is_safe_id(bundle.backend))
+        throw std::invalid_argument("bundle family and backend must match [a-z][a-z0-9_]*");
+
+    if (has_complete_runtime(current_directory, bundle))
+        return current_directory.string();
+    const fs::path executable_directory = executable.parent_path();
+    if (has_complete_runtime(executable_directory, bundle))
+        return executable_directory.string();
+
+    throw std::invalid_argument(
+        "no complete runtime found in the current or executable directory; pass --runtime-root");
+}
 
 Command parse_args(int argc, char** argv) {
     if (argc < 2)
@@ -721,8 +771,6 @@ Command parse_args(int argc, char** argv) {
             throw std::invalid_argument(option + " may be specified only once");
         command.options.emplace(option, take_value(argc, argv, index, option));
     }
-    if (command.runtime_root.empty())
-        throw std::invalid_argument("--runtime-root is required for " + name);
     const int byok_option_count = static_cast<int>(command.options.count("--byok-library") +
                                                    command.options.count("--byok-function") +
                                                    command.options.count("--byok-name"));
@@ -1206,7 +1254,7 @@ void print_usage(std::ostream& output) {
     output << "Usage:\n"
               "  trtmc version\n"
               "  trtmc inspect BUNDLE\n"
-              "  trtmc COMMAND BUNDLE --runtime-root DIR [OPTIONS]\n\n"
+              "  trtmc COMMAND BUNDLE [--runtime-root DIR] [OPTIONS]\n\n"
               "Execution commands:\n"
               "  run, encode, embed, rerank, classify, extract-features, disparity, geometry,\n"
               "  segment,\n"
@@ -1233,12 +1281,13 @@ void print_usage(std::ostream& output) {
               "  [--kv-cache-size BYTES|GB|GiB]\n\n"
               "TensorRT-RTX runtime options:\n"
               "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
-              "Execution never searches for runtimes; --runtime-root is always required.\n";
+              "Without --runtime-root, execution checks the current directory, then the\n"
+              "directory containing the running trtmc executable.\n";
 }
 
 int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
     try {
-        const Command command = parse_args(argc, argv);
+        Command command = parse_args(argc, argv);
         if (command.kind == CommandKind::kHelp) {
             print_usage(output);
             return EXIT_SUCCESS;
@@ -1259,6 +1308,8 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
                                 {"sections", std::move(sections)}});
             return EXIT_SUCCESS;
         }
+        command.runtime_root = resolve_runtime_root(command, InspectBundle(command.bundle),
+                                                    fs::current_path(), current_executable_path());
         const bool has_byok_library = has_option(command, "--byok-library");
         const bool has_byok_function = has_option(command, "--byok-function");
         const bool has_byok_name = has_option(command, "--byok-name");

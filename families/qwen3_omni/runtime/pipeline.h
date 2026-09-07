@@ -35,6 +35,7 @@ class Qwen3OmniTextPipeline final : public ITextGeneration {
                           Qwen3OmniRuntimeConfig config, std::shared_ptr<ITokenizer> tokenizer);
 
     std::int32_t default_max_new_tokens() const override { return 128; }
+    bool default_use_chat_template() const noexcept override { return false; }
     TextResult generate(const std::string& prompt,
                         const TextGenerationConfig& config = {}) override;
 

@@ -9,7 +9,8 @@
     {
       "name": "glm-4-9b-l0-tp2",
       "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
-      "max_new_tokens": 8
+      "max_new_tokens": 8,
+      "use_chat_template": false
     }
   ],
   "precision": "fp32",

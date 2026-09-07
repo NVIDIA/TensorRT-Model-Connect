@@ -12,8 +12,14 @@ to that task interface, never to a family implementation:
 auto task = trtmc::load_task("gpt2.bundle", "/opt/trtmc/lib");
 auto* text = dynamic_cast<trtmc::ITextGeneration*>(task.get());
 if (text == nullptr) throw std::runtime_error("not a text-generation bundle");
-auto result = text->generate("Hello");
+trtmc::TextGenerationConfig config;
+config.use_chat_template = text->default_use_chat_template();
+auto result = text->generate("Hello", config);
 ```
+
+The chat-template default is selected by the loaded family and checkpoint. An
+application can set `config.use_chat_template` explicitly when it needs raw
+completion or a template regardless of that default.
 
 Each family DSO directly implements one or more interfaces from
 `trtmc/task.h`. The loader verifies that `ITask::task()` exactly matches the

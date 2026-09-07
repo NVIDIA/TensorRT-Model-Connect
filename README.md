@@ -28,13 +28,11 @@
 ## 💻 Example Code
 
 ```bash
-python -m tensorrt_model_connect build Qwen/Qwen3-0.6B \
+trtmc build Qwen/Qwen3-0.6B \
   --max-sequence-length 16384 \
   --output qwen3-0.6b.bundle
 trtmc run ./qwen3-0.6b.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "What is the capital of France? Answer in one word." \
-  --use-chat-template true \
   --enable-thinking false
 # Generated text: Paris
 ```
@@ -52,7 +50,10 @@ The same bundle works from
 auto task = trtmc::load_task("./qwen3-0.6b.bundle", "/opt/trtmc/lib");
 auto* text = dynamic_cast<trtmc::ITextGeneration*>(task.get());
 if (text == nullptr) throw std::runtime_error("unexpected task");
-std::cout << text->generate("What is the capital of France? Answer in one word.").text << '\n';
+trtmc::TextGenerationConfig config;
+config.use_chat_template = text->default_use_chat_template();
+config.enable_thinking = false;
+std::cout << text->generate("What is the capital of France? Answer in one word.", config).text << '\n';
 ```
 
 <a id="get-started-and-stay-tuned"></a>

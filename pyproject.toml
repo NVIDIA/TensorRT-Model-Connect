@@ -32,6 +32,7 @@ dependencies = [
 ]
 
 [project.scripts]
+trtmc = "tensorrt_model_connect.__main__:main"
 trtmc-bench = "trtmc_benchmark.cli:main"
 
 [project.optional-dependencies]

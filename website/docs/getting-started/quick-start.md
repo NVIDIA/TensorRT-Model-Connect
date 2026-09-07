@@ -26,44 +26,42 @@ python -m pip install -r "$FAMILY_REQUIREMENTS"
 There is no central family extra or dependency registry. A family without a
 `requirements.txt` needs only the pinned base environment and the wheel.
 
-Build a bundle directly from a Hugging Face model ID:
+After the wheel is installed, build and run a supported model in two commands:
 
 ```bash
-python -m tensorrt_model_connect build openai-community/gpt2 \
-  --precision fp16 \
-  --output gpt2.bundle
+trtmc build Qwen/Qwen3-0.6B \
+  --max-sequence-length 16384 \
+  --output qwen3-0.6b.bundle
+trtmc run qwen3-0.6b.bundle \
+  --prompt "What is the capital of France? Answer in one word." \
+  --enable-thinking false
 ```
 
 The CLI downloads the snapshot, reads `config.json` or `model_index.json`, and
 asks every dependency-free family `support.py`. Exactly one family must claim
 the checkpoint. That family supplies the default task; pass `--task` only when
 selecting another task supported by the same family. The build then imports
-only the selected `families.gpt2.model` and calls `build(request, writer)` once.
+only the selected `families.qwen.model` and calls `build(request, writer)` once.
 A prepared local snapshot can be passed in place of the model ID.
 
-For a wheel install, resolve its native runtime directory directly from the
-installed package:
-
-```bash
-TRTMC_RUNTIME_ROOT="$(python -c 'import pathlib, tensorrt_model_connect as m; print(pathlib.Path(m.__file__).parent / "bin")')"
-trtmc run gpt2.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
-  --prompt "Hello" \
-  --max-new-tokens 32
-```
+The installed `trtmc` command routes `build` to the existing Python builder and
+executes the native CLI packaged beside the runtime DSOs for every other
+command. A text family that owns a supported chat template enables it by
+default; pass `--use-chat-template false` to request raw completion instead.
 
 For a native CMake install, point the loader at the directory containing the matching
 `libtrtmc_core.so`, `libtrtmc_runtime.so`, `libtrtmc_backend_trt.so`, and
-`libtrtmc_model_gpt2.so`. The loader reads the bundle header, loads exactly
+selected family DSO. The loader reads the bundle header, loads exactly
 those DSOs, and returns the abstract task interface declared by the bundle.
 
 ```bash
-trtmc run gpt2.bundle \
+trtmc run model.bundle \
   --runtime-root /opt/trtmc/lib \
-  --prompt "Hello" \
-  --max-new-tokens 32
+  --prompt "Hello"
 ```
 
-The shell variable above is only a convenient explicit argument. The CLI never
-searches environment variables, the current directory, or an installed
-fallback runtime.
+An explicit `--runtime-root` always wins. Without it, the native CLI accepts a
+directory only when the exact core, runtime, backend, and family files are all
+present. It checks the current directory first and the real executable
+directory second. It does not scan environment variables or other install
+locations.

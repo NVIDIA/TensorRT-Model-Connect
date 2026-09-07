@@ -15,6 +15,7 @@
         "Paris"
       ],
       "max_new_tokens": 10,
+      "use_chat_template": false,
       "reference_precision": "bf16"
     }
   ],

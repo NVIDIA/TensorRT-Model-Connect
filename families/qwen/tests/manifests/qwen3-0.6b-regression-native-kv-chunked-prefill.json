@@ -22,7 +22,8 @@
       "expected_prefill_chunk_limit": 64,
       "max_new_tokens": 2,
       "temperature": 0.0,
-      "top_k": 1
+      "top_k": 1,
+      "use_chat_template": false
     },
     {
       "name": "qwen3-0.6b-bf16-native-kv-two-chunk-parity",

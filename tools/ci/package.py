@@ -262,20 +262,24 @@ class WheelArchiveValidator:
                 raise CiError(
                     f"{wheel}: expected only unaliased TensorRT backend DSOs, found {backend_dsos}"
                 )
-            scripts = [name for name in names if name.endswith(".data/scripts/trtmc")]
-            script_cores = [
-                name for name in names if name.endswith(".data/scripts/libtrtmc_core.so")
+            duplicate_native_scripts = [
+                name
+                for name in names
+                if ".data/scripts/" in name
+                and Path(name).name in {"trtmc", "libtrtmc_core.so", "libtrtmc_runtime.so"}
             ]
-            script_runtimes = [
-                name for name in names if name.endswith(".data/scripts/libtrtmc_runtime.so")
-            ]
-            if len(scripts) != 1 or len(script_cores) != 1 or len(script_runtimes) != 1:
-                raise CiError(f"{wheel}: installed CLI payload is incomplete")
+            if duplicate_native_scripts:
+                raise CiError(f"{wheel}: duplicate native CLI payload is forbidden")
             entry_points = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
-            if len(entry_points) != 1 or "trtmc-bench" not in archive.read(entry_points[0]).decode(
-                "utf-8"
-            ):
-                raise CiError(f"{wheel}: trtmc-bench console entrypoint is missing")
+            if len(entry_points) != 1:
+                raise CiError(f"{wheel}: console entrypoints are missing")
+            entry_point_text = archive.read(entry_points[0]).decode("utf-8")
+            expected_entrypoints = (
+                "trtmc = tensorrt_model_connect.__main__:main",
+                "trtmc-bench = trtmc_benchmark.cli:main",
+            )
+            if any(entrypoint not in entry_point_text for entrypoint in expected_entrypoints):
+                raise CiError(f"{wheel}: required console entrypoints are missing")
         print(f"validated wheel={wheel} families={len(expected_families)}")
 
 
@@ -369,6 +373,16 @@ print(json.dumps({
         )
         if not version.stdout.startswith("trtmc "):
             raise CiError("installed trtmc CLI returned an invalid version")
+        build_help = subprocess.run(
+            [executable, "build", "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=Path("/tmp"),
+            env=environment,
+        )
+        if "usage: trtmc build" not in build_help.stdout:
+            raise CiError("installed trtmc build command returned invalid help")
         with tempfile.TemporaryDirectory(prefix="trtmc-installed-wheel-") as directory:
             bundle = Path(directory) / "inspect.bundle"
             subprocess.run(

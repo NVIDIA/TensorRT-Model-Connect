@@ -51,6 +51,9 @@ class Gpt2TextGenerationPipeline final : public ITextGeneration {
     // Public API: takes raw text, returns typed result.
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }
+    bool default_use_chat_template() const noexcept override {
+        return !config_.chat_template_format.empty();
+    }
 
     // Token-ID-based generation (for unit tests and internal callers).
     struct GenerationResult {

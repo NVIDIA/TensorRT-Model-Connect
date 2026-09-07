@@ -13,6 +13,7 @@
       "reference_precision": "bf16",
       "prompt": "The capital of France is",
       "max_new_tokens": 8,
+      "use_chat_template": false,
       "do_sample": false
     }
   ],

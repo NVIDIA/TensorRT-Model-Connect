@@ -96,6 +96,8 @@ int main() {
     auto* embedding = dynamic_cast<trtmc::IEmbedding*>(task.get());
     if (text == nullptr || embedding == nullptr)
         return 1;
+    if (text->default_use_chat_template())
+        return 1;
     if (text->generate("hello").text != "hello")
         return 1;
     if (embedding->embed("abc").data != std::vector<float>{3.0F})

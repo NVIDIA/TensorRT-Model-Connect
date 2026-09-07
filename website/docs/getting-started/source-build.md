@@ -120,6 +120,20 @@ cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
 ```
 
+The native executable and selected DSOs share the build directory, so runtime
+commands issued from the checkout or through this `PATH` entry do not need
+`--runtime-root`. Build the bundle through the installed Python module, then run
+it natively:
+
+```bash
+python -m tensorrt_model_connect build Qwen/Qwen3-0.6B \
+  --max-sequence-length 16384 \
+  --output qwen3-0.6b.bundle
+trtmc run qwen3-0.6b.bundle \
+  --prompt "What is the capital of France? Answer in one word." \
+  --enable-thinking false
+```
+
 TensorRT-RTX is an explicit optional build. When its SDK is installed, enable
 only its backend DSO with the exact include and library directories:
 

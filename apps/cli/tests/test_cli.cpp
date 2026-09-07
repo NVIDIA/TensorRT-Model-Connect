@@ -45,6 +45,66 @@ bool parse_throws(std::vector<std::string> arguments) {
     }
 }
 
+bool runtime_root_throws(const trtmc::cli::Command& command, const trtmc::BundleInfo& bundle,
+                         const std::filesystem::path& current_directory,
+                         const std::filesystem::path& executable) {
+    try {
+        (void)trtmc::cli::resolve_runtime_root(command, bundle, current_directory, executable);
+        return false;
+    } catch (const std::invalid_argument&) {
+        return true;
+    }
+}
+
+void add_runtime_files(const std::filesystem::path& root, const trtmc::BundleInfo& bundle) {
+    std::filesystem::create_directories(root);
+    for (const auto& name : {std::string("libtrtmc_core.so"), std::string("libtrtmc_runtime.so"),
+                             "libtrtmc_backend_" + bundle.backend + ".so",
+                             "libtrtmc_model_" + bundle.family + ".so"}) {
+        std::ofstream(root / name).put('\0');
+    }
+}
+
+void test_runtime_root_resolution() {
+    const auto root = std::filesystem::temp_directory_path() / "trtmc-cli-runtime-root";
+    std::filesystem::remove_all(root);
+    const auto current_directory = root / "current";
+    const auto executable_directory = root / "executable";
+    const auto executable = executable_directory / "trtmc";
+
+    trtmc::BundleInfo bundle;
+    bundle.family = "fake";
+    bundle.task = "text_generation";
+    bundle.backend = "fake";
+
+    trtmc::cli::Command command;
+    command.runtime_root = (root / "explicit").string();
+    check(trtmc::cli::resolve_runtime_root(command, bundle, current_directory, executable) ==
+              command.runtime_root,
+          "explicit runtime root wins without discovery");
+
+    command.runtime_root.clear();
+    add_runtime_files(current_directory, bundle);
+    add_runtime_files(executable_directory, bundle);
+    check(trtmc::cli::resolve_runtime_root(command, bundle, current_directory, executable) ==
+              current_directory.string(),
+          "complete current directory wins before executable directory");
+
+    std::filesystem::remove(current_directory / "libtrtmc_model_fake.so");
+    check(trtmc::cli::resolve_runtime_root(command, bundle, current_directory, executable) ==
+              executable_directory.string(),
+          "complete executable directory is the second default");
+
+    std::filesystem::remove(executable_directory / "libtrtmc_backend_fake.so");
+    check(runtime_root_throws(command, bundle, current_directory, executable),
+          "missing exact runtime files require an explicit root");
+
+    bundle.family = "../fake";
+    check(runtime_root_throws(command, bundle, current_directory, executable),
+          "unsafe bundle identity is rejected before path construction");
+    std::filesystem::remove_all(root);
+}
+
 class FakeText final : public trtmc::ITextGeneration,
                        public trtmc::IEmbedding,
                        public trtmc::ILoraAdapterManager {
@@ -54,6 +114,7 @@ class FakeText final : public trtmc::ITextGeneration,
     std::string loaded_adapter_path;
     const char* task() const noexcept override { return trtmc::ITextGeneration::kTask; }
     std::int32_t default_max_new_tokens() const override { return 7; }
+    bool default_use_chat_template() const noexcept override { return true; }
 
     trtmc::TextResult generate(const std::string& prompt,
                                const trtmc::TextGenerationConfig& config) override {
@@ -255,6 +316,8 @@ bool dispatch_throws(const trtmc::cli::Command& command, trtmc::ITask& task) {
 } // namespace
 
 int main() {
+    test_runtime_root_resolution();
+
     const std::vector<std::string> execution_commands{
         "run",
         "encode",
@@ -287,8 +350,8 @@ int main() {
         check(command.runtime_root == "lib", "runtime root is retained");
     }
 
-    check(parse_throws({"trtmc", "run", "model.bundle"}),
-          "execution command requires runtime root");
+    check(parse({"trtmc", "run", "model.bundle"}).runtime_root.empty(),
+          "execution command may defer runtime root resolution");
     check(parse_throws(
               {"trtmc", "run", "model.bundle", "--runtime-root", "a", "--runtime-root", "b"}),
           "duplicate runtime root rejected");
@@ -498,8 +561,12 @@ int main() {
     default_run.options.emplace("--prompt", "hello");
     check(trtmc::cli::dispatch(default_run, text, output) == 0 &&
               text.seen.text_generation_mode == "auto" && text.seen.block_length == 0 &&
-              text.seen.confidence_threshold == -1.0F && text.seen.temperature == 1.0F,
-          "text diffusion options preserve Task API defaults");
+              text.seen.confidence_threshold == -1.0F && text.seen.temperature == 1.0F &&
+              text.seen.use_chat_template,
+          "text request uses the family-owned chat template default");
+    default_run.options.emplace("--use-chat-template", "false");
+    check(trtmc::cli::dispatch(default_run, text, output) == 0 && !text.seen.use_chat_template,
+          "explicit false overrides the family-owned chat template default");
     const std::filesystem::path unsupported_image_path = "/tmp/trtmc-cli-unsupported.ppm";
     {
         std::ofstream image_file(unsupported_image_path, std::ios::binary);

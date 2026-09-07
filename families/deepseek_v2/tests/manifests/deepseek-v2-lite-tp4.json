@@ -9,7 +9,8 @@
     {
       "name": "deepseek-v2-lite-tp4",
       "prompt": "The capital of France is",
-      "max_new_tokens": 10
+      "max_new_tokens": 10,
+      "use_chat_template": false
     }
   ],
   "precision": "fp32",

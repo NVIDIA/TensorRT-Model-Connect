@@ -230,10 +230,14 @@ make_pipeline(cudaStream_t stream, trtmc::LlamaTextGenConfig config,
 
 void test_pipeline_construction() {
     StreamFixture fixture;
-    auto pipeline = make_pipeline(fixture.stream, make_config());
+    auto config = make_config();
+    config.chat_template_format = "chatml";
+    auto pipeline = make_pipeline(fixture.stream, config);
     check(std::string(pipeline->task()) == trtmc::ITextGeneration::kTask,
           "pipeline exposes text-generation Task API");
     check(pipeline->default_max_new_tokens() == 128, "pipeline default token limit");
+    check(pipeline->default_use_chat_template(),
+          "pipeline defaults to its supported chat template");
 }
 
 void test_generate_stops_at_eos() {

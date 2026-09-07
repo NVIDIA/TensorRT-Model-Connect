@@ -14,7 +14,8 @@
       "reference_precision": "fp16",
       "reference_experts_implementation": "batched_mm",
       "prompt": "The capital of France is",
-      "max_new_tokens": 10
+      "max_new_tokens": 10,
+      "use_chat_template": false
     }
   ],
   "max_sequence_length": 64,

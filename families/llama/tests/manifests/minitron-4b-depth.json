@@ -11,7 +11,8 @@
       "name": "minitron-4b-depth",
       "reference_precision": "fp32",
       "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
-      "max_new_tokens": 20
+      "max_new_tokens": 20,
+      "use_chat_template": false
     }
   ],
   "max_sequence_length": 256,

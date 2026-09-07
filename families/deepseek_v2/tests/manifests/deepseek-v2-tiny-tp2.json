@@ -11,7 +11,8 @@
       "name": "deepseek-v2-tiny-tp2",
       "reference_experts_implementation": "batched_mm",
       "prompt": "The capital of France is",
-      "max_new_tokens": 10
+      "max_new_tokens": 10,
+      "use_chat_template": false
     }
   ],
   "precision": "fp32",

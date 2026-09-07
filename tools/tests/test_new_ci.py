@@ -647,7 +647,9 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_byok_tvm_ffi.so", "")
         archive.writestr(
             "package-0.1.dist-info/entry_points.txt",
-            "[console_scripts]\ntrtmc-bench = trtmc_benchmark.cli:main\n",
+            "[console_scripts]\n"
+            "trtmc = tensorrt_model_connect.__main__:main\n"
+            "trtmc-bench = trtmc_benchmark.cli:main\n",
         )
         archive.writestr(
             "package-0.1.dist-info/METADATA",
@@ -657,9 +659,6 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             "Provides-Extra: cutedsl\n"
             "Provides-Extra: test\n",
         )
-        archive.writestr("package-0.1.data/scripts/trtmc", "")
-        archive.writestr("package-0.1.data/scripts/libtrtmc_core.so", "")
-        archive.writestr("package-0.1.data/scripts/libtrtmc_runtime.so", "")
         for family in family_names:
             archive.writestr(
                 f"families/{family}/model.py",
@@ -668,6 +667,14 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             archive.writestr(f"tensorrt_model_connect/bin/libtrtmc_model_{family}.so", "")
 
     WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+
+    duplicate_native = tmp_path / "duplicate-native.whl"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(duplicate_native, "w") as output:
+        for entry in source.infolist():
+            output.writestr(entry, source.read(entry.filename))
+        output.writestr("package-0.1.data/scripts/trtmc", "")
+    with pytest.raises(CiError, match="duplicate native CLI payload"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([duplicate_native])
 
     corrupt = tmp_path / "corrupt.whl"
     with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(corrupt, "w") as output:

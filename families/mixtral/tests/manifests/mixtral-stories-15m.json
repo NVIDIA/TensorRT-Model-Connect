@@ -17,7 +17,8 @@
       "premerge": true,
       "reference_precision": "fp32",
       "prompt": "Once upon a time there was a little",
-      "max_new_tokens": 20
+      "max_new_tokens": 20,
+      "use_chat_template": false
     }
   ],
   "max_sequence_length": 256,

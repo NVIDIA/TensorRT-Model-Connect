@@ -9,7 +9,8 @@
     {
       "name": "granite-3.1-2b-tp4",
       "prompt": "The capital of France is",
-      "max_new_tokens": 20
+      "max_new_tokens": 20,
+      "use_chat_template": false
     }
   ],
   "precision": "fp32",

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,41 @@ from types import SimpleNamespace
 import pytest
 
 from tensorrt_model_connect import build_cli
+
+
+def test_module_entry_routes_build_to_the_existing_builder(monkeypatch) -> None:
+    entry = importlib.import_module("tensorrt_model_connect.__main__")
+    calls = []
+    monkeypatch.setattr(entry.build_cli, "main", lambda arguments: calls.append(arguments) or 7)
+
+    assert entry.main(["build", "model", "--output", "model.bundle"]) == 7
+    assert calls == [["build", "model", "--output", "model.bundle"]]
+
+
+def test_module_entry_executes_the_packaged_native_cli(monkeypatch, tmp_path: Path) -> None:
+    entry = importlib.import_module("tensorrt_model_connect.__main__")
+    executable = tmp_path / "trtmc"
+    executable.write_text("native", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(entry, "_native_executable", lambda: executable)
+    monkeypatch.setattr(entry.os, "execv", lambda path, arguments: calls.append((path, arguments)))
+
+    assert entry.main(["run", "model.bundle", "--prompt", "hello"]) is None
+    assert calls == [
+        (
+            str(executable),
+            [str(executable), "run", "model.bundle", "--prompt", "hello"],
+        )
+    ]
+
+
+def test_module_entry_rejects_a_missing_native_cli(monkeypatch, tmp_path: Path) -> None:
+    entry = importlib.import_module("tensorrt_model_connect.__main__")
+    missing = tmp_path / "missing-trtmc"
+    monkeypatch.setattr(entry, "_native_executable", lambda: missing)
+
+    with pytest.raises(FileNotFoundError, match="packaged native trtmc does not exist"):
+        entry.main(["version"])
 
 
 def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) -> None:

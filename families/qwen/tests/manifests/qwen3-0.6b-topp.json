@@ -15,6 +15,7 @@
       "top_p": 0.9,
       "top_k": 50,
       "seed": 42,
+      "use_chat_template": false,
       "determinism_reruns": 1
     }
   ],

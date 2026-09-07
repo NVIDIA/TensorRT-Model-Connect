@@ -446,6 +446,7 @@ class ITextGeneration : public virtual ITask {
     static constexpr const char* kTask = "text_generation";
     const char* task() const noexcept override { return kTask; }
     virtual std::int32_t default_max_new_tokens() const = 0;
+    virtual bool default_use_chat_template() const noexcept { return false; }
     virtual TextResult generate(const std::string& prompt,
                                 const TextGenerationConfig& config = {}) = 0;
 };
