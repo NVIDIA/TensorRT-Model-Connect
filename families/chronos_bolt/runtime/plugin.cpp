@@ -69,6 +69,8 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 } // namespace
 } // namespace trtmc::chronos_bolt
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("chronos_bolt")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("chronos_bolt does not support --kv-cache-size");

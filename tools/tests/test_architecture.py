@@ -293,6 +293,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/byok/tvm_ffi_kernel_plugin.h",
         "core/runtime/primitives/cuda_common.cpp",
         "core/runtime/primitives/cuda_common.h",
+        "core/runtime/primitives/build_identity.cpp",
         "core/runtime/primitives/device_tensor.cpp",
         "core/runtime/primitives/trt_common.cpp",
         "core/runtime/primitives/trt_common.h",
@@ -303,6 +304,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/runtime/device_tensor.h",
         "core/runtime/include/trtmc/runtime/family_factory.h",
         "core/runtime/include/trtmc/runtime/family_loader.h",
+        "core/runtime/include/trtmc/runtime/plugin_abi.h",
         "core/runtime/include/trtmc/runtime/runtime_root.h",
         "core/runtime/include/trtmc/runtime/tensor.h",
         "core/runtime/include/trtmc/runtime/trt_backend.h",
@@ -1116,7 +1118,7 @@ def test_rtx_backend_is_an_explicit_optional_dso() -> None:
     assert "runtime cache and whole-graph capture require a TensorRT-RTX bundle" in loader
 
 
-def test_every_runtime_exports_only_the_task_factory_contract() -> None:
+def test_every_runtime_exports_task_factory_and_abi_descriptor() -> None:
     forbidden = (
         "IPipeline",
         "PipelineContext",
@@ -1141,6 +1143,8 @@ def test_every_runtime_exports_only_the_task_factory_contract() -> None:
         source = factory.read_text(encoding="utf-8", errors="ignore")
         if "trtmc_create_family" not in source or "trtmc::ITask*" not in source:
             violations.append(f"{family.name}:factory")
+        if f'TRTMC_DEFINE_FAMILY_PLUGIN_V1("{family.name}")' not in source:
+            violations.append(f"{family.name}:plugin-descriptor")
         cmake = (runtime / "CMakeLists.txt").read_text(encoding="utf-8")
         if f"trtmc_model_{family.name}" not in cmake:
             violations.append(f"{family.name}:target")
@@ -1157,6 +1161,38 @@ def test_every_runtime_exports_only_the_task_factory_contract() -> None:
                 if token in text:
                     violations.append(f"{path.relative_to(REPO)}:{token}")
     assert violations == []
+
+
+def test_runtime_plugins_publish_one_exact_build_descriptor() -> None:
+    descriptor = (REPO / "core/runtime/include/trtmc/runtime/plugin_abi.h").read_text(
+        encoding="utf-8"
+    )
+    loader = (REPO / "core/runtime/loader/family_loader.cpp").read_text(encoding="utf-8")
+    cmake = (REPO / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    assert "struct PluginDescriptorV1" in descriptor
+    assert 'kPluginDescriptorSymbol = "trtmc_plugin_descriptor_v1"' in descriptor
+    assert "kPluginBuildId = TRTMC_BUILD_ID" in descriptor
+    assert "trtmc_core_build_id" in descriptor
+    assert "trtmc_runtime_build_id" in descriptor
+    assert "require_plugin(PluginKind expected_kind" in loader
+    assert "require_matching_core_build();" in loader
+    assert "active runtime requires" in loader
+    assert "<elf.h>" not in loader
+    assert "build_cohort" not in loader
+    assert "TRTMC_BUILD_COHORT_ID" not in cmake
+    assert "TRTMC_BUILD_ID" in cmake
+
+    backends = {
+        "core/runtime/tensorrt/trt_backend.cpp": "trt",
+        "core/runtime/tensorrt/rtx_backend.cpp": "trt_rtx",
+    }
+    for path, backend in backends.items():
+        source = (REPO / path).read_text(encoding="utf-8")
+        assert f'TRTMC_DEFINE_BACKEND_PLUGIN_V1("{backend}")' in source
+
+    byok = (REPO / "core/runtime/byok/byok.cpp").read_text(encoding="utf-8")
+    assert "PluginKind::kRuntimeExtension" in byok
 
 
 def test_family_factory_receives_only_direct_runtime_inputs() -> None:

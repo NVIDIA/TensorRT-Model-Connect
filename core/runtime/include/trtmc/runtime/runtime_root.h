@@ -16,11 +16,11 @@ namespace trtmc {
 // only operation that loads a family and backend.
 std::string loaded_runtime_root();
 
-// Return whether runtime_root contains one complete build cohort for bundle
-// that matches the core and runtime loader already active in this process.
-// This function validates one explicit candidate and never searches, loads, or
-// falls back to another directory.
-bool runtime_root_matches_loaded_build(const BundleInfo& bundle, const std::string& runtime_root,
-                                       bool require_byok = false);
+// Return whether runtime_root contains the root-local backend and family DSOs
+// named by bundle, plus BYOK when requested. This structural check never
+// searches, loads, or falls back. Exact product-build and plugin identities are
+// validated when the selected DSOs are loaded.
+bool runtime_root_contains_bundle(const BundleInfo& bundle, const std::string& runtime_root,
+                                  bool require_byok = false);
 
 } // namespace trtmc

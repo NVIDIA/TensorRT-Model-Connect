@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "trtmc/runtime/plugin_abi.h"
+
 #include <stdexcept>
 #include <string>
 

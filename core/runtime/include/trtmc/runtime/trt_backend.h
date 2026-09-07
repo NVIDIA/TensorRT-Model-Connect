@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "trtmc/runtime/plugin_abi.h"
+
 // IBackend: the narrow interface implemented by the TensorRT backend DSO.
 
 #include "trtmc/runtime/trt_module.h"
@@ -70,3 +72,6 @@ extern "C" {
 trtmc::IBackend* trtmc_create_backend();
 void trtmc_destroy_backend(trtmc::IBackend* backend);
 }
+
+#define TRTMC_DEFINE_BACKEND_PLUGIN_V1(backend_id)                                                 \
+    TRTMC_DEFINE_PLUGIN_DESCRIPTOR_V1(::trtmc::PluginKind::kBackend, backend_id)

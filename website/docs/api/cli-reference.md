@@ -56,17 +56,19 @@ backend, and section bounds. Family-owned section payloads are not decoded.
 Every execution command has this shape:
 
 ```bash
-trtmc COMMAND MODEL.bundle --runtime-root DIR [OPTIONS]
+trtmc COMMAND MODEL.bundle [--runtime-root DIR] [OPTIONS]
 ```
 
-`--runtime-root` is always required. It must contain the matching
-`libtrtmc_core.so`, `libtrtmc_runtime.so`, backend DSO, and selected family DSO.
-The CLI never searches the current directory, environment variables, or an
-installed fallback. Common load options are:
+When `--runtime-root` is omitted, the CLI searches the active runtime and CLI
+installation, followed by colon-separated `TRTMC_RUNTIME_PATH` entries. It
+does not search the current directory unless `.` is explicitly present in that
+variable. One selected root must contain the requested backend and family DSOs;
+their descriptors must declare the active product-build identity, expected
+kind, and bundle ID before either factory is called. Common load options are:
 
 | Option | Contract |
 | --- | --- |
-| `--runtime-root DIR` | Required exact DSO root. |
+| `--runtime-root DIR` | Select one exact plugin root without search fallback; exact-build validation still applies. |
 | `--kv-cache-size BYTES\|GB\|GiB` | Runtime-sized KV capacity for a compatible bundle. |
 | `--runtime-cache PATH` | TensorRT-RTX cache path; rejected by the standard TensorRT backend. |
 | `--cuda-graphs` | Enable TensorRT-RTX CUDA graphs; rejected by the standard backend. |
@@ -101,7 +103,6 @@ text-diffusion replay inputs, and a paired `--lora-adapter` /
 
 ```bash
 trtmc run qwen.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "Hello" \
   --max-new-tokens 32 \
   --temperature 0 \

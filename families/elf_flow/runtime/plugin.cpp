@@ -107,6 +107,8 @@ ITask* create(const FamilyContext& context) {
 
 } // namespace trtmc::elf_flow
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("elf_flow")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("elf_flow does not support --kv-cache-size");

@@ -15,7 +15,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -199,8 +198,6 @@ void append_python_package_runtime_roots(std::vector<fs::path>& candidates,
 
 RuntimeRootSearchContext runtime_root_search_context() {
     RuntimeRootSearchContext context;
-    std::error_code error;
-    context.current_directory = fs::current_path(error);
     context.loaded_runtime_root = loaded_runtime_root();
 
     std::vector<char> executable(4096, '\0');
@@ -213,31 +210,6 @@ RuntimeRootSearchContext runtime_root_search_context() {
     if (const char* value = std::getenv("TRTMC_RUNTIME_PATH"))
         context.runtime_path = value;
     return context;
-}
-
-void load_byok_extension(const Command& command) {
-    using LoadKernelFn = const char* (*)(const char*, const char*, const char*) noexcept;
-    const fs::path extension = fs::path(command.runtime_root) / "libtrtmc_byok_tvm_ffi.so";
-    dlerror();
-    void* handle = dlopen(extension.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("unable to load BYOK extension '" + extension.string() +
-                                 "': " + (error != nullptr ? error : "unknown dlopen error"));
-    }
-    static auto* handles = new std::vector<void*>;
-    handles->push_back(handle);
-    dlerror();
-    auto load = reinterpret_cast<LoadKernelFn>(dlsym(handle, "trtmc_load_byok_kernel"));
-    if (const char* error = dlerror(); error != nullptr || load == nullptr) {
-        throw std::runtime_error("BYOK extension is missing trtmc_load_byok_kernel");
-    }
-    if (const char* error = load(command.options.at("--byok-library").c_str(),
-                                 command.options.at("--byok-function").c_str(),
-                                 command.options.at("--byok-name").c_str())) {
-        const std::string message = error;
-        throw std::runtime_error(message);
-    }
 }
 
 std::string take_value(int argc, char** argv, int& index, const std::string& option) {
@@ -741,12 +713,10 @@ std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& ex
     if (!matches)
         throw std::logic_error("runtime-root discovery requires a candidate matcher");
 
-    std::vector<fs::path> current_candidates;
     std::vector<fs::path> installed_candidates;
     std::vector<fs::path> wheel_candidates;
     std::vector<fs::path> configured_candidates;
     std::set<std::string> seen;
-    append_candidate(current_candidates, seen, context.current_directory);
     append_candidate(installed_candidates, seen, context.loaded_runtime_root);
 
     if (!context.executable.empty()) {
@@ -763,13 +733,6 @@ std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& ex
     append_path_list(configured_candidates, seen, context.runtime_path);
 
     std::vector<fs::path> searched;
-    if (!current_candidates.empty()) {
-        const auto& current = current_candidates.front();
-        searched.push_back(current);
-        if (matches(bundle, current, require_byok)) {
-            return current.string();
-        }
-    }
     for (const auto& candidate : installed_candidates) {
         searched.push_back(candidate);
         if (matches(bundle, candidate, require_byok))
@@ -1410,9 +1373,9 @@ void print_usage(std::ostream& output) {
               "  [--kv-cache-size BYTES|GB|GiB]\n\n"
               "TensorRT-RTX runtime options:\n"
               "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
-              "Runtime discovery: current directory, the active trtmc installation, then\n"
-              "TRTMC_RUNTIME_PATH. LD_LIBRARY_PATH can select the active cohort before startup.\n"
-              "--runtime-root overrides discovery.\n";
+              "Runtime discovery: the active trtmc installation, then TRTMC_RUNTIME_PATH.\n"
+              "The current directory is not searched; use TRTMC_RUNTIME_PATH=. explicitly.\n"
+              "--runtime-root selects one exact root without fallback.\n";
 }
 
 int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
@@ -1454,13 +1417,15 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
                 resolve_runtime_root(bundle, {}, has_byok_library, runtime_root_search_context(),
                                      [](const BundleInfo& candidate_bundle,
                                         const fs::path& candidate, bool require_byok) {
-                                         return runtime_root_matches_loaded_build(
+                                         return runtime_root_contains_bundle(
                                              candidate_bundle, candidate.string(), require_byok);
                                      });
             error << "Using TRTMC runtime: " << command.runtime_root << '\n';
         }
         if (has_byok_library)
-            load_byok_extension(command);
+            load_byok_kernel_from_runtime(
+                command.runtime_root, command.options.at("--byok-library"),
+                command.options.at("--byok-function"), command.options.at("--byok-name"));
         std::unique_ptr<ITask> task =
             load_task(command.bundle, command.runtime_root, command.kv_cache_size_bytes,
                       command.runtime_cache_path, command.cuda_graphs);

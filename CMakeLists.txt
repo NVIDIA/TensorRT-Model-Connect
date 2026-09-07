@@ -12,19 +12,18 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 
-if(NOT TRTMC_BUILD_COHORT_ID)
-  string(RANDOM LENGTH 32 ALPHABET 0123456789abcdef TRTMC_BUILD_COHORT_ID)
+set(TRTMC_BUILD_ID "" CACHE STRING "Exact product-build identity embedded in runtime plugins")
+if(NOT TRTMC_BUILD_ID)
+  string(RANDOM LENGTH 32 ALPHABET 0123456789abcdef _trtmc_generated_build_id)
+  set(TRTMC_BUILD_ID "${_trtmc_generated_build_id}" CACHE STRING
+    "Exact product-build identity embedded in runtime plugins" FORCE
+  )
 endif()
-string(LENGTH "${TRTMC_BUILD_COHORT_ID}" _trtmc_build_cohort_id_length)
-if(NOT _trtmc_build_cohort_id_length EQUAL 32 OR
-   NOT TRTMC_BUILD_COHORT_ID MATCHES "^[0-9a-f]+$")
-  message(FATAL_ERROR "TRTMC_BUILD_COHORT_ID must contain exactly 32 lowercase hex characters")
+string(LENGTH "${TRTMC_BUILD_ID}" _trtmc_build_id_length)
+if(NOT _trtmc_build_id_length EQUAL 32 OR NOT TRTMC_BUILD_ID MATCHES "^[0-9a-f]+$")
+  message(FATAL_ERROR "TRTMC_BUILD_ID must contain exactly 32 lowercase hex characters")
 endif()
-set(_trtmc_build_cohort_symbol "trtmc_build_cohort_${TRTMC_BUILD_COHORT_ID}")
-add_link_options(
-  "LINKER:--defsym=${_trtmc_build_cohort_symbol}=0"
-  "LINKER:--export-dynamic-symbol=${_trtmc_build_cohort_symbol}"
-)
+add_compile_definitions(TRTMC_BUILD_ID="${TRTMC_BUILD_ID}")
 
 include(GNUInstallDirs)
 find_package(CUDAToolkit REQUIRED)
@@ -95,6 +94,7 @@ set(TRTMC_CUDART_LIBRARY CUDA::cudart)
 
 add_library(trtmc_core SHARED
   core/runtime/bundle/bundle_format.cpp
+  core/runtime/primitives/build_identity.cpp
   core/runtime/primitives/cuda_common.cpp
   core/runtime/primitives/device_tensor.cpp
   core/runtime/primitives/trt_common.cpp
@@ -364,8 +364,6 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_cli PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME cli COMMAND test_cli
     "${_trtmc_test_runtime_root}"
-    $<TARGET_FILE:trtmc_core>
-    $<TARGET_FILE:trtmc_runtime>
   )
 
   add_library(trtmc_test_backend_fake SHARED core/runtime/tests/fake_backend.cpp)
@@ -389,6 +387,48 @@ if(TRTMC_BUILD_TESTS)
     LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
   )
 
+  add_library(trtmc_test_backend_incompatible SHARED core/runtime/tests/fake_backend.cpp)
+  target_include_directories(trtmc_test_backend_incompatible PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(trtmc_test_backend_incompatible PRIVATE CUDA::cudart)
+  target_compile_definitions(trtmc_test_backend_incompatible PRIVATE
+    TRTMC_FAKE_BACKEND_NAME="incompatible"
+    TRTMC_FAKE_INCOMPATIBLE_BUILD=1
+  )
+  set_target_properties(trtmc_test_backend_incompatible PROPERTIES
+    OUTPUT_NAME trtmc_backend_incompatible
+    LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
+  )
+
+  add_library(trtmc_test_core_incompatible SHARED
+    core/runtime/bundle/bundle_format.cpp
+    core/runtime/primitives/build_identity.cpp
+    core/runtime/primitives/cuda_common.cpp
+    core/runtime/primitives/device_tensor.cpp
+    core/runtime/primitives/trt_common.cpp
+  )
+  target_include_directories(trtmc_test_core_incompatible
+    PUBLIC ${PROJECT_SOURCE_DIR}/core/runtime/include
+    PRIVATE ${PROJECT_SOURCE_DIR}/core
+  )
+  target_include_directories(trtmc_test_core_incompatible SYSTEM PRIVATE
+    ${CUDAToolkit_INCLUDE_DIRS}
+  )
+  target_link_libraries(trtmc_test_core_incompatible
+    PUBLIC CUDA::cudart
+    PRIVATE nlohmann_json::nlohmann_json
+  )
+  target_compile_definitions(trtmc_test_core_incompatible PRIVATE
+    TRTMC_FAKE_INCOMPATIBLE_BUILD=1
+  )
+  target_compile_options(trtmc_test_core_incompatible PRIVATE -Wall -Wextra -Wpedantic)
+  set_target_properties(trtmc_test_core_incompatible PROPERTIES
+    OUTPUT_NAME trtmc_core
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/incompatible-core"
+    BUILD_RPATH "\$ORIGIN"
+  )
+
   add_library(trtmc_test_family_fake SHARED core/runtime/tests/fake_family.cpp)
   target_include_directories(trtmc_test_family_fake PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
   target_link_libraries(trtmc_test_family_fake PRIVATE trtmc_core)
@@ -406,7 +446,6 @@ if(TRTMC_BUILD_TESTS)
   add_dependencies(test_runtime_root trtmc_test_backend_fake trtmc_test_family_fake)
   add_test(NAME runtime_root COMMAND test_runtime_root
     "${CMAKE_BINARY_DIR}/tests/runtime-root-validator"
-    $<TARGET_FILE:trtmc_core>
     $<TARGET_FILE:trtmc_runtime>
     $<TARGET_FILE:trtmc_test_backend_fake>
     $<TARGET_FILE:trtmc_test_family_fake>
@@ -422,9 +461,18 @@ if(TRTMC_BUILD_TESTS)
   add_dependencies(test_family_loader
     trtmc_test_backend_fake
     trtmc_test_backend_fake_rtx
+    trtmc_test_backend_incompatible
+    trtmc_test_core_incompatible
     trtmc_test_family_fake
   )
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
+  add_test(NAME family_loader_incompatible_core
+    COMMAND ${CMAKE_COMMAND} -E env
+      "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:trtmc_test_core_incompatible>"
+      $<TARGET_FILE:test_family_loader>
+      "${_trtmc_test_runtime_root}"
+      --expect-core-mismatch
+  )
 
   add_executable(test_trt_module_dynamic_input
     core/runtime/tests/test_trt_module_dynamic_input.cpp
@@ -577,6 +625,7 @@ install(FILES
   core/runtime/include/trtmc/runtime/device_tensor.h
   core/runtime/include/trtmc/runtime/family_factory.h
   core/runtime/include/trtmc/runtime/family_loader.h
+  core/runtime/include/trtmc/runtime/plugin_abi.h
   core/runtime/include/trtmc/runtime/runtime_root.h
   core/runtime/include/trtmc/runtime/tensor.h
   core/runtime/include/trtmc/runtime/trt_backend.h

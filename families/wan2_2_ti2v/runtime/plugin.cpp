@@ -64,6 +64,8 @@ std::unique_ptr<ITokenizer> load_tokenizer(const BundleReader& bundle) {
 } // namespace
 } // namespace trtmc::wan22_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("wan2_2_ti2v")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("wan2_2_ti2v does not support --kv-cache-size");

@@ -846,17 +846,57 @@ def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> 
             check=True,
         )
 
-    compile_library("libtrtmc_core.so", "void core_symbol(void) {}\n")
-    compile_library("libtrtmc_runtime.so", "void runtime_symbol(void) {}\n")
-    compile_library("libtrtmc_backend_trt.so", "void backend_symbol(void) {}\n")
-    compile_library("libtrtmc_byok_tvm_ffi.so", "void byok_symbol(void) {}\n")
-    compile_library("libtrtmc_model_alpha.so", "void alpha_symbol(void) {}\n")
-    compile_library("libtrtmc_model_beta.so", "void beta_symbol(void) {}\n")
+    def plugin_source(
+        kind: int,
+        plugin_id: str,
+        implementation: str,
+        build_id: str = "1234567890abcdef1234567890abcdef",
+    ) -> str:
+        return f"""
+#include <stdint.h>
+struct PluginDescriptorV1 {{
+    uint32_t struct_size;
+    uint32_t descriptor_version;
+    uint32_t kind;
+    const char *id;
+    const char *build_id;
+}};
+static const struct PluginDescriptorV1 descriptor = {{
+    sizeof(struct PluginDescriptorV1), 1, {kind}, "{plugin_id}", "{build_id}"
+}};
+const struct PluginDescriptorV1 *trtmc_plugin_descriptor_v1(void) {{ return &descriptor; }}
+{implementation}
+"""
+
+    build_id = "1234567890abcdef1234567890abcdef"
+    compile_library(
+        "libtrtmc_core.so",
+        f'const char *trtmc_core_build_id(void) {{ return "{build_id}"; }}\n',
+    )
+    compile_library(
+        "libtrtmc_runtime.so",
+        f'const char *trtmc_runtime_build_id(void) {{ return "{build_id}"; }}\n',
+    )
+    compile_library(
+        "libtrtmc_backend_trt.so", plugin_source(1, "trt", "void backend_symbol(void) {}")
+    )
+    compile_library(
+        "libtrtmc_byok_tvm_ffi.so",
+        plugin_source(3, "tvm_ffi", "void byok_symbol(void) {}"),
+    )
+    compile_library(
+        "libtrtmc_model_alpha.so", plugin_source(2, "alpha", "void alpha_symbol(void) {}")
+    )
+    compile_library("libtrtmc_model_beta.so", plugin_source(2, "beta", "void beta_symbol(void) {}"))
     load_native_libraries(tmp_path, ("alpha", "beta"))
 
     compile_library(
         "libtrtmc_model_beta.so",
-        "extern void missing_symbol(void); void beta_symbol(void) { missing_symbol(); }\n",
+        plugin_source(
+            2,
+            "beta",
+            "extern void missing_symbol(void); void beta_symbol(void) { missing_symbol(); }",
+        ),
     )
     with pytest.raises(CiError, match="undefined symbol: missing_symbol"):
         load_native_libraries(tmp_path, ("alpha", "beta"))
