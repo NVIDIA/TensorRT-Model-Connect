@@ -1,0 +1,85 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="706" height="530" role="img" aria-labelledby="tutorials-advanced-byok-workflow-svg-title tutorials-advanced-byok-workflow-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 706.00 530.00" xmlns="http://www.w3.org/2000/svg">
+<title id="tutorials-advanced-byok-workflow-svg-title">Bring-your-own-kernel workflow</title>
+<desc id="tutorials-advanced-byok-workflow-svg-description">A family builder or application graph transform inserts one explicit TVM-FFI kernel into a live TensorRT network before serialization, and runtime loads the named kernel DSO before the family task.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 504.4)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-504.4 680.65,-504.4 680.65,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="179.92" y="-451" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Bring your own kernel</text>
+<text xml:space="preserve" text-anchor="start" x="8" y="-433.8" font-family="Arial" font-size="16.00" fill="#111827">One explicit build hook and one explicit runtime load; no graph framework or hash registry.</text>
+<!-- kernel -->
+<g id="node1" class="node">
+<title>kernel</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M455.36,-427.2C455.36,-427.2 221.97,-427.2 221.97,-427.2 215.97,-427.2 209.97,-421.2 209.97,-415.2 209.97,-415.2 209.97,-384.6 209.97,-384.6 209.97,-378.6 215.97,-372.6 221.97,-372.6 221.97,-372.6 455.36,-372.6 455.36,-372.6 461.36,-372.6 467.36,-378.6 467.36,-384.6 467.36,-384.6 467.36,-415.2 467.36,-415.2 467.36,-421.2 461.36,-427.2 455.36,-427.2"/>
+<text xml:space="preserve" text-anchor="start" x="256.96" y="-402.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">TVM&#45;FFI kernel DSO</text>
+<text xml:space="preserve" text-anchor="start" x="224.37" y="-386" font-family="Arial" font-size="16.00" fill="#111827">explicit function + shape + dtype</text>
+</g>
+<!-- owner -->
+<g id="node2" class="node">
+<title>owner</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M367.02,-324.6C367.02,-324.6 122.3,-324.6 122.3,-324.6 116.3,-324.6 110.3,-318.6 110.3,-312.6 110.3,-312.6 110.3,-294.6 110.3,-294.6 110.3,-288.6 116.3,-282.6 122.3,-282.6 122.3,-282.6 367.02,-282.6 367.02,-282.6 373.02,-282.6 379.02,-288.6 379.02,-294.6 379.02,-294.6 379.02,-312.6 379.02,-312.6 379.02,-318.6 373.02,-324.6 367.02,-324.6"/>
+<text xml:space="preserve" text-anchor="start" x="124.7" y="-299.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family build or app transform</text>
+</g>
+<!-- kernel&#45;&gt;owner -->
+<g id="edge1" class="edge">
+<title>kernel&#45;&gt;owner</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M311.47,-371.62C299.58,-359.69 285.61,-345.68 273.53,-333.56"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="275.72,-331.78 268.08,-328.1 271.75,-335.74 275.72,-331.78"/>
+</g>
+<!-- runtime -->
+<g id="node5" class="node">
+<title>runtime</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M606.58,-228.3C606.58,-228.3 380.75,-228.3 380.75,-228.3 374.75,-228.3 368.75,-222.3 368.75,-216.3 368.75,-216.3 368.75,-198.3 368.75,-198.3 368.75,-192.3 374.75,-186.3 380.75,-186.3 380.75,-186.3 606.58,-186.3 606.58,-186.3 612.58,-186.3 618.58,-192.3 618.58,-198.3 618.58,-198.3 618.58,-216.3 618.58,-216.3 618.58,-222.3 612.58,-228.3 606.58,-228.3"/>
+<text xml:space="preserve" text-anchor="start" x="383.15" y="-203.2" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Explicit BYOK runtime load</text>
+</g>
+<!-- kernel&#45;&gt;runtime -->
+<g id="edge4" class="edge">
+<title>kernel&#45;&gt;runtime</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M360.54,-372C389.31,-336.62 439.7,-274.65 469.55,-237.96"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="471.5,-239.99 474.37,-232.02 467.15,-236.46 471.5,-239.99"/>
+</g>
+<!-- network -->
+<g id="node3" class="node">
+<title>network</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M320.46,-234.6C320.46,-234.6 48.87,-234.6 48.87,-234.6 42.87,-234.6 36.87,-228.6 36.87,-222.6 36.87,-222.6 36.87,-192 36.87,-192 36.87,-186 42.87,-180 48.87,-180 48.87,-180 320.46,-180 320.46,-180 326.46,-180 332.46,-186 332.46,-192 332.46,-192 332.46,-222.6 332.46,-222.6 332.46,-228.6 326.46,-234.6 320.46,-234.6"/>
+<text xml:space="preserve" text-anchor="start" x="90.67" y="-209.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Live TensorRT network</text>
+<text xml:space="preserve" text-anchor="start" x="51.27" y="-193.4" font-family="Arial" font-size="16.00" fill="#111827">insert layer and reconnect consumers</text>
+</g>
+<!-- owner&#45;&gt;network -->
+<g id="edge2" class="edge">
+<title>owner&#45;&gt;network</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M231.35,-281.67C224.48,-270.88 215.91,-257.41 207.99,-244.96"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="210.43,-243.58 203.77,-238.33 205.7,-246.58 210.43,-243.58"/>
+</g>
+<!-- bundle -->
+<g id="node4" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M342.33,-132C342.33,-132 193,-132 193,-132 187,-132 181,-126 181,-120 181,-120 181,-102 181,-102 181,-96 187,-90 193,-90 193,-90 342.33,-90 342.33,-90 348.33,-90 354.33,-96 354.33,-102 354.33,-102 354.33,-120 354.33,-120 354.33,-126 348.33,-132 342.33,-132"/>
+<text xml:space="preserve" text-anchor="start" x="195.4" y="-106.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Serialized .bundle</text>
+</g>
+<!-- network&#45;&gt;bundle -->
+<g id="edge3" class="edge">
+<title>network&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M208.67,-179.02C219.07,-167.21 231.27,-153.35 241.86,-141.31"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="243.66,-143.5 246.85,-135.65 239.46,-139.8 243.66,-143.5"/>
+</g>
+<!-- task -->
+<g id="node6" class="node">
+<title>task</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M431.77,-42C431.77,-42 245.56,-42 245.56,-42 239.56,-42 233.56,-36 233.56,-30 233.56,-30 233.56,-12 233.56,-12 233.56,-6 239.56,0 245.56,0 245.56,0 431.77,0 431.77,0 437.77,0 443.77,-6 443.77,-12 443.77,-12 443.77,-30 443.77,-30 443.77,-36 437.77,-42 431.77,-42"/>
+<text xml:space="preserve" text-anchor="start" x="247.96" y="-16.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family Task execution</text>
+</g>
+<!-- bundle&#45;&gt;task -->
+<g id="edge5" class="edge">
+<title>bundle&#45;&gt;task</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M284.49,-89.15C293.51,-77.97 304.78,-64 314.7,-51.71"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="316.83,-53.52 319.68,-45.53 312.47,-50 316.83,-53.52"/>
+</g>
+<!-- runtime&#45;&gt;task -->
+<g id="edge6" class="edge">
+<title>runtime&#45;&gt;task</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M476.18,-185.52C448.62,-152.75 394.97,-88.95 363.45,-51.47"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="365.95,-50.09 358.65,-45.77 361.66,-53.69 365.95,-50.09"/>
+</g>
+</g>
+</svg>

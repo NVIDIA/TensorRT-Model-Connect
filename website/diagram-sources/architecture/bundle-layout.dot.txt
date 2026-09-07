@@ -1,0 +1,18 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Minimal bundle layout
+// @description: A bundle contains a bounded header with family, task, backend, and section ranges followed by opaque family-owned byte sections.
+digraph BundleLayout {
+  graph [bgcolor="#fbfcfe", pad="0.35", nodesep="0.5", ranksep="0.65", rankdir="TB", splines="ortho", fontname="Arial", labelloc="t", label=<<B>Minimal .bundle layout</B><BR/><FONT POINT-SIZE="16">Core owns bounds; the family owns section names and semantics.</FONT>>, fontsize="28", fontcolor="#111827"];
+  node [shape="record", style="rounded,filled", fillcolor="#ffffff", color="#64748b", penwidth="2", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.15"];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  prefix [fillcolor="#eff6ff", color="#2563eb", label="{Fixed prefix|magic|header length}"];
+  header [fillcolor="#fffbeb", color="#b45309", label="{UTF-8 JSON header|format|family|task|backend|section offsets + lengths}"];
+  payload [fillcolor="#ecfccb", color="#4d7c0f", label="{Opaque payload|engine plans|tokenizer or assets|family runtime metadata|other named sections}"];
+  reader [shape="rect", fillcolor="#f5f3ff", color="#7c3aed", label=<<B>BundleReader</B><BR/><FONT POINT-SIZE="16">bounded on-demand reads</FONT>>];
+
+  prefix -> header -> payload [label="contiguous bytes"];
+  reader -> header [label="validates"];
+  reader -> payload [label="reads named range"];
+}

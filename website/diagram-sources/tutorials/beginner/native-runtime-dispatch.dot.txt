@@ -1,0 +1,18 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Explicit family runtime dispatch
+// @description: The loader reads family, task, and backend from the bundle, opens exactly those DSOs from the runtime root, calls the family factory, and returns the matching abstract Task interface.
+digraph NativeRuntimeDispatch {
+  graph [bgcolor="#fbfcfe", pad="0.32", nodesep="0.42", ranksep="0.62", rankdir="TB", splines="ortho", fontname="Arial", labelloc="t", label=<<B>From bundle identity to a Task API</B><BR/><FONT POINT-SIZE="16">This is load control flow; no registry search or fallback occurs.</FONT>>, fontsize="28", fontcolor="#101828"];
+  node [shape="rect", style="rounded,filled", color="#64748b", penwidth="1.8", fillcolor="#ffffff", fontname="Arial", fontsize="17", fontcolor="#101828", margin="0.18,0.13"];
+  edge [color="#64748b", penwidth="2.2", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  load [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>load_task(bundle, root)</B>>];
+  header [fillcolor="#fffbeb", color="#b45309", label=<<B>Read bounded header</B><BR/><FONT POINT-SIZE="16">family · task · backend</FONT>>];
+  backend [fillcolor="#eff6ff", color="#2563eb", label=<<B>Open backend DSO</B><BR/><FONT POINT-SIZE="16">returns IBackend</FONT>>];
+  family [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Open family DSO</B><BR/><FONT POINT-SIZE="16">call trtmc_create_family</FONT>>];
+  verify [fillcolor="#eff6ff", color="#2563eb", label=<<B>Verify task identity</B>>];
+  task [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Return abstract ITask</B>>];
+
+  load -> header -> backend -> family -> verify -> task;
+}

@@ -1,0 +1,29 @@
+{
+  "title": "Load one family-owned bundle",
+  "description": "The loader reads bounded bundle identity, opens the exact backend and family DSO from an explicit runtime root, calls the family factory, verifies the returned task, and never falls back.",
+  "subtitle": "Missing libraries, rejected names, factory failures, and task mismatches are terminal.",
+  "participants": [
+    {"id": "caller", "label": "Caller", "color": "api"},
+    {"id": "loader", "label": "Loader", "color": "runtime"},
+    {"id": "bundle", "label": "Bundle", "color": "artifact"},
+    {"id": "backend", "label": "Backend DSO", "color": "build"},
+    {"id": "family", "label": "Family DSO", "color": "runtime"}
+  ],
+  "messages": [
+    {"kind": "section", "label": "1 · Read exact artifact identity"},
+    {"number": 1, "from": "caller", "to": "loader", "label": "load_task"},
+    {"number": 2, "from": "loader", "to": "bundle", "label": "Read header"},
+    {"number": 3, "from": "bundle", "to": "loader", "label": "Exact IDs", "style": "return"},
+    {"kind": "section", "label": "2 · Open exactly named implementations"},
+    {"number": 4, "from": "loader", "to": "backend", "label": "Open DSO"},
+    {"number": 5, "from": "backend", "to": "loader", "label": "IBackend", "style": "return"},
+    {"number": 6, "from": "loader", "to": "family", "label": "Open DSO"},
+    {"number": 7, "from": "loader", "to": "family", "label": "Call factory"},
+    {"number": 8, "from": "family", "to": "bundle", "label": "Read sections"},
+    {"number": 9, "from": "family", "to": "backend", "label": "Create engine"},
+    {"number": 10, "from": "family", "to": "loader", "label": "Concrete ITask", "style": "return"},
+    {"kind": "section", "label": "3 · Verify and return abstract Task"},
+    {"number": 11, "from": "loader", "to": "loader", "label": "Verify task"},
+    {"number": 12, "from": "loader", "to": "caller", "label": "ITask", "style": "return"}
+  ]
+}

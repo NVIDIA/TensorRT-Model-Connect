@@ -1,0 +1,26 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Build-system dependency boundaries
+// @description: Solid arrows point from targets to their source dependencies; root CMake discovers family-owned runtime targets by directory convention without naming families.
+digraph BuildSystem {
+  graph [bgcolor="#fbfcfe", pad="0.35", nodesep="0.5", ranksep="0.72", rankdir="BT", splines="polyline", fontname="Arial", labelloc="t", label=<<B>Native build dependencies</B><BR/><FONT POINT-SIZE="16">A → B means target A depends on B. Family discovery is dashed.</FONT>>, fontsize="28", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", fillcolor="#ffffff", color="#64748b", penwidth="2", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.15"];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  app [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>apps / examples</B>>];
+  loader [fillcolor="#eff6ff", color="#2563eb", label=<<B>libtrtmc_runtime</B><BR/><FONT POINT-SIZE="16">explicit DSO loader</FONT>>];
+  family [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>libtrtmc_model_family</B><BR/><FONT POINT-SIZE="16">family-owned target and sources</FONT>>];
+  backend [fillcolor="#eff6ff", color="#2563eb", label=<<B>libtrtmc_backend_trt</B>>];
+  core [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>libtrtmc_core</B><BR/><FONT POINT-SIZE="16">Bundle · Task · Engine contracts</FONT>>];
+  trt [fillcolor="#fffbeb", color="#b45309", label=<<B>TensorRT + CUDA</B>>];
+  cmake [fillcolor="#ffffff", color="#64748b", label=<<B>Root CMake</B><BR/><FONT POINT-SIZE="16">glob families/*/runtime/CMakeLists.txt</FONT>>];
+
+  app -> loader [label="links"];
+  app -> core [label="uses Task API"];
+  loader -> core [label="links"];
+  family -> core [label="implements Task API"];
+  backend -> core [label="implements Engine API"];
+  backend -> trt [label="links"];
+  family -> trt [label="custom ops only"];
+  cmake -> family [style="dashed", label="discovers"];
+}

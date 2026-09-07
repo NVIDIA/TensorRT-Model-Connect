@@ -1,0 +1,33 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Runtime source dependencies and dynamic loading
+// @description: Solid arrows point from consumers and implementations to abstract core interfaces; dashed arrows show the loader opening the exact backend and family named by the bundle.
+digraph RuntimeOwnership {
+  graph [bgcolor="#fbfcfe", pad="0.35", nodesep="0.4", ranksep="0.65", rankdir="TB", splines="polyline", size="11.5,8", ratio="compress", fontname="Arial", labelloc="t", label=<<B>Runtime dependencies</B><BR/><FONT POINT-SIZE="16">Solid A → B means A depends on B. Dashed arrows are dynamic loads.</FONT>>, fontsize="28", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", fillcolor="#ffffff", color="#64748b", penwidth="2", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.15"];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  app [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>User app / trtmc CLI</B>>];
+  loader [fillcolor="#eff6ff", color="#2563eb", label=<<B>Runtime loader</B>>];
+  family [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Family DSO</B><BR/><FONT POINT-SIZE="16">concrete Task pipeline</FONT>>];
+  backend [fillcolor="#eff6ff", color="#2563eb", label=<<B>TensorRT backend DSO</B>>];
+  load_api [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Load API</B>>];
+  task_api [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Abstract Task API</B>>];
+  engine_api [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Abstract Engine API</B>>];
+  bundle [fillcolor="#fffbeb", color="#b45309", label=<<B>BundleReader</B>>];
+  factory [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Family factory contract</B>>];
+
+  app -> load_api [label="depends on"];
+  app -> task_api [label="depends on"];
+  loader -> load_api [label="implements"];
+  loader -> task_api [label="depends on"];
+  loader -> bundle [label="depends on"];
+  loader -> factory [label="depends on"];
+  family -> task_api [label="implements"];
+  family -> engine_api [label="depends on"];
+  family -> bundle [label="depends on"];
+  family -> factory [label="implements"];
+  backend -> engine_api [label="implements"];
+  loader -> family [style="dashed", label="dlopen family"];
+  loader -> backend [style="dashed", label="dlopen backend"];
+}

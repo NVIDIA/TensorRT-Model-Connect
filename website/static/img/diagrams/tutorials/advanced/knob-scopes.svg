@@ -1,0 +1,92 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="702" height="538" role="img" aria-labelledby="tutorials-advanced-knob-scopes-svg-title tutorials-advanced-knob-scopes-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 702.00 538.00" xmlns="http://www.w3.org/2000/svg">
+<title id="tutorials-advanced-knob-scopes-svg-title">Build, load, and request option scopes</title>
+<desc id="tutorials-advanced-knob-scopes-svg-description">Build options shape family-owned bundle sections, load options select explicit runtime resources, and request options affect only one abstract Task call.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 513)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-513 677.15,-513 677.15,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="131.47" y="-459.6" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Keep option scopes separate</text>
+<text xml:space="preserve" text-anchor="start" x="90.74" y="-442.4" font-family="Arial" font-size="16.00" fill="#111827">Typed inputs flow to one owner; there is no layered config registry.</text>
+<!-- build_opts -->
+<g id="node1" class="node">
+<title>build_opts</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M306.75,-435.8C306.75,-435.8 12,-435.8 12,-435.8 6,-435.8 0,-429.8 0,-423.8 0,-423.8 0,-393.2 0,-393.2 0,-387.2 6,-381.2 12,-381.2 12,-381.2 306.75,-381.2 306.75,-381.2 312.75,-381.2 318.75,-387.2 318.75,-393.2 318.75,-393.2 318.75,-423.8 318.75,-423.8 318.75,-429.8 312.75,-435.8 306.75,-435.8"/>
+<text xml:space="preserve" text-anchor="start" x="105.08" y="-410.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Build options</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-394.6" font-family="Arial" font-size="16.00" fill="#111827">precision · shapes · topology · backend</text>
+</g>
+<!-- family_build -->
+<g id="node2" class="node">
+<title>family_build</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M217.03,-334.2C217.03,-334.2 101.73,-334.2 101.73,-334.2 95.73,-334.2 89.73,-328.2 89.73,-322.2 89.73,-322.2 89.73,-304.2 89.73,-304.2 89.73,-298.2 95.73,-292.2 101.73,-292.2 101.73,-292.2 217.03,-292.2 217.03,-292.2 223.03,-292.2 229.03,-298.2 229.03,-304.2 229.03,-304.2 229.03,-322.2 229.03,-322.2 229.03,-328.2 223.03,-334.2 217.03,-334.2"/>
+<text xml:space="preserve" text-anchor="start" x="104.13" y="-309.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family build()</text>
+</g>
+<!-- build_opts&#45;&gt;family_build -->
+<g id="edge1" class="edge">
+<title>build_opts&#45;&gt;family_build</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M159.38,-380.51C159.38,-369.84 159.38,-357.49 159.38,-346.36"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="162.18,-346.53 159.38,-338.53 156.58,-346.53 162.18,-346.53"/>
+</g>
+<!-- bundle -->
+<g id="node3" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M192,-238.9C192,-238.9 126.76,-238.9 126.76,-238.9 120.76,-238.9 114.76,-232.9 114.76,-226.9 114.76,-226.9 114.76,-208.9 114.76,-208.9 114.76,-202.9 120.76,-196.9 126.76,-196.9 126.76,-196.9 192,-196.9 192,-196.9 198,-196.9 204,-202.9 204,-208.9 204,-208.9 204,-226.9 204,-226.9 204,-232.9 198,-238.9 192,-238.9"/>
+<text xml:space="preserve" text-anchor="start" x="129.16" y="-213.8" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">.bundle</text>
+</g>
+<!-- family_build&#45;&gt;bundle -->
+<g id="edge2" class="edge">
+<title>family_build&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M159.38,-291.49C159.38,-279.74 159.38,-264.76 159.38,-251.47"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="162.18,-251.5 159.38,-243.5 156.58,-251.5 162.18,-251.5"/>
+</g>
+<!-- loader -->
+<g id="node5" class="node">
+<title>loader</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M321.65,-137.3C321.65,-137.3 227.1,-137.3 227.1,-137.3 221.1,-137.3 215.1,-131.3 215.1,-125.3 215.1,-125.3 215.1,-107.3 215.1,-107.3 215.1,-101.3 221.1,-95.3 227.1,-95.3 227.1,-95.3 321.65,-95.3 321.65,-95.3 327.65,-95.3 333.65,-101.3 333.65,-107.3 333.65,-107.3 333.65,-125.3 333.65,-125.3 333.65,-131.3 327.65,-137.3 321.65,-137.3"/>
+<text xml:space="preserve" text-anchor="start" x="229.5" y="-112.2" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">load_task()</text>
+</g>
+<!-- bundle&#45;&gt;loader -->
+<g id="edge3" class="edge">
+<title>bundle&#45;&gt;loader</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M183.48,-196.02C200.35,-181.41 223.08,-161.72 241.6,-145.69"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="243.34,-147.88 247.55,-140.53 239.67,-143.65 243.34,-147.88"/>
+</g>
+<!-- load_opts -->
+<g id="node4" class="node">
+<title>load_opts</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M530.17,-245.2C530.17,-245.2 250.58,-245.2 250.58,-245.2 244.58,-245.2 238.58,-239.2 238.58,-233.2 238.58,-233.2 238.58,-202.6 238.58,-202.6 238.58,-196.6 244.58,-190.6 250.58,-190.6 250.58,-190.6 530.17,-190.6 530.17,-190.6 536.17,-190.6 542.17,-196.6 542.17,-202.6 542.17,-202.6 542.17,-233.2 542.17,-233.2 542.17,-239.2 536.17,-245.2 530.17,-245.2"/>
+<text xml:space="preserve" text-anchor="start" x="337.02" y="-220.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Load options</text>
+<text xml:space="preserve" text-anchor="start" x="252.98" y="-204" font-family="Arial" font-size="16.00" fill="#111827">runtime root · KV budget · RTX cache</text>
+</g>
+<!-- load_opts&#45;&gt;loader -->
+<g id="edge4" class="edge">
+<title>load_opts&#45;&gt;loader</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M358.68,-189.68C342.72,-175.98 323.39,-159.38 307.26,-145.54"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="309.33,-143.62 301.43,-140.53 305.68,-147.87 309.33,-143.62"/>
+</g>
+<!-- task -->
+<g id="node7" class="node">
+<title>task</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M467.53,-42C467.53,-42 317.22,-42 317.22,-42 311.22,-42 305.22,-36 305.22,-30 305.22,-30 305.22,-12 305.22,-12 305.22,-6 311.22,0 317.22,0 317.22,0 467.53,0 467.53,0 473.53,0 479.53,-6 479.53,-12 479.53,-12 479.53,-30 479.53,-30 479.53,-36 473.53,-42 467.53,-42"/>
+<text xml:space="preserve" text-anchor="start" x="319.62" y="-16.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Abstract Task call</text>
+</g>
+<!-- loader&#45;&gt;task -->
+<g id="edge5" class="edge">
+<title>loader&#45;&gt;task</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M300.86,-94.36C317.41,-81.28 338.92,-64.27 356.93,-50.03"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="358.6,-52.28 363.13,-45.12 355.12,-47.89 358.6,-52.28"/>
+</g>
+<!-- request_opts -->
+<g id="node6" class="node">
+<title>request_opts</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M639.95,-143.6C639.95,-143.6 380.8,-143.6 380.8,-143.6 374.8,-143.6 368.8,-137.6 368.8,-131.6 368.8,-131.6 368.8,-101 368.8,-101 368.8,-95 374.8,-89 380.8,-89 380.8,-89 639.95,-89 639.95,-89 645.95,-89 651.95,-95 651.95,-101 651.95,-101 651.95,-131.6 651.95,-131.6 651.95,-137.6 645.95,-143.6 639.95,-143.6"/>
+<text xml:space="preserve" text-anchor="start" x="443.79" y="-118.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Request options</text>
+<text xml:space="preserve" text-anchor="start" x="383.2" y="-102.4" font-family="Arial" font-size="16.00" fill="#111827">prompt · sampling · output controls</text>
+</g>
+<!-- request_opts&#45;&gt;task -->
+<g id="edge6" class="edge">
+<title>request_opts&#45;&gt;task</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M475.93,-88.06C460.83,-76.13 443.12,-62.12 427.9,-50.09"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="429.66,-47.91 421.65,-45.14 426.18,-52.3 429.66,-47.91"/>
+</g>
+</g>
+</svg>

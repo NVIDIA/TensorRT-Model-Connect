@@ -1,0 +1,157 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="828" height="267" role="img" aria-labelledby="architecture-runtime-ownership-svg-title architecture-runtime-ownership-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 828.00 267.00" xmlns="http://www.w3.org/2000/svg">
+<title id="architecture-runtime-ownership-svg-title">Runtime source dependencies and dynamic loading</title>
+<desc id="architecture-runtime-ownership-svg-description">Solid arrows point from consumers and implementations to abstract core interfaces; dashed arrows show the loader opening the exact backend and family named by the bundle.</desc>
+<g id="graph0" class="graph" transform="scale(0.711926 0.711926) rotate(0) translate(25.2 350.2)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-350.2 1137.84,-350.2 1137.84,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="403.07" y="-296.8" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Runtime dependencies</text>
+<text xml:space="preserve" text-anchor="start" x="301.52" y="-279.6" font-family="Arial" font-size="16.00" fill="#111827">Solid A → B means A depends on B. Dashed arrows are dynamic loads.</text>
+<!-- app -->
+<g id="node1" class="node">
+<title>app</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M1080.86,-273C1080.86,-273 914.53,-273 914.53,-273 908.53,-273 902.53,-267 902.53,-261 902.53,-261 902.53,-243 902.53,-243 902.53,-237 908.53,-231 914.53,-231 914.53,-231 1080.86,-231 1080.86,-231 1086.86,-231 1092.86,-237 1092.86,-243 1092.86,-243 1092.86,-261 1092.86,-261 1092.86,-267 1086.86,-273 1080.86,-273"/>
+<text xml:space="preserve" text-anchor="start" x="916.93" y="-247.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">User app / trtmc CLI</text>
+</g>
+<!-- load_api -->
+<g id="node5" class="node">
+<title>load_api</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M985.93,-157.5C985.93,-157.5 907.46,-157.5 907.46,-157.5 901.46,-157.5 895.46,-151.5 895.46,-145.5 895.46,-145.5 895.46,-127.5 895.46,-127.5 895.46,-121.5 901.46,-115.5 907.46,-115.5 907.46,-115.5 985.93,-115.5 985.93,-115.5 991.93,-115.5 997.93,-121.5 997.93,-127.5 997.93,-127.5 997.93,-145.5 997.93,-145.5 997.93,-151.5 991.93,-157.5 985.93,-157.5"/>
+<text xml:space="preserve" text-anchor="start" x="909.86" y="-132.4" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Load API</text>
+</g>
+<!-- app&#45;&gt;load_api -->
+<g id="edge1" class="edge">
+<title>app&#45;&gt;load_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M975,-230.03C962.73,-218.7 950.06,-207 950.06,-207 950.06,-207 949.15,-188.04 948.27,-169.93"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="951.07,-169.84 947.88,-161.98 945.47,-170.11 951.07,-169.84"/>
+<text xml:space="preserve" text-anchor="middle" x="991.88" y="-192.6" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- task_api -->
+<g id="node6" class="node">
+<title>task_api</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M857.85,-42C857.85,-42 707.55,-42 707.55,-42 701.55,-42 695.55,-36 695.55,-30 695.55,-30 695.55,-12 695.55,-12 695.55,-6 701.55,0 707.55,0 707.55,0 857.85,0 857.85,0 863.85,0 869.85,-6 869.85,-12 869.85,-12 869.85,-30 869.85,-30 869.85,-36 863.85,-42 857.85,-42"/>
+<text xml:space="preserve" text-anchor="start" x="709.95" y="-16.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Abstract Task API</text>
+</g>
+<!-- app&#45;&gt;task_api -->
+<g id="edge2" class="edge">
+<title>app&#45;&gt;task_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M1016.28,-230.03C1026.33,-218.7 1036.7,-207 1036.7,-207 1036.7,-207 1036.7,-187.8 1036.7,-187.8 1036.7,-187.8 1012.7,-109.2 1012.7,-109.2 1012.7,-109.2 916.69,-72.8 848.73,-47.03"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="849.95,-44.5 841.48,-44.29 847.97,-49.74 849.95,-44.5"/>
+<text xml:space="preserve" text-anchor="middle" x="1070.83" y="-131.7" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- loader -->
+<g id="node2" class="node">
+<title>loader</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M647.97,-273C647.97,-273 519.43,-273 519.43,-273 513.43,-273 507.43,-267 507.43,-261 507.43,-261 507.43,-243 507.43,-243 507.43,-237 513.43,-231 519.43,-231 519.43,-231 647.97,-231 647.97,-231 653.97,-231 659.97,-237 659.97,-243 659.97,-243 659.97,-261 659.97,-261 659.97,-267 653.97,-273 647.97,-273"/>
+<text xml:space="preserve" text-anchor="start" x="521.83" y="-247.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Runtime loader</text>
+</g>
+<!-- family -->
+<g id="node3" class="node">
+<title>family</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M571.14,-163.8C571.14,-163.8 406.25,-163.8 406.25,-163.8 400.25,-163.8 394.25,-157.8 394.25,-151.8 394.25,-151.8 394.25,-121.2 394.25,-121.2 394.25,-115.2 400.25,-109.2 406.25,-109.2 406.25,-109.2 571.14,-109.2 571.14,-109.2 577.14,-109.2 583.14,-115.2 583.14,-121.2 583.14,-121.2 583.14,-151.8 583.14,-151.8 583.14,-157.8 577.14,-163.8 571.14,-163.8"/>
+<text xml:space="preserve" text-anchor="start" x="440.99" y="-138.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family DSO</text>
+<text xml:space="preserve" text-anchor="start" x="408.65" y="-122.6" font-family="Arial" font-size="16.00" fill="#111827">concrete Task pipeline</text>
+</g>
+<!-- loader&#45;&gt;family -->
+<g id="edge12" class="edge">
+<title>loader&#45;&gt;family</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M555.45,-230.03C540.18,-218.7 524.42,-207 524.42,-207 524.42,-207 516.35,-191.28 507.87,-174.8"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="510.42,-173.64 504.27,-167.8 505.44,-176.2 510.42,-173.64"/>
+<text xml:space="preserve" text-anchor="middle" x="571.56" y="-192.6" font-family="Arial" font-size="16.00" fill="#334155">dlopen family</text>
+</g>
+<!-- backend -->
+<g id="node4" class="node">
+<title>backend</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M211.4,-157.5C211.4,-157.5 12,-157.5 12,-157.5 6,-157.5 0,-151.5 0,-145.5 0,-145.5 0,-127.5 0,-127.5 0,-121.5 6,-115.5 12,-115.5 12,-115.5 211.4,-115.5 211.4,-115.5 217.4,-115.5 223.4,-121.5 223.4,-127.5 223.4,-127.5 223.4,-145.5 223.4,-145.5 223.4,-151.5 217.4,-157.5 211.4,-157.5"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-132.4" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">TensorRT backend DSO</text>
+</g>
+<!-- loader&#45;&gt;backend -->
+<g id="edge13" class="edge">
+<title>loader&#45;&gt;backend</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M506.58,-243.23C381.13,-230.6 146.71,-207 146.71,-207 146.71,-207 136.7,-187.13 127.38,-168.63"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="129.94,-167.48 123.84,-161.6 124.94,-170 129.94,-167.48"/>
+<text xml:space="preserve" text-anchor="middle" x="203.21" y="-192.6" font-family="Arial" font-size="16.00" fill="#334155">dlopen backend</text>
+</g>
+<!-- loader&#45;&gt;load_api -->
+<g id="edge3" class="edge">
+<title>loader&#45;&gt;load_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M660.81,-235.36C723.19,-222.72 800.7,-207 800.7,-207 800.7,-207 851,-183.05 892.55,-163.27"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="893.59,-165.88 899.61,-159.91 891.19,-160.82 893.59,-165.88"/>
+<text xml:space="preserve" text-anchor="middle" x="880.76" y="-192.6" font-family="Arial" font-size="16.00" fill="#334155">implements</text>
+</g>
+<!-- loader&#45;&gt;task_api -->
+<g id="edge4" class="edge">
+<title>loader&#45;&gt;task_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M623.46,-230.11C672.57,-204.32 749.7,-163.8 749.7,-163.8 749.7,-163.8 765.46,-96.05 775.2,-54.21"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="777.92,-54.89 777,-46.46 772.46,-53.62 777.92,-54.89"/>
+<text xml:space="preserve" text-anchor="middle" x="804.2" y="-131.7" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- bundle -->
+<g id="node8" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M394.72,-42C394.72,-42 274.67,-42 274.67,-42 268.67,-42 262.67,-36 262.67,-30 262.67,-30 262.67,-12 262.67,-12 262.67,-6 268.67,0 274.67,0 274.67,0 394.72,0 394.72,0 400.72,0 406.72,-6 406.72,-12 406.72,-12 406.72,-30 406.72,-30 406.72,-36 400.72,-42 394.72,-42"/>
+<text xml:space="preserve" text-anchor="start" x="277.07" y="-16.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">BundleReader</text>
+</g>
+<!-- loader&#45;&gt;bundle -->
+<g id="edge5" class="edge">
+<title>loader&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M514.44,-230C429.33,-204.2 296.06,-163.8 296.06,-163.8 296.06,-163.8 248.7,-85.2 248.7,-85.2 248.7,-85.2 248.7,-66 248.7,-66 248.7,-66 264.98,-57.67 283.37,-48.26"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="284.63,-50.76 290.48,-44.62 282.08,-45.77 284.63,-50.76"/>
+<text xml:space="preserve" text-anchor="middle" x="337.88" y="-131.7" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- factory -->
+<g id="node9" class="node">
+<title>factory</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M649.63,-42C649.63,-42 457.77,-42 457.77,-42 451.77,-42 445.77,-36 445.77,-30 445.77,-30 445.77,-12 445.77,-12 445.77,-6 451.77,0 457.77,0 457.77,0 649.63,0 649.63,0 655.63,0 661.63,-6 661.63,-12 661.63,-12 661.63,-30 661.63,-30 661.63,-36 655.63,-42 649.63,-42"/>
+<text xml:space="preserve" text-anchor="start" x="460.17" y="-16.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family factory contract</text>
+</g>
+<!-- loader&#45;&gt;factory -->
+<g id="edge6" class="edge">
+<title>loader&#45;&gt;factory</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M601.81,-230.03C611.59,-218.7 621.7,-207 621.7,-207 621.7,-207 663.06,-109.2 663.06,-109.2 663.06,-109.2 713.7,-85.2 713.7,-85.2 713.7,-85.2 713.7,-66 713.7,-66 713.7,-66 678.46,-56.31 641.06,-46.02"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="641.91,-43.35 633.45,-43.93 640.42,-48.75 641.91,-43.35"/>
+<text xml:space="preserve" text-anchor="middle" x="704.88" y="-131.7" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- family&#45;&gt;task_api -->
+<g id="edge7" class="edge">
+<title>family&#45;&gt;task_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M559.12,-108.31C607.34,-89.7 670.83,-65.19 717.82,-47.05"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="718.64,-49.73 725.1,-44.24 716.63,-44.51 718.64,-49.73"/>
+<text xml:space="preserve" text-anchor="middle" x="702.93" y="-70.8" font-family="Arial" font-size="16.00" fill="#334155">implements</text>
+</g>
+<!-- engine_api -->
+<g id="node7" class="node">
+<title>engine_api</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M201.81,-42C201.81,-42 33.59,-42 33.59,-42 27.59,-42 21.59,-36 21.59,-30 21.59,-30 21.59,-12 21.59,-12 21.59,-6 27.59,0 33.59,0 33.59,0 201.81,0 201.81,0 207.81,0 213.81,-6 213.81,-12 213.81,-12 213.81,-30 213.81,-30 213.81,-36 207.81,-42 201.81,-42"/>
+<text xml:space="preserve" text-anchor="start" x="35.99" y="-16.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Abstract Engine API</text>
+</g>
+<!-- family&#45;&gt;engine_api -->
+<g id="edge8" class="edge">
+<title>family&#45;&gt;engine_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M393.51,-109.98C347.06,-97.53 301.06,-85.2 301.06,-85.2 301.06,-85.2 240.76,-64.42 189.32,-46.69"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="190.41,-44.1 181.94,-44.14 188.59,-49.39 190.41,-44.1"/>
+<text xml:space="preserve" text-anchor="middle" x="342.88" y="-70.8" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- family&#45;&gt;bundle -->
+<g id="edge9" class="edge">
+<title>family&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M449.41,-108.29C432.29,-96.44 416.06,-85.2 416.06,-85.2 416.06,-85.2 392.33,-66.77 370.5,-49.81"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="372.24,-47.62 364.21,-44.92 368.81,-52.04 372.24,-47.62"/>
+<text xml:space="preserve" text-anchor="middle" x="457.88" y="-70.8" font-family="Arial" font-size="16.00" fill="#334155">depends on</text>
+</g>
+<!-- family&#45;&gt;factory -->
+<g id="edge10" class="edge">
+<title>family&#45;&gt;factory</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M498.12,-108.43C504.92,-88.92 512.89,-66 512.89,-66 512.89,-66 519,-59.42 526.48,-51.35"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="528.39,-53.4 531.78,-45.63 524.29,-49.59 528.39,-53.4"/>
+<text xml:space="preserve" text-anchor="middle" x="553.8" y="-70.8" font-family="Arial" font-size="16.00" fill="#334155">implements</text>
+</g>
+<!-- backend&#45;&gt;engine_api -->
+<g id="edge11" class="edge">
+<title>backend&#45;&gt;engine_api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M112.8,-114.68C113.69,-97.72 114.98,-73.49 116,-54.06"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="118.79,-54.45 116.41,-46.31 113.19,-54.15 118.79,-54.45"/>
+<text xml:space="preserve" text-anchor="middle" x="156.14" y="-70.8" font-family="Arial" font-size="16.00" fill="#334155">implements</text>
+</g>
+</g>
+</svg>

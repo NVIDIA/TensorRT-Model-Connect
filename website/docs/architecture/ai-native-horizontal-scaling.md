@@ -200,8 +200,8 @@ flowchart BT
   FamilySO --> TaskAPI
   FamilySO --> BundleReader
   FamilySO --> EngineAPI
-  FamilySO -->|"only for a real custom op"| FamilyPlugin["family-local plugin sources"]
-  FamilyPlugin --> TRTPluginAPI["TensorRT plugin API"]
+  FamilySO -->|"only for a real custom op"| FamilyCustomOp["family-local custom plugin sources"]
+  FamilyCustomOp --> TRTPluginAPI["TensorRT plugin API"]
 
   TRTBackend["TensorRT backend"] --> EngineAPI
   TRTBackend --> TRTRuntimeAPI["TensorRT runtime API"]

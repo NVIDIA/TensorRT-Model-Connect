@@ -1,0 +1,20 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: TensorRT-Model-Connect extension ownership paths
+// @description: A change stays in one family or application unless a current model-independent backend or public interface requirement proves a shared boundary.
+digraph ExtensionDecision {
+  graph [bgcolor="#fbfcfe", pad="0.35", rankdir="TB", nodesep="0.4", ranksep="0.62", splines="polyline", fontname="Arial", labelloc="t", label=<<B>Choose the narrowest owner</B><BR/><FONT POINT-SIZE="17">This is a decision flow; normal model contributions change one family only.</FONT>>, fontsize="30", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", color="#64748b", penwidth="2.2", fillcolor="#ffffff", fontname="Arial", fontsize="18", fontcolor="#111827", margin="0.20,0.16"];
+  edge [color="#64748b", penwidth="2.5", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  start [fillcolor="#eff6ff", color="#2563eb", label=<<B>What behavior changes?</B>>];
+  family [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>One model family</B><BR ALIGN="LEFT"/><FONT POINT-SIZE="16">support.py · model.py<BR ALIGN="LEFT"/>runtime · tests · requirements</FONT>>];
+  app [fillcolor="#fffbeb", color="#b45309", label=<<B>Application or example</B><BR ALIGN="LEFT"/><FONT POINT-SIZE="16">apps/ or examples/<BR ALIGN="LEFT"/>public APIs only</FONT>>];
+  backend [fillcolor="#eff6ff", color="#2563eb", label=<<B>Engine-wide backend</B><BR ALIGN="LEFT"/><FONT POINT-SIZE="16">implements Engine API<BR ALIGN="LEFT"/>no model knowledge</FONT>>];
+  shared [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Public contract</B><BR ALIGN="LEFT"/><FONT POINT-SIZE="16">current shared need only<BR ALIGN="LEFT"/>small typed interface</FONT>>];
+
+  start -> family [label="model semantics"];
+  start -> app [label="user workflow"];
+  start -> backend [label="engine behavior"];
+  start -> shared [label="shared API"];
+}

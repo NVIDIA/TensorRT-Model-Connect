@@ -8,24 +8,6 @@ Install the wheel produced by the release or local package stage:
 python -m pip install /path/to/tensorrt_model_connect-0.1.0-*.whl
 ```
 
-If the selected family owns extra build or reference dependencies, install its
-plain requirements file. From a checkout or unpacked source release:
-
-```bash
-python -m pip install -r families/sana_wm/requirements.txt
-```
-
-The wheel carries the same owner file. After installing the wheel, locate it
-from the installed `families` package:
-
-```bash
-FAMILY_REQUIREMENTS="$(python -c 'from pathlib import Path; import families; print(Path(families.__file__).parent / "sana_wm" / "requirements.txt")')"
-python -m pip install -r "$FAMILY_REQUIREMENTS"
-```
-
-There is no central family extra or dependency registry. A family without a
-`requirements.txt` needs only the pinned base environment and the wheel.
-
 Build a bundle directly from a Hugging Face model ID:
 
 ```bash
@@ -40,6 +22,13 @@ the checkpoint. That family supplies the default task; pass `--task` only when
 selecting another task supported by the same family. The build then imports
 only the selected `families.gpt2.model` and calls `build(request, writer)` once.
 A prepared local snapshot can be passed in place of the model ID.
+
+Inspect the shared routing header and family-owned section inventory without
+loading native code:
+
+```bash
+trtmc inspect gpt2.bundle
+```
 
 For a wheel install, resolve its native runtime directory directly from the
 installed package:
@@ -58,12 +47,31 @@ For a native CMake install, point the loader at the directory containing the mat
 those DSOs, and returns the abstract task interface declared by the bundle.
 
 ```bash
+TRTMC_RUNTIME_ROOT="${TRTMC_RUNTIME_ROOT:-/opt/trtmc/lib}"
 trtmc run gpt2.bundle \
-  --runtime-root /opt/trtmc/lib \
+  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --prompt "Hello" \
   --max-new-tokens 32
 ```
 
 The shell variable above is only a convenient explicit argument. The CLI never
-searches environment variables, the current directory, or an installed
-fallback runtime.
+searches environment variables, the current directory, or another install.
+
+GPT-2 needs no family-specific Python packages beyond the base environment.
+For another family that owns a `requirements.txt`, install that exact file
+before its build. From a checkout or unpacked source release:
+
+```bash
+python -m pip install -r families/sana_wm/requirements.txt
+```
+
+The wheel carries the same family-owned file. Locate it from the installed
+`families` package:
+
+```bash
+FAMILY_REQUIREMENTS="$(python -c 'from pathlib import Path; import families; print(Path(families.__file__).parent / "sana_wm" / "requirements.txt")')"
+python -m pip install -r "$FAMILY_REQUIREMENTS"
+```
+
+A family without that file needs only the pinned base environment and the
+project wheel.

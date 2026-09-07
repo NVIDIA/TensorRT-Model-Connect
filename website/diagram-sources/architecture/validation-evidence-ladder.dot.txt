@@ -1,0 +1,17 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Validation evidence ladder
+// @description: Confidence grows from family ownership and source checks through focused units, bundle loading, exact model end-to-end behavior, and reproducible performance evidence.
+digraph ValidationEvidenceLadder {
+  graph [bgcolor="#fbfcfe", pad="0.35", nodesep="0.48", ranksep="0.72", rankdir="TB", splines="polyline", fontname="Arial", labelloc="t", label=<<B>Evidence ladder</B><BR/><FONT POINT-SIZE="16">Each layer proves a different contract; run only layers relevant to the change.</FONT>>, fontsize="28", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", fillcolor="#ffffff", color="#64748b", penwidth="2", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.15", width="2.6"];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8"];
+
+  ownership [fillcolor="#eff6ff", color="#2563eb", label=<<B>1 · Ownership + source</B><BR/><FONT POINT-SIZE="16">support · imports · dependency direction</FONT>>];
+  units [fillcolor="#eff6ff", color="#2563eb", label=<<B>2 · Focused units</B><BR/><FONT POINT-SIZE="16">family · core · apps</FONT>>];
+  integration [fillcolor="#fffbeb", color="#b45309", label=<<B>3 · Bundle + loader</B><BR/><FONT POINT-SIZE="16">header · backend · family DSO · Task</FONT>>];
+  e2e [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>4 · Exact model E2E</B><BR/><FONT POINT-SIZE="16">family oracle + meaningful thresholds</FONT>>];
+  performance [fillcolor="#ecfeff", color="#0e7490", label=<<B>5 · Performance</B><BR/><FONT POINT-SIZE="16">exact workload + timing scopes</FONT>>];
+
+  ownership -> units -> integration -> e2e -> performance;
+}

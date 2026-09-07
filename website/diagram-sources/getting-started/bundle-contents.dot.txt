@@ -1,0 +1,21 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Minimal bundle contents and ownership
+// @description: Core owns a bounded identity header while the selected family owns every named payload section and the runtime reads only what that family defines.
+digraph BundleContents {
+  graph [bgcolor="#fbfcfe", pad="0.35", rankdir="TB", nodesep="0.45", ranksep="0.6", splines="polyline", fontname="Arial", labelloc="t", label=<<B>What a .bundle contains</B><BR/><FONT POINT-SIZE="17">Small shared header; opaque family-owned sections.</FONT>>, fontsize="30", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", color="#64748b", penwidth="2.2", fillcolor="#ffffff", fontname="Arial", fontsize="18", fontcolor="#111827", margin="0.20,0.16"];
+  edge [color="#64748b", penwidth="2.5", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  file [fillcolor="#fffbeb", color="#b45309", label=<<B>.bundle file</B>>];
+  header [fillcolor="#eff6ff", color="#2563eb", label=<<B>Core-owned header</B><BR/><FONT POINT-SIZE="16">format · family · task · backend<BR/>section offsets and lengths</FONT>>];
+  sections [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Family-owned sections</B><BR/><FONT POINT-SIZE="16">engine plans · tokenizer/assets<BR/>runtime metadata</FONT>>];
+  loader [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Runtime loader</B><BR/><FONT POINT-SIZE="16">opens exact backend + family DSO</FONT>>];
+  pipeline [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Family Task pipeline</B><BR/><FONT POINT-SIZE="16">reads its named sections on demand</FONT>>];
+
+  file -> header;
+  file -> sections;
+  header -> loader;
+  loader -> pipeline;
+  sections -> pipeline;
+}

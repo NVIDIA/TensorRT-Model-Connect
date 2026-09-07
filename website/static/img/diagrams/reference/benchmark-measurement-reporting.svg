@@ -1,0 +1,80 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="535" height="600" role="img" aria-labelledby="reference-benchmark-measurement-reporting-svg-title reference-benchmark-measurement-reporting-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 535.00 600.00" xmlns="http://www.w3.org/2000/svg">
+<title id="reference-benchmark-measurement-reporting-svg-title">Benchmark measurement and reporting</title>
+<desc id="reference-benchmark-measurement-reporting-svg-description">The native worker loads one bundle through the public loader, invokes its abstract Task operation, preserves raw observations, and reports task-aware metrics with explicit timing scopes.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(21.6 578.76)">
+<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-578.76 513.17,-578.76 513.17,21.6 -21.6,21.6"/>
+<text xml:space="preserve" text-anchor="start" x="8" y="-529.86" font-family="Arial" font-weight="bold" font-size="27.00" fill="#111827">Measure through the public Task API</text>
+<text xml:space="preserve" text-anchor="start" x="38.11" y="-512.76" font-family="Arial" font-size="16.00" fill="#111827">Setup, prefill, decode, and end&#45;to&#45;end scopes stay distinct.</text>
+<!-- bundle -->
+<g id="node1" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="1.8" d="M278.4,-506.16C278.4,-506.16 213.17,-506.16 213.17,-506.16 207.17,-506.16 201.17,-500.16 201.17,-494.16 201.17,-494.16 201.17,-477.6 201.17,-477.6 201.17,-471.6 207.17,-465.6 213.17,-465.6 213.17,-465.6 278.4,-465.6 278.4,-465.6 284.4,-465.6 290.4,-471.6 290.4,-477.6 290.4,-477.6 290.4,-494.16 290.4,-494.16 290.4,-500.16 284.4,-506.16 278.4,-506.16"/>
+<text xml:space="preserve" text-anchor="start" x="215.57" y="-481.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">.bundle</text>
+</g>
+<!-- loader -->
+<g id="node2" class="node">
+<title>loader</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M329.78,-420.6C329.78,-420.6 161.79,-420.6 161.79,-420.6 155.79,-420.6 149.79,-414.6 149.79,-408.6 149.79,-408.6 149.79,-379.44 149.79,-379.44 149.79,-373.44 155.79,-367.44 161.79,-367.44 161.79,-367.44 329.78,-367.44 329.78,-367.44 335.78,-367.44 341.78,-373.44 341.78,-379.44 341.78,-379.44 341.78,-408.6 341.78,-408.6 341.78,-414.6 335.78,-420.6 329.78,-420.6"/>
+<text xml:space="preserve" text-anchor="start" x="206.57" y="-396.22" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">load_task</text>
+<text xml:space="preserve" text-anchor="start" x="164.19" y="-380.12" font-family="Arial" font-size="16.00" fill="#111827">exact backend + family</text>
+</g>
+<!-- bundle&#45;&gt;loader -->
+<g id="edge1" class="edge">
+<title>bundle&#45;&gt;loader</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M245.79,-464.94C245.79,-455.42 245.79,-443.71 245.79,-432.61"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="248.59,-432.72 245.79,-424.72 242.99,-432.72 248.59,-432.72"/>
+</g>
+<!-- task -->
+<g id="node3" class="node">
+<title>task</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" d="M345.49,-322.44C345.49,-322.44 146.08,-322.44 146.08,-322.44 140.08,-322.44 134.08,-316.44 134.08,-310.44 134.08,-310.44 134.08,-293.88 134.08,-293.88 134.08,-287.88 140.08,-281.88 146.08,-281.88 146.08,-281.88 345.49,-281.88 345.49,-281.88 351.49,-281.88 357.49,-287.88 357.49,-293.88 357.49,-293.88 357.49,-310.44 357.49,-310.44 357.49,-316.44 351.49,-322.44 345.49,-322.44"/>
+<text xml:space="preserve" text-anchor="start" x="148.48" y="-298.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Abstract Task operation</text>
+</g>
+<!-- loader&#45;&gt;task -->
+<g id="edge2" class="edge">
+<title>loader&#45;&gt;task</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M245.79,-366.55C245.79,-356.46 245.79,-344.88 245.79,-334.4"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="248.59,-334.5 245.79,-326.5 242.99,-334.5 248.59,-334.5"/>
+</g>
+<!-- samples -->
+<g id="node4" class="node">
+<title>samples</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M341.13,-236.88C341.13,-236.88 150.44,-236.88 150.44,-236.88 144.44,-236.88 138.44,-230.88 138.44,-224.88 138.44,-224.88 138.44,-195.72 138.44,-195.72 138.44,-189.72 144.44,-183.72 150.44,-183.72 150.44,-183.72 341.13,-183.72 341.13,-183.72 347.13,-183.72 353.13,-189.72 353.13,-195.72 353.13,-195.72 353.13,-224.88 353.13,-224.88 353.13,-230.88 347.13,-236.88 341.13,-236.88"/>
+<text xml:space="preserve" text-anchor="start" x="173.04" y="-212.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Raw observations</text>
+<text xml:space="preserve" text-anchor="start" x="152.84" y="-196.4" font-family="Arial" font-size="16.00" fill="#111827">latency · tokens · outputs</text>
+</g>
+<!-- task&#45;&gt;samples -->
+<g id="edge3" class="edge">
+<title>task&#45;&gt;samples</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M245.79,-281.22C245.79,-271.7 245.79,-259.99 245.79,-248.89"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="248.59,-249 245.79,-241 242.99,-249 248.59,-249"/>
+</g>
+<!-- metrics -->
+<g id="node5" class="node">
+<title>metrics</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="1.8" d="M327.09,-138.72C327.09,-138.72 164.48,-138.72 164.48,-138.72 158.48,-138.72 152.48,-132.72 152.48,-126.72 152.48,-126.72 152.48,-110.16 152.48,-110.16 152.48,-104.16 158.48,-98.16 164.48,-98.16 164.48,-98.16 327.09,-98.16 327.09,-98.16 333.09,-98.16 339.09,-104.16 339.09,-110.16 339.09,-110.16 339.09,-126.72 339.09,-126.72 339.09,-132.72 333.09,-138.72 327.09,-138.72"/>
+<text xml:space="preserve" text-anchor="start" x="166.88" y="-114.34" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Task&#45;aware metrics</text>
+</g>
+<!-- samples&#45;&gt;metrics -->
+<g id="edge4" class="edge">
+<title>samples&#45;&gt;metrics</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M245.79,-182.83C245.79,-172.74 245.79,-161.16 245.79,-150.68"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="248.59,-150.78 245.79,-142.78 242.99,-150.78 248.59,-150.78"/>
+</g>
+<!-- report -->
+<g id="node6" class="node">
+<title>report</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M354.69,-53.16C354.69,-53.16 136.89,-53.16 136.89,-53.16 130.89,-53.16 124.89,-47.16 124.89,-41.16 124.89,-41.16 124.89,-12 124.89,-12 124.89,-6 130.89,0 136.89,0 136.89,0 354.69,0 354.69,0 360.69,0 366.69,-6 366.69,-12 366.69,-12 366.69,-41.16 366.69,-41.16 366.69,-47.16 360.69,-53.16 354.69,-53.16"/>
+<text xml:space="preserve" text-anchor="start" x="165.03" y="-28.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">JSON / HTML report</text>
+<text xml:space="preserve" text-anchor="start" x="139.29" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">environment + exact workload</text>
+</g>
+<!-- metrics&#45;&gt;report -->
+<g id="edge5" class="edge">
+<title>metrics&#45;&gt;report</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M245.79,-97.5C245.79,-87.98 245.79,-76.27 245.79,-65.17"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="248.59,-65.28 245.79,-57.28 242.99,-65.28 248.59,-65.28"/>
+</g>
+</g>
+</svg>

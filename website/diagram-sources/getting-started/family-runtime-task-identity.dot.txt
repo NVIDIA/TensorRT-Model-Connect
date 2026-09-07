@@ -1,0 +1,24 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Family, task, and backend are separate identities
+// @description: The family selects one independent build and runtime owner, the task names the abstract user behavior it implements, and the backend supplies the model-independent Engine API.
+digraph IdentityLayers {
+  graph [bgcolor="#fbfcfe", pad="0.30", nodesep="0.4", ranksep="0.68", rankdir="TB", splines="polyline", fontname="Arial", labelloc="t", label=<<B>Three identities answer three questions</B><BR/><FONT POINT-SIZE="16">Who owns the model? What can the user do? Which engine implementation runs it?</FONT>>, fontsize="28", fontcolor="#101828"];
+  node [shape="rect", style="rounded,filled", color="#64748b", penwidth="1.8", fillcolor="#ffffff", fontname="Arial", fontsize="17", fontcolor="#101828", margin="0.18,0.13"];
+  edge [color="#64748b", penwidth="2.2", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  header [fillcolor="#fffbeb", color="#b45309", label=<<B>Bundle header</B><BR/><FONT POINT-SIZE="16">family · task · backend</FONT>>];
+  family [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Family</B><BR/><FONT POINT-SIZE="16">qwen · whisper · flux</FONT>>];
+  task [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Abstract Task</B><BR/><FONT POINT-SIZE="16">text · transcription · image</FONT>>];
+  backend [fillcolor="#eff6ff", color="#2563eb", label=<<B>Engine backend</B><BR/><FONT POINT-SIZE="16">trt · trt_rtx</FONT>>];
+  pipeline [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Family Task pipeline</B>>];
+  engine [fillcolor="#eff6ff", color="#2563eb", label=<<B>IEngine implementation</B>>];
+
+  header -> family [label="opens owner"];
+  header -> task [label="verifies API"];
+  header -> backend [label="opens engine"];
+  family -> pipeline;
+  task -> pipeline [label="implemented by", dir="back"];
+  backend -> engine;
+  pipeline -> engine [label="drives"];
+}

@@ -1,0 +1,129 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="1174" height="356" role="img" aria-labelledby="tutorials-intermediate-task-pipeline-patterns-svg-title tutorials-intermediate-task-pipeline-patterns-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 1174.00 356.00" xmlns="http://www.w3.org/2000/svg">
+<title id="tutorials-intermediate-task-pipeline-patterns-svg-title">Shared task pipeline pattern</title>
+<desc id="tutorials-intermediate-task-pipeline-patterns-svg-description">Every task accepts typed input, performs task-owned preprocessing, executes one or more TensorRT engines, postprocesses the outputs, and returns a typed result; the repeated work differs by task.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(21.6 334.08)">
+<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-334.08 1152.51,-334.08 1152.51,21.6 -21.6,21.6"/>
+<text xml:space="preserve" text-anchor="start" x="304.41" y="-285.18" font-family="Arial" font-weight="bold" font-size="27.00" fill="#111827">One public pattern, task&#45;owned behavior</text>
+<text xml:space="preserve" text-anchor="start" x="266.61" y="-268.08" font-family="Arial" font-size="16.00" fill="#111827">The bundle and plugin contract stay stable while each task owns its processing loop.</text>
+<!-- input -->
+<g id="node1" class="node">
+<title>input</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M238.24,-261.48C238.24,-261.48 12,-261.48 12,-261.48 6,-261.48 0,-255.48 0,-249.48 0,-249.48 0,-218.32 0,-218.32 0,-212.32 6,-206.32 12,-206.32 12,-206.32 238.24,-206.32 238.24,-206.32 244.24,-206.32 250.24,-212.32 250.24,-218.32 250.24,-218.32 250.24,-249.48 250.24,-249.48 250.24,-255.48 244.24,-261.48 238.24,-261.48"/>
+<text xml:space="preserve" text-anchor="start" x="71.29" y="-235.3" font-family="Arial" font-weight="bold" font-size="19.00" fill="#111827">Typed input</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-219" font-family="Arial" font-size="16.00" fill="#111827">text · pixels · audio · numbers</text>
+</g>
+<!-- preprocess -->
+<g id="node2" class="node">
+<title>preprocess</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M497.69,-261.48C497.69,-261.48 286.54,-261.48 286.54,-261.48 280.54,-261.48 274.54,-255.48 274.54,-249.48 274.54,-249.48 274.54,-218.32 274.54,-218.32 274.54,-212.32 280.54,-206.32 286.54,-206.32 286.54,-206.32 497.69,-206.32 497.69,-206.32 503.69,-206.32 509.69,-212.32 509.69,-218.32 509.69,-218.32 509.69,-249.48 509.69,-249.48 509.69,-255.48 503.69,-261.48 497.69,-261.48"/>
+<text xml:space="preserve" text-anchor="start" x="340.37" y="-235.3" font-family="Arial" font-weight="bold" font-size="19.00" fill="#111827">Preprocess</text>
+<text xml:space="preserve" text-anchor="start" x="288.94" y="-219" font-family="Arial" font-size="16.00" fill="#111827">task&#45;owned input preparation</text>
+</g>
+<!-- input&#45;&gt;preprocess -->
+<g id="edge1" class="edge">
+<title>input&#45;&gt;preprocess</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M250.8,-234C250.8,-234 262.6,-234 262.6,-234"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="262.6,-236.8 270.6,-234 262.6,-231.2 262.6,-236.8"/>
+</g>
+<!-- token -->
+<g id="node6" class="node">
+<title>token</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M218.69,-53.16C218.69,-53.16 31.55,-53.16 31.55,-53.16 25.55,-53.16 19.55,-47.16 19.55,-41.16 19.55,-41.16 19.55,-12 19.55,-12 19.55,-6 25.55,0 31.55,0 31.55,0 218.69,0 218.69,0 224.69,0 230.69,-6 230.69,-12 230.69,-12 230.69,-41.16 230.69,-41.16 230.69,-47.16 224.69,-53.16 218.69,-53.16"/>
+<text xml:space="preserve" text-anchor="start" x="67.97" y="-28.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Token decode</text>
+<text xml:space="preserve" text-anchor="start" x="33.95" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">repeat until stop condition</text>
+</g>
+<!-- input&#45;&gt;token -->
+<!-- engines -->
+<g id="node3" class="node">
+<title>engines</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M804.73,-261.48C804.73,-261.48 545.51,-261.48 545.51,-261.48 539.51,-261.48 533.51,-255.48 533.51,-249.48 533.51,-249.48 533.51,-218.32 533.51,-218.32 533.51,-212.32 539.51,-206.32 545.51,-206.32 545.51,-206.32 804.73,-206.32 804.73,-206.32 810.73,-206.32 816.73,-212.32 816.73,-218.32 816.73,-218.32 816.73,-249.48 816.73,-249.48 816.73,-255.48 810.73,-261.48 804.73,-261.48"/>
+<text xml:space="preserve" text-anchor="start" x="592.24" y="-235.3" font-family="Arial" font-weight="bold" font-size="19.00" fill="#111827">TensorRT engines</text>
+<text xml:space="preserve" text-anchor="start" x="547.91" y="-219" font-family="Arial" font-size="16.00" fill="#111827">one engine or a component pipeline</text>
+</g>
+<!-- preprocess&#45;&gt;engines -->
+<g id="edge2" class="edge">
+<title>preprocess&#45;&gt;engines</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M510.5,-234C510.5,-234 521.61,-234 521.61,-234"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="521.61,-236.8 529.61,-234 521.61,-231.2 521.61,-236.8"/>
+</g>
+<!-- denoise -->
+<g id="node7" class="node">
+<title>denoise</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M489.69,-53.16C489.69,-53.16 294.55,-53.16 294.55,-53.16 288.55,-53.16 282.55,-47.16 282.55,-41.16 282.55,-41.16 282.55,-12 282.55,-12 282.55,-6 288.55,0 294.55,0 294.55,0 489.69,0 489.69,0 495.69,0 501.69,-6 501.69,-12 501.69,-12 501.69,-41.16 501.69,-41.16 501.69,-47.16 495.69,-53.16 489.69,-53.16"/>
+<text xml:space="preserve" text-anchor="start" x="351.03" y="-28.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Denoising</text>
+<text xml:space="preserve" text-anchor="start" x="296.95" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">repeat for configured steps</text>
+</g>
+<!-- preprocess&#45;&gt;denoise -->
+<!-- postprocess -->
+<g id="node4" class="node">
+<title>postprocess</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M797.46,-157.32C797.46,-157.32 590.77,-157.32 590.77,-157.32 584.77,-157.32 578.77,-151.32 578.77,-145.32 578.77,-145.32 578.77,-114.16 578.77,-114.16 578.77,-108.16 584.77,-102.16 590.77,-102.16 590.77,-102.16 797.46,-102.16 797.46,-102.16 803.46,-102.16 809.46,-108.16 809.46,-114.16 809.46,-114.16 809.46,-145.32 809.46,-145.32 809.46,-151.32 803.46,-157.32 797.46,-157.32"/>
+<text xml:space="preserve" text-anchor="start" x="637.1" y="-131.14" font-family="Arial" font-weight="bold" font-size="19.00" fill="#111827">Postprocess</text>
+<text xml:space="preserve" text-anchor="start" x="593.17" y="-114.84" font-family="Arial" font-size="16.00" fill="#111827">decode task&#45;specific outputs</text>
+</g>
+<!-- engines&#45;&gt;postprocess -->
+<g id="edge3" class="edge">
+<title>engines&#45;&gt;postprocess</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M694.12,-205.44C694.12,-205.44 694.12,-169.5 694.12,-169.5"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="696.92,-169.5 694.12,-161.5 691.32,-169.5 696.92,-169.5"/>
+</g>
+<!-- engines&#45;&gt;token -->
+<g id="edge5" class="edge">
+<title>engines&#45;&gt;token</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" stroke-dasharray="5,2" d="M548.6,-205.52C548.6,-193.4 548.6,-182 548.6,-182 548.6,-182 160.31,-182 160.31,-182 160.31,-182 160.31,-65.34 160.31,-65.34"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="163.11,-65.34 160.31,-57.34 157.51,-65.34 163.11,-65.34"/>
+</g>
+<!-- engines&#45;&gt;denoise -->
+<g id="edge6" class="edge">
+<title>engines&#45;&gt;denoise</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" stroke-dasharray="5,2" d="M563.69,-205.82C563.69,-151 563.69,-35 563.69,-35 563.69,-35 513.56,-35 513.56,-35"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="513.56,-32.2 505.56,-35 513.56,-37.8 513.56,-32.2"/>
+</g>
+<!-- chunks -->
+<g id="node8" class="node">
+<title>chunks</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M777.9,-53.16C777.9,-53.16 610.34,-53.16 610.34,-53.16 604.34,-53.16 598.34,-47.16 598.34,-41.16 598.34,-41.16 598.34,-12 598.34,-12 598.34,-6 604.34,0 610.34,0 610.34,0 777.9,0 777.9,0 783.9,0 789.9,-6 789.9,-12 789.9,-12 789.9,-41.16 789.9,-41.16 789.9,-47.16 783.9,-53.16 777.9,-53.16"/>
+<text xml:space="preserve" text-anchor="start" x="637.92" y="-28.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Audio chunks</text>
+<text xml:space="preserve" text-anchor="start" x="612.74" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">update streaming state</text>
+</g>
+<!-- engines&#45;&gt;chunks -->
+<g id="edge7" class="edge">
+<title>engines&#45;&gt;chunks</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" stroke-dasharray="5,2" d="M811.88,-205.57C811.88,-148.9 811.88,-27 811.88,-27 811.88,-27 801.89,-27 801.89,-27"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="801.89,-24.2 793.89,-27 801.89,-29.8 801.89,-24.2"/>
+</g>
+<!-- single -->
+<g id="node9" class="node">
+<title>single</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M1080.66,-53.16C1080.66,-53.16 933.57,-53.16 933.57,-53.16 927.57,-53.16 921.57,-47.16 921.57,-41.16 921.57,-41.16 921.57,-12 921.57,-12 921.57,-6 927.57,0 933.57,0 933.57,0 1080.66,0 1080.66,0 1086.66,0 1092.66,-6 1092.66,-12 1092.66,-12 1092.66,-41.16 1092.66,-41.16 1092.66,-47.16 1086.66,-53.16 1080.66,-53.16"/>
+<text xml:space="preserve" text-anchor="start" x="959.88" y="-28.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Single pass</text>
+<text xml:space="preserve" text-anchor="start" x="935.97" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">vision or forecasting</text>
+</g>
+<!-- engines&#45;&gt;single -->
+<g id="edge8" class="edge">
+<title>engines&#45;&gt;single</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" stroke-dasharray="5,2" d="M814.31,-205.71C814.31,-151.93 814.31,-40 814.31,-40 814.31,-40 909.53,-40 909.53,-40"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="909.53,-42.8 917.53,-40 909.53,-37.2 909.53,-42.8"/>
+</g>
+<!-- result -->
+<g id="node5" class="node">
+<title>result</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" d="M1118.91,-157.32C1118.91,-157.32 895.33,-157.32 895.33,-157.32 889.33,-157.32 883.33,-151.32 883.33,-145.32 883.33,-145.32 883.33,-114.16 883.33,-114.16 883.33,-108.16 889.33,-102.16 895.33,-102.16 895.33,-102.16 1118.91,-102.16 1118.91,-102.16 1124.91,-102.16 1130.91,-108.16 1130.91,-114.16 1130.91,-114.16 1130.91,-145.32 1130.91,-145.32 1130.91,-151.32 1124.91,-157.32 1118.91,-157.32"/>
+<text xml:space="preserve" text-anchor="start" x="950.63" y="-131.14" font-family="Arial" font-weight="bold" font-size="19.00" fill="#111827">Typed result</text>
+<text xml:space="preserve" text-anchor="start" x="897.73" y="-114.84" font-family="Arial" font-size="16.00" fill="#111827">text · image · audio · forecast</text>
+</g>
+<!-- postprocess&#45;&gt;result -->
+<g id="edge4" class="edge">
+<title>postprocess&#45;&gt;result</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M810.22,-130C810.22,-130 871.21,-130 871.21,-130"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="871.21,-132.8 879.21,-130 871.21,-127.2 871.21,-132.8"/>
+</g>
+<!-- postprocess&#45;&gt;chunks -->
+<!-- result&#45;&gt;single -->
+<!-- token&#45;&gt;denoise -->
+<!-- denoise&#45;&gt;chunks -->
+<!-- chunks&#45;&gt;single -->
+</g>
+</svg>

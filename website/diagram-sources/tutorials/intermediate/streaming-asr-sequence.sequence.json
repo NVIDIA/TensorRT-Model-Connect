@@ -1,0 +1,30 @@
+{
+  "title": "Cache-aware streaming transcription",
+  "description": "The application calls the transcription stream, which can buffer early chunks and return an empty current result; once the schedule is ready it runs RNNT frames, while finish processes all pending features before returning the final result.",
+  "subtitle": "Early calls may only buffer features; model work begins when the configured schedule is ready.",
+  "participants": [
+    {"id": "app", "label": "Application", "color": "api"},
+    {"id": "stream", "label": "Stream API", "color": "runtime"},
+    {"id": "feature", "label": "Feature cache", "color": "artifact"},
+    {"id": "rnnt", "label": "RNNT pipeline", "color": "runtime"}
+  ],
+  "messages": [
+    {"kind": "section", "label": "Early chunks: buffer until the schedule is ready"},
+    {"number": 1, "from": "app", "to": "stream", "label": "accept_audio(early chunk)"},
+    {"number": 2, "from": "stream", "to": "feature", "label": "update feature cache"},
+    {"number": 3, "from": "stream", "to": "app", "label": "result may be empty", "style": "return"},
+    {"kind": "section", "label": "A later chunk makes one or more encoder windows ready"},
+    {"number": 4, "from": "app", "to": "stream", "label": "accept_audio(next chunk)"},
+    {"number": 5, "from": "stream", "to": "feature", "label": "reuse overlap/cache"},
+    {"number": 6, "from": "stream", "to": "rnnt", "label": "process ready frames"},
+    {"number": 7, "from": "rnnt", "to": "stream", "label": "partial hypothesis", "style": "return"},
+    {"number": 8, "from": "stream", "to": "app", "label": "TranscriptionStreamResult", "style": "return"},
+    {"kind": "section", "label": "Finalize the stream"},
+    {"number": 9, "from": "app", "to": "stream", "label": "finish()"},
+    {"number": 10, "from": "stream", "to": "stream", "label": "process_ready(true)"},
+    {"number": 11, "from": "stream", "to": "feature", "label": "flush pending features"},
+    {"number": 12, "from": "stream", "to": "rnnt", "label": "process remaining frames"},
+    {"number": 13, "from": "rnnt", "to": "stream", "label": "final hypothesis", "style": "return"},
+    {"number": 14, "from": "stream", "to": "app", "label": "final stream result", "style": "return"}
+  ]
+}

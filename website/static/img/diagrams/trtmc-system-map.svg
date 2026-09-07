@@ -1,0 +1,83 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="667" height="630" role="img" aria-labelledby="trtmc-system-map-svg-title trtmc-system-map-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 667.00 630.00" xmlns="http://www.w3.org/2000/svg">
+<title id="trtmc-system-map-svg-title">TensorRT-Model-Connect build and runtime system map</title>
+<desc id="trtmc-system-map-svg-description">A checkpoint resolves to exactly one family-owned build, becomes a minimal bundle, and loads through an explicit backend and family DSO into an abstract Task API.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 605.16)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-605.16 641.32,-605.16 641.32,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="8" y="-549.96" font-family="Arial" font-weight="bold" font-size="30.00" fill="#111827">Checkpoint → family → bundle → Task API</text>
+<text xml:space="preserve" text-anchor="start" x="10.86" y="-531.66" font-family="Arial" font-size="17.00" fill="#111827">One artifact contract connects Python build ownership to native C++ execution.</text>
+<!-- checkpoint -->
+<g id="node1" class="node">
+<title>checkpoint</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2.2" d="M386.84,-524.96C386.84,-524.96 229.28,-524.96 229.28,-524.96 223.28,-524.96 217.28,-518.96 217.28,-512.96 217.28,-512.96 217.28,-482.8 217.28,-482.8 217.28,-476.8 223.28,-470.8 229.28,-470.8 229.28,-470.8 386.84,-470.8 386.84,-470.8 392.84,-470.8 398.84,-476.8 398.84,-482.8 398.84,-482.8 398.84,-512.96 398.84,-512.96 398.84,-518.96 392.84,-524.96 386.84,-524.96"/>
+<text xml:space="preserve" text-anchor="start" x="259.06" y="-499.68" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">Checkpoint</text>
+<text xml:space="preserve" text-anchor="start" x="230.24" y="-483.48" font-family="Arial" font-size="16.00" fill="#111827">Hugging Face or local</text>
+</g>
+<!-- resolver -->
+<g id="node2" class="node">
+<title>resolver</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2.2" d="M408.64,-430.8C408.64,-430.8 207.48,-430.8 207.48,-430.8 201.48,-430.8 195.48,-424.8 195.48,-418.8 195.48,-418.8 195.48,-388.64 195.48,-388.64 195.48,-382.64 201.48,-376.64 207.48,-376.64 207.48,-376.64 408.64,-376.64 408.64,-376.64 414.64,-376.64 420.64,-382.64 420.64,-388.64 420.64,-388.64 420.64,-418.8 420.64,-418.8 420.64,-424.8 414.64,-430.8 408.64,-430.8"/>
+<text xml:space="preserve" text-anchor="start" x="211.52" y="-405.52" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">Unique family resolver</text>
+<text xml:space="preserve" text-anchor="start" x="208.44" y="-389.32" font-family="Arial" font-size="16.00" fill="#111827">dependency&#45;free support.py</text>
+</g>
+<!-- checkpoint&#45;&gt;resolver -->
+<g id="edge1" class="edge">
+<title>checkpoint&#45;&gt;resolver</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M308.06,-469.88C308.06,-469.88 308.06,-443.55 308.06,-443.55"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="310.86,-443.55 308.06,-435.55 305.26,-443.55 310.86,-443.55"/>
+</g>
+<!-- family_build -->
+<g id="node3" class="node">
+<title>family_build</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2.2" d="M377.04,-336.64C377.04,-336.64 239.08,-336.64 239.08,-336.64 233.08,-336.64 227.08,-330.64 227.08,-324.64 227.08,-324.64 227.08,-294.48 227.08,-294.48 227.08,-288.48 233.08,-282.48 239.08,-282.48 239.08,-282.48 377.04,-282.48 377.04,-282.48 383.04,-282.48 389.04,-288.48 389.04,-294.48 389.04,-294.48 389.04,-324.64 389.04,-324.64 389.04,-330.64 383.04,-336.64 377.04,-336.64"/>
+<text xml:space="preserve" text-anchor="start" x="240.04" y="-311.36" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">family/model.py</text>
+<text xml:space="preserve" text-anchor="start" x="241.79" y="-295.16" font-family="Arial" font-size="16.00" fill="#111827">plain build function</text>
+</g>
+<!-- resolver&#45;&gt;family_build -->
+<g id="edge2" class="edge">
+<title>resolver&#45;&gt;family_build</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M308.06,-375.72C308.06,-375.72 308.06,-349.39 308.06,-349.39"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="310.86,-349.39 308.06,-341.39 305.26,-349.39 310.86,-349.39"/>
+</g>
+<!-- bundle -->
+<g id="node4" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="3" d="M430.85,-242.48C430.85,-242.48 185.27,-242.48 185.27,-242.48 179.27,-242.48 173.27,-236.48 173.27,-230.48 173.27,-230.48 173.27,-200.32 173.27,-200.32 173.27,-194.32 179.27,-188.32 185.27,-188.32 185.27,-188.32 430.85,-188.32 430.85,-188.32 436.85,-188.32 442.85,-194.32 442.85,-200.32 442.85,-200.32 442.85,-230.48 442.85,-230.48 442.85,-236.48 436.85,-242.48 430.85,-242.48"/>
+<text xml:space="preserve" text-anchor="start" x="276.06" y="-217.2" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">.bundle</text>
+<text xml:space="preserve" text-anchor="start" x="186.23" y="-201" font-family="Arial" font-size="16.00" fill="#111827">family · task · backend · sections</text>
+</g>
+<!-- family_build&#45;&gt;bundle -->
+<g id="edge3" class="edge">
+<title>family_build&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M308.06,-281.56C308.06,-281.56 308.06,-255.56 308.06,-255.56"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="310.86,-255.56 308.06,-247.56 305.26,-255.56 310.86,-255.56"/>
+</g>
+<!-- loader -->
+<g id="node5" class="node">
+<title>loader</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2.2" d="M410.17,-148.32C410.17,-148.32 205.94,-148.32 205.94,-148.32 199.94,-148.32 193.94,-142.32 193.94,-136.32 193.94,-136.32 193.94,-106.16 193.94,-106.16 193.94,-100.16 199.94,-94.16 205.94,-94.16 205.94,-94.16 410.17,-94.16 410.17,-94.16 416.17,-94.16 422.17,-100.16 422.17,-106.16 422.17,-106.16 422.17,-136.32 422.17,-136.32 422.17,-142.32 416.17,-148.32 410.17,-148.32"/>
+<text xml:space="preserve" text-anchor="start" x="242.55" y="-123.04" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">Runtime loader</text>
+<text xml:space="preserve" text-anchor="start" x="206.9" y="-106.84" font-family="Arial" font-size="16.00" fill="#111827">exact backend + family DSO</text>
+</g>
+<!-- bundle&#45;&gt;loader -->
+<g id="edge4" class="edge">
+<title>bundle&#45;&gt;loader</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M308.06,-186.89C308.06,-186.89 308.06,-161.11 308.06,-161.11"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="310.86,-161.11 308.06,-153.11 305.26,-161.11 310.86,-161.11"/>
+</g>
+<!-- task -->
+<g id="node6" class="node">
+<title>task</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.2" d="M408.17,-54.16C408.17,-54.16 207.94,-54.16 207.94,-54.16 201.94,-54.16 195.94,-48.16 195.94,-42.16 195.94,-42.16 195.94,-12 195.94,-12 195.94,-6 201.94,0 207.94,0 207.94,0 408.17,0 408.17,0 414.17,0 420.17,-6 420.17,-12 420.17,-12 420.17,-42.16 420.17,-42.16 420.17,-48.16 414.17,-54.16 408.17,-54.16"/>
+<text xml:space="preserve" text-anchor="start" x="231.03" y="-28.88" font-family="Arial" font-weight="bold" font-size="18.00" fill="#111827">Abstract Task API</text>
+<text xml:space="preserve" text-anchor="start" x="208.9" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">text · image · audio · more</text>
+</g>
+<!-- loader&#45;&gt;task -->
+<g id="edge5" class="edge">
+<title>loader&#45;&gt;task</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M308.06,-93.24C308.06,-93.24 308.06,-66.91 308.06,-66.91"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="310.86,-66.91 308.06,-58.91 305.26,-66.91 310.86,-66.91"/>
+</g>
+</g>
+</svg>

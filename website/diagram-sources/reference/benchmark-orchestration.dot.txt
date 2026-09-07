@@ -1,0 +1,22 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Benchmark case and bundle orchestration
+// @description: The benchmark application resolves one family-owned manifest, reuses an explicit bundle or invokes the public Python build API, then measures through the native public Task API.
+digraph BenchmarkOrchestration {
+  graph [bgcolor="#fbfcfe", pad="0.30", nodesep="0.42", ranksep="0.58", rankdir="TB", splines="polyline", fontname="Arial", labelloc="t", label=<<B>Resolve one reproducible benchmark case</B><BR/><FONT POINT-SIZE="16">Benchmark code is an application over public build and Task APIs.</FONT>>, fontsize="27", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", color="#64748b", penwidth="1.8", fillcolor="#ffffff", fontname="Arial", fontsize="17", fontcolor="#111827", margin="0.20,0.14"];
+  edge [color="#64748b", penwidth="2.2", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  cli [fillcolor="#eff6ff", color="#2563eb", label=<<B>trtmc-bench</B>>];
+  manifest [label=<<B>Family-owned manifest</B><BR/><FONT POINT-SIZE="16">model · task · build settings</FONT>>];
+  bundle [shape="diamond", style="filled", fillcolor="#fffbeb", color="#b45309", label=<<B>Bundle supplied?</B>>];
+  build [fillcolor="#eff6ff", color="#2563eb", label=<<B>Public Python build API</B>>];
+  worker [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Native benchmark worker</B><BR/><FONT POINT-SIZE="16">public Task API</FONT>>];
+  metrics [fillcolor="#ecfeff", color="#0e7490", label=<<B>Metrics + report</B><BR/><FONT POINT-SIZE="16">raw samples and timing scope</FONT>>];
+
+  cli -> manifest -> bundle;
+  bundle -> worker [label="yes"];
+  bundle -> build [label="no"];
+  build -> worker;
+  worker -> metrics;
+}
