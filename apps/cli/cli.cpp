@@ -7,6 +7,7 @@
 
 #include "cli/io.h"
 #include "trtmc/runtime/family_loader.h"
+#include "trtmc/runtime/runtime_root.h"
 
 #include <algorithm>
 #include <chrono>
@@ -15,7 +16,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <dlfcn.h>
-#include <elf.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -197,114 +197,11 @@ void append_python_package_runtime_roots(std::vector<fs::path>& candidates,
         append_candidate(candidates, seen, root);
 }
 
-std::string read_build_cohort(const fs::path& library) {
-    static constexpr char prefix[] = "trtmc_build_cohort_";
-    static constexpr std::size_t id_size = 32;
-    static constexpr std::uint64_t max_string_table_size = 16ULL * 1024ULL * 1024ULL;
-    std::ifstream input(library, std::ios::binary);
-    if (!input)
-        return {};
-
-    std::error_code error;
-    const std::uintmax_t file_size = fs::file_size(library, error);
-    if (error || file_size < sizeof(Elf64_Ehdr))
-        return {};
-    const auto read_at = [&](std::uint64_t offset, void* destination, std::size_t size) {
-        if (offset > file_size || size > file_size - offset)
-            return false;
-        input.clear();
-        input.seekg(static_cast<std::streamoff>(offset));
-        input.read(static_cast<char*>(destination), static_cast<std::streamsize>(size));
-        return input.good();
-    };
-
-    Elf64_Ehdr header{};
-    if (!read_at(0, &header, sizeof(header)) || header.e_ident[EI_MAG0] != ELFMAG0 ||
-        header.e_ident[EI_MAG1] != ELFMAG1 || header.e_ident[EI_MAG2] != ELFMAG2 ||
-        header.e_ident[EI_MAG3] != ELFMAG3 || header.e_ident[EI_CLASS] != ELFCLASS64 ||
-        header.e_ident[EI_DATA] != ELFDATA2LSB || header.e_shentsize != sizeof(Elf64_Shdr) ||
-        header.e_shnum == 0 || header.e_shstrndx >= header.e_shnum || header.e_shoff > file_size ||
-        header.e_shnum > (file_size - header.e_shoff) / sizeof(Elf64_Shdr)) {
-        return {};
-    }
-
-    const auto read_section_header = [&](std::size_t index, Elf64_Shdr& section) {
-        return read_at(header.e_shoff + index * sizeof(Elf64_Shdr), &section, sizeof(section));
-    };
-    Elf64_Shdr names_header{};
-    if (!read_section_header(header.e_shstrndx, names_header) ||
-        names_header.sh_size > max_string_table_size || names_header.sh_offset > file_size ||
-        names_header.sh_size > file_size - names_header.sh_offset) {
-        return {};
-    }
-    std::string names(static_cast<std::size_t>(names_header.sh_size), '\0');
-    if (!read_at(names_header.sh_offset, names.data(), names.size()))
-        return {};
-
-    for (std::size_t index = 0; index < header.e_shnum; ++index) {
-        Elf64_Shdr section{};
-        if (!read_section_header(index, section) || section.sh_name >= names.size())
-            return {};
-        const auto name_end = names.find('\0', section.sh_name);
-        if (name_end == std::string::npos ||
-            names.compare(section.sh_name, name_end - section.sh_name, ".dynstr") != 0) {
-            continue;
-        }
-        if (section.sh_size > max_string_table_size || section.sh_offset > file_size ||
-            section.sh_size > file_size - section.sh_offset) {
-            return {};
-        }
-        std::string strings(static_cast<std::size_t>(section.sh_size), '\0');
-        if (!read_at(section.sh_offset, strings.data(), strings.size()))
-            return {};
-        std::size_t position = strings.find(prefix);
-        while (position != std::string::npos) {
-            const std::size_t id_begin = position + sizeof(prefix) - 1;
-            const std::size_t marker_end = id_begin + id_size;
-            if (marker_end < strings.size() && strings[marker_end] == '\0' &&
-                std::all_of(
-                    strings.begin() + static_cast<std::ptrdiff_t>(id_begin),
-                    strings.begin() + static_cast<std::ptrdiff_t>(marker_end),
-                    [](const unsigned char character) {
-                        return (character >= '0' && character <= '9') ||
-                               (character >= 'a' && character <= 'f');
-                    })) {
-                return strings.substr(id_begin, id_size);
-            }
-            position = strings.find(prefix, position + 1);
-        }
-        return {};
-    }
-    return {};
-}
-
 RuntimeRootSearchContext runtime_root_search_context() {
     RuntimeRootSearchContext context;
     std::error_code error;
     context.current_directory = fs::current_path(error);
-
-    fs::path core_library;
-    Dl_info core_info{};
-    using InspectBundleFn = BundleInfo (*)(const std::string&);
-    const auto inspect_bundle_function = static_cast<InspectBundleFn>(&InspectBundle);
-    if (dladdr(reinterpret_cast<const void*>(inspect_bundle_function), &core_info) != 0 &&
-        core_info.dli_fname != nullptr) {
-        core_library = core_info.dli_fname;
-    }
-
-    Dl_info runtime_info{};
-    using LoadTaskFn = std::unique_ptr<ITask> (*)(const std::string&, const std::string&,
-                                                  std::uint64_t, const std::string&, bool);
-    const auto load_task_function = static_cast<LoadTaskFn>(&load_task);
-    if (dladdr(reinterpret_cast<const void*>(load_task_function), &runtime_info) != 0 &&
-        runtime_info.dli_fname != nullptr) {
-        context.runtime_library = runtime_info.dli_fname;
-    }
-
-    const std::string core_cohort = read_build_cohort(core_library);
-    const std::string runtime_cohort = read_build_cohort(context.runtime_library);
-    if (!core_cohort.empty() && core_cohort == runtime_cohort)
-        context.cohort_id = core_cohort;
+    context.loaded_runtime_root = loaded_runtime_root();
 
     std::vector<char> executable(4096, '\0');
     const ssize_t length = readlink("/proc/self/exe", executable.data(), executable.size() - 1);
@@ -837,25 +734,12 @@ int dispatch_run(const Command& command, ITask& task, std::ostream& output) {
 } // namespace
 
 std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& explicit_root,
-                                 bool require_byok, const RuntimeRootSearchContext& context) {
+                                 bool require_byok, const RuntimeRootSearchContext& context,
+                                 const RuntimeRootMatcher& matches) {
     if (!explicit_root.empty())
         return explicit_root;
-
-    const auto is_safe_id = [](const std::string& value) {
-        if (value.empty() || value.front() < 'a' || value.front() > 'z')
-            return false;
-        return std::all_of(value.begin(), value.end(), [](const unsigned char character) {
-            return (character >= 'a' && character <= 'z') ||
-                   (character >= '0' && character <= '9') || character == '_';
-        });
-    };
-    if (!is_safe_id(bundle.family) || !is_safe_id(bundle.backend))
-        throw std::runtime_error("Cannot discover a runtime for unsafe bundle family/backend IDs");
-    if (context.runtime_library.empty() || context.cohort_id.empty()) {
-        throw std::runtime_error(
-            "Unable to identify one build cohort for the loaded TRTMC core/runtime libraries; "
-            "pass --runtime-root DIR");
-    }
+    if (!matches)
+        throw std::logic_error("runtime-root discovery requires a candidate matcher");
 
     std::vector<fs::path> current_candidates;
     std::vector<fs::path> installed_candidates;
@@ -863,7 +747,7 @@ std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& ex
     std::vector<fs::path> configured_candidates;
     std::set<std::string> seen;
     append_candidate(current_candidates, seen, context.current_directory);
-    append_candidate(installed_candidates, seen, context.runtime_library.parent_path());
+    append_candidate(installed_candidates, seen, context.loaded_runtime_root);
 
     if (!context.executable.empty()) {
         const fs::path executable_directory = context.executable.parent_path();
@@ -878,41 +762,24 @@ std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& ex
 
     append_path_list(configured_candidates, seen, context.runtime_path);
 
-    std::vector<std::string> required{
-        "libtrtmc_core.so",
-        "libtrtmc_runtime.so",
-        "libtrtmc_backend_" + bundle.backend + ".so",
-        "libtrtmc_model_" + bundle.family + ".so",
-    };
-    if (require_byok)
-        required.emplace_back("libtrtmc_byok_tvm_ffi.so");
-
-    const auto is_matching_runtime = [&](const fs::path& candidate) {
-        return std::all_of(required.begin(), required.end(), [&](const std::string& library) {
-            std::error_code error;
-            const fs::path path = candidate / library;
-            return fs::is_regular_file(path, error) && read_build_cohort(path) == context.cohort_id;
-        });
-    };
-
     std::vector<fs::path> searched;
     if (!current_candidates.empty()) {
         const auto& current = current_candidates.front();
         searched.push_back(current);
-        if (is_matching_runtime(current)) {
+        if (matches(bundle, current, require_byok)) {
             return current.string();
         }
     }
     for (const auto& candidate : installed_candidates) {
         searched.push_back(candidate);
-        if (is_matching_runtime(candidate))
+        if (matches(bundle, candidate, require_byok))
             return candidate.string();
     }
 
     std::vector<fs::path> matching_wheels;
     for (const auto& candidate : wheel_candidates) {
         searched.push_back(candidate);
-        if (is_matching_runtime(candidate))
+        if (matches(bundle, candidate, require_byok))
             matching_wheels.push_back(candidate);
     }
     if (matching_wheels.size() == 1)
@@ -928,19 +795,13 @@ std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& ex
 
     for (const auto& candidate : configured_candidates) {
         searched.push_back(candidate);
-        if (is_matching_runtime(candidate))
+        if (matches(bundle, candidate, require_byok))
             return candidate.string();
     }
 
     std::ostringstream message;
-    message << "Unable to discover a complete TRTMC runtime for family '" << bundle.family
-            << "' and backend '" << bundle.backend << "'. Expected in one directory: ";
-    for (std::size_t index = 0; index < required.size(); ++index) {
-        if (index != 0)
-            message << ", ";
-        message << required[index];
-    }
-    message << ". Searched:";
+    message << "Unable to discover a complete TRTMC runtime for bundle '" << bundle.family << "/"
+            << bundle.backend << "'. Searched:";
     for (const auto& candidate : searched)
         message << " " << candidate.string();
     message << ". Pass --runtime-root DIR or add a directory to TRTMC_RUNTIME_PATH.";
@@ -1587,11 +1448,17 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
             }
         }
         const bool discover_runtime = command.runtime_root.empty();
-        const BundleInfo bundle = InspectBundle(command.bundle);
-        command.runtime_root = resolve_runtime_root(bundle, command.runtime_root, has_byok_library,
-                                                    runtime_root_search_context());
-        if (discover_runtime)
+        if (discover_runtime) {
+            const BundleInfo bundle = InspectBundle(command.bundle);
+            command.runtime_root =
+                resolve_runtime_root(bundle, {}, has_byok_library, runtime_root_search_context(),
+                                     [](const BundleInfo& candidate_bundle,
+                                        const fs::path& candidate, bool require_byok) {
+                                         return runtime_root_matches_loaded_build(
+                                             candidate_bundle, candidate.string(), require_byok);
+                                     });
             error << "Using TRTMC runtime: " << command.runtime_root << '\n';
+        }
         if (has_byok_library)
             load_byok_extension(command);
         std::unique_ptr<ITask> task =
