@@ -517,6 +517,16 @@ Runtime dispatch occurs once:
 
 Core, family, and backend DSOs are produced by one product build. There is no
 ABI negotiation, version translation, old-symbol alias, or compatibility shim.
+The human-facing `trtmc` CLI may discover a complete runtime cohort before this
+control transfer. It prefers the current directory, then the runtime belonging
+to the running CLI installation, followed by explicitly configured runtime
+library paths. The public C++ load API still receives one explicit root, and
+the loader never combines or falls back across roots. Every native artifact
+carries the build-cohort identity generated when CMake configures the build.
+Automatic
+candidates must contain that same identity in core, runtime, backend, family,
+and optional BYOK DSOs, preventing another build cohort from being selected
+implicitly.
 
 ### Task API
 
