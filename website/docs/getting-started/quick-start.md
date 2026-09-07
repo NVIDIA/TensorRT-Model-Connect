@@ -61,9 +61,10 @@ single-directory runtime in this order:
 A complete GPT-2 TensorRT runtime contains matching `libtrtmc_core.so`,
 `libtrtmc_runtime.so`, `libtrtmc_backend_trt.so`, and
 `libtrtmc_model_gpt2.so` files. Candidates are never combined across
-directories, and the CLI prints the automatically selected directory. If more
-than one installed wheel runtime matches, select one with `--runtime-root DIR`.
-An explicit root bypasses discovery.
+directories: the CLI enumerates paths, and the Runtime Loader contract validates
+each candidate without loading it. The CLI prints the automatically selected
+directory. If more than one installed wheel runtime matches, select one with
+`--runtime-root DIR`. An explicit root bypasses discovery.
 
 Every native artifact carries a build-cohort identity, and automatic discovery
 accepts a directory only when the identity matches the core and runtime already
