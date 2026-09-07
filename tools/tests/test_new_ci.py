@@ -40,6 +40,7 @@ class RecordingContext:
         self.runtime_snapshots = []
         self.skip_ctest = False
         self.no_cpu_family_tests = False
+        self.missing_e2e_testcases = set()
 
     def run(self, command, **kwargs):
         self.calls.append((list(command), kwargs))
@@ -83,17 +84,17 @@ class RecordingContext:
             testcases = "" if empty else '<testcase name="hardware" />'
             if "-e2e-junit.xml" in report.name:
                 family = report.name.removeprefix("trtmc-").removesuffix("-e2e-junit.xml")
-                known = {
-                    str(case["name"])
-                    for path in (self.repository / f"families/{family}/tests/manifests").glob(
-                        "*.json"
-                    )
-                    for case in json.loads(path.read_text(encoding="utf-8"))["testcases"]
-                }
-                selected = known
                 if "--e2e-testcase" in command:
                     raw = str(command[command.index("--e2e-testcase") + 1])
-                    selected = known & set(raw.split(","))
+                    selected = set(raw.split(",")) - self.missing_e2e_testcases
+                else:
+                    selected = {
+                        str(case["name"])
+                        for path in (self.repository / f"families/{family}/tests/manifests").glob(
+                            "*.json"
+                        )
+                        for case in json.loads(path.read_text(encoding="utf-8"))["testcases"]
+                    }
                 testcases = "".join(
                     f'<testcase name="test_e2e[{name}]" />' for name in sorted(selected)
                 )
@@ -124,10 +125,11 @@ def test_selective_e2e_calls_family_tests_directly(
         (root / "tests/manifests").mkdir()
         (root / "model.py").write_text("def build(request, writer): pass\n")
         (root / "tests/test_e2e.py").write_text("def test_e2e(): pass\n")
-        (root / "tests/manifests/case.json").write_text(
-            json.dumps({"testcases": [{"name": f"{family}-case"}]}),
-            encoding="utf-8",
-        )
+        manifest = json.dumps({"testcases": [{"name": f"{family}-case"}]})
+        if family == "beta" and testcases is not None:
+            # Explicit auxiliary E2E cases do not depend on model manifests.
+            manifest = "invalid manifest"
+        (root / "tests/manifests/case.json").write_text(manifest, encoding="utf-8")
         if family == "beta":
             (root / "tests/test_model.py").write_text(
                 "def test_model(): pass\n",
@@ -405,6 +407,7 @@ def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
             "TRTMC_NATIVE_BUILD_DIR": str(native_build),
         },
     )
+    context.missing_e2e_testcases.add("does-not-exist")
 
     with pytest.raises(CiError, match="missing requested E2E testcase: does-not-exist"):
         E2ERunner(context)._run(("gpt2",), ("does-not-exist",))

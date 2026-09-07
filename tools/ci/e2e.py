@@ -236,8 +236,7 @@ class E2ERunner:
                     limit=self.context.env.get("TRTMC_E2E_TIMEOUT", "12h"),
                 )
                 _require_passing_junit(hardware_junit, "family hardware tests")
-            known_testcases = self._family_testcases(family)
-            requested_testcases = testcases or known_testcases
+            requested_testcases = testcases or self._family_testcases(family)
             test = f"families/{family}/tests/test_e2e.py"
             e2e_junit = native_build / f"trtmc-{family}-e2e-junit.xml"
             with self._isolated_runtime_root(runtime_root, family) as isolated:
