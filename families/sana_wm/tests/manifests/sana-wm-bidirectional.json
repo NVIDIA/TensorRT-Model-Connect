@@ -1,6 +1,7 @@
 {
   "name": "sana-wm-bidirectional",
   "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
+  "hf_revision": "e96271d77398def8ebb9fc595e7c0056dc625ab7",
   "hf_dependencies": [
     {
       "repo_id": "Efficient-Large-Model/gemma-2-2b-it"

@@ -1,6 +1,7 @@
 {
   "name": "albert-base",
   "hf_id": "albert/albert-base-v2",
+  "hf_revision": "8e2f239c5f8a2c0f253781ca60135db913e5c80c",
   "bundle": "albert-base.bundle",
   "family": "albert",
   "task": "encoding",

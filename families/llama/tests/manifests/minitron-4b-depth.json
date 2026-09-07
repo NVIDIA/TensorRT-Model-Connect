@@ -1,6 +1,7 @@
 {
   "name": "minitron-4b-depth",
   "hf_id": "nvidia/Llama-3.1-Minitron-4B-Depth-Base",
+  "hf_revision": "47f17b2c73bbd07a4b643a0382970704d389f737",
   "bundle": "minitron-4b-depth.bundle",
   "family": "llama",
   "task": "text_generation",

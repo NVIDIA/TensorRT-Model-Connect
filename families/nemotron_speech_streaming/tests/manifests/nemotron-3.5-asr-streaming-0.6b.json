@@ -1,6 +1,7 @@
 {
   "name": "nemotron-3.5-asr-streaming-0.6b",
   "hf_id": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+  "hf_revision": "1c8deaecc64b91f034d73e08dd8b64625eb3395d",
   "bundle": "nemotron-3.5-asr-streaming-0.6b.bundle",
   "family": "nemotron_speech_streaming",
   "task": "transcription_streaming",

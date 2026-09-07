@@ -1,6 +1,7 @@
 {
   "name": "nemotron-speech-streaming-en-0.6b-tp4",
   "hf_id": "nvidia/nemotron-speech-streaming-en-0.6b",
+  "hf_revision": "ebe59e5a817142986528bbbee5dba8db7b38ed50",
   "bundle": "nemotron-speech-streaming-en-0.6b-tp4.bundle",
   "family": "nemotron_speech_streaming",
   "task": "transcription_streaming",

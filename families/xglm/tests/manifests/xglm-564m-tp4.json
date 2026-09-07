@@ -1,6 +1,7 @@
 {
   "name": "xglm-564m-tp4",
   "hf_id": "facebook/xglm-564M",
+  "hf_revision": "f3059f01b98ccc877c673149e0178c0e957660f9",
   "bundle": "xglm-564m-tp4.bundle",
   "family": "xglm",
   "task": "text_generation",

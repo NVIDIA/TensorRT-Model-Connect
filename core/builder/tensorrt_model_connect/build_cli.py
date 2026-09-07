@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Sequence
 
-from .build import BuildRequest, _load_family, build
+from .build import BuildRequest, _load_family, build, resolve_source_revision
 from .model_support import load_model_metadata, resolve_family
+
+
+_EXACT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -21,6 +25,10 @@ def _parser() -> argparse.ArgumentParser:
     build_parser.add_argument("model", help="Hugging Face model ID or local snapshot")
     build_parser.add_argument("-o", "--output", type=Path, required=True)
     build_parser.add_argument("--task", help="Override the family-owned default task")
+    build_parser.add_argument(
+        "--checkpoint-id",
+        help="Canonical checkpoint ID when MODEL is an already-resolved local snapshot",
+    )
     build_parser.add_argument("--revision", help="Hugging Face model revision")
     build_parser.add_argument("--precision", choices=("fp16", "bf16", "fp32"))
     build_parser.add_argument("--backend", choices=("trt", "trt_rtx"), default="trt")
@@ -68,6 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command != "build":
         raise AssertionError(f"unhandled command: {args.command}")
+    source_is_local = Path(args.model).is_dir()
+    checkpoint_revision = _checkpoint_revision(
+        model_dir,
+        requested=args.revision,
+        require_exact=not source_is_local,
+    )
     task = args.task or support.default_task
     if task not in support.tasks:
         raise ValueError(
@@ -78,6 +92,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         BuildRequest(
             model_dir=model_dir,
             output_path=args.output,
+            checkpoint_id=args.checkpoint_id or args.model,
+            checkpoint_revision=checkpoint_revision,
+            source_revision=_source_revision(),
             precision=args.precision or support.default_precision,
             backend=args.backend,
             family=family,
@@ -108,3 +125,23 @@ def _resolve_model(model: str, revision: str | None) -> Path:
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(repo_id=model, revision=revision))
+
+
+def _checkpoint_revision(
+    model_dir: Path, *, requested: str | None, require_exact: bool
+) -> str:
+    resolved = model_dir.name.lower() if model_dir.parent.name == "snapshots" else ""
+    if _EXACT_REVISION.fullmatch(resolved):
+        return resolved
+    requested = (requested or "").strip().lower()
+    if _EXACT_REVISION.fullmatch(requested):
+        return requested
+    if require_exact:
+        raise ValueError(
+            "Hugging Face model resolution did not produce an exact 40-character commit SHA"
+        )
+    return requested
+
+
+def _source_revision() -> str:
+    return resolve_source_revision()

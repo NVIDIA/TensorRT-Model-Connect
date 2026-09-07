@@ -1320,15 +1320,21 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
             return EXIT_SUCCESS;
         }
         if (command.kind == CommandKind::kInspect) {
-            const BundleInfo bundle = InspectBundle(command.bundle);
+            const BundleReader reader(command.bundle);
+            const BundleInfo& bundle = reader.info();
             nlohmann::json sections = nlohmann::json::object();
             for (const auto& section : bundle.sections)
                 sections[section.name] = {{"offset", section.offset}, {"length", section.length}};
-            write_json(output, {{"format", bundle.format},
-                                {"family", bundle.family},
-                                {"task", bundle.task},
-                                {"backend", bundle.backend},
-                                {"sections", std::move(sections)}});
+            nlohmann::json result = {{"format", bundle.format},
+                                     {"family", bundle.family},
+                                     {"task", bundle.task},
+                                     {"backend", bundle.backend},
+                                     {"sections", std::move(sections)}};
+            if (reader.find_section("provenance.json") != nullptr) {
+                const std::vector<char> provenance = reader.read_section("provenance.json");
+                result["provenance"] = nlohmann::json::parse(provenance.begin(), provenance.end());
+            }
+            write_json(output, result);
             return EXIT_SUCCESS;
         }
         const bool has_byok_library = has_option(command, "--byok-library");

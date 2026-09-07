@@ -1,6 +1,7 @@
 {
   "name": "densenet121-ra-in1k",
   "hf_id": "timm/densenet121.ra_in1k",
+  "hf_revision": "92007b6200e0b4a4fe68cb4e3947022a928aaaae",
   "bundle": "densenet121-ra-in1k.bundle",
   "family": "timm_densenet",
   "task": "classification",

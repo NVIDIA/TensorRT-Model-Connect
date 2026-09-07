@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +20,7 @@ from .graph_transform import GraphTransform, graph_transform
 
 
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
+_EXACT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,9 @@ class BuildRequest:
     task: str
     precision: str
     backend: str = "trt"
+    checkpoint_id: str = ""
+    checkpoint_revision: str = ""
+    source_revision: str = ""
     max_sequence_length: int | None = None
     image_height: int | None = None
     image_width: int | None = None
@@ -46,6 +52,10 @@ class BuildRequest:
     def __post_init__(self) -> None:
         if not self.precision:
             raise ValueError("precision must be non-empty")
+        for field in ("checkpoint_revision", "source_revision"):
+            revision = getattr(self, field)
+            if revision and _EXACT_REVISION.fullmatch(revision) is None:
+                raise ValueError(f"{field} must be an exact 40-character Git SHA")
         _validate_id("family", self.family)
         _validate_id("task", self.task)
         if self.backend not in {"trt", "trt_rtx"}:
@@ -140,7 +150,76 @@ def build(request: BuildRequest) -> None:
     try:
         with graph_transform(request.graph_transform):
             family_module.build(request, writer)
+        writer.add_json("provenance.json", _build_provenance(request))
         writer.finish()
     except BaseException:
         writer.abort()
         raise
+
+
+def resolve_source_revision(explicit: str = "") -> str:
+    """Return the exact source revision that produced a bundle."""
+
+    candidates = (
+        ("source_revision", explicit),
+        ("TRTMC_ENGINE_BUILD_REVISION", os.environ.get("TRTMC_ENGINE_BUILD_REVISION", "")),
+        ("GITHUB_SHA", os.environ.get("GITHUB_SHA", "")),
+    )
+    for field, candidate in candidates:
+        revision = candidate.strip().lower()
+        if not revision:
+            continue
+        if _EXACT_REVISION.fullmatch(revision) is None:
+            raise ValueError(f"{field} must be an exact 40-character Git SHA")
+        return revision
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        completed = None
+    revision = completed.stdout.strip().lower() if completed and completed.returncode == 0 else ""
+    if _EXACT_REVISION.fullmatch(revision):
+        return revision
+    raise ValueError(
+        "source revision is unavailable; set TRTMC_ENGINE_BUILD_REVISION to the exact Git SHA"
+    )
+
+
+def _build_provenance(request: BuildRequest) -> dict[str, object]:
+    options: dict[str, object] = {
+        "family": request.family,
+        "task": request.task,
+        "backend": request.backend,
+        "precision": request.precision,
+        "max_batch_size": request.max_batch_size,
+        "tensor_parallel_size": request.tensor_parallel_size,
+        "context_parallel_size": request.context_parallel_size,
+        "dynamic_kv_cache": request.dynamic_kv_cache,
+    }
+    if request.max_sequence_length is not None:
+        options["max_sequence_length"] = request.max_sequence_length
+    if request.image_height is not None:
+        options["image_height"] = request.image_height
+    if request.image_width is not None:
+        options["image_width"] = request.image_width
+    if request.video_num_frames is not None:
+        options["video_num_frames"] = request.video_num_frames
+    if request.quantization is not None:
+        options["quantization"] = request.quantization
+    if request.fp32_layers:
+        options["fp32_layers"] = list(request.fp32_layers)
+    return {
+        "format": 1,
+        "checkpoint": {
+            "id": request.checkpoint_id or str(request.model_dir.resolve()),
+            "revision": request.checkpoint_revision or "unknown",
+        },
+        "build": {"source_revision": resolve_source_revision(request.source_revision)},
+        "request": options,
+    }

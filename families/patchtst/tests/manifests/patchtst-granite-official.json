@@ -1,6 +1,7 @@
 {
   "name": "patchtst-granite-official",
   "hf_id": "ibm-granite/granite-timeseries-patchtst",
+  "hf_revision": "7fe295d8bc8fbac8041b60ab351882634165517f",
   "bundle": "patchtst-granite-official.bundle",
   "family": "patchtst",
   "task": "time_series_forecast",

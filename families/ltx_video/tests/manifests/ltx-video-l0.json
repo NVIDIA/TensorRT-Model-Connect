@@ -1,6 +1,7 @@
 {
   "name": "ltx-video-l0",
   "hf_id": "Lightricks/LTX-Video",
+  "hf_revision": "8984fa25007f376c1a299016d0957a37a2f797bb",
   "bundle": "ltx-video-l0.bundle",
   "family": "ltx_video",
   "task": "image_generation",

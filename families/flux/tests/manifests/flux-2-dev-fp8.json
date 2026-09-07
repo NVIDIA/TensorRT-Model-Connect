@@ -1,6 +1,7 @@
 {
   "name": "flux-2-dev-fp8",
   "hf_id": "black-forest-labs/FLUX.2-dev",
+  "hf_revision": "26afe3a78bb242c0a8bb181dcc8937bb16e5c66c",
   "bundle": "flux-2-dev-fp8.bundle",
   "family": "flux",
   "task": "image_generation",

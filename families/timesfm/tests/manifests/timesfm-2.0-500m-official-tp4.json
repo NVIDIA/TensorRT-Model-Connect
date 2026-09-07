@@ -1,6 +1,7 @@
 {
   "name": "timesfm-2.0-500m-official-tp4",
   "hf_id": "google/timesfm-2.0-500m-pytorch",
+  "hf_revision": "dc2443792ce5516872b89b37cf1bc058c3bf0c10",
   "bundle": "timesfm-2.0-500m-official-tp4.bundle",
   "family": "timesfm",
   "task": "time_series_forecast",

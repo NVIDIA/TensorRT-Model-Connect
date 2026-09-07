@@ -1,6 +1,7 @@
 {
   "name": "efficientnet-b0-ra-in1k",
   "hf_id": "timm/efficientnet_b0.ra_in1k",
+  "hf_revision": "1b5383e5f79cc0f7fc067e372f8f26a5fa73f26a",
   "bundle": "efficientnet-b0-ra-in1k.bundle",
   "family": "timm_efficientnet",
   "task": "classification",

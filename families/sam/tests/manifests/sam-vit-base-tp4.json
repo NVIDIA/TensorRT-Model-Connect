@@ -1,6 +1,7 @@
 {
   "name": "sam-vit-base-tp4",
   "hf_id": "facebook/sam-vit-base",
+  "hf_revision": "70c1a07f894ebb5b307fd9eaaee97b9dfc16068f",
   "bundle": "sam-vit-base-tp4.bundle",
   "family": "sam",
   "task": "prompted_segmentation",

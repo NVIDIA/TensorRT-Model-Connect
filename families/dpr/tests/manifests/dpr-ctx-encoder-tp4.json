@@ -1,6 +1,7 @@
 {
   "name": "dpr-ctx-encoder-tp4",
   "hf_id": "facebook/dpr-ctx_encoder-single-nq-base",
+  "hf_revision": "bb21a3c2b1656d60c6a8e920283bc40dabddadb8",
   "bundle": "dpr-ctx-encoder-tp4.bundle",
   "family": "dpr",
   "task": "encoding",

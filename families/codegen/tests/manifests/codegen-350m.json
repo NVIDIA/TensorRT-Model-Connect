@@ -1,6 +1,7 @@
 {
   "name": "codegen-350m",
   "hf_id": "Salesforce/codegen-350M-mono",
+  "hf_revision": "d9107f71cca463240db1143f4a75a927a27fcb27",
   "bundle": "codegen-350m.bundle",
   "family": "codegen",
   "task": "text_generation",

@@ -38,6 +38,48 @@ def _validate_nonempty_string(field: str, value: object) -> str:
     return value
 
 
+def read_bundle_section(path: str | Path, name: str) -> bytes:
+    """Read one named section from a validated bundle file."""
+
+    bundle_path = Path(path)
+    with bundle_path.open("rb") as bundle:
+        if bundle.read(len(BUNDLE_MAGIC)) != BUNDLE_MAGIC:
+            raise ValueError(f"{bundle_path} is not a TRTMC bundle")
+        raw_header_size = bundle.read(8)
+        if len(raw_header_size) != 8:
+            raise ValueError(f"{bundle_path} has a truncated header size")
+        header_size = struct.unpack("<Q", raw_header_size)[0]
+        if header_size > _MAX_HEADER_SIZE:
+            raise ValueError(f"{bundle_path} header exceeds the size limit")
+        raw_header = bundle.read(header_size)
+        if len(raw_header) != header_size:
+            raise ValueError(f"{bundle_path} has a truncated header")
+        header = json.loads(raw_header)
+        sections = header.get("sections") if isinstance(header, dict) else None
+        location = sections.get(name) if isinstance(sections, dict) else None
+        if not isinstance(location, dict):
+            raise ValueError(f"{bundle_path} has no {name!r} section")
+        offset = location.get("offset")
+        length = location.get("length")
+        if not isinstance(offset, int) or not isinstance(length, int):
+            raise ValueError(f"{bundle_path} has an invalid {name!r} section")
+        data_start = len(BUNDLE_MAGIC) + 8 + header_size
+        file_size = bundle_path.stat().st_size
+        if offset < 0 or length < 0 or data_start + offset + length > file_size:
+            raise ValueError(f"{bundle_path} has an invalid {name!r} section range")
+        bundle.seek(data_start + offset)
+        data = bundle.read(length)
+        if len(data) != length:
+            raise ValueError(f"{bundle_path} has a truncated {name!r} section")
+        return data
+
+
+def read_bundle_json(path: str | Path, name: str) -> Any:
+    """Read one named JSON section from a validated bundle file."""
+
+    return json.loads(read_bundle_section(path, name).decode("utf-8"))
+
+
 class BundleWriter:
     """Stage named sections and atomically publish one bundle."""
 

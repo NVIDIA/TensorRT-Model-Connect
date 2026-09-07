@@ -1,6 +1,7 @@
 {
   "name": "deberta-base",
   "hf_id": "microsoft/deberta-base",
+  "hf_revision": "0d1b43ccf21b5acd9f4e5f7b077fa698f05cf195",
   "bundle": "deberta-base.bundle",
   "family": "deberta",
   "task": "encoding",

@@ -1,6 +1,7 @@
 {
   "name": "roberta-large-tp4",
   "hf_id": "FacebookAI/roberta-large",
+  "hf_revision": "722cf37b1afa9454edce342e7895e588b6ff1d59",
   "bundle": "roberta-large-tp4.bundle",
   "family": "roberta",
   "task": "encoding",

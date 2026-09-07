@@ -1,6 +1,7 @@
 {
   "name": "nemotron-h-nano-9b-tp4",
   "hf_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+  "hf_revision": "6533e8de2c68e4536bf7c411d7a3ce5734111476",
   "bundle": "nemotron-h-nano-9b-tp4.bundle",
   "family": "nemotron_h",
   "task": "text_generation",

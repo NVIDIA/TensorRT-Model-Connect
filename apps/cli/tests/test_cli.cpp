@@ -36,6 +36,30 @@ trtmc::cli::Command parse(std::vector<std::string> arguments) {
     return trtmc::cli::parse_args(static_cast<int>(argv.size()), argv.data());
 }
 
+int run(std::vector<std::string> arguments, std::ostream& output, std::ostream& error) {
+    std::vector<char*> argv;
+    argv.reserve(arguments.size());
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    return trtmc::cli::run(static_cast<int>(argv.size()), argv.data(), output, error);
+}
+
+void write_inspect_bundle(const std::filesystem::path& path) {
+    const std::string provenance =
+        R"({"format":1,"checkpoint":{"id":"openai-community/gpt2","revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"build":{"source_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"request":{}})";
+    const std::string header =
+        R"({"format":1,"family":"gpt2","task":"text_generation","backend":"trt","sections":{"provenance.json":{"offset":0,"length":)" +
+        std::to_string(provenance.size()) + "}}}";
+    constexpr unsigned char magic[8] = {'B', 'U', 'N', 'D', 'L', 'E', '\x01', '\0'};
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(magic), 8);
+    const std::uint64_t length = header.size();
+    for (int shift = 0; shift < 64; shift += 8)
+        output.put(static_cast<char>((length >> shift) & 0xffU));
+    output.write(header.data(), static_cast<std::streamsize>(header.size()));
+    output.write(provenance.data(), static_cast<std::streamsize>(provenance.size()));
+}
+
 bool parse_throws(std::vector<std::string> arguments) {
     try {
         (void)parse(std::move(arguments));
@@ -418,6 +442,18 @@ int main() {
           "batch transcription inputs preserve repeated option order");
     check(parse({"trtmc", "inspect", "model.bundle"}).kind == trtmc::cli::CommandKind::kInspect,
           "inspect does not require runtime root");
+    const std::filesystem::path inspect_bundle = "/tmp/trtmc-cli-inspect.bundle";
+    write_inspect_bundle(inspect_bundle);
+    std::ostringstream inspect_output;
+    std::ostringstream inspect_error;
+    check(run({"trtmc", "inspect", inspect_bundle.string()}, inspect_output, inspect_error) == 0,
+          "inspect reads a valid bundle");
+    check(inspect_output.str().find("openai-community/gpt2") != std::string::npos,
+          "inspect reports checkpoint provenance");
+    check(inspect_output.str().find("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") !=
+              std::string::npos,
+          "inspect reports source revision provenance");
+    std::filesystem::remove(inspect_bundle);
     check(parse({"trtmc", "version"}).kind == trtmc::cli::CommandKind::kVersion,
           "version parses without bundle");
     check(parse_throws({"trtmc", "--version"}), "version flag alias is not accepted");

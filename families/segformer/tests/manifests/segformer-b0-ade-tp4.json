@@ -1,6 +1,7 @@
 {
   "name": "segformer-b0-ade-tp4",
   "hf_id": "nvidia/segformer-b0-finetuned-ade-512-512",
+  "hf_revision": "489d5cd81a0b59fab9b7ea758d3548ebe99677da",
   "bundle": "segformer-b0-ade-tp4.bundle",
   "family": "segformer",
   "task": "segmentation",

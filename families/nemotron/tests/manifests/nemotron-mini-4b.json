@@ -1,6 +1,7 @@
 {
   "name": "nemotron-mini-4b",
   "hf_id": "nvidia/Nemotron-Mini-4B-Instruct",
+  "hf_revision": "791833e92ebddb0bc2c1007f6d2b6764f886a2ae",
   "bundle": "nemotron-mini-4b.bundle",
   "family": "nemotron",
   "task": "text_generation",

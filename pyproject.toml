@@ -5,7 +5,7 @@
 requires = [
     "apache-tvm-ffi==0.1.12",
     "conan-py-build==0.4.3",
-    "torch>=2.6",
+    "torch==2.12.0",
 ]
 build-backend = "conan_py_build.build"
 
@@ -18,24 +18,24 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "ASSET_LICENSES.md"]
 requires-python = ">=3.12"
 dependencies = [
-    "safetensors>=0.4",
-    "numpy>=1.24",
-    "ml_dtypes>=0.4",
-    "onnx>=1.16",
+    "safetensors==0.8.0",
+    "numpy==1.26.4",
+    "ml_dtypes==0.5.4",
+    "onnx==1.21.0",
     "transformers==5.2.0",
-    "huggingface_hub>=0.23",
-    "sentencepiece>=0.1.99",
-    "cuda-python>=13.0.3,<14",
+    "huggingface_hub==1.21.0",
+    "sentencepiece==0.2.2",
+    "cuda-python==13.0.3",
     "apache-tvm-ffi==0.1.12",
     "tensorrt==11.1.0.106",
-    "PyYAML>=6.0",
+    "PyYAML==6.0.3",
 ]
 
 [project.scripts]
 trtmc-bench = "trtmc_benchmark.cli:main"
 
 [project.optional-dependencies]
-test = ["pytest>=7.0", "torch>=2.0", "jsonschema>=4.23,<5"]
+test = ["pytest==8.4.2", "torch==2.12.0", "jsonschema==4.26.0"]
 cutedsl = ["nvidia-cutlass-dsl==4.7.1"]
 
 [tool.conan-py-build.wheel]

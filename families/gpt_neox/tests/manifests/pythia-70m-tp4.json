@@ -1,6 +1,7 @@
 {
   "name": "pythia-70m-tp4",
   "hf_id": "EleutherAI/pythia-70m",
+  "hf_revision": "a39f36b100fe8a5377810d56c3f4789b9c53ac42",
   "bundle": "pythia-70m-tp4.bundle",
   "family": "gpt_neox",
   "task": "text_generation",

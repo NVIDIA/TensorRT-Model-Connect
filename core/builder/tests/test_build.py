@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+import struct
 import sys
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -57,6 +59,8 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
         ("dynamic_kv_cache", 1),
         ("graph_transform", object()),
         ("backend", "unknown"),
+        ("checkpoint_revision", "main"),
+        ("source_revision", "dirty"),
     ],
 )
 def test_build_request_rejects_invalid_direct_inputs(
@@ -167,6 +171,9 @@ def test_build_finishes_after_family_returns(monkeypatch, tmp_path: Path) -> Non
         def finish(self) -> None:
             events.append("finish")
 
+        def add_json(self, _name: str, _value: object) -> None:
+            pass
+
         def abort(self) -> None:
             events.append("abort")
 
@@ -183,6 +190,65 @@ def test_build_finishes_after_family_returns(monkeypatch, tmp_path: Path) -> Non
     assert events[0] == ("writer", request.output_path)
     assert events[1][0:2] == ("build", request)
     assert events[2:] == ["finish"]
+
+
+def test_build_embeds_checkpoint_and_source_provenance(monkeypatch, tmp_path: Path) -> None:
+    checkpoint_revision = "b" * 40
+    source_revision = "a" * 40
+    request = BuildRequest(
+        model_dir=tmp_path / "model",
+        output_path=tmp_path / "model.bundle",
+        checkpoint_id="openai-community/gpt2",
+        checkpoint_revision=checkpoint_revision,
+        source_revision=source_revision,
+        precision="fp16",
+        family="gpt2",
+        task="text_generation",
+        max_sequence_length=128,
+    )
+
+    def family_build(seen_request: BuildRequest, writer) -> None:
+        writer.set_header(
+            family=seen_request.family,
+            task=seen_request.task,
+            backend=seen_request.backend,
+        )
+        writer.add_bytes("engine.plan", b"plan")
+
+    monkeypatch.setattr(
+        build_core,
+        "_load_family",
+        lambda _family: SimpleNamespace(build=family_build),
+    )
+
+    build_core.build(request)
+
+    data = request.output_path.read_bytes()
+    header_size = struct.unpack_from("<Q", data, 8)[0]
+    payload_start = 16 + header_size
+    header = json.loads(data[16:payload_start])
+    location = header["sections"]["provenance.json"]
+    start = payload_start + location["offset"]
+    provenance = json.loads(data[start : start + location["length"]])
+    assert provenance == {
+        "format": 1,
+        "checkpoint": {
+            "id": "openai-community/gpt2",
+            "revision": checkpoint_revision,
+        },
+        "build": {"source_revision": source_revision},
+        "request": {
+            "family": "gpt2",
+            "task": "text_generation",
+            "backend": "trt",
+            "precision": "fp16",
+            "max_sequence_length": 128,
+            "max_batch_size": 1,
+            "tensor_parallel_size": 1,
+            "context_parallel_size": 1,
+            "dynamic_kv_cache": False,
+        },
+    }
 
 
 def test_build_runs_graph_transform_before_family_engine_serialization(
@@ -207,6 +273,9 @@ def test_build_runs_graph_transform_before_family_engine_serialization(
 
         def finish(self) -> None:
             events.append("finish")
+
+        def add_json(self, _name: str, _value: object) -> None:
+            pass
 
         def abort(self) -> None:
             events.append("abort")
@@ -273,6 +342,9 @@ def test_build_aborts_if_finish_fails(monkeypatch, tmp_path: Path) -> None:
         def finish(self) -> None:
             events.append("finish")
             raise OSError("publish failed")
+
+        def add_json(self, _name: str, _value: object) -> None:
+            pass
 
         def abort(self) -> None:
             events.append("abort")

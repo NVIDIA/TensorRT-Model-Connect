@@ -1,6 +1,7 @@
 {
   "name": "magpie-tts-357m-tp4",
   "hf_id": "nvidia/magpie_tts_multilingual_357m",
+  "hf_revision": "34d7e40da85cabc97f92198889b65cea27bc7fd1",
   "hf_dependencies": [
     {
       "repo_id": "openai/whisper-large-v3-turbo"

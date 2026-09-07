@@ -9,11 +9,14 @@ optional build-time graph transform.
 
 ```python
 from pathlib import Path
-from tensorrt_model_connect import BuildRequest, build
+from tensorrt_model_connect import BuildRequest, build, resolve_source_revision
 
 build(BuildRequest(
     model_dir=Path("/models/gpt2"),
     output_path=Path("gpt2.bundle"),
+    checkpoint_id="openai-community/gpt2",
+    checkpoint_revision="607a30d783dfa663caf39e06633721c8d4cfcd7e",
+    source_revision=resolve_source_revision(),
     family="gpt2",
     task="text_generation",
     precision="fp16",
@@ -28,6 +31,10 @@ resolved API directly.
 `model_dir` is already local at this boundary. The selected family alone
 decides whether that directory is a Hugging Face snapshot or a prepared
 checkpoint; `BuildRequest` does not perform another discovery pass.
+Callers of this low-level API should pass the canonical checkpoint ID and exact
+checkpoint revision. `resolve_source_revision()` accepts an explicit SHA,
+`TRTMC_ENGINE_BUILD_REVISION`, `GITHUB_SHA`, or a Git checkout and fails when
+none yields an exact source commit.
 
 ## Optional graph transform
 
@@ -47,6 +54,9 @@ def replace_subgraph(network, engine_index):
 build(BuildRequest(
     model_dir=Path("/models/gpt2"),
     output_path=Path("gpt2.bundle"),
+    checkpoint_id="openai-community/gpt2",
+    checkpoint_revision="607a30d783dfa663caf39e06633721c8d4cfcd7e",
+    source_revision=resolve_source_revision(),
     family="gpt2",
     task="text_generation",
     precision="fp16",
