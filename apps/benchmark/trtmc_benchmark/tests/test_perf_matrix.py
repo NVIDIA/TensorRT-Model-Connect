@@ -234,6 +234,7 @@ def test_release_suite_expands_profiles_and_covers_ready_catalog() -> None:
         "timm_efficientnet.classify",
         "timm_inception.classify",
         "timm_mnasnet.classify",
+        "timm_mobilenetv2.classify",
         "timm_mobilenetv3.classify",
         "timm_repvgg.classify",
         "timm_resnet.classify",

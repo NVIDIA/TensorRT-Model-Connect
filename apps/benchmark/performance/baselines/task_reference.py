@@ -1345,6 +1345,7 @@ def _load_vision(
         "timm_efficientnet",
         "timm_inception",
         "timm_mnasnet",
+        "timm_mobilenetv2",
         "timm_mobilenetv3",
         "timm_repvgg",
         "timm_resnet",
