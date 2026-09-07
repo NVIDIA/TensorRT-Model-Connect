@@ -38,6 +38,11 @@ excluded_profiles:
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
       into the release performance runner.
+  - model: ornith-1-5-9b
+    reason: >-
+      Functional and Hugging Face reference-parity qualification are present,
+      but no matching release-performance workload or receipt has been
+      collected.
 
 entries:
   - id: albert.encode
