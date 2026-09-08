@@ -1,0 +1,18 @@
+{
+  "name": "xception41-tf-in1k",
+  "hf_id": "timm/xception41.tf_in1k",
+  "hf_revision": "8a17189361e63c972815ef62f2a30dd5b9f393b1",
+  "bundle": "xception41-tf-in1k.bundle",
+  "family": "timm_xception",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "xception41-tf-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}
