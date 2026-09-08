@@ -134,11 +134,12 @@ If you rebase a branch that you already pushed, never use an unguarded force
 push. Use `git push --force-with-lease`, and coordinate before rewriting a
 branch that other people are using.
 
-### 7. Open a pull request against upstream `main`
+### 7. Open a draft pull request against upstream `main`
 
 Open the pull request from your fork branch to
-`NVIDIA/TensorRT-Model-Connect:main`. Complete every section of the pull-request
-template; use `Not applicable: <reason>` instead of deleting a section. Include:
+`NVIDIA/TensorRT-Model-Connect:main` and keep it in draft while completing the
+self-review below. Complete every section of the pull-request template; use
+`Not applicable: <reason>` instead of deleting a section. Include:
 
 - **Background**: the problem, motivation, current behavior, and linked issue;
 - **Exit Criteria**: the conditions that define completion, including important
@@ -147,21 +148,60 @@ template; use `Not applicable: <reason>` instead of deleting a section. Include:
   API, ABI, bundle, dependency, compatibility, migration, or rollout changes;
 - **Validation**: exact commands and results, tested head and dependency/model
   revisions, environment and hardware, plus paths that were not run; and
+- **Contributor Self-Review**: method, exact reviewed head, result, resolved
+  findings, and any remaining issue that needs maintainer judgment; and
 - **Notes For Future Readers**: remaining risk, compatibility or rollout notes,
   third-party provenance, and useful follow-up context.
 
-`PR Metadata / Required` checks that these sections and the structured
-validation evidence are present. The trusted triage workflow derives model and
-component labels from the actual diff and repository ownership metadata; it
-uses the template only for declared risk and compatibility-change labels. DCO
-sign-off is enforced by the repository's DCO check rather than a self-attested
-template checkbox.
+Once the pull request is marked ready, `PR Metadata / Required` checks that
+these sections, the structured validation evidence, and the contributor
+self-review fields are present. It also verifies that the recorded self-review
+head is the current pull-request head. The trusted triage workflow derives
+model and component labels from the actual diff and repository ownership
+metadata; it uses the template only for declared risk and compatibility-change
+labels. DCO sign-off is enforced by the repository's DCO check rather than a
+self-attested template checkbox.
 
 Compilation, unit tests, inference, model parity, target-hardware execution,
 performance, and release qualification are separate evidence levels. Claim only
 what the recorded validation proves.
 
-### 8. Run contributor-visible public CPU validation
+### 8. Perform contributor self-review
+
+Review the exact current draft pull-request head after implementation and local
+validation. Codex users can run the repository-provided skill from the
+repository root:
+
+```text
+$review-trtmc-pr review this draft PR as a contributor self-review. Do not
+publish comments or change the branch. Report architecture, correctness, and
+validation findings first.
+```
+
+For an earlier pass before a draft PR exists, run:
+
+```text
+$review-trtmc-pr self-review my current branch and working tree against
+upstream/main. Do not modify files.
+```
+
+Use `/skills` or type `$` to confirm that the skill is available. If it does
+not appear, restart Codex from the repository root.
+
+Using Codex is recommended, not required. A manual review or another review
+tool is acceptable when it checks the same repository rules, architecture
+ownership boundaries, changed behavior, tests, and PR evidence. Record the
+method, full reviewed head SHA, result, corrected findings, and unresolved
+risks in **Contributor Self-Review**.
+
+Resolve blocking and high-severity findings before marking the pull request
+ready. If a finding requires an architecture or policy decision, leave the pull
+request in draft, record the question, and ask a maintainer. Any code change
+creates a new head; rerun the affected validation and self-review before
+marking that head ready. Self-review does not replace public CI, protected CI,
+or maintainer review.
+
+### 9. Run contributor-visible public CPU validation
 
 Opening a pull request or pushing a new commit automatically starts Community
 CPU against GitHub's exact pull-request merge revision. Separate jobs run
@@ -178,7 +218,7 @@ new commit automatically validates the new merge revision and cancels an older
 in-progress run for the same pull request. If `main` advances and GitHub asks
 for an update, rebase or update the branch so the new exact merge is validated.
 
-### 9. Ask a maintainer to trigger protected CI
+### 10. Ask a maintainer to trigger protected CI
 
 Opening a pull request or pushing to your fork does **not** start the protected
 premerge suite. After public CPU validation passes and the pull request is
@@ -207,7 +247,7 @@ head; finish the update, wait for automatic Community CPU validation, and
 mention `@yifeif-nv` once to request a new protected run. Private runner details,
 logs, artifacts, and URLs are not part of the public contribution interface.
 
-### 10. Respond to review and keep evidence current
+### 11. Respond to review and keep evidence current
 
 Address review feedback on the same topic branch and sign off every new commit.
 Keep the pull request current with upstream when requested. A new head requires

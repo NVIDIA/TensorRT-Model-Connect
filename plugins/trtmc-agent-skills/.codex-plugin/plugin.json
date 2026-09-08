@@ -28,6 +28,7 @@
     ],
     "defaultPrompt": [
       "Use $write-git-messages to draft a PR message from my diff.",
+      "Use $review-trtmc-pr to self-review my branch before marking its PR ready.",
       "Use $submit-github-pr to push this branch and open a PR.",
       "Use $transform-model to add this checkpoint as one self-contained family.",
       "Use $debug-trt-mismatch to locate this family's first output divergence.",

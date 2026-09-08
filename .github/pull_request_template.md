@@ -64,6 +64,35 @@ why. Use "None: <reason>" only when the recorded evidence covers every relevant
 path.
 -->
 
+## Contributor Self-Review
+
+<!--
+Review the exact current head after completing the implementation and local
+validation. `$review-trtmc-pr` is the recommended shortcut, but a documented
+manual review or another review tool is also accepted. Rerun the review after
+changes that alter the head. This section may remain incomplete while the pull
+request is a draft, but it is required before marking the pull request ready.
+-->
+
+### Method
+
+<!-- Name the skill, tool, or manual checklist used. -->
+
+### Reviewed Head
+
+<!-- Record the full Git commit SHA reviewed. -->
+
+### Result
+
+<!-- State PASS, BLOCK, or HUMAN REVIEW REQUIRED. -->
+
+### Findings and Resolution
+
+<!--
+Summarize findings that were corrected and list any remaining findings or
+decisions that require maintainer review.
+-->
+
 ## Notes For Future Readers
 
 <!--
