@@ -50,11 +50,15 @@ print(" ".join(environment.command("bash")))
 The toolkit reuses a container only when its checkout-owned configuration still
 matches. A foreign name collision or configuration drift fails without removing
 or replacing the container. Unknown host architectures fail before Docker is
-invoked. The toolkit has no environment catalog or secondary artifact identity.
-Each development Dockerfile's first `FROM` is its base-image pin; repository CI
-continues to use the root `Dockerfile`. Optional Python dependencies remain in
-`families/<family>/requirements.txt`. See `apps/devtoolkit/README.md` for
-lifecycle policies and the explicit existing-interpreter local path.
+invoked. This preparation call remains separate from the toolkit's optional
+`resolve`, `provision`, `build`, and `run` capabilities; use
+`environment.execution_target()` to pass the prepared container into that
+evidence-producing path. Each development Dockerfile's first `FROM` is its
+base-image pin; repository CI continues to use the root `Dockerfile`. Optional
+Python dependencies remain in `families/<family>/requirements.txt`. See
+`apps/devtoolkit/README.md` for lifecycle policies, immutable environment
+identity and receipts, managed toolchain catalogs, and the explicit
+existing-interpreter local path.
 
 The manual commands below remain the direct source-build path and show the
 operations performed by development mode.

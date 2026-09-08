@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Any, Iterator
 
 from .models import DevToolkitError
-from .runner import CommandRunner
+from .runner import Runner
 
 
 _CONTAINER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
@@ -169,7 +169,7 @@ def _environment_file(values: Mapping[str, str]) -> Iterator[Path | None]:
 class DockerLifecycle:
     """Inspect and prepare one container without deleting or replacing anything."""
 
-    def __init__(self, repository: Path, runner: CommandRunner) -> None:
+    def __init__(self, repository: Path, runner: Runner) -> None:
         self.repository = repository.resolve()
         self.runner = runner
 
