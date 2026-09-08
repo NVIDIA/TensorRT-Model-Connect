@@ -24,7 +24,9 @@ def prefill_observations(stderr: str) -> tuple[tuple[int, int, int], ...]:
     return tuple(values)
 
 
-def assert_native_kv_receipt(payload: dict, case: dict, prompt_tokens: int) -> None:
+def assert_native_kv_receipt(
+    payload: dict, case: dict, prompt_tokens: int, *, eos_token_ids: tuple[int, ...] = ()
+) -> None:
     stderr = str(payload["runtime_stderr"])
     expected_rows = int(case["expected_kv_cache_rows"])
     expected_launches = int(case["expected_prefill_chunks"])
@@ -42,5 +44,10 @@ def assert_native_kv_receipt(payload: dict, case: dict, prompt_tokens: int) -> N
     assert 0 < observed_max_chunk <= expected_limit
     assert f"KV cache rows={expected_rows} (bundle max={expected_rows})" in stderr
     assert not _RUNTIME_ERROR.search(stderr)
-    assert len(payload["token_ids"]) == int(case["max_new_tokens"])
+    token_ids = payload["token_ids"]
+    limit = int(case["max_new_tokens"])
+    assert 0 < len(token_ids) <= limit
+    assert not any(token in eos_token_ids for token in token_ids[:-1]), "tokens follow EOS"
+    if len(token_ids) < limit:
+        assert token_ids[-1] in eos_token_ids, "generation stopped before its limit without EOS"
     assert float(payload["decode_ms"]) > 0.0

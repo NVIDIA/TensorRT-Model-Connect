@@ -16,13 +16,13 @@
       "max_new_tokens": 10,
       "expected_prompt_tokens": 12,
       "expected_runtime_prefill_tokens": 80,
-      "expected_kv_cache_rows": 256,
+      "expected_kv_cache_rows": 65536,
       "expected_prefill_chunks": 2,
       "expected_prefill_chunk_limit": 64,
       "use_chat_template": true,
       "enable_thinking": false
     }
   ],
-  "max_sequence_length": 256,
+  "max_sequence_length": 65536,
   "tensor_parallel_size": 1
 }

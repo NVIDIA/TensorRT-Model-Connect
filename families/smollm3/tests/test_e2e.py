@@ -540,10 +540,14 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         )
 
     if _NATIVE_KV_FIELDS <= case.keys():
+        from transformers import GenerationConfig
+
         from families.smollm3.tests.runtime_receipt import assert_native_kv_receipt
 
         prompt_tokens = _raw_prompt_token_count(model_dir, manifest, prompt)
-        assert_native_kv_receipt(payload, case, prompt_tokens)
+        eos = GenerationConfig.from_pretrained(model_dir, local_files_only=True).eos_token_id
+        eos_token_ids = () if eos is None else tuple(eos if isinstance(eos, list) else [eos])
+        assert_native_kv_receipt(payload, case, prompt_tokens, eos_token_ids=eos_token_ids)
 
     reference = _hf_reference(
         model_dir,
