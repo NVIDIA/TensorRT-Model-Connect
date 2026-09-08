@@ -1,19 +1,17 @@
 # Architecture Decision Records
 
-No numbered ADRs are currently tracked in this directory. The empty table is
-intentional; it is not evidence that the project has made no architectural
-decisions.
-
 :::caution Historical index
 
-This restored index predates PR #1093. Current decisions are reflected by
-`AGENTS.md`, the maintained architecture pages, family-local source and tests,
-and Git history.
+This index was restored from material that predates PR #1093. Entries marked
+`Proposed` are review documents, not accepted implementation contracts. Current
+decisions are reflected by `AGENTS.md`, the maintained architecture pages,
+family-local source and tests, and Git history.
 
 :::
 
 | Number | Title | Status | Date |
 |--------|-------|--------|------|
+| 0001 | [Stable Task C ABI and Header-Only C++ API](./0001-stable-task-api-c-abi.md) | Proposed | 2026-09-07 |
 
 ## Current decision sources
 
