@@ -88,7 +88,44 @@ Confirm that the manifest has a meaningful task/testcase, exact inputs,
 premerge selection where intended, and thresholds that reject adversarial or
 known-wrong outputs. Never weaken a criterion to pass CI.
 
-## 5. Report evidence by level
+## 5. Save and read correctness evidence
+
+Set an artifact directory when running a selected family E2E to retain the
+inputs, native and reference outputs, original assertion expressions and
+evaluated values, stage timings, and reproduction commands:
+
+```bash
+TRTMC_E2E_ARTIFACT_DIR=/tmp/trtmc-e2e \
+TRTMC_BINARY="$PWD/build/apps/cli/trtmc" \
+TRTMC_RUNTIME_ROOT="$PWD/build/install/lib" \
+python3 -m pytest families/qwen/tests/test_e2e.py \
+  --e2e-testcase qwen3-0.6b-fp16 -q
+
+python3 -m tools.e2e_report /tmp/trtmc-e2e \
+  -o /tmp/trtmc-correctness.html
+```
+
+Open the HTML directly in a browser. Each testcase also writes its own
+`evidence/<case>/evidence.json` and `report.html`; failure paths retain the
+observations produced before the failure. Use a fresh artifact directory for
+each campaign. Reusing a directory replaces the selected case's earlier
+evidence, while untouched cases remain from their original runs.
+
+The report records existing assertions; it does not replace a family's oracle
+or change thresholds. A contract-only check is identified as such instead of
+claiming an official-reference comparison. Model-specific visualizations remain
+in the owning family's tests. Detailed arrays and original files are retained
+alongside bounded, embedded media; any omitted or truncated evidence is marked.
+The standalone report embeds up to 32 MiB per media file and 256 MiB across the
+report. Full-size raw data stays in the testcase evidence directory.
+
+Distinguish a testcase's actual execution result from certification of its
+whole family or pipeline. A family can fail while some of its cases pass.
+Also distinguish correctness from the latency and throughput measurements in
+`trtmc-bench` reports. Compare the same checkpoint, inputs, seed or initial
+latents, precision, and runtime configuration before interpreting a difference.
+
+## 6. Report evidence by level
 
 | Level | What it establishes |
 | --- | --- |

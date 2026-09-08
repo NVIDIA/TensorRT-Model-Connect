@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence
+
 import json
 import os
 import subprocess
@@ -105,6 +107,7 @@ def _model_dir(manifest: dict) -> Path:
 def _asset(case: dict, name: str) -> Path:
     path = TEST_ROOT / case["inputs"][name]
     assert path.is_file(), path
+    record_evidence("inputs", {"asset": path})
     return path
 
 
@@ -154,6 +157,8 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict, tmp_
         text=True,
         timeout=1800,
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     summary = json.loads(completed.stdout)
     actions = np.fromfile(output, dtype="<f4").reshape(100, 14)
 
@@ -184,6 +189,8 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict, tmp_
         env=environment,
         timeout=1800,
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     summary.update(json.loads(completed.stdout))
     qualification_actions = np.fromfile(qualification_output, dtype="<f4").reshape(100, 14)
     assert np.array_equal(actions, qualification_actions)
@@ -305,37 +312,54 @@ def test_actual_actions_must_be_inside_training_bounds() -> None:
 
 def test_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     import torch
 
-    assert torch.cuda.is_available()
+    with evidence_stage("compare"):
+        assert torch.cuda.is_available()
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     bundle = tmp_path / manifest["bundle"]
-    build(
-        BuildRequest(
-            model_dir=model_dir,
-            output_path=bundle,
-            family=FAMILY,
-            task="robot_control",
-            precision=manifest["precision"],
+    with evidence_stage("build"):
+        build(
+            BuildRequest(
+                model_dir=model_dir,
+                output_path=bundle,
+                family=FAMILY,
+                task="robot_control",
+                precision=manifest["precision"],
+            )
         )
-    )
 
-    summary, actual = _run_native(binary, runtime_root, bundle, case, tmp_path)
-    expected = _run_reference(model_dir, case, tmp_path)
-    assert actual.shape == expected.shape == (100, 14)
-    _assert_actions_in_training_bounds(actual)
+    with evidence_stage("native"):
+        summary, actual = _run_native(binary, runtime_root, bundle, case, tmp_path)
+    record_evidence("native", {"summary": summary, "actions": actual})
+    with evidence_stage("reference"):
+        expected = _run_reference(model_dir, case, tmp_path)
+    record_evidence("reference", expected)
+    with evidence_stage("compare"):
+        assert actual.shape == expected.shape == (100, 14)
+    with evidence_stage("compare"):
+        _assert_actions_in_training_bounds(actual)
     delta = actual.astype(np.float64) - expected.astype(np.float64)
     thresholds = json.loads((THRESHOLD_ROOT / f"{case_name}.json").read_text(encoding="utf-8"))[
         "threshold_overrides"
     ]
-    assert np.max(np.abs(delta)) <= float(thresholds["action_max_abs_error"])
-    assert np.mean(np.abs(delta)) <= float(thresholds["action_mean_abs_error"])
-    assert np.sqrt(np.mean(np.square(delta))) <= float(thresholds["action_rmse"])
+    record_evidence("thresholds", thresholds)
+    with evidence_stage("compare"):
+        assert np.max(np.abs(delta)) <= float(thresholds["action_max_abs_error"])
+    with evidence_stage("compare"):
+        assert np.mean(np.abs(delta)) <= float(thresholds["action_mean_abs_error"])
+    with evidence_stage("compare"):
+        assert np.sqrt(np.mean(np.square(delta))) <= float(thresholds["action_rmse"])
     inference_ms = float(summary["chunk_inference_p95_ms"])
-    assert inference_ms <= float(thresholds["chunk_inference_p95_ms"])
-    assert float(summary["action_step_capacity_hz"]) >= float(
-        thresholds["action_step_capacity_hz"]
-    )
-    _assert_operational_summary(summary)
+    with evidence_stage("compare"):
+        assert inference_ms <= float(thresholds["chunk_inference_p95_ms"])
+    with evidence_stage("compare"):
+        assert float(summary["action_step_capacity_hz"]) >= float(
+            thresholds["action_step_capacity_hz"]
+        )
+    with evidence_stage("compare"):
+        _assert_operational_summary(summary)

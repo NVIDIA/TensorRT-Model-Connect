@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence
+
 import json
 import os
 import subprocess
@@ -140,6 +142,8 @@ def _inspect_bundle(binary: Path, bundle: Path) -> None:
         text=True,
         timeout=30,
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     payload = json.loads(completed.stdout)
     assert payload["family"] == _FAMILY
     assert payload["task"] == "monocular_geometry"
@@ -209,6 +213,8 @@ def _run_native(
         text=True,
         timeout=1800,
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     return _load_native_geometry(output_dir, completed.stdout)
 
 
@@ -239,6 +245,8 @@ def _run_reference(
         text=True,
         timeout=1800,
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("reference", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     assert json.loads(completed.stdout)["num_tokens"] == 1800
     with np.load(output, allow_pickle=False) as payload:
         return {
@@ -351,30 +359,44 @@ def _thresholds(case_name: str) -> dict[str, float]:
 @pytest.mark.parametrize("case_name", sorted(_CASES))
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": _CASES[case_name][-1]})
     _require_selected(case_name, manifest, request.config)
     binary, runtime_root, source_root = _required_environment()
     model_dir = _checkpoint(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     image = _TEST_DIR / case["image"]
+    record_evidence("inputs", {"image": image})
     num_tokens = int(case["num_tokens"])
-    assert image.is_file(), image
-    assert num_tokens == 1800
+    with evidence_stage("compare"):
+        assert image.is_file(), image
+    with evidence_stage("compare"):
+        assert num_tokens == 1800
     bundle = tmp_path / manifest["bundle"]
 
-    _build_bundle(manifest, model_dir, bundle)
+    with evidence_stage("build"):
+        _build_bundle(manifest, model_dir, bundle)
     _inspect_bundle(binary, bundle)
-    actual = _run_native(binary, runtime_root, bundle, image, tmp_path / "native")
-    reference = _run_reference(
-        source_root,
-        model_dir,
-        image,
-        tmp_path / "reference.npz",
-        num_tokens,
-    )
-    thresholds = _thresholds(case_name)
+    with evidence_stage("native"):
+        actual = _run_native(binary, runtime_root, bundle, image, tmp_path / "native")
+    record_evidence("native", actual)
+    with evidence_stage("reference"):
+        reference = _run_reference(
+            source_root,
+            model_dir,
+            image,
+            tmp_path / "reference.npz",
+            num_tokens,
+        )
+    record_evidence("reference", reference)
+    thresholds = record_evidence("thresholds", _thresholds(case_name))
+    record_evidence("thresholds", thresholds)
     for name, value in _metrics(actual, reference).items():
         threshold = float(thresholds[name])
-        assert np.isfinite(value), name
+        with evidence_stage("compare"):
+            assert np.isfinite(value), name
         if _OPERATORS[name] == "<=":
-            assert value <= threshold, f"{name}: {value} > {threshold}"
+            with evidence_stage("compare"):
+                assert value <= threshold, f"{name}: {value} > {threshold}"
         else:
-            assert value >= threshold, f"{name}: {value} < {threshold}"
+            with evidence_stage("compare"):
+                assert value >= threshold, f"{name}: {value} < {threshold}"

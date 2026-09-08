@@ -6,15 +6,21 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import importlib.util
+import json
+import re
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from tensorrt_model_connect.build_cli import _resolve_model
+import tensorrt_model_connect
 
 from .types import BenchmarkError, ModelDescriptor, ResolvedCase
 
@@ -29,6 +35,7 @@ class BundlePreparation:
     command: tuple[str, ...] = ()
     stdout_log: Path | None = None
     stderr_log: Path | None = None
+    build_identity: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -40,6 +47,7 @@ class BundlePreparation:
             "command": list(self.command),
             "stdout_log": str(self.stdout_log) if self.stdout_log else None,
             "stderr_log": str(self.stderr_log) if self.stderr_log else None,
+            "build_identity": self.build_identity,
             "included_in_performance_metrics": False,
         }
 
@@ -51,10 +59,11 @@ class _BuildPlan:
     bundle: Path
     command: tuple[str, ...]
     timeout_s: int
+    identity: str | None
 
 
 class BundleBuilder:
-    """A deliberately simple one-bundle-per-model cache."""
+    """A managed bundle cache with a benchmark-owned build identity receipt."""
 
     def __init__(
         self,
@@ -118,7 +127,7 @@ class BundleBuilder:
     ) -> tuple[Path, BundlePreparation]:
         model = cases[0].model
         managed = _is_relative_to(requested, self.cache_root)
-        if requested.is_file() and not rebuild:
+        if requested.is_file() and not managed and not rebuild:
             return requested, BundlePreparation(model.name, "reused", requested)
         if requested.is_file() and not managed:
             raise BenchmarkError(
@@ -127,10 +136,19 @@ class BundleBuilder:
             )
         if not managed:
             raise BenchmarkError(f"explicit bundle does not exist: {requested}")
-        if not allow_build:
+        if not requested.is_file() and not allow_build:
             raise BenchmarkError(f"bundle for {model.name} is unavailable and --no-build was set")
 
         plan = self._plan(model, cases)
+        if not rebuild and _matches_receipt(plan):
+            return plan.bundle, BundlePreparation(
+                model.name, "reused", plan.bundle, build_identity=plan.identity
+            )
+        if not allow_build:
+            raise BenchmarkError(
+                f"managed bundle for {model.name} has no matching immutable build identity; "
+                "remove --no-build to rebuild, or provide an explicit --bundle"
+            )
         if dry_run:
             return plan.bundle, BundlePreparation(
                 model.name,
@@ -165,7 +183,8 @@ class BundleBuilder:
         timeout = int(os.environ.get("TRTMC_BENCH_BUILD_TIMEOUT_S", "3600"))
         if timeout <= 0:
             raise BenchmarkError("TRTMC_BENCH_BUILD_TIMEOUT_S must be positive")
-        return _BuildPlan(model, model_dir, bundle, command, timeout)
+        identity = _build_identity(model, model_dir, command) if explicit is None else None
+        return _BuildPlan(model, model_dir, bundle, command, timeout, identity)
 
     def _build(self, plan: _BuildPlan) -> BundlePreparation:
         plan.bundle.parent.mkdir(parents=True, exist_ok=True)
@@ -213,6 +232,7 @@ class BundleBuilder:
                 artifacts=(("stdout", stdout_log), ("stderr", stderr_log)),
             )
         os.replace(temporary, plan.bundle)
+        _write_receipt(plan)
         return BundlePreparation(
             plan.model.name,
             "built",
@@ -222,7 +242,97 @@ class BundleBuilder:
             command=plan.command,
             stdout_log=stdout_log,
             stderr_log=stderr_log,
+            build_identity=plan.identity,
         )
+
+
+def _source_digest(model: ModelDescriptor) -> str:
+    specification = importlib.util.find_spec(f"families.{model.family}")
+    if specification is None or not specification.origin:
+        raise BenchmarkError(f"cannot identify builder sources for {model.family}")
+    roots = (Path(tensorrt_model_connect.__file__).parent, Path(specification.origin).parent)
+    digest = hashlib.sha256()
+    for index, root in enumerate(roots):
+        for path in sorted(root.rglob("*.py")):
+            relative = path.relative_to(root)
+            if "tests" in relative.parts or "__pycache__" in relative.parts:
+                continue
+            digest.update(f"{index}/{relative.as_posix()}\0".encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _build_identity(model: ModelDescriptor, checkpoint: Path, command: Sequence[str]) -> str | None:
+    # Hugging Face snapshot directories are immutable revisions. Arbitrary local
+    # checkpoints are deliberately rebuilt instead of trusting file timestamps.
+    if checkpoint.parent.name != "snapshots" or not re.fullmatch("[0-9a-f]{40}", checkpoint.name):
+        return None
+    versions = {}
+    for package in ("tensorrt", "tensorrt-cu13", "torch", "numpy"):
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            pass
+    identity = {
+        "manifest": hashlib.sha256(model.manifest_path.read_bytes()).hexdigest(),
+        "checkpoint_revision": checkpoint.name,
+        "command": list(command),
+        "source": _source_digest(model),
+        "python": sys.version,
+        "packages": versions,
+        "build_environment": {
+            key: value for key, value in os.environ.items() if key.startswith("TRTMC_")
+        },
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def _receipt_path(bundle: Path) -> Path:
+    return bundle.with_suffix(bundle.suffix + ".benchmark.json")
+
+
+def _matches_receipt(plan: _BuildPlan) -> bool:
+    # File identity/change metadata catches replacements and in-place writes,
+    # including copies that preserve mtime. This is cache invalidation, not a
+    # cryptographic guarantee about the serialized bundle's contents.
+    if plan.identity is None or not plan.bundle.is_file():
+        return False
+    try:
+        receipt = json.loads(_receipt_path(plan.bundle).read_text(encoding="utf-8"))
+        stat = plan.bundle.stat()
+        return receipt == {
+            "schema_version": "trtmc.benchmark-build/v1",
+            "identity": plan.identity,
+            "bundle_size": stat.st_size,
+            "bundle_mtime_ns": stat.st_mtime_ns,
+            "bundle_ctime_ns": stat.st_ctime_ns,
+            "bundle_device": stat.st_dev,
+            "bundle_inode": stat.st_ino,
+        }
+    except (OSError, ValueError):
+        return False
+
+
+def _write_receipt(plan: _BuildPlan) -> None:
+    path = _receipt_path(plan.bundle)
+    if plan.identity is None:
+        path.unlink(missing_ok=True)
+        return
+    stat = plan.bundle.stat()
+    receipt = {
+        "schema_version": "trtmc.benchmark-build/v1",
+        "identity": plan.identity,
+        "bundle_size": stat.st_size,
+        "bundle_mtime_ns": stat.st_mtime_ns,
+        "bundle_ctime_ns": stat.st_ctime_ns,
+        "bundle_device": stat.st_dev,
+        "bundle_inode": stat.st_ino,
+    }
+    # The receipt contains only digests and bundle metadata, not source paths or
+    # environment values. It is published after the successfully built bundle.
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+        json.dump(receipt, stream, sort_keys=True)
+    os.replace(stream.name, path)
 
 
 def default_bundle_cache() -> Path:

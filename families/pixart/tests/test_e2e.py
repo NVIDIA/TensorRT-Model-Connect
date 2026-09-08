@@ -4,6 +4,11 @@
 """Direct build, native-runtime, and official-reference E2E for pixart."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
+from families.pixart.tests.reporting import (
+    native_snapshot, record_native_preview, record_report_views, reference_snapshot,
+)
 import json
 import os
 import re
@@ -190,6 +195,8 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     payloads = []
     for line in completed.stdout.splitlines():
         if tp_size > 1:
@@ -219,6 +226,7 @@ def _asset(raw: str) -> Path:
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence("inputs", {"asset": path})
     return path
 
 
@@ -316,9 +324,11 @@ def _native(
             arguments.extend((option, str(float(case[key]))))
     latents_path = tmp_path / "initial-latents.raw"
     np.ascontiguousarray(initial_latents, dtype=np.float32).tofile(latents_path)
+    record_evidence("inputs", {"raw_file": latents_path})
     arguments.extend(("--initial-latents-raw", str(latents_path)))
     payload = _run_json(binary, runtime_root, bundle, manifest, case, command, *arguments)
     payload["artifact"] = str(output)
+    record_native_preview(output)
     return payload
 
 
@@ -634,20 +644,30 @@ def test_reference_metrics_reject_rearranged_pixels(
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     initial_latents = _initial_latents(manifest, case)
-    actual = _native(
-        binary,
-        runtime_root,
-        bundle,
-        model_dir,
-        manifest,
-        case,
-        tmp_path,
-        initial_latents,
-    )
-    expected = _official_reference(model_dir, manifest, case, tmp_path, initial_latents)
-    _assert_contract(actual, expected, manifest, case, _thresholds(case_name))
+    record_evidence("inputs", {"initial_latents": None if initial_latents is None else {"shape": list(initial_latents.shape), "dtype": str(initial_latents.dtype), "note": "The native stage records the supplied raw latent file within the evidence bound."}})
+    with evidence_stage("native"):
+        actual = _native(
+            binary,
+            runtime_root,
+            bundle,
+            model_dir,
+            manifest,
+            case,
+            tmp_path,
+            initial_latents,
+        )
+    record_evidence("native", native_snapshot(actual))
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, manifest, case, tmp_path, initial_latents)
+    record_report_views(actual, expected, tmp_path / "paired-report-views")
+    record_evidence("reference", reference_snapshot(expected))
+    with evidence_stage("compare"):
+        _assert_contract(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))

@@ -4,6 +4,8 @@
 """Direct build, native-runtime, and declared-reference E2E for internvl."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
 import json
 import os
 import re
@@ -184,6 +186,8 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -209,6 +213,7 @@ def _asset(raw: str) -> Path:
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence("inputs", {"asset": path})
     return path
 
 
@@ -490,13 +495,22 @@ def test_golden_reference_fails_closed_for_missing_or_invalid_data(tmp_path: Pat
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     from families.internvl.tests.vision_oracle import native_vision_features
 
-    _assert_native_vision_health(native_vision_features(bundle, _asset(case["test_image"])))
-    actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
-    expected = _reference(model_dir, manifest, case, tmp_path)
-    _assert_parity(actual, expected, manifest, case, _thresholds(case_name))
+    with evidence_stage("compare"):
+        _assert_native_vision_health(native_vision_features(bundle, _asset(case["test_image"])))
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
+    record_evidence("native", actual)
+    with evidence_stage("reference"):
+        expected = _reference(model_dir, manifest, case, tmp_path)
+    record_evidence("reference", expected)
+    with evidence_stage("compare"):
+        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))

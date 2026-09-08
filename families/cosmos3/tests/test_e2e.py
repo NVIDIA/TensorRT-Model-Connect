@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence
+from families.cosmos3.tests.reporting import record_native_preview
+
 import json
 import os
 import re
@@ -214,6 +217,8 @@ def _native(
         env=env,
         timeout=int(case["runtime_timeout_s"]),
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     if cp_size == 1:
         payloads = [
             json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{")
@@ -261,9 +266,17 @@ def _assert_video(output: Path, thresholds: dict) -> None:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
+    record_evidence("reference", {"mode": "contract_only", "oracle": "video dimensions and pixel statistics"})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
-    output = _native(binary, runtime_root, bundle, manifest, case, tmp_path)
-    _assert_video(output, _thresholds(case_name))
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        output = _native(binary, runtime_root, bundle, manifest, case, tmp_path)
+    record_native_preview(output)
+    record_evidence("native", {"original_location": f"Original frames: {output}"})
+    with evidence_stage("compare"):
+        _assert_video(output, record_evidence("thresholds", _thresholds(case_name)))
