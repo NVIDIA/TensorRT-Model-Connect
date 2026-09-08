@@ -47,6 +47,23 @@ environment = toolkit.prepare_docker(
 print(" ".join(environment.command("bash")))
 ```
 
+Runnable end-to-end examples are available for both supported execution paths:
+
+```bash
+# Build in a checkout-owned development container.
+python3 apps/devtoolkit/examples/docker_build.py --gpu 0
+
+# Build directly on a prepared host interpreter/toolchain.
+python3 apps/devtoolkit/examples/local_build.py \
+  --python /path/to/python3.12 \
+  --tensorrt 11.0.0.114
+```
+
+The local path expects the generic native build prerequisites documented in
+`apps/devtoolkit/README.md`; use its `--cmake-python` and
+`--cmake-prefix-path` options when those dependencies live in isolated
+prefixes.
+
 The toolkit reuses a container only when its checkout-owned configuration still
 matches. A foreign name collision or configuration drift fails without removing
 or replacing the container. Unknown host architectures fail before Docker is

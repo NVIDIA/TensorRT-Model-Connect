@@ -73,6 +73,44 @@ Both methods return `PreparedEnvironment`. Its `command(...)` method forms a
 command for the prepared container or local shell, while
 `execution_target(...)` connects it to the capability layer below.
 
+## Runnable build examples
+
+The examples build only the model-agnostic `trtmc` CLI and TensorRT backend,
+then execute the evidence-bound binary with `trtmc version`.
+
+Docker preparation installs the repository's generic build dependencies and
+uses the TensorRT version pinned by the development Dockerfile:
+
+```bash
+python3 apps/devtoolkit/examples/docker_build.py --gpu 0
+```
+
+The local example runs directly on the host. It can adopt a matching complete
+CUDA/TensorRT installation or materialize a digest-pinned managed toolchain:
+
+```bash
+python3 apps/devtoolkit/examples/local_build.py \
+  --python /path/to/python3.12 \
+  --tensorrt 11.0.0.114
+```
+
+Local preparation intentionally does not install generic C++ or checkout
+Python build dependencies. The host must provide CMake, a C++ compiler,
+Ninja or Make, and nlohmann-json 3.11 or newer. The current top-level CMake
+configuration also imports Torch for the SANA-WM family even when the example
+does not build that family. Select an interpreter containing Torch when needed:
+
+```bash
+python3 apps/devtoolkit/examples/local_build.py \
+  --python /usr/bin/python3 \
+  --tensorrt 11.0.0.114 \
+  --cmake-python /path/to/python-with-torch \
+  --cmake-prefix-path /path/to/nlohmann-prefix
+```
+
+Both examples accept `--state-root` for receipts and isolated build state.
+Run either script with `--help` for the complete set of options.
+
 ## Resolve, provision, build, and run
 
 The capability core has four stages:

@@ -26,6 +26,19 @@ from trtmc_devtoolkit import (  # noqa: E402
 )
 
 
+@pytest.mark.parametrize("name", ("docker_build.py", "local_build.py"))
+def test_build_examples_expose_help_without_preparing_an_environment(name: str) -> None:
+    result = subprocess.run(
+        [sys.executable, str(REPO / "apps" / "devtoolkit" / "examples" / name), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "TRTMC CLI and TensorRT backend" in result.stdout
+
+
 class RecordingRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], Path, dict[str, str] | None]] = []
