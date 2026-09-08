@@ -68,6 +68,29 @@ descriptive name instead of changing the existing definition. The high-level
 runner passes the definition and model-owned case to the family executor without
 interpreting their contents.
 
+Performance uses the same discovery path. Until a high-level device run owns a
+baseline and threshold, model Performance cases are observation-only and report
+measurements without claiming a pass or fail verdict:
+
+```yaml
+schema_version: trtmc.qualification/v1
+model: gpt2-125m
+kind: performance
+suites:
+  - benchmark: text_generation_performance
+    gate_policy: observation_only
+    cases:
+      - id: generate_64
+        candidate:
+          testcase: gpt2-125m
+          request:
+            prompt: The capital of France is
+            max_new_tokens: 64
+          measurement:
+            warmup: 5
+            iterations: 20
+```
+
 ## Commands
 
 Show the immutable plan without loading a model:
@@ -93,6 +116,16 @@ trtmc-qualify run \
   --run-config apps/benchmark/qualification/runs/all-accuracy.yaml \
   --families-root families \
   --output artifacts/qualification/accuracy
+```
+
+Run every discovered Performance case with the corresponding high-level
+configuration:
+
+```bash
+trtmc-qualify run \
+  --run-config apps/benchmark/qualification/runs/all-performance.yaml \
+  --families-root families \
+  --output artifacts/qualification/performance
 ```
 
 The run configuration owns the environment assignment and may contain exact

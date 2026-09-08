@@ -31,6 +31,74 @@ def test_checked_in_gpt2_accuracy_suite_is_discoverable() -> None:
     assert "device" not in plan.items[0].case
 
 
+def test_checked_in_gpt2_performance_suite_is_discoverable() -> None:
+    plan = QualificationCatalog(REPOSITORY / "families").plan(
+        "performance", models=["gpt2-125m"]
+    )
+
+    assert [(item.suite_id, item.case_id) for item in plan.items] == [
+        ("text_generation_performance", "generate_64")
+    ]
+    assert plan.items[0].gate_policy == "observation_only"
+    assert plan.items[0].case["candidate"]["measurement"] == {
+        "warmup": 5,
+        "iterations": 20,
+    }
+    assert "device" not in plan.items[0].case
+
+
+def test_gpt2_performance_reports_measurements_without_a_device_gate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    item = (
+        QualificationCatalog(REPOSITORY / "families")
+        .plan("performance", models=["gpt2-125m"])
+        .items[0]
+    )
+    candidate = {
+        "measurement_policy": {
+            "timing_scope": "public_task_call_wall",
+            "load_excluded": True,
+            "warmup_excluded": True,
+            "telemetry_in_timed_path": False,
+        },
+        "environment": {"gpus": [{"name": "test-gpu"}]},
+        "preparation": {"included_in_performance_metrics": False, "bundles": []},
+        "cells": [
+            {
+                "name": "generate_64",
+                "status": "completed",
+                "samples_ms": [4.0, 5.0],
+                "metrics": {
+                    "sample_count": 2,
+                    "latency_ms": {"p50": 4.5, "p95": 4.95},
+                    "request_throughput_per_s": 222.2,
+                    "output_tokens_per_s": 14222.2,
+                },
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        executor,
+        "_run_performance_candidate",
+        lambda **_kwargs: candidate,
+    )
+
+    result = executor._execute(
+        {
+            "schema_version": "trtmc.qualification-executor-request/v1",
+            "environment": {"schema_version": "trtmc.qualification-environment/v1"},
+        },
+        item.to_json(),
+        tmp_path,
+    )
+
+    assert result["execution"] == "completed"
+    assert result["verdict"] is None
+    assert result["details"]["metrics"]["latency_ms"]["p50"] == 4.5
+    assert result["details"]["runtime_environment"]["gpus"][0]["name"] == "test-gpu"
+
+
 def test_gpt2_manifest_covers_the_accuracy_context_window() -> None:
     item = QualificationCatalog(REPOSITORY / "families").plan(
         "accuracy", models=["gpt2-125m"]

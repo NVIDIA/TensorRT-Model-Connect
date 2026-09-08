@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+implementation: text_generation_performance
+
+timing:
+  timing_scope: public_task_call_wall
+  load_excluded: true
+  warmup_excluded: true
+  telemetry_in_timed_path: false
+
+metrics:
+  - sample_count
+  - latency_ms.p50
+  - latency_ms.p95
+  - request_throughput_per_s
+  - output_tokens_per_s

@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification-run/v1
+name: all-discovered-performance
+kind: performance
+environment: ../environments/example.yaml
+
+# Omit models, suites, and cases to run every discovered Performance case. A
+# device-specific run may list exact model names here without changing any
+# model-owned qualification file.

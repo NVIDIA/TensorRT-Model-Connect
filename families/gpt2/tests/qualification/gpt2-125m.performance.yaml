@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: gpt2-125m
+kind: performance
+
+suites:
+  - benchmark: text_generation_performance
+    gate_policy: observation_only
+    cases:
+      - id: generate_64
+        candidate:
+          testcase: gpt2-125m
+          request:
+            prompt: The capital of France is
+            max_new_tokens: 64
+            temperature: 1.0
+            top_k: 1
+            top_p: 1.0
+            min_p: 0.0
+            seed: -1
+            repetition_penalty: 1.0
+            use_chat_template: false
+            enable_thinking: false
+            do_sample: false
+          measurement:
+            warmup: 5
+            iterations: 20
+          telemetry:
+            gpu: auto

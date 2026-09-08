@@ -73,13 +73,14 @@ def _qualification_main(request_path: Path, output_path: Path) -> int:
 def _execute(request: Mapping[str, Any], item: Mapping[str, Any], item_dir: Path) -> dict[str, Any]:
     if request.get("schema_version") != REQUEST_SCHEMA:
         raise Gpt2QualificationError(f"request schema_version must be {REQUEST_SCHEMA}")
-    if item.get("family") != "gpt2" or item.get("kind") != "accuracy":
-        raise Gpt2QualificationError("the GPT-2 executor only accepts gpt2 Accuracy items")
-    definition = _mapping(item.get("definition"), "suite definition")
-    if definition.get("implementation") != "mmlu_continuation_parity":
+    if item.get("family") != "gpt2" or item.get("kind") not in {
+        "accuracy",
+        "performance",
+    }:
         raise Gpt2QualificationError(
-            f"unsupported GPT-2 Accuracy implementation {definition.get('implementation')!r}"
+            "the GPT-2 executor only accepts gpt2 Accuracy or Performance items"
         )
+    definition = _mapping(item.get("definition"), "suite definition")
     case = _mapping(item.get("case"), "case")
     environment = _mapping(request.get("environment"), "environment")
     if environment.get("schema_version") != "trtmc.qualification-environment/v1":
@@ -88,6 +89,48 @@ def _execute(request: Mapping[str, Any], item: Mapping[str, Any], item_dir: Path
     manifest = _read_json(Path(str(item["manifest_path"])), "model manifest")
     if manifest.get("name") != item.get("model") or manifest.get("family") != "gpt2":
         raise Gpt2QualificationError("plan item and GPT-2 manifest do not match")
+
+    if item["kind"] == "accuracy":
+        if definition.get("implementation") != "mmlu_continuation_parity":
+            raise Gpt2QualificationError(
+                "unsupported GPT-2 Accuracy implementation "
+                f"{definition.get('implementation')!r}"
+            )
+        return _execute_accuracy(
+            request=request,
+            item=item,
+            item_dir=item_dir,
+            manifest=manifest,
+            definition=definition,
+            case=case,
+            environment=environment,
+        )
+
+    if definition.get("implementation") != "text_generation_performance":
+        raise Gpt2QualificationError(
+            "unsupported GPT-2 Performance implementation "
+            f"{definition.get('implementation')!r}"
+        )
+    return _execute_performance(
+        request=request,
+        item=item,
+        item_dir=item_dir,
+        definition=definition,
+        case=case,
+        environment=environment,
+    )
+
+
+def _execute_accuracy(
+    *,
+    request: Mapping[str, Any],
+    item: Mapping[str, Any],
+    item_dir: Path,
+    manifest: Mapping[str, Any],
+    definition: Mapping[str, Any],
+    case: Mapping[str, Any],
+    environment: Mapping[str, Any],
+) -> dict[str, Any]:
     samples, dataset_path = _load_samples(definition, case, environment)
     _write_jsonl(item_dir / "selected-samples.jsonl", samples)
 
@@ -151,6 +194,109 @@ def _execute(request: Mapping[str, Any], item: Mapping[str, Any], item_dir: Path
         },
         "artifacts": artifacts,
     }
+
+
+def _execute_performance(
+    *,
+    request: Mapping[str, Any],
+    item: Mapping[str, Any],
+    item_dir: Path,
+    definition: Mapping[str, Any],
+    case: Mapping[str, Any],
+    environment: Mapping[str, Any],
+) -> dict[str, Any]:
+    if item.get("gate_policy") != "observation_only":
+        raise Gpt2QualificationError(
+            "GPT-2 Performance requires observation_only until an environment owns its gate"
+        )
+    candidate = _run_performance_candidate(
+        request=request,
+        item=item,
+        case=case,
+        environment=environment,
+        item_dir=item_dir,
+    )
+    cells = candidate.get("cells")
+    if not isinstance(cells, list) or len(cells) != 1:
+        raise Gpt2QualificationError("GPT-2 Performance must return exactly one benchmark cell")
+    cell = _mapping(cells[0], "performance benchmark cell")
+    if cell.get("status") != "completed":
+        raise Gpt2QualificationError("GPT-2 Performance benchmark cell did not complete")
+    metrics = _mapping(cell.get("metrics"), "performance metrics")
+    _validate_performance_metrics(definition, metrics)
+    measurement_policy = _mapping(candidate.get("measurement_policy"), "measurement policy")
+    _validate_performance_timing(definition, measurement_policy)
+    samples_ms = cell.get("samples_ms")
+    if not isinstance(samples_ms, list) or len(samples_ms) != int(metrics["sample_count"]):
+        raise Gpt2QualificationError(
+            "Performance latency samples do not match metrics.sample_count"
+        )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        for value in samples_ms
+    ):
+        raise Gpt2QualificationError("Performance latency samples must be finite numbers")
+    return {
+        **_identity(item),
+        "schema_version": RESULT_SCHEMA,
+        "execution": "completed",
+        "verdict": None,
+        "details": {
+            "gate_policy": "observation_only",
+            "metrics": dict(metrics),
+            "samples_ms": list(samples_ms),
+            "measurement_policy": dict(measurement_policy),
+            "runtime_environment": dict(
+                _mapping(candidate.get("environment"), "benchmark environment")
+            ),
+            "preparation": dict(_mapping(candidate.get("preparation"), "preparation")),
+        },
+        "artifacts": [
+            _artifact("performance request", "candidate-spec.json"),
+            _artifact("performance result", "candidate/result.json"),
+            _artifact("performance report", "candidate/report.html"),
+            _artifact("performance stdout", "candidate.stdout.log"),
+            _artifact("performance stderr", "candidate.stderr.log"),
+        ],
+    }
+
+
+def _validate_performance_metrics(
+    definition: Mapping[str, Any], metrics: Mapping[str, Any]
+) -> None:
+    required = definition.get("metrics")
+    if not isinstance(required, list) or not required or not all(
+        isinstance(value, str) and value for value in required
+    ):
+        raise Gpt2QualificationError("Performance suite metrics must be a non-empty string list")
+    for field in required:
+        value: Any = metrics
+        for name in field.split("."):
+            if not isinstance(value, Mapping) or name not in value:
+                raise Gpt2QualificationError(f"Performance metric {field!r} is missing")
+            value = value[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise Gpt2QualificationError(f"Performance metric {field!r} must be numeric")
+        if not math.isfinite(float(value)):
+            raise Gpt2QualificationError(f"Performance metric {field!r} must be finite")
+
+
+def _validate_performance_timing(
+    definition: Mapping[str, Any], measurement_policy: Mapping[str, Any]
+) -> None:
+    timing = _mapping(definition.get("timing"), "Performance suite timing")
+    for field in (
+        "timing_scope",
+        "load_excluded",
+        "warmup_excluded",
+        "telemetry_in_timed_path",
+    ):
+        if field not in timing or measurement_policy.get(field) != timing[field]:
+            raise Gpt2QualificationError(
+                f"Performance measurement policy does not match suite timing field {field!r}"
+            )
 
 
 def _load_samples(
@@ -442,13 +588,6 @@ def _run_candidate(
     environment: Mapping[str, Any],
     item_dir: Path,
 ) -> dict[str, Any]:
-    tools = _mapping(environment.get("tools"), "environment tools")
-    storage = _mapping(environment.get("storage"), "environment storage")
-    execution = _mapping(environment.get("execution", {}), "environment execution")
-    executable = _path(tools.get("trtmc_bench"), "tools.trtmc_bench")
-    if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise Gpt2QualificationError(f"trtmc-bench is not executable: {executable}")
-    runtime_root = _path(storage.get("runtime_root"), "storage.runtime_root")
     candidate_request = _candidate_request(case)
     testcase = _string(
         _mapping(case.get("candidate"), "case candidate").get("testcase"),
@@ -474,6 +613,79 @@ def _run_candidate(
             }
         ]
     }
+    result = _run_benchmark(
+        request=request,
+        environment=environment,
+        item_dir=item_dir,
+        spec=spec,
+        label="GPT-2 candidate",
+    )
+    cells = result.get("cells")
+    if not isinstance(cells, list) or len(cells) != len(reference_samples):
+        raise Gpt2QualificationError("candidate result count does not match selected samples")
+    if any(not isinstance(cell, Mapping) or cell.get("status") != "completed" for cell in cells):
+        raise Gpt2QualificationError("one or more GPT-2 candidate samples failed")
+    return result
+
+
+def _run_performance_candidate(
+    *,
+    request: Mapping[str, Any],
+    item: Mapping[str, Any],
+    case: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    item_dir: Path,
+) -> dict[str, Any]:
+    candidate = _mapping(case.get("candidate"), "case candidate")
+    spec = {
+        "models": [
+            {
+                "model": item["model"],
+                "cases": [
+                    {
+                        "name": item["case_id"],
+                        "testcase": _string(candidate.get("testcase"), "candidate.testcase"),
+                        "request": dict(
+                            _mapping(candidate.get("request"), "candidate request")
+                        ),
+                        "measurement": dict(
+                            _mapping(candidate.get("measurement"), "candidate measurement")
+                        ),
+                        "telemetry": dict(
+                            _mapping(
+                                candidate.get("telemetry", {"gpu": "auto"}),
+                                "candidate telemetry",
+                            )
+                        ),
+                    }
+                ],
+            }
+        ]
+    }
+    return _run_benchmark(
+        request=request,
+        environment=environment,
+        item_dir=item_dir,
+        spec=spec,
+        label="GPT-2 Performance candidate",
+    )
+
+
+def _run_benchmark(
+    *,
+    request: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    item_dir: Path,
+    spec: Mapping[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    tools = _mapping(environment.get("tools"), "environment tools")
+    storage = _mapping(environment.get("storage"), "environment storage")
+    execution = _mapping(environment.get("execution", {}), "environment execution")
+    executable = _path(tools.get("trtmc_bench"), "tools.trtmc_bench")
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise Gpt2QualificationError(f"trtmc-bench is not executable: {executable}")
+    runtime_root = _path(storage.get("runtime_root"), "storage.runtime_root")
     spec_path = item_dir / "candidate-spec.json"
     output_dir = item_dir / "candidate"
     stdout_path = item_dir / "candidate.stdout.log"
@@ -516,16 +728,13 @@ def _run_candidate(
         )
     if completed.returncode != 0:
         raise Gpt2QualificationError(
-            f"GPT-2 candidate exited {completed.returncode}; see {stderr_path.name}"
+            f"{label} exited {completed.returncode}; see {stderr_path.name}"
         )
-    result = _read_json(output_dir / "result.json", "candidate result")
+    result = _read_json(output_dir / "result.json", f"{label} result")
     if result.get("schema_version") != "trtmc.benchmark-run/v2":
-        raise Gpt2QualificationError("GPT-2 candidate returned an unsupported result")
-    cells = result.get("cells")
-    if not isinstance(cells, list) or len(cells) != len(reference_samples):
-        raise Gpt2QualificationError("candidate result count does not match selected samples")
-    if any(not isinstance(cell, Mapping) or cell.get("status") != "completed" for cell in cells):
-        raise Gpt2QualificationError("one or more GPT-2 candidate samples failed")
+        raise Gpt2QualificationError(f"{label} returned an unsupported result")
+    if result.get("status") != "completed":
+        raise Gpt2QualificationError(f"{label} did not complete")
     return result
 
 
