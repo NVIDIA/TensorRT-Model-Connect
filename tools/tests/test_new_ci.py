@@ -82,8 +82,8 @@ class RecordingContext:
             report = Path(command[command.index("--junitxml") + 1])
             empty = self.no_cpu_family_tests and "-unit-junit.xml" in report.name
             testcases = "" if empty else '<testcase name="hardware" />'
-            if "-e2e-junit.xml" in report.name:
-                family = report.name.removeprefix("trtmc-").removesuffix("-e2e-junit.xml")
+            if any(str(item).endswith("/test_e2e.py") for item in command):
+                family = str(command[3]).split("/")[1]
                 if "--e2e-testcase" in command:
                     raw = str(command[command.index("--e2e-testcase") + 1])
                     selected = set(raw.split(",")) - self.missing_e2e_testcases
@@ -108,16 +108,18 @@ class RecordingContext:
 
 
 @pytest.mark.parametrize(
-    ("testcases", "selector"),
+    ("testcases", "selector", "external_junit"),
     (
-        (None, ["--e2e-model", "beta"]),
-        (["beta-case"], ["--e2e-testcase", "beta-case"]),
+        (None, ["--e2e-model", "beta"], False),
+        (["beta-case"], ["--e2e-testcase", "beta-case"], False),
+        (["beta-case"], ["--e2e-testcase", "beta-case"], True),
     ),
 )
 def test_selective_e2e_calls_family_tests_directly(
     tmp_path: Path,
     testcases: list[str] | None,
     selector: list[str],
+    external_junit: bool,
 ) -> None:
     for family in ("alpha", "beta"):
         root = tmp_path / "families" / family
@@ -153,14 +155,17 @@ def test_selective_e2e_calls_family_tests_directly(
     if testcases is not None:
         impact["testcases"] = testcases
     (tmp_path / "impact.json").write_text(json.dumps(impact))
-    context = RecordingContext(
-        tmp_path,
-        {
-            "TRTMC_BINARY": str(binary),
-            "TRTMC_RUNTIME_ROOT": str(runtime),
-            "TRTMC_NATIVE_BUILD_DIR": str(native_build),
-        },
-    )
+    env = {
+        "TRTMC_BINARY": str(binary),
+        "TRTMC_RUNTIME_ROOT": str(runtime),
+        "TRTMC_NATIVE_BUILD_DIR": str(native_build),
+    }
+    expected_e2e_junit = native_build / "trtmc-beta-e2e-junit.xml"
+    if external_junit:
+        expected_e2e_junit = tmp_path / ".ci/family-beta-junit.xml"
+        expected_e2e_junit.parent.mkdir()
+        env["PYTEST_ADDOPTS"] = f"--maxfail=2 --junitxml={expected_e2e_junit}"
+    context = RecordingContext(tmp_path, env)
 
     E2ERunner(context).selective()
 
@@ -203,7 +208,7 @@ def test_selective_e2e_calls_family_tests_directly(
     assert selector == command[4:6]
     assert command[-2:] == [
         "--junitxml",
-        native_build / "trtmc-beta-e2e-junit.xml",
+        expected_e2e_junit,
     ]
     rendered = " ".join(map(str, command))
     assert "e2e_harness" not in rendered
@@ -211,6 +216,7 @@ def test_selective_e2e_calls_family_tests_directly(
     assert "--model-plugin-dir" not in rendered
     assert options["updates"]["TRTMC_BINARY"] == str(binary)
     assert options["updates"]["TRTMC_RUNTIME_ROOT"] != str(runtime)
+    assert options["unset"] == ("PYTEST_ADDOPTS",)
     assert context.runtime_snapshots == [
         ("libtrtmc_backend_trt.so", "libtrtmc_core.so", "libtrtmc_model_beta.so")
     ]

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -20,6 +21,42 @@ from .process import CiError
 
 
 _E2E_CASE_NAME = re.compile(r"^test_.*e2e\[(?P<case>.+)\]$")
+_JUNIT_OPTIONS = ("--junitxml", "--junit-xml")
+
+
+def _pytest_addopts_junit(repository: Path, value: str) -> Path | None:
+    """Preserve the caller-owned JUnit destination without honoring other addopts."""
+    try:
+        options = shlex.split(value)
+    except ValueError as error:
+        raise CiError(f"PYTEST_ADDOPTS is invalid: {error}") from error
+
+    destinations = []
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option in _JUNIT_OPTIONS:
+            index += 1
+            if index == len(options) or options[index].startswith("-"):
+                raise CiError(f"PYTEST_ADDOPTS {option} requires a path")
+            destinations.append(options[index])
+        else:
+            for name in _JUNIT_OPTIONS:
+                prefix = f"{name}="
+                if option.startswith(prefix):
+                    destination = option.removeprefix(prefix)
+                    if not destination:
+                        raise CiError(f"PYTEST_ADDOPTS {name} requires a path")
+                    destinations.append(destination)
+                    break
+        index += 1
+
+    if not destinations:
+        return None
+    if len(destinations) != 1:
+        raise CiError("PYTEST_ADDOPTS must specify at most one JUnit destination")
+    path = Path(destinations[0])
+    return path if path.is_absolute() else repository / path
 
 
 def _read_junit(path: Path, label: str) -> list[ET.Element]:
@@ -238,7 +275,16 @@ class E2ERunner:
                 _require_passing_junit(hardware_junit, "family hardware tests")
             requested_testcases = testcases or self._family_testcases(family)
             test = f"families/{family}/tests/test_e2e.py"
-            e2e_junit = native_build / f"trtmc-{family}-e2e-junit.xml"
+            # Protected runners historically own the evidence path through
+            # PYTEST_ADDOPTS. Keep that path contract, but do not allow unrelated
+            # addopts to alter selection or execution.
+            e2e_junit = (
+                _pytest_addopts_junit(
+                    self.context.repository,
+                    self.context.env.get("PYTEST_ADDOPTS", ""),
+                )
+                or native_build / f"trtmc-{family}-e2e-junit.xml"
+            )
             with self._isolated_runtime_root(runtime_root, family) as isolated:
                 command = [
                     "python",
