@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Any
 
 
-def create_network(*, verbose: bool) -> tuple[Any, Any, Any]:
-    """Create a strongly typed TensorRT network with the family logging policy."""
+def create_network(*, verbose: bool) -> tuple[Any, Any, Any, Any]:
+    """Create a network and return its logger so callers retain its lifetime."""
     import tensorrt as trt
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-    return trt, builder, builder.create_network(flags)
+    return trt, builder, builder.create_network(flags), logger
 
 
 def build_plan(builder: Any, network: Any, *, workspace_bytes: int) -> tuple[Any, float]:

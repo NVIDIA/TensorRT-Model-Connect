@@ -48,7 +48,7 @@ DIFFUSION_ENGINE_SPECS: Final = tuple(
 COMPONENT_ENGINE_SPECS: Final = (
     EngineSpec(
         "input_embedder",
-        "engine_plan",
+        "engine.plan",
         (
             "ref_pos",
             "ref_mask",

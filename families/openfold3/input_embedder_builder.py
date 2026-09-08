@@ -154,7 +154,7 @@ def build_input_embedder_engine(
     """Build the pinned OpenFold3 input graph directly with TensorRT."""
 
     weights = load_weight_prefixes(checkpoint_path, ("input_embedder.",), verify=verify_checkpoint)
-    trt, builder, network = create_network(verbose=verbose)
+    trt, builder, network, _logger = create_network(verbose=verbose)
     define_input_embedder_network(
         network,
         trt,

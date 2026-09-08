@@ -378,7 +378,7 @@ def build_pairformer_engine(
         block_count=block_count,
         verify=verify_checkpoint,
     )
-    trt, builder, network = create_network(verbose=verbose)
+    trt, builder, network, _logger = create_network(verbose=verbose)
     define_pairformer_network(
         network,
         trt,

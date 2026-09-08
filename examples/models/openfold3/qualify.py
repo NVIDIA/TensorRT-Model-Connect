@@ -81,12 +81,20 @@ def read_atom_site(path: Path) -> list[Atom]:
 def _matched_coordinates(
     candidate: list[Atom], reference: list[Atom], *, atom_name: str | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
-    reference_by_key = {atom.key: atom.coordinates for atom in reference}
+    reference_by_key: dict[tuple[str, str, str], np.ndarray] = {}
+    for atom in reference:
+        if atom.key in reference_by_key:
+            raise ValueError(f"duplicate reference atom key: {atom.key}")
+        reference_by_key[atom.key] = atom.coordinates
     candidate_points: list[np.ndarray] = []
     reference_points: list[np.ndarray] = []
+    candidate_keys: set[tuple[str, str, str]] = set()
     for atom in candidate:
         if atom_name is not None and atom.name != atom_name:
             continue
+        if atom.key in candidate_keys:
+            raise ValueError(f"duplicate candidate atom key: {atom.key}")
+        candidate_keys.add(atom.key)
         point = reference_by_key.get(atom.key)
         if point is not None:
             candidate_points.append(atom.coordinates)

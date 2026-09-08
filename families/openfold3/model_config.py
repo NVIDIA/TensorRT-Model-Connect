@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from zipfile import BadZipFile
 
 import numpy as np
 
@@ -64,7 +65,7 @@ def config_from_dir(model_dir: str | Path) -> dict | None:
             if msa.ndim != 3:
                 raise ValueError("OpenFold3 prepared MSA must be a rank-3 tensor")
             msa_depth = int(msa.shape[1])
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+    except (KeyError, TypeError, ValueError, BadZipFile, json.JSONDecodeError) as error:
         raise ValueError("invalid OpenFold3 structure metadata") from error
     if atom_count <= 0:
         raise ValueError("OpenFold3 structure metadata atom_count must be positive")

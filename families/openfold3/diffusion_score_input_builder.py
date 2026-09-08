@@ -212,7 +212,7 @@ def build_diffusion_score_input_engine(
         ),
         verify=verify_checkpoint,
     )
-    trt, builder, network = create_network(verbose=verbose)
+    trt, builder, network, _logger = create_network(verbose=verbose)
     define_diffusion_score_input_network(
         network,
         trt,

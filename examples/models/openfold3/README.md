@@ -83,7 +83,7 @@ cmake --build /tmp/openfold3-native --target trtmc_openfold3_native -j
 
 The standards-compliant mmCIF stores per-atom pLDDT in
 `_atom_site.B_iso_or_equiv`. JSON metadata contains pLDDT, PAE, PDE, average
-pLDDT, gPDE, pTM, sampling controls, precision, request digest, and rank.
+pLDDT, gPDE, pTM, sampling controls, precision, and rank.
 
 ## Reproduce parity and performance
 
@@ -142,10 +142,10 @@ rather than rigid trajectory agreement.
 
 Seeded diffusion is deterministic for a serialized bundle, but numerically
 equivalent TensorRT tactics can select a different valid diffusion basin.
-Consequently, strict BF16 trajectory evidence is bound to the recorded bundle
-SHA, and every rebuild must be requalified. Exact quality, validity, timing,
-memory, artifact hashes, and software-stack evidence is recorded in the
-adjacent `qualification/` directory.
+Consequently, strict BF16 trajectory evidence applies only to the plans that
+were exercised, and every rebuild must be requalified. Exact quality, validity,
+timing, memory, artifact identity, and software-stack evidence is recorded in
+the adjacent `qualification/` directory.
 
 ## Limits
 

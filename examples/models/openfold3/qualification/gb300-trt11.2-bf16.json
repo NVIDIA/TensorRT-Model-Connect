@@ -45,7 +45,6 @@
     "bundle_size_mib": 918.2,
     "onnx_used": false,
     "custom_kernels_used": false,
-    "qualification_scope": "exact serialized TensorRT plan set",
     "rebuild_policy": "Rebuilds must be requalified because valid tactic choices can select a different seeded diffusion basin."
   },
   "validity": {
@@ -113,6 +112,6 @@
     "no searched templates, nucleic acids, ligands, or modified residues",
     "one diffusion sample and no runtime-variable shapes",
     "no CUDA graph qualification",
-    "strict trajectory parity is bound to the recorded bundle SHA because TensorRT tactic choices can select another valid diffusion basin"
+    "strict trajectory parity applies only to the plans exercised by this qualification; rebuilt plans must be requalified"
   ]
 }

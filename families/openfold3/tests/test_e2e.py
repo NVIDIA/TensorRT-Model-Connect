@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -102,7 +103,12 @@ def _prepared_package(source: Path, destination: Path) -> Path:
     for name in ("of3-ob-2025-06-30-174k.pt", "components.bcif"):
         path = source / name
         assert path.is_file() and not path.is_symlink(), path
-        os.link(path, destination / name)
+        try:
+            os.link(path, destination / name)
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            shutil.copyfile(path, destination / name)
     shutil.copyfile(
         TEST_ROOT.parents[2] / "examples/models/openfold3/query_ubiquitin.json",
         destination / "query.json",

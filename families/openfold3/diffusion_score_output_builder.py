@@ -117,7 +117,7 @@ def build_diffusion_score_output_engine(
         ("diffusion_module.layer_norm_a.", "diffusion_module.atom_attn_dec."),
         verify=verify_checkpoint,
     )
-    trt, builder, network = create_network(verbose=verbose)
+    trt, builder, network, _logger = create_network(verbose=verbose)
     define_diffusion_score_output_network(
         network,
         trt,

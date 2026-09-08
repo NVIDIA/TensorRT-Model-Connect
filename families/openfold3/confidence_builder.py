@@ -171,7 +171,7 @@ def build_confidence_engine(
     precision: str = "fp16",
 ) -> ConfidenceBuildResult:
     weights = load_weight_prefixes(checkpoint_path, ("aux_heads.",), verify=verify_checkpoint)
-    trt, builder, network = create_network(verbose=verbose)
+    trt, builder, network, _logger = create_network(verbose=verbose)
     define_confidence_network(
         network,
         trt,

@@ -11,6 +11,7 @@
     "structural_parity.all_atom_pair_distance_mae_angstrom": 1.0
   },
   "minimum": {
+    "matched_atom_count": 601,
     "confidence_parity.pae_pearson": 0.9,
     "confidence_parity.pde_pearson": 0.9,
     "confidence_parity.plddt_pearson": 0.9

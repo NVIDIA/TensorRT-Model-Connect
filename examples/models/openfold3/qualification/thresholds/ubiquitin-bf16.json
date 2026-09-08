@@ -13,6 +13,7 @@
     "structural_parity.ca_aligned_rmsd_angstrom": 1.5
   },
   "minimum": {
+    "matched_atom_count": 601,
     "confidence_parity.pae_pearson": 0.9,
     "confidence_parity.pde_pearson": 0.9,
     "confidence_parity.plddt_pearson": 0.95

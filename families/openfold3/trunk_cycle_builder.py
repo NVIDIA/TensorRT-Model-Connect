@@ -258,7 +258,7 @@ def build_trunk_cycle_engine(
         ),
         verify=verify_checkpoint,
     )
-    trt, builder, network = create_network(verbose=verbose)
+    trt, builder, network, _logger = create_network(verbose=verbose)
     define_trunk_cycle_network(
         network,
         trt,

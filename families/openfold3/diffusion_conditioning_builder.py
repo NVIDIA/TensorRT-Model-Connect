@@ -105,7 +105,7 @@ def build_diffusion_conditioning_engine(
         ("diffusion_module.diffusion_conditioning.",),
         verify=verify_checkpoint,
     )
-    trt, builder, network = create_network(verbose=verbose)
+    trt, builder, network, _logger = create_network(verbose=verbose)
     define_diffusion_conditioning_network(
         network, trt, weights, token_count=token_count, precision=precision
     )

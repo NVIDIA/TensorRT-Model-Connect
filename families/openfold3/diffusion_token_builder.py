@@ -146,7 +146,7 @@ def build_diffusion_token_engine(
         for index in range(first_layer, first_layer + layer_count)
     )
     weights = load_weight_prefixes(checkpoint_path, prefixes, verify=verify_checkpoint)
-    trt, builder, network = create_network(verbose=verbose)
+    trt, builder, network, _logger = create_network(verbose=verbose)
     define_diffusion_token_network(
         network,
         trt,

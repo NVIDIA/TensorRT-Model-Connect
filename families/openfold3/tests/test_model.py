@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from families.openfold3 import model
+from examples.models.openfold3.qualify import Atom, _matched_coordinates
+from families.openfold3 import model, model_config
 from families.openfold3.contracts import (
     INITIAL_FP16_PROFILE,
     OpenFold3Confidence,
@@ -57,6 +58,9 @@ from tensorrt_model_connect.model_support import ModelMetadata
 
 
 _PREPARED_FIXTURES = Path(__file__).resolve().with_name("data")
+_QUALIFICATION_THRESHOLDS = (
+    Path(__file__).resolve().parents[3] / "examples/models/openfold3/qualification/thresholds"
+)
 
 
 def _query(sequence: str = "ACDE") -> str:
@@ -170,6 +174,7 @@ def test_graph_manifest_has_one_unique_section_per_native_engine() -> None:
     sections = [engine["section"] for engine in manifest["engines"]]
     assert len(sections) == len(ALL_ENGINE_SPECS) == 18
     assert len(sections) == len(set(sections))
+    assert sections[0] == "engine.plan"
     assert manifest["precision"] == "fp16-mixed"
     assert manifest["template_mode"] == "four_identical_disabled_search_placeholders"
     assert manifest["recycling_passes"] == 4
@@ -219,6 +224,30 @@ def test_family_support_owns_the_mixed_fp16_default() -> None:
 def test_malformed_msa_rank_reports_a_value_error() -> None:
     with pytest.raises(ValueError, match="rank-3"):
         model._shape_profile({"msa": np.zeros((1,), dtype=np.float32)})
+
+
+def test_corrupt_feature_archive_reports_a_value_error(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / QUERY).write_text(_query(), encoding="utf-8")
+    (tmp_path / STRUCTURE_METADATA).write_text('{"atom_count": 1}', encoding="utf-8")
+    (tmp_path / FEATURES).write_bytes(b"PK\x03\x04")
+    monkeypatch.setattr(model_config, "resolve_package_root", lambda _model_dir: tmp_path)
+
+    with pytest.raises(ValueError, match="invalid OpenFold3 structure metadata"):
+        model_config.config_from_dir(tmp_path)
+
+
+def test_qualification_rejects_duplicate_atom_keys() -> None:
+    atom = Atom("A", "1", "CA", np.zeros(3, dtype=np.float64))
+    with pytest.raises(ValueError, match="duplicate reference atom key"):
+        _matched_coordinates([atom], [atom, atom])
+
+
+def test_qualification_requires_all_ubiquitin_atoms_to_match() -> None:
+    paths = sorted(_QUALIFICATION_THRESHOLDS.glob("ubiquitin-*.json"))
+    assert len(paths) == 2
+    for path in paths:
+        thresholds = json.loads(path.read_text(encoding="utf-8"))
+        assert thresholds["minimum"]["matched_atom_count"] == 601
 
 
 def test_sampling_controls_are_rejected_before_cuda_is_loaded() -> None:
