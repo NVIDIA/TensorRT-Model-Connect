@@ -18,6 +18,7 @@
 #include "trtmc/task.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -66,6 +67,10 @@ struct VoiceChatAssets {
     VoiceChatTtsPrompt tts_prompt;
 };
 
+// Loads either the first-frame or steady-state streaming perception engine.
+// The runtime keeps only one of these large engines resident at a time.
+using VoiceChatPerceptionLoader = std::function<std::unique_ptr<ITrtModule>(bool first_step)>;
+
 class NemotronVoiceChatRuntime;
 
 class NemotronVoiceChatPipeline final : public ISpeechToSpeech,
@@ -78,7 +83,7 @@ class NemotronVoiceChatPipeline final : public ISpeechToSpeech,
 
     NemotronVoiceChatPipeline(std::unique_ptr<ITrtModule> thinker,
                               std::unique_ptr<ITrtModule> perception_stream_first,
-                              std::unique_ptr<ITrtModule> perception_stream,
+                              VoiceChatPerceptionLoader perception_loader,
                               std::unique_ptr<ITrtModule> rnnt_predictor,
                               std::unique_ptr<ITrtModule> rnnt_joint,
                               std::unique_ptr<ITrtModule> tts, std::unique_ptr<ITrtModule> codec,

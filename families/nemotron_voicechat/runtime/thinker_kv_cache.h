@@ -37,16 +37,32 @@ class VoiceChatThinkerKvCache : public VoiceChatThinkerInferenceState {
     void advance() override;
     bool ok() const override;
 
+    // Preserve the rows already written by the system-prompt prefill. Later
+    // live frames roll only through the remaining cache suffix.
+    void pin_current_prefix();
+
+    // The behavioral system prompt is immutable for a session. Capture its
+    // pinned rows once so context rollover can restore them without executing
+    // the Thinker once per prompt token.
+    void capture_prompt_snapshot();
+    void restore_prompt_snapshot();
+    bool prompt_snapshot_ready() const noexcept { return prompt_snapshot_ready_; }
+
   private:
     VoiceChatThinkerKvCacheNames names_;
     std::vector<DeviceTensor> cache_k_;
     std::vector<DeviceTensor> cache_v_;
     std::vector<DeviceTensor> present_k_;
     std::vector<DeviceTensor> present_v_;
+    std::vector<DeviceTensor> prompt_snapshot_k_;
+    std::vector<DeviceTensor> prompt_snapshot_v_;
     int32_t num_layers_{0};
     int32_t max_length_{0};
     int32_t kv_dim_{0};
-    int32_t position_{0};
+    std::int64_t logical_position_{0};
+    int32_t pinned_prefix_rows_{0};
+    int32_t prompt_snapshot_rows_{0};
+    bool prompt_snapshot_ready_{false};
     cudaStream_t stream_{nullptr};
     std::vector<float> mask_buf_;
 };

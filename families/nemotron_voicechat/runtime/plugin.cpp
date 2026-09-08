@@ -81,6 +81,8 @@ nemotron_voicechat::Config parse_config(const nlohmann::json& json) {
     VC_INT(tts_head_dim);
     VC_INT(tts_kv_width);
     VC_INT(tts_max_cache_length);
+    VC_INT(tts_sliding_window_pattern);
+    VC_INT(tts_max_position_embeddings);
     VC_INT(tts_num_quantizers);
     VC_INT(tts_codebook_size);
     VC_INT(tts_mog_num_predictions);
@@ -93,6 +95,9 @@ nemotron_voicechat::Config parse_config(const nlohmann::json& json) {
     VC_INT(max_pending_input_ms);
     VC_INT(max_pending_events);
     VC_INT(stream_tick_ms);
+    VC_INT(context_rollover_soft_frames);
+    VC_INT(context_rollover_hard_frames);
+    VC_INT(context_memory_max_tokens);
 #undef VC_INT
     config.mel_preemphasis = json.at("mel_preemphasis").get<float>();
     config.tts_guidance_scale = json.at("tts_guidance_scale").get<float>();
@@ -103,7 +108,34 @@ nemotron_voicechat::Config parse_config(const nlohmann::json& json) {
         config.output_sample_rate <= 0 || config.tts_hidden_size <= 0 ||
         config.tts_num_layers <= 0 || config.default_system_prompt.empty())
         throw std::runtime_error("VoiceChat runtime.json does not match its runtime contract");
+    if (config.tts_sliding_window_pattern <= 0 ||
+        config.tts_sliding_window_pattern > config.tts_num_layers ||
+        config.tts_max_position_embeddings <= 0) {
+        throw std::runtime_error("VoiceChat TTS position policy is invalid");
+    }
+    if (config.context_rollover_soft_frames <= 0 ||
+        config.context_rollover_hard_frames < config.context_rollover_soft_frames ||
+        config.context_memory_max_tokens <= 0 ||
+        config.context_memory_max_tokens >= config.max_cache_length) {
+        throw std::runtime_error("VoiceChat context rollover policy is invalid");
+    }
     return config;
+}
+
+VoiceChatPerceptionLoader make_perception_loader(BundleReader bundle, IBackend& backend,
+                                                 cudaStream_t stream) {
+    for (const char* name : {"perception.first.plan", "perception.plan"}) {
+        const auto* section = bundle.find_section(name);
+        if (section == nullptr || section->length == 0)
+            throw std::runtime_error("bundle section is missing or empty: " + std::string(name));
+    }
+    return [bundle = std::move(bundle), &backend, stream](bool first_step) {
+        const char* name = first_step ? "perception.first.plan" : "perception.plan";
+        const auto plan = require_section(bundle, name);
+        ModuleCreateOptions options{};
+        options.stream = stream;
+        return load_trt_module_from_plan(&backend, &plan, name, options).module;
+    };
 }
 
 VoiceChatTtsPrompt load_tts_prompt(const BundleReader& bundle,
@@ -160,7 +192,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto thinker = load("engine.plan");
     const auto stream = thinker->stream();
     auto perception_first = load("perception.first.plan", stream);
-    auto perception = load("perception.plan", stream);
+    auto perception_loader =
+        voicechat_factory::make_perception_loader(context.reader, context.backend, stream);
     auto rnnt_predictor = load("rnnt.predictor.plan", stream);
     auto rnnt_joint = load("rnnt.joint.plan", stream);
     auto tts = load("tts.plan", stream);
@@ -185,7 +218,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (!tokenizer)
         throw std::runtime_error("VoiceChat bundle does not contain its required tokenizer");
     return new NemotronVoiceChatPipeline(
-        std::move(thinker), std::move(perception_first), std::move(perception),
+        std::move(thinker), std::move(perception_first), std::move(perception_loader),
         std::move(rnnt_predictor), std::move(rnnt_joint), std::move(tts), std::move(codec),
         std::move(config), std::move(assets), std::move(tokenizer), "");
 }

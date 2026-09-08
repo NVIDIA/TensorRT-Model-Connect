@@ -76,6 +76,14 @@ def test_readme_documents_one_off_build_and_offline_device_scoped_run() -> None:
         assert "--device /dev/snd:/dev/snd" in block
         assert "readonly" in block or ":ro" in block
     assert "headset" in readme.lower()
+    assert "python -m tensorrt_model_connect build" in readme
+    assert "--revision 359ada7b1c60851e40ff08065f9b0340244f27e0" in readme
+    assert "--quantization int8" in readme
+    assert "--max-sequence-length 512" in readme
+    assert "--playback-gain-db" in readme
+    assert "160 ms" in readme
+    assert "rolls recurrent generation state" in readme
+    assert "clipped-sample count" in readme
 
 
 def test_application_wires_alsa_capture_session_events_and_barge_in_flush() -> None:
@@ -102,6 +110,7 @@ def test_application_wires_alsa_capture_session_events_and_barge_in_flush() -> N
         "ISpeechSessionProvider",
         "create_speech_session",
         "SpeechSessionEventKind::kYielded",
+        "SpeechSessionEventKind::kContextRolled",
     ):
         assert symbol in source
     assert source.count("std::thread") >= 2
@@ -114,6 +123,11 @@ def test_application_wires_alsa_capture_session_events_and_barge_in_flush() -> N
         r"PlaybackQueueItemKind::kFlush[\s\S]{0,800}playback\.flush_playback\s*\(",
         source,
     )
+    rollover_case = re.search(
+        r"case SpeechSessionEventKind::kContextRolled:([\s\S]*?)break;", source
+    )
+    assert rollover_case is not None
+    assert "request_flush" not in rollover_case.group(1)
     flush_method = re.search(
         r"void\s+flush_playback\s*\(\)\s*\{([\s\S]{0,1200}?)\n    \}",
         source,
@@ -121,6 +135,101 @@ def test_application_wires_alsa_capture_session_events_and_barge_in_flush() -> N
     assert flush_method is not None
     assert "snd_pcm_drop" in flush_method.group(1)
     assert "snd_pcm_prepare" in flush_method.group(1)
+
+    read_method = re.search(
+        r"std::size_t\s+read_frames\s*\([^)]*\)\s*\{([\s\S]{0,2400}?)\n    \}",
+        source,
+    )
+    assert read_method is not None
+    read_body = read_method.group(1)
+    for symbol in ("snd_pcm_state", "SND_PCM_STATE_PREPARED", "snd_pcm_start"):
+        assert symbol in read_body
+    assert read_body.index("snd_pcm_state") < read_body.index("snd_pcm_start")
+    assert read_body.index("snd_pcm_start") < read_body.index("snd_pcm_readi")
+
+    capacity = re.search(r"constexpr int kPlaybackQueueSeconds = (\d+);", source)
+    assert capacity is not None
+    # The model-owned response limit is 256 x 80 ms = 20.48 seconds. Keep the
+    # event consumer non-blocking for barge-in while bounding buffered PCM.
+    assert int(capacity.group(1)) >= 21
+    assert "four-second bound" not in source
+
+    for event_serializer in (
+        (REPO_ROOT / "apps" / "cli" / "cli.cpp").read_text(encoding="utf-8"),
+        (
+            REPO_ROOT
+            / "families"
+            / "nemotron_voicechat"
+            / "tests"
+            / "cpp"
+            / "native_lifecycle_probe.cpp"
+        ).read_text(encoding="utf-8"),
+    ):
+        assert re.search(
+            r"case (?:SpeechSessionEventKind|EventKind)::kContextRolled:\s*"
+            r'return "context_rolled";',
+            event_serializer,
+        )
+
+    assert re.search(
+        r"AlsaPcm\s+capture\([^;]*SND_PCM_STREAM_CAPTURE[^;]*,\s*1U\s*,",
+        source,
+        flags=re.DOTALL,
+    )
+    assert re.search(
+        r"AlsaPcm\s+playback\([^;]*SND_PCM_STREAM_PLAYBACK[^;]*,\s*2U\s*,",
+        source,
+        flags=re.DOTALL,
+    )
+    assert re.search(r"stereo\[frame\s*\*\s*2U\]\s*=\s*mono\[frame\]", source)
+    assert re.search(r"stereo\[frame\s*\*\s*2U\s*\+\s*1U\]\s*=\s*mono\[frame\]", source)
+    playback_loop = re.search(
+        r"void\s+playback_loop\s*\([^)]*\)\s*noexcept\s*\{([\s\S]{0,7000}?)\n\}",
+        source,
+    )
+    assert playback_loop is not None
+    playback_body = playback_loop.group(1)
+    assert "queue.try_pop()" in playback_body
+    assert "queue.wait_pop()" not in playback_body
+    assert "std::fill(mono.begin(), mono.end(), 0)" in playback_body
+    assert "while (written < period_frames)" in playback_body
+
+
+def test_playback_gain_cli_is_bounded_and_applied_once() -> None:
+    source = _text("main.cpp")
+
+    assert re.search(r"float\s+playback_gain_db\s*\{\s*0(?:\.0)?F?\s*\}", source)
+    assert re.search(r"--playback-gain-db[^\n]*default:\s*0", source)
+
+    parser = re.search(
+        r'if\s*\(argument\s*==\s*"--playback-gain-db"\)\s*\{([\s\S]{0,800}?)\n\s*\}',
+        source,
+    )
+    assert parser is not None
+    parser_body = parser.group(1)
+    assert "playback_gain_db" in parser_body
+    assert re.search(r"-24(?:\.0)?F?", parser_body)
+    assert re.search(r"(?<!-)24(?:\.0)?F?", parser_body)
+
+    float_parser = re.search(
+        r"float\s+parse_float\s*\([^)]*\)\s*\{([\s\S]{0,1200}?)\n\}",
+        source,
+    )
+    assert float_parser is not None
+    assert "std::isfinite" in float_parser.group(1)
+    assert "parsed < minimum" in float_parser.group(1)
+    assert "parsed > maximum" in float_parser.group(1)
+
+    gain_resolution = re.findall(
+        r"playback_gain_from_db\s*\(\s*options\.playback_gain_db\s*\)", source
+    )
+    assert len(gain_resolution) == 1
+    assert re.search(
+        r"float_to_pcm16\s*\(\s*sample\s*,\s*playback_gain\s*\)", source
+    )
+    assert re.search(
+        r"consume_event\s*\([^;]*playback_gain[^;]*\)", source, flags=re.DOTALL
+    )
 
 
 def test_playback_queue_is_pure_cpp_and_runs_without_alsa(tmp_path: Path) -> None:
