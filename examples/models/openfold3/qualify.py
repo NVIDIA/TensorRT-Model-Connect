@@ -205,6 +205,10 @@ def main() -> None:
     native_atoms = read_atom_site(arguments.native_structure)
     reference_atoms = read_atom_site(arguments.reference_structure)
     native, reference = matched_coordinates(native_atoms, reference_atoms)
+    if len(native) != len(native_atoms) or len(reference) != len(reference_atoms):
+        raise ValueError(
+            "qualification requires every native and reference atom key to match"
+        )
     native_ca, reference_ca = matched_coordinates(native_atoms, reference_atoms, atom_name="CA")
     result: dict[str, object] = {
         "schema_version": 1,
