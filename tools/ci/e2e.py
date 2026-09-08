@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -363,10 +364,10 @@ class E2ERunner:
             isolated = root / "tensorrt_model_connect/bin"
             isolated.mkdir(parents=True)
             for name in required:
-                (isolated / name).symlink_to((runtime_root / name).resolve())
+                shutil.copy2(runtime_root / name, isolated / name)
             byok = runtime_root / "libtrtmc_byok_tvm_ffi.so"
             if byok.is_file():
-                (isolated / byok.name).symlink_to(byok.resolve())
+                shutil.copy2(byok, isolated / byok.name)
             declaration = runtime_root / "families" / family / "cli.json"
             if (
                 self.context.repository / "families" / family / "cli.json"
@@ -375,11 +376,11 @@ class E2ERunner:
             if declaration.is_file():
                 destination = isolated / "families" / family / "cli.json"
                 destination.parent.mkdir(parents=True)
-                destination.symlink_to(declaration.resolve())
+                shutil.copy2(declaration, destination)
                 if library := native_cli_library(declaration):
                     if not (runtime_root / library).is_file():
                         raise CiError(f"TRTMC_RUNTIME_ROOT has no {library}")
-                    (isolated / library).symlink_to((runtime_root / library).resolve())
+                    shutil.copy2(runtime_root / library, isolated / library)
 
             # Preserve only non-family wheel dependencies expected by RUNPATH.
             site_packages = runtime_root.parent.parent
