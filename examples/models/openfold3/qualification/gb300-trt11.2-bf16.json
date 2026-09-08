@@ -23,9 +23,7 @@
     "checkpoint_access": "public-ungated",
     "checkpoint_license": "Apache-2.0",
     "checkpoint_size_bytes": 2287872989,
-    "checkpoint_sha256": "bd43301c011d5f87580d3e8b548658869433e4488399feb03035ba248f8e29e4",
-    "components_size_bytes": 63393643,
-    "components_sha256": "473d845c8b250b188dbed9bf505ae206692a178a2a7c4869bf8f9de707ffcc0c"
+    "components_size_bytes": 63393643
   },
   "profile": {
     "request": "ubiquitin",
@@ -39,16 +37,12 @@
     "trunk_passes": 4,
     "diffusion_samples": 1,
     "diffusion_steps": 200,
-    "seed": 42,
-    "query_sha256": "cb64b2bc719dedc77594b26bb6f070192a974cee95f602d599726a7994ef0485",
-    "features_sha256": "60a28fa84b8088849b96e67c16d537a6f79858229907736f381fdd5b100766c4",
-    "structure_metadata_sha256": "23dab4813f744c3ff8b922d665359cbd830abf168fa4a2c2e8bb917cf4d219f2"
+    "seed": 42
   },
   "build": {
     "engine_count": 18,
     "bundle_size_bytes": 962799236,
     "bundle_size_mib": 918.2,
-    "bundle_sha256": "073ad25fa442606237d9dc467eb7f071fb5b2b337585425a8dacaf51f2318d60",
     "onnx_used": false,
     "custom_kernels_used": false,
     "qualification_scope": "exact serialized TensorRT plan set",
@@ -65,15 +59,11 @@
     "gemmi_atoms": 601,
     "biotite_atoms": 601,
     "sample_rank": 0,
-    "sample_ranking_applicable": false,
-    "structure_sha256": "e37fd19cd4b58fd52781c4bdd479a4abdb9fd3472f3a1c73ff1327e4071e6702",
-    "confidence_sha256": "314336e2adbb52c2853c9e87c9be0084a12dd688733d99d86b107a4e72e5cdf3"
+    "sample_ranking_applicable": false
   },
   "accuracy": {
     "reference_backend": "openfold3-0.5.0-pytorch-bf16-mixed",
-    "reference_structure_sha256": "779f1834a5d9cb0d5a4fbe63f5c3021773dc3c94ba60798e16787c2cbd7391ef",
     "experimental_structure": "PDB 1UBQ",
-    "experimental_structure_sha256": "056f98710cb2b36f633c45e41902a02eb446e82871da21ff2dd44f74a56ca0f6",
     "experimental_ca_aligned_rmsd_angstrom": 0.9188658201578573,
     "all_atom_aligned_rmsd_angstrom": 1.286310103201864,
     "ca_aligned_rmsd_angstrom": 1.051475539649028,

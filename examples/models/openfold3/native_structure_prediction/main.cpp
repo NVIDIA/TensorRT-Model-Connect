@@ -3,23 +3,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "trtmc/pipeline.h"
+#include "trtmc/runtime/family_loader.h"
+#include "trtmc/task.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <iterator>
 #include <stdexcept>
 #include <string>
 
 namespace {
 
+constexpr std::uintmax_t kMaximumRequestBytes = 1U << 20;
+
 struct Options {
     std::string bundle;
     std::string request;
     std::string output;
-    std::string backend_dir;
-    std::string model_plugin_dir;
+    std::string metadata;
+    std::string runtime_root;
 };
 
 std::string takeValue(int& index, int argc, char** argv, const std::string& option) {
@@ -36,10 +39,10 @@ Options parseOptions(int argc, char** argv) {
             options.request = takeValue(index, argc, argv, argument);
         else if (argument == "--output")
             options.output = takeValue(index, argc, argv, argument);
-        else if (argument == "--backend-dir")
-            options.backend_dir = takeValue(index, argc, argv, argument);
-        else if (argument == "--model-plugin-dir")
-            options.model_plugin_dir = takeValue(index, argc, argv, argument);
+        else if (argument == "--metadata")
+            options.metadata = takeValue(index, argc, argv, argument);
+        else if (argument == "--runtime-root")
+            options.runtime_root = takeValue(index, argc, argv, argument);
         else if (!argument.empty() && argument.front() == '-')
             throw std::invalid_argument("unknown option: " + argument);
         else if (options.bundle.empty())
@@ -47,16 +50,32 @@ Options parseOptions(int argc, char** argv) {
         else
             throw std::invalid_argument("only one bundle may be specified");
     }
-    if (options.bundle.empty() || options.request.empty() || options.output.empty())
-        throw std::invalid_argument("bundle, --request, and --output are required");
+    if (options.bundle.empty() || options.request.empty() || options.output.empty() ||
+        options.metadata.empty() || options.runtime_root.empty())
+        throw std::invalid_argument(
+            "bundle, --request, --output, --metadata, and --runtime-root are required");
+    if (std::filesystem::absolute(options.output).lexically_normal() ==
+        std::filesystem::absolute(options.metadata).lexically_normal())
+        throw std::invalid_argument("structure and metadata outputs must be different files");
     return options;
 }
 
-std::string readFile(const std::string& path) {
+std::string readRequest(const std::filesystem::path& path) {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error || !std::filesystem::is_regular_file(status) || std::filesystem::is_symlink(status))
+        throw std::invalid_argument("structure request must be a regular non-symlink file");
+    const auto size = std::filesystem::file_size(path, error);
+    if (error || size > kMaximumRequestBytes)
+        throw std::invalid_argument("structure request exceeds the 1 MiB limit");
     std::ifstream input(path, std::ios::binary);
     if (!input)
-        throw std::runtime_error("failed to open input: " + path);
-    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        throw std::runtime_error("failed to open input: " + path.string());
+    std::string result(static_cast<std::size_t>(size), '\0');
+    input.read(result.data(), static_cast<std::streamsize>(result.size()));
+    if (!input && !result.empty())
+        throw std::runtime_error("failed to read input: " + path.string());
+    return result;
 }
 
 void writeFile(const std::filesystem::path& path, const std::string& contents) {
@@ -71,7 +90,7 @@ void writeFile(const std::filesystem::path& path, const std::string& contents) {
 void usage(const char* program) {
     std::cerr << "Usage: " << program
               << " MODEL.bundle --request query.json --output prediction.cif "
-                 "[--backend-dir DIR] [--model-plugin-dir DIR]\n";
+                 "--metadata prediction.json --runtime-root DIR\n";
 }
 
 } // namespace
@@ -79,20 +98,14 @@ void usage(const char* program) {
 int main(int argc, char** argv) {
     try {
         const auto options = parseOptions(argc, argv);
-        trtmc::LoadOptions load_options;
-        if (!options.backend_dir.empty())
-            load_options.backend_search_paths.push_back(options.backend_dir);
-        if (!options.model_plugin_dir.empty())
-            load_options.model_plugin_search_paths.push_back(options.model_plugin_dir);
-        auto pipeline = trtmc::load(options.bundle, load_options);
-        const auto request =
-            pipeline->prepare_structure_input(readFile(options.request), options.request);
-        const auto result = pipeline->predict_structure(request);
+        auto task = trtmc::load_task(options.bundle, options.runtime_root);
+        auto* prediction = dynamic_cast<trtmc::IStructurePrediction*>(task.get());
+        if (prediction == nullptr)
+            throw std::runtime_error("bundle does not implement structure prediction");
+        const auto result = prediction->predict_structure(readRequest(options.request));
         writeFile(options.output, result.structure);
-        writeFile(options.output + ".metadata.json", result.metadata_json);
-        std::cout << "Wrote " << result.confidence.plddt.size()
-                  << " atom confidence values; average pLDDT=" << result.confidence.complex_plddt
-                  << "; pTM=" << result.confidence.ptm << '\n';
+        writeFile(options.metadata, result.metadata_json);
+        std::cout << "Wrote structure and confidence metadata\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n';

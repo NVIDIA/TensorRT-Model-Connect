@@ -44,15 +44,15 @@ curl -fL \
 curl -fL https://openfold3-data.s3.amazonaws.com/components.bcif \
   -o "$PACKAGE/components.bcif"
 cp examples/models/openfold3/query_ubiquitin.json "$PACKAGE/query.json"
-cp tests/e2e/models/openfold3/data/openfold3_{features.npz,structure.json} \
+cp families/openfold3/tests/data/openfold3_{features.npz,structure.json} \
   "$PACKAGE/"
 
 # Mixed FP16 is the family default.
-trtmc build "$PACKAGE" -o "$BUNDLE"
+python -m tensorrt_model_connect build "$PACKAGE" -o "$BUNDLE"
 ```
 
 To prepare another supported protein request, install `openfold3==0.5.0` and run
-`python -m tensorrt_model_connect.families.openfold3.prepare_model_dir` with
+`python -m families.openfold3.prepare_model_dir` with
 `--query`, `--components`, and `--output-dir`. Preparation validates the request,
 dummy-template convention, and feature shapes, then writes a deterministic,
 pickle-free archive. OpenFold3 is not needed for the subsequent engine build.
@@ -67,19 +67,7 @@ confidence heads. Family-owned plans are composed on one CUDA stream.
 
 ## Run natively
 
-```bash
-trtmc predict-structure "$BUNDLE" \
-  --input examples/models/openfold3/query_ubiquitin.json \
-  --output /tmp/openfold3-ubiquitin.cif \
-  --output-json /tmp/openfold3-ubiquitin.json
-```
-
-The standards-compliant mmCIF stores per-atom pLDDT in
-`_atom_site.B_iso_or_equiv`. JSON metadata contains pLDDT, PAE, PDE, average
-pLDDT, gPDE, pTM, sampling controls, precision, request digest, and rank. Ranking
-score is not applicable because this profile emits exactly one sample.
-
-The direct C++ API example is built as follows:
+Build and run the direct C++ API example:
 
 ```bash
 cmake -S examples/models/openfold3/native_structure_prediction \
@@ -89,9 +77,13 @@ cmake --build /tmp/openfold3-native --target trtmc_openfold3_native -j
 /tmp/openfold3-native/trtmc_openfold3_native "$BUNDLE" \
   --request examples/models/openfold3/query_ubiquitin.json \
   --output /tmp/openfold3-ubiquitin.cif \
-  --backend-dir /tmp/openfold3-native \
-  --model-plugin-dir /tmp/openfold3-native/models/openfold3
+  --metadata /tmp/openfold3-ubiquitin.json \
+  --runtime-root /tmp/openfold3-native/trtmc
 ```
+
+The standards-compliant mmCIF stores per-atom pLDDT in
+`_atom_site.B_iso_or_equiv`. JSON metadata contains pLDDT, PAE, PDE, average
+pLDDT, gPDE, pTM, sampling controls, precision, request digest, and rank.
 
 ## Reproduce parity and performance
 
@@ -113,10 +105,10 @@ python examples/models/openfold3/generate_reference.py \
 ```
 
 Run `qualify.py` against that output and the fixed thresholds under
-`qualification/thresholds/`. For warmed native timing, use
-`predict-structure --warmup 3 --benchmark 10`. The aligned eager and compiled
-baselines use the same prepared inputs and exclude preprocessing, checkpoint
-loading, engine construction, and compilation:
+`qualification/thresholds/`. The eager and compiled baselines use the same
+prepared inputs and measure a complete model call through confidence
+aggregation; preprocessing, checkpoint loading, engine construction, and
+compilation are excluded:
 
 ```bash
 for MODE in eager compile; do

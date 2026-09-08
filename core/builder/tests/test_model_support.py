@@ -43,6 +43,8 @@ def test_family_support_rejects_invalid_declarations() -> None:
         FamilySupport(tasks=("generation",), default_task="editing")
     with pytest.raises(ValueError, match="lowercase identifiers"):
         FamilySupport(tasks=("not-valid",), default_task="not-valid")
+    with pytest.raises(ValueError, match="default_precision"):
+        FamilySupport(tasks=("generation",), default_task="generation", default_precision="int8")
 
 
 def test_load_model_metadata_reads_only_standard_identity_files(tmp_path: Path) -> None:
@@ -130,12 +132,8 @@ def test_specific_model_identity_never_falls_through_to_a_broad_family(
 
 
 def test_qwen_image_default_task_is_checkpoint_owned() -> None:
-    _, generation = resolve_family(
-        ModelMetadata({}, {"_class_name": "QwenImagePipeline"})
-    )
-    _, editing = resolve_family(
-        ModelMetadata({}, {"_class_name": "QwenImageEditPipeline"})
-    )
+    _, generation = resolve_family(ModelMetadata({}, {"_class_name": "QwenImagePipeline"}))
+    _, editing = resolve_family(ModelMetadata({}, {"_class_name": "QwenImageEditPipeline"}))
 
     assert generation.default_task == "image_generation"
     assert editing.default_task == "image_edit"
@@ -215,9 +213,7 @@ def test_qwen38_marker_has_one_owner() -> None:
             "t5",
         ),
         (
-            ModelMetadata(
-                {"model_name": "Lance", "organization": "bytedance-research"}, {}
-            ),
+            ModelMetadata({"model_name": "Lance", "organization": "bytedance-research"}, {}),
             "lance",
         ),
         (
@@ -251,9 +247,7 @@ def test_qwen38_marker_has_one_owner() -> None:
             "sana_wm",
         ),
         (
-            ModelMetadata(
-                {}, {}, ("sam2.1_hiera_s.yaml", "sam2.1_hiera_small.pt")
-            ),
+            ModelMetadata({}, {}, ("sam2.1_hiera_s.yaml", "sam2.1_hiera_small.pt")),
             "sam2",
         ),
         (

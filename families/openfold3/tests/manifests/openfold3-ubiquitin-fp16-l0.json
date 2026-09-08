@@ -1,0 +1,30 @@
+{
+  "name": "openfold3-ubiquitin-fp16-l0",
+  "bundle": "openfold3-ubiquitin-fp16-l0.bundle",
+  "family": "openfold3",
+  "task": "structure_prediction",
+  "precision": "fp16",
+  "external_files": [
+    {
+      "path": "of3-ob-2025-06-30-174k.pt",
+      "url": "https://openfold3-data.s3.amazonaws.com/openfold3-parameters/of3-ob-2025-06-30-174k.pt",
+      "size": 2287872989
+    },
+    {
+      "path": "components.bcif",
+      "url": "https://openfold3-data.s3.amazonaws.com/components.bcif",
+      "size": 63393643
+    }
+  ],
+  "max_sequence_length": 76,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "openfold3-ubiquitin-fp16-l0",
+      "premerge": true,
+      "expected_token_count": 76,
+      "expected_atom_count": 601,
+      "runtime_timeout_s": 1800
+    }
+  ]
+}

@@ -21,7 +21,7 @@ def _parser() -> argparse.ArgumentParser:
     build_parser.add_argument("-o", "--output", type=Path, required=True)
     build_parser.add_argument("--task", help="Override the family-owned default task")
     build_parser.add_argument("--revision", help="Hugging Face model revision")
-    build_parser.add_argument("--precision", choices=("fp16", "bf16", "fp32"), default="fp32")
+    build_parser.add_argument("--precision", choices=("fp16", "bf16", "fp32"))
     build_parser.add_argument("--backend", choices=("trt", "trt_rtx"), default="trt")
     build_parser.add_argument("--max-sequence-length", type=int)
     build_parser.add_argument("--image-height", type=int)
@@ -53,7 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         BuildRequest(
             model_dir=model_dir,
             output_path=args.output,
-            precision=args.precision,
+            precision=args.precision or support.default_precision,
             backend=args.backend,
             family=family,
             task=task,
