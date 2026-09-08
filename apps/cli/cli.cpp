@@ -76,6 +76,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"embed", {CommandKind::kEmbed, {"--text"}}},
         {"rerank", {CommandKind::kRerank, {"--query", "--document"}}},
         {"classify", {CommandKind::kClassify, {"--image"}}},
+        {"detect", {CommandKind::kDetect, {"--image"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"disparity", {CommandKind::kDisparity, {"--left", "--right"}}},
         {"geometry", {CommandKind::kGeometry, {"--image", "--output"}}},
@@ -769,6 +770,30 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
                             {"top_score", result.top_score}});
         return EXIT_SUCCESS;
     }
+    case CommandKind::kDetect: {
+        const io::LoadedImage image = read_image(require_option(command, "--image"));
+        const auto result = require_interface<IObjectDetection>(task).detect(
+            image.pixels.data(), image.height, image.width);
+        std::vector<float> boxes;
+        std::vector<float> scores;
+        std::vector<std::int32_t> classes;
+        boxes.reserve(result.boxes.size() * 4);
+        scores.reserve(result.boxes.size());
+        classes.reserve(result.boxes.size());
+        for (const auto& box : result.boxes) {
+            boxes.insert(boxes.end(), {box.x_min, box.y_min, box.x_max, box.y_max});
+            scores.push_back(box.score);
+            classes.push_back(box.class_id);
+        }
+        require_finite(boxes, "detection boxes");
+        require_finite(scores, "detection scores");
+        write_json(output, {{"boxes", boxes},
+                            {"scores", scores},
+                            {"classes", classes},
+                            {"image_height", result.image_height},
+                            {"image_width", result.image_width}});
+        return EXIT_SUCCESS;
+    }
     case CommandKind::kExtractFeatures: {
         const io::LoadedImage image = read_image(require_option(command, "--image"));
         const auto result = require_interface<IImageFeatureExtractor>(task).extract_image_features(
@@ -1208,7 +1233,8 @@ void print_usage(std::ostream& output) {
               "  trtmc inspect BUNDLE\n"
               "  trtmc COMMAND BUNDLE --runtime-root DIR [OPTIONS]\n\n"
               "Execution commands:\n"
-              "  run, encode, embed, rerank, classify, extract-features, disparity, geometry,\n"
+              "  run, encode, embed, rerank, classify, detect, extract-features, disparity,\n"
+              "  geometry,\n"
               "  segment,\n"
               "  segment-prompted, video-segment, generate-audio, transcribe,\n"
               "  transcribe-batch, transcribe-streaming, speak, speech-session, generate-image,\n"

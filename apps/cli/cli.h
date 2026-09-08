@@ -25,6 +25,7 @@ enum class CommandKind {
     kEmbed,
     kRerank,
     kClassify,
+    kDetect,
     kExtractFeatures,
     kDisparity,
     kGeometry,
