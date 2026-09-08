@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -362,10 +363,10 @@ class E2ERunner:
             isolated = root / "tensorrt_model_connect/bin"
             isolated.mkdir(parents=True)
             for name in required:
-                (isolated / name).symlink_to((runtime_root / name).resolve())
+                shutil.copy2(runtime_root / name, isolated / name)
             byok = runtime_root / "libtrtmc_byok_tvm_ffi.so"
             if byok.is_file():
-                (isolated / byok.name).symlink_to(byok.resolve())
+                shutil.copy2(byok, isolated / byok.name)
 
             # Preserve only non-family wheel dependencies expected by RUNPATH.
             site_packages = runtime_root.parent.parent
