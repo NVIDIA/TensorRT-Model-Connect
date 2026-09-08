@@ -41,9 +41,9 @@ description: >-
   untracked files. A dirty working tree cannot receive a ready-to-submit result
   because its uncommitted content has no immutable reviewed head.
 
-For contributor self-review, remain read-only and prepare a result the
-contributor can paste into the PR template. Do not mark the PR ready, push,
-commit, edit files, or publish comments unless separately requested.
+For contributor self-review, remain read-only and tell the contributor whether
+the self-review checkbox can honestly be selected. Do not mark the PR ready,
+push, commit, edit files, or publish comments unless separately requested.
 
 ## Establish The Pull-Request Baseline
 
@@ -257,9 +257,8 @@ Check that:
   the current architecture;
 - validation lists exact commands, outcomes, tested head, checkpoint and
   dependency revisions, hardware/environment when relevant, and unrun paths;
-- contributor self-review records the method, exact reviewed head, result,
-  corrected findings, and unresolved risks; a later code push invalidates that
-  record;
+- the contributor self-review checkbox is selected only after the contributor
+  has actually reviewed the change;
 - repository documentation, code comments, user-facing messages, and PR text
   are English except model data needed for multilingual validation;
 - SPDX headers, third-party notices, asset entries, and redistribution rights
@@ -332,10 +331,9 @@ replace merge authority with:
    base/head, and whether the worktree is clean.
 2. The next contributor action. Do not recommend `Approve` or `Request
    changes`, because contributors do not review their own PR in that role.
-3. A ready-to-paste **Contributor Self-Review** record containing `Method`,
-   `Reviewed Head`, `Result`, and `Findings and Resolution`. Use the full
-   immutable head SHA, or state that no immutable reviewed head exists when the
-   worktree is dirty.
+3. Whether the contributor can honestly select the **Contributor Self-Review**
+   checkbox. Keep the detailed verdict, findings, exact head, and evidence in
+   the review response; the PR template requires only the confirmation.
 
 Keep review verdict separate from merge readiness. A code/architecture `PASS`
 may still be `NOT READY` while required exact-head CI, model proof, or human

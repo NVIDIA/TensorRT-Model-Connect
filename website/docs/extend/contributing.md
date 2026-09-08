@@ -16,10 +16,9 @@ marking it ready. Codex users can run:
 $review-trtmc-pr review this draft PR as a contributor self-review
 ```
 
-A documented manual review or another tool is also accepted. Record the method,
-full reviewed head SHA, result, corrected findings, and unresolved risks in the
-pull-request template. Any new code commit requires another self-review. For an
-earlier local pass, ask `$review-trtmc-pr` to review the current branch and
-working tree against `upstream/main`.
+A documented manual review or another tool is also accepted. When complete,
+select the single **Contributor Self-Review** checkbox in the pull-request
+template. For an earlier local pass, ask `$review-trtmc-pr` to review the
+current branch and working tree against `upstream/main`.
 
 See the repository-level `CONTRIBUTING.md` for the GitHub and CI flow.

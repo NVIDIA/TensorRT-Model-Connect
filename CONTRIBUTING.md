@@ -148,15 +148,13 @@ self-review below. Complete every section of the pull-request template; use
   API, ABI, bundle, dependency, compatibility, migration, or rollout changes;
 - **Validation**: exact commands and results, tested head and dependency/model
   revisions, environment and hardware, plus paths that were not run; and
-- **Contributor Self-Review**: method, exact reviewed head, result, resolved
-  findings, and any remaining issue that needs maintainer judgment; and
+- **Contributor Self-Review**: confirmation that you reviewed your change; and
 - **Notes For Future Readers**: remaining risk, compatibility or rollout notes,
   third-party provenance, and useful follow-up context.
 
 Once the pull request is marked ready, `PR Metadata / Required` checks that
-these sections, the structured validation evidence, and the contributor
-self-review fields are present. It also verifies that the recorded self-review
-head is the current pull-request head. The trusted triage workflow derives
+these sections and the structured validation evidence are present, including
+the contributor self-review confirmation. The trusted triage workflow derives
 model and component labels from the actual diff and repository ownership
 metadata; it uses the template only for declared risk and compatibility-change
 labels. DCO sign-off is enforced by the repository's DCO check rather than a
@@ -189,17 +187,14 @@ Use `/skills` or type `$` to confirm that the skill is available. If it does
 not appear, restart Codex from the repository root.
 
 Using Codex is recommended, not required. A manual review or another review
-tool is acceptable when it checks the same repository rules, architecture
-ownership boundaries, changed behavior, tests, and PR evidence. Record the
-method, full reviewed head SHA, result, corrected findings, and unresolved
-risks in **Contributor Self-Review**.
+tool is also acceptable. When the review is complete, select the single
+**Contributor Self-Review** checkbox in the pull-request description.
 
 Resolve blocking and high-severity findings before marking the pull request
 ready. If a finding requires an architecture or policy decision, leave the pull
-request in draft, record the question, and ask a maintainer. Any code change
-creates a new head; rerun the affected validation and self-review before
-marking that head ready. Self-review does not replace public CI, protected CI,
-or maintainer review.
+request in draft, record the question, and ask a maintainer. Rerun the affected
+validation and self-review after material changes. Self-review does not replace
+public CI, protected CI, or maintainer review.
 
 ### 9. Run contributor-visible public CPU validation
 

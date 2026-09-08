@@ -27,13 +27,7 @@ VALIDATION_SUBSECTIONS = (
     "Hardware, Environment, and Revisions",
     "Not Run / Remaining Gaps",
 )
-SELF_REVIEW_SUBSECTIONS = (
-    "Method",
-    "Reviewed Head",
-    "Result",
-    "Findings and Resolution",
-)
-SELF_REVIEW_RESULTS = ("PASS", "BLOCK", "HUMAN REVIEW REQUIRED")
+SELF_REVIEW_CONFIRMATION = "I have completed a self-review of this change."
 CHANGE_CATEGORIES = (
     "Model or runtime behavior",
     "Public API",
@@ -47,7 +41,6 @@ RISK_LEVELS = ("Low", "Medium", "High")
 _HEADING_RE = re.compile(r"^(?P<level>#{2,3})[ \t]+(?P<title>.+?)[ \t]*$", re.MULTILINE)
 _CHECKBOX_RE = re.compile(r"^- \[(?P<mark>[ xX])\] (?P<label>.+?)[ \t]*$", re.MULTILINE)
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-_FULL_GIT_SHA_RE = re.compile(r"(?<![0-9a-f])(?:[0-9a-f]{40}|[0-9a-f]{64})(?![0-9a-f])", re.IGNORECASE)
 
 
 class MetadataError(RuntimeError):
@@ -83,7 +76,6 @@ def checked_options(body: str, options: Sequence[str]) -> list[str]:
 def validate_body(
     body: str,
     *,
-    expected_head_sha: str | None = None,
     require_self_review: bool = True,
 ) -> list[str]:
     errors: list[str] = []
@@ -96,7 +88,7 @@ def validate_body(
         content = sections.get(title.casefold())
         if content is None:
             errors.append(f"Missing required section: {title}")
-        elif title != "Validation" and not _meaningful(content):
+        elif title not in ("Validation", "Contributor Self-Review") and not _meaningful(content):
             errors.append(f"Required section is empty: {title}")
 
     nested_requirements = {
@@ -104,8 +96,6 @@ def validate_body(
         "Validation": VALIDATION_SUBSECTIONS,
         "Notes For Future Readers": ("Risk level",),
     }
-    if require_self_review:
-        nested_requirements["Contributor Self-Review"] = SELF_REVIEW_SUBSECTIONS
     for section_title, subsection_titles in nested_requirements.items():
         content = sections.get(section_title.casefold(), "")
         subsections = _heading_blocks(content, 3)
@@ -127,20 +117,11 @@ def validate_body(
     if len(selected_risks) != 1:
         errors.append("Select exactly one Risk level option")
     if require_self_review:
-        self_review_subsections = _heading_blocks(sections.get("contributor self-review", ""), 3)
-        reviewed_head = self_review_subsections.get("reviewed head")
-        if reviewed_head is not None and _meaningful(reviewed_head):
-            match = _FULL_GIT_SHA_RE.search(_HTML_COMMENT_RE.sub("", reviewed_head))
-            if match is None:
-                errors.append("Contributor Self-Review / Reviewed Head must contain a full Git commit SHA")
-            elif expected_head_sha is not None and match.group(0).casefold() != expected_head_sha.casefold():
-                errors.append("Contributor Self-Review / Reviewed Head does not match the current PR head")
-        result = self_review_subsections.get("result")
-        if result is not None and _meaningful(result):
-            normalized_result = _HTML_COMMENT_RE.sub("", result).strip().strip("`").strip().upper()
-            if normalized_result not in SELF_REVIEW_RESULTS:
-                choices = ", ".join(SELF_REVIEW_RESULTS)
-                errors.append(f"Contributor Self-Review / Result must be exactly one of: {choices}")
+        self_review = sections.get("contributor self-review", "")
+        if SELF_REVIEW_CONFIRMATION not in checked_options(
+            self_review, (SELF_REVIEW_CONFIRMATION,)
+        ):
+            errors.append("Complete the Contributor Self-Review checkbox")
     return errors
 
 
@@ -158,18 +139,6 @@ def _pull_request_body(event: Mapping[str, object]) -> str:
     return body if isinstance(body, str) else ""
 
 
-def _pull_request_head_sha(event: Mapping[str, object]) -> str:
-    pull_request = event["pull_request"]
-    assert isinstance(pull_request, Mapping)
-    head = pull_request.get("head")
-    if not isinstance(head, Mapping):
-        raise MetadataError("GitHub event does not contain pull_request head SHA")
-    sha = head.get("sha")
-    if not isinstance(sha, str):
-        raise MetadataError("GitHub event does not contain pull_request head SHA")
-    return sha
-
-
 def _pull_request_is_draft(event: Mapping[str, object]) -> bool:
     pull_request = event["pull_request"]
     assert isinstance(pull_request, Mapping)
@@ -183,7 +152,6 @@ def _validate(event_path: Path) -> None:
     event = _load_event(event_path)
     errors = validate_body(
         _pull_request_body(event),
-        expected_head_sha=_pull_request_head_sha(event),
         require_self_review=not _pull_request_is_draft(event),
     )
     if errors:
