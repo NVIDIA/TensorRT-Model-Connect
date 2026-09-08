@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+from families.gpt2.tests.qualification import executor
 from families.gpt2.tests.qualification.executor import (
     _compare,
     _load_samples,
     _request_prompt,
+    _run_reference,
     _truncate_prompt,
 )
 from trtmc_benchmark.qualification import QualificationCatalog
@@ -78,6 +81,50 @@ def test_mmlu_prompt_prefers_the_last_user_message() -> None:
         )
         == "question"
     )
+
+
+def test_reference_preserves_virtual_environment_python_symlink(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = tmp_path / "base-python"
+    target.write_text("", encoding="utf-8")
+    virtualenv_python = tmp_path / "venv-python"
+    virtualenv_python.symlink_to(target)
+    commands: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "schema_version": "trtmc.gpt2-reference-result/v1",
+                    "samples": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(executor.subprocess, "run", run)
+
+    _run_reference(
+        manifest={"hf_id": "openai-community/gpt2"},
+        definition={},
+        case={
+            "reference": {"implementation": "hf_transformers"},
+            "prompt": {},
+            "candidate": {"request": {}},
+        },
+        samples=[],
+        environment={
+            "tools": {"reference_python": str(virtualenv_python)},
+            "execution": {"timeout_seconds": 1},
+        },
+        item_dir=tmp_path / "result",
+    )
+
+    assert commands[0][0] == str(virtualenv_python)
 
 
 def test_exact_token_gate_preserves_the_old_sample_acceptance_rule() -> None:

@@ -247,7 +247,9 @@ def _run_reference(
 ) -> dict[str, Any]:
     tools = _mapping(environment.get("tools"), "environment tools")
     execution = _mapping(environment.get("execution", {}), "environment execution")
-    python = Path(str(tools.get("reference_python") or sys.executable)).expanduser().resolve()
+    # Do not resolve this path: a virtual environment's Python entry point is
+    # normally a symlink, and following it would discard the virtual environment.
+    python = Path(str(tools.get("reference_python") or sys.executable)).expanduser().absolute()
     if not python.is_file():
         raise Gpt2QualificationError(f"reference Python does not exist: {python}")
     reference = _mapping(case.get("reference"), "case reference")
