@@ -7,7 +7,6 @@ description: Vision-language, transcription, audio generation, and speech-sessio
 
 ```bash
 trtmc run vision-language.bundle \
-  --runtime-root /opt/trtmc/lib \
   --image input.jpg \
   --prompt "Describe this image in one sentence." \
   --max-new-tokens 48
@@ -20,7 +19,6 @@ request values belong to the selected family.
 
 ```bash
 trtmc transcribe speech-to-text.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input input.wav \
   --beam-size 1 \
   --source-language en \
@@ -38,12 +36,10 @@ contracts.
 
 ```bash
 trtmc generate-audio text-to-audio.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "A clear short test sentence." \
   --output output.wav
 
 trtmc speak speech-to-speech.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input input.wav \
   --output response.wav
 ```
@@ -54,7 +50,6 @@ application for a persistent local session:
 
 ```bash
 trtmc speech-session nemotron-voicechat.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input input.wav \
   --output response.wav \
   --timeout-ms 30000

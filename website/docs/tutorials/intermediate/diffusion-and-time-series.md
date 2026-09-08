@@ -17,7 +17,6 @@ python -m tensorrt_model_connect build black-forest-labs/FLUX.1-schnell \
   --image-width 1024
 
 trtmc generate-image flux.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "A brass robot reading beside a window" \
   --output robot.png \
   --height 1024 \
@@ -41,7 +40,6 @@ python -m tensorrt_model_connect build Wan-AI/Wan2.1-T2V-1.3B \
   --video-num-frames 81
 
 trtmc generate-video wan.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "Ocean waves under moonlight" \
   --output waves.mp4 \
   --height 480 \
@@ -63,7 +61,6 @@ python -m tensorrt_model_connect build amazon/chronos-bolt-tiny \
   --precision fp32
 
 trtmc forecast chronos.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input history.f32 \
   --frequency H
 ```

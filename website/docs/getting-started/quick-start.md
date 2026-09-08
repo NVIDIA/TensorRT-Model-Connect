@@ -53,9 +53,12 @@ The CLI reads the bundle family and backend, then selects the first complete,
 single-directory plugin root in this order:
 
 1. the directory containing the active `libtrtmc_runtime.so`;
-2. the installation belonging to the active `trtmc` selected through `PATH`,
-   including native CMake and wheel install layouts;
-3. colon-separated directories in `TRTMC_RUNTIME_PATH`.
+2. colon-separated directories in `TRTMC_RUNTIME_PATH`.
+
+The wheel console command replaces itself with the native CLI stored beside
+Core, Runtime, backend, and family DSOs. Native installs resolve their already
+loaded Runtime directory in the same way, so discovery does not inspect Python
+installation layouts or scan `PATH` directories.
 
 A complete GPT-2 TensorRT plugin root contains root-local
 `libtrtmc_backend_trt.so` and `libtrtmc_model_gpt2.so` files. Candidates are
@@ -65,12 +68,13 @@ requires their descriptors to match the active product build, plugin kinds,
 and bundle IDs before it calls either factory. A mismatched selected root fails
 immediately without falling back to another installation.
 
-The Runtime Loader also verifies that its already loaded Core belongs to the
-same product build before reading the bundle.
+Before bundle inspection crosses a C++ interface, the CLI verifies that its
+own product-build identity matches the already loaded Runtime and Core. The
+Runtime Loader repeats the Core check and validates selected plugins at load.
 
-The CLI prints the automatically selected directory. If more than one installed
-wheel root matches structurally, select one with `--runtime-root DIR`. An
-explicit root bypasses discovery but not build and identity validation. The
-current directory is not searched implicitly; use `TRTMC_RUNTIME_PATH=.` when
-that behavior is intended. `LD_LIBRARY_PATH` remains a platform-loader setting
-evaluated before the CLI starts.
+The CLI prints the automatically selected directory. Use `--runtime-root DIR`
+to override it with one exact root. An explicit root bypasses discovery but not
+build and identity validation. The current directory is not searched
+implicitly; use `TRTMC_RUNTIME_PATH=.` when that behavior is intended.
+`LD_LIBRARY_PATH` remains a platform-loader setting evaluated before the CLI
+starts.

@@ -37,7 +37,6 @@ Use the MPI launcher and rank count required by the family-owned manifest:
 
 ```bash
 mpirun -n 4 trtmc run qwen-tp4.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "Explain tensor parallelism." \
   --max-new-tokens 64 \
   --seed 1234

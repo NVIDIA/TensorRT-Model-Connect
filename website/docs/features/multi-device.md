@@ -45,7 +45,6 @@ mpirun --tag-output -np 4 \
   -x CUDA_VISIBLE_DEVICES \
   -x TRTMC_NCCL_RENDEZVOUS \
   trtmc run model-tp4.bundle \
-    --runtime-root /opt/trtmc/lib \
     --prompt "Hello"
 ```
 
