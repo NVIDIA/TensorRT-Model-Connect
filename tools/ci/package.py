@@ -173,6 +173,8 @@ class WheelArchiveValidator:
                 raise CiError(f"{wheel}: generated Python cache files are packaged")
             if "tensorrt_model_connect/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python core package is missing")
+            if "tensorrt_model_connect/native_cli.py" not in names:
+                raise CiError(f"{wheel}: native CLI console adapter is missing")
             if "trtmc_benchmark/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python benchmark application is missing")
             source_suffixes = {
@@ -318,20 +320,24 @@ class WheelArchiveValidator:
                 raise CiError(
                     f"{wheel}: expected only unaliased TensorRT backend DSOs, found {backend_dsos}"
                 )
-            scripts = [name for name in names if name.endswith(".data/scripts/trtmc")]
-            script_cores = [
-                name for name in names if name.endswith(".data/scripts/libtrtmc_core.so")
+            duplicate_native_payload = [
+                name
+                for name in names
+                if ".data/scripts/" in name
+                and Path(name).name in {"trtmc", "libtrtmc_core.so", "libtrtmc_runtime.so"}
             ]
-            script_runtimes = [
-                name for name in names if name.endswith(".data/scripts/libtrtmc_runtime.so")
-            ]
-            if len(scripts) != 1 or len(script_cores) != 1 or len(script_runtimes) != 1:
-                raise CiError(f"{wheel}: installed CLI payload is incomplete")
+            if duplicate_native_payload:
+                raise CiError(f"{wheel}: native product payload is duplicated in wheel scripts")
             entry_points = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
-            if len(entry_points) != 1 or "trtmc-bench" not in archive.read(entry_points[0]).decode(
-                "utf-8"
-            ):
-                raise CiError(f"{wheel}: trtmc-bench console entrypoint is missing")
+            if len(entry_points) != 1:
+                raise CiError(f"{wheel}: console entrypoints are missing")
+            entrypoint_text = archive.read(entry_points[0]).decode("utf-8")
+            required_entrypoints = (
+                "trtmc = tensorrt_model_connect.native_cli:main",
+                "trtmc-bench = trtmc_benchmark.cli:main",
+            )
+            if not all(entrypoint in entrypoint_text for entrypoint in required_entrypoints):
+                raise CiError(f"{wheel}: required console entrypoints are missing")
         print(f"validated wheel={wheel} families={len(expected_families)}")
 
 

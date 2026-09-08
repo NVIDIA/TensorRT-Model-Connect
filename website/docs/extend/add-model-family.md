@@ -76,6 +76,17 @@ concrete implementation of an abstract interface in `trtmc/task.h`.
 The family pipeline depends on and implements `trtmc/task.h`; `trtmc/task.h`
 never includes or links a family.
 
+The same `plugin.cpp` must publish the model-agnostic descriptor next to its
+factory:
+
+```cpp
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("my_family")
+```
+
+This declaration supplies the family ID, plugin kind, and coordinated product
+build identity used before the factory crosses a C++ interface. It does not
+register the family centrally or move any family behavior into shared code.
+
 If the family graph contains distributed collectives, that same family owns
 its communicator setup and NCCL loading. A replicated plan that only selects a
 rank-specific section must not load NCCL.

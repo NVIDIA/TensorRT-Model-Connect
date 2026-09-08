@@ -8,7 +8,7 @@ one family DSO named `libtrtmc_model_<family>.so`.
 The bundle header names exactly one family and backend. Each DSO publishes the
 model-agnostic `trtmc_plugin_descriptor_v1` interface with its product-build
 identity, kind, and ID. The loader opens the exact backend and family paths
-from one explicit plugin root, validates both descriptors, resolves
+from one selected plugin root, validates both descriptors, resolves
 `trtmc_create_family`, and receives an implementation of an abstract Task
 interface.
 
@@ -23,6 +23,11 @@ another product build are rejected even when they expose the same descriptor
 version. Core and runtime also expose and compare their product-build identities
 before the runtime calls a core C++ interface.
 
+The native CLI also embeds that identity and compares it with the Runtime and
+Core C symbols before calling bundle or loader C++ interfaces. This check is
+application assembly, not family selection, so it remains outside the generic
+Runtime Loader.
+
 Plugin roots are trusted native-code inputs. ELF constructors run during
 `dlopen`, before the descriptor can be called. The loader therefore never opens
 discovery candidates speculatively, never falls back after a selected load
@@ -33,3 +38,10 @@ There is no runtime-strategy map, central manifest, sibling fallback, or hot
 plugin marketplace. To extend an existing family, edit only its
 `families/<family>/runtime/` implementation and family-owned tests. To add a
 new family, follow [Add a Model Family](../extend/add-model-family.md).
+
+Every family factory declares
+`TRTMC_DEFINE_FAMILY_PLUGIN_V1("<family>")`; every backend declares
+`TRTMC_DEFINE_BACKEND_PLUGIN_V1("<backend>")`. Runtime extensions use the
+generic descriptor macro with `PluginKind::kRuntimeExtension`. These macros
+only publish the fixed descriptor symbol and build identity. They are required
+because calling a factory first would cross an unvalidated C++ interface.

@@ -524,15 +524,25 @@ alias, or fallback. Source work remains family-local, but native artifacts from
 separate product builds are never mixed.
 
 The human-facing `trtmc` CLI may discover one plugin root before this control
-transfer. The CLI owns only candidate enumeration and search order: the active
-runtime, the installation belonging to the running executable, then explicitly
-configured `TRTMC_RUNTIME_PATH` entries. The current directory participates
-only when a user explicitly adds `.` to that variable. For each candidate, the
-CLI asks the model-agnostic Runtime Loader contract whether the requested
-root-local backend, family, and optional BYOK files exist. It does not derive
-DSO names, inspect native metadata, or load discovery candidates. The public
-C++ load interface still receives one explicit root, and a selected-root load
-failure never triggers another search.
+transfer. A product installation owns one plugin root containing Core, Runtime,
+backend, extension, and family artifacts. A native CMake install may keep the
+CLI in its conventional sibling `bin` directory; the already loaded Runtime
+still identifies the `lib` plugin root. A wheel console adapter instead
+replaces itself with the native CLI inside its single native product directory.
+The CLI therefore owns only candidate enumeration and search order: the active
+Runtime directory, then explicitly configured `TRTMC_RUNTIME_PATH` entries.
+The current directory participates only when a user explicitly adds `.` to
+that variable. For each candidate, the CLI asks the model-agnostic Runtime
+Loader contract whether the requested root-local backend, family, and optional
+BYOK files exist. It does not derive DSO names, inspect native metadata, scan
+installation layouts, or load discovery candidates. The public C++ load
+interface still receives one explicit root, and a selected-root load failure
+never triggers another search.
+
+Before calling bundle or loader C++ interfaces, the CLI compares its embedded
+product-build identity with the C identity symbols exported by the active
+Runtime and Core. This keeps executable validation at the application seam;
+the Runtime Loader continues to own Core and plugin validation.
 
 ### Task API
 

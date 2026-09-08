@@ -5,6 +5,10 @@
 
 #pragma once
 
+#if __has_include("trtmc/runtime/product_build.h")
+#include "trtmc/runtime/product_build.h"
+#endif
+
 #include <cstdint>
 
 namespace trtmc {

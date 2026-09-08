@@ -16,7 +16,6 @@ python -m tensorrt_model_connect build MODEL_ID \
   --output media.bundle
 
 trtmc generate-video media.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "A sunrise over a mountain lake" \
   --output frames \
   --num-steps 28 \
@@ -30,17 +29,15 @@ file plus comma-separated seeds for a family that declares the batch Task.
 
 ```bash
 trtmc classify classifier.bundle \
-  --runtime-root /opt/trtmc/lib --image input.jpg
+  --image input.jpg
 
 trtmc segment segmenter.bundle \
-  --runtime-root /opt/trtmc/lib --image input.jpg
+  --image input.jpg
 
 trtmc segment-prompted prompted.bundle \
-  --runtime-root /opt/trtmc/lib \
   --image input.jpg --point-x 0.5 --point-y 0.5 --foreground true
 
 trtmc geometry moge.bundle \
-  --runtime-root /opt/trtmc/lib \
   --image input.jpg --output geometry-output
 ```
 

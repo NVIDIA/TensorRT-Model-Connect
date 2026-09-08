@@ -19,7 +19,6 @@ python -m tensorrt_model_connect build Qwen/Qwen2.5-VL-3B-Instruct \
   --max-sequence-length 384
 
 trtmc run qwen-vl.bundle \
-  --runtime-root /opt/trtmc/lib \
   --image sample.png \
   --prompt "Describe the image." \
   --max-new-tokens 80
@@ -33,12 +32,10 @@ between vision and decoder engines are family-owned. The shared builder has no
 
 ```bash
 trtmc transcribe whisper.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input recording.wav \
   --max-output-tokens 128
 
 trtmc transcribe-streaming nemotron-asr.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input recording.wav \
   --chunk-samples 16000 \
   --max-new-tokens 128
@@ -52,13 +49,11 @@ family supports them.
 
 ```bash
 trtmc generate-audio audio.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "A calm spoken welcome" \
   --output welcome.wav \
   --seed 1234
 
 trtmc speech-session voicechat.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input question.wav \
   --output answer.wav \
   --system-prompt "Answer concisely." \

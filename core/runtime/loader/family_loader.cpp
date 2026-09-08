@@ -82,11 +82,17 @@ fs::path explicit_runtime_root(const std::string& runtime_root) {
     if (runtime_root.empty())
         throw std::invalid_argument("runtime_root must be explicit and non-empty");
     std::error_code error;
-    fs::path root = fs::absolute(fs::path(runtime_root), error);
+    const fs::path absolute = fs::absolute(fs::path(runtime_root), error);
     if (error)
         throw std::runtime_error("Unable to resolve runtime_root '" + runtime_root +
                                  "': " + error.message());
-    return root.lexically_normal();
+    fs::path root = fs::canonical(absolute, error);
+    if (error)
+        throw std::runtime_error("Unable to resolve runtime_root '" + runtime_root +
+                                 "': " + error.message());
+    if (!fs::is_directory(root, error) || error)
+        throw std::runtime_error("runtime_root is not a directory: '" + runtime_root + "'");
+    return root;
 }
 
 fs::path loaded_library_path(const void* symbol) {
@@ -106,6 +112,20 @@ bool contains_root_local_library(const fs::path& root, const std::string& librar
     const fs::path resolved = fs::canonical(root / library, error);
     return !error && resolved.parent_path() == root && fs::is_regular_file(resolved, error) &&
            !error;
+}
+
+fs::path require_root_local_library(const fs::path& root, const std::string& library) {
+    std::error_code error;
+    const fs::path resolved = fs::canonical(root / library, error);
+    if (error || !fs::is_regular_file(resolved, error) || error) {
+        throw std::runtime_error("Runtime root '" + root.string() + "' does not contain '" +
+                                 library + "'");
+    }
+    if (resolved.parent_path() != root) {
+        throw std::runtime_error("Library '" + (root / library).string() +
+                                 "' escapes the selected runtime root");
+    }
+    return resolved;
 }
 
 void require_matching_build(const std::string& path, const PluginDescriptorV1& descriptor) {
@@ -195,7 +215,7 @@ class SharedLibrary {
 class BackendLibrary {
   public:
     BackendLibrary(const fs::path& runtime_root, const std::string& backend_id)
-        : library_(runtime_root / backend_library_name(backend_id)) {
+        : library_(require_root_local_library(runtime_root, backend_library_name(backend_id))) {
         library_.require_plugin(PluginKind::kBackend, backend_id);
         const auto create =
             reinterpret_cast<CreateBackendFn>(library_.require_symbol("trtmc_create_backend"));
@@ -234,7 +254,7 @@ class BackendLibrary {
 class FamilyLibrary {
   public:
     FamilyLibrary(const fs::path& runtime_root, const std::string& family_id)
-        : library_(runtime_root / family_library_name(family_id)) {
+        : library_(require_root_local_library(runtime_root, family_library_name(family_id))) {
         library_.require_plugin(PluginKind::kFamily, family_id);
         create_ = reinterpret_cast<CreateFamilyFn>(library_.require_symbol(kCreateFamilySymbol));
     }
@@ -252,7 +272,8 @@ class FamilyLibrary {
 class RuntimeExtensionLibrary {
   public:
     explicit RuntimeExtensionLibrary(const fs::path& runtime_root)
-        : library_(runtime_root / runtime_extension_library_name("tvm_ffi")) {
+        : library_(
+              require_root_local_library(runtime_root, runtime_extension_library_name("tvm_ffi"))) {
         library_.require_plugin(PluginKind::kRuntimeExtension, "tvm_ffi");
         load_ = reinterpret_cast<LoadKernelFn>(library_.require_symbol("trtmc_load_byok_kernel"));
     }
