@@ -431,7 +431,7 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     final_norm = weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
-        hidden_state = _apply_norm(
+        hidden_state = graph_blocks.apply_norm(
             network,
             hidden_state,
             hidden,
@@ -501,23 +501,6 @@ def build_standard_decoder_engine(
         raise RuntimeError("TensorRT engine build failed")
 
     return bytes(plan)
-
-
-def _apply_norm(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    hidden_size: int,
-    gamma: np.ndarray,
-    beta: np.ndarray | None,
-    eps_tensor: trt.ITensor,
-    norm_type: str,
-    dtype: np.dtype = np.float32,
-    eps: float | None = None,
-) -> trt.ITensor:
-    """Dispatch to RMSNorm or LayerNorm based on norm_type."""
-    return graph_blocks.apply_norm(
-        network, inp, hidden_size, gamma, beta, eps_tensor, norm_type, dtype=dtype, eps=eps
-    )
 
 
 def _add_decoder_layer(
@@ -597,7 +580,7 @@ def _add_decoder_layer(
     if parallel_residual:
         post_attn_norm_w = weights.get(f"{prefix}.post_attn_norm")
         if post_attn_norm_w is not None:
-            norm2 = _apply_norm(
+            norm2 = graph_blocks.apply_norm(
                 network,
                 hidden,
                 hidden_size,
@@ -612,7 +595,7 @@ def _add_decoder_layer(
             norm2 = attn["normed"]
     else:
         residual1 = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
-        norm2 = _apply_norm(
+        norm2 = graph_blocks.apply_norm(
             network,
             residual1.get_output(0),
             hidden_size,

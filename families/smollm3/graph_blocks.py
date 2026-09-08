@@ -1,23 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Composable architectural building blocks for TRT engine construction.
+"""Family-owned attention, normalization, and MLP blocks.
 
-Layer 2 in the three-layer builder stack:
-
-    graph_ops.py        Layer 1: Atomic TRT operations (tensor-in/tensor-out)
-        |
-    graph_blocks.py     Layer 2: Composable blocks (weight-aware)  <- THIS FILE
-        |
-    builders / plugins  Layer 3: Full engine assembly
-
-Each block composes multiple graph_ops into a reusable sub-structure
-(full attention block, SwiGLU MLP, GELU MLP, norm dispatch). Functions
-accept a ``weights`` dict + ``prefix`` string to resolve weight names.
-
-Blocks do NOT apply residual connections. Callers compose the residual
-pattern, which is what varies across architectures (sequential vs parallel
-residual, DeepStack injection, MoE routing, etc.).
+Builders own residual connections; blocks resolve weights and compose graph_ops.
 """
 
 from __future__ import annotations
@@ -39,7 +25,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 def make_matmul_fn(network, dtype):
-    """Create the GPT-2 projection matmul callable."""
+    """Create the SmolLM3 projection matmul callable."""
 
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
         del weight_name
@@ -47,9 +33,6 @@ def make_matmul_fn(network, dtype):
             network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
 
     return matmul
-
-
-_make_matmul_fn = make_matmul_fn
 
 
 def infer_kv_attention_size(
@@ -146,7 +129,7 @@ def add_attention_block(
     ALiBi is represented as a per-head additive attention mask and still uses
     native IAttention.
     """
-    matmul = _make_matmul_fn(network, dtype)
+    matmul = make_matmul_fn(network, dtype)
     attention_window = max_cache_length + 1
     if num_kv_heads is None:
         num_kv_heads = num_heads
@@ -296,7 +279,7 @@ def add_swiglu_mlp(
     layer_prefix: str = "",
 ) -> trt.ITensor:
     """Gate/up/down SwiGLU MLP. Returns output tensor."""
-    matmul = _make_matmul_fn(network, dtype)
+    matmul = make_matmul_fn(network, dtype)
     _lp = layer_prefix or prefix
 
     gate = matmul(inp, hidden_size, mlp_size,
@@ -328,7 +311,7 @@ def add_gelu_fc_mlp(
     layer_prefix: str = "",
 ) -> trt.ITensor:
     """fc1 -> activation -> fc2 MLP. Returns output tensor."""
-    matmul = _make_matmul_fn(network, dtype)
+    matmul = make_matmul_fn(network, dtype)
     _lp = layer_prefix or prefix
 
     fc1 = matmul(inp, hidden_size, mlp_size,

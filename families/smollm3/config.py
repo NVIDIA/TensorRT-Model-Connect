@@ -269,6 +269,4 @@ class ModelConfig:
     def from_dir(model_dir: str | Path) -> ModelConfig:
         model_path = Path(model_dir)
         config_path = model_path / "config.json"
-        if config_path.exists():
-            return ModelConfig.from_json(config_path.read_text())
         return ModelConfig.from_json(config_path.read_text())

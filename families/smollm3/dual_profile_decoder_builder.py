@@ -1,46 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dual-profile decoder engine builder — single engine, two optimization profiles.
+"""SmolLM3 prefill/decode graphs with dynamic sequence profiles.
 
-Produces one TensorRT engine that handles both prefill (multi-token) and
-decode (single-token) phases by switching between two optimization profiles
-at runtime:
-  * Profile 0 (prefill): Sq ranges over [1, opt=opt_prefill_length, max=max_prefill_length].
-    TensorRT picks batched MHA kernels (e.g. ``_gemm_mha_v2``) at opt Sq.
-  * Profile 1 (decode): Sq fixed to 1. TensorRT picks the GEMV fast-path
-    (``_gemv_mha_v1``).
-
-Both profiles use the same graph and weights — only the optimization
-profile differs, so the engine's weights live once in GPU memory and the
-C++ runtime creates two ``IExecutionContext``s (one per profile) that
-share the engine.
-
-Scope: covers the same architectural variants the explicit
-``standard_decoder_builder`` supports — RMSNorm or LayerNorm; SwiGLU or
-GeluFC MLP; RoPE (full / partial / interleaved), learned absolute, or
-ALiBi position; sequential or parallel residual; optional q/k_norm,
-QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Quantized
-builds (fp8 / int8 ``quant_ctx``) thread Q/DQ insertion through every
-projection matmul via ``QuantContext.maybe_quantized_matmul``. Per-layer
-debug outputs, hidden-state outputs, and the VL ``embed_input`` path stay
-on ``standard_decoder_builder`` for now and are dispatched there from
-inside ``build_standard_decoder_engine``.
-
-Tensor contract for the TensorRT native KV-cache path:
-  Inputs (Sq varies by profile; cache capacity is static)
-    token_id        int32   (-1,)
-    position_id     int32   (-1,)
-    cache_write_indices int32 (1,)                   # update start offset
-    key_value_lengths   int32 (1,)                   # active length after update
-    cache_k_i       bf16 (1, Hkv, capacity, D)       # user-owned static buffer
-    cache_v_i       bf16 (1, Hkv, capacity, D)       # user-owned static buffer
-  Outputs
-    logits          float32 (1, vocab)               # last-row sliced inside the engine
-    present_k_i     bf16 (1, Hkv, capacity, D)       # aliases cache_k_i
-    present_v_i     bf16 (1, Hkv, capacity, D)       # aliases cache_v_i
-
-The dense-mask path covers SmolLM3 checkpoints outside the native-KV contract.
+The native path uses BF16 caches shaped [1, Hkv, capacity, D], write indices,
+and active lengths. The portable path uses explicit masks. Both emit the
+last token's logits as float32 [1, vocab].
 """
 
 from __future__ import annotations
@@ -60,120 +25,11 @@ from . import graph_blocks
 # Runtime import: the schedule is resolved while the graph is built, so this
 # cannot live under TYPE_CHECKING the way the annotation-only names do.
 from .config import resolve_rope_layer_schedule
+from .utils import const_in_work_dtype
 
 if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
-
-
-def _const_in_work_dtype(
-    network: trt.INetworkDefinition,
-    shape: tuple,
-    values: np.ndarray,
-    work_np_dtype: np.dtype,
-    work_trt_dtype: trt.DataType,
-) -> trt.ITensor:
-    """Create a constant in work_np_dtype storage and cast it to work_trt_dtype.
-
-    Needed for bf16 builds: the dual-profile builder stores bf16 weights
-    on disk as fp16 (work_np_dtype = np.float16), but the runtime tensor
-    must be bfloat16 to match the rest of the graph. ``add_constant``
-    alone produces an fp16 constant — we need an explicit cast to
-    bfloat16 so layers like IRotaryEmbeddingLayer (which require all
-    inputs to share a dtype) accept it. fp16 / fp32 builds are no-ops
-    because work_np_dtype maps directly to work_trt_dtype.
-    """
-    const = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
-    if const.dtype != work_trt_dtype:
-        const = network.add_cast(const, work_trt_dtype).get_output(0)
-    return const
-
-
-def _make_matmul_fn(
-    network: trt.INetworkDefinition,
-    dtype: np.dtype,
-):
-    """Create the SmolLM3 projection matmul callable."""
-
-    def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
-        del weight_name
-        return graph_ops.add_matmul_rhs_constant(
-            network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype
-        )
-
-    return matmul
-
-
-def _norm_multi(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    hidden: int,
-    gamma: np.ndarray,
-    beta: np.ndarray | None,
-    eps_tensor: trt.ITensor,
-    norm_type: str,
-    dtype: np.dtype,
-) -> trt.ITensor:
-    if norm_type == "layernorm":
-        if beta is None:
-            beta = np.zeros(hidden, dtype=np.float32)
-        return graph_ops.add_layer_norm(network, inp, hidden, gamma, beta, eps_tensor, dtype=dtype)
-    return graph_ops.add_rms_norm(network, inp, hidden, gamma, eps_tensor, dtype=dtype)
-
-
-# ---------------------------------------------------------------------------
-# MLP helpers.
-# ---------------------------------------------------------------------------
-
-
-def _swiglu_mlp(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    *,
-    matmul,
-    weights: "WeightDict",
-    prefix: str,
-    hidden: int,
-    mlp_size: int,
-) -> trt.ITensor:
-    gate = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_gate"], f"{prefix}.w_gate")
-    up = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_up"], f"{prefix}.w_up")
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
-    mlp_out = matmul(
-        gated.get_output(0), mlp_size, hidden, weights[f"{prefix}.w_down"], f"{prefix}.w_down"
-    )
-    return mlp_out
-
-
-def _gelu_fc_mlp(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    *,
-    matmul,
-    weights: "WeightDict",
-    prefix: str,
-    hidden: int,
-    mlp_size: int,
-    activation: str,
-    work_np_dtype: np.dtype,
-) -> trt.ITensor:
-    fc1 = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_fc1"], f"{prefix}.w_fc1")
-    fc1_bias = weights.get(f"{prefix}.fc1_bias")
-    if fc1_bias is not None:
-        fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias, dtype=work_np_dtype)
-    activated = graph_ops.add_activation(network, fc1, activation, dtype=work_np_dtype)
-    fc2 = matmul(activated, mlp_size, hidden, weights[f"{prefix}.w_fc2"], f"{prefix}.w_fc2")
-    fc2_bias = weights.get(f"{prefix}.fc2_bias")
-    if fc2_bias is not None:
-        fc2 = graph_ops.add_bias_sum(network, fc2, hidden, fc2_bias, dtype=work_np_dtype)
-    return fc2
-
-
-# ---------------------------------------------------------------------------
-# Config guard.
-# ---------------------------------------------------------------------------
 
 
 def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
@@ -380,7 +236,7 @@ def build_dual_profile_decoder_engine(
         _add_profile(1, 1, fixed=True)
 
     # ---- Shared constants ------------------------------------------------
-    embedding_table = _const_in_work_dtype(
+    embedding_table = const_in_work_dtype(
         network, (vocab, hidden), weights["embedding"], work_np_dtype, work_trt_dtype
     )
 
@@ -425,10 +281,10 @@ def build_dual_profile_decoder_engine(
             # BF16 must round directly from the FP32 indexed table. Routing
             # through FP16 storage would introduce FP16 -> BF16 double rounding.
             rope_np_dtype = np.float32 if work_trt_dtype == trt.bfloat16 else work_np_dtype
-            cos_half_table = _const_in_work_dtype(
+            cos_half_table = const_in_work_dtype(
                 network, cos_half_np.shape, cos_half_np, rope_np_dtype, work_trt_dtype
             )
-            sin_half_table = _const_in_work_dtype(
+            sin_half_table = const_in_work_dtype(
                 network, sin_half_np.shape, sin_half_np, rope_np_dtype, work_trt_dtype
             )
 
@@ -436,7 +292,7 @@ def build_dual_profile_decoder_engine(
     position_embed_table: trt.ITensor | None = None
     if position_type == "learned":
         pos_embed_np = weights["position_embedding"]
-        position_embed_table = _const_in_work_dtype(
+        position_embed_table = const_in_work_dtype(
             network, pos_embed_np.shape, pos_embed_np, work_np_dtype, work_trt_dtype
         )
 
@@ -472,7 +328,7 @@ def build_dual_profile_decoder_engine(
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
 
-    matmul = _make_matmul_fn(network, work_np_dtype)
+    matmul = graph_blocks.make_matmul_fn(network, work_np_dtype)
 
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)
@@ -494,7 +350,7 @@ def build_dual_profile_decoder_engine(
     embed_norm = weights.get("embedding_norm")
     if embed_norm is not None:
         embed_norm_beta = weights.get("embedding_norm_beta", np.zeros(hidden, dtype=np.float32))
-        hidden_state = _norm_multi(
+        hidden_state = graph_blocks.apply_norm(
             network,
             hidden_state,
             hidden,
@@ -547,7 +403,7 @@ def build_dual_profile_decoder_engine(
         prefix = f"layer.{layer_idx}"
 
         # Pre-attention norm.
-        normed = _norm_multi(
+        normed = graph_blocks.apply_norm(
             network,
             hidden_state,
             hidden,
@@ -690,7 +546,7 @@ def build_dual_profile_decoder_engine(
         if parallel_residual:
             post_attn_norm_w = weights.get(f"{prefix}.post_attn_norm")
             if post_attn_norm_w is not None:
-                norm2 = _norm_multi(
+                norm2 = graph_blocks.apply_norm(
                     network,
                     hidden_state,
                     hidden,
@@ -706,7 +562,7 @@ def build_dual_profile_decoder_engine(
             residual1 = network.add_elementwise(
                 hidden_state, attn_out, trt.ElementWiseOperation.SUM
             )
-            norm2 = _norm_multi(
+            norm2 = graph_blocks.apply_norm(
                 network,
                 residual1.get_output(0),
                 hidden,
@@ -719,26 +575,25 @@ def build_dual_profile_decoder_engine(
 
         # MLP — SwiGLU (Llama-style) or GeluFC (GPT-2-style).
         if mlp_type == "gelu_fc":
-            mlp_out = _gelu_fc_mlp(
+            mlp_out = graph_blocks.add_gelu_fc_mlp(
                 network,
                 norm2,
-                matmul=matmul,
                 weights=weights,
                 prefix=prefix,
-                hidden=hidden,
+                hidden_size=hidden,
                 mlp_size=mlp_size,
                 activation=activation,
-                work_np_dtype=work_np_dtype,
+                dtype=work_np_dtype,
             )
         else:
-            mlp_out = _swiglu_mlp(
+            mlp_out = graph_blocks.add_swiglu_mlp(
                 network,
                 norm2,
-                matmul=matmul,
                 weights=weights,
                 prefix=prefix,
-                hidden=hidden,
+                hidden_size=hidden,
                 mlp_size=mlp_size,
+                dtype=work_np_dtype,
             )
 
         # Final residual.
@@ -756,7 +611,7 @@ def build_dual_profile_decoder_engine(
     # ---- Final norm + LM head -------------------------------------------
     final_norm = weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
-        hidden_state = _norm_multi(
+        hidden_state = graph_blocks.apply_norm(
             network,
             hidden_state,
             hidden,
