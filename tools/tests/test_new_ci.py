@@ -222,6 +222,29 @@ def test_selective_e2e_calls_family_tests_directly(
     ]
 
 
+def test_isolated_runtime_root_materializes_root_local_trtmc_libraries(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    required = (
+        "libtrtmc_core.so",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_beta.so",
+    )
+    for name in required:
+        (runtime / name).write_text(name, encoding="utf-8")
+
+    runner = E2ERunner(RecordingContext(tmp_path, {}))
+    with runner._isolated_runtime_root(runtime, "beta") as isolated:
+        for name in required:
+            staged = isolated / name
+            assert staged.is_file()
+            assert not staged.is_symlink()
+            assert staged.resolve().parent == isolated.resolve()
+            assert staged.read_text(encoding="utf-8") == name
+
+
 def test_family_with_only_hardware_tests_accepts_exact_empty_cpu_result(
     tmp_path: Path,
 ) -> None:
