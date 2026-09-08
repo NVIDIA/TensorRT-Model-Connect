@@ -179,6 +179,18 @@ int main(int argc, char** argv) {
     check(incompatible_build_error.find("belongs to product build") != std::string::npos,
           "loader rejects a plugin from a different product build before its factory");
 
+    const auto escaped_root = runtime_root.parent_path() / "escaped-runtime-root";
+    std::filesystem::remove_all(escaped_root);
+    std::filesystem::create_directories(escaped_root);
+    std::filesystem::create_symlink(runtime_root / "libtrtmc_backend_fake.so",
+                                    escaped_root / "libtrtmc_backend_fake.so");
+    std::filesystem::create_symlink(runtime_root / "libtrtmc_model_fake.so",
+                                    escaped_root / "libtrtmc_model_fake.so");
+    const std::string escaped_root_error = load_error(bundle_path, escaped_root.string());
+    check(escaped_root_error.find("escapes the selected runtime root") != std::string::npos,
+          "explicit loading rejects a DSO symlink that escapes the selected root");
+    std::filesystem::remove_all(escaped_root);
+
     const auto wrong_family_library = runtime_root / "libtrtmc_model_other.so";
     const auto wrong_family_bundle = runtime_root / "wrong-family.bundle";
     std::filesystem::copy_file(runtime_root / "libtrtmc_model_fake.so", wrong_family_library,

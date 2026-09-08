@@ -7,7 +7,6 @@ Build and inspect an exact text checkpoint, then call the native Task:
 
 ```bash
 trtmc run model.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "Summarize TensorRT in one sentence." \
   --max-new-tokens 48 \
   --temperature 0 \
@@ -18,7 +17,6 @@ For reproducible stochastic sampling, fix every sampling input:
 
 ```bash
 trtmc run model.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "Write a two-line GPU poem." \
   --max-new-tokens 64 \
   --temperature 0.8 \

@@ -24,7 +24,6 @@ metadata, runtime orchestration, and validation.
 
 ```bash
 trtmc transcribe /tmp/canary-1b-v2.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input /data/input.wav \
   --max-output-tokens 80 \
   --source-language en \
@@ -40,7 +39,6 @@ segmentation are request options:
 
 ```bash
 trtmc transcribe /tmp/canary-1b-v2.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input /data/english.wav \
   --source-language en \
   --target-language fr \

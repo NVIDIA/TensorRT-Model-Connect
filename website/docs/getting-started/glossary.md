@@ -26,10 +26,10 @@ title: Glossary
 | Task | User-visible behavior. | Abstract interfaces such as text generation, transcription, segmentation, embedding, and forecast. |
 | Backend | Engine implementation. | `trt` or optional `trt_rtx`, selected by the bundle header. |
 | DSO | Linux shared library loaded at runtime. | Core, loader, one backend, and exactly one `libtrtmc_model_<family>.so`. |
-| Runtime root | Explicit DSO directory. | Required by every native execution command; no fallback search exists. |
+| Runtime root | One selected DSO directory. | The CLI discovers or explicitly selects it; the Runtime Loader never searches or falls back. |
 | Precision | Numeric representation. | A build request such as FP32, FP16, or BF16 that the family validates. |
 | Quantization | Lower-precision graph/weights such as FP8. | Entirely family-owned and qualified per exact checkpoint/path. |
-| ABI | Binary compatibility contract. | Runtime DSOs and TensorRT plans must match their software/hardware cohort. |
+| ABI | Binary compatibility contract. | Runtime DSOs must share one exact product build and use a supported TensorRT environment. |
 
 ## Project building blocks
 

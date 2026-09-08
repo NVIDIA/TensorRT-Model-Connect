@@ -56,11 +56,13 @@ std::string path_key(const std::filesystem::path& path) {
     return (error ? absolute.lexically_normal() : canonical).string();
 }
 
-void write_fake_bundle(const std::filesystem::path& path) {
+void write_fake_bundle(const std::filesystem::path& path, const std::string& backend = "fake") {
     static constexpr unsigned char magic[8] = {'B', 'U', 'N', 'D', 'L', 'E', '\x01', '\0'};
     const std::string header =
         "{\"format\":1,\"family\":\"fake\",\"task\":\"time_series_forecast\","
-        "\"backend\":\"fake\",\"sections\":{\"runtime.json\":{\"offset\":0,\"length\":2},"
+        "\"backend\":\"" +
+        backend +
+        "\",\"sections\":{\"runtime.json\":{\"offset\":0,\"length\":2},"
         "\"engine.plan\":{\"offset\":2,\"length\":4}}}";
     std::ofstream output(path, std::ios::binary);
     output.write(reinterpret_cast<const char*>(magic), 8);
@@ -110,6 +112,58 @@ void check_cli_runtime_discovery(const std::filesystem::path& runtime_root) {
           "automatically discovered runtime dispatches the bundle task");
 
     std::filesystem::remove_all(discovered_root);
+}
+
+void check_selected_root_never_falls_back(const std::filesystem::path& runtime_root) {
+    const auto base = runtime_root.parent_path() / "cli-no-fallback";
+    const auto incompatible_root = base / "incompatible";
+    const auto compatible_root = base / "compatible";
+    std::filesystem::remove_all(base);
+    std::filesystem::create_directories(incompatible_root);
+    std::filesystem::create_directories(compatible_root);
+    for (const auto& root : {incompatible_root, compatible_root}) {
+        std::filesystem::copy_file(runtime_root / "libtrtmc_model_fake.so",
+                                   root / "libtrtmc_model_fake.so");
+    }
+    std::filesystem::copy_file(runtime_root / "libtrtmc_backend_incompatible.so",
+                               incompatible_root / "libtrtmc_backend_incompatible.so");
+    std::filesystem::copy_file(runtime_root / "libtrtmc_backend_incompatible_compatible.so",
+                               compatible_root / "libtrtmc_backend_incompatible.so");
+    const auto bundle = base / "incompatible.bundle";
+    const auto input = base / "input.f32";
+    write_fake_bundle(bundle, "incompatible");
+    {
+        const float values[] = {1.0F};
+        std::ofstream output(input, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(values), sizeof(values));
+    }
+
+    const char* previous_runtime_path_value = std::getenv("TRTMC_RUNTIME_PATH");
+    const bool had_runtime_path = previous_runtime_path_value != nullptr;
+    const std::string previous_runtime_path = had_runtime_path ? previous_runtime_path_value : "";
+    const std::string configured_roots =
+        incompatible_root.string() + ":" + compatible_root.string();
+    setenv("TRTMC_RUNTIME_PATH", configured_roots.c_str(), 1);
+    std::vector<std::string> arguments{"trtmc", "forecast", bundle.string(), "--input",
+                                       input.string()};
+    std::vector<char*> argv;
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    std::ostringstream output;
+    std::ostringstream error;
+    const int result = trtmc::cli::run(static_cast<int>(argv.size()), argv.data(), output, error);
+    if (had_runtime_path)
+        setenv("TRTMC_RUNTIME_PATH", previous_runtime_path.c_str(), 1);
+    else
+        unsetenv("TRTMC_RUNTIME_PATH");
+
+    check(result != 0 && error.str().find("belongs to product build") != std::string::npos,
+          "selected structurally complete root fails without fallback");
+    check(error.str().find("Using TRTMC runtime: " + incompatible_root.string()) !=
+                  std::string::npos &&
+              output.str().empty(),
+          "runtime path order cannot hide an incompatible selected product");
+    std::filesystem::remove_all(base);
 }
 
 bool resolve_throws(const trtmc::BundleInfo& bundle,
@@ -334,6 +388,22 @@ bool dispatch_throws(const trtmc::cli::Command& command, trtmc::ITask& task) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--expect-core-mismatch") {
+        std::vector<std::string> arguments{"trtmc", "inspect", "not-opened.bundle"};
+        std::vector<char*> pointers;
+        for (auto& argument : arguments)
+            pointers.push_back(argument.data());
+        std::ostringstream output;
+        std::ostringstream error;
+        const int result =
+            trtmc::cli::run(static_cast<int>(pointers.size()), pointers.data(), output, error);
+        check(result != 0 && error.str().find("active Core reports") != std::string::npos,
+              "CLI rejects an incompatible Core before bundle inspection");
+        check(error.str().find("not-opened.bundle") == std::string::npos,
+              "CLI does not cross the Core C++ seam before identity validation");
+        return failures == 0 ? 0 : 1;
+    }
+
     const std::vector<std::string> execution_commands{
         "run",
         "encode",
@@ -386,9 +456,11 @@ int main(int argc, char** argv) {
         path_key(optional_root),
     };
     std::set<std::string> byok_roots;
+    std::vector<std::string> observed_candidates;
     const trtmc::cli::RuntimeRootMatcher matches =
         [&](const trtmc::BundleInfo&, const std::filesystem::path& candidate, bool require_byok) {
             const std::string key = path_key(candidate);
+            observed_candidates.push_back(key);
             return complete_roots.count(key) != 0 && (!require_byok || byok_roots.count(key) != 0);
         };
 
@@ -405,32 +477,6 @@ int main(int argc, char** argv) {
           "the configured runtime path is used when the active installation is incomplete");
     complete_roots.insert(path_key(loaded_runtime_root));
 
-    const auto wheel_prefix = runtime_test_root / "wheel";
-    const auto wheel_bin = wheel_prefix / "bin";
-    const auto wheel_runtime =
-        wheel_prefix / "lib" / "python3.12" / "dist-packages" / "tensorrt_model_connect" / "bin";
-    std::filesystem::create_directories(wheel_bin);
-    std::filesystem::create_directories(wheel_runtime);
-    complete_roots.insert(path_key(wheel_runtime));
-    std::filesystem::create_directory_symlink("lib", wheel_prefix / "lib64");
-    runtime_context = {};
-    runtime_context.executable = wheel_bin / "trtmc";
-    runtime_context.loaded_runtime_root = wheel_bin;
-    check(trtmc::cli::resolve_runtime_root(runtime_bundle, {}, false, runtime_context, matches) ==
-              wheel_runtime.string(),
-          "wheel runtime is discovered once when lib64 aliases lib");
-
-    const auto second_wheel_runtime =
-        wheel_prefix / "lib" / "python3.13" / "site-packages" / "tensorrt_model_connect" / "bin";
-    std::filesystem::create_directories(second_wheel_runtime);
-    complete_roots.insert(path_key(second_wheel_runtime));
-    std::string discovery_error;
-    check(resolve_throws(runtime_bundle, runtime_context, matches, discovery_error) &&
-              discovery_error.find("Multiple installed TRTMC runtimes") != std::string::npos,
-          "ambiguous matching wheel runtimes require an explicit selection");
-    complete_roots.erase(path_key(second_wheel_runtime));
-    std::filesystem::remove_all(second_wheel_runtime);
-
     const auto first_optional = runtime_test_root / "first-optional";
     const auto second_optional = runtime_test_root / "second-optional";
     const auto loaded_libraries = runtime_test_root / "loaded-libraries";
@@ -444,6 +490,21 @@ int main(int argc, char** argv) {
     check(trtmc::cli::resolve_runtime_root(runtime_bundle, {}, false, runtime_context, matches) ==
               second_optional.string(),
           "dedicated runtime path preserves directory order");
+
+    const auto current_directory_root = runtime_test_root / "current-directory";
+    std::filesystem::create_directories(current_directory_root);
+    complete_roots.insert(path_key(current_directory_root));
+    runtime_context.runtime_path.clear();
+    const auto original_current_directory = std::filesystem::current_path();
+    std::filesystem::current_path(current_directory_root);
+    observed_candidates.clear();
+    std::string discovery_error;
+    check(resolve_throws(runtime_bundle, runtime_context, matches, discovery_error),
+          "runtime discovery does not search an unconfigured current directory");
+    std::filesystem::current_path(original_current_directory);
+    check(std::find(observed_candidates.begin(), observed_candidates.end(),
+                    path_key(current_directory_root)) == observed_candidates.end(),
+          "current directory participates only through explicit configuration");
 
     const auto byok_root = runtime_test_root / "byok";
     std::filesystem::create_directories(byok_root);
@@ -469,8 +530,10 @@ int main(int argc, char** argv) {
               discovery_error.find("--runtime-root") != std::string::npos,
           "runtime discovery failure identifies the bundle and explicit override");
     std::filesystem::remove_all(runtime_test_root);
-    if (argc == 2)
+    if (argc == 2) {
         check_cli_runtime_discovery(argv[1]);
+        check_selected_root_never_falls_back(argv[1]);
+    }
     const auto dynamic_kv =
         parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--kv-cache-size", "1GiB"});
     check(dynamic_kv.kv_cache_size_bytes == 1024ULL * 1024ULL * 1024ULL,

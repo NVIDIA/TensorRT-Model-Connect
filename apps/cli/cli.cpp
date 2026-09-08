@@ -7,6 +7,7 @@
 
 #include "cli/io.h"
 #include "trtmc/runtime/family_loader.h"
+#include "trtmc/runtime/plugin_abi.h"
 #include "trtmc/runtime/runtime_root.h"
 
 #include <algorithm>
@@ -26,7 +27,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -170,46 +170,26 @@ void append_path_list(std::vector<fs::path>& candidates, std::set<std::string>& 
     }
 }
 
-void append_python_package_runtime_roots(std::vector<fs::path>& candidates,
-                                         std::set<std::string>& seen, const fs::path& prefix) {
-    std::vector<fs::path> python_roots;
-    for (const auto& library_root : {prefix / "lib", prefix / "lib64"}) {
-        std::error_code error;
-        if (!fs::is_directory(library_root, error))
-            continue;
-        for (fs::directory_iterator iterator(library_root, error), end; !error && iterator != end;
-             iterator.increment(error)) {
-            std::error_code entry_error;
-            if (!iterator->is_directory(entry_error))
-                continue;
-            const std::string name = iterator->path().filename().string();
-            if (name.rfind("python", 0) != 0)
-                continue;
-            for (const auto& packages : {"site-packages", "dist-packages"}) {
-                python_roots.push_back(iterator->path() / packages / "tensorrt_model_connect" /
-                                       "bin");
-            }
-        }
-    }
-    std::sort(python_roots.begin(), python_roots.end());
-    for (const auto& root : python_roots)
-        append_candidate(candidates, seen, root);
-}
-
 RuntimeRootSearchContext runtime_root_search_context() {
     RuntimeRootSearchContext context;
     context.loaded_runtime_root = loaded_runtime_root();
-
-    std::vector<char> executable(4096, '\0');
-    const ssize_t length = readlink("/proc/self/exe", executable.data(), executable.size() - 1);
-    if (length > 0) {
-        executable[static_cast<std::size_t>(length)] = '\0';
-        context.executable = executable.data();
-    }
-
     if (const char* value = std::getenv("TRTMC_RUNTIME_PATH"))
         context.runtime_path = value;
     return context;
+}
+
+void require_matching_product_build() {
+    const std::string expected = trtmc::kPluginBuildId;
+    const auto require_module = [&](const char* module, const char* actual) {
+        if (actual == nullptr || expected != actual) {
+            throw std::runtime_error(
+                "TRTMC product build mismatch: CLI requires '" + expected + "' but active " +
+                module + " reports '" +
+                (actual != nullptr ? std::string(actual) : std::string("<null>")) + "'");
+        }
+    };
+    require_module("Runtime", trtmc_runtime_build_id());
+    require_module("Core", trtmc_core_build_id());
 }
 
 std::string take_value(int argc, char** argv, int& index, const std::string& option) {
@@ -713,50 +693,13 @@ std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& ex
     if (!matches)
         throw std::logic_error("runtime-root discovery requires a candidate matcher");
 
-    std::vector<fs::path> installed_candidates;
-    std::vector<fs::path> wheel_candidates;
-    std::vector<fs::path> configured_candidates;
+    std::vector<fs::path> candidates;
     std::set<std::string> seen;
-    append_candidate(installed_candidates, seen, context.loaded_runtime_root);
-
-    if (!context.executable.empty()) {
-        const fs::path executable_directory = context.executable.parent_path();
-        append_candidate(installed_candidates, seen, executable_directory);
-        if (executable_directory.filename() == "bin") {
-            const fs::path prefix = executable_directory.parent_path();
-            append_candidate(installed_candidates, seen, prefix / "lib");
-            append_candidate(installed_candidates, seen, prefix / "lib64");
-            append_python_package_runtime_roots(wheel_candidates, seen, prefix);
-        }
-    }
-
-    append_path_list(configured_candidates, seen, context.runtime_path);
+    append_candidate(candidates, seen, context.loaded_runtime_root);
+    append_path_list(candidates, seen, context.runtime_path);
 
     std::vector<fs::path> searched;
-    for (const auto& candidate : installed_candidates) {
-        searched.push_back(candidate);
-        if (matches(bundle, candidate, require_byok))
-            return candidate.string();
-    }
-
-    std::vector<fs::path> matching_wheels;
-    for (const auto& candidate : wheel_candidates) {
-        searched.push_back(candidate);
-        if (matches(bundle, candidate, require_byok))
-            matching_wheels.push_back(candidate);
-    }
-    if (matching_wheels.size() == 1)
-        return matching_wheels.front().string();
-    if (matching_wheels.size() > 1) {
-        std::ostringstream message;
-        message << "Multiple installed TRTMC runtimes match the running CLI:";
-        for (const auto& candidate : matching_wheels)
-            message << " " << candidate.string();
-        message << ". Pass --runtime-root DIR to select one.";
-        throw std::runtime_error(message.str());
-    }
-
-    for (const auto& candidate : configured_candidates) {
+    for (const auto& candidate : candidates) {
         searched.push_back(candidate);
         if (matches(bundle, candidate, require_byok))
             return candidate.string();
@@ -1373,7 +1316,7 @@ void print_usage(std::ostream& output) {
               "  [--kv-cache-size BYTES|GB|GiB]\n\n"
               "TensorRT-RTX runtime options:\n"
               "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
-              "Runtime discovery: the active trtmc installation, then TRTMC_RUNTIME_PATH.\n"
+              "Runtime discovery: the active Runtime directory, then TRTMC_RUNTIME_PATH.\n"
               "The current directory is not searched; use TRTMC_RUNTIME_PATH=. explicitly.\n"
               "--runtime-root selects one exact root without fallback.\n";
 }
@@ -1389,6 +1332,7 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
             output << "trtmc " << TRTMC_VERSION_STRING << '\n';
             return EXIT_SUCCESS;
         }
+        require_matching_product_build();
         if (command.kind == CommandKind::kInspect) {
             const BundleInfo bundle = InspectBundle(command.bundle);
             nlohmann::json sections = nlohmann::json::object();

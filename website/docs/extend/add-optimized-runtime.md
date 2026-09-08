@@ -38,7 +38,6 @@ python -m tensorrt_model_connect build MODEL \
   -o model-rtx.bundle
 
 trtmc run model-rtx.bundle \
-  --runtime-root /opt/trtmc/lib \
   --runtime-cache /tmp/trtmc-rtx.cache \
   --cuda-graphs \
   --prompt "Hello"

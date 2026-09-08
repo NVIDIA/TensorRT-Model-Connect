@@ -764,6 +764,7 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
     wheel = tmp_path / "package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("tensorrt_model_connect/__init__.py", "")
+        archive.writestr("tensorrt_model_connect/native_cli.py", "")
         archive.writestr("trtmc_benchmark/__init__.py", "")
         archive.writestr("families/__init__.py", "")
         archive.writestr("tensorrt_model_connect/bin/trtmc", "")
@@ -775,7 +776,9 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_byok_tvm_ffi.so", "")
         archive.writestr(
             "package-0.1.dist-info/entry_points.txt",
-            "[console_scripts]\ntrtmc-bench = trtmc_benchmark.cli:main\n",
+            "[console_scripts]\n"
+            "trtmc = tensorrt_model_connect.native_cli:main\n"
+            "trtmc-bench = trtmc_benchmark.cli:main\n",
         )
         archive.writestr(
             "package-0.1.dist-info/METADATA",
@@ -785,9 +788,6 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             "Provides-Extra: cutedsl\n"
             "Provides-Extra: test\n",
         )
-        archive.writestr("package-0.1.data/scripts/trtmc", "")
-        archive.writestr("package-0.1.data/scripts/libtrtmc_core.so", "")
-        archive.writestr("package-0.1.data/scripts/libtrtmc_runtime.so", "")
         for family in family_names:
             archive.writestr(
                 f"families/{family}/model.py",
@@ -796,6 +796,22 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             archive.writestr(f"tensorrt_model_connect/bin/libtrtmc_model_{family}.so", "")
 
     WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+
+    without_launcher = tmp_path / "without-launcher.whl"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(without_launcher, "w") as output:
+        for entry in source.infolist():
+            if entry.filename != "tensorrt_model_connect/native_cli.py":
+                output.writestr(entry, source.read(entry.filename))
+    with pytest.raises(CiError, match="console adapter is missing"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([without_launcher])
+
+    duplicated = tmp_path / "duplicated.whl"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(duplicated, "w") as output:
+        for entry in source.infolist():
+            output.writestr(entry, source.read(entry.filename))
+        output.writestr("package-0.1.data/scripts/trtmc", "")
+    with pytest.raises(CiError, match="duplicated in wheel scripts"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([duplicated])
 
     corrupt = tmp_path / "corrupt.whl"
     with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(corrupt, "w") as output:
@@ -851,6 +867,8 @@ def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> 
         plugin_id: str,
         implementation: str,
         build_id: str = "1234567890abcdef1234567890abcdef",
+        struct_size: str = "sizeof(struct PluginDescriptorV1)",
+        descriptor_version: int = 1,
     ) -> str:
         return f"""
 #include <stdint.h>
@@ -862,7 +880,7 @@ struct PluginDescriptorV1 {{
     const char *build_id;
 }};
 static const struct PluginDescriptorV1 descriptor = {{
-    sizeof(struct PluginDescriptorV1), 1, {kind}, "{plugin_id}", "{build_id}"
+    {struct_size}, {descriptor_version}, {kind}, "{plugin_id}", "{build_id}"
 }};
 const struct PluginDescriptorV1 *trtmc_plugin_descriptor_v1(void) {{ return &descriptor; }}
 {implementation}
@@ -889,6 +907,25 @@ const struct PluginDescriptorV1 *trtmc_plugin_descriptor_v1(void) {{ return &des
     )
     compile_library("libtrtmc_model_beta.so", plugin_source(2, "beta", "void beta_symbol(void) {}"))
     load_native_libraries(tmp_path, ("alpha", "beta"))
+
+    invalid_descriptors = (
+        ("size=0", plugin_source(2, "beta", "", struct_size="0")),
+        ("version=2", plugin_source(2, "beta", "", descriptor_version=2)),
+        ("kind=1", plugin_source(1, "beta", "")),
+        ("id=gamma", plugin_source(2, "gamma", "")),
+        (
+            "build=00000000000000000000000000000000",
+            plugin_source(2, "beta", "", build_id="00000000000000000000000000000000"),
+        ),
+    )
+    for expected_error, source in invalid_descriptors:
+        compile_library("libtrtmc_model_beta.so", source)
+        with pytest.raises(CiError, match=expected_error):
+            load_native_libraries(tmp_path, ("alpha", "beta"))
+
+    compile_library("libtrtmc_model_beta.so", "void beta_symbol(void) {}")
+    with pytest.raises(CiError, match="trtmc_plugin_descriptor_v1"):
+        load_native_libraries(tmp_path, ("alpha", "beta"))
 
     compile_library(
         "libtrtmc_model_beta.so",

@@ -268,6 +268,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/builder/tensorrt_model_connect/bundle_writer.py",
         "core/builder/tensorrt_model_connect/graph_transform.py",
         "core/builder/tensorrt_model_connect/model_support.py",
+        "core/builder/tensorrt_model_connect/native_cli.py",
         "core/builder/tests/__init__.py",
         "core/builder/tests/test_build.py",
         "core/builder/tests/test_build_cli.py",
@@ -275,6 +276,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/builder/tests/test_byok.py",
         "core/builder/tests/test_graph_transform.py",
         "core/builder/tests/test_model_support.py",
+        "core/builder/tests/test_native_cli.py",
     }
     expected_native = {
         "core/runtime/bundle/bundle_format.cpp",
@@ -310,6 +312,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/runtime/trt_backend.h",
         "core/runtime/include/trtmc/runtime/trt_module.h",
         "core/runtime/tests/fake_backend.cpp",
+        "core/runtime/tests/fake_core_build_identity.cpp",
         "core/runtime/tests/fake_family.cpp",
         "core/runtime/tests/test_bundle_format_v1.cpp",
         "core/runtime/tests/test_byok_shape_spec.cpp",
@@ -352,7 +355,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_pr_metadata.py",
         "tools/tests/test_public_source_hygiene.py",
     }
-    expected_cmake = {"cmake/trtmcConfig.cmake.in"}
+    expected_cmake = {"cmake/product_build.h.in", "cmake/trtmcConfig.cmake.in"}
     expected_third_party = {
         "third_party/stb/stb_image.h",
         "third_party/stb/stb_image_resize2.h",
@@ -1182,6 +1185,8 @@ def test_runtime_plugins_publish_one_exact_build_descriptor() -> None:
     assert "build_cohort" not in loader
     assert "TRTMC_BUILD_COHORT_ID" not in cmake
     assert "TRTMC_BUILD_ID" in cmake
+    assert "cmake/product_build.h.in" in cmake
+    assert "add_compile_definitions(TRTMC_BUILD_ID" not in cmake
 
     backends = {
         "core/runtime/tensorrt/trt_backend.cpp": "trt",

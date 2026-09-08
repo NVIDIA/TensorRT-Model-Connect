@@ -50,8 +50,8 @@ The relevant boundaries are:
 
 1. If inspection cannot parse the header, investigate the build or artifact.
 2. If required sections are absent, investigate the family builder.
-3. If inspection succeeds but loading fails, verify `--runtime-root` contains
-   the installed core, backend, and family libraries from a compatible build.
+3. If inspection succeeds but loading fails, verify the selected runtime root
+   contains the installed core, backend, and family libraries from one build.
 4. If loading succeeds but a request fails, route the issue to the family task
    contract and model-owned tests.
 

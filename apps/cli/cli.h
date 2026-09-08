@@ -64,7 +64,6 @@ struct Command {
 
 struct RuntimeRootSearchContext {
     std::filesystem::path loaded_runtime_root;
-    std::filesystem::path executable;
     std::string runtime_path;
 };
 
