@@ -9,24 +9,11 @@ import argparse
 import json
 import math
 import shlex
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-
-@dataclass(frozen=True)
-class Atom:
-    """One atom-site row required for qualification."""
-
-    chain: str
-    residue: str
-    name: str
-    coordinates: np.ndarray
-
-    @property
-    def key(self) -> tuple[str, str, str]:
-        return self.chain, self.residue, self.name
+from families.openfold3.qualification import Atom, matched_coordinates
 
 
 def _column(headers: list[str], *names: str) -> int:
@@ -76,32 +63,6 @@ def read_atom_site(path: Path) -> list[Atom]:
         if atoms:
             return atoms
     raise ValueError(f"no atom-site loop found in {path}")
-
-
-def _matched_coordinates(
-    candidate: list[Atom], reference: list[Atom], *, atom_name: str | None = None
-) -> tuple[np.ndarray, np.ndarray]:
-    reference_by_key: dict[tuple[str, str, str], np.ndarray] = {}
-    for atom in reference:
-        if atom.key in reference_by_key:
-            raise ValueError(f"duplicate reference atom key: {atom.key}")
-        reference_by_key[atom.key] = atom.coordinates
-    candidate_points: list[np.ndarray] = []
-    reference_points: list[np.ndarray] = []
-    candidate_keys: set[tuple[str, str, str]] = set()
-    for atom in candidate:
-        if atom_name is not None and atom.name != atom_name:
-            continue
-        if atom.key in candidate_keys:
-            raise ValueError(f"duplicate candidate atom key: {atom.key}")
-        candidate_keys.add(atom.key)
-        point = reference_by_key.get(atom.key)
-        if point is not None:
-            candidate_points.append(atom.coordinates)
-            reference_points.append(point)
-    if len(candidate_points) < 3:
-        raise ValueError("fewer than three corresponding atoms are available")
-    return np.stack(candidate_points), np.stack(reference_points)
 
 
 def aligned_rmsd(candidate: np.ndarray, reference: np.ndarray) -> float:
@@ -202,8 +163,8 @@ def main() -> None:
 
     native_atoms = read_atom_site(arguments.native_structure)
     reference_atoms = read_atom_site(arguments.reference_structure)
-    native, reference = _matched_coordinates(native_atoms, reference_atoms)
-    native_ca, reference_ca = _matched_coordinates(native_atoms, reference_atoms, atom_name="CA")
+    native, reference = matched_coordinates(native_atoms, reference_atoms)
+    native_ca, reference_ca = matched_coordinates(native_atoms, reference_atoms, atom_name="CA")
     result: dict[str, object] = {
         "schema_version": 1,
         "native_atom_count": len(native_atoms),
@@ -222,7 +183,7 @@ def main() -> None:
     }
     if arguments.experimental_structure:
         experimental_atoms = read_atom_site(arguments.experimental_structure)
-        predicted_ca, experimental_ca = _matched_coordinates(
+        predicted_ca, experimental_ca = matched_coordinates(
             native_atoms, experimental_atoms, atom_name="CA"
         )
         result["experimental_accuracy"] = {

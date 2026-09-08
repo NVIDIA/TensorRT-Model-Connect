@@ -216,7 +216,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     plddt = confidence["plddt"]
     pae = confidence["pae"]
     pde = confidence["pde"]
-    assert confidence["precision"] == "fp16-mixed"
+    assert confidence["precision"] == f"{manifest['precision']}-mixed"
     assert confidence["token_count"] == case["expected_token_count"]
     assert confidence["atom_count"] == case["expected_atom_count"]
     assert len(coordinates) == 3 * case["expected_atom_count"]

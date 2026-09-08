@@ -8,7 +8,9 @@
     "confidence_parity.plddt_mae": 3.0,
     "confidence_parity.ptm_abs": 0.05,
     "experimental_accuracy.ca_aligned_rmsd_angstrom": 4.0,
-    "structural_parity.all_atom_pair_distance_mae_angstrom": 1.0
+    "structural_parity.all_atom_aligned_rmsd_angstrom": 3.5,
+    "structural_parity.all_atom_pair_distance_mae_angstrom": 1.0,
+    "structural_parity.ca_aligned_rmsd_angstrom": 3.0
   },
   "minimum": {
     "matched_atom_count": 601,

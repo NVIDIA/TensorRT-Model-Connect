@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from examples.models.openfold3.qualify import Atom, _matched_coordinates
 from families.openfold3 import model, model_config
 from families.openfold3.contracts import (
     INITIAL_FP16_PROFILE,
@@ -44,6 +43,7 @@ from families.openfold3.model_config import (
     resolve_package_root,
 )
 from families.openfold3.provenance import PINNED_OPENFOLD3
+from families.openfold3.qualification import Atom, matched_coordinates
 from families.openfold3.prepare_model_dir import (
     _validate_disabled_template_features,
     _write_deterministic_npz,
@@ -239,7 +239,7 @@ def test_corrupt_feature_archive_reports_a_value_error(tmp_path: Path, monkeypat
 def test_qualification_rejects_duplicate_atom_keys() -> None:
     atom = Atom("A", "1", "CA", np.zeros(3, dtype=np.float64))
     with pytest.raises(ValueError, match="duplicate reference atom key"):
-        _matched_coordinates([atom], [atom, atom])
+        matched_coordinates([atom], [atom, atom])
 
 
 def test_qualification_requires_all_ubiquitin_atoms_to_match() -> None:

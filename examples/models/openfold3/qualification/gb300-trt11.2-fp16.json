@@ -67,6 +67,7 @@
     "bf16_cross_precision_all_atom_aligned_rmsd_angstrom": 2.9593122650894994,
     "bf16_cross_precision_ca_aligned_rmsd_angstrom": 2.5890169620487677,
     "bf16_cross_precision_pair_distance_mae_angstrom": 0.9954768196721857,
+    "structural_gate_note": "The recorded all-atom and CA aligned RMSDs are 2.959 and 2.589 Angstroms; the 3.5 and 3.0 Angstrom gates bound the finite mixed-FP16 diffusion basin without applying the tighter mixed-BF16 thresholds.",
     "average_plddt_abs": 2.5466381684570365,
     "gpde_abs": 0.0016837122840881458,
     "ptm_abs": 0.015329088935852053,
