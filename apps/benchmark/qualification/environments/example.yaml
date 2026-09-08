@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification-environment/v1
+name: qualification-example
+
+tools:
+  trtmc_bench: /opt/trtmc/bin/trtmc-bench
+  trtmc_worker: /opt/trtmc/lib/tensorrt_model_connect/bin/trtmc_benchmark_worker
+  reference_python: /opt/trtmc-reference/bin/python
+
+storage:
+  data_root: /data/benchmarks
+  runtime_root: /opt/trtmc/lib
+  bundle_cache: /data/trtmc-bundles
+  bundle_roots: []
+
+execution:
+  allow_build: false
+  local_files_only: true
+  timeout_seconds: 7200
+  reference_device: auto

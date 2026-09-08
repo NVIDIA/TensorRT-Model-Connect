@@ -761,6 +761,13 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         root = tmp_path / "families" / family
         root.mkdir(parents=True)
         (root / "model.py").write_text("def build(request, writer): pass\n")
+    qualification = tmp_path / "families/alpha/tests/qualification"
+    qualification.mkdir(parents=True)
+    (qualification / "executor.py").write_text("def main(): pass\n")
+    (qualification / "alpha.accuracy.yaml").write_text("schema_version: trtmc.qualification/v1\n")
+    suites = tmp_path / "apps/benchmark/qualification/suites"
+    suites.mkdir(parents=True)
+    (suites / "shared.yaml").write_text("implementation: shared\n")
     wheel = tmp_path / "package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("tensorrt_model_connect/__init__.py", "")
@@ -775,7 +782,9 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_byok_tvm_ffi.so", "")
         archive.writestr(
             "package-0.1.dist-info/entry_points.txt",
-            "[console_scripts]\ntrtmc-bench = trtmc_benchmark.cli:main\n",
+            "[console_scripts]\n"
+            "trtmc-bench = trtmc_benchmark.cli:main\n"
+            "trtmc-qualify = trtmc_benchmark.qualification_cli:main\n",
         )
         archive.writestr(
             "package-0.1.dist-info/METADATA",
@@ -794,6 +803,18 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
                 (tmp_path / "families" / family / "model.py").read_bytes(),
             )
             archive.writestr(f"tensorrt_model_connect/bin/libtrtmc_model_{family}.so", "")
+        archive.writestr(
+            "trtmc_benchmark/_catalog/alpha/tests/qualification/executor.py",
+            (qualification / "executor.py").read_bytes(),
+        )
+        archive.writestr(
+            "trtmc_benchmark/_catalog/alpha/tests/qualification/alpha.accuracy.yaml",
+            (qualification / "alpha.accuracy.yaml").read_bytes(),
+        )
+        archive.writestr(
+            "trtmc_benchmark/_suites/shared.yaml",
+            (suites / "shared.yaml").read_bytes(),
+        )
 
     WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
 

@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+implementation: mmlu_continuation_parity
+
+dataset:
+  relative_path: MMLU_five_shot/mmlu_dataset.json
+  version: pre1093-mmlu-five-shot-json-v1
+
+selection:
+  method: first
+
+scoring:
+  implementation: continuation_token_parity
