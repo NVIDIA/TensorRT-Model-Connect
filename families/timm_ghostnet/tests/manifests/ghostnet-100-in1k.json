@@ -1,0 +1,18 @@
+{
+  "name": "ghostnet-100-in1k",
+  "hf_id": "timm/ghostnet_100.in1k",
+  "hf_revision": "e524c2ee5d5a9412f802ce38ff895aba07b30910",
+  "bundle": "ghostnet-100-in1k.bundle",
+  "family": "timm_ghostnet",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "ghostnet-100-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}
