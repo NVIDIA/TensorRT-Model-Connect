@@ -1,0 +1,18 @@
+{
+  "name": "inception-resnet-v2-tf-in1k",
+  "hf_id": "timm/inception_resnet_v2.tf_in1k",
+  "hf_revision": "836b07d7d599da247de92f148c7a07fda18afced",
+  "bundle": "inception-resnet-v2-tf-in1k.bundle",
+  "family": "timm_inception_resnet",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "inception-resnet-v2-tf-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}
