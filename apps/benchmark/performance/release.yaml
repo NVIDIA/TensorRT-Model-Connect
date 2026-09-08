@@ -1017,6 +1017,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: timm_senet.classify
+    family: timm_senet
+    operation: classify
+    model: senet154-gluon-in1k
+    workload:
+      testcase: senet154-gluon-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_repvgg.classify
     family: timm_repvgg
     operation: classify

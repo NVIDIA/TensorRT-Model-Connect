@@ -1,0 +1,18 @@
+{
+  "name": "senet154-gluon-in1k",
+  "hf_id": "timm/senet154.gluon_in1k",
+  "hf_revision": "86f6d239ed30acbe3aca0cbb5769da2621a4e02c",
+  "bundle": "senet154-gluon-in1k.bundle",
+  "family": "timm_senet",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "senet154-gluon-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}
