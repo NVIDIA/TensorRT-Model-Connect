@@ -14,7 +14,7 @@ from families.minimax_h3.provenance import (
     validate_super_resolution_bundle_config,
     validate_super_resolution_source_identity,
 )
-from families.minimax_h3.runtime_config_schema import Layer, SCHEMA
+from families.minimax_h3.runtime_config_schema import normalize_build_options
 
 
 def _checkpoints(tmp_path: Path) -> tuple[Path, Path]:
@@ -26,13 +26,9 @@ def _checkpoints(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def test_super_resolution_checkpoint_options_are_build_only(tmp_path: Path) -> None:
-    fields = {field.name: field for field in SCHEMA.fields}
-    for name in ("super_resolution_model", "super_resolution_weak_model"):
-        assert fields[name].allowed_layers == frozenset(
-            {Layer.BUILD_TIME, Layer.SESSION_REQUEST}
-        )
-
     primary, weak = _checkpoints(tmp_path)
+    options = {"super_resolution_model": str(primary), "super_resolution_weak_model": str(weak)}
+    assert normalize_build_options(options) == options
     assert _super_resolution_build_inputs(
         {"super_resolution_model": str(primary), "super_resolution_weak_model": str(weak)}
     ) == (primary.absolute(), weak.absolute(), 0.5)
@@ -43,6 +39,34 @@ def test_super_resolution_checkpoint_options_are_build_only(tmp_path: Path) -> N
     )
     with pytest.raises(ValueError, match="requires super_resolution_model"):
         _super_resolution_build_inputs({"super_resolution_weak_model": str(weak)})
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"unknown": True}, "unknown MiniMax-H3 option"),
+        ({"first_block_cache": 1}, "invalid MiniMax-H3 option first_block_cache"),
+        ({"first_block_cache_threshold": True}, "invalid MiniMax-H3 option"),
+        ({"first_block_cache_threshold": float("nan")}, "invalid MiniMax-H3 option"),
+        ({"first_block_cache_threshold": 0.0}, "invalid MiniMax-H3 option"),
+        ({"super_resolution_model": False}, "invalid MiniMax-H3 option"),
+        ({"retain_engines": True}, "runtime-only: retain_engines"),
+        ({"retained_tail_weight_budget_gib": 24}, "runtime-only"),
+        ({"retained_tail_weight_budget_gib": True}, "invalid MiniMax-H3 option"),
+        ({"retained_tail_weight_budget_gib": 2**33}, "invalid MiniMax-H3 option"),
+    ],
+)
+def test_build_options_preserve_type_and_runtime_only_rejections(options, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        normalize_build_options(options)
+
+
+def test_build_options_return_only_supplied_values() -> None:
+    assert normalize_build_options({}) == {}
+    options = {"first_block_cache": False, "first_block_cache_threshold": 0.12}
+    normalized = normalize_build_options(options)
+    assert normalized == options
+    assert normalized is not options
 
 
 def test_super_resolution_bundle_contract_is_path_free(tmp_path: Path) -> None:

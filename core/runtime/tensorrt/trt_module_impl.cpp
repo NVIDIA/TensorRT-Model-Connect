@@ -429,11 +429,11 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     if (entry.d_ptr)
         bind_tensor_address(name, entry);
 
+    buffers_[name] = std::move(entry);
+
     if (is_dynamic && !ctx_->setInputShape(name.c_str(), init_dims))
         throw std::runtime_error("TensorRT rejected initial dynamic input shape for '" + name +
                                  "'");
-
-    buffers_[name] = std::move(entry);
 }
 
 void TrtModuleImpl::ensure_input_buffer(const std::string& name, BufferEntry& entry) {

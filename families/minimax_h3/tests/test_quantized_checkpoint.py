@@ -13,6 +13,7 @@ import pytest
 from safetensors.numpy import save_file
 
 from families.minimax_h3 import quantized_checkpoint as checkpoint
+from families.minimax_h3.provenance import validate_quantized_transformer_metadata
 from families.minimax_h3.quantized_checkpoint import (
     CHECKPOINT_BYTES,
     CHECKPOINT_FILENAME,
@@ -92,6 +93,15 @@ def _tiny_checkpoint(
         ),
     )
     return path
+
+
+def test_bundle_provenance_validates_source_identity_without_quantization_options() -> None:
+    metadata = checkpoint.QUANTIZED_CHECKPOINT_IDENTITY.bundle_metadata()
+    assert validate_quantized_transformer_metadata(metadata) == metadata
+    with pytest.raises(ValueError, match="does not match the public model"):
+        validate_quantized_transformer_metadata({**metadata, "revision": "different"})
+    with pytest.raises(ValueError, match="does not match the public model"):
+        validate_quantized_transformer_metadata({**metadata, "local_path": "private"})
 
 
 def test_released_identity_and_full_header_contract_are_pinned() -> None:

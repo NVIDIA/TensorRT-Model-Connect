@@ -15,20 +15,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#ifndef PSAPI_VERSION
-#define PSAPI_VERSION 2
-#endif
-// psapi.h consumes Win32 base types from windows.h.
-// clang-format off
 #include <windows.h>
-#include <psapi.h>
-// clang-format on
 #else
 #include <dlfcn.h>
-#include <unistd.h>
-#if defined(__linux__)
-#include <link.h>
-#endif
 #endif
 
 namespace trtmc::internal {
@@ -80,38 +69,6 @@ std::string windows_error_message(DWORD code) {
         message.pop_back();
     }
     return message.empty() ? "Windows error " + std::to_string(code) : message;
-}
-
-std::vector<HMODULE> process_modules() {
-    std::vector<HMODULE> modules(128);
-    while (true) {
-        DWORD bytes_required = 0;
-        if (!EnumProcessModules(GetCurrentProcess(), modules.data(),
-                                static_cast<DWORD>(modules.size() * sizeof(HMODULE)),
-                                &bytes_required)) {
-            return {};
-        }
-        const std::size_t count = bytes_required / sizeof(HMODULE);
-        if (count <= modules.size()) {
-            modules.resize(count);
-            return modules;
-        }
-        modules.resize(count + 32);
-    }
-}
-
-fs::path module_path(HMODULE module) {
-    std::vector<wchar_t> buffer(512);
-    while (buffer.size() < 32768) {
-        const DWORD size =
-            GetModuleFileNameW(module, buffer.data(), static_cast<DWORD>(buffer.size()));
-        if (size == 0)
-            return {};
-        if (size < buffer.size() - 1)
-            return fs::path(std::wstring(buffer.data(), size));
-        buffer.resize(buffer.size() * 2);
-    }
-    return {};
 }
 
 #else
@@ -188,33 +145,6 @@ void* dynamic_library_symbol(DynamicLibraryHandle handle, const char* name, std:
 #endif
 }
 
-void* dynamic_library_symbol_in_process(const char* name, std::string* error) {
-    if (error != nullptr)
-        error->clear();
-    if (name == nullptr) {
-        assign_error(error, "invalid dynamic-library symbol name");
-        return nullptr;
-    }
-#if defined(_WIN32)
-    for (HMODULE module : process_modules()) {
-        FARPROC symbol = GetProcAddress(module, name);
-        if (symbol != nullptr)
-            return reinterpret_cast<void*>(symbol);
-    }
-    assign_error(error, std::string("symbol not found in loaded modules: ") + name);
-    return nullptr;
-#else
-    dlerror();
-    void* symbol = dlsym(RTLD_DEFAULT, name);
-    const char* message = dlerror();
-    if (message != nullptr) {
-        assign_error(error, message);
-        return nullptr;
-    }
-    return symbol;
-#endif
-}
-
 bool close_dynamic_library(DynamicLibraryHandle handle, std::string* error) noexcept {
     if (error != nullptr)
         error->clear();
@@ -241,59 +171,6 @@ bool close_dynamic_library(DynamicLibraryHandle handle, std::string* error) noex
 #endif
 }
 
-fs::path current_executable_path() noexcept {
-    try {
-#if defined(_WIN32)
-        std::vector<wchar_t> buffer(512);
-        while (buffer.size() < 32768) {
-            const DWORD size =
-                GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-            if (size == 0)
-                return {};
-            if (size < buffer.size() - 1)
-                return fs::path(std::wstring(buffer.data(), size));
-            buffer.resize(buffer.size() * 2);
-        }
-#else
-        std::vector<char> buffer(512);
-        while (buffer.size() < 1024 * 1024) {
-            const ssize_t size = readlink("/proc/self/exe", buffer.data(), buffer.size());
-            if (size < 0)
-                return {};
-            if (static_cast<std::size_t>(size) < buffer.size())
-                return fs::path(std::string(buffer.data(), static_cast<std::size_t>(size)));
-            buffer.resize(buffer.size() * 2);
-        }
-#endif
-    } catch (...) {
-    }
-    return {};
-}
-
-std::vector<fs::path> loaded_dynamic_library_paths() {
-    std::vector<fs::path> paths;
-#if defined(_WIN32)
-    for (HMODULE module : process_modules()) {
-        fs::path path = module_path(module);
-        if (!path.empty())
-            paths.push_back(std::move(path));
-    }
-#elif defined(__linux__)
-    struct CallbackData {
-        std::vector<fs::path>* paths;
-    } data{&paths};
-    dl_iterate_phdr(
-        [](dl_phdr_info* info, std::size_t, void* opaque) {
-            auto* callback = static_cast<CallbackData*>(opaque);
-            if (info->dlpi_name != nullptr && info->dlpi_name[0] != '\0')
-                callback->paths->emplace_back(info->dlpi_name);
-            return 0;
-        },
-        &data);
-#endif
-    return paths;
-}
-
 std::string dynamic_library_filename(std::string_view stem) {
 #if defined(_WIN32)
     return std::string(stem) + ".dll";
@@ -301,24 +178,6 @@ std::string dynamic_library_filename(std::string_view stem) {
     return "lib" + std::string(stem) + ".dylib";
 #else
     return "lib" + std::string(stem) + ".so";
-#endif
-}
-
-const char* dynamic_library_search_path_environment() noexcept {
-#if defined(_WIN32)
-    return "PATH";
-#elif defined(__APPLE__)
-    return "DYLD_LIBRARY_PATH";
-#else
-    return "LD_LIBRARY_PATH";
-#endif
-}
-
-char path_list_separator() noexcept {
-#if defined(_WIN32)
-    return ';';
-#else
-    return ':';
 #endif
 }
 

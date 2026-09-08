@@ -197,12 +197,12 @@ def validate_super_resolution_bundle_config(record: object) -> dict[str, object]
 
 
 def validate_quantized_transformer_metadata(record: object) -> dict[str, object]:
-    if not isinstance(record, dict):
-        raise ValueError("MiniMax-H3 quantized transformer metadata must be an object")
-    for key, value in QUANTIZED_TRANSFORMER_CONFIG.items():
-        if record.get(key) != value:
-            raise ValueError(f"MiniMax-H3 quantized transformer field {key} is invalid")
-    return dict(record)
+    from .quantized_checkpoint import QUANTIZED_CHECKPOINT_IDENTITY
+
+    expected = QUANTIZED_CHECKPOINT_IDENTITY.bundle_metadata()
+    if record != expected:
+        raise ValueError("MiniMax-H3 quantized transformer metadata does not match the public model")
+    return expected
 
 
 def validate_workspace_limit_bytes(

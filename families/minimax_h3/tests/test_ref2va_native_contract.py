@@ -221,6 +221,26 @@ def test_materialized_presentation_has_distinct_qwen_and_h3_modality_maps() -> N
     assert result.mrope_position_ids.shape == (3, 4100)
 
 
+@pytest.mark.parametrize(
+    ("sizes", "frames", "error"),
+    [((), (124,), "visual-size"), (((768, 1344),), (), "video-frame")],
+)
+def test_presentation_rejects_missing_metadata(sizes, frames, error) -> None:
+    with pytest.raises(ValueError, match=error):
+        ref2va_presentation_blueprint(
+            "prompt",
+            (_video(5.0),),
+            normalized_visual_sizes=sizes,
+            normalized_video_frames=frames,
+        )
+
+
+@pytest.mark.parametrize("modality", (1, 2))
+def test_qwen_mrope_rejects_missing_grid_metadata(modality: int) -> None:
+    with pytest.raises(ValueError, match="grid metadata has missing"):
+        qwen_mrope_position_ids((0, modality, 0), image_grids=(), video_grids=())
+
+
 def test_qwen_mrope_rejects_pad_grid_disagreement() -> None:
     with pytest.raises(ValueError, match="grid requires"):
         qwen_mrope_position_ids(
@@ -228,6 +248,11 @@ def test_qwen_mrope_rejects_pad_grid_disagreement() -> None:
             image_grids=((1, 4, 4),),
             video_grids=(),
         )
+
+
+def test_image_geometry_rejects_unconsumed_audio_latents() -> None:
+    with pytest.raises(ValueError, match="image geometry cannot contain audio"):
+        EncodedReferenceGeometry("image", 1, 32, 32, audio_latents=1).validate()
 
 
 def test_ref2va_interleaved_packed_layout_and_rotary_clock() -> None:
@@ -427,6 +452,12 @@ def test_ref2va_builder_fails_closed_before_any_large_build_when_trt_is_availabl
 
 
 def test_ref2va_builder_adds_common_then_public_profiles_without_extra_fallback_weights() -> None:
+    from families.minimax_h3 import trt_compat
+
+    if not trt_compat.is_available("tensorrt"):
+        if not trt_compat.is_available("tensorrt_rtx"):
+            pytest.skip("TensorRT or TensorRT-RTX bindings are unavailable")
+        trt_compat.configure_backend(rtx=True)
     from families.minimax_h3.ref2va_dit_builder import (
         _add_optimization_profiles,
     )

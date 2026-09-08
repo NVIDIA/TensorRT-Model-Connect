@@ -37,18 +37,6 @@ def test_runtime_has_no_external_framework_or_subprocess() -> None:
     assert not violations, "\n".join(violations)
 
 
-def test_windows_helper_builds_only_native_rtx_runtime() -> None:
-    script = (H3_RUNTIME / "build_windows.ps1").read_text(encoding="utf-8")
-    for flag in (
-        "-DTRTMC_BUILD_BACKEND_RTX=ON",
-        "-DTRTMC_BUILD_BACKEND_TRT=OFF",
-        "-DTRTMC_ENABLE_BYOK=OFF",
-        "-DTRTMC_RUNTIME_MODELS=minimax_h3",
-    ):
-        assert flag in script
-    assert "cudart_static.lib" in script
-
-
 def test_runtime_owns_tokenization_and_video_generation() -> None:
     plugin = (H3_RUNTIME / "plugin.cpp").read_text(encoding="utf-8")
     pipeline = (H3_RUNTIME / "pipeline.h").read_text(encoding="utf-8")

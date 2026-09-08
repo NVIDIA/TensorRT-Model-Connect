@@ -744,15 +744,17 @@ class RtxBackend final : public IBackend {
         StreamSetup stream_setup = resolve_stream(options.stream);
 
         const int32_t nprofiles = engine->getNbOptimizationProfiles();
+        if (nprofiles < 2)
+            throw std::runtime_error("[trtmc] Dual-profile modules require at least two profiles");
         auto make_ctx_module = [&](int32_t profile_idx) -> std::unique_ptr<ITrtModule> {
-            return create_profile_module(engine, stream_setup, options, profile_idx);
+            auto profile_options = options;
+            profile_options.optimization_profile = profile_idx;
+            auto config = create_runtime_config(*engine, profile_options, false);
+            return create_execution_module(engine, config, stream_setup, profile_options, {}, false,
+                                           false);
         };
 
         BackendDualProfileModules out;
-        if (nprofiles < 2) {
-            out.decode = make_ctx_module(0);
-            return out;
-        }
         out.prefill = make_ctx_module(0);
         out.decode = make_ctx_module(1);
         return out;
@@ -970,32 +972,6 @@ class RtxBackend final : public IBackend {
         if (stream_setup.owner)
             module->keep_alive(stream_setup.owner);
         return module;
-    }
-
-    std::unique_ptr<ITrtModule>
-    create_profile_module(const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
-                          const StreamSetup& stream_setup, const ModuleCreateOptions& options,
-                          int32_t profile_idx) {
-        auto* rt_config = engine->createRuntimeConfig();
-        if (!rt_config)
-            throw std::runtime_error("[trtmc] Failed to create RTX runtime config");
-        if (options.runtime_cache_path && options.runtime_cache_path[0] != '\0')
-            ensure_runtime_cache(rt_config, options.runtime_cache_path);
-        if (options.cuda_graphs)
-            rt_config->setCudaGraphStrategy(nvinfer1::CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE);
-
-        auto* ctx = engine->createExecutionContext(rt_config);
-        delete rt_config;
-        if (!ctx)
-            throw std::runtime_error("[trtmc] Failed to create RTX execution context");
-        auto mod =
-            std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream_setup.stream, profile_idx);
-        if (!mod->ok())
-            throw std::runtime_error("[trtmc] TrtModuleImpl creation failed (RTX)");
-        mod->keep_alive(engine);
-        if (stream_setup.owner)
-            mod->keep_alive(stream_setup.owner);
-        return mod;
     }
 
     void ensure_runtime_cache(nvinfer1::IRuntimeConfig* cfg, const char* path) {

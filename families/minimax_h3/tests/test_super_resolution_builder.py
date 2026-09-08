@@ -56,6 +56,13 @@ def test_super_resolution_public_contract_is_exact_and_path_free() -> None:
     assert metadata["learned_residual_strength"] == 0.25
     assert metadata["runtime_framework"] is None
     assert "\\" not in repr(metadata)
+    assert metadata["source_models"] == [
+        "realesr-general-x4v3.pth",
+        "realesr-general-wdn-x4v3.pth",
+    ]
+    assert super_resolution_metadata(denoise_strength=1.0)["source_models"] == [
+        "realesr-general-x4v3.pth"
+    ]
 
 
 @pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), True, "0.5"])

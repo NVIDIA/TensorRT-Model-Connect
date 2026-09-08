@@ -94,6 +94,8 @@ def test_qwen_grid_and_fl2va_presentation_rows() -> None:
     assert qwen_vision_token_rows(768, 1344) == 1008
     assert qwen_vision_patch_rows(544, 960) == 2040
     assert qwen_vision_token_rows(544, 960) == 510
+    assert qwen_vision_patch_rows(480, 864) == 1620
+    assert qwen_vision_token_rows(480, 864) == 405
     assert fl2va_text_rows(128, 1, height=768, width=1344) == 1144
     assert fl2va_text_rows(128, 2, height=768, width=1344) == 2160
     assert fl2va_text_rows(128, 1, height=544, width=960) == 646
@@ -195,8 +197,8 @@ def test_plan_abis_are_dynamic_compact_and_shared() -> None:
     assert vae.outputs[0].max_shape == (33, 48, 1, 16, 16)
 
     default_vision = vision_encoder_abi()
-    assert default_vision.inputs[0].min_shape == (2_040, 1_536)
-    assert default_vision.outputs[0].min_shape == (510, 5_120)
+    assert default_vision.inputs[0].min_shape == (1_620, 1_536)
+    assert default_vision.outputs[0].min_shape == (405, 5_120)
 
     vision = vision_encoder_abi(VisionEncoderProfile(4, 8, 16))
     assert vision.filename == "vision_encoder.plan"

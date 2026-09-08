@@ -145,9 +145,6 @@ target_link_libraries(trtmc_runtime
     trtmc_core
     ${CMAKE_DL_LIBS}
 )
-if(WIN32)
-  target_link_libraries(trtmc_runtime PRIVATE Psapi)
-endif()
 target_compile_options(trtmc_runtime PRIVATE ${TRTMC_CXX_WARNINGS})
 set_target_properties(trtmc_runtime PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"

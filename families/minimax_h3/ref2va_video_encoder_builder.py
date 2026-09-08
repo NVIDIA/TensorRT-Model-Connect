@@ -94,7 +94,10 @@ def _require_weight(weights: dict[str, object], name: str, shape: tuple[int, ...
         raise ValueError(
             f"MiniMax-H3 Ref2VA VideoVAE tensor {name} must remain FP32, got {value.dtype}"
         )
-    return np.ascontiguousarray(value)
+    # TensorRT borrows convolution weights until serialization. Retain any
+    # contiguous copy in the dictionary that already owns the checkpoint.
+    weights[name] = np.ascontiguousarray(value)
+    return weights[name]
 
 
 def _spatial_reflect_pad(

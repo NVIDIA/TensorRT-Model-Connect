@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import struct
+
+import pytest
 
 from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC, BundleWriter
 
@@ -122,3 +126,93 @@ def test_staged_component_contract_includes_ref_and_super_resolution_sections() 
     assert "ref2va_denoiser_plan" in sections
     assert "ref2va_video_vae_encoder_plan" in sections
     assert sections[-1] == "video_super_resolution_plan"
+
+
+@pytest.mark.parametrize(
+    "changed", ["weights", "config", "builder", "profile", "sr_weights", "sr_weak", "ref", "quant"]
+)
+def test_resume_rejects_changed_inputs_before_reusing_plans(
+    tmp_path: Path, monkeypatch, changed: str
+) -> None:
+    from families.minimax_h3 import provenance, quantized_checkpoint, ref2va_checkpoint
+
+    model = _model(tmp_path)
+    weight = model / "text_encoder" / "model.safetensors"
+    weight.write_bytes(b"original")
+    primary = tmp_path / provenance.SUPER_RESOLUTION_PRIMARY_FILENAME
+    weak = tmp_path / provenance.SUPER_RESOLUTION_WEAK_FILENAME
+    primary.write_bytes(b"primary")
+    weak.write_bytes(b"weak")
+    options = {"super_resolution_model": primary, "super_resolution_weak_model": weak}
+
+    if changed == "ref":
+        reference = model / "transformer_ref"
+        reference.mkdir()
+        weight = reference / "model.safetensors"
+        weight.write_bytes(b"reference")
+        identity = ref2va_checkpoint.TransformerRefIdentity(
+            ref2va_checkpoint.MODEL_ID,
+            ref2va_checkpoint.CHECKPOINT_REVISION,
+            "transformer_ref",
+            ref2va_checkpoint.TOTAL_TENSOR_BYTES,
+            638,
+            {weight.name: {"bytes": weight.stat().st_size}},
+        )
+        monkeypatch.setattr(
+            ref2va_checkpoint, "validate_transformer_ref_checkpoint", lambda _path: identity
+        )
+        options["transformer_ref"] = reference
+    elif changed == "quant":
+        weight = tmp_path / "quant.safetensors"
+        weight.write_bytes(b"quantized")
+        monkeypatch.setattr(
+            quantized_checkpoint,
+            "validate_quantized_transformer_checkpoint",
+            lambda path: replace(
+                quantized_checkpoint.QUANTIZED_CHECKPOINT_IDENTITY,
+                source_file_identity=quantized_checkpoint._source_file_identity(path),
+            ),
+        )
+        options["quantized_transformer"] = weight
+
+    def build(_component, _model, plan, **_options):
+        plan.write_bytes(b"plan")
+
+    monkeypatch.setattr(staged_build, "_run_component", build)
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1")
+    monkeypatch.setattr(staged_build, "_builder_source_identity", lambda: "original-source")
+    plans = tmp_path / "plans"
+    writer = _writer(tmp_path / "first.bundle")
+    staged_build.build_staged_bundle(model, writer, plans_dir=plans, **options)
+    writer.finish()
+    state = (plans / "build_state.json").read_text(encoding="utf-8")
+    assert str(tmp_path) not in state
+    assert "source_files" in state
+
+    if changed == "sr_weak":
+        del options["super_resolution_weak_model"]
+    elif changed == "builder":
+        monkeypatch.setattr(staged_build, "_builder_source_identity", lambda: "changed-source")
+    elif changed == "profile":
+        profile = staged_build._profile()
+        monkeypatch.setattr(staged_build, "_profile", lambda: replace(profile, norm_eps=1.0e-4))
+    else:
+        if changed == "config":
+            weight = model / "audio_vae" / "config.json"
+        elif changed == "sr_weights":
+            weight = primary
+        # A same-size change still invalidates the stat receipt.
+        before = weight.stat()
+        payload = weight.read_bytes()
+        weight.write_bytes(payload[::-1])
+        os.utime(weight, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+
+    monkeypatch.setattr(
+        staged_build,
+        "_run_component",
+        lambda *_args, **_kwargs: pytest.fail("Changed sources reached plan construction"),
+    )
+    with pytest.raises(ValueError, match="different build options"):
+        staged_build.build_staged_bundle(
+            model, _writer(tmp_path / "second.bundle"), plans_dir=plans, **options
+        )

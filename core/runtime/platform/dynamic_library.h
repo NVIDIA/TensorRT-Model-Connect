@@ -8,7 +8,6 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace trtmc::internal {
 
@@ -25,13 +24,8 @@ open_dynamic_library(const std::filesystem::path& path,
                      std::string* error = nullptr);
 void* dynamic_library_symbol(DynamicLibraryHandle handle, const char* name,
                              std::string* error = nullptr);
-void* dynamic_library_symbol_in_process(const char* name, std::string* error = nullptr);
 bool close_dynamic_library(DynamicLibraryHandle handle, std::string* error = nullptr) noexcept;
 
-std::filesystem::path current_executable_path() noexcept;
-std::vector<std::filesystem::path> loaded_dynamic_library_paths();
 std::string dynamic_library_filename(std::string_view stem);
-const char* dynamic_library_search_path_environment() noexcept;
-char path_list_separator() noexcept;
 
 } // namespace trtmc::internal

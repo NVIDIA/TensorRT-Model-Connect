@@ -63,7 +63,7 @@ bool is_mp4_path(std::string_view path);
 void write_mp4(const VideoResult& result, const std::string& path);
 
 // Decode a Windows-supported media container into the public THWC RGB video
-// and interleaved float-audio value type used by Ref2VA. Decode fails closed
+// and interleaved float-audio value types. Decode fails closed
 // as soon as the pipeline's reference-media policy is exceeded.
 VideoClipInput read_video_file(const std::string& path, const ReferenceMediaDecodePolicy& policy);
 

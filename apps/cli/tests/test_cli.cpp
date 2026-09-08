@@ -5,6 +5,7 @@
 
 #include "cli/cli.h"
 #include "cli/io.h"
+#include "cli/windows_media.h"
 
 #include <chrono>
 #include <cmath>
@@ -857,6 +858,15 @@ int main() {
         }
     };
     const auto wav_path = test_temp_directory().file("io.wav");
+    trtmc::ReferenceMediaDecodePolicy canvas_policy{15, 24, 240, 1, 1, 32, 0.25, 4.0};
+    check(trtmc::cli::detail::reference_video_decode_size(canvas_policy, 1, 1) ==
+              std::make_pair(32U, 32U),
+          "canvas axes clamp to one alignment unit on every platform");
+    canvas_policy.canvas_short_edge = 80;
+    canvas_policy.canvas_max_pixels = 80 * 80;
+    check(trtmc::cli::detail::reference_video_decode_size(canvas_policy, 1, 1) ==
+              std::make_pair(64U, 64U),
+          "canvas rounding uses ties-to-even on every platform");
     trtmc::AudioResult wav;
     wav.samples = {-1.0F, 0.25F, 1.0F};
     wav.num_samples = 3;

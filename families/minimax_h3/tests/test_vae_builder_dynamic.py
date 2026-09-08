@@ -9,7 +9,10 @@ import pytest
 from families.minimax_h3 import trt_compat
 
 
-trt_compat.configure_backend(rtx=True)
+if not trt_compat.is_available("tensorrt"):
+    if not trt_compat.is_available("tensorrt_rtx"):
+        pytest.skip("TensorRT bindings are unavailable", allow_module_level=True)
+    trt_compat.configure_backend(rtx=True)
 trt = trt_compat.get_trt()
 
 from families.minimax_h3 import graph_ops as op  # noqa: E402

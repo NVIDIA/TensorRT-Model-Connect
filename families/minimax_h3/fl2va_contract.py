@@ -119,7 +119,7 @@ class PlanAbi:
 class VisionEncoderProfile:
     """Patch-row profile for one Qwen3-VL image or temporal video block."""
 
-    min_patches: int = 2040
+    min_patches: int = 1620
     opt_patches: int = 4032
     max_patches: int = 4176
 

@@ -54,10 +54,8 @@ enum class Fl2vaPlanKind {
     kKeyframeVaeEncoder,
 };
 
-// Rejects unknown bindings, legacy profiles, and partially rebuilt shared
-// Qwen plans before enqueue. The two accepted Qwen envelopes are the exact
-// FL2VA-only profile and the authenticated Ref2VA superset profile; no
-// intermediate or merely-larger profile is accepted.
+// Validates the exact FL2VA-only or Ref2VA-superset Qwen envelope before enqueue,
+// including compatible bundles built before the compact canvas was added.
 void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind);
 
 using Fl2vaPlanLoader = std::function<std::unique_ptr<ITrtModule>(const std::string& section)>;

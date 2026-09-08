@@ -138,7 +138,7 @@ def super_resolution_metadata(
         "architecture": "SRVGGNetCompact",
         "source_models": [
             GENERAL_CHECKPOINT_FILENAME,
-            WEAK_DENOISE_CHECKPOINT_FILENAME,
+            *([WEAK_DENOISE_CHECKPOINT_FILENAME] if strength != 1.0 else []),
         ],
         "denoise_strength": strength,
         "learned_residual_strength": detail_strength,

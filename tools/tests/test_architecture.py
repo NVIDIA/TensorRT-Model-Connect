@@ -548,7 +548,8 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
         for node in request_class.body
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     }
-    # The core consumes these before dispatch. Every other field belongs to the
+    # The core consumes these before dispatch. Nonempty family_options require
+    # a family validation hook. Every other field belongs to the
     # selected family's build function, including explicit unsupported checks.
     family_owned_fields = request_fields - {
         "family",
@@ -1102,7 +1103,7 @@ def test_rtx_backend_is_an_explicit_optional_dso() -> None:
     ):
         assert method in source
     assert 'return "trt_rtx"' in source
-    assert "engine->createRuntimeConfig()" in source
+    assert "engine.createRuntimeConfig()" in source
     assert "engine->createExecutionContext(config.get())" in source
     assert "runtime_cache_path" in source
     assert "setRuntimeCache" in source

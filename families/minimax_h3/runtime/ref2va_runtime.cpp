@@ -1494,19 +1494,27 @@ void validate_ref2va_denoiser_profile_selection(ITrtModule& module, int32_t expe
 
 void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
     switch (kind) {
-    case Ref2vaPlanKind::kVisionEncoder:
+    case Ref2vaPlanKind::kVisionEncoder: {
         require_counts(module, 4, 4, "vision encoder");
-        require_dynamic_input(module, "pixel_values", DType::kFloat32, {2040, 1536}, {4032, 1536},
-                              {65536, 1536});
-        require_dynamic_input(module, "interp_indices", DType::kInt32, {2040, 4}, {4032, 4},
+        // Shared FL2VA/Ref2VA plans now also cover the compact 480x864 canvas.
+        const int64_t minimum =
+            module.has_input("pixel_values") &&
+                    module.input_profile_shape("pixel_values", 0, ProfileShapeSelector::kMin) ==
+                        std::vector<int64_t>{2040, 1536}
+                ? 2040
+                : 1620;
+        require_dynamic_input(module, "pixel_values", DType::kFloat32, {minimum, 1536},
+                              {4032, 1536}, {65536, 1536});
+        require_dynamic_input(module, "interp_indices", DType::kInt32, {minimum, 4}, {4032, 4},
                               {65536, 4});
-        require_dynamic_input(module, "interp_weights", DType::kFloat32, {2040, 4}, {4032, 4},
+        require_dynamic_input(module, "interp_weights", DType::kFloat32, {minimum, 4}, {4032, 4},
                               {65536, 4});
-        require_dynamic_input(module, "vision_position_ids", DType::kInt32, {2040, 2}, {4032, 2},
+        require_dynamic_input(module, "vision_position_ids", DType::kInt32, {minimum, 2}, {4032, 2},
                               {65536, 2});
         for (const char* name : {"vision_embeds", "deepstack_0", "deepstack_1", "deepstack_2"})
             require_output(module, name, DType::kFloat32, {16384, 5120});
         return;
+    }
     case Ref2vaPlanKind::kTextEncoder:
         require_counts(module, 9, 1, "text encoder");
         require_dynamic_input(module, "input_ids", DType::kInt32, {1}, {1144}, {262144});

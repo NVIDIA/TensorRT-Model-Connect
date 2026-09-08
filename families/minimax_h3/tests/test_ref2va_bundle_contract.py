@@ -62,7 +62,7 @@ def test_bundle_metadata_requires_strict_transformer_ref_identity() -> None:
     assert metadata["ref2va_shared_sections"]["text_encoder"] == "text_encoder_plan"
     assert metadata["ref2va_shared_qwen_profiles"]["vision_encoder_plan"][
         "patch_rows_per_call"
-    ] == [2_040, 4_032, 65_536]
+    ] == [1_620, 4_032, 65_536]
     assert metadata["ref2va_shared_qwen_profiles"]["text_encoder_plan"]["sequence_rows"] == [
         1,
         1_144,

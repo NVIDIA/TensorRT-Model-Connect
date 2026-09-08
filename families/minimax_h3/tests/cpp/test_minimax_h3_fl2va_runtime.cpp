@@ -152,7 +152,7 @@ class FakeModule final : public trtmc::ITrtModule {
                                     ? 0
                                     : (selector == trtmc::ProfileShapeSelector::kOpt ? 1 : 2);
         if (kind_ == ModuleKind::kVision) {
-            const int64_t rows[3] = {2040, 4032,
+            const int64_t rows[3] = {profile_min_override > 0 ? profile_min_override : 1620, 4032,
                                      profile_max_override > 0 ? profile_max_override : 4176};
             if (name == "pixel_values")
                 return {rows[profile], 1536};
@@ -195,6 +195,7 @@ class FakeModule final : public trtmc::ITrtModule {
 
     trtmc::TensorMap last_inputs;
     int32_t observed_vision_count{-1};
+    int64_t profile_min_override{0};
     int64_t profile_max_override{0};
 
   private:
@@ -280,6 +281,14 @@ void test_official_qwen_presentation_and_mock_plans() {
     check(one_features.rows == 1 &&
               vision.last_inputs.at("pixel_values").shape == std::vector<int64_t>({4, 1536}),
           "FL2VA vision mock receives the frozen native plan ABI");
+    const auto compact_inputs = trtmc::minimax_h3::make_fl2va_vision_inputs(make_image(480, 864));
+    const auto compact_features =
+        trtmc::minimax_h3::run_fl2va_vision_encoder(vision, compact_inputs);
+    check(compact_features.rows == 405 &&
+              vision.last_inputs.at("pixel_values").shape == std::vector<int64_t>({1620, 1536}) &&
+              vision.input_profile_shape("pixel_values", 0, trtmc::ProfileShapeSelector::kMin) ==
+                  std::vector<int64_t>({1620, 1536}),
+          "FL2VA compact canvas fits the vision plan minimum");
     trtmc::minimax_h3::Fl2vaVisionFeatures both_features;
     both_features.rows = 2;
     for (auto pair : {std::pair{&both_features.vision_embeds, &one_features.vision_embeds},
@@ -313,6 +322,11 @@ void test_official_qwen_presentation_and_mock_plans() {
     superset_vision.profile_max_override = 65536;
     trtmc::minimax_h3::validate_fl2va_plan(superset_vision,
                                            trtmc::minimax_h3::Fl2vaPlanKind::kVisionEncoder);
+    for (FakeModule* compatible : {&vision, &superset_vision}) {
+        compatible->profile_min_override = 2040;
+        trtmc::minimax_h3::validate_fl2va_plan(*compatible,
+                                               trtmc::minimax_h3::Fl2vaPlanKind::kVisionEncoder);
+    }
     FakeModule superset_text(ModuleKind::kText);
     superset_text.profile_max_override = 262144;
     trtmc::minimax_h3::validate_fl2va_plan(superset_text,

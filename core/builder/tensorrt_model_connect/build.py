@@ -137,6 +137,11 @@ def build(request: BuildRequest) -> None:
     family = _resolve_family(request)
     _select_backend(request.backend)
     family_module = _load_family(family)
+    if request.family_options:
+        validate_options = getattr(family_module, "validate_build_options", None)
+        if validate_options is None:
+            raise ValueError(f"family {family!r} does not accept family_options")
+        validate_options(dict(request.family_options))
     writer = BundleWriter(request.output_path)
     try:
         with graph_transform(request.graph_transform):

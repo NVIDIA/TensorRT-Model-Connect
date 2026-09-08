@@ -240,6 +240,22 @@ def test_build_runs_graph_transform_before_family_engine_serialization(
     assert fake_trt.Builder is FakeTrtBuilder
 
 
+def test_nonempty_family_options_require_family_validation(monkeypatch, tmp_path: Path) -> None:
+    request = replace(_request(tmp_path), family_options=(("example_option", True),))
+    family = SimpleNamespace(build=lambda _request, _writer: pytest.fail("unexpected build"))
+    monkeypatch.setattr(build_core, "_load_family", lambda _family: family)
+    with pytest.raises(ValueError, match="does not accept family_options"):
+        build_core.build(request)
+
+    def reject_options(options):
+        assert options == {"example_option": True}
+        raise ValueError("unsupported example option")
+
+    family.validate_build_options = reject_options
+    with pytest.raises(ValueError, match="unsupported example option"):
+        build_core.build(request)
+
+
 def test_build_aborts_and_preserves_family_error(monkeypatch, tmp_path: Path) -> None:
     events: list[str] = []
     family_error = RuntimeError("family failed")

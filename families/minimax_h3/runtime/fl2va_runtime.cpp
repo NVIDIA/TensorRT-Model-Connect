@@ -176,8 +176,15 @@ void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind) {
         require_io_counts(module, 4, 4, "vision encoder");
         constexpr int64_t kSmallMaxPatches = 4176;
         constexpr int64_t kSupersetMaxPatches = 65536;
+        // Retain the original minimum for bundles built before compact FL2VA support.
+        const int64_t minimum =
+            module.has_input("pixel_values") &&
+                    module.input_profile_shape("pixel_values", 0, ProfileShapeSelector::kMin) ==
+                        std::vector<int64_t>{2040, 1536}
+                ? 2040
+                : 1620;
         const auto matches_envelope = [&](int64_t maximum) {
-            return dynamic_input_matches(module, "pixel_values", DType::kFloat32, {2040, 1536},
+            return dynamic_input_matches(module, "pixel_values", DType::kFloat32, {minimum, 1536},
                                          {4032, 1536}, {maximum, 1536});
         };
         const int64_t maximum =
@@ -188,11 +195,11 @@ void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind) {
             throw std::runtime_error(
                 "MiniMax-H3 FL2VA vision plan is neither the exact public nor Ref2VA-superset "
                 "profile");
-        require_dynamic_input(module, "interp_indices", DType::kInt32, {2040, 4}, {4032, 4},
+        require_dynamic_input(module, "interp_indices", DType::kInt32, {minimum, 4}, {4032, 4},
                               {maximum, 4});
-        require_dynamic_input(module, "interp_weights", DType::kFloat32, {2040, 4}, {4032, 4},
+        require_dynamic_input(module, "interp_weights", DType::kFloat32, {minimum, 4}, {4032, 4},
                               {maximum, 4});
-        require_dynamic_input(module, "vision_position_ids", DType::kInt32, {2040, 2}, {4032, 2},
+        require_dynamic_input(module, "vision_position_ids", DType::kInt32, {minimum, 2}, {4032, 2},
                               {maximum, 2});
         for (const char* name : {"vision_embeds", "deepstack_0", "deepstack_1", "deepstack_2"})
             require_profile_output(module, name, DType::kFloat32, {maximum / 4, kTextDim});

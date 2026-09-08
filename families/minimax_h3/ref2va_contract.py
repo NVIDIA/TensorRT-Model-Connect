@@ -401,6 +401,10 @@ def ref2va_presentation_blueprint(
     if not isinstance(prompt, str):
         raise ValueError("MiniMax-H3 prompt must be one string")
     validate_reference_request(references)
+    if len(normalized_visual_sizes) != sum(ref.kind != "audio" for ref in references):
+        raise ValueError("MiniMax-H3 visual-size metadata count does not match references")
+    if len(normalized_video_frames) != sum(ref.kind == "video" for ref in references):
+        raise ValueError("MiniMax-H3 video-frame metadata count does not match references")
     visual_sizes = iter(normalized_visual_sizes)
     video_frames = iter(normalized_video_frames)
     pieces: list[PresentationPiece] = []
@@ -422,18 +426,6 @@ def ref2va_presentation_blueprint(
             for timestamp in timestamps:
                 pieces.append(PresentationPiece("text", f"<{timestamp:.1f} seconds>"))
                 pieces.append(PresentationPiece("video", height=height, width=width))
-    try:
-        next(visual_sizes)
-    except StopIteration:
-        pass
-    else:
-        raise ValueError("MiniMax-H3 visual-size metadata has unused entries")
-    try:
-        next(video_frames)
-    except StopIteration:
-        pass
-    else:
-        raise ValueError("MiniMax-H3 video-frame metadata has unused entries")
     pieces.append(PresentationPiece("text", prompt))
     return tuple(pieces)
 
@@ -484,7 +476,10 @@ def qwen_mrope_position_ids(
                 axis.extend(values)
             current_position += length
         else:
-            grid_t, grid_h, grid_w = next(image_iter if modality == 1 else video_iter)
+            try:
+                grid_t, grid_h, grid_w = next(image_iter if modality == 1 else video_iter)
+            except StopIteration as error:
+                raise ValueError("MiniMax-H3 Qwen grid metadata has missing entries") from error
             merge = QWEN_VISION_MERGE_SIZE
             if grid_h % merge or grid_w % merge:
                 raise ValueError("MiniMax-H3 Qwen grid is not spatial-merge aligned")
@@ -600,6 +595,12 @@ class EncodedReferenceGeometry:
     def validate(self) -> None:
         if self.kind not in ("image", "video", "audio"):
             raise ValueError("MiniMax-H3 encoded reference kind is invalid")
+        if (
+            isinstance(self.audio_latents, bool)
+            or not isinstance(self.audio_latents, int)
+            or self.audio_latents < 0
+        ):
+            raise ValueError("MiniMax-H3 reference audio latent count must be non-negative")
         if self.kind == "audio":
             if any((self.latent_frames, self.latent_height, self.latent_width)):
                 raise ValueError("MiniMax-H3 audio geometry cannot contain video latents")
@@ -615,8 +616,8 @@ class EncodedReferenceGeometry:
             raise ValueError("MiniMax-H3 reference latents are not transformer-patch aligned")
         if self.kind == "image" and self.latent_frames != 1:
             raise ValueError("MiniMax-H3 image references encode to exactly one latent frame")
-        if self.audio_latents < 0:
-            raise ValueError("MiniMax-H3 reference audio latent count cannot be negative")
+        if self.kind == "image" and self.audio_latents != 0:
+            raise ValueError("MiniMax-H3 image geometry cannot contain audio latents")
 
 
 @dataclass(frozen=True)
@@ -788,6 +789,8 @@ def build_ref2va_packed_layout(
                 )
             rotary_time += max(float(reference.audio_latents), video_span)
 
+    if cursor != text_rows + condition_video_rows + condition_audio_rows:
+        raise RuntimeError("MiniMax-H3 Ref2VA reference row cursor mismatch")
     target_audio_start = cursor
     target_video_start = target_audio_start + target_audio_rows
     _fill_audio_positions(
@@ -810,8 +813,6 @@ def build_ref2va_packed_layout(
     tags[text_index_array] = np.asarray(text_token_tags, dtype=np.int32)
     tags[video_index_array] = H3_VIDEO_TAG
     tags[audio_index_array] = H3_AUDIO_TAG
-    if cursor != target_audio_start:
-        raise RuntimeError("MiniMax-H3 Ref2VA reference row cursor mismatch")
     return Ref2VAPackedLayout(
         position_ids=positions,
         token_tags=tags,

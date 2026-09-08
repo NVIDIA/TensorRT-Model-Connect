@@ -68,6 +68,47 @@ void validate_reference_media_decode_policy(const ReferenceMediaDecodePolicy& po
     }
 }
 
+struct ReferenceVideoSize {
+    std::uint32_t width{0};
+    std::uint32_t height{0};
+};
+
+std::uint32_t round_canvas_axis(double value, const ReferenceMediaDecodePolicy& policy) {
+    const double scaled = value / policy.canvas_multiple;
+    const double lower = std::floor(scaled);
+    const double fraction = scaled - lower;
+    double rounded = lower;
+    if (fraction > 0.5 || (fraction == 0.5 && static_cast<std::uint64_t>(lower) % 2 != 0))
+        rounded += 1.0;
+    if (rounded > std::numeric_limits<std::uint32_t>::max() / policy.canvas_multiple)
+        throw std::runtime_error("reference video canvas rounding overflow");
+    return std::max(policy.canvas_multiple,
+                    static_cast<std::uint32_t>(rounded) * policy.canvas_multiple);
+}
+
+ReferenceVideoSize resolve_reference_video_size(std::uint32_t source_width,
+                                                std::uint32_t source_height,
+                                                const ReferenceMediaDecodePolicy& policy) {
+    if (source_width == 0 || source_height == 0)
+        throw std::runtime_error("reference video has invalid source dimensions");
+    const double ratio = static_cast<double>(source_width) / source_height;
+    if (!std::isfinite(ratio) || ratio < policy.minimum_aspect_ratio ||
+        ratio > policy.maximum_aspect_ratio) {
+        throw std::runtime_error("reference video aspect is outside the configured range");
+    }
+    double width = ratio >= 1.0 ? policy.canvas_short_edge * ratio
+                                : static_cast<double>(policy.canvas_short_edge);
+    double height = ratio >= 1.0 ? static_cast<double>(policy.canvas_short_edge)
+                                 : policy.canvas_short_edge / ratio;
+    const double area = width * height;
+    if (area > static_cast<double>(policy.canvas_max_pixels)) {
+        const double scale = std::sqrt(static_cast<double>(policy.canvas_max_pixels) / area);
+        width *= scale;
+        height *= scale;
+    }
+    return {round_canvas_axis(width, policy), round_canvas_axis(height, policy)};
+}
+
 struct ReferenceAudioFrameWindow {
     std::uint64_t first_frame{0};
     std::uint64_t end_frame{0};
@@ -435,47 +476,6 @@ void validate_result(const VideoResult& result) {
             audio.samples.size() % static_cast<std::size_t>(audio.channels) != 0)
             throw std::runtime_error("write_mp4 requires valid mono or stereo interleaved audio");
     }
-}
-
-struct ReferenceVideoSize {
-    std::uint32_t width{0};
-    std::uint32_t height{0};
-};
-
-std::uint32_t round_canvas_axis(double value, const ReferenceMediaDecodePolicy& policy) {
-    const double scaled = value / policy.canvas_multiple;
-    const double lower = std::floor(scaled);
-    const double fraction = scaled - lower;
-    double rounded = lower;
-    if (fraction > 0.5 || (fraction == 0.5 && static_cast<std::uint64_t>(lower) % 2 != 0))
-        rounded += 1.0;
-    if (rounded > std::numeric_limits<std::uint32_t>::max() / policy.canvas_multiple)
-        throw std::runtime_error("reference video canvas rounding overflow");
-    return std::max(policy.canvas_multiple,
-                    static_cast<std::uint32_t>(rounded) * policy.canvas_multiple);
-}
-
-ReferenceVideoSize resolve_reference_video_size(std::uint32_t source_width,
-                                                std::uint32_t source_height,
-                                                const ReferenceMediaDecodePolicy& policy) {
-    if (source_width == 0 || source_height == 0)
-        throw std::runtime_error("reference video has invalid source dimensions");
-    const double ratio = static_cast<double>(source_width) / source_height;
-    if (!std::isfinite(ratio) || ratio < policy.minimum_aspect_ratio ||
-        ratio > policy.maximum_aspect_ratio) {
-        throw std::runtime_error("reference video aspect is outside the configured range");
-    }
-    double width = ratio >= 1.0 ? policy.canvas_short_edge * ratio
-                                : static_cast<double>(policy.canvas_short_edge);
-    double height = ratio >= 1.0 ? static_cast<double>(policy.canvas_short_edge)
-                                 : policy.canvas_short_edge / ratio;
-    const double area = width * height;
-    if (area > static_cast<double>(policy.canvas_max_pixels)) {
-        const double scale = std::sqrt(static_cast<double>(policy.canvas_max_pixels) / area);
-        width *= scale;
-        height *= scale;
-    }
-    return {round_canvas_axis(width, policy), round_canvas_axis(height, policy)};
 }
 
 std::uint64_t rounded_reference_frame_slot(std::uint64_t frame, std::uint32_t fps_numerator,
@@ -859,32 +859,8 @@ std::pair<std::uint32_t, std::uint32_t>
 detail::reference_video_decode_size(const ReferenceMediaDecodePolicy& policy,
                                     std::uint32_t source_width, std::uint32_t source_height) {
     validate_reference_media_decode_policy(policy);
-#if defined(_WIN32)
     const auto size = resolve_reference_video_size(source_width, source_height, policy);
     return {size.width, size.height};
-#else
-    if (source_width == 0 || source_height == 0)
-        throw std::invalid_argument("reference video has invalid source dimensions");
-    const double short_edge = policy.canvas_short_edge;
-    const double max_pixels = static_cast<double>(policy.canvas_max_pixels);
-    const double ratio = static_cast<double>(source_width) / source_height;
-    if (!std::isfinite(ratio) || ratio < policy.minimum_aspect_ratio ||
-        ratio > policy.maximum_aspect_ratio) {
-        throw std::invalid_argument("reference video aspect is outside the configured range");
-    }
-    double width = ratio >= 1.0 ? short_edge * ratio : short_edge;
-    double height = ratio >= 1.0 ? short_edge : short_edge / ratio;
-    if (width * height > max_pixels) {
-        const double scale = std::sqrt(max_pixels / (width * height));
-        width *= scale;
-        height *= scale;
-    }
-    const auto round_axis = [&](double value) {
-        return static_cast<std::uint32_t>(std::nearbyint(value / policy.canvas_multiple)) *
-               policy.canvas_multiple;
-    };
-    return {round_axis(width), round_axis(height)};
-#endif
 }
 
 bool detail::reference_timeline_within_limit(const ReferenceMediaDecodePolicy& policy,

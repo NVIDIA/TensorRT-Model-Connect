@@ -543,6 +543,27 @@ void test_request_boundary_validation() {
 }
 
 void test_strict_plan_abi_and_fake_end_to_end() {
+    for (int64_t minimum : {1620, 2040}) {
+        FakeModule vision;
+        vision.add_dynamic("pixel_values", trtmc::DType::kFloat32, {minimum, 1536}, {4032, 1536},
+                           {65536, 1536});
+        vision.add_dynamic("interp_indices", trtmc::DType::kInt32, {minimum, 4}, {4032, 4},
+                           {65536, 4});
+        vision.add_dynamic("interp_weights", trtmc::DType::kFloat32, {minimum, 4}, {4032, 4},
+                           {65536, 4});
+        vision.add_dynamic("vision_position_ids", trtmc::DType::kInt32, {minimum, 2}, {4032, 2},
+                           {65536, 2});
+        for (const char* name : {"vision_embeds", "deepstack_0", "deepstack_1", "deepstack_2"})
+            vision.add_output(name, trtmc::DType::kFloat32, {16384, 5120});
+        trtmc::minimax_h3::validate_ref2va_plan(vision,
+                                                trtmc::minimax_h3::Ref2vaPlanKind::kVisionEncoder);
+        vision.tensors.at("interp_indices").minimum = {4, 4};
+        require(rejects([&] {
+                    trtmc::minimax_h3::validate_ref2va_plan(
+                        vision, trtmc::minimax_h3::Ref2vaPlanKind::kVisionEncoder);
+                }),
+                "Ref2VA accepted inconsistent shared vision minima");
+    }
     auto adaln = make_adaln_module();
     auto denoiser = make_denoiser_module();
     trtmc::minimax_h3::validate_ref2va_plan(adaln,

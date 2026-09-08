@@ -26,22 +26,13 @@ int main() {
 #if defined(_WIN32)
     check(trtmc::internal::dynamic_library_filename("trtmc_example") == "trtmc_example.dll",
           "Windows library filename");
-    check(trtmc::internal::path_list_separator() == ';', "Windows path-list separator");
-    check(std::string(trtmc::internal::dynamic_library_search_path_environment()) == "PATH",
-          "Windows loader path environment");
+#elif defined(__APPLE__)
+    check(trtmc::internal::dynamic_library_filename("trtmc_example") == "libtrtmc_example.dylib",
+          "macOS library filename");
 #else
     check(trtmc::internal::dynamic_library_filename("trtmc_example") == "libtrtmc_example.so",
           "Linux library filename");
-    check(trtmc::internal::path_list_separator() == ':', "POSIX path-list separator");
-    check(std::string(trtmc::internal::dynamic_library_search_path_environment()) ==
-              "LD_LIBRARY_PATH",
-          "Linux loader path environment");
 #endif
-
-    const auto executable = trtmc::internal::current_executable_path();
-    check(!executable.empty(), "current executable path is available");
-    check(executable.empty() || std::filesystem::exists(executable),
-          "current executable path exists");
 
     std::string error;
     auto missing = trtmc::internal::open_dynamic_library(

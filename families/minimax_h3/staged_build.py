@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 import math
 from pathlib import Path
@@ -41,6 +41,7 @@ from .config import (
     VISION_ENCODER_DEFAULT_WORKSPACE_BYTES,
 )
 from .provenance import (
+    CHECKPOINT_REPOSITORY,
     CHECKPOINT_REVISION,
     QUANTIZED_TRANSFORMER_CONFIG,
     SUPER_RESOLUTION_LEARNED_RESIDUAL_STRENGTH,
@@ -122,6 +123,34 @@ def _valid_plan_record(value: object) -> bool:
     )
 
 
+def _source_file_receipt(path: Path) -> dict[str, int]:
+    """Detect local source changes without rereading checkpoint tensor payloads."""
+
+    info = path.stat()
+    return {
+        "bytes": info.st_size,
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
+    }
+
+
+def _component_source_receipts(root: Path) -> dict[str, dict[str, int]]:
+    return {
+        path.name: _source_file_receipt(path)
+        for path in sorted(root.iterdir())
+        if path.is_file() and path.suffix in {".json", ".safetensors"}
+    }
+
+
+def _builder_source_identity() -> dict[str, dict[str, int]]:
+    return {
+        path.name: _source_file_receipt(path)
+        for path in sorted(Path(__file__).parent.glob("*.py"))
+    }
+
+
 def _run_component(
     component: str,
     model: Path,
@@ -201,7 +230,7 @@ def _runtime_config(
 
     if transformer_ref_identity is None:
         text_sequence_profile = [1, 1144, 2641]
-        vision_patch_profile = [2040, 4032, 4176]
+        vision_patch_profile = [1620, 4032, 4176]
         vision_row_profile = [1, 1008, 2088]
     else:
         from .ref2va_qwen_contract import ref2va_shared_qwen_profile_metadata
@@ -414,14 +443,60 @@ def build_staged_bundle(
     if not version or not abi:
         raise RuntimeError("Cannot determine TensorRT-RTX version and ABI")
 
+    checkpoint_components = ["text_encoder", "vae", "audio_vae"]
+    if quantized_transformer_identity is None:
+        checkpoint_components.append("transformer")
     state = {
-        "format": 1,
+        "format": 2,
         "trt_version": version,
-        "ref2va": transformer_ref_identity is not None,
-        "quantized_transformer": quantized_transformer_identity is not None,
-        "super_resolution": super_resolution_identity is not None,
+        "trt_abi": abi,
+        "builder_source": _builder_source_identity(),
+        "profile": asdict(_profile()),
+        "workspace_limits": _workspace_limits(
+            components, ref2va=transformer_ref_identity is not None
+        ),
+        "checkpoint": {
+            "repository": CHECKPOINT_REPOSITORY,
+            "revision": CHECKPOINT_REVISION,
+            "components": {
+                name: _component_source_receipts(model / name)
+                for name in checkpoint_components
+            },
+        },
+        "ref2va": (
+            {
+                **transformer_ref_identity.bundle_metadata(),
+                "source_files": _component_source_receipts(transformer_ref_path),
+            }
+            if transformer_ref_identity is not None
+            else None
+        ),
+        "quantized_transformer": (
+            {
+                **quantized_transformer_identity.bundle_metadata(),
+                "source_file_identity": (
+                    quantized_transformer_identity.source_file_identity.receipt_metadata()
+                ),
+            }
+            if quantized_transformer_identity is not None
+            else None
+        ),
+        "super_resolution": (
+            {
+                **super_resolution_bundle_config(super_resolution_identity),
+                "source_files": {
+                    path.name: _source_file_receipt(path)
+                    for path in (super_resolution_model_path, super_resolution_weak_model_path)
+                    if path is not None
+                },
+            }
+            if super_resolution_identity is not None
+            else None
+        ),
         "components": [filename for _component, filename, _section in components],
     }
+    # Compare the JSON form, including dataclass tuples normalized to lists.
+    state = json.loads(json.dumps(state))
     state_path = plans / "build_state.json"
     if state_path.is_file():
         if json.loads(state_path.read_text(encoding="utf-8")) != state:

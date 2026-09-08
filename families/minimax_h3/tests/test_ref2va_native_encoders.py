@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import weakref
 
 
 def _configure_trt():
@@ -98,6 +99,21 @@ def test_ref2va_qwen_builders_delegate_to_shared_graphs_with_superset_profiles(
     assert calls[0][1].max_patches == 65_536
     assert calls[1][1].max_sequence_length == 262_144
     assert calls[1][1].max_vision_rows == 262_144
+
+
+def test_video_encoder_retains_temporary_contiguous_weights() -> None:
+    _configure_trt()
+    from families.minimax_h3.ref2va_video_encoder_builder import _require_weight
+
+    original = np.arange(12, dtype=np.float32).reshape(3, 4).T
+    weights = {"conv.weight": original}
+    value = _require_weight(weights, "conv.weight", (4, 3))
+    assert value.flags.c_contiguous
+    assert value is not original
+    np.testing.assert_array_equal(value, original)
+    reference = weakref.ref(value)
+    del value
+    assert reference() is weights["conv.weight"]
 
 
 def test_temporal_causal_conv_and_isolated_group_norm_micrograph_serializes() -> None:

@@ -113,7 +113,8 @@ if(TRTMC_BUILD_TESTS)
 
   if(WIN32)
     set(_trtmc_minimax_test_path
-      "$<TARGET_FILE_DIR:trtmc_model_minimax_h3>$<SEMICOLON>$ENV{PATH}")
+      "$<TARGET_FILE_DIR:trtmc_model_minimax_h3>;$ENV{PATH}")
+    string(REPLACE ";" "\\;" _trtmc_minimax_test_path "${_trtmc_minimax_test_path}")
     foreach(_trtmc_minimax_test_target IN ITEMS
         minimax_h3_math
         test_minimax_h3_cuda_rng
