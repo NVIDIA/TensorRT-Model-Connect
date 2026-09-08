@@ -31,6 +31,19 @@ def test_checked_in_gpt2_accuracy_suite_is_discoverable() -> None:
     assert "device" not in plan.items[0].case
 
 
+def test_gpt2_manifest_covers_the_accuracy_context_window() -> None:
+    item = QualificationCatalog(REPOSITORY / "families").plan(
+        "accuracy", models=["gpt2-125m"]
+    ).items[0]
+    manifest = json.loads(item.manifest_path.read_text(encoding="utf-8"))
+
+    assert (
+        item.case["prompt"]["token_limit"]
+        + item.case["candidate"]["request"]["max_new_tokens"]
+        <= manifest["max_sequence_length"]
+    )
+
+
 def test_mmlu_samples_are_selected_without_padding_or_repetition(tmp_path: Path) -> None:
     dataset_root = tmp_path / "data"
     dataset_path = dataset_root / "MMLU_five_shot" / "mmlu_dataset.json"
