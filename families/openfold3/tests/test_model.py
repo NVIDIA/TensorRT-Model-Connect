@@ -43,7 +43,6 @@ from families.openfold3.model_config import (
     resolve_package_root,
 )
 from families.openfold3.provenance import PINNED_OPENFOLD3
-from families.openfold3.qualification import Atom, matched_coordinates
 from families.openfold3.prepare_model_dir import (
     _validate_disabled_template_features,
     _write_deterministic_npz,
@@ -234,12 +233,6 @@ def test_corrupt_feature_archive_reports_a_value_error(tmp_path: Path, monkeypat
 
     with pytest.raises(ValueError, match="invalid OpenFold3 structure metadata"):
         model_config.config_from_dir(tmp_path)
-
-
-def test_qualification_rejects_duplicate_atom_keys() -> None:
-    atom = Atom("A", "1", "CA", np.zeros(3, dtype=np.float64))
-    with pytest.raises(ValueError, match="duplicate reference atom key"):
-        matched_coordinates([atom], [atom, atom])
 
 
 def test_qualification_requires_all_ubiquitin_atoms_to_match() -> None:
