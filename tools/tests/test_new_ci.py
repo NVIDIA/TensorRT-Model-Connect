@@ -958,6 +958,7 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("tensorrt_model_connect/__init__.py", "")
         archive.writestr("tensorrt_model_connect/__main__.py", "def main(): pass\n")
+        archive.writestr("tensorrt_model_connect/native_cli.py", "")
         archive.writestr("trtmc_benchmark/__init__.py", "")
         server_source = tmp_path / "apps/server/python/trtmc_server/__init__.py"
         server_source.parent.mkdir(parents=True)
@@ -1101,6 +1102,8 @@ def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> 
         plugin_id: str,
         implementation: str,
         build_id: str = "1234567890abcdef1234567890abcdef",
+        struct_size: str = "sizeof(struct PluginDescriptorV1)",
+        descriptor_version: int = 1,
     ) -> str:
         return f"""
 #include <stdint.h>
@@ -1112,7 +1115,7 @@ struct PluginDescriptorV1 {{
     const char *build_id;
 }};
 static const struct PluginDescriptorV1 descriptor = {{
-    sizeof(struct PluginDescriptorV1), 1, {kind}, "{plugin_id}", "{build_id}"
+    {struct_size}, {descriptor_version}, {kind}, "{plugin_id}", "{build_id}"
 }};
 const struct PluginDescriptorV1 *trtmc_plugin_descriptor_v1(void) {{ return &descriptor; }}
 {implementation}
@@ -1140,6 +1143,25 @@ const struct PluginDescriptorV1 *trtmc_plugin_descriptor_v1(void) {{ return &des
     )
     compile_library("libtrtmc_model_beta.so", plugin_source(2, "beta", "void beta_symbol(void) {}"))
     load_native_libraries(tmp_path, ("alpha", "beta"))
+
+    invalid_descriptors = (
+        ("size=0", plugin_source(2, "beta", "", struct_size="0")),
+        ("version=2", plugin_source(2, "beta", "", descriptor_version=2)),
+        ("kind=1", plugin_source(1, "beta", "")),
+        ("id=gamma", plugin_source(2, "gamma", "")),
+        (
+            "build=00000000000000000000000000000000",
+            plugin_source(2, "beta", "", build_id="00000000000000000000000000000000"),
+        ),
+    )
+    for expected_error, source in invalid_descriptors:
+        compile_library("libtrtmc_model_beta.so", source)
+        with pytest.raises(CiError, match=expected_error):
+            load_native_libraries(tmp_path, ("alpha", "beta"))
+
+    compile_library("libtrtmc_model_beta.so", "void beta_symbol(void) {}")
+    with pytest.raises(CiError, match="trtmc_plugin_descriptor_v1"):
+        load_native_libraries(tmp_path, ("alpha", "beta"))
 
     compile_library(
         "libtrtmc_model_beta.so",

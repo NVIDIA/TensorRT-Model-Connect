@@ -176,6 +176,8 @@ class WheelArchiveValidator:
                 raise CiError(f"{wheel}: generated Python cache files are packaged")
             if "tensorrt_model_connect/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python core package is missing")
+            if "tensorrt_model_connect/native_cli.py" not in names:
+                raise CiError(f"{wheel}: native CLI console adapter is missing")
             if "trtmc_benchmark/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python benchmark application is missing")
             if "trtmc_server/__init__.py" not in names:

@@ -59,12 +59,14 @@ Every execution command has this shape:
 trtmc COMMAND MODEL.bundle [--runtime-root DIR] [OPTIONS]
 ```
 
-When `--runtime-root` is omitted, the CLI searches the active runtime and CLI
-installation, followed by colon-separated `TRTMC_RUNTIME_PATH` entries. It
-does not search the current directory unless `.` is explicitly present in that
-variable. One selected root must contain the requested backend and family DSOs;
-their descriptors must declare the active product-build identity, expected
-kind, and bundle ID before either factory is called. Common load options are:
+When `--runtime-root` is omitted, the CLI checks the active Runtime directory,
+followed by colon-separated `TRTMC_RUNTIME_PATH` entries. A wheel console
+command replaces itself with the native CLI in the wheel's single native root.
+The CLI does not scan `PATH`, Python installation layouts, or the current
+directory unless `.` is explicitly present in `TRTMC_RUNTIME_PATH`. One
+selected root must contain the requested backend and family DSOs; their
+descriptors must declare the active product-build identity, expected kind, and
+bundle ID before either factory is called. Common load options are:
 
 | Option | Contract |
 | --- | --- |

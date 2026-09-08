@@ -15,9 +15,9 @@ Identify the first boundary that fails in the [Quick Start](quick-start.md).
 | Build OOM or disk failure | Requested checkpoint, shape, precision, and cache capacity | Use the exact family manifest/profile or free capacity; retain the first error. |
 | No family or multiple families match | Root checkpoint identity metadata | Use a supported exact checkpoint; do not add prefix/fallback matching. |
 | Bundle inspection fails | Partial/corrupt bundle | Rebuild; failed builds must not publish a partial output. |
-| Family/backend DSO missing | `--runtime-root` contents | Confirm `libtrtmc_core.so`, `libtrtmc_runtime.so`, selected backend, and exact family DSO are together. |
+| Family/backend DSO missing | Selected runtime-root contents | Confirm `libtrtmc_core.so`, `libtrtmc_runtime.so`, selected backend, and exact family DSO are together. |
 | Task mismatch | Bundle `task` versus CLI command | Use the Task command named by the family manifest/header. |
-| TensorRT/DSO ABI error | Mixed software or hardware cohort | Run with a compatible environment and rebuild the bundle when required. |
+| TensorRT/DSO ABI error | Mixed native product builds or incompatible hardware/software | Use one product build in a compatible environment and rebuild the bundle when required. |
 | Output differs | Revision, input framing, precision, sampling, oracle | Reproduce the exact family testcase before changing code or thresholds. |
 
 Collect the source revision, model ID/revision, complete build/run commands,
