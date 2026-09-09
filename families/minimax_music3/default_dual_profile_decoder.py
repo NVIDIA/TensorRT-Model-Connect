@@ -43,7 +43,7 @@ Tensor contract (matches the C++ runtime KvCache naming):
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import tensorrt as trt
@@ -60,7 +60,6 @@ from .utils import (
 if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
-    from ...quantization.context import QuantContext
 
 
 _make_matmul_fn = graph_blocks.make_matmul_fn
@@ -151,7 +150,7 @@ def build_dual_profile_decoder_engine(
     precision: str = "fp16",
     opt_prefill_length: int = 64,
     max_prefill_length: int | None = None,
-    quant_ctx: "QuantContext | None" = None,
+    quant_ctx: "Any | None" = None,
     norm_type: str = "rmsnorm",
     mlp_type: str = "swiglu",
     position_type: str = "rope",
@@ -297,42 +296,21 @@ def build_dual_profile_decoder_engine(
                         (cmx, kv_attention_size))
         trt_config.add_optimization_profile(prof)
 
-    import os as _os_dbg
     if profile_mode == "prefill":
         _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
                      cache_rows_min=1, cache_rows_opt=max_cache_length,
                      cache_rows_max=max_cache_length)
-    elif _os_dbg.environ.get("TRTMC_DECODE_ONLY_DEBUG") == "1":
-        # Diagnostic: build a one-profile engine with dynamic-shape inputs
-        # but Sq pinned to 1. Lets us isolate dynamic-shape enqueueV3
-        # overhead from per-profile kernel specialisation.
-        _add_profile(1, 1, fixed=True)
     else:
-        _reverse = _os_dbg.environ.get("TRTMC_REVERSE_PROFILE_ORDER", "0") == "1"
-        if _reverse:
-            # Decode profile registered first so it commits its preferred
-            # weight layout before the prefill profile compiles.
-            if multi_bucket_decode:
-                for bucket in decode_buckets:
-                    _add_profile(1, 1, fixed=True,
-                                 cache_rows_min=1, cache_rows_opt=bucket,
-                                 cache_rows_max=bucket)
-            else:
-                _add_profile(1, 1, fixed=True)
-            _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                         cache_rows_min=1, cache_rows_opt=max_cache_length,
-                         cache_rows_max=max_cache_length)
+        _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
+                     cache_rows_min=1, cache_rows_opt=max_cache_length,
+                     cache_rows_max=max_cache_length)
+        if multi_bucket_decode:
+            for bucket in decode_buckets:
+                _add_profile(1, 1, fixed=True,
+                             cache_rows_min=1, cache_rows_opt=bucket,
+                             cache_rows_max=bucket)
         else:
-            _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                         cache_rows_min=1, cache_rows_opt=max_cache_length,
-                         cache_rows_max=max_cache_length)
-            if multi_bucket_decode:
-                for bucket in decode_buckets:
-                    _add_profile(1, 1, fixed=True,
-                                 cache_rows_min=1, cache_rows_opt=bucket,
-                                 cache_rows_max=bucket)
-            else:
-                _add_profile(1, 1, fixed=True)
+            _add_profile(1, 1, fixed=True)
 
     # ---- Shared constants ------------------------------------------------
     embedding_table = _const_in_work_dtype(
