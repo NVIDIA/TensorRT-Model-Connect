@@ -8,7 +8,7 @@
 // Host-side prompt planning for GLM-ASR. Kept free of CUDA and TensorRT so the
 // token arithmetic can be tested on its own.
 
-#include "runtime/models/glmasr/glmasr_config.h"
+#include "families/glmasr/runtime/glmasr_config.h"
 
 #include <cstdint>
 #include <vector>

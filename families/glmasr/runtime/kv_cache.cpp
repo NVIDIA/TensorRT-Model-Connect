@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "runtime/models/glmasr/kv_cache.h"
+#include "families/glmasr/runtime/kv_cache.h"
 
 #include "trtmc/runtime/trt_module.h"
 

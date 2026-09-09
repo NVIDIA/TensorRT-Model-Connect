@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "runtime/models/glmasr/pipeline.h"
+#include "families/glmasr/runtime/pipeline.h"
 
-#include "runtime/models/glmasr/glmasr_mel_spectrogram.h"
-#include "runtime/models/glmasr/glmasr_prompt_plan.h"
+#include "families/glmasr/runtime/glmasr_mel_spectrogram.h"
+#include "families/glmasr/runtime/glmasr_prompt_plan.h"
 #include "utils/wav_reader.h"
 
 #include <algorithm>

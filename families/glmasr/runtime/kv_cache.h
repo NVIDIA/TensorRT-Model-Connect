@@ -11,7 +11,7 @@
 // Manages per-layer K/V device tensors, position tracking, and attention mask
 // construction. Binds directly to a TrtModule via bind_to().
 
-#include "runtime/models/glmasr/inference_state.h"
+#include "families/glmasr/runtime/inference_state.h"
 #include "trtmc/runtime/device_tensor.h"
 
 #include <cstdint>

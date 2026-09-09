@@ -14,7 +14,7 @@
 // Postconditions: Embedding count matches GlmAsrProcessor, prompt matches the chat template
 // =============================================================================
 
-#include "runtime/models/glmasr/glmasr_prompt_plan.h"
+#include "families/glmasr/runtime/glmasr_prompt_plan.h"
 
 #include <cstdint>
 #include <iostream>

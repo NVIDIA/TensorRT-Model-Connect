@@ -1,13 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-id = "glmasr"
-plugin = "glmasr"
-module = "plugin"
-aliases = [
-  "glmasr",
-  "glm_asr",
-]
-prefixes = [
-  "glmasr",
-]
+"""GLM-ASR family: a Whisper-style audio encoder feeding a Llama decoder."""
+
+from .model import build
+
+__all__ = ["build"]

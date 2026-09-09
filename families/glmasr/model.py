@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -39,6 +40,11 @@ from .config import (
     projector_config,
 )
 from .standard_decoder_builder import build_standard_decoder_engine
+from .parallel import ParallelConfig
+
+if TYPE_CHECKING:
+    from tensorrt_model_connect.build import BuildRequest
+    from tensorrt_model_connect.bundle_writer import BundleWriter
 
 _MODEL_TYPES = frozenset({"glmasr", "glm_asr"})
 
@@ -295,3 +301,86 @@ class GlmAsrPlugin:
 
 
 plugin = GlmAsrPlugin()
+
+
+def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
+    """Record the exact tokenizer framing consumed by the native runtime."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), use_fast=True)
+    probe = list(tokenizer.encode("hello"))
+    plain = list(tokenizer.encode("hello", add_special_tokens=False))
+    if probe == plain:
+        prefix, suffix = [], []
+    else:
+        start = next(
+            (i for i in range(len(probe) - len(plain) + 1) if probe[i : i + len(plain)] == plain),
+            None,
+        )
+        if start is None:
+            raise ValueError("GLM-ASR tokenizer framing is not prefix/suffix")
+        prefix, suffix = probe[:start], probe[start + len(plain) :]
+    return {
+        "tokenizer_add_special_tokens": False,
+        "tokenizer_prefix_ids": prefix,
+        "tokenizer_suffix_ids": suffix,
+    }
+
+
+def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+    """Build a GLM-ASR bundle using the family-owned encoder and decoder."""
+    if request.task != "transcription":
+        raise ValueError("glmasr supports only task=transcription")
+    if request.max_batch_size != 1 or request.context_parallel_size != 1:
+        raise ValueError("glmasr supports only batch=1 and context_parallel_size=1")
+    if request.quantization not in {None, "none"}:
+        raise NotImplementedError("glmasr does not support quantization")
+    model_dir = Path(request.model_dir)
+    config = ModelConfig.from_dir(model_dir)
+    if str(config.model_type).lower() not in _MODEL_TYPES:
+        raise ValueError(f"glmasr does not support model_type={config.model_type!r}")
+    config.raw["_model_dir"] = str(model_dir)
+    config.raw["_fp32_layers"] = tuple(request.fp32_layers)
+    parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
+    parallel.validate()
+    weights = plugin.load_weights(str(model_dir), config, precision=request.precision)
+    max_length = int(request.max_sequence_length or 256)
+    writer.set_header(family="glmasr", task=request.task, backend=request.backend)
+    writer.add_bytes(
+        "engine.plan",
+        plugin.build_engine(
+            config, weights, max_length, precision=request.precision, verbose=request.verbose
+        ),
+    )
+    encoder = plugin.build_vision_engine(
+        str(model_dir), config, weights, precision=request.precision, verbose=request.verbose
+    )
+    if encoder is None:
+        raise RuntimeError("glmasr audio encoder build returned no engine")
+    writer.add_bytes("encoder.plan", encoder)
+    runtime = {
+        "tensor_parallel_size": parallel.tp_size,
+        "hidden_size": config.hidden_size,
+        "max_cache_length": max_length,
+        "eot_token_id": config.raw.get("eos_token_id", 2),
+        "mel_frontend": "whisper",
+        "mel_n_fft": _MEL_DEFAULTS["n_fft"],
+        "mel_hop_length": _MEL_DEFAULTS["hop_length"],
+        "mel_sampling_rate": _MEL_DEFAULTS["sampling_rate"],
+    }
+    runtime.update(plugin.get_audio_config(config) or {})
+    runtime.update(plugin.get_vl_config(config) or {})
+    runtime.update(plugin.get_bundle_config_overrides(config) or {})
+    runtime.update(_tokenizer_runtime_contract(model_dir))
+    writer.add_json("runtime.json", runtime)
+    for name, data in (plugin.build_extra_engines(
+        config, weights, max_length, precision=request.precision, verbose=request.verbose
+    ) or {}).items():
+        writer.add_bytes(name, data)
+    for filename in (
+        "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+        "tokenizer.model", "vocab.json", "merges.txt",
+    ):
+        path = model_dir / filename
+        if path.is_file():
+            writer.add_bytes(filename, path.read_bytes())

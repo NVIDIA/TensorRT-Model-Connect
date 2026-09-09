@@ -17,10 +17,10 @@
 // but this family has no bundle configuration that emits one, so that path is
 // deliberately absent rather than present and unexercised.
 
-#include "runtime/models/glmasr/glmasr_config.h"
-#include "runtime/models/glmasr/inference_state.h"
-#include "runtime/models/glmasr/kv_cache.h"
-#include "runtime/models/glmasr/plugin_helpers.h"
+#include "families/glmasr/runtime/glmasr_config.h"
+#include "families/glmasr/runtime/inference_state.h"
+#include "families/glmasr/runtime/kv_cache.h"
+#include "families/glmasr/runtime/plugin_helpers.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/device_tensor.h"
 #include "trtmc/runtime/trt_module.h"

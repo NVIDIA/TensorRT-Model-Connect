@@ -7,9 +7,9 @@
 // Audio encoder plus projector in one engine, feeding a Llama decoder that
 // consumes the projected frames through its embed-input contract.
 
-#include "plugin_helpers.h"
-#include "runtime/models/glmasr/glmasr_config.h"
-#include "runtime/models/glmasr/pipeline.h"
+#include "families/glmasr/runtime/glmasr_config.h"
+#include "families/glmasr/runtime/pipeline.h"
+#include "families/glmasr/runtime/plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

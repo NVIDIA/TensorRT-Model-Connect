@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-_RUNNER_PATH = Path(__file__).with_name("runner.py")
+_RUNNER_PATH = Path(__file__).with_name("_e2e_runner.py")
 _SPEC = importlib.util.spec_from_file_location(
     f"{Path(__file__).resolve().parent.name}_e2e_runner",
     _RUNNER_PATH,

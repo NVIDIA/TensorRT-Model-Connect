@@ -14,7 +14,7 @@
 // Postconditions: Mel frames match the Whisper feature extractor contract
 // =============================================================================
 
-#include "runtime/models/glmasr/glmasr_mel_spectrogram.h"
+#include "families/glmasr/runtime/glmasr_mel_spectrogram.h"
 
 #include <algorithm>
 #include <cmath>

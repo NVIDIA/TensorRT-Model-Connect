@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "runtime/models/glmasr/glmasr_mel_spectrogram.h"
+#include "families/glmasr/runtime/glmasr_mel_spectrogram.h"
 
 #include <algorithm>
 #include <cmath>
