@@ -133,8 +133,8 @@ _LIMIT = 32 * 1024 * 1024
 _INLINE_BUDGET = 256 * 1024 * 1024
 _CSS = """
 :root{font:15px/1.45 system-ui,sans-serif;color:#172b42;background:#f5f7fa;color-scheme:light}
-*{box-sizing:border-box}body{max-width:1280px;margin:24px auto;padding:0 24px}h1{font-size:28px;letter-spacing:-.03em;margin:0}h2{font-size:20px;margin:0;overflow-wrap:anywhere}h3{font-size:13px;margin:0 0 8px;color:#52657a}h4{font-size:12px;margin:0 0 6px}p{margin:6px 0}a{color:#086e80;text-underline-offset:3px}.case{border:1px solid #dce3eb;border-radius:12px;background:#fff;margin:16px 0;padding:18px;scroll-margin-top:86px}.case-head{display:flex;gap:12px;align-items:start;justify-content:space-between}.badge{display:inline-block;border-radius:6px;padding:4px 8px;font-size:12px;font-weight:650;flex-shrink:0}.reference,.passed{color:#12644b;background:#e7f5ef}.failed,.error{color:#a12630;background:#fff0f1}.limited,.unverified,.skipped,.partial,.running{color:#815309;background:#fff5df}.meta,.note,.key{color:#596b7d;font-size:12px}.key{display:block;font:11px ui-monospace,monospace;margin-top:2px}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#596b7d;margin:0 0 3px}.result-basis{font-size:13px;margin:5px 0}.recipe-line{margin:0 0 14px}.io-grid,.demo-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:14px}.io-panel{min-width:0;border:1px solid #e2e8ee;border-radius:8px;padding:12px;background:#fbfcfd}.readable{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px;line-height:1.45;max-height:132px;overflow:auto;margin:0}.facts{margin:4px 0}.facts div{padding:2px 0;overflow-wrap:anywhere}.facts dt{display:inline;color:#596b7d;font-size:12px}.facts dt:after{content:': '}.facts dd{display:inline;margin:0;font-weight:550}.pair,.output-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}figure{margin:4px 0 0;display:flex;flex-direction:column}figure>img,figure>audio,figure>video,figure>svg{order:0}figcaption{font-weight:500;font-size:11px;margin:4px 0;order:1}figure>.note{font-size:11px;margin:2px 0;order:2}img,video{display:block;max-width:100%;width:100%;height:170px;object-fit:contain;border-radius:5px;background:#eef2f6}audio{width:100%;max-width:100%;height:42px}svg{display:block;width:100%;height:120px}svg text{fill:#596b7d}.native-key{color:#0b7687}.reference-key{color:#b45e1c}.numeric-preview table{font-size:12px}.numeric-preview td,.numeric-preview th{padding:3px 7px}.readable.text-excerpt{max-height:none}.excerpt-gap{display:block;color:#596b7d;font-size:11px;margin:4px 0}.class-result{font-size:16px}.class-result strong{display:block;font-size:34px;font-weight:650;line-height:1.2}.case-details{margin:12px 0 0;border-top:1px solid #e2e8ee;padding-top:9px}.case-details>summary{font-size:13px}.case-details h3{margin-top:15px}details{margin:10px 0}summary{cursor:pointer;font-weight:600;min-height:22px}summary:hover{color:#086e80}details details{margin:12px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:12px;border-radius:6px;font:12px/1.5 ui-monospace,monospace;max-height:400px;overflow:auto}code{overflow-wrap:anywhere}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;vertical-align:top;padding:8px;border-bottom:1px solid #e2e8ee;overflow-wrap:anywhere}th{color:#596b7d;font-weight:600}.table-scroll{overflow-x:auto}.filters{display:flex;gap:10px;position:sticky;top:0;z-index:1;padding:10px 0;background:#f5f7fa}input,select{min-width:0;font:inherit;padding:8px 10px;border:1px solid #bac7d3;border-radius:6px;background:white}input{flex:1}.counts{display:flex;gap:16px;margin:8px 0;font-size:13px}.count strong{margin-right:4px}.empty{padding:12px;background:#fff5df;border-radius:6px}.failure-summary{color:#a12630}.partial-note{color:#815309}.index td:first-child{min-width:170px}[hidden]{display:none!important}
-@media(max-width:650px){body{padding:0 12px;margin:16px auto}.case{padding:14px;scroll-margin-top:12px}.case-head{flex-wrap:wrap;gap:5px}.io-grid,.demo-grid{grid-template-columns:1fr;gap:10px}.io-panel{padding:10px}.filters{position:static;flex-wrap:wrap}.filters input{flex-basis:100%}h1{font-size:25px}h2{font-size:18px}.readable{max-height:116px}img,video{height:150px}svg{height:105px}.pair{grid-template-columns:1fr}.recipe-line{margin-bottom:10px}}
+*{box-sizing:border-box}body{max-width:1280px;margin:24px auto;padding:0 24px}h1{font-size:28px;letter-spacing:-.03em;margin:0}h2{font-size:20px;margin:0;overflow-wrap:anywhere}h3{font-size:13px;margin:0 0 8px;color:#52657a}h4{font-size:12px;margin:0 0 6px}p{margin:6px 0}a{color:#086e80;text-underline-offset:3px}.case{border:1px solid #dce3eb;border-radius:12px;background:#fff;margin:16px 0;padding:18px;scroll-margin-top:86px}.case-head{display:flex;gap:12px;align-items:start;justify-content:space-between}.badge{display:inline-block;border-radius:6px;padding:4px 8px;font-size:12px;font-weight:650;flex-shrink:0}.reference,.passed{color:#12644b;background:#e7f5ef}.failed,.error{color:#a12630;background:#fff0f1}.limited,.unverified,.skipped,.partial,.running{color:#815309;background:#fff5df}.meta,.note,.key{color:#596b7d;font-size:12px}.key{display:block;font:11px ui-monospace,monospace;margin-top:2px}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#596b7d;margin:0 0 3px}.result-basis{font-size:13px;margin:5px 0}.recipe-line{margin:0 0 14px}.io-grid,.demo-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:14px}.io-panel{min-width:0;border:1px solid #e2e8ee;border-radius:8px;padding:12px;background:#fbfcfd}.readable{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px;line-height:1.45;max-height:132px;overflow:auto;margin:0}.facts{margin:4px 0}.facts div{padding:2px 0;overflow-wrap:anywhere}.facts dt{display:inline;color:#596b7d;font-size:12px}.facts dt:after{content:': '}.facts dd{display:inline;margin:0;font-weight:550}.pair,.output-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}figure{margin:4px 0 0;display:flex;flex-direction:column}figure>img,figure>audio,figure>video,figure>svg{order:0}figcaption{font-weight:500;font-size:11px;margin:4px 0;order:1}figure>.note{font-size:11px;margin:2px 0;order:2}img,video{display:block;max-width:100%;width:100%;height:170px;object-fit:contain;border-radius:5px;background:#eef2f6}audio{width:100%;max-width:100%;height:42px}svg{display:block;width:100%;height:120px}svg text{fill:#596b7d}.native-key{color:#0b7687}.reference-key{color:#b45e1c}.series-key{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}.series-key:before{content:"";display:inline-block;width:23px;border-top:5px solid currentColor}.series-key.reference-key:before{border-top:2px dashed currentColor}.overlap-note{font-weight:600}.text-demo>.io-panel{margin-bottom:12px}.numeric-preview table{font-size:12px}.numeric-preview td,.numeric-preview th{padding:3px 7px}.readable.text-excerpt{max-height:none}.excerpt-gap{display:block;color:#596b7d;font-size:11px;margin:4px 0}.class-result{font-size:16px}.class-result strong{display:block;font-size:34px;font-weight:650;line-height:1.2}.case-details{margin:12px 0 0;border-top:1px solid #e2e8ee;padding-top:9px}.case-details>summary{font-size:13px}.case-details h3{margin-top:15px}details{margin:10px 0}summary{cursor:pointer;font-weight:600;min-height:22px}summary:hover{color:#086e80}details details{margin:12px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:12px;border-radius:6px;font:12px/1.5 ui-monospace,monospace;max-height:400px;overflow:auto}code{overflow-wrap:anywhere}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;vertical-align:top;padding:8px;border-bottom:1px solid #e2e8ee;overflow-wrap:anywhere}th{color:#596b7d;font-weight:600}.table-scroll{overflow-x:auto}.filters{display:flex;gap:10px;position:sticky;top:0;z-index:1;padding:10px 0;background:#f5f7fa}input,select{min-width:0;font:inherit;padding:8px 10px;border:1px solid #bac7d3;border-radius:6px;background:white}input{flex:1}.counts{display:flex;gap:16px;margin:8px 0;font-size:13px}.count strong{margin-right:4px}.empty{padding:12px;background:#fff5df;border-radius:6px}.failure-summary{color:#a12630}.partial-note{color:#815309}.index td:first-child{min-width:170px}[hidden]{display:none!important}
+@media(max-width:650px){body{padding:0 12px;margin:16px auto}.case{padding:14px;scroll-margin-top:12px}.case-head{flex-wrap:wrap;gap:5px}.io-grid,.demo-grid{grid-template-columns:1fr;gap:10px}.io-panel{padding:10px}.filters{position:static;flex-wrap:wrap}.filters input{flex-basis:100%}h1{font-size:25px}h2{font-size:18px}.readable{max-height:116px}img,video{height:150px}svg{height:105px}.pair,.text-comparison{grid-template-columns:1fr}.recipe-line{margin-bottom:10px}}
 """
 _JS = """
 function filterCases(){const q=document.getElementById('search').value.toLowerCase();const s=document.getElementById('status').value;let n=0;document.querySelectorAll('.case').forEach(e=>{e.hidden=!(e.dataset.name.includes(q)&&(!s||e.dataset.status===s));if(!e.hidden)n++;});document.querySelectorAll('.index-row').forEach(e=>{e.hidden=!(e.dataset.name.includes(q)&&(!s||e.dataset.status===s));});document.getElementById('visible-count').textContent=n+' cases shown';document.getElementById('no-results').hidden=n!==0;}
@@ -277,6 +277,16 @@ _TEXT_KEYS = (
     "caption",
     "answer",
 )
+_DEMO_TEXT_TASKS = {
+    "text_generation",
+    "translation",
+    "transcription",
+    "transcription_streaming",
+    "automatic_speech_recognition",
+    "speech_recognition",
+    "vision_language_generation",
+    "ocr",
+}
 _PAYLOAD_KEYS = {
     "manifest",
     "case",
@@ -991,17 +1001,72 @@ def _demo_text(text: str, limit: int = 420) -> str:
 
 
 def _demo_text_value(value: Any, role: str = "native") -> str:
+    """Read output text only, never a log, input, or the other role's diagnostic."""
     if isinstance(value, str):
         return value
-    keys = ("reference_text", *_TEXT_KEYS) if role == "reference" else _TEXT_KEYS
-    return next(
-        (
-            value[key]
-            for key in keys
-            if isinstance(value, dict) and isinstance(value.get(key), str) and value[key]
-        ),
-        "",
+    keys = tuple(key for key in _TEXT_KEYS if key != "reference_text")
+    if role == "reference":
+        keys = ("reference_text", *keys)
+    pending = [value]
+    for _ in range(3):
+        children = []
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            text = next(
+                (item[key] for key in keys if isinstance(item.get(key), str) and item[key]), ""
+            )
+            if text:
+                return text
+            children.extend(item.get(key) for key in ("final", "output", "result", "response"))
+            diagnostic_key = "reference_text" if role == "reference" else "actual_decoded"
+            for key in ("diagnostics", "extras"):
+                diagnostic = _mapping(item.get(key)).get(diagnostic_key)
+                if isinstance(diagnostic, str) and diagnostic:
+                    return diagnostic
+        pending = children
+    return ""
+
+
+def _demo_native_output(native: Any, reference: Any, task: str = "") -> Any:
+    """Use explicitly decoded native tokens from a reference diagnostic for display."""
+    if native is None or _demo_text_value(native) or task not in _DEMO_TEXT_TASKS:
+        return native
+    recorded = _mapping(reference)
+    decoded = recorded.get("actual_decoded")
+    if (
+        not isinstance(decoded, str)
+        or not decoded
+        or not isinstance(recorded.get("reference_ids"), list)
+    ):
+        return native
+    copied = dict(native) if isinstance(native, dict) else {"values": native}
+    return {**copied, "text": decoded}
+
+
+def _demo_text_comparison(native: Any, reference: Any, task: str = "") -> bool:
+    """Expose saved text on both sides without creating empty non-text demos."""
+    if _demo_text_value(native) or _demo_text_value(reference, "reference"):
+        return True
+    operational = isinstance(native, dict) and any(
+        key in native for key in ("probe_returncode", "receipt")
     )
+    return bool(native) and task in _DEMO_TEXT_TASKS and not operational
+
+
+def _demo_reference_text(reference: Any) -> str:
+    """A text comparison never substitutes media or token IDs for readable text."""
+    text = _demo_text_value(reference, "reference")
+    if text:
+        return _demo_text(text, limit=len(text))
+    recorded = _mapping(reference)
+    if recorded.get("mode") == "contract_only":
+        message = "No reference text recorded; this case checks the output contract only."
+    elif any(isinstance(recorded.get(key), list) for key in ("reference_ids", "token_ids")):
+        message = "Reference tokens were recorded, but decoded text is unavailable. Token IDs are in Details."
+    else:
+        message = "No reference text was recorded."
+    return '<p class="note">' + message + "</p>"
 
 
 def _demo_identity(data: dict[str, Any]) -> tuple[str, str]:
@@ -1084,6 +1149,29 @@ def _demo_numeric_value(value: Any, task: str = "") -> tuple[str, Any] | None:
     return None
 
 
+def _demo_numeric_overlap(
+    native: list[int | float], reference: list[int | float], low: int | float, high: int | float
+) -> str:
+    """Describe only corresponding plotted samples, not full tensor correctness."""
+    count = min(len(native), len(reference))
+    if not count:
+        return ""
+    if native[:count] == reference[:count]:
+        message = f"Both curves overlap: {count} displayed paired values are identical."
+        kind = "identical"
+    else:
+        magnitude = max(abs(low), abs(high), 1)
+        span = high / magnitude - low / magnitude
+        separation = max(
+            abs(left / magnitude - right / magnitude) for left, right in zip(native, reference)
+        )
+        if span and 88 * separation / span > 1:
+            return ""
+        message = "Both curves overlap at this plot's scale; displayed paired values differ."
+        kind = "visual"
+    return f'<p class="note overlap-note" data-overlap="{kind}">{message}</p>'
+
+
 def _demo_numeric_comparison(native: Any, reference: Any = None, task: str = "") -> str:
     """Display one shared-axis sample, never use the preview to set a verdict."""
     chosen = _demo_numeric_value(native, task)
@@ -1125,6 +1213,7 @@ def _demo_numeric_comparison(native: Any, reference: Any = None, task: str = "")
     magnitude = max(abs(low), abs(high), 1)
     span = high / magnitude - low / magnitude
     max_length = max(len(values) for _, values, _ in series)
+    overlap = _demo_numeric_overlap(numbers, second[0], low, high) if paired else ""
     lines = []
     for name, values, color in series:
         points = []
@@ -1132,17 +1221,19 @@ def _demo_numeric_comparison(native: Any, reference: Any = None, task: str = "")
             x = 48 + 300 * index / max(1, max_length - 1)
             y = 63 if span == 0 else 108 - 88 * ((number / magnitude - low / magnitude) / span)
             points.append(f"{x:.2f},{y:.2f}")
-        dash = ' stroke-dasharray="5 4"' if name == "Reference" else ""
+        dash = ' stroke-dasharray="6 4"' if name == "Reference" else ""
+        width = 2 if name == "Reference" else 5
         lines.append(
-            f'<polyline aria-label="{name}" points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="2"{dash}/>'
+            f'<polyline aria-label="{name}" points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="{width}" stroke-linecap="round" stroke-linejoin="round"{dash}/>'
         )
         if len(points) == 1:
             x, y = points[0].split(",")
-            lines.append(f'<circle cx="{x}" cy="{y}" r="3" fill="{color}"/>')
+            radius = 2 if name == "Reference" else 4
+            lines.append(f'<circle cx="{x}" cy="{y}" r="{radius}" fill="{color}"/>')
     legend = (
-        "<span class='native-key'>Native</span> / <span class='reference-key'>Reference</span> · shared scale"
+        "<span class='series-key native-key'>Native · solid</span> / <span class='series-key reference-key'>Reference · dashed</span> · shared scale"
         if paired
-        else "Native"
+        else "<span class='series-key native-key'>Native · solid</span>"
     )
     chart = (
         f'<svg viewBox="0 0 360 134" role="img" aria-label="{_escape(caption)}">'
@@ -1152,10 +1243,77 @@ def _demo_numeric_comparison(native: Any, reference: Any = None, task: str = "")
         + "".join(lines)
         + f'<text x="48" y="129" font-size="10">1</text><text x="350" y="129" text-anchor="end" font-size="10">{max_length}</text></svg>'
     )
-    return f'<figure class="numeric-preview"><figcaption>{_escape(caption)}</figcaption>{chart}<p class="note">{legend} · recorded value index</p></figure>'
+    return f'<figure class="numeric-preview"><figcaption>{_escape(caption)}</figcaption>{chart}<p class="note">{legend} · recorded value index</p>{overlap}</figure>'
+
+
+def _demo_runtime_stress(data: dict) -> bool:
+    """Identify declared repeated-input runtime checks without model-name policy."""
+    _, _, case = _context(data)
+    repeat = _mapping(case.get("prompt_repeat"))
+    positive_fields = (
+        "expected_prompt_tokens",
+        "expected_prefill_chunks",
+        "expected_prefill_chunk_limit",
+    )
+    return (
+        _mapping(data.get("reference")).get("mode") == "contract_only"
+        and all(type(case.get(key)) is int and case[key] > 0 for key in positive_fields)
+        and isinstance(repeat.get("text"), str)
+        and bool(repeat["text"])
+        and type(repeat.get("count")) is int
+        and repeat["count"] > 0
+        and isinstance(repeat.get("separator"), str)
+        and isinstance(repeat.get("suffix", ""), str)
+    )
+
+
+def _demo_stress_input(data: dict) -> str:
+    """Compress only an actual prompt that exactly matches its repeat recipe."""
+    if not _demo_runtime_stress(data):
+        return ""
+    inputs, _, case = _context(data)
+    prompt = inputs.get("prompt")
+    if not isinstance(prompt, str):
+        return '<p class="note">The expanded input was not recorded.</p>'
+    repeat = case["prompt_repeat"]
+    unit, count = repeat["text"], repeat["count"]
+    separator, suffix = repeat["separator"], repeat.get("suffix", "")
+    expected_length = len(unit) * count + len(separator) * (count - 1) + len(suffix)
+    if expected_length != len(prompt) or prompt != (unit + separator) * (count - 1) + unit + suffix:
+        return (
+            _demo_text(prompt)
+            + '<p class="note">The recorded input differs from the repeat configuration.</p>'
+        )
+    whitespace = {"": "none", " ": "space", "\n": "newline", "\t": "tab", "\r\n": "newline (CRLF)"}
+    separator_label = whitespace.get(separator, repr(separator))
+    suffix_label = whitespace.get(suffix, repr(suffix))
+    summary = _demo_text(f"{unit!r} × {count:,}", 160)
+    settings = _escape(f"Separator: {separator_label} · Suffix: {suffix_label}")
+    return (
+        summary
+        + f'<p class="note">{settings}</p>'
+        + f'<p class="note">Expected input: {case["expected_prompt_tokens"]:,} tokens.</p>'
+    )
+
+
+def _demo_stress_output(data: dict) -> str:
+    """Describe recorded generation length without claiming output quality."""
+    if not _demo_runtime_stress(data):
+        return ""
+    _, _, case = _context(data)
+    token_ids = _mapping(data.get("native")).get("token_ids")
+    facts = []
+    if isinstance(token_ids, list) and all(type(value) is int for value in token_ids):
+        facts.append(f"{len(token_ids):,} generated tokens")
+    limit = case.get("max_new_tokens")
+    if type(limit) is int and limit > 0:
+        facts.append(f"configured limit {limit:,}")
+    return '<p class="note">' + _escape(" · ".join(facts)) + "</p>" if facts else ""
 
 
 def _demo_input(data: dict[str, Any], media: str = "") -> str:
+    if stress_input := _demo_stress_input(data):
+        return stress_input + media
     inputs, _, case = _context(data)
     request = {**_mapping(case.get("inputs")), **case, **inputs}
     native = _mapping(data.get("native"))
@@ -1309,9 +1467,9 @@ def _demo_output(value: Any, *, role: str, task: str, media: str = "", peer: Any
     notices = _demo_nonfinite(value)
     text = _demo_text_value(value, role)
     if media:
-        return (_demo_text(text) if text else "") + media + notices
+        return (_demo_text(text, limit=len(text)) if text else "") + media + notices
     if text:
-        return _demo_text(text) + notices
+        return _demo_text(text, limit=len(text)) + notices
     if task == "text_generation":
         keys = (
             ("reference_ids", "token_ids")
@@ -1334,7 +1492,7 @@ def _demo_output(value: Any, *, role: str, task: str, media: str = "", peer: Any
     if isinstance(value, (int, float)):
         return f'<p class="readable">{_escape(value)}</p>'
     if isinstance(value, dict) and any(key in value for key in ("probe_returncode", "receipt")):
-        return '<p class="note">Runtime checks only; no generated response was recorded.</p>'
+        return '<p class="note">Runtime checks; response traces are in Details.</p>'
     facts = _nested_scalars(_mapping(value))
     if facts:
         return _facts(facts[:2]) + notices
@@ -1559,6 +1717,12 @@ def _assessment(data, status=None) -> dict:
         isinstance(value, dict) and value.get("mode") in {"contract_only", "invariant_only"}
         for value in reference
     ):
+        if _demo_runtime_stress(data):
+            return _assess_result(
+                "limited",
+                "Runtime stress test passed",
+                "Runtime checks passed; generated text quality was not evaluated.",
+            )
         return _assess_result(
             "limited",
             "Contract checks passed",
@@ -1798,7 +1962,8 @@ def _content(
         }
     )
     task = str(_context(data)[1].get("task", ""))
-    native, reference = display.get("native"), display.get("reference")
+    reference = display.get("reference")
+    native = _demo_native_output(display.get("native"), reference, task)
     search = _escape((family + " " + case + " " + recipe + " " + checkpoint).lower())
     parts = [
         f'<section class="case" id="case-{index}" data-name="{search}" data-status="{_escape(assessment["kind"])}" data-execution-status="{_escape(status)}">',
@@ -1811,7 +1976,7 @@ def _content(
             '<p class="note partial-note">Partial evidence; some details are unavailable.</p>'
         )
     reference_detail = ""
-    if native is not None or previews.get("native"):
+    if native is not None or previews.get("native") or _demo_text_value(reference, "reference"):
         primary = _demo_output(native, role="native", task=task, media=previews.get("native", ""))
         other = _demo_output(
             reference, role="reference", task=task, media=previews.get("reference", "")
@@ -1833,21 +1998,41 @@ def _content(
             first, second = _numeric_data(numeric[1]), _numeric_data(paired[1])
             if first is not None and second is not None and first[1:] == second[1:]:
                 combined = _demo_numeric_comparison(native, reference, task)
+        text_comparison = _demo_text_comparison(native, reference, task)
         if combined:
             notices = dict.fromkeys((_demo_nonfinite(native), _demo_nonfinite(reference)))
             primary = combined + "".join(notices)
+        elif text_comparison:
+            if previews.get("reference"):
+                reference_detail = "<h3>Reference media</h3>" + previews["reference"]
         elif other:
             reference_detail = "<h3>Reference output</h3>" + other
         if "forecast" in task:
             primary += '<p class="note">Last recorded window; all windows are in Details.</p>'
-        parts.append(
-            '<div class="io-grid"><div class="io-panel"><h3>Input</h3>'
-            + _demo_input(display, previews.get("inputs", ""))
-            + '</div><div class="io-panel"><h3>Output</h3>'
-            + primary
-            + previews.get("legend", "")
-            + "</div></div>"
-        )
+        primary += _demo_stress_output(display)
+        reference_text = _demo_reference_text(reference)
+        if _demo_runtime_stress(display):
+            reference_text = '<p class="note">Not run for this runtime test; output quality was not evaluated.</p>'
+        if text_comparison:
+            parts.append(
+                '<div class="text-demo"><div class="io-panel"><h3>Input</h3>'
+                + _demo_input(display, previews.get("inputs", ""))
+                + '</div><div class="output-pair text-comparison"><div class="io-panel"><h3>Native output</h3>'
+                + (primary or '<p class="note">No native output was recorded.</p>')
+                + previews.get("legend", "")
+                + '</div><div class="io-panel"><h3>Reference output</h3>'
+                + reference_text
+                + "</div></div></div>"
+            )
+        else:
+            parts.append(
+                '<div class="io-grid"><div class="io-panel"><h3>Input</h3>'
+                + _demo_input(display, previews.get("inputs", ""))
+                + '</div><div class="io-panel"><h3>Output</h3>'
+                + primary
+                + previews.get("legend", "")
+                + "</div></div>"
+            )
     elif data.get("inputs"):
         parts.append(
             '<div class="io-grid"><div class="io-panel"><h3>Input</h3>'

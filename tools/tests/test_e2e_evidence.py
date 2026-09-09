@@ -299,14 +299,14 @@ def test_glance_view_uses_recorded_prompt_recipe_and_outputs(tmp_path: Path) -> 
     visible = _visible(report)
     assert "What is the capital of France?" in visible
     assert "Old prompt" not in visible
-    assert visible.count("Paris.") == 1
-    assert "Reference output" not in visible and "Reference output" in report
+    assert visible.count("Paris.") == 2
+    assert "Native output" in visible and "Reference output" in visible
     assert "native diagnostic" not in visible
     assert "example-recipe" in visible and "example-greedy-short" not in visible
     assert "example-greedy-short" in report
     assert "example/model" in visible and "FP16 · TP2" in visible
     assert "families/example-model" in report
-    assert 'class="io-grid"' in report
+    assert 'class="output-pair text-comparison"' in report
     assert "RAW_LOG_SENTINEL" not in visible and "RAW_LOG_SENTINEL" in report
     assert "original operands" not in visible and "original operands" in report
     assert "a" * 40 not in visible and "a" * 40 in report
@@ -322,8 +322,8 @@ def test_reference_text_does_not_show_native_diagnostics(tmp_path: Path) -> None
     }
     report = render_case(data, tmp_path)
     visible = _visible(report)
-    reference = report.split("<h3>Reference output</h3>")[1].split("<details>")[0]
-    assert "Expected answer" not in visible and "Expected answer" in reference
+    reference = report.split("<h3>Reference output</h3>")[1].split("</div>")[0]
+    assert "Expected answer" in visible and "Expected answer" in reference
     assert "secondary text" not in reference and "wrong answer" not in reference
 
 
@@ -362,7 +362,7 @@ def test_contract_reference_and_failure_are_never_a_paired_pass(tmp_path: Path) 
     data["evidence_status"] = "partial"
     report = render_case(data, tmp_path)
     visible = _visible(report)
-    assert "Reference output" not in visible
+    assert "Reference output" in visible and "No reference text recorded" in visible
     assert "Reference run failed" in visible and "Partial evidence" in visible
     assert "contract_only" in report and "public core invariants" in report
     assert 'data-status="failed"' in report
@@ -414,8 +414,8 @@ def test_long_text_stays_readable_and_full_evidence_is_expandable(tmp_path: Path
     report = render_case(data, tmp_path)
     visible = _visible(report)
     assert "hello" in visible and "FULL_TEXT_END" in visible
-    assert "middle omitted" in visible
-    assert "MIDDLE_SENTINEL" not in visible and "MIDDLE_SENTINEL" in report
+    assert "middle omitted" not in visible
+    assert "MIDDLE_SENTINEL" in visible
     assert "full text" in report and "FULL_TEXT_END" in report
     assert "no-results" in report and "aria-live" in report
 
@@ -547,6 +547,7 @@ def test_forecast_input_has_bounded_actual_series_preview(tmp_path: Path) -> Non
 def test_nested_recorded_summary_is_readable(tmp_path: Path) -> None:
     data = _case()
     data["inputs"]["manifest"]["task"] = "video_generation"
+    data["native"] = {"num_frames": 12}
     data["reference"] = {"output": {"summary": {"frame_count": 12, "mean": 0.25}}}
     report = render_case(data, tmp_path)
     assert "Output · Summary · Frame count" not in _visible(report)
@@ -644,6 +645,7 @@ def test_numeric_file_path_escape_and_symlinks_are_not_read(tmp_path: Path) -> N
 def test_text_generation_tokens_without_decoded_text_are_explicit(tmp_path: Path) -> None:
     data = _case()
     data["native"] = {"token_ids": [10, 11]}
+    data["reference"].pop("actual_decoded")
     visible = _visible(render_case(data, tmp_path))
     assert "2 recorded tokens; decoded text unavailable" in visible
     assert "token IDs" not in visible and "Token IDs are in Details" in visible
@@ -802,13 +804,14 @@ def test_demo_has_one_outer_details_and_no_execution_bookkeeping(tmp_path: Path)
     report = render_case(data, tmp_path)
     card = report.split('<section class="case"', 1)[1]
     default = card.split('<details class="case-details">', 1)[0]
-    assert default.count('class="io-panel"') == 2
+    assert default.count('class="io-panel"') == 3
     assert "<details" not in default
     assert card.count('<details class="case-details">') == 1
     assert "123.4" not in _visible(report) and "123.4" in report
     assert "Recorded tokens" not in _visible(report)
     assert "Recorded assertions:" not in _visible(report)
-    assert "Reference output" not in default and "Reference output" in card
+    assert "Reference output" in default
+    assert "<h3>Reference output</h3>" not in card.split('<details class="case-details">', 1)[1]
 
 
 def test_demo_keeps_unique_media_and_only_collapses_repeated_bytes(tmp_path: Path) -> None:
@@ -888,6 +891,177 @@ def test_demo_shared_chart_keeps_scope_and_rejects_invalid_values() -> None:
     assert _demo_numeric_comparison(["<script>bad</script>"] * 20) == ""
     huge = _demo_numeric_comparison([1e308] * 20, [0.0] * 20)
     assert "nan" not in huge.lower() and "inf" not in huge.lower()
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "text_generation",
+        "translation",
+        "transcription",
+        "transcription_streaming",
+        "automatic_speech_recognition",
+        "vision_language_generation",
+        "ocr",
+    ],
+)
+def test_text_task_references_are_visible_without_opening_details(
+    tmp_path: Path, task: str
+) -> None:
+    data = _case()
+    data["inputs"]["manifest"]["task"] = task
+    data["native"] = {"generated_text": "Native answer."}
+    data["reference"] = {"transcription": "Reference answer."}
+    original = copy.deepcopy(data)
+    report = render_case(data, tmp_path)
+    default, details = report.split('<details class="case-details">', 1)
+    assert "Native answer." in _visible(default) and "Reference answer." in _visible(default)
+    assert "<h3>Native output</h3>" in default and "<h3>Reference output</h3>" in default
+    assert "<h3>Reference output</h3>" not in details
+    assert ".pair,.text-comparison{grid-template-columns:1fr}" in report
+    assert data == original
+
+
+def test_long_output_text_stays_in_top_level_comparison(tmp_path: Path) -> None:
+    data = _case()
+    text = "a" * 450 + "MIDDLE_SENTINEL <script>alert(1)</script>" + "z" * 450
+    data["native"] = {"text": text}
+    data["reference"] = {"text": text}
+    report = render_case(data, tmp_path)
+    default = report.split('<details class="case-details">', 1)[0]
+    assert _visible(default).count(text) == 2
+    assert "middle omitted" not in default
+    assert "<script>alert(1)</script>" not in default and "&lt;script&gt;" in default
+
+
+def test_text_lookup_uses_only_output_containers_and_role_specific_diagnostics() -> None:
+    from tools.e2e_report import _demo_text_value
+
+    value = {
+        "inputs": {"text": "Wrong input"},
+        "stderr": {"text": "Wrong log"},
+        "actual_decoded": "Wrong native side",
+        "diagnostics": {"text": "Wrong diagnostic", "reference_text": "Expected output"},
+    }
+    assert _demo_text_value(value, "reference") == "Expected output"
+    assert _demo_text_value({"final": {"output": {"text": "Stream result"}}}) == "Stream result"
+    assert _demo_text_value({"extras": {"actual_decoded": "Native decoded"}}) == "Native decoded"
+    assert _demo_text_value({"reference_text": "Wrong reference side"}) == ""
+    assert _demo_text_value({"output": "result.wav", "logs": {"text": "Wrong log"}}) == ""
+    assert _demo_text_value({"diagnostics": {"actual_decoded": "Wrong native"}}, "reference") == ""
+
+
+def test_explicit_decoded_native_diagnostic_stays_on_native_side_without_mutation(
+    tmp_path: Path,
+) -> None:
+    from tools.e2e_report import _demo_native_output
+
+    data = _case()
+    data["native"] = {"shape": [1, 3], "preview": [0.1, 0.2, 0.3]}
+    data["reference"] = {
+        "actual_decoded": "Native token decode",
+        "reference_text": "Reference token decode",
+        "reference_ids": [1, 2],
+    }
+    original = copy.deepcopy(data)
+    report = render_case(data, tmp_path)
+    default = report.split('<details class="case-details">', 1)[0]
+    native_panel, reference_panel = default.split("<h3>Reference output</h3>", 1)
+    assert "Native token decode" in native_panel and "Reference token decode" not in native_panel
+    assert (
+        "Reference token decode" in reference_panel and "Native token decode" not in reference_panel
+    )
+    assert data == original
+    assert _demo_native_output(None, data["reference"], "text_generation") is None
+    assert (
+        _demo_native_output({"text": "Primary native text"}, data["reference"], "text_generation")[
+            "text"
+        ]
+        == "Primary native text"
+    )
+    assert (
+        _demo_native_output(
+            data["native"],
+            {"reference_text": "Do not substitute", "reference_ids": [1]},
+            "text_generation",
+        )
+        == data["native"]
+    )
+    assert (
+        _demo_native_output(
+            data["native"], {"actual_decoded": "Unanchored diagnostic"}, "text_generation"
+        )
+        == data["native"]
+    )
+
+    assert _demo_native_output(data["native"], data["reference"], "encoding") == data["native"]
+
+
+def test_missing_reference_text_is_explicit_without_empty_nontext_panels(tmp_path: Path) -> None:
+    from tools.e2e_report import _demo_text_comparison
+
+    data = _case()
+    data["reference"] = {"reference_ids": [1, 2]}
+    visible = _visible(render_case(data, tmp_path))
+    assert "Reference output" in visible and "decoded text is unavailable" in visible
+    data["reference"] = None
+    assert "No reference text was recorded" in _visible(render_case(data, tmp_path))
+    assert not _demo_text_comparison({"probe_returncode": 0}, None, "text_generation")
+    assert not _demo_text_comparison({"values": [1, 2]}, None, "encoding")
+    assert not _demo_text_comparison(None, None, "text_generation")
+
+
+def test_text_reference_media_remains_in_details_without_repeated_text(tmp_path: Path) -> None:
+    data = _case()
+    gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+    (tmp_path / "reference.gif").write_bytes(gif)
+    data["reference"] = {"text": "Recorded caption", "artifact": "reference.gif"}
+    data["artifacts"] = [{"path": "reference.gif", "role": "reference"}]
+    report = render_case(data, tmp_path)
+    default, details = report.split('<details class="case-details">', 1)
+    assert "Recorded caption" in _visible(default) and "data:image/gif" not in default
+    assert "<h3>Reference media</h3>" in details and "data:image/gif" in details
+    before_raw = details.split("Raw recorded fields, full text and logs", 1)[0]
+    assert "Recorded caption" not in before_raw
+
+
+def test_identical_chart_samples_keep_both_line_styles_and_explicit_scope() -> None:
+    from tools.e2e_report import _demo_numeric_comparison
+
+    values = {"shape": [576], "preview": list(range(64))}
+    output = _demo_numeric_comparison(values, values, "encoding")
+    assert 'aria-label="Native"' in output and 'aria-label="Reference"' in output
+    assert 'stroke-width="5"' in output and 'stroke-width="2"' in output
+    assert 'stroke-dasharray="6 4"' in output
+    assert "Native · solid" in output and "Reference · dashed" in output
+    assert "Both curves overlap: 64 displayed paired values are identical." in output
+    assert "First 64 of 576 values" in output
+    assert "passed" not in output and "full tensor" not in output
+
+
+def test_chart_distinguishes_visual_overlap_from_identical_values() -> None:
+    from tools.e2e_report import _demo_numeric_comparison
+
+    native = list(range(20))
+    near = _demo_numeric_comparison(native, [number + 0.00001 for number in native])
+    assert 'data-overlap="visual"' in near
+    assert "displayed paired values differ" in near and "identical" not in near
+    distinct = _demo_numeric_comparison(native, [number + 100 for number in native])
+    assert "overlap" not in distinct and distinct.count("<polyline") == 2
+    single = _demo_numeric_comparison(native)
+    assert single.count("<polyline") == 1 and "Reference" not in single and "overlap" not in single
+
+
+def test_overlap_note_counts_only_available_paired_samples() -> None:
+    from tools.e2e_report import _demo_numeric_comparison
+
+    output = _demo_numeric_comparison(
+        {"shape": [128], "preview": list(range(12))},
+        {"shape": [128], "preview": list(range(8))},
+    )
+    assert "8 displayed paired values are identical" in output
+    assert "First 12 of 128 values" in output and "reference: first 8 of 128 values" in output
+    assert "128 displayed paired values" not in output
 
 
 def _assessment_fixture(expression=None, explanation="True", native=None, reference=None, **fields):
@@ -1149,3 +1323,55 @@ def test_long_recorded_prompt_keeps_final_question_visible(tmp_path: Path) -> No
     assert "middle omitted; full text in Details" in visible
     assert 'class="readable text-excerpt"' in report
     assert data["inputs"]["prompt"] in _expanded(report)
+
+
+def _stress_case():
+    return {
+        "family": "example",
+        "case": "runtime-example",
+        "status": "passed",
+        "checks": [{"status": "passed", "expression": "count > 0", "explanation": "2 > 0"}],
+        "inputs": {
+            "manifest": {"task": "text_generation"},
+            "prompt": " ".join(["z"] * 12) + "\n",
+            "case": {
+                "expected_prompt_tokens": 13,
+                "expected_prefill_chunks": 4,
+                "expected_prefill_chunk_limit": 4,
+                "max_new_tokens": 3,
+                "prompt_repeat": {"text": "z", "count": 12, "separator": " ", "suffix": "\n"},
+            },
+        },
+        "native": {"text": "Example continuation", "token_ids": [11, 12]},
+        "reference": {"mode": "contract_only"},
+    }
+
+
+def test_runtime_stress_demo_does_not_claim_answer_quality(tmp_path):
+    data = _stress_case()
+    before = copy.deepcopy(data)
+    document = render_case(data, tmp_path)
+    text = _visible(document)
+    assert "Runtime stress test passed" in text
+    assert "generated text quality was not evaluated" in text
+    assert "'z' × 12" in text and "Expected input: 13 tokens" in text
+    assert "Example continuation" in text and "2 generated tokens · configured limit 3" in text
+    assert "Not run for this runtime test" in text
+    assert assessment(data)["kind"] == "limited"
+    assert data == before
+    data["status"] = "failed"
+    assert "Runtime stress test passed" not in _visible(render_case(data, tmp_path))
+
+
+def test_repeat_summary_never_overrides_different_actual_input():
+    from tools.e2e_report import _demo_input
+
+    data = _stress_case()
+    data["inputs"]["prompt"] = data["inputs"]["prompt"].replace("z", "y")
+    text = _visible(_demo_input(data))
+    assert "y y y" in text and "×" not in text
+    assert "differs from the repeat configuration" in text
+    data["inputs"]["case"]["prompt_repeat"]["count"] = 10**50
+    assert "differs from the repeat configuration" in _demo_input(data)
+    data["reference"] = {"text": "Saved reference"}
+    assert assessment(data)["label"] != "Runtime stress test passed"
