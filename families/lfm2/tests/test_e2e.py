@@ -47,27 +47,31 @@ def _csv_values(values: list[str]) -> set[str]:
     return {item.strip() for value in values for item in str(value).split(",") if item.strip()}
 
 
-def _selection(config) -> set[str]:
-    selected = _csv_values(config.getoption("--e2e-model", default=[]) or [])
-    selected |= _csv_values(config.getoption("--e2e-testcase", default=[]) or [])
+def _selectors(config) -> tuple[set[str], set[str]]:
+    model_filters = _csv_values(config.getoption("--e2e-model", default=[]) or [])
     models_file = config.getoption("--e2e-models-file", default=None)
     if models_file:
         path = Path(models_file)
         assert path.is_file(), f"E2E models file does not exist: {path}"
-        selected |= {
+        model_filters |= {
             line.strip()
             for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
-    return selected
+    testcase_filters = _csv_values(config.getoption("--e2e-testcase", default=[]) or [])
+    return model_filters, testcase_filters
 
 
 def _require_selected(case_name: str, manifest: dict, config) -> None:
-    selected = _selection(config)
+    model_filters, testcase_filters = _selectors(config)
     enabled = os.environ.get("TRTMC_E2E") == "1"
-    if not enabled and not selected:
+    if not enabled and not model_filters and not testcase_filters:
         pytest.skip("real family E2E requires TRTMC_E2E=1 or an explicit E2E selection")
-    if selected and not ({_FAMILY, manifest["name"], case_name} & selected):
+    model_match = not model_filters or bool(
+        {_FAMILY, manifest["name"], case_name} & model_filters
+    )
+    testcase_match = not testcase_filters or case_name in testcase_filters
+    if not model_match or not testcase_match:
         pytest.skip(f"{case_name} was not selected")
 
 
