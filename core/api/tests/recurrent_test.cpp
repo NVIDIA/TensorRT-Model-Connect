@@ -29,10 +29,11 @@ void* operator new(std::size_t size) {
         return result;
     throw std::bad_alloc();
 }
-void operator delete(void* value) noexcept {
+// Keep the test-only replacement boundary intact under Release optimization.
+[[gnu::noinline]] void operator delete(void* value) noexcept {
     std::free(value);
 }
-void operator delete(void* value, std::size_t) noexcept {
+[[gnu::noinline]] void operator delete(void* value, std::size_t) noexcept {
     std::free(value);
 }
 namespace {
