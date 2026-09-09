@@ -28,6 +28,11 @@ starts it in a fresh process for every case and understands only the result
 envelope. Dataset interpretation, reference execution, metrics, and gates remain
 inside the family.
 
+Execution requires POSIX process groups. The application owns each executor and
+environment-preparation process group, stops its descendants on timeout or
+SIGINT/SIGTERM, and does not advance while the parent is still running. Executors
+must not detach workers into separate sessions.
+
 ## Python environments and preparation
 
 The scheduler does not import family code or model dependencies. Executors use
@@ -57,6 +62,9 @@ packages. Family preparation must not modify the common environment.
 
 All case preparation finishes before evaluation. GPT-2 resolves an immutable HF
 snapshot and builds a fresh run-owned bundle through the public benchmark CLI.
+Accuracy also validates the dataset and saves the selected samples in the run's
+preparation directory before building. Evaluation and resume read this saved
+selection, never a potentially changed external dataset.
 New runs require `execution.allow_build: true`; prepared runs reuse their
 recorded bundle without rebuilding during measurement. Preparation errors are
 family/case-local and do not stop independent selected work.
@@ -74,8 +82,11 @@ trtmc-qualify resume artifacts/qualification/gpt2-performance
 `prepare` writes `preparation.json`, not an Accuracy/Performance report. `run`
 performs both stages. The executor receives `phase: prepare`, `check`, or `run`;
 preparation returns family-owned `details.prepared`. Its optional `input_files`
-list identifies immutable files whose integrity the application checks before
-reuse. `check` verifies family-specific readiness without rebuilding or measuring.
+list identifies files whose presence, size, modification time, change time, and
+filesystem identity the application checks before reuse. These are local file
+state checks, not content authentication. Runs and prepared files must remain in
+their original trusted storage. `check` verifies family-specific readiness without
+rebuilding or measuring.
 
 Accuracy is a conversion check, not a standalone Hugging Face score. The family
 executor runs the Hugging Face model as the reference, runs the same inputs
@@ -188,7 +199,7 @@ run fail. Without a target, valid timing comparisons remain observations.
 
 ## Commands
 
-Show the immutable plan without loading a model:
+Show the selected plan without loading a model:
 
 ```bash
 trtmc-qualify plan --kind accuracy --families-root families
@@ -254,10 +265,17 @@ Completed pass/fail results are terminal. Missing or malformed results are run
 again; an `execution=error` result is archived under the case's `attempts/`
 directory before that case is retried.
 
-Resume first verifies source/configuration, actual Python package versions, and
-prepared input files. Changed inputs require a new run instead of silently
-reusing completed results. Preparation receipts and executor logs are retained
+Plans and cases use generated run-local IDs, not content-derived identities.
+Resume verifies the recorded repository revision and working-tree changes,
+configuration/source file state, actual Python package versions, and prepared
+file state. It does not hash source, dependencies, weights, or bundles.
+Changed prepared files require a new run instead of silently reusing completed
+results; changes to the original external dataset do not replace the saved samples.
+Preparation receipts and executor logs are retained
 under `preparations/` and `environments/` alongside case evidence in `items/`.
+
+Earlier draft runs without input-file state records and saved Accuracy samples
+must be prepared again; no legacy receipt conversion is supported.
 
 Regenerate the machine-readable and HTML reports without executing cases:
 

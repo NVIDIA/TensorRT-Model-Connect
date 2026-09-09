@@ -8,8 +8,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import subprocess
 from typing import Any, Mapping, Sequence
+
+from .qualification_process import run_process
 
 
 _PROBE = """
@@ -38,7 +39,7 @@ def python_command(python: str, *arguments: str) -> list[str]:
 
 
 def inspect_python(python: str, timeout: int) -> dict[str, Any]:
-    completed = subprocess.run(
+    completed = run_process(
         python_command(python, "-c", _PROBE),
         env=process_environment(),
         capture_output=True,
@@ -103,7 +104,7 @@ def prepare_family_environment(
                 (directory / "stdout.log").open("w") as stdout,
                 (directory / "stderr.log").open("w") as stderr,
             ):
-                subprocess.run(
+                run_process(
                     command,
                     cwd=directory,
                     env=process_environment(),

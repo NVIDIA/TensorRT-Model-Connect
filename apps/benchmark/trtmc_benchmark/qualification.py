@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
 import json
 import math
@@ -22,6 +21,7 @@ from urllib.parse import quote
 import yaml
 
 from .qualification_environment import prepare_family_environment, process_environment
+from .qualification_process import run_process
 
 
 CONFIG_SCHEMA = "trtmc.qualification/v1"
@@ -64,6 +64,7 @@ class PlanItem:
     executor_path: Path
     definition: Mapping[str, Any]
     case: Mapping[str, Any]
+    inputs: Mapping[str, Any]
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -80,6 +81,7 @@ class PlanItem:
             "executor_path": str(self.executor_path),
             "definition": dict(self.definition),
             "case": dict(self.case),
+            "inputs": dict(self.inputs),
         }
 
     @classmethod
@@ -100,6 +102,8 @@ class PlanItem:
             _nonempty_string(value.get(field), f"plan item {field}")
         definition = value.get("definition")
         case = value.get("case")
+        if not isinstance(value.get("inputs"), Mapping):
+            raise QualificationError("plan item requires input file metadata; create a new run")
         if not isinstance(definition, Mapping) or not isinstance(case, Mapping):
             raise QualificationError("plan item definition and case must be objects")
         definition_path = value.get("definition_path")
@@ -123,6 +127,7 @@ class PlanItem:
             executor_path=Path(str(value["executor_path"])),
             definition=dict(definition),
             case=dict(case),
+            inputs=dict(value["inputs"]),
         )
 
 
@@ -245,9 +250,8 @@ class QualificationCatalog:
         _require_requested(requested_cases, discovered_cases, "cases")
 
         items = tuple(self._plan_item(record) for record in records)
-        plan_payload = {"kind": kind, "items": [item.to_json() for item in items]}
         return QualificationPlan(
-            plan_id=_digest(plan_payload),
+            plan_id=uuid.uuid4().hex,
             kind=kind,
             families_root=self.root,
             items=items,
@@ -374,25 +378,8 @@ class QualificationCatalog:
 
     @staticmethod
     def _plan_item(record: Mapping[str, Any]) -> PlanItem:
-        identity = {
-            "family": record["family"],
-            "model": record["model"],
-            "kind": record["kind"],
-            "suite_id": record["suite_id"],
-            "case_id": record["case_id"],
-            "gate_policy": record["gate_policy"],
-            "manifest_sha256": _file_digest(record["manifest_path"]),
-            "config_sha256": _file_digest(record["config_path"]),
-            "executor_sha256": _file_digest(record["executor_path"]),
-            "family_sources": _qualification_sources(Path(record["executor_path"])),
-            "definition_sha256": (
-                _file_digest(record["definition_path"]) if record["definition_path"] else None
-            ),
-            "definition": record["definition"],
-            "case": record["case"],
-        }
         return PlanItem(
-            item_id=_digest(identity),
+            item_id=uuid.uuid4().hex,
             family=str(record["family"]),
             model=str(record["model"]),
             kind=str(record["kind"]),
@@ -407,6 +394,7 @@ class QualificationCatalog:
             executor_path=Path(record["executor_path"]),
             definition=dict(record["definition"]),
             case=dict(record["case"]),
+            inputs=_item_inputs(record),
         )
 
 
@@ -455,7 +443,7 @@ class QualificationRunner:
         for family in dict.fromkeys(item.family for item in plan.items):
             selected = [item for item in plan.items if item.family == family]
             try:
-                if any(_current_item_id(item) != item.item_id for item in selected):
+                if any(_item_inputs(item.to_json()) != item.inputs for item in selected):
                     raise QualificationError(
                         "qualification source changed after the plan was created"
                     )
@@ -615,7 +603,7 @@ class QualificationRunner:
         }
         _write_json(request_path, request)
         try:
-            if _current_item_id(item) != item.item_id:
+            if _item_inputs(item.to_json()) != item.inputs:
                 raise QualificationError("qualification source changed after the plan was created")
         except (OSError, QualificationError) as error:
             _write_json(result_path, _error_result(item, str(error)))
@@ -643,7 +631,7 @@ class QualificationRunner:
                 stdout_path.open("w", encoding="utf-8") as stdout,
                 stderr_path.open("w", encoding="utf-8") as stderr,
             ):
-                completed = subprocess.run(
+                completed = run_process(
                     command,
                     cwd=item_dir,
                     env=process_env,
@@ -739,9 +727,6 @@ def load_plan(path: Path) -> QualificationPlan:
     ids = [item.item_id for item in items]
     if len(ids) != len(set(ids)):
         raise QualificationError("plan contains duplicate item ids")
-    expected = _digest({"kind": kind, "items": [item.to_json() for item in items]})
-    if expected != plan_id:
-        raise QualificationError("plan id does not match its items")
     return QualificationPlan(plan_id, kind, Path(families_root), items, created_at)
 
 
@@ -1127,34 +1112,30 @@ def _archive_attempt(item_dir: Path) -> None:
             path.replace(archive / path.name)
 
 
-def _current_item_id(item: PlanItem) -> str:
-    return _digest(
-        {
-            "family": item.family,
-            "model": item.model,
-            "kind": item.kind,
-            "suite_id": item.suite_id,
-            "case_id": item.case_id,
-            "gate_policy": item.gate_policy,
-            "manifest_sha256": _file_digest(item.manifest_path),
-            "config_sha256": _file_digest(item.config_path),
-            "executor_sha256": _file_digest(item.executor_path),
-            "family_sources": _qualification_sources(item.executor_path),
-            "definition_sha256": (
-                _file_digest(item.definition_path) if item.definition_path else None
-            ),
-            "definition": item.definition,
-            "case": item.case,
-        }
-    )
-
-
-def _qualification_sources(executor: Path) -> dict[str, str]:
+def _item_inputs(record: Mapping[str, Any]) -> dict[str, Any]:
+    executor = Path(record["executor_path"])
     sources = sorted(executor.parent.rglob("*.py"))
     requirements = executor.parents[2] / "requirements.txt"
     if requirements.is_file():
         sources.append(requirements)
-    return {str(path.relative_to(executor.parents[2])): _file_digest(path) for path in sources}
+    sources.extend(Path(record[key]) for key in ("manifest_path", "config_path"))
+    if record["definition_path"]:
+        sources.append(Path(record["definition_path"]))
+    return {str(path): _file_state(path) for path in sources}
+
+
+def _file_state(path: Path) -> dict[str, int]:
+    """Detect local replacement/modification without reading or hashing artifacts."""
+    if not path.is_file():
+        raise QualificationError(f"prepared or configured input is missing: {path}")
+    state = path.stat()
+    return {
+        "device": state.st_dev,
+        "inode": state.st_ino,
+        "size": state.st_size,
+        "modified_ns": state.st_mtime_ns,
+        "changed_ns": state.st_ctime_ns,
+    }
 
 
 def _prepared_inputs(directory: Path, prepared: Mapping[str, Any], *, reuse: bool) -> None:
@@ -1163,7 +1144,7 @@ def _prepared_inputs(directory: Path, prepared: Mapping[str, Any], *, reuse: boo
         not isinstance(path, str) or not Path(path).is_absolute() for path in paths
     ):
         raise QualificationError("prepared input_files must be absolute file paths")
-    evidence = {path: _file_digest(Path(path)) for path in paths}
+    evidence = {path: _file_state(Path(path)) for path in paths}
     receipt = directory / "inputs.json"
     if reuse:
         if evidence != _read_json(receipt, "prepared input evidence"):
@@ -1191,7 +1172,7 @@ def _source_evidence(root: Path) -> dict[str, Any]:
         return {"revision": None, "source": "installed or non-git catalog"}
     return {
         "revision": revision.stdout.strip(),
-        "working_tree_diff": hashlib.sha256(diff.stdout).hexdigest(),
+        "working_tree_diff": diff.stdout.decode("utf-8", errors="replace"),
     }
 
 
@@ -1245,19 +1226,6 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
-
-
-def _digest(value: Mapping[str, Any]) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _file_digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _now() -> str:

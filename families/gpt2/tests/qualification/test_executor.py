@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from families.gpt2.tests.qualification import executor, hf_performance, prepare_environment
 from families.gpt2.tests.qualification.executor import (
@@ -20,21 +21,174 @@ from families.gpt2.tests.qualification.executor import (
     _run_reference,
     _truncate_prompt,
 )
-from trtmc_benchmark.qualification import QualificationCatalog
 
 
 REPOSITORY = Path(__file__).resolve().parents[4]
+
+
+def _item(kind):
+    """Family-owned executor request fixture, independent of the application."""
+    family = Path(__file__).resolve().parents[2]
+    config = yaml.safe_load((Path(__file__).parent / f"gpt2-125m.{kind}.yaml").read_text())
+    suite = config["suites"][0]
+    case = suite["cases"][0]
+    definition = (
+        {
+            "implementation": suite["benchmark"],
+            "dataset": {"relative_path": "MMLU_five_shot/mmlu_dataset.json", "version": "test"},
+            "selection": {"method": "first"},
+            "scoring": {"implementation": "continuation_token_parity"},
+        }
+        if kind == "accuracy"
+        else {
+            "implementation": suite["benchmark"],
+            "timing": {
+                "candidate": {
+                    "timing_scope": "public_task_call_wall",
+                    "load_excluded": True,
+                    "warmup_excluded": True,
+                    "telemetry_in_timed_path": False,
+                },
+                "reference": {
+                    "timing_scope": "public_operation_call_wall",
+                    "model_load_excluded": True,
+                    "compile_excluded": True,
+                    "warmup_excluded": True,
+                },
+            },
+            "comparison": {"primary_metric": "latency_ms.p50"},
+            "stability": {
+                "samples": 10,
+                "median_drift_limit": 0.05,
+                "within_median_fraction": 0.05,
+                "minimum_close_samples": 8,
+                "retries": 1,
+            },
+            "metrics": [
+                "sample_count",
+                "latency_ms.p50",
+                "latency_ms.p95",
+                "request_throughput_per_s",
+                "output_tokens_per_s",
+            ],
+        }
+    )
+    manifest = family / "tests/manifests/gpt2-125m.json"
+    payload = {
+        "id": "test-case",
+        "family": "gpt2",
+        "model": "gpt2-125m",
+        "kind": kind,
+        "suite_id": suite["benchmark"],
+        "case_id": case["id"],
+        "gate_policy": suite["gate_policy"],
+        "manifest_path": str(manifest),
+        "case": case,
+        "definition": definition,
+    }
+    return SimpleNamespace(
+        case=case, definition=definition, manifest_path=manifest, to_json=lambda: payload
+    )
+
+
+def test_inconclusive_result_returns_error_exit_code(tmp_path, monkeypatch):
+    item = _item("performance")
+    request = tmp_path / "request.json"
+    output = tmp_path / "result.json"
+    request.write_text(json.dumps({"plan_item": item.to_json()}))
+    monkeypatch.setattr(
+        executor,
+        "_execute",
+        lambda *args: {
+            **executor._identity(item.to_json()),
+            "schema_version": executor.RESULT_SCHEMA,
+            "execution": "error",
+            "verdict": None,
+            "details": {"error": "measurement_inconclusive"},
+            "artifacts": [],
+        },
+    )
+    assert executor._qualification_main(request, output) == 1
+    assert json.loads(output.read_text())["details"]["error"] == "measurement_inconclusive"
+
+
+def test_accuracy_preparation_freezes_samples_before_execution(tmp_path, monkeypatch):
+    item = _item("accuracy")
+    manifest = json.loads(item.manifest_path.read_text())
+    dataset = tmp_path / item.definition["dataset"]["relative_path"]
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text(json.dumps({"requests": [{"prompt": "original sample"}]}))
+    checkpoint = tmp_path / ("a" * 40)
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}")
+    bundle = tmp_path / "prepared.bundle"
+    bundle.write_bytes(b"test bundle")
+    directory = tmp_path / "preparation"
+    directory.mkdir()
+    environment = {
+        "schema_version": "trtmc.qualification-environment/v1",
+        "tools": {"reference_python": sys.executable},
+        "execution": {"allow_build": True},
+        "storage": {"data_root": str(tmp_path)},
+    }
+
+    def snapshot(_command, **kwargs):
+        kwargs["stdout"].write(
+            json.dumps(
+                {
+                    "checkpoint": str(checkpoint),
+                    "hf_revision": checkpoint.name,
+                }
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(executor.subprocess, "run", snapshot)
+    monkeypatch.setattr(
+        executor,
+        "_run_benchmark",
+        lambda **kwargs: {
+            "bundles": [{"status": "built", "bundle": str(bundle)}],
+        },
+    )
+    result = executor._prepare_case({}, item.to_json(), manifest, item.case, environment, directory)
+    prepared = result["details"]["prepared"]
+    sample_file = Path(prepared["sample_snapshot"])
+    assert str(sample_file) in prepared["input_files"]
+    dataset.write_text(json.dumps({"requests": [{"prompt": "changed sample"}]}))
+    samples, _ = executor._prepared_samples(prepared)
+    assert [sample["prompt"] for sample in samples] == ["original sample"]
+    request = {
+        "schema_version": executor.REQUEST_SCHEMA,
+        "environment": environment,
+        "phase": "check",
+        "preparation": prepared,
+    }
+    assert executor._execute(request, item.to_json(), directory)["execution"] == "completed"
+    sample_file.unlink()
+    with pytest.raises(executor.Gpt2QualificationError, match="prepared Accuracy samples"):
+        executor._execute(request, item.to_json(), directory)
+
+
+def test_accuracy_prepare_checks_missing_dataset_before_build(tmp_path, monkeypatch):
+    item = _item("accuracy")
+    monkeypatch.setattr(executor, "_run_benchmark", lambda **kwargs: pytest.fail("build started"))
+    with pytest.raises(executor.Gpt2QualificationError, match="MMLU dataset does not exist"):
+        executor._prepare_case(
+            {},
+            item.to_json(),
+            {},
+            item.case,
+            {"storage": {"data_root": str(tmp_path)}, "execution": {"allow_build": True}},
+            tmp_path,
+        )
 
 
 @pytest.mark.parametrize("settles", [False, True])
 def test_unstable_performance_retries_both_sides_once_and_preserves_evidence(
     tmp_path, monkeypatch, settles
 ):
-    item = (
-        QualificationCatalog(REPOSITORY / "families")
-        .plan("performance", models=["gpt2-125m"])
-        .items[0]
-    )
+    item = _item("performance")
     calls = []
 
     def measure(**kwargs):
@@ -159,44 +313,10 @@ def test_packaged_family_entry_points_do_not_need_repository_imports(tmp_path):
         assert "usage:" in completed.stdout
 
 
-def test_checked_in_gpt2_accuracy_suite_is_discoverable() -> None:
-    plan = QualificationCatalog(REPOSITORY / "families").plan("accuracy", models=["gpt2-125m"])
-
-    assert [(item.suite_id, item.case_id) for item in plan.items] == [
-        ("mmlu_continuation_parity", "smoke")
-    ]
-    assert plan.items[0].definition["implementation"] == "mmlu_continuation_parity"
-    assert "device" not in plan.items[0].case
-
-
-def test_checked_in_gpt2_performance_suite_is_discoverable() -> None:
-    plan = QualificationCatalog(REPOSITORY / "families").plan("performance", models=["gpt2-125m"])
-
-    assert [(item.suite_id, item.case_id) for item in plan.items] == [
-        ("text_generation_performance", "generate_64")
-    ]
-    assert plan.items[0].gate_policy == "observation_only"
-    assert plan.items[0].case["candidate"]["measurement"] == {
-        "warmup": 5,
-        "iterations": 10,
-    }
-    assert plan.items[0].case["reference"] == {
-        "implementation": "hf_transformers",
-        "mode": "torch-compile",
-        "compile_scope": "model.forward",
-        "precision": "fp32",
-    }
-    assert "device" not in plan.items[0].case
-
-
 def test_gpt2_performance_compares_converted_bundle_with_hf_torch_compile(
     tmp_path: Path, monkeypatch
 ) -> None:
-    item = (
-        QualificationCatalog(REPOSITORY / "families")
-        .plan("performance", models=["gpt2-125m"])
-        .items[0]
-    )
+    item = _item("performance")
     candidate = {
         "measurement_policy": {
             "timing_scope": "public_task_call_wall",
@@ -295,11 +415,7 @@ def test_gpt2_performance_compares_converted_bundle_with_hf_torch_compile(
 
 
 def test_gpt2_performance_rejects_timing_without_output_parity(tmp_path: Path, monkeypatch) -> None:
-    item = (
-        QualificationCatalog(REPOSITORY / "families")
-        .plan("performance", models=["gpt2-125m"])
-        .items[0]
-    )
+    item = _item("performance")
     candidate = {
         "measurement_policy": {
             "timing_scope": "public_task_call_wall",
@@ -377,11 +493,7 @@ def test_gpt2_performance_rejects_timing_without_output_parity(tmp_path: Path, m
 
 
 def test_gpt2_manifest_covers_the_accuracy_context_window() -> None:
-    item = (
-        QualificationCatalog(REPOSITORY / "families")
-        .plan("accuracy", models=["gpt2-125m"])
-        .items[0]
-    )
+    item = _item("accuracy")
     manifest = json.loads(item.manifest_path.read_text(encoding="utf-8"))
 
     assert (

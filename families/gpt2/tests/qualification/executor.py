@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import statistics
 import subprocess
 import sys
 import uuid
@@ -53,7 +54,7 @@ def _qualification_main(request_path: Path, output_path: Path) -> int:
         item = _item(request)
         result = _execute(request, item, output_path.parent.resolve())
         _write_json(output_path, result)
-        return 0
+        return 0 if result["execution"] == "completed" else 1
     except Exception as error:
         try:
             request = _read_json(request_path, "executor request")
@@ -104,6 +105,8 @@ def _execute(request: Mapping[str, Any], item: Mapping[str, Any], item_dir: Path
     if request.get("phase") == "check":
         if not prepared:
             raise Gpt2QualificationError("a prepared bundle receipt is required")
+        if item["kind"] == "accuracy":
+            _prepared_samples(prepared)
         return {
             **_identity(item),
             "schema_version": RESULT_SCHEMA,
@@ -144,6 +147,11 @@ def _execute(request: Mapping[str, Any], item: Mapping[str, Any], item_dir: Path
 
 
 def _prepare_case(request, item, manifest, case, environment, item_dir):
+    sample_snapshot = None
+    if item["kind"] == "accuracy":
+        samples, dataset_path = _load_samples(item["definition"], case, environment)
+        sample_snapshot = item_dir / "selected-samples.json"
+        _write_json(sample_snapshot, {"dataset_path": str(dataset_path), "samples": samples})
     if not environment.get("execution", {}).get("allow_build", False):
         raise Gpt2QualificationError(
             "a new GPT-2 run requires allow_build; resume a prepared run to reuse its bundle"
@@ -219,6 +227,7 @@ def _prepare_case(request, item, manifest, case, environment, item_dir):
         **checkpoint,
         "bundle": bundle,
         "input_files": [bundle]
+        + ([str(sample_snapshot)] if sample_snapshot else [])
         + [
             str(path)
             for path in sorted(Path(checkpoint["checkpoint"]).iterdir())
@@ -226,6 +235,7 @@ def _prepare_case(request, item, manifest, case, environment, item_dir):
         ],
         "build": bundles[0],
         "plan_item_id": item["id"],
+        "sample_snapshot": str(sample_snapshot) if sample_snapshot else None,
     }
     _write_json(item_dir / "bundle-receipt.json", prepared)
     return {
@@ -252,7 +262,7 @@ def _execute_accuracy(
     case: Mapping[str, Any],
     environment: Mapping[str, Any],
 ) -> dict[str, Any]:
-    samples, dataset_path = _load_samples(definition, case, environment)
+    samples, dataset_path = _prepared_samples(request.get("preparation", {}))
     _write_jsonl(item_dir / "selected-samples.jsonl", samples)
 
     reference = _run_reference(
@@ -328,6 +338,49 @@ def _execute_accuracy(
     }
 
 
+def _prepared_samples(prepared):
+    snapshot = prepared.get("sample_snapshot")
+    if not snapshot:
+        raise Gpt2QualificationError("Accuracy requires prepared dataset samples")
+    selected = _read_json(Path(snapshot), "prepared Accuracy samples")
+    samples = selected.get("samples")
+    if not isinstance(samples, list) or not samples:
+        raise Gpt2QualificationError("prepared Accuracy samples must be a non-empty list")
+    ids = set()
+    for sample in samples:
+        if not isinstance(sample, dict):
+            raise Gpt2QualificationError("prepared Accuracy sample must be an object")
+        sample_id = _string(sample.get("sample_id"), "prepared sample id")
+        _string(sample.get("prompt"), "prepared prompt")
+        if sample_id in ids:
+            raise Gpt2QualificationError("duplicate prepared sample id")
+        ids.add(sample_id)
+    return samples, Path(_string(selected.get("dataset_path"), "prepared dataset path"))
+
+
+def measurement_stability(samples: Sequence[float]) -> dict:
+    if len(samples) != 10 or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+        for value in samples
+    ):
+        raise ValueError("stability requires ten finite positive latency samples")
+    median = statistics.median(samples)
+    first = statistics.median(samples[:5])
+    last = statistics.median(samples[5:])
+    drift = abs(last - first) / first
+    close = sum(abs(sample - median) / median <= 0.05 for sample in samples)
+    return {
+        "stable": drift <= 0.05 and close >= 8,
+        "first_half_median_ms": first,
+        "last_half_median_ms": last,
+        "median_drift": drift,
+        "samples_within_five_percent": close,
+    }
+
+
 def _execute_performance(
     *,
     request: Mapping[str, Any],
@@ -338,8 +391,6 @@ def _execute_performance(
     case: Mapping[str, Any],
     environment: Mapping[str, Any],
 ) -> dict[str, Any]:
-    from trtmc_benchmark.measurement_stability import measurement_stability
-
     if definition.get("stability") != {
         "samples": 10,
         "median_drift_limit": 0.05,

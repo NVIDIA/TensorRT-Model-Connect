@@ -421,7 +421,11 @@ def test_applications_depend_only_on_public_model_connect_surfaces() -> None:
                 for include in re.findall(r'#include\s+[<"]([^>"]+)', source):
                     if include.startswith(("apps/", "examples/")):
                         violations.append(f"{path.relative_to(REPO)}:reverse-include:{include}")
-    for path in (REPO / "core/builder/tensorrt_model_connect").rglob("*.py"):
+    python_consumers = [
+        *(REPO / "core/builder/tensorrt_model_connect").rglob("*.py"),
+        *(REPO / "families").rglob("*.py"),
+    ]
+    for path in python_consumers:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             modules: list[str] = []

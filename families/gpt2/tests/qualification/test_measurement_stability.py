@@ -3,7 +3,7 @@
 
 import pytest
 
-from trtmc_benchmark.measurement_stability import measurement_stability
+from families.gpt2.tests.qualification.executor import measurement_stability
 
 
 def test_historical_stability_requires_both_drift_and_median_band():

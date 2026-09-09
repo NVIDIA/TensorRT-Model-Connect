@@ -6,6 +6,9 @@ from __future__ import annotations
 import json
 import sys
 import subprocess
+import os
+import signal
+import time
 from pathlib import Path
 
 import pytest
@@ -22,6 +25,40 @@ from trtmc_benchmark.qualification import (
     load_plan,
 )
 from trtmc_benchmark.qualification_cli import main
+
+
+def test_checked_in_gpt2_accuracy_suite_is_discoverable() -> None:
+    plan = QualificationCatalog(Path(__file__).resolve().parents[4] / "families").plan(
+        "accuracy", models=["gpt2-125m"]
+    )
+
+    assert [(item.suite_id, item.case_id) for item in plan.items] == [
+        ("mmlu_continuation_parity", "smoke")
+    ]
+    assert plan.items[0].definition["implementation"] == "mmlu_continuation_parity"
+    assert "device" not in plan.items[0].case
+
+
+def test_checked_in_gpt2_performance_suite_is_discoverable() -> None:
+    plan = QualificationCatalog(Path(__file__).resolve().parents[4] / "families").plan(
+        "performance", models=["gpt2-125m"]
+    )
+
+    assert [(item.suite_id, item.case_id) for item in plan.items] == [
+        ("text_generation_performance", "generate_64")
+    ]
+    assert plan.items[0].gate_policy == "observation_only"
+    assert plan.items[0].case["candidate"]["measurement"] == {
+        "warmup": 5,
+        "iterations": 10,
+    }
+    assert plan.items[0].case["reference"] == {
+        "implementation": "hf_transformers",
+        "mode": "torch-compile",
+        "compile_scope": "model.forward",
+        "precision": "fp32",
+    }
+    assert "device" not in plan.items[0].case
 
 
 def _family(root: Path, family: str, model: str, *, with_config: bool = True) -> Path:
@@ -117,6 +154,77 @@ def _environment() -> dict:
         "name": "test",
         "execution": {"timeout_seconds": 10},
     }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
+def test_executor_timeout_stops_descendants_before_returning(tmp_path):
+    qualification = _family(tmp_path / "families", "alpha", "model-a")
+    pidfile = tmp_path / "child.pid"
+    (qualification / "executor.py").write_text(
+        "import subprocess, sys, time\nfrom pathlib import Path\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        f"Path({str(pidfile)!r}).write_text(str(child.pid))\n"
+        "time.sleep(30)\n"
+    )
+    plan = QualificationCatalog(tmp_path / "families").plan("accuracy", cases=["small"])
+    directory = tmp_path / "item"
+    directory.mkdir()
+    QualificationRunner()._run_item(
+        plan, plan.items[0], directory, {"tools": {"python": sys.executable}}, 1
+    )
+    assert json.loads((directory / "result.json").read_text())["execution"] == "error"
+    pid = int(pidfile.read_text())
+    try:
+        for _ in range(100):
+            status = Path(f"/proc/{pid}/stat")
+            if not status.exists() or status.read_text().split()[2] == "Z":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("executor descendant is still running after timeout")
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_inconclusive_family_entrypoint_survives_runner_and_report(tmp_path):
+    family = _family(tmp_path / "families", "gpt2", "gpt2-test")
+    config = yaml.safe_load((family / "gpt2-test.accuracy.yaml").read_text())
+    config["kind"] = "performance"
+    config["suites"] = [config["suites"][1]]
+    (family / "gpt2-test.performance.yaml").write_text(yaml.safe_dump(config))
+    executor_path = (
+        Path(__file__).resolve().parents[4] / "families/gpt2/tests/qualification/executor.py"
+    )
+    # Use the real family entry point with a deterministic unstable measurement.
+    (family / "executor.py").write_text(
+        "import importlib.util, json\n"
+        f"spec = importlib.util.spec_from_file_location('gpt2_executor', {str(executor_path)!r})\n"
+        "module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)\n"
+        "def execute(request, item, directory):\n"
+        "    result = {'schema_version': module.RESULT_SCHEMA, **module._identity(item),\n"
+        "              'execution': 'completed', 'verdict': None, 'details': {}, 'artifacts': []}\n"
+        "    if request.get('phase') == 'run':\n"
+        "        for name in ('first.json', 'retry.json'):\n"
+        "            (directory / name).write_text('{}')\n"
+        "        result.update(execution='error',\n"
+        "            details={'error': 'measurement_inconclusive', 'comparison_valid': False,\n"
+        "                     'measurement_attempts': [{'stable': False}, {'stable': False}]},\n"
+        "            artifacts=[{'path': 'first.json'}, {'path': 'retry.json'}])\n"
+        "    return result\n"
+        "module._execute = execute\n"
+        "raise SystemExit(module.main())\n"
+    )
+    plan = QualificationCatalog(tmp_path / "families").plan("performance")
+    report = QualificationRunner().run(plan, tmp_path / "run", _environment())
+    assert report["status"] == "error"
+    assert report["summary"]["inconclusive"] == 1
+    assert report["summary"]["comparable"] == 0
+    result = report["items"][0]
+    assert len(result["details"]["measurement_attempts"]) == 2
+    assert {"first.json", "retry.json"} <= {artifact["path"] for artifact in result["artifacts"]}
 
 
 def test_family_python_is_used_by_real_executor_without_inherited_packages(tmp_path, monkeypatch):
