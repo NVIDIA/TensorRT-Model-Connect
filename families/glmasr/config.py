@@ -16,12 +16,72 @@ projector runs, which is why the projector's input width is the encoder's
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
 
-# The decoder builders ported into this family import ModelConfig from their
-# own package. GLM-ASR's decoder fields arrive through the shared parser
-# unchanged, so re-export it rather than carrying a second copy.
-from tensorrt_model_connect.config import ModelConfig
+
+@dataclass
+class ModelConfig:
+    """GLM-ASR-owned decoder configuration parser.
+
+    GLM-ASR keeps its Llama decoder under ``text_config``; this parser hoists
+    those fields while retaining the original JSON for audio-specific logic.
+    """
+
+    model_type: str = ""
+    architectures: list[str] = field(default_factory=list)
+    vocab_size: int = 0
+    hidden_size: int = 0
+    intermediate_size: int = 0
+    num_hidden_layers: int = 0
+    num_attention_heads: int = 1
+    num_key_value_heads: int = 1
+    rms_norm_eps: float = 1e-5
+    rope_theta: float = 10000.0
+    max_position_embeddings: int = 8192
+    _head_dim: int = 0
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @property
+    def head_dim(self) -> int:
+        return self._head_dim or (self.hidden_size // self.num_attention_heads)
+
+    @property
+    def attention_size(self) -> int:
+        return self.num_attention_heads * self.head_dim
+
+    @staticmethod
+    def from_json(text: str) -> "ModelConfig":
+        raw = json.loads(text)
+        merged = dict(raw)
+        nested = raw.get("text_config")
+        if isinstance(nested, dict):
+            merged = {**raw, **nested}
+            merged["model_type"] = raw.get("model_type", merged.get("model_type", ""))
+            merged["architectures"] = raw.get("architectures", merged.get("architectures", []))
+        rope = merged.get("rope_theta")
+        if rope is None and isinstance(merged.get("rope_parameters"), dict):
+            rope = merged["rope_parameters"].get("rope_theta")
+        return ModelConfig(
+            model_type=str(merged.get("model_type", "")),
+            architectures=list(merged.get("architectures", [])),
+            vocab_size=int(merged.get("vocab_size", 0)),
+            hidden_size=int(merged.get("hidden_size", 0)),
+            intermediate_size=int(merged.get("intermediate_size", 0)),
+            num_hidden_layers=int(merged.get("num_hidden_layers", 0)),
+            num_attention_heads=int(merged.get("num_attention_heads", 1)),
+            num_key_value_heads=int(merged.get("num_key_value_heads", merged.get("num_attention_heads", 1))),
+            rms_norm_eps=float(merged.get("rms_norm_eps", merged.get("layer_norm_eps", 1e-5))),
+            rope_theta=float(rope if rope is not None else 10000.0),
+            max_position_embeddings=int(merged.get("max_position_embeddings", 8192)),
+            _head_dim=int(merged.get("head_dim", 0) or 0),
+            raw=raw,
+        )
+
+    @staticmethod
+    def from_dir(model_dir: str | Path) -> "ModelConfig":
+        return ModelConfig.from_json((Path(model_dir) / "config.json").read_text())
 
 __all__ = [
     "MERGE_FACTOR",

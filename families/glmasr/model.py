@@ -23,8 +23,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from tensorrt_model_connect.config import ModelConfig
-
 from .audio_encoder_builder import build_audio_encoder_engine
 from .checkpoint_mapper import (
     WeightDict,
@@ -38,6 +36,7 @@ from .config import (
     audio_encoder_config,
     audio_token_id,
     projector_config,
+    ModelConfig,
 )
 from .standard_decoder_builder import build_standard_decoder_engine
 from .parallel import ParallelConfig
