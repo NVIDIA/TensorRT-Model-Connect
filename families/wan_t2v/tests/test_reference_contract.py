@@ -9,8 +9,19 @@ from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
+from packaging.requirements import Requirement
 
 from . import test_e2e as e2e
+
+
+def test_reference_declares_diffusers_low_memory_loader_dependency() -> None:
+    requirements = Path(__file__).parents[1] / "requirements.txt"
+    names = {
+        Requirement(line).name
+        for line in requirements.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    }
+    assert "accelerate" in names
 
 
 class _Tensor:
