@@ -7,13 +7,11 @@
   "external_files": [
     {
       "path": "of3-ob-2025-06-30-174k.pt",
-      "url": "https://openfold3-data.s3.amazonaws.com/openfold3-parameters/of3-ob-2025-06-30-174k.pt",
-      "size": 2287872989
+      "url": "https://openfold3-data.s3.amazonaws.com/openfold3-parameters/of3-ob-2025-06-30-174k.pt"
     },
     {
       "path": "components.bcif",
-      "url": "https://openfold3-data.s3.amazonaws.com/components.bcif",
-      "size": 63393643
+      "url": "https://openfold3-data.s3.amazonaws.com/components.bcif"
     }
   ],
   "max_sequence_length": 76,
