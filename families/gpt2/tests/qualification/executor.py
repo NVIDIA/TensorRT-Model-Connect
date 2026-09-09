@@ -115,6 +115,7 @@ def _execute(request: Mapping[str, Any], item: Mapping[str, Any], item_dir: Path
         request=request,
         item=item,
         item_dir=item_dir,
+        manifest=manifest,
         definition=definition,
         case=case,
         environment=environment,
@@ -150,6 +151,7 @@ def _execute_accuracy(
         environment=environment,
         item_dir=item_dir,
     )
+    conversion = _conversion_evidence(item, candidate)
     comparison = _compare(definition, case, item, reference, candidate)
     _write_jsonl(item_dir / "samples.jsonl", comparison["samples"])
     _write_jsonl(item_dir / "disagreements.jsonl", comparison["disagreements"])
@@ -181,9 +183,17 @@ def _execute_accuracy(
                 "version": _mapping(definition.get("dataset"), "suite dataset").get("version"),
             },
             "reference": {
+                "backend": "hugging_face",
                 "model": reference.get("model"),
                 "revision": reference.get("revision"),
                 "precision": reference.get("precision"),
+                "device": reference.get("device"),
+            },
+            "candidate": conversion,
+            "comparison": {
+                "reference": "hugging_face",
+                "candidate": "converted_tensorrt_bundle",
+                "output_contract": "continuation_token_parity",
             },
             "actual_sample_count": comparison["actual_sample_count"],
             "passed_sample_count": comparison["passed_sample_count"],
@@ -201,6 +211,7 @@ def _execute_performance(
     request: Mapping[str, Any],
     item: Mapping[str, Any],
     item_dir: Path,
+    manifest: Mapping[str, Any],
     definition: Mapping[str, Any],
     case: Mapping[str, Any],
     environment: Mapping[str, Any],
@@ -216,6 +227,7 @@ def _execute_performance(
         environment=environment,
         item_dir=item_dir,
     )
+    conversion = _conversion_evidence(item, candidate)
     cells = candidate.get("cells")
     if not isinstance(cells, list) or len(cells) != 1:
         raise Gpt2QualificationError("GPT-2 Performance must return exactly one benchmark cell")
@@ -225,19 +237,33 @@ def _execute_performance(
     metrics = _mapping(cell.get("metrics"), "performance metrics")
     _validate_performance_metrics(definition, metrics)
     measurement_policy = _mapping(candidate.get("measurement_policy"), "measurement policy")
-    _validate_performance_timing(definition, measurement_policy)
-    samples_ms = cell.get("samples_ms")
-    if not isinstance(samples_ms, list) or len(samples_ms) != int(metrics["sample_count"]):
+    _validate_performance_timing(definition, measurement_policy, "candidate")
+    requested_measurement = _mapping(
+        _mapping(case.get("candidate"), "case candidate").get("measurement"),
+        "candidate measurement",
+    )
+    requested_iterations = int(requested_measurement.get("iterations"))
+    if int(metrics["sample_count"]) != requested_iterations:
         raise Gpt2QualificationError(
-            "Performance latency samples do not match metrics.sample_count"
+            "TensorRT Performance sample_count does not match the requested iterations"
         )
-    if any(
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-        for value in samples_ms
-    ):
-        raise Gpt2QualificationError("Performance latency samples must be finite numbers")
+    samples_ms = _performance_samples(
+        cell.get("samples_ms"), requested_iterations, "TensorRT"
+    )
+    reference = _run_performance_reference(
+        manifest=manifest,
+        item=item,
+        case=case,
+        environment=environment,
+        item_dir=item_dir,
+    )
+    reference_metrics = _validate_performance_reference(
+        definition=definition,
+        case=case,
+        manifest=manifest,
+        reference=reference,
+    )
+    comparison = _compare_performance(definition, cell, reference)
     return {
         **_identity(item),
         "schema_version": RESULT_SCHEMA,
@@ -245,20 +271,53 @@ def _execute_performance(
         "verdict": None,
         "details": {
             "gate_policy": "observation_only",
-            "metrics": dict(metrics),
-            "samples_ms": list(samples_ms),
-            "measurement_policy": dict(measurement_policy),
-            "runtime_environment": dict(
-                _mapping(candidate.get("environment"), "benchmark environment")
-            ),
-            "preparation": dict(_mapping(candidate.get("preparation"), "preparation")),
+            "candidate": {
+                "backend": "tensorrt",
+                "conversion": conversion,
+                "metrics": dict(metrics),
+                "samples_ms": samples_ms,
+                "measurement_policy": dict(measurement_policy),
+                "runtime_environment": dict(
+                    _mapping(candidate.get("environment"), "benchmark environment")
+                ),
+            },
+            "reference": {
+                "backend": "hugging_face",
+                "mode": reference["mode"],
+                "compile_scope": reference["compile_scope"],
+                "compile_evidence": dict(
+                    _mapping(reference.get("compile_evidence"), "compile evidence")
+                ),
+                "model": reference["model"],
+                "revision": reference.get("revision"),
+                "precision": reference["precision"],
+                "metrics": reference_metrics,
+                "samples_ms": list(reference["samples_ms"]),
+                "measurement_policy": dict(
+                    _mapping(reference.get("measurement_policy"), "reference measurement policy")
+                ),
+                "runtime_environment": dict(
+                    _mapping(reference.get("environment"), "reference environment")
+                ),
+            },
+            "comparison": comparison,
+            "metrics": {
+                "candidate_latency_ms_p50": comparison["candidate_p50_ms"],
+                "reference_latency_ms_p50": comparison["reference_p50_ms"],
+                "reference_over_candidate_p50": comparison[
+                    "reference_over_candidate_p50"
+                ],
+            },
         },
         "artifacts": [
-            _artifact("performance request", "candidate-spec.json"),
-            _artifact("performance result", "candidate/result.json"),
-            _artifact("performance report", "candidate/report.html"),
-            _artifact("performance stdout", "candidate.stdout.log"),
-            _artifact("performance stderr", "candidate.stderr.log"),
+            _artifact("TensorRT performance request", "candidate-spec.json"),
+            _artifact("TensorRT performance result", "candidate/result.json"),
+            _artifact("TensorRT performance report", "candidate/report.html"),
+            _artifact("TensorRT performance stdout", "candidate.stdout.log"),
+            _artifact("TensorRT performance stderr", "candidate.stderr.log"),
+            _artifact("HF torch.compile result", "reference-performance.json"),
+            _artifact("HF torch.compile stdout", "reference-performance.stdout.log"),
+            _artifact("HF torch.compile stderr", "reference-performance.stderr.log"),
         ],
     }
 
@@ -284,19 +343,147 @@ def _validate_performance_metrics(
 
 
 def _validate_performance_timing(
-    definition: Mapping[str, Any], measurement_policy: Mapping[str, Any]
+    definition: Mapping[str, Any], measurement_policy: Mapping[str, Any], side: str
 ) -> None:
     timing = _mapping(definition.get("timing"), "Performance suite timing")
-    for field in (
-        "timing_scope",
-        "load_excluded",
-        "warmup_excluded",
-        "telemetry_in_timed_path",
-    ):
-        if field not in timing or measurement_policy.get(field) != timing[field]:
+    expected = _mapping(timing.get(side), f"Performance suite {side} timing")
+    for field, value in expected.items():
+        if measurement_policy.get(field) != value:
             raise Gpt2QualificationError(
-                f"Performance measurement policy does not match suite timing field {field!r}"
+                f"Performance {side} measurement policy does not match "
+                f"suite timing field {field!r}"
             )
+
+
+def _performance_samples(value: Any, expected: int, label: str) -> list[float]:
+    if not isinstance(value, list) or len(value) != expected:
+        raise Gpt2QualificationError(
+            f"{label} Performance latency samples do not match the requested iterations"
+        )
+    samples = []
+    for sample in value:
+        if (
+            isinstance(sample, bool)
+            or not isinstance(sample, (int, float))
+            or not math.isfinite(float(sample))
+            or float(sample) <= 0.0
+        ):
+            raise Gpt2QualificationError(
+                f"{label} Performance latency samples must be finite positive numbers"
+            )
+        samples.append(float(sample))
+    return samples
+
+
+def _validate_performance_reference(
+    *,
+    definition: Mapping[str, Any],
+    case: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    if reference.get("schema_version") != "trtmc.perf-baseline/v1":
+        raise Gpt2QualificationError("HF Performance returned an unsupported result")
+    if reference.get("status") != "completed" or reference.get("backend") != "hf-transformers":
+        raise Gpt2QualificationError("HF Performance did not complete")
+    configured = _mapping(case.get("reference"), "case reference")
+    if reference.get("mode") != "torch-compile":
+        raise Gpt2QualificationError("Performance reference did not use torch.compile")
+    if reference.get("compile_scope") != configured.get("compile_scope"):
+        raise Gpt2QualificationError("Performance reference compiled the wrong callable")
+    if reference.get("model") != manifest.get("hf_id"):
+        raise Gpt2QualificationError("Performance reference used the wrong HF model")
+    if reference.get("precision") != configured.get("precision"):
+        raise Gpt2QualificationError("Performance reference precision differs from the case")
+    evidence = _mapping(reference.get("compile_evidence"), "compile evidence")
+    required_evidence = {
+        "api": "torch.compile",
+        "target": "model.forward",
+        "backend": "inductor",
+        "applied": True,
+        "warmup_completed": True,
+        "timed_callable_uses_compiled_target": True,
+    }
+    for field, expected in required_evidence.items():
+        if evidence.get(field) != expected:
+            raise Gpt2QualificationError(
+                f"Performance reference has invalid torch.compile evidence field {field!r}"
+            )
+    policy = _mapping(reference.get("measurement_policy"), "reference measurement policy")
+    _validate_performance_timing(definition, policy, "reference")
+    measurement = _mapping(
+        _mapping(case.get("candidate"), "case candidate").get("measurement"),
+        "candidate measurement",
+    )
+    samples = _performance_samples(
+        reference.get("samples_ms"), int(measurement.get("iterations")), "HF torch.compile"
+    )
+    metrics = _mapping(reference.get("metrics"), "reference metrics")
+    latency = _mapping(metrics.get("latency_ms"), "reference latency metrics")
+    for field in ("p50", "p95"):
+        value = latency.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0.0
+        ):
+            raise Gpt2QualificationError(f"HF Performance latency {field} is invalid")
+    output = _mapping(reference.get("output_summary"), "reference output summary")
+    token_ids = output.get("token_ids")
+    if not isinstance(token_ids, list) or not all(isinstance(value, int) for value in token_ids):
+        raise Gpt2QualificationError("HF Performance output is missing generated token ids")
+    output_tokens = len(token_ids)
+    total_seconds = sum(samples) / 1000.0
+    return {
+        **dict(metrics),
+        "sample_count": len(samples),
+        "request_throughput_per_s": len(samples) / total_seconds,
+        "output_tokens_per_s": len(samples) * output_tokens / total_seconds,
+    }
+
+
+def _compare_performance(
+    definition: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    policy = _mapping(definition.get("comparison"), "Performance comparison")
+    if policy.get("output_contract") != "exact_token_ids":
+        raise Gpt2QualificationError("unsupported Performance output comparison")
+    if policy.get("primary_metric") != "latency_ms.p50":
+        raise Gpt2QualificationError("unsupported Performance primary metric")
+    candidate_output = _mapping(candidate.get("output_summary"), "candidate output summary")
+    reference_output = _mapping(reference.get("output_summary"), "reference output summary")
+    candidate_ids = candidate_output.get("token_ids")
+    reference_ids = reference_output.get("token_ids")
+    if not isinstance(candidate_ids, list) or not all(
+        isinstance(value, int) and not isinstance(value, bool) for value in candidate_ids
+    ):
+        raise Gpt2QualificationError("TensorRT Performance output is missing generated token ids")
+    if not isinstance(reference_ids, list) or not all(
+        isinstance(value, int) and not isinstance(value, bool) for value in reference_ids
+    ):
+        raise Gpt2QualificationError("HF Performance output is missing generated token ids")
+    if candidate_ids != reference_ids:
+        raise Gpt2QualificationError(
+            "Performance result is invalid because generated token ids differ"
+        )
+    candidate_metrics = _mapping(candidate.get("metrics"), "candidate metrics")
+    reference_metrics = _mapping(reference.get("metrics"), "reference metrics")
+    candidate_p50 = float(
+        _mapping(candidate_metrics.get("latency_ms"), "candidate latency")["p50"]
+    )
+    reference_p50 = float(
+        _mapping(reference_metrics.get("latency_ms"), "reference latency")["p50"]
+    )
+    return {
+        "output_contract": "exact_token_ids",
+        "output_match": True,
+        "candidate_p50_ms": candidate_p50,
+        "reference_p50_ms": reference_p50,
+        "reference_over_candidate_p50": reference_p50 / candidate_p50,
+    }
 
 
 def _load_samples(
@@ -535,9 +722,11 @@ def _generate_reference(request: Mapping[str, Any]) -> dict[str, Any]:
     revision = getattr(getattr(model, "config", None), "_commit_hash", None)
     return {
         "schema_version": REFERENCE_RESULT_SCHEMA,
+        "backend": "hugging_face",
         "model": request["model"],
         "revision": revision or request.get("revision"),
         "precision": precision,
+        "device": device_name,
         "samples": outputs,
     }
 
@@ -669,6 +858,118 @@ def _run_performance_candidate(
         spec=spec,
         label="GPT-2 Performance candidate",
     )
+
+
+def _run_performance_reference(
+    *,
+    manifest: Mapping[str, Any],
+    item: Mapping[str, Any],
+    case: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    item_dir: Path,
+) -> dict[str, Any]:
+    tools = _mapping(environment.get("tools"), "environment tools")
+    execution = _mapping(environment.get("execution", {}), "environment execution")
+    python = Path(str(tools.get("reference_python") or sys.executable)).expanduser().absolute()
+    if not python.is_file():
+        raise Gpt2QualificationError(f"reference Python does not exist: {python}")
+    runner = _path(tools.get("hf_transformers_runner"), "tools.hf_transformers_runner")
+    if not runner.is_file():
+        raise Gpt2QualificationError(f"HF Performance runner does not exist: {runner}")
+
+    configured = _mapping(case.get("reference"), "case reference")
+    if configured.get("implementation") != "hf_transformers":
+        raise Gpt2QualificationError("unsupported GPT-2 Performance reference")
+    if configured.get("mode") != "torch-compile":
+        raise Gpt2QualificationError("GPT-2 Performance reference must use torch.compile")
+    if configured.get("compile_scope") != "model.forward":
+        raise Gpt2QualificationError("GPT-2 Performance must compile model.forward")
+    precision = _string(configured.get("precision"), "reference precision")
+    candidate = _mapping(case.get("candidate"), "case candidate")
+    benchmark_request = _mapping(candidate.get("request"), "candidate request")
+    measurement = _mapping(candidate.get("measurement"), "candidate measurement")
+    output_path = item_dir / "reference-performance.json"
+    stdout_path = item_dir / "reference-performance.stdout.log"
+    stderr_path = item_dir / "reference-performance.stderr.log"
+    command = [
+        str(python),
+        str(runner),
+        "--model",
+        _string(manifest.get("hf_id"), "manifest hf_id"),
+        "--task",
+        "causal-lm",
+        "--request-json",
+        json.dumps(dict(benchmark_request), ensure_ascii=True, separators=(",", ":")),
+        "--precision",
+        precision,
+        "--max-length",
+        str(int(manifest.get("max_sequence_length", 256))),
+        "--padding",
+        "longest",
+        "--mode",
+        "torch-compile",
+        "--compile-mode",
+        "default",
+        "--compile-dynamic",
+        "--warmup",
+        str(int(measurement.get("warmup"))),
+        "--iterations",
+        str(int(measurement.get("iterations"))),
+        "--case-name",
+        str(item["case_id"]),
+        "--output-token-policy",
+        "new-tokens",
+        "--output",
+        str(output_path),
+    ]
+    revision = manifest.get("hf_revision")
+    if revision:
+        command.extend(("--revision", str(revision)))
+    if bool(manifest.get("trust_remote_code", False)):
+        command.append("--trust-remote-code")
+    if bool(execution.get("local_files_only", False)):
+        command.append("--local-files-only")
+    with (
+        stdout_path.open("w", encoding="utf-8") as stdout,
+        stderr_path.open("w", encoding="utf-8") as stderr,
+    ):
+        completed = subprocess.run(
+            command,
+            stdout=stdout,
+            stderr=stderr,
+            check=False,
+            timeout=_timeout(environment),
+        )
+    if completed.returncode != 0:
+        raise Gpt2QualificationError(
+            f"HF torch.compile Performance exited {completed.returncode}; "
+            f"see {stderr_path.name}"
+        )
+    return _read_json(output_path, "HF torch.compile Performance result")
+
+
+def _conversion_evidence(
+    item: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> dict[str, Any]:
+    preparation = _mapping(candidate.get("preparation"), "candidate preparation")
+    bundles = preparation.get("bundles")
+    if not isinstance(bundles, list) or len(bundles) != 1:
+        raise Gpt2QualificationError("TensorRT candidate must identify exactly one converted bundle")
+    bundle = _mapping(bundles[0], "candidate bundle")
+    if bundle.get("model") != item.get("model"):
+        raise Gpt2QualificationError("TensorRT candidate bundle belongs to the wrong model")
+    status = bundle.get("status")
+    if status not in {"built", "reused"}:
+        raise Gpt2QualificationError("TensorRT candidate bundle was not built or reused")
+    path = _string(bundle.get("bundle"), "candidate bundle path")
+    return {
+        "backend": "tensorrt",
+        "source": "converted_bundle",
+        "model": item["model"],
+        "manifest": item["manifest_path"],
+        "bundle": path,
+        "bundle_status": status,
+    }
 
 
 def _run_benchmark(
@@ -914,6 +1215,9 @@ def _existing_artifacts(item_dir: Path) -> list[dict[str, str]]:
         ("reference result", "reference.json"),
         ("reference stdout", "reference.stdout.log"),
         ("reference stderr", "reference.stderr.log"),
+        ("HF torch.compile result", "reference-performance.json"),
+        ("HF torch.compile stdout", "reference-performance.stdout.log"),
+        ("HF torch.compile stderr", "reference-performance.stderr.log"),
     )
     return [
         _artifact(label, relative)

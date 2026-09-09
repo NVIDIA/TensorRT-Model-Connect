@@ -4,10 +4,20 @@
 implementation: text_generation_performance
 
 timing:
-  timing_scope: public_task_call_wall
-  load_excluded: true
-  warmup_excluded: true
-  telemetry_in_timed_path: false
+  candidate:
+    timing_scope: public_task_call_wall
+    load_excluded: true
+    warmup_excluded: true
+    telemetry_in_timed_path: false
+  reference:
+    timing_scope: public_operation_call_wall
+    model_load_excluded: true
+    compile_excluded: true
+    warmup_excluded: true
+
+comparison:
+  output_contract: exact_token_ids
+  primary_metric: latency_ms.p50
 
 metrics:
   - sample_count

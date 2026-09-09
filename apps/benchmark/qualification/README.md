@@ -24,6 +24,11 @@ starts it in a fresh process for every case and understands only the result
 envelope. Dataset interpretation, reference execution, metrics, and gates remain
 inside the family.
 
+Accuracy is a conversion check, not a standalone Hugging Face score. The family
+executor runs the Hugging Face model as the reference, runs the same inputs
+through the converted TensorRT bundle, and compares the two outputs. A report is
+invalid if it cannot identify the converted bundle used by the candidate.
+
 An optional family `tests/qualification/data/` directory is only for small,
 deterministic fixtures, sample indexes, or scorer metadata that can be committed
 legally. Full benchmark datasets, model weights, and run results do not belong
@@ -68,9 +73,15 @@ descriptive name instead of changing the existing definition. The high-level
 runner passes the definition and model-owned case to the family executor without
 interpreting their contents.
 
-Performance uses the same discovery path. Until a high-level device run owns a
-baseline and threshold, model Performance cases are observation-only and report
-measurements without claiming a pass or fail verdict:
+Performance uses the same discovery path. Every Performance case measures both
+the converted TensorRT bundle and its reference backend with the same workload.
+For GPT-2 the reference is Hugging Face `torch.compile(model.forward)`. Generated
+token IDs must match before the timing comparison is accepted. The two sides run
+sequentially on the GPU selected by the high-level environment; model files never
+select or exclude a device.
+
+Until a high-level device run owns a threshold, the timing comparison is
+observation-only and does not claim a pass or fail verdict:
 
 ```yaml
 schema_version: trtmc.qualification/v1
@@ -81,6 +92,11 @@ suites:
     gate_policy: observation_only
     cases:
       - id: generate_64
+        reference:
+          implementation: hf_transformers
+          mode: torch-compile
+          compile_scope: model.forward
+          precision: fp32
         candidate:
           testcase: gpt2-125m
           request:
@@ -90,6 +106,11 @@ suites:
             warmup: 5
             iterations: 20
 ```
+
+The report records both raw latency samples, both metric sets, compile evidence,
+the TensorRT bundle path, output-parity status, and
+`reference_over_candidate_p50`. Model loading, conversion, compilation, and
+warmup are excluded from timed samples on both sides.
 
 ## Commands
 

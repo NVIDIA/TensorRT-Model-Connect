@@ -8,6 +8,7 @@ tools:
   trtmc_bench: /opt/trtmc/bin/trtmc-bench
   trtmc_worker: /opt/trtmc/lib/tensorrt_model_connect/bin/trtmc_benchmark_worker
   reference_python: /opt/trtmc-reference/bin/python
+  hf_transformers_runner: /opt/trtmc/apps/benchmark/performance/baselines/hf_transformers.py
 
 storage:
   data_root: /data/benchmarks

@@ -247,8 +247,13 @@ def _generation_call(
             )
         return tokenizer(prompt, return_tensors="pt")
 
+    do_sample = request.get("do_sample")
+    if do_sample is None:
+        do_sample = float(request.get("temperature", 0.0)) > 0.0
+    if not isinstance(do_sample, bool):
+        raise ValueError("request.do_sample must be a boolean")
     generation: dict[str, Any] = {
-        "do_sample": float(request.get("temperature", 0.0)) > 0.0,
+        "do_sample": do_sample,
         "max_new_tokens": max_new_tokens,
         "use_cache": True,
         "pad_token_id": tokenizer.pad_token_id,
@@ -471,6 +476,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "compile_scope": "model.forward" if arguments.mode == "torch-compile" else None,
         "compile_evidence": compile_evidence,
         "model": arguments.model,
+        "revision": (
+            getattr(getattr(model, "config", None), "_commit_hash", None)
+            or arguments.revision
+        ),
         "case_name": arguments.case_name,
         "task": arguments.task,
         "precision": arguments.precision,

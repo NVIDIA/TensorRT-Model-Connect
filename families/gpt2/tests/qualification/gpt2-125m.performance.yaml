@@ -10,6 +10,11 @@ suites:
     gate_policy: observation_only
     cases:
       - id: generate_64
+        reference:
+          implementation: hf_transformers
+          mode: torch-compile
+          compile_scope: model.forward
+          precision: fp32
         candidate:
           testcase: gpt2-125m
           request:
