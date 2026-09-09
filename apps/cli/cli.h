@@ -47,6 +47,11 @@ enum class CommandKind {
     kGenerateWorld,
 };
 
+struct VideoReferenceArgument {
+    VideoReferenceKind kind{VideoReferenceKind::kImage};
+    std::string path;
+};
+
 struct Command {
     CommandKind kind{CommandKind::kHelp};
     std::string name;
@@ -55,6 +60,7 @@ struct Command {
     std::unordered_map<std::string, std::string> options;
     std::vector<std::string> frames;
     std::vector<std::string> inputs;
+    std::vector<VideoReferenceArgument> video_references;
     std::uint64_t kv_cache_size_bytes{0};
     std::string runtime_cache_path;
     bool cuda_graphs{false};

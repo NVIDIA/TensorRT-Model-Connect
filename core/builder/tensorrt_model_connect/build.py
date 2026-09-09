@@ -41,6 +41,7 @@ class BuildRequest:
     dynamic_kv_cache: bool = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
+    family_options: tuple[tuple[str, str | int | float | bool | None], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.precision:
@@ -69,6 +70,19 @@ class BuildRequest:
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
             raise ValueError("graph_transform must be callable when provided")
+        if not isinstance(self.family_options, tuple):
+            raise ValueError("family_options must be an immutable tuple")
+        names: set[str] = set()
+        for item in self.family_options:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise ValueError("family_options entries must be (name, value) tuples")
+            name, value = item
+            _validate_id("family option", name)
+            if name in names:
+                raise ValueError(f"duplicate family option: {name}")
+            if not isinstance(value, (str, int, float, bool, type(None))):
+                raise ValueError("family option values must be JSON scalar values")
+            names.add(name)
 
 
 def _validate_id(field: str, value: object) -> str:
@@ -123,6 +137,11 @@ def build(request: BuildRequest) -> None:
     family = _resolve_family(request)
     _select_backend(request.backend)
     family_module = _load_family(family)
+    if request.family_options:
+        validate_options = getattr(family_module, "validate_build_options", None)
+        if validate_options is None:
+            raise ValueError(f"family {family!r} does not accept family_options")
+        validate_options(dict(request.family_options))
     writer = BundleWriter(request.output_path)
     try:
         with graph_transform(request.graph_transform):

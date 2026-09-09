@@ -136,6 +136,7 @@ NON_SOURCE_SUFFIXES = frozenset(
         ".json",
         ".jsonl",
         ".lock",
+        ".manifest",
         ".md",
         ".model",
         ".mp3",

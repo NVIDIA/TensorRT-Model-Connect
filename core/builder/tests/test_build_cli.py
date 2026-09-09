@@ -55,6 +55,10 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
                 "5",
                 "--dynamic-kv-cache",
                 "--verbose",
+                "--set",
+                "patchtsmixer.feature=true",
+                "--set",
+                "patchtsmixer.path=C:\\models\\weights.bin",
             ]
         )
         == 0
@@ -77,6 +81,24 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
     assert request.fp32_layers == (2, 5)
     assert request.dynamic_kv_cache is True
     assert request.verbose is True
+    assert request.family_options == (
+        ("feature", True),
+        ("path", "C:\\models\\weights.bin"),
+    )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["wrong.option=true"],
+        ["gpt2.option={}"],
+        ["gpt2.option=true", "gpt2.option=false"],
+        ["missing_namespace=true"],
+    ],
+)
+def test_family_options_reject_invalid_or_cross_family_values(values) -> None:
+    with pytest.raises(ValueError):
+        build_cli._parse_family_options(values, "gpt2")
 
 
 def test_build_command_uses_the_family_owned_default_task(monkeypatch, tmp_path: Path) -> None:

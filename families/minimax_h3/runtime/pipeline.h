@@ -5,10 +5,14 @@
 
 #pragma once
 
+#include "families/minimax_h3/runtime/public_profile.h"
+#include "families/minimax_h3/runtime/super_resolution_runtime.h"
 #include "families/minimax_h3/runtime/tokenizer.h"
+#include "trtmc/runtime/trt_backend.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
+#include <array>
 #include <cuda_runtime_api.h>
 #include <functional>
 #include <memory>
@@ -18,28 +22,114 @@
 
 namespace trtmc {
 
-using MiniMaxH3ModuleLoader =
-    std::function<std::unique_ptr<ITrtModule>(const std::string&, cudaStream_t)>;
+using MiniMaxH3ModuleLoader = std::function<std::unique_ptr<ITrtModule>(
+    const std::string&, cudaStream_t, const std::vector<ModuleExternalBinding>&, int32_t)>;
 
 struct MiniMaxH3Schedule {
     std::vector<float> sigmas;
     std::vector<float> timesteps;
 };
 
+struct MiniMaxH3VaeTileLayout {
+    std::vector<int32_t> y_starts;
+    std::vector<int32_t> x_starts;
+    std::vector<int32_t> y_overlaps;
+    std::vector<int32_t> x_overlaps;
+};
+
+struct MiniMaxH3Geometry {
+    int32_t output_frames{0};
+    int32_t output_height{0};
+    int32_t output_width{0};
+    int32_t video_latent_frames{0};
+    int32_t latent_height{0};
+    int32_t latent_width{0};
+    int32_t audio_latent_frames{0};
+    int32_t audio_rows{0};
+    // The denoiser's video binding is [condition_video_rows | target_video_rows].
+    // T2VA has zero condition frames and video_rows == target_video_rows.
+    int32_t condition_video_frames{0};
+    int32_t condition_video_rows{0};
+    int32_t target_video_rows{0};
+    int32_t video_rows{0};
+    int32_t vae_tile_rows{0};
+    int32_t vae_tile_columns{0};
+    int32_t vae_tile_count{0};
+};
+
+struct MiniMaxH3DenoiserMetadata {
+    std::vector<float> positions;
+    std::vector<int32_t> adaln_indices;
+    std::vector<int32_t> timestep_indices;
+};
+
+struct MiniMaxH3DenoiserConfig {
+    int32_t scheduler_grid_points{50};
+    int32_t transformer_forwards{49};
+    float guidance_scale{1.0F};
+    int32_t max_text_rows{537};
+    int32_t optimization_profile_count{1};
+};
+
+struct MiniMaxH3Ref2VAConfig {
+    bool enabled{false};
+    int32_t scheduler_grid_points{50};
+    int32_t transformer_forwards{49};
+    float video_shift{12.0F};
+    float audio_shift{3.0F};
+    float guidance_scale{1.0F};
+    bool guidance_distilled{true};
+    int32_t denoiser_profile_count{1};
+    bool first_block_cache{false};
+    float first_block_cache_threshold{0.08F};
+    std::array<float, 32> audio_latent_mean{};
+    std::array<float, 32> audio_latent_std{};
+};
+
 MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift);
+bool should_compute_minimax_h3_tail(std::size_t step, std::size_t transformer_forwards,
+                                    float metric, float cache_threshold);
+MiniMaxH3VaeTileLayout make_minimax_h3_vae_tile_layout(int32_t output_height, int32_t output_width);
+MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output_height,
+                                           int32_t output_width);
+MiniMaxH3Geometry make_minimax_h3_fl2va_geometry(const MiniMaxH3Geometry& target_geometry,
+                                                 int32_t keyframe_count);
+MiniMaxH3DenoiserMetadata make_minimax_h3_denoiser_metadata(int32_t text_rows,
+                                                            const MiniMaxH3Geometry& geometry);
+int32_t select_minimax_h3_denoiser_profile(int32_t optimization_profile_count, int32_t text_rows,
+                                           const MiniMaxH3Geometry& geometry);
+MiniMaxH3DenoiserMetadata
+make_minimax_h3_fl2va_denoiser_metadata(const std::vector<int32_t>& text_token_tags,
+                                        const std::vector<int32_t>& keyframe_anchors,
+                                        const MiniMaxH3Geometry& geometry);
+void validate_minimax_h3_prompt_token_count(std::size_t token_count, int32_t max_text_rows);
 std::vector<float> make_minimax_h3_position_ids(int32_t text_rows);
+std::vector<float> make_minimax_h3_position_ids(int32_t text_rows,
+                                                const MiniMaxH3Geometry& geometry);
+std::vector<float> unpack_and_denormalize_minimax_h3_audio(const std::vector<float>& audio_rows,
+                                                           int32_t audio_latent_frames);
+std::vector<float>
+duplicate_minimax_h3_audio_decoder_channel(const std::vector<float>& channel_major_latents,
+                                           int32_t audio_latent_frames, int32_t stereo_channel);
 void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t count,
                                float timestep, float sigma, float sigma_next);
 
-class MiniMaxH3Pipeline final : public IImageGeneration {
+class MiniMaxH3Pipeline final : public IImageGeneration, public IVideoGeneration {
   public:
     MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader, std::unique_ptr<ITokenizer> tokenizer,
-                      std::string model_id, bool first_block_cache = false,
-                      float cache_threshold = 0.025F);
+                      std::string model_id, float cache_threshold = 0.08F,
+                      MiniMaxH3DenoiserConfig denoiser_config = {},
+                      MiniMaxH3Ref2VAConfig ref2va_config = {},
+                      minimax_h3::SuperResolutionConfig super_resolution_config = {},
+                      std::function<void()> runtime_cache_finalize = {});
     ~MiniMaxH3Pipeline() override;
 
     ImageResult generate_image(const std::string& prompt,
                                const ImageGenerationConfig& cfg = {}) override;
+    VideoResult generate_video(const std::string& prompt,
+                               const ImageGenerationConfig& cfg = {}) override;
+    VideoResult generate_video(const VideoGenerationRequest& request) override;
+    std::optional<ReferenceMediaDecodePolicy> reference_media_decode_policy() const override;
 
   private:
     struct ResidentState;
@@ -50,8 +140,18 @@ class MiniMaxH3Pipeline final : public IImageGeneration {
     cudaStream_t stream_{nullptr};
     std::mutex generation_mutex_;
     std::unique_ptr<ResidentState> resident_;
-    bool first_block_cache_{false};
-    float cache_threshold_{0.025F};
+    float cache_threshold_{0.08F};
+    MiniMaxH3DenoiserConfig denoiser_config_{};
+    MiniMaxH3Ref2VAConfig ref2va_config_{};
+    minimax_h3::SuperResolutionConfig super_resolution_config_{};
+    std::function<void()> runtime_cache_finalize_;
+
+    VideoResult generate_video_impl(const std::string& prompt, const ImageGenerationConfig& cfg,
+                                    bool include_audio);
+    VideoResult generate_video_request_impl(const VideoGenerationRequest& request,
+                                            bool include_audio);
+    VideoResult generate_ref2va_request_impl(const VideoGenerationRequest& request,
+                                             bool include_audio);
 };
 
 } // namespace trtmc

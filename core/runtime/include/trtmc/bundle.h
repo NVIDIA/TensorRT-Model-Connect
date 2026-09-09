@@ -42,6 +42,10 @@ class BundleReader {
     const std::string& path() const noexcept { return path_; }
     const BundleInfo& info() const noexcept { return info_; }
     const BundleSectionInfo* find_section(std::string_view name) const noexcept;
+    // Return the validated absolute byte offset of a section in the bundle.
+    // Large TensorRT plans can be stream-deserialized from this range without
+    // first duplicating the entire section in host memory.
+    std::uint64_t section_file_offset(std::string_view name) const;
     std::vector<char> read_section(std::string_view name) const;
 
   private:
