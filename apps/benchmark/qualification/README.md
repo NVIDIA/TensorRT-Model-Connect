@@ -5,8 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Qualification
 
-The [design](DESIGN.md) records the pre-#1093 comparison contracts and migration
-scope. The current implementation below covers GPT-2 continuation parity and
+The current implementation covers GPT-2 continuation parity and
 compiled HF-vs-TensorRT Performance; it does not restore all historical datasets
 or claim MMLU answer accuracy.
 
