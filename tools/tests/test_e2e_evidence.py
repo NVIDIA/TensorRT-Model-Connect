@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import base64
+import copy
+import unittest
 import json
 import struct
 from html.parser import HTMLParser
@@ -16,6 +18,7 @@ from tools import e2e_evidence
 from tools.e2e_evidence import Evidence, evidence_stage, record_evidence
 from tools.e2e_report import (
     NPY_MAX_BYTES,
+    _assessment as assessment,
     classification_index,
     decode_npy,
     _numeric_preview,
@@ -251,6 +254,10 @@ def _visible(report: str) -> str:
     return " ".join(parser.text)
 
 
+def _expanded(report: str) -> str:
+    return _visible(report.replace("<details", "<div").replace("</details>", "</div>"))
+
+
 def _case() -> dict:
     return {
         "family": "example_model",
@@ -292,9 +299,11 @@ def test_glance_view_uses_recorded_prompt_recipe_and_outputs(tmp_path: Path) -> 
     visible = _visible(report)
     assert "What is the capital of France?" in visible
     assert "Old prompt" not in visible
-    assert visible.count("Paris.") == 2
+    assert visible.count("Paris.") == 1
+    assert "Reference output" not in visible and "Reference output" in report
     assert "native diagnostic" not in visible
-    assert "example-recipe" in visible and "example-greedy-short" in visible
+    assert "example-recipe" in visible and "example-greedy-short" not in visible
+    assert "example-greedy-short" in report
     assert "example/model" in visible and "FP16 · TP2" in visible
     assert "families/example-model" in report
     assert 'class="io-grid"' in report
@@ -311,9 +320,11 @@ def test_reference_text_does_not_show_native_diagnostics(tmp_path: Path) -> None
         "text": "secondary text",
         "actual_decoded": "wrong answer",
     }
-    visible = _visible(render_case(data, tmp_path))
-    assert "Expected answer" in visible
-    assert "secondary text" not in visible and "wrong answer" not in visible
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    reference = report.split("<h3>Reference output</h3>")[1].split("<details>")[0]
+    assert "Expected answer" not in visible and "Expected answer" in reference
+    assert "secondary text" not in reference and "wrong answer" not in reference
 
 
 def test_numeric_output_shows_dimensions_without_vectors(tmp_path: Path) -> None:
@@ -334,9 +345,11 @@ def test_classification_preserves_ids_and_raw_score_meaning(tmp_path: Path) -> N
     data["inputs"]["manifest"]["task"] = "image_classification"
     data["native"] = {"top_class": 7, "top_score": 12.5, "logits": [0.1] * 1000}
     data["reference"] = 7
-    visible = _visible(render_case(data, tmp_path))
-    assert "Class ID" in visible and "Raw score" in visible and "12.5" in visible
-    assert "1000" in visible
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert "Class ID" in visible and "7" in visible
+    assert "12.5" not in visible and "12.5" in report and "top_score" in report
+    assert "1000" not in visible and "logits" in report
     assert "confidence" not in visible.lower() and "probability" not in visible.lower()
 
 
@@ -349,8 +362,9 @@ def test_contract_reference_and_failure_are_never_a_paired_pass(tmp_path: Path) 
     data["evidence_status"] = "partial"
     report = render_case(data, tmp_path)
     visible = _visible(report)
-    assert "Contract checks only" in visible and "No reference output was generated" in visible
-    assert "Stopped during reference" in visible and "Partial evidence" in visible
+    assert "Reference output" not in visible
+    assert "Reference run failed" in visible and "Partial evidence" in visible
+    assert "contract_only" in report and "public core invariants" in report
     assert 'data-status="failed"' in report
     assert "TRACEBACK_SENTINEL" not in visible and "TRACEBACK_SENTINEL" in report
 
@@ -358,10 +372,13 @@ def test_contract_reference_and_failure_are_never_a_paired_pass(tmp_path: Path) 
 def test_missing_settings_and_outputs_remain_explicit(tmp_path: Path) -> None:
     report = render_case({"family": "example", "case": "not-run", "status": "skipped"}, tmp_path)
     visible = _visible(report)
-    assert visible.count("No output recorded") == 2
-    assert "Recipe not recorded" in visible and "Build configuration not recorded" in visible
+    assert "Not verified" in visible and "Completed execution evidence is unavailable" in visible
+    assert "io-panel" not in report.split("<body>", 1)[1]
+    assert (
+        "Recipe not recorded" not in visible and "Build configuration not recorded" not in visible
+    )
     assert "TP1" not in visible and "FP16" not in visible
-    assert "No assertion measurements were recorded" in visible
+    assert "No assertion measurements were recorded" in report
 
 
 def test_run_settings_use_human_labels_and_original_keys(tmp_path: Path) -> None:
@@ -384,26 +401,22 @@ def test_media_uses_recorded_references_and_embeds_each_file_once(tmp_path: Path
     data["reference"] = {"artifact": paths[2]}
     data["artifacts"] = [{"path": path, "role": "observations", "label": path} for path in paths]
     report = render_case(data, tmp_path)
-    assert report.count("data:image/gif;base64,") == 4
-    before_more = report.split("<summary>More recorded media")[0]
-    assert before_more.count("data:image/gif;base64,") == 3
-    assert "More recorded media (1)" in report
-    assert (
-        report.index("Input</h3>") < report.index("input.gif") < report.index("Native output</h3>")
-    )
-    assert (
-        report.index("Native output</h3>")
-        < report.index("native.gif")
-        < report.index("Reference output</h3>")
-    )
+    assert report.count("data:image/gif;base64,") == 1
+    assert "Same recorded media as Input" in report
+    assert "More recorded media" not in report
+    assert all(path in report for path in paths)
+    assert all((tmp_path / path).read_bytes() == gif for path in paths)
 
 
 def test_long_text_stays_readable_and_full_evidence_is_expandable(tmp_path: Path) -> None:
     data = _case()
-    data["native"]["text"] = "hello " * 200 + "FULL_TEXT_END"
+    data["native"]["text"] = "hello " * 100 + "MIDDLE_SENTINEL" + "hello " * 100 + "FULL_TEXT_END"
     report = render_case(data, tmp_path)
-    assert "hello" in _visible(report) and "FULL_TEXT_END" not in _visible(report)
-    assert "Full text" in report and "FULL_TEXT_END" in report
+    visible = _visible(report)
+    assert "hello" in visible and "FULL_TEXT_END" in visible
+    assert "middle omitted" in visible
+    assert "MIDDLE_SENTINEL" not in visible and "MIDDLE_SENTINEL" in report
+    assert "full text" in report and "FULL_TEXT_END" in report
     assert "no-results" in report and "aria-live" in report
 
 
@@ -412,7 +425,7 @@ def test_forecast_is_identified_as_last_window(tmp_path: Path) -> None:
     data["inputs"]["manifest"]["task"] = "forecasting"
     data["native"] = {"shape": [1, 24], "values": [0.1] * 24}
     report = render_case(data, tmp_path)
-    assert "Preview of the last recorded window" in _visible(report)
+    assert "Last recorded window" in _visible(report)
     assert "1 × 24" in _visible(report)
 
 
@@ -444,7 +457,8 @@ def test_structured_prompt_is_prose_with_original_collapsed(tmp_path: Path) -> N
     visible = _visible(report)
     assert "A robot cleans a plate." in visible and "Close up" in visible
     assert '{"description"' not in visible
-    assert "Original structured prompt" in report and "&quot;description&quot;" in report
+    assert "Raw recorded fields" in report and "description" in report
+    assert "camera" in report and "7s" in report
 
 
 def test_forecast_uses_actual_last_input_not_initial_contract(tmp_path: Path) -> None:
@@ -461,6 +475,7 @@ def test_forecast_uses_actual_last_input_not_initial_contract(tmp_path: Path) ->
 
 def test_small_score_vectors_show_actual_values_and_documents(tmp_path: Path) -> None:
     data = _case()
+    data["inputs"]["manifest"]["task"] = "reranking"
     data["inputs"]["case"]["inputs"] = {
         "documents": ["Candidate A says yes.", "Candidate B says no."]
     }
@@ -468,12 +483,13 @@ def test_small_score_vectors_show_actual_values_and_documents(tmp_path: Path) ->
     data["reference"] = {"scores": [-8.95, -10.28]}
     visible = _visible(render_case(data, tmp_path))
     assert "Candidate A says yes." in visible and "Candidate B says no." in visible
-    assert "Scores shape" in visible and "All 2 values" in visible
+    assert "Scores" in visible and "All 2 values" in visible
     assert "-8.96" in visible and "-10.28" in visible
 
 
 def test_masks_and_points_distinguish_counts_shapes_and_values(tmp_path: Path) -> None:
     data = _case()
+    data["inputs"]["manifest"]["task"] = "segmentation"
     data["inputs"]["case"].update({"point_x": 0.5, "point_y": 0.25})
     data["native"] = {
         "num_masks": 3,
@@ -482,12 +498,14 @@ def test_masks_and_points_distinguish_counts_shapes_and_values(tmp_path: Path) -
         "bbox_xyxy": [10, 20, 30, 40],
         "mask_foreground_pixels": [50, 51, 52, 53, 54],
     }
-    visible = _visible(render_case(data, tmp_path))
-    assert "Point X (recorded)" in visible and "0.25" in visible
-    assert "Generated masks" in visible and "Masks shape" in visible
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert "Point X: 0.5" in visible and "Point Y: 0.25" in visible
+    assert "recorded coordinates" in visible
     assert "All 3 values" in visible and "0.821" in visible
-    assert "All 4 values" in visible and "40" in visible
-    assert "All 5 values" in visible and "54" in visible
+    assert "bbox_xyxy" in report and "40" in report
+    assert "mask_foreground_pixels" in report and "54" in report
+    assert "733440" not in visible and "733440" in report
     assert "normalized" not in visible.lower()
 
 
@@ -520,16 +538,21 @@ def test_forecast_input_has_bounded_actual_series_preview(tmp_path: Path) -> Non
     report = render_case(data, tmp_path)
     visible = _visible(report)
     assert "First 64 of 2048 values" in visible and "First 64 of 128 values" in visible
-    assert "Recorded window index" in visible and "999" not in visible
-    assert report.count("<svg") == 3
+    assert "Recorded window 9" in visible and "999" not in visible
+    assert report.count("<svg") == 2
+    assert report.count('aria-label="Native"') == 1
+    assert report.count('aria-label="Reference"') == 1
 
 
 def test_nested_recorded_summary_is_readable(tmp_path: Path) -> None:
     data = _case()
+    data["inputs"]["manifest"]["task"] = "video_generation"
     data["reference"] = {"output": {"summary": {"frame_count": 12, "mean": 0.25}}}
-    visible = _visible(render_case(data, tmp_path))
-    assert "Output · Summary · Frame count" in visible
-    assert "12" in visible and "0.25" in visible
+    report = render_case(data, tmp_path)
+    assert "Output · Summary · Frame count" not in _visible(report)
+    expanded = _expanded(report)
+    assert "Output · Summary · Frame count" in expanded
+    assert "12" in expanded and "0.25" in expanded
 
 
 def test_nested_request_options_are_settings_not_just_raw_json(tmp_path: Path) -> None:
@@ -541,9 +564,7 @@ def test_nested_request_options_are_settings_not_just_raw_json(tmp_path: Path) -
         "documents": ["LONG_DOCUMENT_SENTINEL"],
     }
     report = render_case(data, tmp_path)
-    settings = report.split("<h3>Request input options</h3>")[1].split(
-        "<details><summary>All recorded input fields"
-    )[0]
+    settings = report.split("<h3>Request input options</h3>")[1].split("</details>")[0]
     assert "CFG scale" in settings and "4.5" in settings
     assert "num_sampling_steps" in settings and "conditional_sample" in settings
     assert "LONG_DOCUMENT_SENTINEL" not in settings
@@ -585,9 +606,11 @@ def test_saved_complete_logits_supply_class_index_without_mutating_evidence(tmp_
     np.save(buffer, logits, allow_pickle=False)
     (tmp_path / "logits.npy").write_bytes(buffer.getvalue())
     original = copy.deepcopy(data)
-    visible = _visible(render_case(data, tmp_path))
-    assert "Class index (from saved logits)" in visible and "777" in visible
-    assert "Raw score" in visible and "9.0" in visible
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    reference = report.split("<h3>Reference output</h3>")[1].split("<details>")[0]
+    assert "From complete saved logits" in reference and "777" in reference
+    assert "777" not in visible
     assert "Class ID" in visible and data == original
     assert "values" not in descriptor
 
@@ -598,9 +621,9 @@ def test_partial_logits_never_claim_a_derived_class_index(tmp_path: Path) -> Non
     data["reference"] = {
         "logits": {"shape": [1, 1000], "preview": [100.0] * 64, "artifact": "absent.npy"}
     }
-    visible = _visible(render_case(data, tmp_path))
-    assert "Class index (from saved logits)" not in visible
-    assert "complete saved logits are unavailable" in visible
+    report = render_case(data, tmp_path)
+    assert "From complete saved logits" not in report
+    assert "complete saved logits are unavailable" in _expanded(report)
 
 
 def test_numeric_file_path_escape_and_symlinks_are_not_read(tmp_path: Path) -> None:
@@ -621,7 +644,9 @@ def test_numeric_file_path_escape_and_symlinks_are_not_read(tmp_path: Path) -> N
 def test_text_generation_tokens_without_decoded_text_are_explicit(tmp_path: Path) -> None:
     data = _case()
     data["native"] = {"token_ids": [10, 11]}
-    assert "Decoded text not recorded" in _visible(render_case(data, tmp_path))
+    visible = _visible(render_case(data, tmp_path))
+    assert "2 recorded tokens; decoded text unavailable" in visible
+    assert "token IDs" not in visible and "Token IDs are in Details" in visible
 
 
 def test_recorded_class_color_key_is_visible_by_default(tmp_path: Path) -> None:
@@ -732,11 +757,10 @@ def test_nonfinite_preview_warning_is_scoped_and_preserves_result(tmp_path: Path
     original = copy.deepcopy(data)
     report = render_case(data, tmp_path)
     visible = _visible(report)
-    assert "Depth shape" in visible and "382 × 640" in visible
-    assert "all 64 values in this recorded preview are non-finite" in visible
-    assert "this recorded preview contains 1 non-finite value out of 2" in visible
+    assert "Depth (64/64): non-finite saved preview values" in visible
+    assert "Depth (1/2): non-finite saved preview values" in _expanded(report)
     assert "preview only, not the full tensor" in visible
-    assert 'data-status="passed"' in report and data == original
+    assert 'data-execution-status="passed"' in report and data == original
 
 
 def test_nonfinite_notice_keeps_other_finite_output_samples(tmp_path: Path) -> None:
@@ -746,10 +770,11 @@ def test_nonfinite_notice_keeps_other_finite_output_samples(tmp_path: Path) -> N
         "depth": {"shape": [382, 640], "preview": ["inf"] * 64},
         "actions": {"shape": [100, 14], "preview": [0.125, 0.25, 0.375, 0.5] * 16},
     }
-    visible = _visible(render_case(data, tmp_path))
-    assert "all 64 values in this recorded preview are non-finite" in visible
-    assert "Actions sample (first values)" in visible
-    assert "0.125, 0.25, 0.375, 0.5" in visible
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert "Depth (64/64): non-finite saved preview values" in visible
+    assert "Actions" in visible and "First 64 of 1400 values" in visible
+    assert "<svg" in report and "0.125" in report
 
 
 def test_output_samples_take_priority_over_summary_regardless_of_key_order() -> None:
@@ -768,3 +793,359 @@ def test_output_samples_take_priority_over_summary_regardless_of_key_order() -> 
     assert first == second
     assert "Actions shape" in first and "100 × 14" in first
     assert "Actions sample (first values)" in first and "0.125, 0.25, 0.375, 0.5" in first
+
+
+def test_demo_has_one_outer_details_and_no_execution_bookkeeping(tmp_path: Path) -> None:
+    data = _case()
+    data["duration_seconds"] = 123.4
+    data["stages"] = [{"name": "native", "duration_seconds": 123.4}]
+    report = render_case(data, tmp_path)
+    card = report.split('<section class="case"', 1)[1]
+    default = card.split('<details class="case-details">', 1)[0]
+    assert default.count('class="io-panel"') == 2
+    assert "<details" not in default
+    assert card.count('<details class="case-details">') == 1
+    assert "123.4" not in _visible(report) and "123.4" in report
+    assert "Recorded tokens" not in _visible(report)
+    assert "Recorded assertions:" not in _visible(report)
+    assert "Reference output" not in default and "Reference output" in card
+
+
+def test_demo_keeps_unique_media_and_only_collapses_repeated_bytes(tmp_path: Path) -> None:
+    data = _case()
+    gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+    paths = ["native.gif", "reference.gif", "extra.gif", "duplicate.gif"]
+    blobs = [gif, gif + b"reference", gif + b"extra", gif]
+    for path, blob in zip(paths, blobs):
+        (tmp_path / path).write_bytes(blob)
+    data["native"] = {"artifact": paths[0]}
+    data["reference"] = {"artifact": paths[1]}
+    data["artifacts"] = [{"path": path, "label": path} for path in paths]
+    report = render_case(data, tmp_path)
+    assert report.count("data:image/gif;base64,") == 3
+    default = report.split('<details class="case-details">', 1)[0]
+    assert default.count("data:image/gif;base64,") == 1
+    assert "More recorded media (1)" in report
+    assert all((tmp_path / path).read_bytes() == blob for path, blob in zip(paths, blobs))
+
+
+def test_demo_snapshot_links_retain_full_unique_values_without_mutation() -> None:
+    import copy
+
+    from tools.e2e_report import _demo_raw_data
+
+    data = _case()
+    data["observations"] = [
+        {"name": "native", "value": {"text": "earlier unique result"}},
+        {"name": "native", "value": data["native"]},
+        {"name": "reference", "value": data["reference"]},
+    ]
+    original = copy.deepcopy(data)
+    rendered = _demo_raw_data(data)
+    assert rendered["native"] == data["native"]
+    assert rendered["observations"][0]["value"] == {"text": "earlier unique result"}
+    assert rendered["observations"][1]["value"] == {"same_recorded_value_as": "native"}
+    assert rendered["observations"][2]["value"] == {"same_recorded_value_as": "reference"}
+    assert data == original
+
+
+def test_demo_audio_output_keeps_spoken_text_without_tensor_bookkeeping() -> None:
+    from tools.e2e_report import _demo_output
+
+    output = _demo_output(
+        {"text": "Hello there.", "num_samples": 24000, "sample_rate": 24000},
+        role="native",
+        task="speech_generation",
+        media='<audio controls src="recorded.wav"></audio>',
+    )
+    assert "Hello there." in output and "<audio controls" in output
+    assert "24000" not in output
+
+
+def test_demo_class_index_accepts_complete_direct_tensor_without_probability() -> None:
+    from tools.e2e_report import _demo_output
+
+    output = _demo_output(
+        {"shape": [1, 3], "values": [0.2, 0.8, 0.5]},
+        role="native",
+        task="image_classification",
+    )
+    assert "Class ID" in output and ">1</strong>" in output
+    assert "From complete saved logits" in output
+    assert "probability" not in output and "0.8" not in output
+
+
+def test_demo_shared_chart_keeps_scope_and_rejects_invalid_values() -> None:
+    from tools.e2e_report import _demo_numeric_comparison
+
+    native = {"shape": [576], "preview": list(range(64))}
+    reference = {"shape": [576], "preview": list(range(0, 128, 2))}
+    output = _demo_numeric_comparison(native, reference, "encoding")
+    assert output.count("<svg") == 1 and output.count("<polyline") == 2
+    assert output.count("First 64 of 576 values") == 2  # Caption and accessible chart label.
+    assert "shared scale" in output and ">126</text>" in output
+    assert _demo_numeric_comparison([float("inf")] * 20) == ""
+    assert _demo_numeric_comparison(["<script>bad</script>"] * 20) == ""
+    huge = _demo_numeric_comparison([1e308] * 20, [0.0] * 20)
+    assert "nan" not in huge.lower() and "inf" not in huge.lower()
+
+
+def _assessment_fixture(expression=None, explanation="True", native=None, reference=None, **fields):
+    data = {
+        "status": "passed",
+        "native": {"values": [1.0, 2.0]} if native is None else native,
+        "reference": {"values": [1.0, 2.0]} if reference is None else reference,
+    }
+    data["checks"] = (
+        []
+        if expression is None
+        else [{"status": "passed", "expression": expression, "explanation": explanation}]
+    )
+    data.update(fields)
+    return data
+
+
+class AssessmentTests(unittest.TestCase):
+    def test_reference_presence_is_not_parity(self):
+        self.assertEqual(assessment(_assessment_fixture())["kind"], "unverified")
+
+    def test_shape_presence_metadata_checks_are_not_parity(self):
+        for expression in [
+            "native.shape == reference.shape",
+            "actual.shape == expected.shape",
+            "actual.size == expected.size",
+            "actual_num_masks == expected_num_masks",
+            "expected_images",
+            "reference is not None",
+        ]:
+            with self.subTest(expression=expression):
+                self.assertNotEqual(
+                    assessment(_assessment_fixture(expression))["kind"], "reference"
+                )
+
+    def test_self_comparisons_are_not_parity(self):
+        for expression in [
+            "_cosine(native,native) >= 0.99",
+            "_cosine(actual, actual) >= 0.99",
+            "_relative_l2(actual, actual) <= 0.01",
+            "_edit_distance(actual_text, actual_text) <= 0.1",
+        ]:
+            with self.subTest(expression=expression):
+                self.assertNotEqual(
+                    assessment(_assessment_fixture(expression, "1.0 >= 0.99"))["kind"], "reference"
+                )
+
+    def test_pixel_statistics_are_not_parity(self):
+        data = _assessment_fixture(
+            'float(pixels.std()) >= float(thresholds["min_pixel_std"])',
+            "0.2 >= 0.1",
+            thresholds={"min_pixel_std": 0.1},
+        )
+        self.assertEqual(assessment(data)["kind"], "limited")
+
+    def test_native_reference_cosine_is_parity(self):
+        result = assessment(
+            _assessment_fixture(
+                '_cosine(actual["values"], expected["values"]) >= 0.99', "0.999 >= 0.99"
+            )
+        )
+        self.assertEqual(result["kind"], "reference")
+        self.assertIn("0.999 >= 0.99", result["summary"])
+
+    def test_case_expected_ids_are_not_upstream_reference(self):
+        result = assessment(
+            _assessment_fixture('actual_ids == case["expected_token_ids"]', "[1] == [1]")
+        )
+        self.assertNotEqual(result["kind"], "reference")
+
+    def test_actual_reference_tokens_are_parity(self):
+        self.assertEqual(
+            assessment(_assessment_fixture("actual_ids == reference_ids", "[1] == [1]"))["kind"],
+            "reference",
+        )
+
+    def test_or_answer_bypass_does_not_claim_reference_pass(self):
+        data = _assessment_fixture(
+            "ned <= threshold or expected_answer_matches",
+            "(0.8 <= 0.1 or True)",
+            native={"text": "answer one"},
+            reference={"reference_text": "answer two"},
+        )
+        self.assertEqual(assessment(data)["kind"], "limited")
+
+    def test_or_with_observed_reference_branch_pass(self):
+        data = _assessment_fixture(
+            "ned <= threshold or expected_answer_matches",
+            "(0.0 <= 0.1)",
+            native={"text": "answer"},
+            reference={"reference_text": "answer"},
+        )
+        self.assertEqual(assessment(data)["kind"], "reference")
+
+    def test_or_unknown_branch_is_not_reference_proof(self):
+        data = _assessment_fixture(
+            "ned <= threshold or expected_answer_matches",
+            "True",
+            native={"text": "answer one"},
+            reference={"reference_text": "answer two"},
+        )
+        self.assertEqual(assessment(data)["kind"], "limited")
+
+    def test_prompt_asr_is_limited(self):
+        data = _assessment_fixture(
+            "_normalized_edit_distance(transcript, prompt) <= limit",
+            "0.0 <= 0.15",
+            native={"audio": "native.wav"},
+            reference={"audio": "reference.wav"},
+        )
+        self.assertEqual(assessment(data)["kind"], "limited")
+
+    def test_response_fixture_is_limited(self):
+        data = _assessment_fixture(
+            '_edit_distance(actual_text, expected["text"]) <= limit',
+            "0.0 <= 0.1",
+            native={"text": "hello"},
+            reference={"text": "hello"},
+            inputs={"case": {"expected_response_text": "hello"}},
+        )
+        self.assertEqual(assessment(data)["kind"], "limited")
+
+    def test_contract_declaration_needs_native_and_checks(self):
+        data = _assessment_fixture(reference={"mode": "contract_only"})
+        self.assertEqual(assessment(data)["kind"], "unverified")
+        data["checks"] = [
+            {"status": "passed", "expression": "probe.is_file()", "explanation": "True"}
+        ]
+        self.assertEqual(assessment(data)["kind"], "limited")
+
+    def test_reference_failure_takes_precedence_over_old_checks(self):
+        data = _assessment_fixture(
+            "_cosine(actual, expected) >= .99",
+            "1.0 >= 0.99",
+            status="failed",
+            failure_stage="reference",
+        )
+        result = assessment(data)
+        self.assertEqual(result["kind"], "failed")
+        self.assertEqual(result["label"], "Reference run failed")
+        self.assertEqual(assessment(data, "passed")["kind"], "failed")
+
+    def test_failed_assertion_overrides_passed_status(self):
+        data = _assessment_fixture("_cosine(actual, expected) >= .99", "0.5 >= 0.99")
+        data["checks"][0]["status"] = "failed"
+        self.assertEqual(assessment(data)["kind"], "failed")
+
+    def test_missing_execution_is_unverified(self):
+        self.assertEqual(assessment({}, "not-run")["kind"], "unverified")
+        self.assertEqual(assessment(None)["kind"], "unverified")
+
+    def test_class_margin_exception_is_visible(self):
+        data = _assessment_fixture(
+            'int(actual["top_class"]) == int(expected["second_class"])',
+            "2 == 2",
+            native={"top_class": 2},
+            reference={"top_class": 1, "second_class": 2, "top1_margin": 0.03},
+        )
+        data["checks"].append(
+            {
+                "status": "passed",
+                "expression": 'float(expected["top1_margin"]) <= float(margin)',
+                "explanation": "0.03 <= 0.1",
+            }
+        )
+        result = assessment(data)
+        self.assertEqual(result["kind"], "reference")
+        self.assertIn("Top classes differ (2 vs 1)", result["summary"])
+        self.assertIn("allowed", result["summary"])
+
+    def test_generic_metric_loop_needs_named_limits_and_pairs(self):
+        data = _assessment_fixture(
+            "value <= threshold",
+            "0.001 <= 0.01",
+            native={"depth": [1], "points": [1]},
+            reference={"depth": [1], "points": [1]},
+            thresholds={"depth_rel_l2": 0.01, "points_rel_l2": 0.02},
+        )
+        data["checks"].append(
+            {"status": "passed", "expression": "value <= threshold", "explanation": "0.001 <= 0.02"}
+        )
+        self.assertEqual(assessment(data)["kind"], "reference")
+        data["thresholds"] = {"min_pixel_mean": 0.01, "min_pixel_std": 0.02}
+        self.assertNotEqual(assessment(data)["kind"], "reference")
+
+    def test_does_not_mutate_input(self):
+        data = _assessment_fixture("_cosine(actual, expected) >= .99", "1.0 >= 0.99")
+        before = copy.deepcopy(data)
+        assessment(data)
+        self.assertEqual(data, before)
+
+    def test_names_are_irrelevant(self):
+        data = _assessment_fixture("_cosine(actual, expected) >= .99", "1.0 >= 0.99")
+        result = assessment(data)
+        data.update(family="arbitrary-new-family", case="arbitrary-new-case", nodeid="whatever")
+        self.assertEqual(assessment(data), result)
+
+
+def test_text_generation_never_substitutes_logits_for_a_readable_response(tmp_path: Path) -> None:
+    import copy
+
+    data = _case()
+    logits = {"shape": [1000000], "preview": [0.25] * 64, "dtype": "float16"}
+    data["native"] = logits
+    data["reference"] = {"logits": logits}
+    original = copy.deepcopy(data)
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert "Decoded text unavailable" in visible and "recorded logits are in Details" in visible
+    assert "1000000" not in visible and "float16" not in visible
+    assert "<svg" not in report and "1000000" in report
+    assert data == original
+    data["native"] = {"text": "A real response.", "logits": logits}
+    data["reference"] = {"reference_text": "A real response.", "logits": logits}
+    report = render_case(data, tmp_path)
+    assert "A real response." in _visible(report) and "<svg" not in report
+
+
+def test_nonfinite_notice_is_one_sentence_without_output_metadata(tmp_path: Path) -> None:
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "monocular_geometry"
+    descriptor = {"shape": [100, 20], "preview": ["inf"] * 64, "dtype": "float32"}
+    data["native"] = {"depth": descriptor, "points": descriptor, "dtype": "float32"}
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert "Depth (64/64), Points (64/64): non-finite saved preview values" in visible
+    assert visible.count("preview only, not the full tensor") == 1
+    assert "float32" not in visible and "float32" in report
+    assert '<dl class="facts">' not in report.split('<details class="case-details">')[0]
+
+
+def test_numeric_demo_deduplicates_equal_notices_and_keeps_finite_prefix(tmp_path: Path) -> None:
+    from tools.e2e_report import _demo_output
+
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "monocular_geometry"
+    descriptor = {"shape": [100, 20], "preview": ["inf"] * 64}
+    data["native"] = {"depth": descriptor, "actions": {"shape": [128], "preview": [0.1] * 64}}
+    data["reference"] = {"depth": descriptor, "actions": {"shape": [128], "preview": [0.2] * 64}}
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert visible.count("preview only, not the full tensor") == 1
+    assert "First 64 of 128 values" in visible and report.count("<svg") == 1
+    mixed = {"depth": {"shape": [100, 20], "preview": [0.5, "inf", 0.7]}}
+    output = _demo_output(mixed, role="native", task="monocular_geometry")
+    assert "First 1 of 2000 values" in output and "<circle" in output
+    assert "Depth (1/3): non-finite saved preview values" in output
+    assert mixed["depth"]["preview"] == [0.5, "inf", 0.7]
+
+
+def test_long_recorded_prompt_keeps_final_question_visible(tmp_path: Path) -> None:
+    data = _case()
+    data["inputs"]["prompt"] = (
+        "Context begins. " + "Context filler. " * 300 + "What color is the final marker?"
+    )
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert "Context begins." in visible and "What color is the final marker?" in visible
+    assert "middle omitted; full text in Details" in visible
+    assert 'class="readable text-excerpt"' in report
+    assert data["inputs"]["prompt"] in _expanded(report)
