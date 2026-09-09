@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+implementation: time_series_performance
+
+timing:
+  candidate:
+    timing_scope: public_task_call_wall
+    load_excluded: true
+    warmup_excluded: true
+    telemetry_in_timed_path: false
+  reference:
+    timing_scope: task_model_call_wall
+    model_load_excluded: true
+    compile_excluded: true
+    warmup_excluded: true
+    input_preparation_included: false
+
+comparison:
+  primary_metric: latency_ms.p50
+  output_contract: time_series_tensor_parity
+
+stability:
+  samples: 10
+  median_drift_limit: 0.05
+  within_median_fraction: 0.05
+  minimum_close_samples: 8
+  retries: 1
+
+metrics:
+  - sample_count
+  - latency_ms.p50
+  - latency_ms.p95
+  - request_throughput_per_s
+  - forecast_elements_per_s

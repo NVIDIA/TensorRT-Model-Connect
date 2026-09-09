@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import math
 import re
@@ -592,6 +593,11 @@ class QualificationRunner:
         result_path = item_dir / "result.json"
         stdout_path = item_dir / "executor.stdout.log"
         stderr_path = item_dir / "executor.stderr.log"
+        try:
+            dataset = _dataset_evidence(item, environment) if phase == "prepare" else None
+        except QualificationError as error:
+            _write_json(result_path, _error_result(item, str(error)))
+            return
         request = {
             "schema_version": REQUEST_SCHEMA,
             "plan_id": plan.plan_id,
@@ -600,6 +606,7 @@ class QualificationRunner:
             "environment": dict(environment),
             "phase": phase,
             "preparation": dict(preparation or {}),
+            "dataset": dataset,
         }
         _write_json(request_path, request)
         try:
@@ -1093,6 +1100,50 @@ def _execution_timeout(environment: Mapping[str, Any]) -> int:
     return timeout
 
 
+def _dataset_evidence(item: PlanItem, environment: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Verify an immutable external benchmark asset without deriving run identity from it."""
+    dataset = item.definition.get("dataset")
+    if not isinstance(dataset, Mapping) or "sha256" not in dataset:
+        return None
+    expected = dataset.get("sha256")
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise QualificationError("suite dataset sha256 must be a lowercase 64-character hex value")
+    relative_value = _nonempty_string(dataset.get("relative_path"), "dataset.relative_path")
+    relative = Path(relative_value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise QualificationError("dataset.relative_path must stay below storage.data_root")
+    storage = environment.get("storage")
+    if not isinstance(storage, Mapping):
+        raise QualificationError("environment storage must be an object")
+    data_root = (
+        Path(_nonempty_string(storage.get("data_root"), "storage.data_root")).expanduser().resolve()
+    )
+    path = (data_root / relative).resolve()
+    try:
+        path.relative_to(data_root)
+    except ValueError as error:
+        raise QualificationError("dataset path escapes storage.data_root") from error
+    if path.is_symlink() or not path.is_file():
+        raise QualificationError(f"declared benchmark dataset is missing: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    actual = digest.hexdigest()
+    if actual != expected:
+        raise QualificationError(f"declared benchmark dataset sha256 does not match: {path}")
+    return {
+        "path": str(path),
+        "version": dataset.get("version"),
+        "sha256": actual,
+        "file_state": _file_state(path),
+    }
+
+
 def _item_directory_name(index: int, item: PlanItem) -> str:
     label = "-".join((item.family, item.model, item.suite_id, item.case_id))
     slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", label).strip("-") or "item"
@@ -1115,6 +1166,7 @@ def _archive_attempt(item_dir: Path) -> None:
 def _item_inputs(record: Mapping[str, Any]) -> dict[str, Any]:
     executor = Path(record["executor_path"])
     sources = sorted(executor.parent.rglob("*.py"))
+    sources.extend(sorted(executor.parent.rglob("*.txt")))
     requirements = executor.parents[2] / "requirements.txt"
     if requirements.is_file():
         sources.append(requirements)

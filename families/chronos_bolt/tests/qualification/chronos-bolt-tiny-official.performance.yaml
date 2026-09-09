@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: chronos-bolt-tiny-official
+kind: performance
+
+suites:
+  - benchmark: time_series_performance
+    gate_policy: observation_only
+    cases:
+      - id: forecast_64
+        reference:
+          implementation: chronos_bolt
+          mode: torch-compile
+          compile_scope: model.forward
+          precision: fp32
+        parity:
+          max_relative_l2: 1.0e-6
+          max_absolute_error: 8.0e-6
+        candidate:
+          testcase: chronos-bolt-tiny-official
+          request:
+            past_values:
+              - 100.1
+              - 100.15
+              - 100.18
+              - 100.22
+              - 100.21
+              - 100.27
+              - 100.31
+              - 100.35
+              - 100.37
+              - 100.4
+              - 100.44
+              - 100.5
+            frequency: 0
+          measurement:
+            warmup: 5
+            iterations: 10
+          telemetry:
+            gpu: auto

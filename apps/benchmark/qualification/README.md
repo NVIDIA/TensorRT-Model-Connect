@@ -5,9 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Qualification
 
-The current implementation covers GPT-2 continuation parity and
-compiled HF-vs-TensorRT Performance; it does not restore all historical datasets
-or claim MMLU answer accuracy.
+The current implementation covers GPT-2 continuation parity, Chronos-Bolt ETTh1
+numeric parity, and compiled PyTorch-reference-vs-TensorRT Performance. It does
+not restore all historical datasets or claim MMLU answer accuracy.
 
 `trtmc-qualify` discovers optional Accuracy and Performance configuration files
 directly from model families. There is no central model-to-suite registry.
@@ -51,20 +51,25 @@ Reference-only environments need not install the TRTMC builder package.
 GPT-2 reuses a CUDA-capable common environment. If the common environment is not
 compatible, its preparation script can create a private reference environment
 with Torch 2.14.0 and Transformers 5.2.0 while retaining the common build Python.
-Set `execution.allow_environment_creation: true` explicitly during preparation
-to permit this installation. Other families own their own dependency choices.
+Chronos-Bolt requires Transformers 4.57.6 and Chronos Forecasting 2.2.2 for both
+conversion and the official reference. Its preparation script therefore returns
+one family-private interpreter for both roles when the common environment does
+not match those exact dependencies. Set `execution.allow_environment_creation:
+true` explicitly during preparation to permit installation. Other families own
+their own dependency choices.
 
 The application prepares each selected family's environment once, records
-actual package versions, and starts executors with their resolved Python.
-GPT-2 invokes the benchmark/build CLI with that interpreter too. Reference
-subprocesses do not inherit another environment's `PYTHONPATH` or user-site
-packages. Family preparation must not modify the common environment.
+actual package versions, and starts executors with their resolved Python. The
+family executor invokes the benchmark/build CLI with that interpreter too.
+Reference subprocesses do not inherit another environment's `PYTHONPATH` or
+user-site packages. Family preparation must not modify the common environment.
 
-All case preparation finishes before evaluation. GPT-2 resolves an immutable HF
-snapshot and builds a fresh run-owned bundle through the public benchmark CLI.
-Accuracy also validates the dataset and saves the selected samples in the run's
-preparation directory before building. Evaluation and resume read this saved
-selection, never a potentially changed external dataset.
+All case preparation finishes before evaluation. Each implemented family resolves
+an immutable HF snapshot and builds a fresh run-owned bundle through the public
+benchmark CLI. Accuracy also validates the dataset and saves the selected samples
+in the run's preparation directory before building. Evaluation and resume read
+this saved selection, never a potentially changed external dataset. Chronos-Bolt
+also verifies the ETTh1 checksum recorded by the historical benchmark contract.
 New runs require `execution.allow_build: true`; prepared runs reuse their
 recorded bundle without rebuilding during measurement. Preparation errors are
 family/case-local and do not stop independent selected work.
@@ -139,10 +144,12 @@ interpreting their contents.
 
 Performance uses the same discovery path. Every Performance case measures both
 the converted TensorRT bundle and its reference backend with the same workload.
-For GPT-2 the reference is Hugging Face `torch.compile(model.forward)`. Generated
-token IDs must match before the timing comparison is accepted. The two sides run
-sequentially on the GPU selected by the high-level environment; model files never
-select or exclude a device.
+GPT-2 and Chronos-Bolt both compile the official model's `forward` method with
+`torch.compile`. Generated token IDs must match for GPT-2; Chronos-Bolt requires
+the forecast tensors to satisfy its numeric-parity gates. A timing comparison is
+accepted only after that conversion check. The two sides run sequentially on the
+GPU selected by the high-level environment; model files never select or exclude
+a device.
 
 Until a high-level device run owns a threshold, the timing comparison is
 observation-only and does not claim a pass or fail verdict:

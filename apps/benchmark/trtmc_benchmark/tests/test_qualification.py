@@ -61,6 +61,105 @@ def test_checked_in_gpt2_performance_suite_is_discoverable() -> None:
     assert "device" not in plan.items[0].case
 
 
+def test_checked_in_chronos_accuracy_suite_is_discoverable() -> None:
+    plan = QualificationCatalog(Path(__file__).resolve().parents[4] / "families").plan(
+        "accuracy", models=["chronos-bolt-tiny-official"]
+    )
+
+    assert [(item.suite_id, item.case_id) for item in plan.items] == [
+        ("etth1_time_series_parity", "smoke")
+    ]
+    assert plan.items[0].definition["implementation"] == "etth1_time_series_parity"
+    assert plan.items[0].case["gate"] == {
+        "max_relative_l2": 1.0e-6,
+        "max_absolute_error": 8.0e-6,
+    }
+    assert "device" not in plan.items[0].case
+
+
+def test_checked_in_chronos_performance_suite_is_discoverable() -> None:
+    plan = QualificationCatalog(Path(__file__).resolve().parents[4] / "families").plan(
+        "performance", models=["chronos-bolt-tiny-official"]
+    )
+
+    assert [(item.suite_id, item.case_id) for item in plan.items] == [
+        ("time_series_performance", "forecast_64")
+    ]
+    assert plan.items[0].gate_policy == "observation_only"
+    assert plan.items[0].case["reference"] == {
+        "implementation": "chronos_bolt",
+        "mode": "torch-compile",
+        "compile_scope": "model.forward",
+        "precision": "fp32",
+    }
+    assert "device" not in plan.items[0].case
+
+
+def test_family_environment_requirements_are_plan_inputs(tmp_path: Path) -> None:
+    qualification = _family(tmp_path / "families", "alpha", "model-a")
+    requirements = qualification.parent.parent / "requirements.txt"
+    requirements.write_text("family-reference==1.0\n", encoding="utf-8")
+
+    plan = QualificationCatalog(tmp_path / "families").plan("accuracy")
+
+    assert str(requirements) in plan.items[0].inputs
+
+
+def test_runner_verifies_a_declared_external_dataset_before_family_preparation(
+    tmp_path: Path,
+) -> None:
+    families = tmp_path / "families"
+    qualification = _family(families, "alpha", "model-a")
+    config_path = qualification / "model-a.accuracy.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["suites"][0]["definition"]["dataset"] = {
+        "relative_path": "benchmark/data.txt",
+        "version": "fixture",
+        "sha256": "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    data_root = tmp_path / "data"
+    dataset = data_root / "benchmark/data.txt"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text("data", encoding="utf-8")
+    plan = QualificationCatalog(families).plan("accuracy", suites=["file-suite"], cases=["small"])
+    environment = {
+        **_environment(),
+        "storage": {"data_root": str(data_root)},
+    }
+
+    report = QualificationRunner(Path(sys.executable)).run(plan, tmp_path / "run", environment)
+
+    assert report["status"] == "pass"
+    request_path = next((tmp_path / "run/preparations").glob("*/request.json"))
+    evidence = json.loads(request_path.read_text(encoding="utf-8"))["dataset"]
+    assert evidence["path"] == str(dataset.resolve())
+    assert evidence["version"] == "fixture"
+
+
+def test_runner_rejects_a_dataset_that_does_not_match_its_definition(tmp_path: Path) -> None:
+    families = tmp_path / "families"
+    qualification = _family(families, "alpha", "model-a")
+    config_path = qualification / "model-a.accuracy.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["suites"][0]["definition"]["dataset"] = {
+        "relative_path": "benchmark/data.txt",
+        "sha256": "0" * 64,
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    data_root = tmp_path / "data"
+    dataset = data_root / "benchmark/data.txt"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text("data", encoding="utf-8")
+    plan = QualificationCatalog(families).plan("accuracy", suites=["file-suite"], cases=["small"])
+    environment = {**_environment(), "storage": {"data_root": str(data_root)}}
+
+    report = QualificationRunner(Path(sys.executable)).run(plan, tmp_path / "run", environment)
+
+    assert report["status"] == "error"
+    assert "dataset sha256 does not match" in report["items"][0]["details"]["error"]
+
+
 def _family(root: Path, family: str, model: str, *, with_config: bool = True) -> Path:
     tests = root / family / "tests"
     manifests = tests / "manifests"
