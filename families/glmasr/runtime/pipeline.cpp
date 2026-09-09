@@ -55,8 +55,8 @@ int32_t host_argmax_logits(const TensorMap& outputs, int32_t vocab_size) {
 
 } // namespace
 
-GlmAsrPipeline::GlmAsrPipeline(std::unique_ptr<TrtModule> encoder,
-                               std::unique_ptr<TrtModule> decoder,
+GlmAsrPipeline::GlmAsrPipeline(std::unique_ptr<ITrtModule> encoder,
+                               std::unique_ptr<ITrtModule> decoder,
                                std::unique_ptr<GlmAsrInferenceState> state, GlmAsrConfig config,
                                MelFilterbank mel_filterbank, cudaStream_t stream,
                                std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)

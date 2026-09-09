@@ -17,6 +17,8 @@ std::vector<char> required(const trtmc::BundleReader& b, const char* name) {
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     using namespace trtmc;
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("glmasr does not support --kv-cache-size");
     const auto runtime_data = required(context.reader, "runtime.json");
     const auto json = nlohmann::json::parse(runtime_data.begin(), runtime_data.end());
     ModuleCreateOptions options;

@@ -212,7 +212,7 @@ void GlmAsrKvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_le
     write_bidirectional_mask(inputs, seq_len);
 }
 
-void GlmAsrKvCache::bind_to(TrtModule& module) {
+void GlmAsrKvCache::bind_to(ITrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
     // Enable dynamic row binding only when cache_k[0] itself is dynamic.
@@ -240,7 +240,7 @@ void GlmAsrKvCache::bind_to(TrtModule& module) {
     }
 }
 
-void GlmAsrKvCache::bind_cache_inputs(TrtModule& module) {
+void GlmAsrKvCache::bind_cache_inputs(ITrtModule& module) {
     has_position_input_ = module.has_input(names_.position_id);
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);

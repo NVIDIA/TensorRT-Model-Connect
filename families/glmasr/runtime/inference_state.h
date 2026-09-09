@@ -29,7 +29,6 @@
 namespace trtmc {
 
 class ITrtModule;
-using TrtModule = ITrtModule;
 
 class GlmAsrInferenceState {
   public:
@@ -44,7 +43,7 @@ class GlmAsrInferenceState {
     // Bind all state tensors to the given TRT module.
     // Called once per sequence after reset(). The module reads/writes
     // state tensors via the bound device pointers.
-    virtual void bind_to(TrtModule& module) = 0;
+    virtual void bind_to(ITrtModule& module) = 0;
 
     // Write state-related inputs (mask, position, block table, etc.) into
     // the TensorMap before engine.forward(). The state owns its buffers —

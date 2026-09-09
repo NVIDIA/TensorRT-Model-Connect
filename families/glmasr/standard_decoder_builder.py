@@ -103,7 +103,6 @@ def build_standard_decoder_engine(
     Returns:
         Serialized engine plan bytes.
     """
-    import os as _os
     # Mark the graph as honoring the internal decoder role contract. This is
     # embedded in the mutable config for family helpers that need to branch on
     # the active engine layout while building.
@@ -121,10 +120,6 @@ def build_standard_decoder_engine(
     #   - embed_input=True             (VL prefill replacement, Bark sub-engines)
     #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
     #   - hidden_state_output=True     (speech / Bark hidden output)
-    #
-    # ``TRTMC_NO_DUAL_PROFILE=1`` is an internal escape hatch (perf A/B,
-    # bisects against the legacy graph). It is *not* intended as a
-    # supported user-facing flag.
     requested_fp32_layers = tuple(config.raw.get("_fp32_layers", ()))
     dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
     if dynamic_kv_cache and position_type == "alibi":
@@ -139,7 +134,6 @@ def build_standard_decoder_engine(
         or debug_layer_outputs
         or hidden_state_output
         or bool(requested_fp32_layers)
-        or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
     if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
         raise NotImplementedError(
@@ -202,6 +196,7 @@ def build_standard_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
 
     # Precision configuration
     if precision == "fp16":

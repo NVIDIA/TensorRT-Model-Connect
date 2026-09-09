@@ -72,30 +72,6 @@ class WeightDict(dict):
 # Safetensors I/O helpers
 # ---------------------------------------------------------------------------
 
-def _detect_framework() -> str:
-    """Use 'torch' if available (handles BF16 natively), else 'numpy'."""
-    try:
-        import torch  # noqa: F401
-        return "torch"
-    except ImportError:
-        return "numpy"
-
-
-class _TorchBinReader:
-    """Adapter that wraps a pytorch .bin state dict with the safetensors reader
-    interface (keys() / get_tensor())."""
-
-    def __init__(self, path: Path):
-        import torch
-        self._state = torch.load(str(path), map_location="cpu", weights_only=True)
-
-    def keys(self) -> list[str]:
-        return list(self._state.keys())
-
-    def get_tensor(self, name: str):
-        return self._state[name]
-
-
 class _ReaderCollection(list):
     """Reader list with a cached tensor-name -> reader lookup table."""
 
@@ -110,11 +86,10 @@ class _ReaderCollection(list):
 
 
 def _open_safetensors(model_dir: Path) -> list:
-    """Open all safetensor shards (or pytorch .bin) in a model directory."""
-    fw = _detect_framework()
+    """Open all safetensor shards in a model directory."""
     single = model_dir / "model.safetensors"
     if single.exists():
-        return _ReaderCollection([safe_open(str(single), framework=fw)])
+        return _ReaderCollection([safe_open(str(single), framework="numpy")])
 
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
@@ -123,7 +98,7 @@ def _open_safetensors(model_dir: Path) -> list:
         weight_map = index.get("weight_map", {})
         shard_files = sorted(set(weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework=fw)
+            shard: safe_open(str(model_dir / shard), framework="numpy")
             for shard in shard_files
         }
         tensor_map = {
@@ -138,7 +113,7 @@ def _open_safetensors(model_dir: Path) -> list:
     # Diffusers format: diffusion_pytorch_model.safetensors
     diff_single = model_dir / "diffusion_pytorch_model.safetensors"
     if diff_single.exists():
-        return _ReaderCollection([safe_open(str(diff_single), framework=fw)])
+        return _ReaderCollection([safe_open(str(diff_single), framework="numpy")])
 
     diff_index = model_dir / "diffusion_pytorch_model.safetensors.index.json"
     if diff_index.exists():
@@ -147,7 +122,7 @@ def _open_safetensors(model_dir: Path) -> list:
         weight_map = index.get("weight_map", {})
         shard_files = sorted(set(weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework=fw)
+            shard: safe_open(str(model_dir / shard), framework="numpy")
             for shard in shard_files
         }
         tensor_map = {
@@ -159,13 +134,8 @@ def _open_safetensors(model_dir: Path) -> list:
             tensor_map=tensor_map,
         )
 
-    # Fallback: pytorch_model.bin (older HF models)
-    bin_single = model_dir / "pytorch_model.bin"
-    if bin_single.exists():
-        return _ReaderCollection([_TorchBinReader(bin_single)])
-
     raise FileNotFoundError(
-        f"No model.safetensors, index.json, or pytorch_model.bin in {model_dir}")
+        f"No model.safetensors or index.json in {model_dir}")
 
 
 def _has_tensor(readers: list, name: str) -> bool:

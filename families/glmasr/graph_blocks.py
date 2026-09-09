@@ -280,17 +280,9 @@ def add_attention_block(
             mask=mask_4d,
             scale=attention_scale,
         )
-    elif ffi_attention_kernel is not None:
-        if num_kv_heads != num_heads:
-            raise ValueError(
-                "FFI decoder attention requires num_kv_heads == num_heads; "
-                "use TRT native attention for compact GQA/MQA KV cache")
-        # Fused attention kernel via TVM-FFI plugin
-        context = graph_ops.add_decoder_attention_ffi(
-            network, q, all_k.get_output(0), all_v.get_output(0),
-            kernel_name=ffi_attention_kernel,
-            num_heads=num_heads, head_dim=head_dim,
-            attention_window=attention_window)
+    else:
+        raise NotImplementedError(
+            "glmasr does not support FFI decoder attention kernels")
 
     # Output projection
     attn_out = matmul(context,

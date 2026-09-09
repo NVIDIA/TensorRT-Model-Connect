@@ -112,6 +112,7 @@ def build_audio_encoder_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     builder_config = builder.create_builder_config()
+    builder_config.builder_optimization_level = 1
 
     eps = graph_ops.add_constant(
         network, (1, 1),

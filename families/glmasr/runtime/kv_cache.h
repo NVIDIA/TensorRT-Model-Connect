@@ -9,7 +9,7 @@
 // HF equivalent: DynamicCache / past_key_values.
 //
 // Manages per-layer K/V device tensors, position tracking, and attention mask
-// construction. Binds directly to a TrtModule via bind_to().
+// construction. Binds directly to an ITrtModule via bind_to().
 
 #include "families/glmasr/runtime/inference_state.h"
 #include "trtmc/runtime/device_tensor.h"
@@ -21,7 +21,6 @@
 namespace trtmc {
 
 class ITrtModule;
-using TrtModule = ITrtModule;
 
 // Explicit tensor names for KV cache I/O binding.
 // Per-layer vectors hold expanded names; scalar names are for single inputs.
@@ -45,7 +44,7 @@ class GlmAsrKvCache : public GlmAsrInferenceState {
 
     // --- GlmAsrInferenceState overrides ---
     void reset() override;
-    void bind_to(TrtModule& module) override;
+    void bind_to(ITrtModule& module) override;
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
     void advance(int32_t n_tokens = 1) override;
     int32_t position() const override { return position_; }
@@ -87,11 +86,11 @@ class GlmAsrKvCache : public GlmAsrInferenceState {
     void set_position(int32_t position);
 
     // Bind only the cache_k/v INPUT pointers to `module`. Used for the
-    // prefill TrtModule whose present_k/v outputs have shape (Sq, kv_dim)
+    // prefill ITrtModule whose present_k/v outputs have shape (Sq, kv_dim)
     // — too big for GlmAsrKvCache's single-row present buffer. The caller reads
     // the prefill outputs directly from the module's own allocations and
     // copies them via write_prefill_kv().
-    void bind_cache_inputs(TrtModule& module);
+    void bind_cache_inputs(ITrtModule& module);
 
   private:
     void rebind_cache_rows(int32_t cache_rows);
@@ -119,7 +118,7 @@ class GlmAsrKvCache : public GlmAsrInferenceState {
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
     GlmAsrKvCacheNames names_;
-    TrtModule* bound_module_{nullptr};
+    ITrtModule* bound_module_{nullptr};
 };
 
 } // namespace trtmc

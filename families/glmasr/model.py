@@ -17,7 +17,6 @@ any extra discriminator.
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -221,11 +220,6 @@ class GlmAsrPlugin:
             activation="silu",
             embed_input=True,
             verbose=verbose,
-            # Bisection aid: TRTMC_GLMASR_DEBUG_LAYERS=1 marks every layer's
-            # hidden state as an engine output, for a numeric diff against a
-            # reference implementation layer by layer. Off by default -- it
-            # adds outputs the normal path never reads.
-            debug_layer_outputs=os.environ.get("TRTMC_GLMASR_DEBUG_LAYERS") == "1",
         )
 
     def build_extra_engines(
@@ -340,6 +334,14 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("glmasr supports only batch=1 and context_parallel_size=1")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("glmasr does not support quantization")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("glmasr does not support dynamic_kv_cache")
+    if request.image_height is not None:
+        raise NotImplementedError("glmasr does not support image_height")
+    if request.image_width is not None:
+        raise NotImplementedError("glmasr does not support image_width")
+    if request.video_num_frames is not None:
+        raise NotImplementedError("glmasr does not support video_num_frames")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() not in _MODEL_TYPES:
