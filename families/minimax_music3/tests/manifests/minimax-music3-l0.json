@@ -6,6 +6,7 @@
   "family": "minimax_music3",
   "task": "audio_generation",
   "precision": "bf16",
+  "tensor_parallel_size": 1,
   "max_sequence_length": 9216,
   "testcases": [
     {
