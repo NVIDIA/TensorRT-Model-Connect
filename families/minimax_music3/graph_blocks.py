@@ -22,7 +22,7 @@ residual, DeepStack injection, MoE routing, etc.).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import tensorrt as trt
@@ -32,7 +32,6 @@ from . import graph_ops
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
-    from ...quantization.context import QuantContext
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +137,7 @@ def add_attention_block(
     alibi_slopes_tensor: trt.ITensor | None = None,
     alibi_indices_tensor: trt.ITensor | None = None,
     dtype: np.dtype = np.float32,
-    quant_ctx: QuantContext | None = None,
+    quant_ctx: Any | None = None,
     layer_prefix: str = "",
     # TRT 10 native API tensors.
     cos_half_tensor: trt.ITensor | None = None,
@@ -323,7 +322,7 @@ def add_swiglu_mlp(
     hidden_size: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
-    quant_ctx: QuantContext | None = None,
+    quant_ctx: Any | None = None,
     layer_prefix: str = "",
 ) -> trt.ITensor:
     """Gate/up/down SwiGLU MLP. Returns output tensor."""
@@ -356,7 +355,7 @@ def add_gelu_fc_mlp(
     mlp_size: int,
     activation: str = "gelu_new",
     dtype: np.dtype = np.float32,
-    quant_ctx: QuantContext | None = None,
+    quant_ctx: Any | None = None,
     layer_prefix: str = "",
 ) -> trt.ITensor:
     """fc1 -> activation -> fc2 MLP. Returns output tensor."""

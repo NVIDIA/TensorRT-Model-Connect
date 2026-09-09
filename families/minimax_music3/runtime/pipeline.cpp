@@ -867,8 +867,6 @@ MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& pro
     depth_hidden_.assign(static_cast<std::size_t>(config_.num_residual_codebooks) *
                              static_cast<std::size_t>(config_.language_model_hidden_size),
                          0.0F);
-    const auto stream_width =
-        static_cast<std::size_t>(config_.frame_hidden_width / config_.condition_streams);
     hidden.assign(static_cast<std::size_t>(frames) *
                       static_cast<std::size_t>(config_.frame_hidden_width),
                   0.0F);

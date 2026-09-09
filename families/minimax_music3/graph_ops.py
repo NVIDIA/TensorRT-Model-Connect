@@ -1316,7 +1316,7 @@ def add_tvm_ffi_kernel(
     if creator is None:
         raise RuntimeError(
             "TvmFfiKernel plugin not found in TRT registry. "
-            "Ensure the C++ plugin is compiled with TRTMC_HAS_TVM_FFI=1."
+            "Ensure the C++ plugin is compiled with TVM-FFI support."
         )
 
     spec_dict = {
