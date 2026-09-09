@@ -12,6 +12,7 @@ import os
 import shlex
 import shutil
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -175,16 +176,35 @@ def _run_native(
     return structure.read_text(encoding="utf-8"), json.loads(metadata.read_text(encoding="utf-8"))
 
 
+@cache
+def _qualification_binary() -> Path:
+    native_build = _required_path(
+        os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR"
+    )
+    subprocess.run(
+        [
+            "cmake",
+            "--build",
+            str(native_build),
+            "--parallel",
+            "8",
+            "--target",
+            "openfold3_qualification",
+        ],
+        check=True,
+        timeout=600,
+    )
+    qualification = native_build / "families/openfold3/openfold3_qualification"
+    assert qualification.is_file(), qualification
+    return qualification
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
     source = _model_dir(manifest)
     package = _prepared_package(source, tmp_path / "package")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
-    native_build = _required_path(
-        os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR"
-    )
-    qualification = native_build / "families/openfold3/openfold3_qualification"
-    assert qualification.is_file(), qualification
+    qualification = _qualification_binary()
     bundle = tmp_path / manifest["bundle"]
     build(
         BuildRequest(
