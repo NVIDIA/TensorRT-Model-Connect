@@ -431,6 +431,7 @@ print(json.dumps({
         )
         if not version.stdout.startswith("trtmc "):
             raise CiError("installed trtmc CLI returned an invalid version")
+        fixture_family = min(expected)
         with tempfile.TemporaryDirectory(prefix="trtmc-installed-wheel-") as directory:
             bundle = Path(directory) / "inspect.bundle"
             subprocess.run(
@@ -440,9 +441,11 @@ print(json.dumps({
                     "from pathlib import Path; "
                     "from tensorrt_model_connect.bundle_writer import BundleWriter; "
                     "writer = BundleWriter(Path(__import__('sys').argv[1])); "
-                    "writer.set_header(family='gpt2', task='text_generation', backend='trt'); "
+                    "writer.set_header(family=__import__('sys').argv[2], "
+                    "task='package_validation', backend='trt'); "
                     "writer.finish()",
                     bundle,
+                    fixture_family,
                 ],
                 check=True,
                 cwd=Path("/tmp"),
@@ -457,7 +460,7 @@ print(json.dumps({
                 env=environment,
             )
             metadata = json.loads(inspected.stdout)
-            if metadata.get("family") != "gpt2" or metadata.get("backend") != "trt":
+            if metadata.get("family") != fixture_family or metadata.get("backend") != "trt":
                 raise CiError("installed trtmc CLI failed bundle inspection")
             executed = subprocess.run(
                 [executable, "run", bundle],

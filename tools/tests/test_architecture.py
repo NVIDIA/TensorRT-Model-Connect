@@ -798,6 +798,7 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
 
     package_validation = (REPO / "tools/ci/package.py").read_text(encoding="utf-8")
     assert 'import_module(f"families.{family}.model")' not in package_validation
+    assert re.search(r"set_header\(family=['\"]", package_validation) is None
 
 
 def test_family_reference_consumers_declare_their_source() -> None:

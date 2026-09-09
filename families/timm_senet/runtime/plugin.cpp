@@ -50,6 +50,8 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 } // namespace
 } // namespace trtmc::timm_senet
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("timm_senet")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("timm_senet does not support --kv-cache-size");
