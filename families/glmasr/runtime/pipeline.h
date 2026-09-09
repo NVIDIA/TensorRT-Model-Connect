@@ -21,7 +21,7 @@
 #include "families/glmasr/runtime/inference_state.h"
 #include "families/glmasr/runtime/kv_cache.h"
 #include "families/glmasr/runtime/plugin_helpers.h"
-#include "families/whisper/runtime/tokenizer.h"
+#include "families/glmasr/runtime/tokenizer.h"
 #include "trtmc/runtime/device_tensor.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"

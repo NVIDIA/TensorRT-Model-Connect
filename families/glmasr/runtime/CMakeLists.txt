@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_glmasr SHARED
+  bpe_tokenizer.cpp
   glmasr_mel_spectrogram.cpp
   kv_cache.cpp
   pipeline.cpp

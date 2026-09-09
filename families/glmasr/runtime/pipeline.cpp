@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -196,7 +197,23 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
         std::min(glmasr::audio_embedding_count(real_mel_frames, config_.audio_merge_factor),
                  config_.max_audio_embeddings);
 
-    const std::vector<float> audio_embeds = run_audio_encoder(mel.data);
+    // Bisection aid: inject a reference implementation's audio embeddings in
+    // place of this engine's own, to separate an audio-encoder fault from a
+    // decoder fault. Not part of the normal path; never touched unless the
+    // variable is set.
+    std::vector<float> audio_embeds;
+    if (const char* injected = std::getenv("TRTMC_GLMASR_AUDIO_EMBEDS")) {
+        std::ifstream in(injected, std::ios::binary | std::ios::ate);
+        if (!in)
+            throw std::runtime_error("cannot read TRTMC_GLMASR_AUDIO_EMBEDS");
+        const auto bytes = static_cast<std::size_t>(in.tellg());
+        in.seekg(0);
+        audio_embeds.resize(bytes / sizeof(float));
+        in.read(reinterpret_cast<char*>(audio_embeds.data()), static_cast<std::streamsize>(bytes));
+        std::cerr << "[glmasr] injected audio embeddings: " << audio_embeds.size() << " floats\n";
+    } else {
+        audio_embeds = run_audio_encoder(mel.data);
+    }
 
     const auto plan =
         glmasr::build_prompt_plan(config_, tokenize_instruction(), num_audio_embeddings);
@@ -227,6 +244,10 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
                   << " audio_offset=" << plan.audio_offset
                   << " decode_launches=" << stats_.decode_launches
                   << " generated=" << generated.size() << std::endl;
+        std::cerr << "[glmasr] generated token ids:";
+        for (const auto token : generated)
+            std::cerr << ' ' << token;
+        std::cerr << std::endl;
     }
 
     std::string text;

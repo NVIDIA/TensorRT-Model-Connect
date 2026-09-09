@@ -22,18 +22,17 @@ residual, DeepStack injection, MoE routing, etc.).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
-from tensorrt_model_connect import trt_compat
+import tensorrt as trt
 
 from . import graph_ops
 
-trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
-    from ...quantization.context import QuantContext
+    QuantContext = Any
 
 
 # ---------------------------------------------------------------------------

@@ -7,12 +7,9 @@ from __future__ import annotations
 
 
 import numpy as np
-from tensorrt_model_connect import trt_compat
+import tensorrt as trt
 
 from . import graph_ops
-
-
-trt = trt_compat.get_trt()
 
 
 def const_in_work_dtype(

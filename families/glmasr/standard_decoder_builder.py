@@ -19,10 +19,10 @@ Tensor names MUST match what the C++ runtime expects:
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
-from tensorrt_model_connect import trt_compat
+import tensorrt as trt
 
 from . import graph_ops
 from . import graph_blocks
@@ -30,11 +30,10 @@ from .config import ModelConfig
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 from .utils import const_in_work_dtype
 
-trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
-    from ...quantization.context import QuantContext
+    QuantContext = Any
 
 
 def _mark_debug_output(

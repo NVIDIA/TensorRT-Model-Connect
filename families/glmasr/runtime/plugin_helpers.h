@@ -1,5 +1,5 @@
 #pragma once
-#include "families/whisper/runtime/tokenizer.h"
+#include "families/glmasr/runtime/tokenizer.h"
 #include "trtmc/bundle.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/runtime/trt_module.h"

@@ -13,14 +13,11 @@ import math
 from typing import Any
 
 import numpy as np
-from tensorrt_model_connect import trt_compat
-from ...native_kv_attention_builder import (
+import tensorrt as trt
+from .native_kv_attention_builder import (
     NativeKvMasks,
     add_explicit_masked_grouped_query_attention,
 )
-
-
-trt = trt_compat.get_trt()
 
 
 def _cast_back_to_trt_dtype(
@@ -1396,7 +1393,6 @@ def add_gelu_erf(
     """Exact GELU, 0.5 * x * (1 + erf(x / sqrt(2))), via TensorRT GELU_ERF."""
     return network.add_activation(
         inp, trt.ActivationType.GELU_ERF).get_output(0)
-
 
 
 # ---------------------------------------------------------------------------

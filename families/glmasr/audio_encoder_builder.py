@@ -24,7 +24,7 @@ import sys
 
 import numpy as np
 
-from tensorrt_model_connect import trt_compat
+import tensorrt as trt
 
 from . import graph_ops
 from .config import (
@@ -34,7 +34,6 @@ from .config import (
     projector_config,
 )
 
-trt = trt_compat.get_trt()
 
 _AUDIO = "audio.audio_tower."
 _PROJ = "projector."

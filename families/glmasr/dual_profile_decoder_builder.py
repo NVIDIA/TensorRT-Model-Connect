@@ -47,11 +47,11 @@ this builder and still use dense masks plus incremental present K/V outputs.
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
-from tensorrt_model_connect import trt_compat
-from ...native_kv_attention_builder import (
+import tensorrt as trt
+from .native_kv_attention_builder import (
     EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS,
     add_active_prefix_causal_masks,
 )
@@ -59,12 +59,11 @@ from ...native_kv_attention_builder import (
 from . import graph_ops
 from . import graph_blocks
 
-trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
-    from ...quantization.context import QuantContext
+    QuantContext = Any
 
 
 def _const_in_work_dtype(

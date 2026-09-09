@@ -2,7 +2,3 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """GLM-ASR family: a Whisper-style audio encoder feeding a Llama decoder."""
-
-from .model import build
-
-__all__ = ["build"]
