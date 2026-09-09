@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cuda_runtime.h>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
 namespace trtmc {
@@ -128,14 +129,28 @@ class BarkSampler::Impl {
     void ensure_device_buffers(int32_t entries, int32_t rows) {
         if (entries > entry_capacity_) {
             cudaFree(device_indices_);
+            device_indices_ = nullptr;
             cudaFree(device_probabilities_);
-            cudaMalloc(&device_indices_, static_cast<std::size_t>(entries) * sizeof(int32_t));
-            cudaMalloc(&device_probabilities_, static_cast<std::size_t>(entries) * sizeof(float));
+            device_probabilities_ = nullptr;
+            entry_capacity_ = 0;
+            cudaError_t error =
+                cudaMalloc(&device_indices_, static_cast<std::size_t>(entries) * sizeof(int32_t));
+            if (error != cudaSuccess)
+                throw std::runtime_error("Unable to allocate bark sampler index buffer");
+            error = cudaMalloc(&device_probabilities_,
+                               static_cast<std::size_t>(entries) * sizeof(float));
+            if (error != cudaSuccess)
+                throw std::runtime_error("Unable to allocate bark sampler probability buffer");
             entry_capacity_ = entries;
         }
         if (rows > row_capacity_) {
             cudaFree(device_token_ids_);
-            cudaMalloc(&device_token_ids_, static_cast<std::size_t>(rows) * sizeof(int32_t));
+            device_token_ids_ = nullptr;
+            row_capacity_ = 0;
+            const cudaError_t error =
+                cudaMalloc(&device_token_ids_, static_cast<std::size_t>(rows) * sizeof(int32_t));
+            if (error != cudaSuccess)
+                throw std::runtime_error("Unable to allocate bark sampler token id buffer");
             row_capacity_ = rows;
         }
     }
