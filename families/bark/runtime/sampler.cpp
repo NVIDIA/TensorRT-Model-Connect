@@ -69,18 +69,31 @@ FilteredDistribution build_filtered_distributions(const float* logits, int32_t r
     return distribution;
 }
 
+template <typename T>
+class DeviceBuffer {
+  public:
+    DeviceBuffer() = default;
+    ~DeviceBuffer() { cudaFree(ptr_); }
+    DeviceBuffer(const DeviceBuffer&) = delete;
+    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+
+    T* get() const { return ptr_; }
+
+    void reset(T* pointer) {
+        cudaFree(ptr_);
+        ptr_ = pointer;
+    }
+
+  private:
+    T* ptr_{nullptr};
+};
+
 } // namespace
 
 class BarkSampler::Impl {
   public:
     explicit Impl(void* stream) : stream_(static_cast<cudaStream_t>(stream)) {
         ensure_device_buffers(1, 1);
-    }
-
-    ~Impl() {
-        cudaFree(device_indices_);
-        cudaFree(device_probabilities_);
-        cudaFree(device_token_ids_);
     }
 
     void reset(int64_t seed) {
@@ -111,14 +124,15 @@ class BarkSampler::Impl {
         ensure_device_buffers(static_cast<int32_t>(distribution.indices.size()), rows);
         const std::size_t index_bytes = distribution.indices.size() * sizeof(int32_t);
         const std::size_t probability_bytes = distribution.probabilities.size() * sizeof(float);
-        cudaMemcpyAsync(device_indices_, distribution.indices.data(), index_bytes,
+        cudaMemcpyAsync(device_indices_.get(), distribution.indices.data(), index_bytes,
                         cudaMemcpyHostToDevice, stream_);
-        cudaMemcpyAsync(device_probabilities_, distribution.probabilities.data(), probability_bytes,
-                        cudaMemcpyHostToDevice, stream_);
-        bark_gpu_sparse_torch_multinomial_exact(
-            device_indices_, device_probabilities_, distribution.rows, distribution.vocab_size,
-            distribution.keep, seed_, current_offset_, total_threads_, device_token_ids_, stream_);
-        cudaMemcpyAsync(selected_tokens.data(), device_token_ids_,
+        cudaMemcpyAsync(device_probabilities_.get(), distribution.probabilities.data(),
+                        probability_bytes, cudaMemcpyHostToDevice, stream_);
+        bark_gpu_sparse_torch_multinomial_exact(device_indices_.get(), device_probabilities_.get(),
+                                                distribution.rows, distribution.vocab_size,
+                                                distribution.keep, seed_, current_offset_,
+                                                total_threads_, device_token_ids_.get(), stream_);
+        cudaMemcpyAsync(selected_tokens.data(), device_token_ids_.get(),
                         selected_tokens.size() * sizeof(int32_t), cudaMemcpyDeviceToHost, stream_);
         cudaStreamSynchronize(stream_);
         current_offset_ += counter_offset_;
@@ -140,10 +154,8 @@ class BarkSampler::Impl {
                 cudaFree(new_indices);
                 throw std::runtime_error("Unable to allocate bark sampler probability buffer");
             }
-            cudaFree(device_indices_);
-            cudaFree(device_probabilities_);
-            device_indices_ = new_indices;
-            device_probabilities_ = new_probabilities;
+            device_indices_.reset(new_indices);
+            device_probabilities_.reset(new_probabilities);
             entry_capacity_ = entries;
         }
         if (rows > row_capacity_) {
@@ -152,8 +164,7 @@ class BarkSampler::Impl {
                 cudaMalloc(&new_token_ids, static_cast<std::size_t>(rows) * sizeof(int32_t));
             if (error != cudaSuccess)
                 throw std::runtime_error("Unable to allocate bark sampler token id buffer");
-            cudaFree(device_token_ids_);
-            device_token_ids_ = new_token_ids;
+            device_token_ids_.reset(new_token_ids);
             row_capacity_ = rows;
         }
     }
@@ -172,9 +183,9 @@ class BarkSampler::Impl {
     uint64_t seed_{0};
     uint64_t current_offset_{0};
     cudaStream_t stream_{nullptr};
-    int32_t* device_indices_{nullptr};
-    float* device_probabilities_{nullptr};
-    int32_t* device_token_ids_{nullptr};
+    DeviceBuffer<int32_t> device_indices_;
+    DeviceBuffer<float> device_probabilities_;
+    DeviceBuffer<int32_t> device_token_ids_;
     int32_t entry_capacity_{0};
     int32_t row_capacity_{0};
     int32_t cached_numel_{-1};

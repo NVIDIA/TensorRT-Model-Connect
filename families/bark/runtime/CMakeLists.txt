@@ -65,4 +65,22 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME bark_pipeline COMMAND test_bark_pipeline)
   set_tests_properties(bark_pipeline PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
+
+  # Compiles the sampler against CPU CUDA stubs defined in the test, so
+  # allocation failures can be injected without a GPU or cudart.
+  add_executable(test_bark_sampler_alloc
+    ${PROJECT_SOURCE_DIR}/families/bark/tests/cpp/test_bark_sampler_alloc.cpp
+    sampler.cpp
+  )
+  target_include_directories(test_bark_sampler_alloc PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_bark_sampler_alloc SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_compile_options(test_bark_sampler_alloc PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME bark_sampler_alloc COMMAND test_bark_sampler_alloc)
 endif()
