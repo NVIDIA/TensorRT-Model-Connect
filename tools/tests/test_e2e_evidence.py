@@ -750,3 +750,21 @@ def test_nonfinite_notice_keeps_other_finite_output_samples(tmp_path: Path) -> N
     assert "all 64 values in this recorded preview are non-finite" in visible
     assert "Actions sample (first values)" in visible
     assert "0.125, 0.25, 0.375, 0.5" in visible
+
+
+def test_output_samples_take_priority_over_summary_regardless_of_key_order() -> None:
+    from tools.e2e_report import _output_summary
+
+    actions = {"shape": [100, 14], "preview": [0.125, 0.25, 0.375, 0.5] * 16}
+    summary = {f"detail_{index}": index for index in range(12)}
+    first = _output_summary(
+        {"summary": summary, "actions": actions}, role="native", task="robot_control"
+    )
+    second = _output_summary(
+        {"actions": actions, "summary": dict(reversed(list(summary.items())))},
+        role="native",
+        task="robot_control",
+    )
+    assert first == second
+    assert "Actions shape" in first and "100 × 14" in first
+    assert "Actions sample (first values)" in first and "0.125, 0.25, 0.375, 0.5" in first

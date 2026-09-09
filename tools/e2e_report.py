@@ -365,7 +365,7 @@ def _recipe(data: dict[str, Any]) -> tuple[str, str, str, str]:
 
 def _settings_table(values: dict[str, Any], *, excluded: set[str]) -> str:
     rows = []
-    for key, value in values.items():
+    for key, value in sorted(values.items()):
         if key in excluded:
             continue
         display = _escape(_value(value))
@@ -682,7 +682,7 @@ def _nested_scalars(
     value: dict[str, Any], prefix: str = "", depth: int = 0
 ) -> list[tuple[str, Any]]:
     result = []
-    for key, item in value.items():
+    for key, item in sorted(value.items()):
         if key in _QUIET_KEYS or _diagnostic_key(key):
             continue
         label = prefix + _label(key)
@@ -727,7 +727,7 @@ def _output_summary(value: Any, *, role: str, task: str, peer: Any = None) -> st
         ) or _facts([("Output shape", _shape(value))])
     if not isinstance(value, dict):
         return "<p class='note'>No readable output preview recorded.</p>"
-    parts, facts = [], []
+    parts, facts, summary_facts = [], [], []
     text_keys = ("reference_text", *_TEXT_KEYS) if role == "reference" else _TEXT_KEYS
     text = next(
         (value[key] for key in text_keys if isinstance(value.get(key), str) and value[key]), None
@@ -748,7 +748,7 @@ def _output_summary(value: Any, *, role: str, task: str, peer: Any = None) -> st
         parts.append(numeric)
     else:
         parts.append(_numeric_preview_notice(value, _OUTPUT_NAMES.get(task, "Numeric output")))
-    for key, item in value.items():
+    for key, item in sorted(value.items()):
         if (
             key in _TEXT_KEYS
             or _diagnostic_key(key)
@@ -779,7 +779,8 @@ def _output_summary(value: Any, *, role: str, task: str, peer: Any = None) -> st
             "result",
             "results",
         }:
-            facts.extend(_nested_scalars(item, _label(key) + " · "))
+            nested = _nested_scalars(item, _label(key) + " · ")
+            (summary_facts if key == "summary" else facts).extend(nested)
     if not numeric:
         shape = _shape(value) or _shape(value.get("values"))
         if shape:
@@ -788,7 +789,7 @@ def _output_summary(value: Any, *, role: str, task: str, peer: Any = None) -> st
         if isinstance(value.get(key), list):
             facts.append(("Recorded tokens", len(value[key])))
             break
-    parts.append(_facts(facts[:8]))
+    parts.append(_facts(facts[:8] + summary_facts[: max(0, 8 - len(facts))]))
     if not any(parts):
         message = (
             "Recorded media shown below."
