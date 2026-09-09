@@ -15,6 +15,7 @@
 #include <cuda_runtime.h>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -89,8 +90,16 @@ int main() {
             std::vector<trtmc::bart::DeviceBuffer> keys;
             std::vector<trtmc::bart::DeviceBuffer> values;
             allocate_cross_kv(keys, values, layers, bytes);
-        } catch (const std::runtime_error&) {
+        } catch (const std::runtime_error& error) {
             threw = true;
+            // Allocations alternate key, value, so an odd failure point is a
+            // key buffer and an even one is a value buffer.
+            const char* expected =
+                (failing % 2) == 1
+                    ? "BartPipeline: unable to allocate cross-attention key buffer"
+                    : "BartPipeline: unable to allocate cross-attention value buffer";
+            check(std::string(error.what()) == expected,
+                  "the error should name the buffer that actually failed");
         }
         check(threw, "a failed cross-attention allocation should throw");
         check(g_outstanding.empty(),
