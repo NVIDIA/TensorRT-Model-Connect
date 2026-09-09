@@ -4,6 +4,9 @@
  */
 
 #include "playback_queue.h"
+#include "session_io.h"
+#include "task_runtime.h"
+#include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
 #include "trtmc/task.h"
 
@@ -34,6 +37,8 @@ using trtmc::examples::voicechat::float_to_pcm16;
 using trtmc::examples::voicechat::pcm16_to_float;
 using trtmc::examples::voicechat::PlaybackQueue;
 using trtmc::examples::voicechat::PlaybackQueueItemKind;
+using trtmc::examples::voicechat::RunState;
+using trtmc::examples::voicechat::TranscriptPrinter;
 
 constexpr int kCaptureChunkMs = 20;
 constexpr int kCaptureWaitMs = 50;
@@ -50,8 +55,9 @@ struct Options {
     std::string bundle_path;
     std::string capture_device{"default"};
     std::string playback_device{"default"};
-    std::string runtime_root{"/opt/trtmc/lib"};
+    std::string runtime_root;
     std::string system_prompt;
+    bool system_prompt_set{false};
     int input_rate{16000};
     int output_rate{48000};
     int latency_ms{80};
@@ -72,7 +78,7 @@ void print_usage(std::ostream& output, const char* program) {
            << "  --capture-device NAME   ALSA capture PCM (default: default)\n"
            << "  --playback-device NAME  ALSA playback PCM (default: default)\n"
            << "  --runtime-root DIR      Directory containing runtime DSOs "
-              "(default: /opt/trtmc/lib)\n"
+              "(default: SDK library directory)\n"
            << "  --input-rate HZ         Capture/session rate (default: 16000)\n"
            << "  --output-rate HZ        Session/playback rate (default: 48000)\n"
            << "  --latency-ms MS         ALSA target latency (default: 80)\n"
@@ -114,6 +120,8 @@ bool parse_value_option(const std::string& argument, int& index, int argc, char*
     }
     if (argument == "--runtime-root") {
         options.runtime_root = take_option_value(index, argc, argv, "--runtime-root");
+        if (options.runtime_root.empty())
+            throw CliError("--runtime-root requires a nonempty path");
         return true;
     }
     if (argument == "--input-rate") {
@@ -137,6 +145,7 @@ bool parse_value_option(const std::string& argument, int& index, int argc, char*
         return true;
     }
     if (argument == "--system-prompt") {
+        options.system_prompt_set = true;
         options.system_prompt = take_option_value(index, argc, argv, "--system-prompt");
         return true;
     }
@@ -283,33 +292,6 @@ class AlsaPcm {
     snd_pcm_stream_t stream_;
 };
 
-class RunState {
-  public:
-    bool stopping() const noexcept { return stopping_.load(); }
-
-    void request_stop() noexcept { stopping_.store(true); }
-
-    void fail(std::exception_ptr failure) noexcept {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!failure_)
-                failure_ = std::move(failure);
-        }
-        request_stop();
-    }
-
-    void rethrow_if_failed() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (failure_)
-            std::rethrow_exception(failure_);
-    }
-
-  private:
-    std::atomic<bool> stopping_{false};
-    mutable std::mutex mutex_;
-    std::exception_ptr failure_;
-};
-
 void list_alsa_devices() {
     void** hints = nullptr;
     const int status = snd_device_name_hint(-1, "pcm", &hints);
@@ -355,6 +337,29 @@ void capture_loop(AlsaPcm& capture, trtmc::ISpeechSession& session, int sample_r
     }
 }
 
+void capture_loop(AlsaPcm& capture, trtmc::SpeechSession& session, int sample_rate, RunState& state,
+                  PlaybackQueue& playback_queue) noexcept {
+    try {
+        const auto chunk_samples =
+            static_cast<std::size_t>(std::max(1, sample_rate * kCaptureChunkMs / 1000));
+        std::vector<std::int16_t> pcm(chunk_samples);
+        std::vector<float> audio(chunk_samples);
+        while (!state.stopping()) {
+            const auto count = capture.read_frames(pcm.data(), pcm.size());
+            if (count == 0 || state.stopping())
+                continue;
+            std::transform(pcm.begin(), pcm.begin() + static_cast<std::ptrdiff_t>(count),
+                           audio.begin(), pcm16_to_float);
+            trtmc::examples::voicechat::append_captured_audio(session, {audio.data(), count}, state,
+                                                              g_signal_requested);
+        }
+    } catch (...) {
+        if (!state.stopping())
+            state.fail(std::current_exception());
+        playback_queue.stop();
+    }
+}
+
 void playback_loop(AlsaPcm& playback, PlaybackQueue& queue, int sample_rate,
                    RunState& state) noexcept {
     try {
@@ -391,15 +396,17 @@ struct SessionThreads {
     std::thread capture;
 };
 
+template <class Session>
 SessionThreads start_session_threads(AlsaPcm& playback, AlsaPcm& capture,
-                                     PlaybackQueue& playback_queue, trtmc::ISpeechSession& session,
+                                     PlaybackQueue& playback_queue, Session& session,
                                      int output_rate, int input_rate, RunState& state) {
     SessionThreads threads;
     try {
         threads.playback = std::thread(playback_loop, std::ref(playback), std::ref(playback_queue),
                                        output_rate, std::ref(state));
-        threads.capture = std::thread(capture_loop, std::ref(capture), std::ref(session),
-                                      input_rate, std::ref(state), std::ref(playback_queue));
+        threads.capture = std::thread([&capture, &session, input_rate, &state, &playback_queue] {
+            capture_loop(capture, session, input_rate, state, playback_queue);
+        });
     } catch (...) {
         state.request_stop();
         playback_queue.stop();
@@ -411,53 +418,6 @@ SessionThreads start_session_threads(AlsaPcm& playback, AlsaPcm& capture,
     }
     return threads;
 }
-
-class TranscriptPrinter {
-  public:
-    void agent_text(const SpeechSessionEvent& event) {
-        if (event.epoch != agent_epoch_) {
-            finish_agent_line();
-            agent_epoch_ = event.epoch;
-            saw_agent_delta_ = false;
-        }
-        if (!agent_line_open_) {
-            std::cout << "agent> " << std::flush;
-            agent_line_open_ = true;
-        }
-        if (!event.is_final) {
-            std::cout << event.text << std::flush;
-            saw_agent_delta_ = true;
-        } else {
-            if (!saw_agent_delta_)
-                std::cout << event.text;
-            finish_agent_line();
-        }
-    }
-
-    void user_text(const SpeechSessionEvent& event) {
-        if (!event.is_final || event.text.empty())
-            return;
-        finish_agent_line();
-        std::cout << "user> " << event.text << '\n';
-    }
-
-    void status(const std::string& text) {
-        finish_agent_line();
-        std::cout << '[' << text << "]\n";
-    }
-
-    void finish_agent_line() {
-        if (agent_line_open_)
-            std::cout << '\n';
-        agent_line_open_ = false;
-        saw_agent_delta_ = false;
-    }
-
-  private:
-    std::uint64_t agent_epoch_{0};
-    bool agent_line_open_{false};
-    bool saw_agent_delta_{false};
-};
 
 void enqueue_agent_audio(const SpeechSessionEvent& event, int expected_sample_rate,
                          PlaybackQueue& queue) {
@@ -524,16 +484,10 @@ void consume_event(const SpeechSessionEvent& event, int output_rate, PlaybackQue
         consume_lifecycle_event(event, queue, printer, state);
 }
 
-int run(const Options& options) {
-    // Fail on an unavailable host audio device before loading the large model.
-    AlsaPcm capture(options.capture_device, SND_PCM_STREAM_CAPTURE,
-                    static_cast<unsigned int>(options.input_rate),
-                    static_cast<unsigned int>(options.latency_ms));
-    AlsaPcm playback(options.playback_device, SND_PCM_STREAM_PLAYBACK,
-                     static_cast<unsigned int>(options.output_rate),
-                     static_cast<unsigned int>(options.latency_ms));
-
-    auto task = trtmc::load_task(options.bundle_path, options.runtime_root);
+int run_existing(const Options& options, AlsaPcm& capture, AlsaPcm& playback) {
+    auto task =
+        trtmc::load_task(options.bundle_path,
+                         options.runtime_root.empty() ? "/opt/trtmc/lib" : options.runtime_root);
     auto* provider = dynamic_cast<trtmc::ISpeechSessionProvider*>(task.get());
     if (provider == nullptr)
         throw std::runtime_error("bundle does not support persistent speech sessions");
@@ -586,6 +540,58 @@ int run(const Options& options) {
     printer.finish_agent_line();
     state.rethrow_if_failed();
     return EXIT_SUCCESS;
+}
+
+int run_sdk(const Options& options, AlsaPcm& capture, AlsaPcm& playback) {
+    trtmc::LoadOptions load;
+    load.runtime_root = options.runtime_root;
+    auto model = trtmc::Model::load(options.bundle_path, load);
+    auto session = trtmc::examples::voicechat::create_sdk_session(
+        model, options.input_rate, options.output_rate,
+        options.system_prompt_set ? std::optional<std::string>{options.system_prompt}
+                                  : std::nullopt,
+        options.seed);
+    PlaybackQueue queue(static_cast<std::size_t>(options.output_rate) * kPlaybackQueueSeconds);
+    RunState state;
+    TranscriptPrinter printer;
+    auto threads = start_session_threads(playback, capture, queue, session, options.output_rate,
+                                         options.input_rate, state);
+    std::cout << "Listening on '" << options.capture_device << "'; playing on '"
+              << options.playback_device << "'. Press Ctrl-C to stop.\n";
+    try {
+        while (!state.stopping() && g_signal_requested == 0)
+            trtmc::examples::voicechat::poll_sdk_session(session, options.output_rate, queue,
+                                                         printer, state, kEventWaitMs);
+    } catch (...) {
+        state.fail(std::current_exception());
+    }
+    state.request_stop();
+    queue.stop();
+    try {
+        session.cancel();
+    } catch (...) {
+        state.fail(std::current_exception());
+    }
+    threads.capture.join();
+    threads.playback.join();
+    session.close();
+    printer.finish_agent_line();
+    state.rethrow_if_failed();
+    return EXIT_SUCCESS;
+}
+
+int run(const Options& options) {
+    // Fail on an unavailable audio device before loading the large model.
+    AlsaPcm capture(options.capture_device, SND_PCM_STREAM_CAPTURE,
+                    static_cast<unsigned int>(options.input_rate),
+                    static_cast<unsigned int>(options.latency_ms));
+    AlsaPcm playback(options.playback_device, SND_PCM_STREAM_PLAYBACK,
+                     static_cast<unsigned int>(options.output_rate),
+                     static_cast<unsigned int>(options.latency_ms));
+    const auto primary = trtmc::Bundle::open(options.bundle_path).info().task;
+    if (trtmc::app::uses_existing_task_runtime(primary))
+        return run_existing(options, capture, playback);
+    return run_sdk(options, capture, playback);
 }
 
 } // namespace

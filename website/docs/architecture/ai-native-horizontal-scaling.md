@@ -2,7 +2,9 @@
 title: AI-Native Horizontal Scaling Architecture
 ---
 
-Status: current repository architecture and single-PR completion contract.
+Status: family-isolated repository architecture. The original repository cutover
+was atomic; the later public [C Task SDK](../api/cpp-api.md) has a separate,
+family-by-family interface migration over this existing layout.
 
 ## One-sentence decision
 
@@ -39,9 +41,10 @@ physical limit.
 8. Examples, benchmarks, and BYOK are applications over public APIs. Core,
    backend, and families do not depend on application code.
 
-## Delivery constraints
+## Original repository cutover constraints
 
-This architecture replaces the old project atomically in one pull request:
+The original isolation refactor replaced the old project in one pull request,
+under these constraints:
 
 - All supported families, build paths, runtime paths, bundles, and tests move
   to the new architecture in the same PR.
@@ -56,6 +59,14 @@ This architecture replaces the old project atomically in one pull request:
 The project has no external compatibility promise that justifies retaining
 the old architecture. Simplicity of the current design takes priority over
 keeping an obsolete path alive.
+
+The Task SDK does not repeat that repository reorganization. Its shared
+contracts are introduced first; each subsequent family PR changes only that
+family's implementation and tests. During this conversion, an application
+selects the known primary Task path before execution, never by retrying failed
+calls through another interface. No stable internal C++ ABI or old-format
+compatibility layer is promised. See the
+[family migration checklist](../extend/add-model-family.md#migrate-an-existing-family-to-the-task-sdk).
 
 ## Non-goals
 

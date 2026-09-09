@@ -17,11 +17,17 @@
 core/**
 !core/runtime/
 !core/runtime/**
+!core/api/
+!core/api/include/
+!core/api/include/**
+!core/api/runtime/
+!core/api/runtime/**
 
 !apps/
 apps/**
 !apps/cli/
 !apps/cli/**
+!apps/task_runtime.h
 
 !families/
 families/**

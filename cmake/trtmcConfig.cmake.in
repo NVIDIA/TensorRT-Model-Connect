@@ -3,9 +3,13 @@
 
 @PACKAGE_INIT@
 
-include(CMakeFindDependencyMacro)
-find_dependency(CUDAToolkit)
-
 include("${CMAKE_CURRENT_LIST_DIR}/trtmcTargets.cmake")
+
+if("runtime" IN_LIST trtmc_FIND_COMPONENTS)
+  include(CMakeFindDependencyMacro)
+  find_dependency(CUDAToolkit)
+  include("${CMAKE_CURRENT_LIST_DIR}/trtmcRuntimeTargets.cmake")
+  set(trtmc_runtime_FOUND TRUE)
+endif()
 
 check_required_components(trtmc)

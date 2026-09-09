@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "task_runtime.h"
+#include "trtmc/action.hpp"
+#include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
 #include "trtmc/task.h"
 
@@ -32,7 +35,7 @@ struct Options {
 void usage(const char* program) {
     std::cerr << "Usage: " << program
               << " MODEL.bundle --image FRAME.png --state STATE.f32 "
-                 "--runtime-root DIR [--control-hz 50]\n";
+                 "[--runtime-root DIR] [--control-hz 50]\n";
 }
 
 std::string take_value(int& index, int argc, char** argv, const std::string& option) {
@@ -61,10 +64,9 @@ Options parse_options(int argc, char** argv) {
             throw std::invalid_argument("only one bundle may be specified");
     }
     if (options.bundle.empty() || options.image.empty() || options.state.empty() ||
-        options.runtime_root.empty() || !std::isfinite(options.control_hz) ||
-        options.control_hz <= 0.0)
+        !std::isfinite(options.control_hz) || options.control_hz <= 0.0)
         throw std::invalid_argument(
-            "bundle, image, state, runtime root, and a positive control rate are required");
+            "bundle, image, state, and a positive control rate are required");
     return options;
 }
 
@@ -103,6 +105,29 @@ Image read_image(const std::string& path) {
     return image;
 }
 
+void emit_chunk(trtmc::FloatMatrixView actions, bool within_training_bounds, double inference_ms,
+                double control_hz) {
+    if (actions.rows != 100 || actions.columns != 14 || actions.values.size() != 1400)
+        throw std::runtime_error("qualified ACT bundle must return a 100x14 action chunk");
+    using Clock = std::chrono::steady_clock;
+    const auto period = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::duration<double>(1.0 / control_hz));
+    const auto start = Clock::now() + std::chrono::milliseconds(10);
+    for (int32_t step = 0; step < 100; ++step) {
+        std::this_thread::sleep_until(start + step * period);
+        const float* action = actions.values.data() + static_cast<std::size_t>(step) * 14;
+        std::cout << step;
+        for (int32_t joint = 0; joint < 14; ++joint)
+            std::cout << (joint == 0 ? ',' : ' ') << action[joint];
+        std::cout << '\n';
+    }
+    if (!std::cout)
+        throw std::runtime_error("failed to write recorded actions");
+    std::cerr << "Emitted 100 recorded-replay actions at " << control_hz
+              << " Hz; inference_ms=" << inference_ms
+              << "; within_training_bounds=" << std::boolalpha << within_training_bounds << '\n';
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -113,35 +138,40 @@ int main(int argc, char** argv) {
             throw std::runtime_error("recorded image must be 640x480 RGB");
         const auto state = read_state(options.state);
 
-        auto task = trtmc::load_task(options.bundle, options.runtime_root);
-        auto* control = dynamic_cast<trtmc::IRobotControl*>(task.get());
-        if (control == nullptr)
-            throw std::runtime_error("bundle does not implement the robot_control Task API");
-        const trtmc::RobotObservation observation{{image.pixels.data(), image.pixels.size()},
-                                                  image.height,
-                                                  image.width,
-                                                  3,
-                                                  {state.data(), state.size()}};
-        const auto chunk = control->predict_action_chunk(observation);
-        if (chunk.num_actions != 100 || chunk.action_dim != 14 || chunk.actions.size() != 1400)
-            throw std::runtime_error("qualified ACT bundle must return a 100x14 action chunk");
-
-        using Clock = std::chrono::steady_clock;
-        const auto period = std::chrono::duration_cast<Clock::duration>(
-            std::chrono::duration<double>(1.0 / options.control_hz));
-        const auto start = Clock::now() + std::chrono::milliseconds(10);
-        for (int32_t step = 0; step < chunk.num_actions; ++step) {
-            std::this_thread::sleep_until(start + step * period);
-            const float* action = chunk.actions.data() + static_cast<std::size_t>(step) * 14;
-            std::cout << step;
-            for (int32_t joint = 0; joint < 14; ++joint)
-                std::cout << (joint == 0 ? ',' : ' ') << action[joint];
-            std::cout << '\n';
+        const auto primary = trtmc::Bundle::open(options.bundle).info().task;
+        if (trtmc::app::uses_existing_task_runtime(primary)) {
+            if (options.runtime_root.empty())
+                throw std::invalid_argument(
+                    "--runtime-root is required for an existing bundle mode");
+            auto task = trtmc::load_task(options.bundle, options.runtime_root);
+            auto* control = dynamic_cast<trtmc::IRobotControl*>(task.get());
+            if (control == nullptr)
+                throw std::runtime_error("bundle does not implement the robot_control Task API");
+            const trtmc::RobotObservation observation{{image.pixels.data(), image.pixels.size()},
+                                                      image.height,
+                                                      image.width,
+                                                      3,
+                                                      {state.data(), state.size()}};
+            const auto chunk = control->predict_action_chunk(observation);
+            if (chunk.num_actions < 0 || chunk.action_dim < 0)
+                throw std::runtime_error("recorded action chunk has invalid dimensions");
+            emit_chunk({{chunk.actions.data(), chunk.actions.size()},
+                        static_cast<uint64_t>(chunk.num_actions),
+                        static_cast<uint64_t>(chunk.action_dim)},
+                       chunk.within_training_bounds, chunk.inference_ms, options.control_hz);
+        } else {
+            trtmc::LoadOptions load;
+            load.runtime_root = options.runtime_root;
+            auto model = trtmc::Model::load(options.bundle, load);
+            const trtmc::ImageStateToActionChunkRequest request{
+                {trtmc::ImageInput{{image.pixels.data(), image.pixels.size()},
+                                   static_cast<uint32_t>(image.height),
+                                   static_cast<uint32_t>(image.width)},
+                 {state.data(), state.size()}}};
+            const auto chunk = model.task<trtmc::ImageStateToActionChunk>().run(request);
+            emit_chunk(chunk.actions(), chunk.within_training_bounds(), chunk.inference_ms(),
+                       options.control_hz);
         }
-        std::cerr << "Emitted 100 recorded-replay actions at " << options.control_hz
-                  << " Hz; inference_ms=" << chunk.inference_ms
-                  << "; within_training_bounds=" << std::boolalpha << chunk.within_training_bounds
-                  << '\n';
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n';

@@ -345,6 +345,9 @@ class E2ERunner:
     def _isolated_runtime_root(self, runtime_root: Path, family: str):
         required = (
             "libtrtmc_core.so",
+            "libtrtmc_runtime.so",
+            "libtrtmc_c.so",
+            "libtrtmc_c.so.1",
             "libtrtmc_backend_trt.so",
             f"libtrtmc_model_{family}.so",
         )
@@ -358,10 +361,13 @@ class E2ERunner:
             isolated.mkdir(parents=True)
             for name in required:
                 (isolated / name).symlink_to((runtime_root / name).resolve())
+            byok = runtime_root / "libtrtmc_byok_tvm_ffi.so"
+            if byok.is_file():
+                (isolated / byok.name).symlink_to(byok.resolve())
 
             # Preserve only non-family wheel dependencies expected by RUNPATH.
             site_packages = runtime_root.parent.parent
-            for package in ("tensorrt_libs", "torch"):
+            for package in ("tensorrt_libs", "torch", "tvm_ffi"):
                 source = site_packages / package
                 if source.is_dir():
                     (root / package).symlink_to(source.resolve(), target_is_directory=True)

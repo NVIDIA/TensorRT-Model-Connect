@@ -37,6 +37,20 @@ The executable prints the best hypothesis, its score, and whether every output
 pose is rigid. All refined poses are written to `/tmp/refined-poses.f32` as
 FP32 matrices.
 
+SDK bundles call `PoseHypothesesCropsToRefinedPoses` through the header-only C++
+SDK and C ABI. When the family/backend DSOs are beside `libtrtmc_c.so.1`, omit
+the runtime-root positional argument:
+
+```bash
+"$EXAMPLE_BUILD"/trtmc_foundationpose_preprocessed \
+  "$BUNDLE" "$INPUTS" /tmp/refined-poses.f32
+```
+
+Existing `pose_hypothesis_refinement` bundles explicitly select the existing
+application path and still need the original four positional arguments. An SDK
+error never retries that path. Both paths use three hypotheses, two refinement
+iterations, scoring, and the same application-owned crop callback.
+
 ## Input contract
 
 Inputs are FP32 NHWC `[N,160,160,6]`: RGB in `[0,1]`, followed by XYZ relative

@@ -214,6 +214,7 @@ struct RuntimeLibraryCache {
     std::mutex mutex;
     std::unordered_map<std::string, std::unique_ptr<BackendLibrary>> backends;
     std::unordered_map<std::string, std::unique_ptr<FamilyLibrary>> families;
+    std::unordered_map<std::string, std::unique_ptr<SharedLibrary>> byok_extensions;
     std::unordered_map<ConfiguredBackendKey, std::unique_ptr<RuntimeOptionsBackend>,
                        ConfiguredBackendKeyHash>
         configured_backends;
@@ -283,10 +284,43 @@ void require_matching_task(const BundleInfo& info, const ITask& task) {
 
 } // namespace
 
+void preload_byok_kernel(const std::string& runtime_root, const std::string& library,
+                         const std::string& function, const std::string& kernel_name) {
+    if (library.empty() || function.empty() || kernel_name.empty())
+        throw std::invalid_argument("BYOK library, function, and kernel name must be non-empty");
+    using LoadKernel = const char* (*)(const char*, const char*, const char*) noexcept;
+    const auto path = explicit_runtime_root(runtime_root) / "libtrtmc_byok_tvm_ffi.so";
+    LoadKernel load;
+    {
+        auto& cache = runtime_library_cache();
+        const std::lock_guard<std::mutex> lock(cache.mutex);
+        auto found = cache.byok_extensions.find(path.string());
+        if (found == cache.byok_extensions.end()) {
+            auto extension = std::make_unique<SharedLibrary>(path);
+            load =
+                reinterpret_cast<LoadKernel>(extension->require_symbol("trtmc_load_byok_kernel"));
+            cache.byok_extensions.emplace(path.string(), std::move(extension));
+        } else {
+            load = reinterpret_cast<LoadKernel>(
+                found->second->require_symbol("trtmc_load_byok_kernel"));
+        }
+    }
+    // The extension owns registration locking. Never hold the library cache
+    // mutex while invoking extension code, which may itself load libraries.
+    if (const char* error = load(library.c_str(), function.c_str(), kernel_name.c_str()))
+        throw std::runtime_error(error);
+}
+
 std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::string& runtime_root,
                                  std::uint64_t kv_cache_size_bytes,
                                  const std::string& runtime_cache_path, bool cuda_graphs) {
     const BundleReader reader(bundle_path);
+    return load_task(reader, runtime_root, kv_cache_size_bytes, runtime_cache_path, cuda_graphs);
+}
+
+std::unique_ptr<ITask> load_task(const BundleReader& reader, const std::string& runtime_root,
+                                 std::uint64_t kv_cache_size_bytes,
+                                 const std::string& runtime_cache_path, bool cuda_graphs) {
     const BundleInfo& info = reader.info();
     require_safe_id("family", info.family);
     require_safe_id("task", info.task);
