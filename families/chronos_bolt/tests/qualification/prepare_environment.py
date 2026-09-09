@@ -15,6 +15,34 @@ REQUIREMENTS = ROOT.parent.parent / "requirements.txt"
 VERIFICATION = ROOT / "verify_environment.py"
 
 
+def _purelib(python: str) -> Path:
+    completed = subprocess.run(
+        [
+            python,
+            "-c",
+            "import sysconfig; print(sysconfig.get_path('purelib'))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    path = Path(completed.stdout.strip()).resolve()
+    if not path.is_dir():
+        raise RuntimeError(f"Python site-packages directory does not exist: {path}")
+    return path
+
+
+def _inherit_common_environment(common: str, target: str) -> None:
+    """Expose the common environment as the base layer of a family venv."""
+    common_purelib = _purelib(common)
+    target_purelib = _purelib(target)
+    if common_purelib == target_purelib:
+        return
+    (target_purelib / "trtmc-common-environment.pth").write_text(
+        f"{common_purelib}\n", encoding="utf-8"
+    )
+
+
 def _compatible(python: str) -> bool:
     return (
         subprocess.run(
@@ -54,6 +82,7 @@ def main() -> None:
                 [common, "-m", "venv", "--system-site-packages", str(target)], check=True
             )
             selected = str(target / "bin" / "python")
+            _inherit_common_environment(common, selected)
             subprocess.run(
                 [
                     selected,
@@ -69,7 +98,7 @@ def main() -> None:
                 check=True,
             )
             if not _compatible(selected):
-                raise RuntimeError("prepared Chronos-Bolt environment failed verification")
+                subprocess.run([selected, str(VERIFICATION)], check=True)
             receipt.write_text(json.dumps({"python": selected}) + "\n", encoding="utf-8")
     arguments.output.write_text(
         json.dumps({"python": selected, "reference_python": selected}) + "\n",

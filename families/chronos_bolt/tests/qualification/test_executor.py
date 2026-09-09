@@ -144,6 +144,7 @@ def test_chronos_environment_is_used_for_build_and_reference(tmp_path, monkeypat
         encoding="utf-8",
     )
     calls = []
+    inherited = []
     monkeypatch.setattr(
         prepare_environment.tempfile,
         "mkdtemp",
@@ -153,6 +154,11 @@ def test_chronos_environment_is_used_for_build_and_reference(tmp_path, monkeypat
         prepare_environment,
         "_compatible",
         lambda python: str(python) == str(target / "bin/python"),
+    )
+    monkeypatch.setattr(
+        prepare_environment,
+        "_inherit_common_environment",
+        lambda common, selected: inherited.append((common, selected)),
     )
 
     def fake_run(command, **_kwargs):
@@ -180,11 +186,41 @@ def test_chronos_environment_is_used_for_build_and_reference(tmp_path, monkeypat
         "--system-site-packages",
         str(target),
     ]
+    assert inherited == [(sys.executable, selected)]
     assert "--no-deps" in calls[1]
     assert calls[1][-2:] == [
         "--requirement",
         str(prepare_environment.REQUIREMENTS),
     ]
+
+
+def test_family_venv_inherits_packages_from_common_venv(tmp_path: Path) -> None:
+    common = tmp_path / "common"
+    target = tmp_path / "target"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(common)], check=True)
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(target)], check=True)
+    common_python = str(common / "bin/python")
+    target_python = str(target / "bin/python")
+    common_site = prepare_environment._purelib(common_python)
+    target_site = prepare_environment._purelib(target_python)
+    (common_site / "common_cuda_base.py").write_text("VALUE = 'shared-base'\n", encoding="utf-8")
+    (common_site / "family_override.py").write_text("VALUE = 'common'\n", encoding="utf-8")
+    (target_site / "family_override.py").write_text("VALUE = 'family'\n", encoding="utf-8")
+
+    prepare_environment._inherit_common_environment(common_python, target_python)
+
+    completed = subprocess.run(
+        [
+            target_python,
+            "-c",
+            "import common_cuda_base, family_override; "
+            "print(common_cuda_base.VALUE, family_override.VALUE)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.stdout.strip() == "shared-base family"
 
 
 def test_historical_stability_contract_is_preserved() -> None:
