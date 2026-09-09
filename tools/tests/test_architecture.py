@@ -814,6 +814,16 @@ def test_ci_base_image_is_pinned_by_its_from_reference() -> None:
     assert re.fullmatch(r"FROM\s+\S+@sha256:[0-9a-f]{64}(?:\s+AS\s+\S+)?", first_from)
 
 
+def test_ci_base_image_overlays_the_validated_nccl_runtime() -> None:
+    dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
+
+    assert '"nvidia-nccl-cu13==2.30.7"' in dockerfile
+    assert "--target /tmp/trtmc-nccl-2.30.7" in dockerfile
+    assert "/tmp/trtmc-nccl-2.30.7/nvidia/nccl/lib/." in dockerfile
+    assert "m.version('nvidia-nccl-cu13') == '2.29.7'" in dockerfile
+    assert "nccl_version.value == 23007" in dockerfile
+
+
 def test_checkpoint_readers_use_one_explicit_format() -> None:
     violations: list[str] = []
     for family in family_dirs():

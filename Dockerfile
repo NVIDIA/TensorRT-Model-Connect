@@ -72,6 +72,12 @@ RUN python3.12 -m venv "$VIRTUAL_ENV" \
       "torchvision==0.27.0+cu130" \
       "torchaudio==2.11.0+cu130" \
       --index-url https://download.pytorch.org/whl/cu130 \
+    && pip install --no-deps \
+      --target /tmp/trtmc-nccl-2.30.7 \
+      "nvidia-nccl-cu13==2.30.7" \
+    && cp -a /tmp/trtmc-nccl-2.30.7/nvidia/nccl/lib/. \
+      /opt/venv/lib/python3.12/site-packages/nvidia/nccl/lib/ \
+    && rm -rf /tmp/trtmc-nccl-2.30.7 \
     && pip install "setuptools>=80,<82"
 
 ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
@@ -82,7 +88,7 @@ ENV LD_LIBRARY_PATH=$TRT_LIB_DIR:$NCCL_LIB_DIR:$TVM_FFI_LIB_DIR:/usr/local/cuda/
 ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 
 RUN python3.12 -c \
-      "import importlib.metadata as m, tensorrt, torch, transformers, tvm_ffi; assert tensorrt.__version__ == '11.1.0.106'; assert torch.__version__ == '2.12.0+cu130'; assert transformers.__version__ == '5.2.0'; assert m.version('conan-py-build') == '0.4.3'; assert m.version('apache-tvm-ffi') == '0.1.12'; assert 80 <= int(m.version('setuptools').split('.', 1)[0]) < 82" \
+      "import ctypes, importlib.metadata as m, tensorrt, torch, transformers, tvm_ffi; nccl = ctypes.CDLL('/opt/venv/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2'); nccl_version = ctypes.c_int(); assert nccl.ncclGetVersion(ctypes.byref(nccl_version)) == 0; assert nccl_version.value == 23007; assert tensorrt.__version__ == '11.1.0.106'; assert torch.__version__ == '2.12.0+cu130'; assert transformers.__version__ == '5.2.0'; assert m.version('conan-py-build') == '0.4.3'; assert m.version('apache-tvm-ffi') == '0.1.12'; assert m.version('nvidia-nccl-cu13') == '2.29.7'; assert 80 <= int(m.version('setuptools').split('.', 1)[0]) < 82" \
     && test -f "$TRT_INC_DIR/NvInferVersion.h" \
     && test -f "$TRT_LIB_DIR/libnvinfer.so.11" \
     && test -f "$TRT_LIB_DIR/libnvonnxparser.so.11" \
