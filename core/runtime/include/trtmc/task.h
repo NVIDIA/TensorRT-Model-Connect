@@ -183,6 +183,26 @@ struct DetectionBox {
 };
 
 struct ObjectDetectionResult {
+    // Ordered by descending score, and already reduced to the boxes the family
+    // keeps. A detector that suppresses duplicates and one that never produces
+    // them therefore present the same result.
+    std::vector<DetectionBox> boxes;
+    std::int32_t image_height{0};
+    std::int32_t image_width{0};
+};
+
+struct DetectionBox {
+    // Corner form in input-image pixels, not the letterboxed network input: a
+    // family undoes its own padding and scaling before returning.
+    float x_min{0.0F};
+    float y_min{0.0F};
+    float x_max{0.0F};
+    float y_max{0.0F};
+    float score{0.0F};
+    std::int32_t class_id{-1};
+};
+
+struct ObjectDetectionResult {
     // Ordered by descending score. A family returns only the boxes it keeps,
     // so a detector that suppresses duplicates and one that never produces
     // them present the same result.
@@ -664,6 +684,14 @@ class IImageClassification : public virtual ITask {
     const char* task() const noexcept override { return kTask; }
     virtual ClassificationResult classify(const float* pixels, std::int32_t height,
                                           std::int32_t width) = 0;
+};
+
+class IObjectDetection : public virtual ITask {
+  public:
+    static constexpr const char* kTask = "object_detection";
+    const char* task() const noexcept override { return kTask; }
+    virtual ObjectDetectionResult detect(const float* pixels, std::int32_t height,
+                                         std::int32_t width) = 0;
 };
 
 class IObjectDetection : public virtual ITask {
