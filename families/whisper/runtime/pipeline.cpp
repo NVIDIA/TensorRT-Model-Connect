@@ -52,16 +52,14 @@ WhisperPipeline::WhisperPipeline(
     cross_kv_bytes_ = static_cast<std::size_t>(whisper_config_.max_source_positions) *
                       static_cast<std::size_t>(hidden_size_) * sizeof(float);
 
-    cross_k_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
-    cross_v_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
+    cross_k_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_));
+    cross_v_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_));
     for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-        cudaError_t error =
-            cudaMalloc(&cross_k_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
-        if (error != cudaSuccess)
+        const std::size_t layer = static_cast<std::size_t>(i);
+        if (cross_k_ptrs_[layer].allocate(cross_kv_bytes_) != cudaSuccess)
             throw std::runtime_error(
                 "WhisperPipeline: unable to allocate cross-attention key buffer");
-        error = cudaMalloc(&cross_v_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
-        if (error != cudaSuccess)
+        if (cross_v_ptrs_[layer].allocate(cross_kv_bytes_) != cudaSuccess)
             throw std::runtime_error(
                 "WhisperPipeline: unable to allocate cross-attention value buffer");
     }
@@ -79,16 +77,7 @@ WhisperPipeline::WhisperPipeline(
                       0.0F, false, "whisper", stream, std::move(tokenizer),
                       std::move(model_id_str)) {}
 
-WhisperPipeline::~WhisperPipeline() {
-    for (auto* ptr : cross_k_ptrs_) {
-        if (ptr)
-            cudaFree(ptr);
-    }
-    for (auto* ptr : cross_v_ptrs_) {
-        if (ptr)
-            cudaFree(ptr);
-    }
-}
+WhisperPipeline::~WhisperPipeline() = default;
 
 TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samples,
                                        const TranscriptionConfig& config) {
@@ -211,8 +200,8 @@ void WhisperPipeline::setup_cross_attention(int32_t actual_enc_seq_len) {
         },
         [this, enc_output_device](std::size_t layer, WhisperCrossKvBufferKind kind,
                                   std::size_t bytes) {
-            void* dst =
-                kind == WhisperCrossKvBufferKind::K ? cross_k_ptrs_[layer] : cross_v_ptrs_[layer];
+            void* dst = kind == WhisperCrossKvBufferKind::K ? cross_k_ptrs_[layer].get()
+                                                            : cross_v_ptrs_[layer].get();
             return cudaMemcpy(dst, enc_output_device, bytes, cudaMemcpyDeviceToDevice) ==
                    cudaSuccess;
         },
@@ -224,8 +213,10 @@ void WhisperPipeline::setup_cross_attention(int32_t actual_enc_seq_len) {
     // Bind cross-K/V to decoder module
     for (int32_t i = 0; i < num_decoder_layers_; ++i) {
         const std::string suffix = "_" + std::to_string(i);
-        decoder_->bind_external("cross_k" + suffix, cross_k_ptrs_[static_cast<std::size_t>(i)]);
-        decoder_->bind_external("cross_v" + suffix, cross_v_ptrs_[static_cast<std::size_t>(i)]);
+        decoder_->bind_external("cross_k" + suffix,
+                                cross_k_ptrs_[static_cast<std::size_t>(i)].get());
+        decoder_->bind_external("cross_v" + suffix,
+                                cross_v_ptrs_[static_cast<std::size_t>(i)].get());
     }
 }
 
