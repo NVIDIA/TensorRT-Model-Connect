@@ -160,8 +160,15 @@ class BartPipeline final : public ITextGeneration {
         cross_k_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
         cross_v_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-            cudaMalloc(&cross_k_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
-            cudaMalloc(&cross_v_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
+            cudaError_t error =
+                cudaMalloc(&cross_k_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
+            if (error != cudaSuccess)
+                throw std::runtime_error(
+                    "BartPipeline: unable to allocate cross-attention key buffer");
+            error = cudaMalloc(&cross_v_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
+            if (error != cudaSuccess)
+                throw std::runtime_error(
+                    "BartPipeline: unable to allocate cross-attention value buffer");
         }
     }
 
