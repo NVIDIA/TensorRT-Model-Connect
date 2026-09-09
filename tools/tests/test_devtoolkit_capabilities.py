@@ -8,6 +8,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import math
 import subprocess
 import sys
 import threading
@@ -54,10 +55,11 @@ from trtmc_devtoolkit.spi import (  # noqa: E402
 )
 from trtmc_devtoolkit import receipt as receipt_module  # noqa: E402
 from trtmc_devtoolkit import catalogs as catalogs_module  # noqa: E402
-from trtmc_devtoolkit.building import BuildContext  # noqa: E402
+from trtmc_devtoolkit.building import BuildContext, Builder  # noqa: E402
 from trtmc_devtoolkit.builtin_providers import (  # noqa: E402
     ManagedArtifactToolchainSource,
 )
+from trtmc_devtoolkit.runner import CommandRunner, command_output  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -602,7 +604,7 @@ class CommandRecordingRunner:
             output = "b" * 40 + "\n"
         elif arguments[-3:-1] == ["diff", "--binary"]:
             output = ""
-        elif arguments[-3:-1] == ["ls-files", "--others"]:
+        elif "ls-files" in arguments and "--others" in arguments:
             output = ""
         elif arguments[0] == "sha256sum":
             output = f"{self.artifact_digest}  {arguments[1]}\n"
@@ -828,6 +830,18 @@ class ExistingToolchainSource:
 
 class ReplacementToolchainSource(ExistingToolchainSource):
     descriptor = ProviderDescriptor("test-system", "tests==2", 1)
+
+
+class MismatchedIdentityToolchainSource(ExistingToolchainSource):
+    def provision(self, lock, context, *, repository, state_dir, runner):
+        toolchain = super().provision(
+            lock,
+            context,
+            repository=repository,
+            state_dir=state_dir,
+            runner=runner,
+        )
+        return replace(toolchain, identity={"prefix": "/different"})
 
 
 class AlternateExistingToolchainSource(ExistingToolchainSource):
@@ -1473,6 +1487,25 @@ def test_cuda_policy_rejects_an_unknown_runtime_kind() -> None:
         CudaPolicy("unknown")  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("value", (math.nan, math.inf, -math.inf))
+def test_capability_identities_reject_nonfinite_numbers(value: float) -> None:
+    with pytest.raises(DevToolkitError, match="finite JSON numbers"):
+        ExecutionTarget("test-local", {"weight": value})
+
+    with pytest.raises(DevToolkitError, match="finite JSON numbers"):
+        ToolchainHandle(
+            provider=ExistingToolchainSource.descriptor,
+            identity={"weight": value},
+            runtime=ToolchainRuntime(
+                python_executable="python3",
+                cuda_root="/cuda",
+                nvcc="/cuda/bin/nvcc",
+                tensorrt_include_dir="/tensorrt/include",
+                tensorrt_library="/tensorrt/lib/libnvinfer.so",
+            ),
+        )
+
+
 def test_environment_lock_rejects_a_tampered_identity(tmp_path: Path) -> None:
     registry = ProviderRegistry()
     registry.register_context(StaticLocalContext())
@@ -1628,6 +1661,34 @@ def test_provision_rejects_a_different_toolchain_provider_implementation(
         toolkit.provision(lock)
 
 
+def test_provision_rejects_a_toolchain_identity_that_differs_from_the_lock(
+    tmp_path: Path,
+) -> None:
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(MismatchedIdentityToolchainSource())
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+
+    with pytest.raises(AttestationFailed, match="toolchain identity"):
+        toolkit.provision(lock)
+
+    state_dir = tmp_path / "state" / "environments" / lock.lock_id
+    failure = json.loads((state_dir / "provision-failure.json").read_text(encoding="utf-8"))
+    assert failure["error_type"] == "AttestationFailed"
+    assert not (state_dir / "provision-receipt.json").exists()
+
+
 def test_provision_records_failure_when_locked_provider_is_not_registered(
     tmp_path: Path,
 ) -> None:
@@ -1718,6 +1779,15 @@ def test_json_receipt_replace_failure_preserves_previous_state(
 
     assert json.loads(receipt.read_text(encoding="utf-8")) == {"status": "previous"}
     assert list(tmp_path.glob(".receipt.json.*.tmp")) == []
+
+
+def test_json_receipt_rejects_nonfinite_numbers(tmp_path: Path) -> None:
+    receipt = tmp_path / "receipt.json"
+
+    with pytest.raises(ValueError, match="JSON compliant"):
+        receipt_module.write_json(receipt, {"weight": math.nan})
+
+    assert not receipt.exists()
 
 
 def test_builtin_docker_provider_adopts_a_probed_campaign_container(
@@ -2025,6 +2095,30 @@ def test_run_trtmc_forwards_check_policy(tmp_path: Path) -> None:
     assert runner.checks == [False]
 
 
+def test_command_output_explicitly_requests_checked_execution(tmp_path: Path) -> None:
+    checks: list[bool] = []
+
+    class DefaultUncheckedRunner:
+        def run(
+            self,
+            command,
+            *,
+            cwd,
+            env=None,
+            check=False,
+            capture_output=False,
+            timeout=None,
+        ):
+            del cwd, env, capture_output, timeout
+            checks.append(check)
+            return subprocess.CompletedProcess(command, 0, "observed\n", "")
+
+    output = command_output(DefaultUncheckedRunner(), ("probe",), cwd=tmp_path)
+
+    assert output == "observed"
+    assert checks == [True]
+
+
 def test_command_failure_receipt_does_not_serialize_environment_values(
     tmp_path: Path,
 ) -> None:
@@ -2055,6 +2149,50 @@ def test_command_failure_receipt_does_not_serialize_environment_values(
 
     receipt = next((environment.state_dir / "commands").glob("*.json"))
     assert "super-secret" not in receipt.read_text(encoding="utf-8")
+
+
+def test_source_snapshot_handles_untracked_unicode_and_newline_names(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "checkout"
+    repository.mkdir()
+    (repository / "pyproject.toml").touch()
+    (repository / "families").mkdir()
+    (repository / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    for command in (
+        ("git", "init", "--quiet"),
+        ("git", "config", "user.name", "DevToolkit Test"),
+        ("git", "config", "user.email", "devtoolkit@example.invalid"),
+        ("git", "add", "pyproject.toml", "tracked.txt"),
+        ("git", "commit", "--quiet", "-m", "initial"),
+    ):
+        subprocess.run(command, cwd=repository, check=True, capture_output=True, text=True)
+    (repository / "模型\nsource.cpp").write_text("untracked\n", encoding="utf-8")
+
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(ExistingToolchainSource())
+    providers = registry.freeze()
+    runner = CommandRunner()
+    toolkit = DevToolkit.from_checkout(
+        repository,
+        state_root=tmp_path / "state",
+        providers=providers,
+        runner=runner,
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock)
+
+    snapshot = Builder(repository, providers, runner)._source_snapshot(environment)
+
+    assert snapshot.dirty is True
+    assert len(snapshot.content_digest) == 64
 
 
 def test_native_build_identity_includes_source_sm_options_and_outputs(
@@ -2154,6 +2292,48 @@ def test_native_recipe_resolves_thor_architecture_through_cuda_driver() -> None:
     assert inputs["generator"] == "Unix Makefiles"
 
 
+@pytest.mark.parametrize("architecture", ("100-real", "89-virtual"))
+def test_native_recipe_accepts_cmake_cuda_architecture_suffixes(
+    architecture: str,
+) -> None:
+    runtime = ToolchainRuntime(
+        python_executable="python3",
+        cuda_root="/cuda",
+        nvcc="/cuda/bin/nvcc",
+        tensorrt_include_dir="/tensorrt/include",
+        tensorrt_library="/tensorrt/lib/libnvinfer.so",
+    )
+
+    inputs = TrtmcBuildRecipe(
+        cuda_architectures=(architecture,),
+        generator="Ninja",
+    ).inputs(BuildContext(runtime=runtime, architecture="x86_64", _probe=lambda _: ""))
+
+    assert inputs["cuda_architectures"] == (architecture,)
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    ("90a", "100f", "100-real-real", "real", "100-"),
+)
+def test_native_recipe_rejects_invalid_cuda_architecture_forms(
+    architecture: str,
+) -> None:
+    runtime = ToolchainRuntime(
+        python_executable="python3",
+        cuda_root="/cuda",
+        nvcc="/cuda/bin/nvcc",
+        tensorrt_include_dir="/tensorrt/include",
+        tensorrt_library="/tensorrt/lib/libnvinfer.so",
+    )
+
+    with pytest.raises(DevToolkitError, match="CUDA architecture"):
+        TrtmcBuildRecipe(
+            cuda_architectures=(architecture,),
+            generator="Ninja",
+        ).inputs(BuildContext(runtime=runtime, architecture="x86_64", _probe=lambda _: ""))
+
+
 def test_native_recipe_auto_generator_prefers_ninja_when_available() -> None:
     runtime = ToolchainRuntime(
         python_executable="python3",
@@ -2209,6 +2389,49 @@ def test_native_build_records_attestation_preflight_failure(tmp_path: Path) -> N
     assert payload["environment_id"] == environment.environment_id
     assert payload["error_type"] == "RuntimeError"
     assert "super-secret" not in receipts[0].read_text(encoding="utf-8")
+
+
+def test_native_build_records_identity_serialization_preflight_failure(
+    tmp_path: Path,
+) -> None:
+    class NonfiniteIdentityRecipe:
+        descriptor = "nonfinite-identity==1"
+
+        def inputs(self, context):
+            del context
+            return {"weight": math.nan}
+
+        def plan(self, context, inputs, build_dir):
+            del context, inputs, build_dir
+            raise AssertionError("invalid build identity must fail before planning")
+
+    registry = ProviderRegistry()
+    registry.register_context(StaticLocalContext())
+    registry.register_toolchain(ExistingToolchainSource())
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        state_root=tmp_path / "state",
+        providers=registry.freeze(),
+        runner=CommandRecordingRunner(),
+    )
+    lock = toolkit.resolve(
+        EnvironmentRequest(
+            tensorrt="11.2.0.113",
+            target=ExecutionTarget("test-local"),
+            architecture="aarch64",
+        )
+    )
+    environment = toolkit.provision(lock)
+
+    with pytest.raises(DevToolkitError, match="JSON-compatible"):
+        toolkit.build(environment, NonfiniteIdentityRecipe())
+
+    receipts = list((environment.state_dir / "builds" / "preflight").glob("*.json"))
+    assert len(receipts) == 1
+    payload = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["stage"] == "build-identity"
+    assert payload["error_type"] == "DevToolkitError"
 
 
 def test_identical_builds_are_serialized(tmp_path: Path) -> None:
@@ -2331,6 +2554,61 @@ def test_qualification_is_optional_provenance_not_an_allowlist(
     assert qualified.qualifications[0].name == "qualified-trt"
     assert len(qualified.qualifications[0].digest) == 64
     assert qualified.lock_id == unrestricted.lock_id
+
+
+def test_context_qualification_cannot_override_resolved_environment_facts(
+    tmp_path: Path,
+) -> None:
+    class SpoofingLocalContext(StaticLocalContext):
+        def resolve(self, request, *, repository, runner):
+            context = super().resolve(request, repository=repository, runner=runner)
+            return replace(
+                context,
+                qualification={
+                    "execution": "local",
+                    "tensorrt": "0.0.0.0",
+                    "cuda": "13.3",
+                    "python": "2.7",
+                    "architecture": "x86_64",
+                },
+            )
+
+    presets = tmp_path / "presets"
+    presets.mkdir()
+    (presets / "spoofed.json").write_text(
+        json.dumps(
+            {
+                "id": "spoofed",
+                "status": "supported",
+                "requirements": {
+                    "tensorrt": "0.0.0.0",
+                    "cuda": "13.3",
+                    "python": "2.7",
+                    "architecture": "x86_64",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = ProviderRegistry()
+    registry.register_context(SpoofingLocalContext())
+    registry.register_toolchain(ExistingToolchainSource())
+    toolkit = DevToolkit.from_checkout(
+        tmp_path,
+        providers=registry.freeze(),
+        qualifications=(JsonQualificationSource((presets,)),),
+    )
+
+    with pytest.raises(IncompatibleCombination, match="does not match"):
+        toolkit.resolve(
+            EnvironmentRequest(
+                tensorrt="11.2.0.113",
+                target=ExecutionTarget("test-local"),
+                architecture="aarch64",
+                preset="spoofed",
+                require_qualification=True,
+            )
+        )
 
 
 def test_required_qualification_fails_without_restricting_default_resolution(

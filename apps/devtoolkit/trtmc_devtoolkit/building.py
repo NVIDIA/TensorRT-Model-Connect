@@ -100,7 +100,12 @@ class BuildRecipe(Protocol):
 
 def _digest(payload: object, domain: bytes) -> str:
     try:
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
     except (TypeError, ValueError) as error:
         raise DevToolkitError(f"Build identity must be JSON-compatible: {error}") from error
     return hashlib.sha256(domain + b"\0" + encoded).hexdigest()
@@ -162,7 +167,12 @@ class Builder:
         }
         try:
             normalized_identity = json.loads(
-                json.dumps(expected_identity, sort_keys=True, separators=(",", ":"))
+                json.dumps(
+                    expected_identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
             )
         except (TypeError, ValueError):
             return None
@@ -250,11 +260,18 @@ class Builder:
         ).stdout
         untracked_output = self._execute(
             environment,
-            git("ls-files", "--others", "--exclude-standard"),
+            git(
+                "-c",
+                "core.quotePath=false",
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+            ),
             capture_output=True,
         ).stdout
         untracked: list[tuple[str, str]] = []
-        for path in sorted(line for line in untracked_output.splitlines() if line):
+        for path in sorted(item for item in untracked_output.split("\0") if item):
             file_hash = self._execute(
                 environment,
                 git("hash-object", "--", path),
@@ -298,6 +315,15 @@ class Builder:
             inputs = dict(recipe.inputs(context))
             if not recipe.descriptor:
                 raise DevToolkitError("Build recipe descriptor must be non-empty")
+            preflight_stage = "build-identity"
+            input_payload = {
+                "schema_version": 3,
+                "environment_id": environment.environment_id,
+                "source": asdict(source),
+                "recipe": recipe.descriptor,
+                "inputs": inputs,
+            }
+            request_id = _digest(input_payload, b"trtmc-devtoolkit-build-request-v3")
         except Exception as error:
             write_json(
                 environment.state_dir / "builds" / "preflight" / f"{preflight_occurrence}.json",
@@ -312,14 +338,6 @@ class Builder:
                 },
             )
             raise
-        input_payload = {
-            "schema_version": 3,
-            "environment_id": environment.environment_id,
-            "source": asdict(source),
-            "recipe": recipe.descriptor,
-            "inputs": inputs,
-        }
-        request_id = _digest(input_payload, b"trtmc-devtoolkit-build-request-v3")
         build_dir = state_path(f"builds/{request_id}/build")
         receipt = environment.state_dir / "builds" / request_id / "receipt.json"
         with exclusive_lock(receipt.parent / ".build.lock"):

@@ -47,11 +47,11 @@ class QualificationRecord:
         candidate: ToolchainCandidate,
     ) -> bool:
         facts = {
+            **dict(context.qualification),
             "tensorrt": candidate.tensorrt,
             "cuda": candidate.cuda,
             "python": candidate.python,
             "architecture": context.architecture,
-            **dict(context.qualification),
         }
         return all(facts.get(name) in accepted for name, accepted in self.requirements.items())
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import urllib.parse
 from collections.abc import Mapping, Sequence
@@ -30,7 +31,11 @@ ResolutionKind = Literal["system-first", "exact", "system-only", "managed"]
 
 
 def _freeze_json(value: object) -> FrozenJson:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise DevToolkitError("Provider state requires finite JSON numbers")
+        return value
+    if value is None or isinstance(value, (str, int, bool)):
         return value
     if isinstance(value, Mapping):
         return MappingProxyType(
@@ -575,7 +580,12 @@ def _environment_lock_id(
     candidate: ToolchainCandidate,
 ) -> str:
     payload = _identity_payload(context, candidate)
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
     return hashlib.sha256(b"trtmc-devtoolkit-environment-lock-v3\0" + encoded).hexdigest()
 
 

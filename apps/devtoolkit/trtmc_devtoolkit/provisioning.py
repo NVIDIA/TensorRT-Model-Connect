@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -28,7 +29,11 @@ class ProvisionPolicy(Enum):
 
 
 def _freeze_json(value: object) -> object:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise DevToolkitError("Provisioned identity requires finite JSON numbers")
+        return value
+    if value is None or isinstance(value, (str, int, bool)):
         return value
     if isinstance(value, Mapping):
         return MappingProxyType(
@@ -180,7 +185,12 @@ def _environment_id(
         "runtime": _runtime_payload(toolchain.runtime),
         "observed": _observation_payload(observed),
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
     return hashlib.sha256(b"trtmc-devtoolkit-environment-v3\0" + encoded).hexdigest()
 
 
@@ -307,6 +317,10 @@ class EnvironmentProvisioner:
                 raise AttestationFailed(
                     "Provisioned toolchain provider does not match the environment lock"
                 )
+            if dict(toolchain.identity) != dict(lock.toolchain.identity):
+                raise AttestationFailed(
+                    "Provisioned toolchain identity does not match the environment lock"
+                )
             context = replace(
                 context,
                 environment={**dict(context.environment), **dict(toolchain.environment)},
@@ -390,6 +404,10 @@ def attest_environment(
         environment.context.identity
     ) != dict(environment.lock.context.identity):
         raise AttestationFailed("Provisioned context does not match the environment lock")
+    if environment.toolchain.provider != environment.lock.toolchain.provider or dict(
+        environment.toolchain.identity
+    ) != dict(environment.lock.toolchain.identity):
+        raise AttestationFailed("Provisioned toolchain does not match the environment lock")
     observed = toolchain_provider.observe(
         environment.lock,
         environment.context,

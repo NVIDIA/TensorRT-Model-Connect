@@ -80,6 +80,7 @@ def command_output(
         command,
         cwd=cwd,
         env=env,
+        check=True,
         capture_output=True,
         timeout=timeout,
     ).stdout.strip()

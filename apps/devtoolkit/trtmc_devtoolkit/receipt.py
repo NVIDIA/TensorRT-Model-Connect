@@ -23,7 +23,16 @@ def _json_default(value: Any) -> str:
 
 def write_json(path: Path, payload: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n"
+    content = (
+        json.dumps(
+            payload,
+            indent=2,
+            sort_keys=True,
+            default=_json_default,
+            allow_nan=False,
+        )
+        + "\n"
+    )
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(

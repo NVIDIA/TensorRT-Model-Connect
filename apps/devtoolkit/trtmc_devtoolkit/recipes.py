@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -149,7 +150,10 @@ class TrtmcBuildRecipe:
             architectures = tuple(
                 line.strip().replace(".", "") for line in output.splitlines() if line.strip()
             )
-        if not architectures or any(not architecture.isdigit() for architecture in architectures):
+        if not architectures or any(
+            re.fullmatch(r"[0-9]+(?:-(?:real|virtual))?", architecture) is None
+            for architecture in architectures
+        ):
             raise DevToolkitError("Could not resolve a CUDA architecture for the TRTMC recipe")
         generator = self.generator
         if generator == "auto":
