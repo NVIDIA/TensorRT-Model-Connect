@@ -5,6 +5,7 @@
 
 #include "cli/cli.h"
 #include "cli/io.h"
+#include "cli/sdk_dispatch.h"
 
 #include <cmath>
 #include <filesystem>
@@ -303,8 +304,21 @@ int main() {
         check(command.runtime_root == "lib", "runtime root is retained");
     }
 
-    check(parse_throws({"trtmc", "run", "model.bundle"}),
-          "execution command requires runtime root");
+    check(parse({"trtmc", "run", "model.bundle"}).runtime_root.empty(),
+          "Task SDK execution leaves an omitted runtime root for the installed default");
+    const auto configured = parse({"trtmc", "run", "model.bundle", "--task", "text_continuation",
+                                   "--set", "suffix=", "--set", "emit_eos=false"});
+    check(configured.selected_task == "text_continuation" &&
+              configured.config_entries ==
+                  std::vector<std::pair<std::string, std::string>>{{"suffix", ""},
+                                                                   {"emit_eos", "false"}},
+          "typed family config retains empty and false values until Task selection");
+    check(parse_throws({"trtmc", "run", "model.bundle", "--set", "=1"}) &&
+              parse_throws({"trtmc", "run", "model.bundle", "--set", "missing-equals"}),
+          "config arguments require an explicit nonempty name");
+    check(parse({"trtmc", "run", "model.bundle", "--set", "suffix=a", "--set", "suffix=b"})
+                  .config_entries.size() == 2,
+          "duplicate config entries reach the family instead of overwriting");
     check(parse_throws(
               {"trtmc", "run", "model.bundle", "--runtime-root", "a", "--runtime-root", "b"}),
           "duplicate runtime root rejected");
@@ -476,6 +490,12 @@ int main() {
     run_command.options.emplace("--sde-noise-raw", replay_values_path.string());
 
     FakeText text;
+    check(dispatch_throws(
+              parse({"trtmc", "run", "model.bundle", "--prompt", "Q", "--context", "C"}), text),
+          "existing interface rejects new typed inputs instead of silently discarding them");
+    check(dispatch_throws(parse({"trtmc", "embed", "model.bundle", "--text", "Q", "--image", "C"}),
+                          text),
+          "existing embedding rejects the new multimodal input rather than dropping it");
     std::ostringstream output;
     check(trtmc::cli::dispatch(run_command, text, output) == 0, "text task dispatch succeeds");
     check(output.str().find("hello:3") != std::string::npos,
@@ -849,6 +869,66 @@ int main() {
     const auto loaded_wav = trtmc::cli::io::read_wav(wav_path.string());
     check(loaded_wav.sample_rate == 16000 && loaded_wav.samples == wav.samples,
           "float WAV round trip succeeds");
+    const std::vector<float> stereo_samples{1.0F, -1.0F, 0.25F, 0.75F, -0.5F, 0.25F};
+    trtmc::cli::io::write_wav_interleaved({stereo_samples.data(), stereo_samples.size()}, 24000, 2,
+                                          wav_path.string());
+    const auto stereo = trtmc::cli::io::read_wav_interleaved(wav_path.string());
+    check(stereo.sample_rate == 24000 && stereo.channels == 2 && stereo.samples == stereo_samples,
+          "SDK WAV IO preserves interleaved stereo without downmixing");
+    const auto mono = trtmc::cli::io::read_wav(wav_path.string());
+    check(mono.samples == std::vector<float>({0.0F, 0.5F, -0.125F}) && mono.num_samples == 3,
+          "existing mono interface reuses the decoder and preserves its averaging behavior");
+    check(throws_runtime([&] {
+              trtmc::cli::io::write_wav_interleaved({stereo_samples.data(), 3}, 24000, 2,
+                                                    wav_path.string());
+          }),
+          "incomplete stereo sample frames are rejected before writing");
+    check(throws_runtime([&] {
+              trtmc::cli::io::write_wav_interleaved({stereo_samples.data(), stereo_samples.size()},
+                                                    0, 2, wav_path.string());
+          }),
+          "invalid sample rate is not replaced by an invented default");
+    {
+        // PCM16 stereo with a padded odd-sized unknown RIFF chunk.
+        std::ofstream file(wav_path, std::ios::binary);
+        auto u16 = [&](std::uint16_t value) {
+            file.put(static_cast<char>(value & 0xffU));
+            file.put(static_cast<char>((value >> 8) & 0xffU));
+        };
+        auto u32 = [&](std::uint32_t value) {
+            for (int shift = 0; shift < 32; shift += 8)
+                file.put(static_cast<char>((value >> shift) & 0xffU));
+        };
+        file.write("RIFF", 4);
+        u32(54);
+        file.write("WAVEfmt ", 8);
+        u32(16);
+        u16(1);
+        u16(2);
+        u32(22050);
+        u32(88200);
+        u16(4);
+        u16(16);
+        file.write("JUNK", 4);
+        u32(1);
+        file.write("x\0", 2);
+        file.write("data", 4);
+        u32(8);
+        u16(0x8000);
+        u16(0x7fff);
+        u16(0x4000);
+        u16(0xc000);
+    }
+    const auto pcm = trtmc::cli::io::read_wav_interleaved(wav_path.string());
+    check(pcm.channels == 2 && pcm.sample_rate == 22050 &&
+              pcm.samples == std::vector<float>({-1.0F, 32767.0F / 32768.0F, 0.5F, -0.5F}),
+          "PCM16 stereo and odd RIFF chunk padding retain correct sample order");
+    {
+        std::ofstream file(wav_path, std::ios::binary);
+        file.write("RIFF", 4);
+    }
+    check(throws_runtime([&] { trtmc::cli::io::read_wav_interleaved(wav_path.string()); }),
+          "truncated WAV data fails instead of returning invented samples");
     std::filesystem::remove(wav_path);
     check(throws_runtime([&] { trtmc::cli::io::read_wav(wav_path.string()); }),
           "missing WAV is rejected");
@@ -884,6 +964,18 @@ int main() {
     frames.pixels.clear();
     check(throws_runtime([&] { trtmc::cli::io::save_png(frames, png_path.string()); }),
           "undersized image result is rejected");
+
+    if (std::filesystem::exists("/dev/full")) {
+        check(throws_runtime([&] { trtmc::cli::detail::write_binary("/dev/full", rgb); }),
+              "raw output flush failures are reported");
+        check(throws_runtime([&] {
+                  trtmc::cli::io::write_wav_interleaved({rgb.data(), rgb.size()}, 8000, 1,
+                                                        "/dev/full");
+              }),
+              "WAV output flush failures are reported");
+        check(throws_runtime([&] { trtmc::cli::io::save_png("/dev/full", rgb, 1, 1); }),
+              "PNG output flush failures are reported");
+    }
 
     std::cerr << (failures == 0 ? "ALL PASSED\n" : "SOME FAILED\n");
     return failures;

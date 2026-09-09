@@ -13,8 +13,10 @@ performance matrix -> reference runner
 ~~~
 
 Neither the native core nor any family imports benchmark code. The candidate
-worker loads a bundle with the public load_task(bundle, runtime_root) API and
-calls the exact abstract Task interface implemented by that family.
+worker selects the bundle's runtime mode before execution: migrated bundles use
+the public header-only Task SDK and C ABI, while existing bundles use
+load_task(bundle, runtime_root). Both call the family's implementation directly;
+a failed SDK call is never retried through an old interface.
 
 ## Task API benchmark
 
@@ -36,6 +38,59 @@ and build environment. Changed or missing identities rebuild the bundle;
 are mutable and are rebuilt rather than assumed unchanged. An explicitly
 supplied bundle outside the managed cache remains the caller's provenance
 responsibility. `--rebuild` forces a fresh managed build.
+
+## DataFrame forecast formatting
+
+Install `pandas` separately (`pip install pandas`) when using the optional table
+helpers. They do not load a model or run Python inference:
+
+```python
+import pandas as pd
+from trtmc_benchmark.dataframe import prepare_forecast_frame, format_forecast_frame
+
+frame = pd.read_csv("history.csv", parse_dates=["ds"])
+prepared = prepare_forecast_frame(frame, freq="D")
+# prepared.request is the existing native worker's batch solve payload.
+# Pass it as request= to an existing resolved batch forecast case.
+```
+
+Input columns default to `unique_id`, `ds`, and `values`. Series keep first-seen
+order; time is sorted within each series. Timestamps must match the explicit
+calendar frequency: gaps/duplicates are errors, not silently resampled data.
+Use `value_columns=("x", "y")` for one two-channel series, not two batch items.
+Missing values retain their masks; no shared imputation or normalization occurs.
+`config_by_series={"sensor-a": {"frequency": 0}}` passes family Config unchanged;
+calendar `freq` never selects a model's frequency category.
+
+For an existing resolved `case` whose bundle declares one of
+`batch_series_to_point_forecast`, `batch_series_to_quantile_forecast`, or
+`batch_series_to_point_and_quantile_forecast`, reuse the normal worker:
+
+```python
+from pathlib import Path
+from trtmc_benchmark.types import MeasurementSpec
+from trtmc_benchmark.worker import find_worker, run_worker
+
+case = case.with_values(request=prepared.request,
+                        measurement=MeasurementSpec(warmup=0, iterations=1))
+output_dir = Path("forecast-results")
+output_dir.mkdir(parents=True, exist_ok=True)
+receipt = run_worker(case, output_dir, find_worker())
+forecast = format_forecast_frame(prepared, receipt["output_summary"])
+```
+
+The case retains its explicit runtime root. This example executes one complete
+native batch; normal benchmark warmup/iteration settings repeat that batch.
+Scalar-only routes reject the batch payload rather than retrying each series.
+Real family native-batch support must be qualified separately; this helper does
+not imply that the existing TimesFM batch-one bundle supports native batching.
+
+The result keeps series/horizon/channel order, actual horizon offsets, output
+channel labels/units, and all actual quantile levels. The `forecast` column is
+the real point output, never a substituted median; quantile-only results have
+no invented point column. Unknown output labels remain missing. Heterogeneous
+quantile columns have missing cells where a series did not predict that level,
+with actual per-series levels recorded in `forecast.attrs`.
 
 ## Timing contract
 

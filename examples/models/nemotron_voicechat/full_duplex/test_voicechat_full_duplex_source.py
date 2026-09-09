@@ -164,3 +164,37 @@ def test_playback_queue_is_pure_cpp_and_runs_without_alsa(tmp_path: Path) -> Non
         timeout=30,
     )
     assert run_result.returncode == 0, run_result.stdout + run_result.stderr
+
+
+def test_sdk_session_path_preserves_backpressure_events_and_shutdown() -> None:
+    source = _text("main.cpp")
+    helpers = _text("session_io.h")
+    sdk_path = source.split("int run_sdk(", 1)[1].split("int run(const Options&", 1)[0]
+    assert "uses_existing_task_runtime" in source
+    assert "create_sdk_session" in sdk_path
+    assert "load_task" not in sdk_path
+    assert "dynamic_cast" not in sdk_path
+    assert sdk_path.index("threads.capture.join()") < sdk_path.index("session.close()")
+    assert sdk_path.index("threads.playback.join()") < sdk_path.index("session.close()")
+    for symbol in (
+        "session.append_audio(audio)",
+        "std::this_thread::sleep_for",
+        "SpeechPollStatus::Timeout",
+        "SpeechPollStatus::EpochEnd",
+        "SpeechReadState::Failed",
+        "SpeechEventKind::Yielded",
+        "queue.request_flush()",
+        "require_audio_formats",
+    ):
+        assert symbol in helpers
+    assert "alsa/" not in helpers
+    assert "trtmc_c" in _text("CMakeLists.txt")
+
+
+def test_sdk_sources_and_soname_are_in_the_existing_image_contract() -> None:
+    dockerfile = _text("Dockerfile")
+    projection = _text("Dockerfile.dockerignore")
+    assert "COPY --from=builder /build/trtmc/libtrtmc_c.so.1 /opt/trtmc/lib/" in dockerfile
+    assert "!core/api/include/**" in projection
+    assert "!core/api/runtime/**" in projection
+    assert "!apps/task_runtime.h" in projection

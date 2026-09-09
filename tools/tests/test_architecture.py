@@ -300,9 +300,28 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/byok.h",
         "core/runtime/include/trtmc/bundle.h",
         "core/runtime/include/trtmc/task.h",
+        "core/runtime/include/trtmc/internal/config.h",
+        "core/runtime/include/trtmc/internal/action.h",
+        "core/runtime/include/trtmc/internal/audio.h",
+        "core/runtime/include/trtmc/internal/features.h",
+        "core/runtime/include/trtmc/internal/image.h",
+        "core/runtime/include/trtmc/internal/language.h",
+        "core/runtime/include/trtmc/internal/matrix.h",
+        "core/runtime/include/trtmc/internal/model.h",
+        "core/runtime/include/trtmc/internal/numeric.h",
+        "core/runtime/include/trtmc/internal/perception.h",
+        "core/runtime/include/trtmc/internal/recurrent.h",
+        "core/runtime/include/trtmc/internal/scores.h",
+        "core/runtime/include/trtmc/internal/speech.h",
+        "core/runtime/include/trtmc/internal/stream.h",
+        "core/runtime/include/trtmc/internal/text.h",
+        "core/runtime/include/trtmc/internal/tools.h",
+        "core/runtime/include/trtmc/internal/tracking.h",
+        "core/runtime/include/trtmc/internal/video.h",
         "core/runtime/include/trtmc/runtime/device_tensor.h",
         "core/runtime/include/trtmc/runtime/family_factory.h",
         "core/runtime/include/trtmc/runtime/family_loader.h",
+        "core/runtime/include/trtmc/runtime/span.h",
         "core/runtime/include/trtmc/runtime/tensor.h",
         "core/runtime/include/trtmc/runtime/trt_backend.h",
         "core/runtime/include/trtmc/runtime/trt_module.h",
@@ -311,9 +330,68 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tests/test_bundle_format_v1.cpp",
         "core/runtime/tests/test_byok_shape_spec.cpp",
         "core/runtime/tests/test_family_loader.cpp",
+        "core/runtime/tests/test_internal_config.cpp",
         "core/runtime/tests/test_task_api.cpp",
         "core/runtime/tests/test_trt_module_dynamic_input.cpp",
     }
+    expected_api = {
+        "core/api/include/trtmc/control.h",
+        "core/api/include/trtmc/control.hpp",
+        "core/api/include/trtmc/core.hpp",
+        "core/api/include/trtmc/image.h",
+        "core/api/include/trtmc/image.hpp",
+        "core/api/include/trtmc/text.h",
+        "core/api/include/trtmc/text.hpp",
+        "core/api/include/trtmc/trtmc.h",
+        "core/api/include/trtmc/trtmc.hpp",
+        "core/api/include/trtmc/types.h",
+        "core/api/include/trtmc/tools.h",
+        "core/api/include/trtmc/tools.hpp",
+        "core/api/include/trtmc/matrix.h",
+        "core/api/include/trtmc/matrix.hpp",
+        "core/api/include/trtmc/scores.h",
+        "core/api/include/trtmc/scores.hpp",
+        "core/api/runtime/api.cpp",
+        "core/api/runtime/api_internal.h",
+        "core/api/runtime/control.cpp",
+        "core/api/runtime/exports.map",
+        "core/api/runtime/image_tasks.cpp",
+        "core/api/runtime/language_internal.h",
+        "core/api/runtime/scores.cpp",
+        "core/api/runtime/text_runtime.cpp",
+        "core/api/runtime/text_tasks.cpp",
+        "core/api/tests/fake_byok.cpp",
+        "core/api/tests/fake_control_family.cpp",
+        "core/api/tests/fake_family.cpp",
+        "core/api/tests/image_family.cpp",
+        "core/api/tests/test_c_api.c",
+        "core/api/tests/test_control_api.c",
+        "core/api/tests/test_control_cpp.cpp",
+        "core/api/tests/test_cpp_api.cpp",
+        "core/api/tests/test_cpp_config.cpp",
+        "core/api/tests/test_header_helpers.cpp",
+        "core/api/tests/test_image_api.c",
+        "core/api/tests/test_image_cpp.cpp",
+        "core/api/tests/text_c_test.c",
+        "core/api/tests/text_family.cpp",
+        "core/api/tests/text_test.cpp",
+    }
+    # Each reviewed contract group remains a closed set: this convention does
+    # not admit arbitrary new shared files or model-specific implementations.
+    for group in (
+        "audio", "features", "numeric", "stream", "video", "perception",
+        "language", "tracking", "speech", "action", "recurrent",
+    ):
+        expected_api.update(
+            {
+                f"core/api/include/trtmc/{group}.h",
+                f"core/api/include/trtmc/{group}.hpp",
+                f"core/api/runtime/{group}.cpp",
+                f"core/api/tests/{group}_family.cpp",
+                f"core/api/tests/{group}_test.cpp",
+                f"core/api/tests/{group}_c_test.c",
+            }
+        )
     expected_tools = {
         "tools/__init__.py",
         "tools/brev_exec.py",
@@ -371,12 +449,53 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
 
     assert files("core/builder") == expected_python
     assert files("core/runtime") == expected_native
+    assert files("core/api") == expected_api
     tool_files = files("tools")
     tool_tests = {path for path in tool_files if path.startswith("tools/tests/")}
     assert tool_files - tool_tests == expected_tools
     assert tool_tests == expected_tool_tests
     assert files("cmake") == expected_cmake
     assert files("third_party") == expected_third_party
+
+
+def test_public_task_sdk_does_not_include_internal_or_device_headers() -> None:
+    violations: list[str] = []
+    public_root = REPO / "core/api/include"
+    headers = [path for path in public_root.rglob("*") if path.is_file()]
+    assert headers
+    for path in headers:
+        source = path.read_text(encoding="utf-8")
+        for include in re.findall(r'#include\s+[<"]([^>"]+)', source):
+            if include.startswith(("families/", "cuda", "NvInfer", "trtmc/internal/")):
+                violations.append(f"{path.relative_to(REPO)}:{include}")
+            if include in {"trtmc/task.h", "trtmc/runtime/family_loader.h"}:
+                violations.append(f"{path.relative_to(REPO)}:{include}")
+    assert violations == []
+    assert "std::" not in (public_root / "trtmc/trtmc.h").read_text(encoding="utf-8")
+
+
+def test_internal_task_contracts_do_not_depend_on_public_c_layouts() -> None:
+    headers = sorted((REPO / "core/runtime/include/trtmc/internal").glob("*.h"))
+    assert headers
+    for path in headers:
+        includes = re.findall(r'#include\s+[<"]([^>"]+)', path.read_text(encoding="utf-8"))
+        assert not [
+            include
+            for include in includes
+            if include.startswith(("families/", "core/api/"))
+            or include in {"trtmc/trtmc.h", "trtmc/trtmc.hpp"}
+        ], path
+
+
+def test_c_task_implementation_keeps_family_policy_out() -> None:
+    sources = sorted((REPO / "core/api/runtime").glob("*.cpp"))
+    assert sources
+    for path in sources:
+        source = path.read_text(encoding="utf-8")
+        includes = re.findall(r'#include\s+[<"]([^>"]+)', source)
+        assert not [include for include in includes if include.startswith("families/")], path
+        assert '"top_k"' not in source, path
+        assert '"top_p"' not in source, path
 
 
 def test_applications_depend_only_on_public_model_connect_surfaces() -> None:
@@ -1359,18 +1478,110 @@ def test_family_mpirun_launchers_export_the_native_loader_path() -> None:
     assert violations == []
 
 
-def test_every_manifest_task_has_a_concrete_family_implementation() -> None:
-    violations: list[str] = []
-    task_header = (REPO / "core/runtime/include/trtmc/task.h").read_text(encoding="utf-8")
-    core_task_interfaces = dict(
+def _declared_task_interfaces(source: str) -> dict[str, str]:
+    source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.DOTALL)
+    interfaces = dict(
         re.findall(
-            r"class\s+(I[A-Za-z0-9_]+)\s*:\s*public virtual ITask\s*\{.*?"
-            r'kTask\s*=\s*"([a-z0-9_]+)"',
-            task_header,
-            flags=re.DOTALL,
+            r"\bclass\s+(I[A-Za-z0-9_]+)\b[^;{]*\{[^{}]*?"
+            r'\bkTask\s*=\s*"([a-z][a-z0-9_]*)"',
+            source,
         )
     )
-    interface_pattern = re.compile(r"public\s+(I[A-Z][A-Za-z0-9_]+)")
+    # These existing contract macros expand to I<Name> with a literal kTask.
+    for name, task in re.findall(
+        r"TRTMC_(?:(?:NUMERIC|PERCEPTION|RECURRENT(?:_BATCH)?)_INTERFACE|TRACK_FACTORY)"
+        r'\(\s*(\w+),\s*"([a-z][a-z0-9_]*)"',
+        source,
+    ):
+        interfaces[f"I{name}"] = task
+    return interfaces
+
+
+def _implemented_task_ids(source: str, interfaces: dict[str, str]) -> set[str]:
+    source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.DOTALL)
+    return {
+        interfaces[interface]
+        for interface in re.findall(
+            r"\bpublic\s+(?:virtual\s+)?(?:(?:trtmc::)?internal::|trtmc::)?"
+            r"(I[A-Z][A-Za-z0-9_]+)\b",
+            source,
+        )
+        if interface in interfaces
+    }
+
+
+def test_task_contract_inventory_recognizes_implemented_interfaces_not_mentions() -> None:
+    declarations = _declared_task_interfaces(
+        '''
+        class IModel { public: virtual void describe() = 0; };
+        class ITextContinuation {
+            public: static constexpr std::string_view kTask = "text_continuation";
+        };
+        class ITextGeneration : public virtual ITask {
+            public: static constexpr const char* kTask = "text_generation";
+        };
+        TRTMC_NUMERIC_INTERFACE(LatentReplayToText, "latent_replay_to_text", Request, Result)
+        TRTMC_TRACK_FACTORY(FramesBoxToMaskTracks, "frames_box_to_mask_tracks", create, Input)
+        TRTMC_RECURRENT_INTERFACE(RecurrentTokensToLogits, "recurrent_tokens_to_logits",
+                                 step, Request, Result)
+        TRTMC_RECURRENT_BATCH_INTERFACE(BatchRecurrentTokensToLogits,
+                                       "batch_recurrent_tokens_to_logits", step, Request, Result)
+        // TRTMC_TRACK_FACTORY(PhantomTracks, "phantom_tracks", create, Input)
+        // class IPhantom { static constexpr auto kTask = "phantom"; };
+        '''
+    )
+    assert declarations == {
+        "ITextContinuation": "text_continuation",
+        "ITextGeneration": "text_generation",
+        "ILatentReplayToText": "latent_replay_to_text",
+        "IFramesBoxToMaskTracks": "frames_box_to_mask_tracks",
+        "IRecurrentTokensToLogits": "recurrent_tokens_to_logits",
+        "IBatchRecurrentTokensToLogits": "batch_recurrent_tokens_to_logits",
+    }
+    assert _implemented_task_ids(
+        '''
+        class Family : public trtmc::internal::ITextContinuation,
+                       public internal::ILatentReplayToText {};
+        // public ITextGeneration is not an implementation.
+        /* public ITextGeneration */
+        ITextGeneration* pointer_only;
+        ''',
+        declarations,
+    ) == {"text_continuation", "latent_replay_to_text"}
+    assert _implemented_task_ids("class Family : public INotDefined {};", declarations) == set()
+    assert _implemented_task_ids(
+        '''
+        class Tracker : public trtmc::internal::IFramesBoxToMaskTracks {};
+        class Recurrent : public internal::IRecurrentTokensToLogits,
+                          public internal::IBatchRecurrentTokensToLogits {};
+        ''',
+        declarations,
+    ) == {
+        "frames_box_to_mask_tracks",
+        "recurrent_tokens_to_logits",
+        "batch_recurrent_tokens_to_logits",
+    }
+
+
+def test_semantic_tasks_are_disjoint_from_existing_bundle_execution_modes() -> None:
+    include = REPO / "core/runtime/include/trtmc"
+    existing = _declared_task_interfaces((include / "task.h").read_text(encoding="utf-8"))
+    semantic: dict[str, str] = {}
+    for header in (include / "internal").glob("*.h"):
+        semantic.update(_declared_task_interfaces(header.read_text(encoding="utf-8")))
+    assert set(existing.values()).isdisjoint(semantic.values())
+    selector = (REPO / "apps/task_runtime.h").read_text(encoding="utf-8")
+    selected = set(re.findall(r"\b(I[A-Z][A-Za-z0-9_]+)::kTask\b", selector))
+    assert selected == set(existing)
+
+
+def test_every_manifest_task_has_a_concrete_family_implementation() -> None:
+    violations: list[str] = []
+    include = REPO / "core/runtime/include/trtmc"
+    headers = [include / "task.h", *sorted((include / "internal").glob("*.h"))]
+    core_task_interfaces: dict[str, str] = {}
+    for header in headers:
+        core_task_interfaces.update(_declared_task_interfaces(header.read_text(encoding="utf-8")))
     for family in family_dirs():
         task_interfaces = dict(core_task_interfaces)
         for header in (family / "include").rglob("*.h"):
@@ -1387,11 +1598,7 @@ def test_every_manifest_task_has_a_concrete_family_implementation() -> None:
             for path in (family / "runtime").rglob("*")
             if path.is_file() and path.suffix in {".h", ".hpp", ".cpp", ".cu"}
         )
-        implemented = {
-            task_interfaces[interface]
-            for interface in interface_pattern.findall(runtime_source)
-            if interface in task_interfaces
-        }
+        implemented = _implemented_task_ids(runtime_source, task_interfaces)
         for manifest in (family / "tests/manifests").glob("*.json"):
             task = json.loads(manifest.read_text(encoding="utf-8")).get("task")
             if task not in implemented:

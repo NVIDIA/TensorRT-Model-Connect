@@ -173,13 +173,12 @@ def test_rootless_moge_sentinel_does_not_steal_a_config_owned_checkpoint() -> No
     )
     assert family == "gpt2"
 
-    family, support = resolve_family(ModelMetadata({}, {}, ("model.pt",)))
+    family, _ = resolve_family(ModelMetadata({}, {}, ("model.pt",)))
     assert family == "moge"
-    assert support.default_task == "monocular_geometry"
 
 
 def test_qwen38_marker_has_one_owner() -> None:
-    family, support = resolve_family(
+    family, _ = resolve_family(
         ModelMetadata(
             {
                 "model_type": "qwen3_5",
@@ -189,7 +188,6 @@ def test_qwen38_marker_has_one_owner() -> None:
         )
     )
     assert family == "qwen3_8"
-    assert support.default_task == "text_generation"
 
 
 @pytest.mark.parametrize(
