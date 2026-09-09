@@ -128,29 +128,32 @@ class BarkSampler::Impl {
   private:
     void ensure_device_buffers(int32_t entries, int32_t rows) {
         if (entries > entry_capacity_) {
-            cudaFree(device_indices_);
-            device_indices_ = nullptr;
-            cudaFree(device_probabilities_);
-            device_probabilities_ = nullptr;
-            entry_capacity_ = 0;
+            int32_t* new_indices = nullptr;
             cudaError_t error =
-                cudaMalloc(&device_indices_, static_cast<std::size_t>(entries) * sizeof(int32_t));
+                cudaMalloc(&new_indices, static_cast<std::size_t>(entries) * sizeof(int32_t));
             if (error != cudaSuccess)
                 throw std::runtime_error("Unable to allocate bark sampler index buffer");
-            error = cudaMalloc(&device_probabilities_,
-                               static_cast<std::size_t>(entries) * sizeof(float));
-            if (error != cudaSuccess)
+            float* new_probabilities = nullptr;
+            error =
+                cudaMalloc(&new_probabilities, static_cast<std::size_t>(entries) * sizeof(float));
+            if (error != cudaSuccess) {
+                cudaFree(new_indices);
                 throw std::runtime_error("Unable to allocate bark sampler probability buffer");
+            }
+            cudaFree(device_indices_);
+            cudaFree(device_probabilities_);
+            device_indices_ = new_indices;
+            device_probabilities_ = new_probabilities;
             entry_capacity_ = entries;
         }
         if (rows > row_capacity_) {
-            cudaFree(device_token_ids_);
-            device_token_ids_ = nullptr;
-            row_capacity_ = 0;
+            int32_t* new_token_ids = nullptr;
             const cudaError_t error =
-                cudaMalloc(&device_token_ids_, static_cast<std::size_t>(rows) * sizeof(int32_t));
+                cudaMalloc(&new_token_ids, static_cast<std::size_t>(rows) * sizeof(int32_t));
             if (error != cudaSuccess)
                 throw std::runtime_error("Unable to allocate bark sampler token id buffer");
+            cudaFree(device_token_ids_);
+            device_token_ids_ = new_token_ids;
             row_capacity_ = rows;
         }
     }
