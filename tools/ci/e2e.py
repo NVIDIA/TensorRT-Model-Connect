@@ -346,6 +346,7 @@ class E2ERunner:
     def _isolated_runtime_root(self, runtime_root: Path, family: str):
         required = (
             "libtrtmc_core.so",
+            "libtrtmc_runtime.so",
             "libtrtmc_backend_trt.so",
             f"libtrtmc_model_{family}.so",
         )

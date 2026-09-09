@@ -146,6 +146,7 @@ def test_selective_e2e_calls_family_tests_directly(
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     (runtime / "libtrtmc_core.so").write_text("")
+    (runtime / "libtrtmc_runtime.so").write_text("")
     (runtime / "libtrtmc_backend_trt.so").write_text("")
     (runtime / "libtrtmc_model_beta.so").write_text("")
     native_build = tmp_path / "native-build"
@@ -218,7 +219,12 @@ def test_selective_e2e_calls_family_tests_directly(
     assert options["updates"]["TRTMC_RUNTIME_ROOT"] != str(runtime)
     assert options["unset"] == ("PYTEST_ADDOPTS",)
     assert context.runtime_snapshots == [
-        ("libtrtmc_backend_trt.so", "libtrtmc_core.so", "libtrtmc_model_beta.so")
+        (
+            "libtrtmc_backend_trt.so",
+            "libtrtmc_core.so",
+            "libtrtmc_model_beta.so",
+            "libtrtmc_runtime.so",
+        )
     ]
 
 
@@ -229,6 +235,7 @@ def test_isolated_runtime_root_materializes_root_local_trtmc_libraries(
     runtime.mkdir()
     required = (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
         "libtrtmc_backend_trt.so",
         "libtrtmc_model_beta.so",
     )
@@ -267,6 +274,7 @@ def test_family_with_only_hardware_tests_accepts_exact_empty_cpu_result(
     runtime.mkdir()
     for name in (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
         "libtrtmc_backend_trt.so",
         "libtrtmc_model_beta.so",
     ):
@@ -424,6 +432,7 @@ def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
     runtime.mkdir()
     for name in (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
         "libtrtmc_backend_trt.so",
         "libtrtmc_model_alpha.so",
     ):
