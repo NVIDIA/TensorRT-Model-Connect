@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "trtmc/openfold3/structure_prediction.h"
 #include "trtmc/runtime/family_loader.h"
-#include "trtmc/task.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
         if (structure_path == metadata_path)
             throw std::invalid_argument("structure and metadata outputs must be different files");
         auto task = trtmc::load_task(argv[1], argv[2]);
-        auto* prediction = dynamic_cast<trtmc::IStructurePrediction*>(task.get());
+        auto* prediction = dynamic_cast<trtmc::openfold3::IStructurePrediction*>(task.get());
         if (prediction == nullptr)
             throw std::runtime_error("bundle does not implement IStructurePrediction");
         const auto result = prediction->predict_structure(readRequest(argv[3]));

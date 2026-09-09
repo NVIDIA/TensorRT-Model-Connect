@@ -103,11 +103,6 @@ struct ImageResult {
     std::int32_t num_frames{1};
 };
 
-struct StructurePredictionResult {
-    std::string structure;
-    std::string metadata_json;
-};
-
 struct AudioResult {
     std::vector<float> samples;
     std::int32_t num_samples{0};
@@ -693,13 +688,6 @@ class IImageFeatureExtractor : public virtual ITask {
     const char* task() const noexcept override { return kTask; }
     virtual ImageFeaturesResult extract_image_features(const float* pixels, std::int32_t height,
                                                        std::int32_t width) = 0;
-};
-
-class IStructurePrediction : public virtual ITask {
-  public:
-    static constexpr const char* kTask = "structure_prediction";
-    const char* task() const noexcept override { return kTask; }
-    virtual StructurePredictionResult predict_structure(const std::string& input) = 0;
 };
 
 class IVideoSegmentation : public virtual ITask {

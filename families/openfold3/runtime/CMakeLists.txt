@@ -10,6 +10,7 @@ add_library(trtmc_model_openfold3 SHARED
 target_include_directories(trtmc_model_openfold3 PRIVATE
   ${PROJECT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/core/runtime/include
+  ${PROJECT_SOURCE_DIR}/families/openfold3/include
 )
 target_include_directories(trtmc_model_openfold3 SYSTEM PRIVATE
   ${TRTMC_CUDA_INCLUDE_DIR}
@@ -27,6 +28,10 @@ set_target_properties(trtmc_model_openfold3 PROPERTIES
 )
 install(TARGETS trtmc_model_openfold3
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(FILES
+  ${PROJECT_SOURCE_DIR}/families/openfold3/include/trtmc/openfold3/structure_prediction.h
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/trtmc/openfold3
 )
 
 if(TRTMC_BUILD_TESTS)
@@ -48,6 +53,7 @@ if(TRTMC_BUILD_TESTS)
   target_include_directories(openfold3_qualification PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${PROJECT_SOURCE_DIR}/families/openfold3/include
   )
   target_link_libraries(openfold3_qualification PRIVATE
     trtmc_runtime

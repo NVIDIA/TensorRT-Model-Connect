@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "trtmc/openfold3/structure_prediction.h"
 #include "trtmc/runtime/family_loader.h"
-#include "trtmc/task.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     try {
         const auto options = parseOptions(argc, argv);
         auto task = trtmc::load_task(options.bundle, options.runtime_root);
-        auto* prediction = dynamic_cast<trtmc::IStructurePrediction*>(task.get());
+        auto* prediction = dynamic_cast<trtmc::openfold3::IStructurePrediction*>(task.get());
         if (prediction == nullptr)
             throw std::runtime_error("bundle does not implement structure prediction");
         const auto result = prediction->predict_structure(readRequest(options.request));

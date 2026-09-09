@@ -18,6 +18,9 @@ add_subdirectory("${TRTMC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/trtmc")
 
 add_executable(trtmc_openfold3_native main.cpp)
 target_compile_features(trtmc_openfold3_native PRIVATE cxx_std_17)
+target_include_directories(trtmc_openfold3_native PRIVATE
+  "${TRTMC_SOURCE_DIR}/families/openfold3/include"
+)
 target_compile_options(trtmc_openfold3_native PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(trtmc_openfold3_native PRIVATE trtmc_runtime)
 add_dependencies(trtmc_openfold3_native trtmc_model_openfold3 trtmc_backend_trt)

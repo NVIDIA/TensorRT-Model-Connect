@@ -8,9 +8,9 @@
 #include "families/openfold3/runtime/engine_contract.h"
 #include "families/openfold3/runtime/feature_bundle.h"
 #include "families/openfold3/runtime/random_samples.h"
+#include "trtmc/openfold3/structure_prediction.h"
 #include "trtmc/runtime/device_tensor.h"
 #include "trtmc/runtime/trt_module.h"
-#include "trtmc/task.h"
 
 #include <array>
 #include <memory>
