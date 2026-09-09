@@ -1,0 +1,341 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Community GPU CI
+
+run-name: >-
+  PR #${{ github.event.pull_request.number || inputs.pr_number }} · community GPU smoke test
+
+# Community-facing GPU smoke test. Unlike TRTMC Internal CI (GB300, private
+# runners), this reserves a short-lived external GPU instance through Brev
+# (https://brev.nvidia.com/) on x86_64 hardware (L4/L40/L40S) and runs there.
+# A GitHub-hosted runner only orchestrates: it never checks out or executes
+# pull-request code itself. It asks Brev to create the instance, has that
+# instance clone the exact PR head SHA and run the tests, then tears the
+# instance down. This mirrors the trust boundary already used by
+# internal-ci-bridge.yml (trusted dispatcher, untrusted code runs elsewhere).
+on:
+  pull_request_target:
+    branches: [main]
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open pull request number to test
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: community-gpu-ci-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    name: Authorize trusted trigger
+    if: >-
+      github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request_target' &&
+          github.ref == 'refs/heads/main' &&
+          github.event.label.name == 'run-gpu-ci'
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    outputs:
+      pr_number: ${{ steps.snapshot.outputs.pr_number }}
+      head_sha: ${{ steps.snapshot.outputs.head_sha }}
+      base_sha: ${{ steps.snapshot.outputs.base_sha }}
+      families: ${{ steps.impact.outputs.families }}
+      scope: ${{ steps.impact.outputs.scope }}
+
+    steps:
+      # Same trust model as internal-ci-bridge.yml: this trusted workflow
+      # reads PR metadata only. It never checks out or executes the
+      # pull-request head itself.
+      - name: Capture the exact pull-request snapshot
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+
+          actor_role="$(
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+              --jq '.role_name'
+          )"
+          case "$actor_role" in
+            maintain|admin) ;;
+            *)
+              echo "::error::Only actors with maintain or admin access may dispatch GPU CI."
+              exit 1
+              ;;
+          esac
+
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          fi
+
+          pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          state="$(jq -er '.state' <<<"$pull")"
+          base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
+          base_ref="$(jq -er '.base.ref' <<<"$pull")"
+          base_sha="$(jq -er '.base.sha' <<<"$pull")"
+          head_sha="$(jq -er '.head.sha' <<<"$pull")"
+
+          test "$state" = "open"
+          test "$base_repo" = "$GITHUB_REPOSITORY"
+          test "$base_ref" = "main"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$EVENT_NAME" = "pull_request_target" ] \
+            && [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
+            echo "::error::The CI trigger was superseded by a newer PR head."
+            exit 1
+          fi
+
+          community_cpu_run="$(
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
+              --jq '.workflow_runs | map(select(.conclusion == "success")) | sort_by(.updated_at) | last | .id // empty'
+          )"
+          if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Community CPU / Required must pass on the current PR head before GPU CI can run."
+            exit 1
+          fi
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "head_sha=$head_sha"
+            echo "base_sha=$base_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      # Read-only checkout of the trusted base ref only (never the PR head)
+      # so the impact classifier can diff base...head without running any
+      # pull-request-controlled code on this trusted runner.
+      - name: Check out the base branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the exact pull-request head for diffing only
+        env:
+          HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$HEAD_SHA"
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Resolve the changed model families
+        id: impact
+        env:
+          HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
+          BASE_SHA: ${{ steps.snapshot.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git checkout --quiet "$HEAD_SHA"
+          python3 -m tools.community_ci impact --base "$BASE_SHA" | tee /tmp/impact.json
+          # tools.community_ci already writes the "families" output; scope
+          # ("changed" vs "all", e.g. a shared/root file was touched) is not
+          # exposed as an action output, so read it from the same JSON here.
+          python3 -c "
+          import json
+          with open('/tmp/impact.json') as f:
+              summary = json.load(f)
+          print(f\"scope={summary['scope']}\")
+          " >> "$GITHUB_OUTPUT"
+
+      - name: Consume the trusted trigger label
+        if: ${{ success() && github.event_name == 'pull_request_target' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method DELETE \
+            "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-gpu-ci"
+
+  announce:
+    name: Publish pending result
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+
+    steps:
+      - name: Publish the pending automated status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=pending \
+            -f context="TRTMC Community GPU CI / Smoke test" \
+            -f description="Reserving a GPU and running the smoke test" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  provision-and-test:
+    name: Provision GPU and run tests
+    needs: [authorize, announce]
+    if: ${{ always() && needs.authorize.result == 'success' }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: gpu-ci-dispatch
+      deployment: false
+    # Hard cost/time bound: at ~$2.23/hr for a single L40S (g6e.xlarge), this
+    # caps worst-case spend for one run regardless of what goes wrong inside.
+    timeout-minutes: 60
+    permissions: {}
+    outputs:
+      conclusion: ${{ steps.result.outputs.conclusion }}
+
+    steps:
+      - name: Install the Brev CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/brevdev/brev-cli/main/bin/install-latest.sh \
+            -o /tmp/brev-install.sh
+          bash /tmp/brev-install.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Log in to Brev
+        env:
+          BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
+        run: brev login --api-key "$BREV_API_KEY"
+
+      - name: Reserve a GPU instance
+        id: reserve
+        run: |
+          set -euo pipefail
+          instance_name="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # L40/L40S/L4 (Ada Lovelace, compute capability 8.9). Falls back
+          # across providers/types automatically; see `brev create --help`.
+          brev create "$instance_name" -g L40 --timeout 600
+          echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
+
+      - name: Build the GPU image, clone the PR head, and run the smoke test
+        id: test
+        env:
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          FAMILIES: ${{ needs.authorize.outputs.families }}
+          SCOPE: ${{ needs.authorize.outputs.scope }}
+        run: |
+          set -euo pipefail
+          brev exec "$INSTANCE_NAME" "git clone --no-checkout https://github.com/$GITHUB_REPOSITORY.git /tmp/model_connect && cd /tmp/model_connect && git fetch --depth 1 origin $HEAD_SHA && git checkout $HEAD_SHA"
+          brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements"
+
+          # Selective by design: 87 model families exist, and running the
+          # full tests/e2e/models suite on GPU for every push is not
+          # affordable. FAMILIES comes from tools.community_ci impact, same
+          # classifier the CPU gate uses. When a shared/root file is touched
+          # (impact scope "all"), fall back to a small, fixed set of
+          # architecturally diverse families as a smoke test rather than
+          # skipping model-specific GPU coverage entirely. This is a
+          # deliberately narrow substitute for "all", not equivalent
+          # coverage; widen it if it proves too weak in practice.
+          echo "Changed families: $FAMILIES (scope: $SCOPE)"
+          if [ "$SCOPE" = "all" ]; then
+            smoke_families='["bert","gpt2","qwen3_8","whisper","timm_vit"]'
+            test_paths="$(python3 - "$smoke_families" <<'PY'
+          import json, sys
+          families = json.loads(sys.argv[1])
+          print(" ".join(f"tests/e2e/models/{name}" for name in families))
+          PY
+            )"
+          else
+            test_paths="$(python3 - "$FAMILIES" <<'PY'
+          import json, sys
+          families = json.loads(sys.argv[1])
+          print(" ".join(f"tests/e2e/models/{name}" for name in families))
+          PY
+            )"
+          fi
+          if [ -z "$test_paths" ]; then
+            echo "No model-family paths changed; nothing to run on GPU."
+            echo "conclusion=success" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          brev exec "$INSTANCE_NAME" "docker run --rm --gpus all -v /tmp/model_connect:/src -w /src trtmc-quickstart-gpu bash -c 'python3.12 -m pip install --no-deps -e . -C py-only=true && python3.12 -m pytest $test_paths -v'" \
+            | tee /tmp/gpu-ci-output.log
+          echo "conclusion=success" >> "$GITHUB_OUTPUT"
+
+      - name: Record the step conclusion
+        if: always()
+        id: result
+        run: |
+          if [ "${{ failure() }}" = "true" ]; then
+            echo "conclusion=failure" >> "$GITHUB_OUTPUT"
+          else
+            echo "conclusion=${{ steps.test.outputs.conclusion || 'success' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Always tear down the GPU instance
+        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
+        env:
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+        run: brev delete "$INSTANCE_NAME" || true
+
+      - name: Upload the smoke-test log
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gpu-ci-output-${{ needs.authorize.outputs.pr_number }}
+          path: /tmp/gpu-ci-output.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    name: Publish result
+    needs: [authorize, announce, provision-and-test]
+    if: ${{ always() && needs.authorize.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write
+      statuses: write
+
+    steps:
+      - name: Publish the terminal status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          CONCLUSION: ${{ needs.provision-and-test.outputs.conclusion }}
+        run: |
+          set -euo pipefail
+          state=failure
+          description="GPU smoke test did not complete"
+          if [ "$CONCLUSION" = "success" ]; then
+            state=success
+            description="GPU smoke test passed"
+          fi
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$state" \
+            -f context="TRTMC Community GPU CI / Smoke test" \
+            -f description="$description" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
