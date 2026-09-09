@@ -11,10 +11,14 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from tests.e2e_harness.model_runner import (
-    model_names_for_dir,
-    run_model_e2e as run_model_manifest_e2e,
-)
+try:
+    from tests.e2e_harness.model_runner import (
+        model_names_for_dir,
+        run_model_e2e as run_model_manifest_e2e,
+    )
+except ModuleNotFoundError:  # pragma: no cover - legacy harness is optional
+    model_names_for_dir = None
+    run_model_manifest_e2e = None
 
 _MODEL_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _MODEL_DIR.parents[3]
@@ -160,6 +164,8 @@ def _case_matches_e2e_model(case, filters: set[str]) -> bool:
 
 
 def model_case_names(config=None) -> list[str]:
+    if model_names_for_dir is None:
+        return []
     return model_names_for_dir(
         config=config,
         model_dir=_MODEL_DIR,
@@ -169,6 +175,8 @@ def model_case_names(config=None) -> list[str]:
 
 
 def run_model_e2e(case_name: str, request) -> None:
+    if run_model_manifest_e2e is None:
+        raise RuntimeError("GLM-ASR E2E harness is unavailable in this checkout")
     run_model_manifest_e2e(
         model_name=case_name,
         request=request,
