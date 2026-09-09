@@ -403,6 +403,8 @@ struct AudioGenerationConfig {
     std::int32_t max_new_tokens{128};
     std::int32_t talker_max_new_tokens{0};
     std::int32_t seed{-1};
+    // Optional secondary text conditioning for music and other audio models.
+    std::string description;
 };
 
 using AudioChunkCallback =

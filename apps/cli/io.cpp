@@ -31,8 +31,7 @@ void write_wav(const AudioResult& audio, const std::string& path) {
 
     const auto num_samples = static_cast<std::int32_t>(audio.samples.size());
     const std::int32_t sample_rate = audio.sample_rate;
-    const auto num_channels =
-        static_cast<std::int16_t>(audio.channels > 0 ? audio.channels : 1);
+    const auto num_channels = static_cast<std::int16_t>(audio.channels > 0 ? audio.channels : 1);
     if (audio.samples.size() % static_cast<std::size_t>(num_channels) != 0)
         throw std::runtime_error("write_wav: sample count is not a multiple of the channel count");
     const std::int16_t bits_per_sample = 32;
