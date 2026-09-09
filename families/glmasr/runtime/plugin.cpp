@@ -1,100 +1,50 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- */
-
-// GlmAsrPlugin: handles the "glmasr_speech_to_text" strategy.
-// Audio encoder plus projector in one engine, feeding a Llama decoder that
-// consumes the projected frames through its embed-input contract.
-
 #include "families/glmasr/runtime/glmasr_config.h"
 #include "families/glmasr/runtime/pipeline.h"
 #include "families/glmasr/runtime/plugin_helpers.h"
-#include "trtmc/runtime/pipeline_registry.h"
-#include "utils/json_helpers.h"
+#include "trtmc/runtime/family_factory.h"
 
-namespace trtmc {
+#include <nlohmann/json.hpp>
+#include <stdexcept>
 
 namespace {
-
-GlmAsrConfig read_config(const std::string& json, const BaseConfig& base) {
-    GlmAsrConfig config;
-
-    config.mel_num_bins = extract_json_int(json, "mel_num_bins", config.mel_num_bins);
-    config.mel_n_fft = extract_json_int(json, "mel_n_fft", config.mel_n_fft);
-    config.mel_hop_length = extract_json_int(json, "mel_hop_length", config.mel_hop_length);
-    config.mel_chunk_length = extract_json_int(json, "mel_chunk_length", config.mel_chunk_length);
-    config.mel_sampling_rate =
-        extract_json_int(json, "mel_sampling_rate", config.mel_sampling_rate);
-
-    config.mel_length = extract_json_int(json, "mel_length", config.mel_length);
-    config.encoder_frames = extract_json_int(json, "encoder_frames", config.encoder_frames);
-    config.audio_merge_factor =
-        extract_json_int(json, "audio_merge_factor", config.audio_merge_factor);
-    config.max_audio_embeddings =
-        extract_json_int(json, "num_audio_embeddings", config.max_audio_embeddings);
-    config.audio_embedding_size = extract_json_int(json, "audio_embedding_size", base.hidden_size);
-
-    config.audio_token_id = extract_json_int(json, "audio_token_id", config.audio_token_id);
-    config.audio_start_token_id =
-        extract_json_int(json, "audio_start_token_id", config.audio_start_token_id);
-    config.audio_end_token_id =
-        extract_json_int(json, "audio_end_token_id", config.audio_end_token_id);
-    config.user_token_id = extract_json_int(json, "user_token_id", config.user_token_id);
-    config.assistant_token_id =
-        extract_json_int(json, "assistant_token_id", config.assistant_token_id);
-
-    config.vocab_size = base.vocab_size > 0 ? base.vocab_size : config.vocab_size;
-    config.max_cache_length = base.max_cache_length;
-    config.eos_token_id = extract_json_int(json, "eos_token_id", config.eos_token_id);
-    config.transcription_prompt =
-        extract_json_string(json, "transcription_prompt", config.transcription_prompt);
-    return config;
+std::vector<char> required(const trtmc::BundleReader& b, const char* name) {
+    const auto* s = b.find_section(name);
+    if (!s || !s->length)
+        throw std::runtime_error(std::string("missing bundle section: ") + name);
+    return b.read_section(name);
 }
-
 } // namespace
 
-class GlmAsrPlugin final : public IPipelinePlugin {
-  public:
-    std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        load_ffi_kernels_from_bundle(ctx.bundle);
-
-        ModuleCreateOptions opts;
-        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
-        opts.cuda_graphs = ctx.cuda_graphs;
-
-        auto decoder_modules = load_dual_profile_modules(
-            ctx.backend, find_section(ctx.bundle, "engine_plan"), "glmasr decoder", opts);
-        cudaStream_t stream = decoder_modules.decode->stream();
-
-        auto encoder_loaded =
-            load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "vision_engine_plan"),
-                                      "glmasr audio encoder", opts);
-        if (!encoder_loaded.module || !encoder_loaded.module->ok())
-            throw std::runtime_error("GlmAsrPipeline: bundle is missing the audio encoder engine");
-
-        const int32_t kv_dim = compute_kv_dim(ctx.config);
-        const DType cache_dtype = decoder_modules.decode->tensor_dtype("cache_k_0");
-        auto state = std::make_unique<GlmAsrKvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, cache_dtype);
-        if (!state->ok())
-            throw std::runtime_error("GlmAsrPipeline: failed to create GlmAsrKvCache");
-
-        GlmAsrConfig config = read_config(ctx.config_json, ctx.config);
-        MelFilterbank mel_filterbank = load_mel_filterbank(ctx.bundle);
-        if (mel_filterbank.data.empty())
-            throw std::runtime_error("GlmAsrPipeline: bundle is missing the mel filterbank");
-
-        auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
-
-        return std::make_unique<GlmAsrPipeline>(
-            std::move(encoder_loaded.module), std::move(decoder_modules.decode), std::move(state),
-            std::move(config), std::move(mel_filterbank), stream, std::move(tokenizer),
-            ctx.bundle.info.model_id);
-    }
-};
-
-REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_glmasr_plugin, GlmAsrPlugin,
-                                       "glmasr_speech_to_text");
-
-} // namespace trtmc
+extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    using namespace trtmc;
+    const auto runtime_data = required(context.reader, "runtime.json");
+    const auto json = nlohmann::json::parse(runtime_data.begin(), runtime_data.end());
+    ModuleCreateOptions options;
+    const auto decoder_plan = required(context.reader, "engine.plan");
+    auto decoder =
+        load_trt_module_from_plan(&context.backend, &decoder_plan, "engine.plan", options);
+    const auto encoder_plan = required(context.reader, "encoder.plan");
+    auto encoder =
+        load_trt_module_from_plan(&context.backend, &encoder_plan, "encoder.plan", options);
+    GlmAsrConfig config;
+    config.max_cache_length = json.value("max_cache_length", 384);
+    config.vocab_size = json.value("vocab_size", config.vocab_size);
+    config.audio_embedding_size = json.value("hidden_size", config.audio_embedding_size);
+    config.mel_num_bins = json.value("mel_num_bins", config.mel_num_bins);
+    config.mel_n_fft = json.value("mel_n_fft", config.mel_n_fft);
+    config.mel_hop_length = json.value("mel_hop_length", config.mel_hop_length);
+    config.mel_sampling_rate = json.value("mel_sampling_rate", config.mel_sampling_rate);
+    config.mel_chunk_length = json.value("mel_chunk_length", config.mel_chunk_length);
+    config.eos_token_id = json.value("eot_token_id", config.eos_token_id);
+    config.transcription_prompt = json.value("transcription_prompt", config.transcription_prompt);
+    const auto cache_shape = decoder.module->tensor_shape("cache_k_0");
+    const auto kv_dim = cache_shape.empty() ? 0 : static_cast<int32_t>(cache_shape.back());
+    auto state = std::make_unique<GlmAsrKvCache>(
+        json.value("num_layers", 1), config.max_cache_length, kv_dim, decoder.module->stream(),
+        decoder.module->tensor_dtype("cache_k_0"));
+    auto mel = load_mel_filterbank(context.reader);
+    auto tokenizer = create_tokenizer_from_bundle(context.reader);
+    return new GlmAsrPipeline(std::move(encoder.module), std::move(decoder.module),
+                              std::move(state), std::move(config), std::move(mel),
+                              decoder.module->stream(), std::move(tokenizer), "");
+}

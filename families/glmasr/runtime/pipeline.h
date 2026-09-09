@@ -21,10 +21,10 @@
 #include "families/glmasr/runtime/inference_state.h"
 #include "families/glmasr/runtime/kv_cache.h"
 #include "families/glmasr/runtime/plugin_helpers.h"
-#include "trtmc/pipeline.h"
+#include "families/whisper/runtime/tokenizer.h"
 #include "trtmc/runtime/device_tensor.h"
 #include "trtmc/runtime/trt_module.h"
-#include "trtmc/tokenizer.h"
+#include "trtmc/task.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -41,20 +41,17 @@ struct GlmAsrRunStats {
     int32_t encoder_launches{0};
 };
 
-class GlmAsrPipeline final : public IPipeline {
+class GlmAsrPipeline final : public ITranscription {
   public:
-    GlmAsrPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
+    GlmAsrPipeline(std::unique_ptr<ITrtModule> encoder, std::unique_ptr<ITrtModule> decoder,
                    std::unique_ptr<GlmAsrInferenceState> state, GlmAsrConfig config,
                    MelFilterbank mel_filterbank, cudaStream_t stream,
                    std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
 
     ~GlmAsrPipeline() override;
 
-    TextResult transcribe(const float* audio_samples, int32_t num_samples, int32_t max_new_tokens,
-                          int32_t input_sample_rate = 0) override;
-
-    const char* model_id() const override { return model_id_.c_str(); }
-    const char* pipeline_type() const override { return "GlmAsrPipeline"; }
+    TextResult transcribe(const float* audio_samples, int32_t num_samples,
+                          const TranscriptionConfig& config = {}) override;
 
     const GlmAsrRunStats& run_stats() const { return stats_; }
 
@@ -72,8 +69,8 @@ class GlmAsrPipeline final : public IPipeline {
                                      const std::vector<float>& audio_embeds, int32_t audio_offset,
                                      int32_t num_audio_embeddings, int32_t max_new_tokens);
 
-    std::unique_ptr<TrtModule> encoder_;
-    std::unique_ptr<TrtModule> decoder_;
+    std::unique_ptr<ITrtModule> encoder_;
+    std::unique_ptr<ITrtModule> decoder_;
     std::unique_ptr<GlmAsrInferenceState> state_;
     GlmAsrConfig config_;
     MelFilterbank mel_filterbank_;

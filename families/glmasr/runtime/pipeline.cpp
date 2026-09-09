@@ -7,7 +7,6 @@
 
 #include "families/glmasr/runtime/glmasr_mel_spectrogram.h"
 #include "families/glmasr/runtime/glmasr_prompt_plan.h"
-#include "utils/wav_reader.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -18,6 +17,23 @@
 namespace trtmc {
 
 namespace {
+
+std::vector<float> resample_linear(const float* samples, int32_t count, int32_t from_rate,
+                                   int32_t to_rate) {
+    if (from_rate <= 0 || to_rate <= 0 || count <= 0)
+        return {};
+    const auto out_count =
+        static_cast<int32_t>((static_cast<int64_t>(count) * to_rate) / from_rate);
+    std::vector<float> out(static_cast<std::size_t>(std::max(1, out_count)));
+    for (int32_t i = 0; i < out_count; ++i) {
+        const float pos = static_cast<float>(i) * from_rate / to_rate;
+        const auto left = std::min(count - 1, static_cast<int32_t>(pos));
+        const auto right = std::min(count - 1, left + 1);
+        const float frac = pos - left;
+        out[static_cast<std::size_t>(i)] = samples[left] * (1.0F - frac) + samples[right] * frac;
+    }
+    return out;
+}
 
 // Pick the highest-scoring vocabulary entry from a logits output.
 int32_t host_argmax_logits(const TensorMap& outputs, int32_t vocab_size) {
@@ -144,7 +160,9 @@ std::vector<int32_t> GlmAsrPipeline::run_decoder(const std::vector<int32_t>& inp
 }
 
 TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_samples,
-                                      int32_t max_new_tokens, int32_t input_sample_rate) {
+                                      const TranscriptionConfig& request) {
+    const int32_t max_new_tokens = request.max_output_tokens;
+    const int32_t input_sample_rate = request.input_sample_rate;
     stats_ = {};
     if (audio_samples == nullptr || num_samples <= 0)
         return TextResult{"", {}};
@@ -199,7 +217,7 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
 
     const std::vector<int32_t> generated =
         run_decoder(plan.input_ids, audio_embeds, plan.audio_offset, plan.num_audio_embeddings,
-                    max_new_tokens > 0 ? max_new_tokens : default_max_new_tokens());
+                    max_new_tokens > 0 ? max_new_tokens : 224);
 
     // TRTMC_GLMASR_DEBUG reports how the audio mapped onto the prompt, which is
     // what to check first when a transcript comes back empty or truncated.
