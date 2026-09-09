@@ -241,6 +241,9 @@ def test_isolated_runtime_root_materializes_root_local_trtmc_libraries(
     runtime.mkdir()
     required = (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
         "libtrtmc_backend_trt.so",
         "libtrtmc_model_beta.so",
     )
