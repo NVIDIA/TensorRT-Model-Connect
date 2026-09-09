@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import math
 import re
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import quote
 
 import yaml
+
+from .qualification_environment import prepare_family_environment, process_environment
 
 
 CONFIG_SCHEMA = "trtmc.qualification/v1"
@@ -381,6 +384,7 @@ class QualificationCatalog:
             "manifest_sha256": _file_digest(record["manifest_path"]),
             "config_sha256": _file_digest(record["config_path"]),
             "executor_sha256": _file_digest(record["executor_path"]),
+            "family_sources": _qualification_sources(Path(record["executor_path"])),
             "definition_sha256": (
                 _file_digest(record["definition_path"]) if record["definition_path"] else None
             ),
@@ -410,7 +414,7 @@ class QualificationRunner:
     """Execute each plan item in its family-owned Python process."""
 
     def __init__(self, python: Path | None = None) -> None:
-        self.python = (python or Path(sys.executable)).expanduser().resolve()
+        self.python = (python or Path(sys.executable)).expanduser().absolute()
 
     def run(
         self,
@@ -419,8 +423,10 @@ class QualificationRunner:
         environment: Mapping[str, Any],
         *,
         resume: bool = False,
+        prepare_only: bool = False,
     ) -> dict[str, Any]:
         output_dir = output_dir.expanduser().resolve()
+        source = _source_evidence(plan.families_root)
         if resume:
             if not output_dir.is_dir():
                 raise QualificationError(f"resume directory does not exist: {output_dir}")
@@ -432,6 +438,8 @@ class QualificationRunner:
             )
             if stored_environment != dict(environment):
                 raise QualificationError("resume environment does not match the existing run")
+            if _read_json(output_dir / "source.json", "run source") != source:
+                raise QualificationError("source changed; prepare a new run")
         elif output_dir.exists():
             raise QualificationError(f"output directory already exists: {output_dir}")
         else:
@@ -439,13 +447,74 @@ class QualificationRunner:
 
         _write_json(output_dir / "plan.json", plan.to_json())
         _write_json(output_dir / "environment.json", dict(environment))
+        _write_json(output_dir / "source.json", source)
         items_root = output_dir / "items"
         items_root.mkdir(exist_ok=True)
         timeout = _execution_timeout(environment)
+        family_environments: dict[str, Any] = {}
+        for family in dict.fromkeys(item.family for item in plan.items):
+            selected = [item for item in plan.items if item.family == family]
+            try:
+                if any(_current_item_id(item) != item.item_id for item in selected):
+                    raise QualificationError(
+                        "qualification source changed after the plan was created"
+                    )
+                family_environments[family] = prepare_family_environment(
+                    family_root=plan.families_root / family,
+                    cases=[item.to_json() for item in selected],
+                    environment=environment,
+                    common_python=self.python,
+                    directory=output_dir / "environments" / family,
+                    timeout=timeout,
+                    reuse=resume,
+                )
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                subprocess.SubprocessError,
+                QualificationError,
+            ) as error:
+                family_environments[family] = {"error": str(error)}
+        preparations = self._prepare_items(
+            plan, output_dir, environment, family_environments, timeout
+        )
+        if prepare_only:
+            receipt = {
+                "plan_id": plan.plan_id,
+                "items": preparations,
+                "status": "prepared"
+                if all(value["execution"] == "completed" for value in preparations.values())
+                else "error",
+            }
+            _write_json(output_dir / "preparation.json", receipt)
+            return receipt
         for index, item in enumerate(plan.items, start=1):
             item_dir = items_root / _item_directory_name(index, item)
             item_dir.mkdir(exist_ok=True)
             result_path = item_dir / "result.json"
+            resolved = family_environments[item.family]
+            if "error" in resolved:
+                if result_path.exists():
+                    _archive_attempt(item_dir)
+                _write_json(
+                    result_path,
+                    _error_result(item, "environment preparation failed: " + resolved["error"]),
+                )
+                continue
+            preparation = preparations[item.item_id]
+            if preparation["execution"] != "completed":
+                if result_path.exists():
+                    _archive_attempt(item_dir)
+                _write_json(
+                    result_path,
+                    _error_result(
+                        item,
+                        "case preparation failed: "
+                        + preparation["details"].get("error", "see preparations/"),
+                    ),
+                )
+                continue
             if resume and result_path.is_file():
                 try:
                     existing_result = _read_json(result_path, "qualification result")
@@ -455,8 +524,70 @@ class QualificationRunner:
                     _archive_attempt(item_dir)
                 except QualificationError:
                     result_path.unlink()
-            self._run_item(plan, item, item_dir, environment, timeout)
+            item_environment = {
+                **environment,
+                "tools": {**environment.get("tools", {}), **resolved["interpreters"]},
+            }
+            _write_json(item_dir / "python-environment.json", resolved)
+            self._run_item(
+                plan,
+                item,
+                item_dir,
+                item_environment,
+                timeout,
+                preparation=preparation.get("details", {}).get("prepared", {}),
+            )
         return generate_report(plan, output_dir)
+
+    def _prepare_items(self, plan, output_dir, environment, family_environments, timeout):
+        results = {}
+        for index, item in enumerate(plan.items, start=1):
+            resolved = family_environments[item.family]
+            if "error" in resolved:
+                results[item.item_id] = _error_result(item, resolved["error"])
+                continue
+            directory = output_dir / "preparations" / _item_directory_name(index, item)
+            directory.mkdir(parents=True, exist_ok=True)
+            item_environment = {
+                **environment,
+                "tools": {**environment.get("tools", {}), **resolved["interpreters"]},
+            }
+            try:
+                results[item.item_id] = self._prepare_item(
+                    plan, item, directory, item_environment, timeout
+                )
+            except (QualificationError, OSError, ValueError, KeyError) as error:
+                results[item.item_id] = _error_result(item, str(error))
+                _write_json(directory / "last-error.json", results[item.item_id])
+        return results
+
+    def _prepare_item(self, plan, item, directory, environment, timeout):
+        result_path = directory / "result.json"
+        if result_path.is_file():
+            previous = _read_json(result_path, "preparation result")
+            _validate_result(previous, item, directory)
+            if previous["execution"] == "completed":
+                prepared = previous.get("details", {}).get("prepared", {})
+                _prepared_inputs(directory, prepared, reuse=True)
+                verification = directory / "verification"
+                verification.mkdir(exist_ok=True)
+                self._run_item(
+                    plan,
+                    item,
+                    verification,
+                    environment,
+                    timeout,
+                    phase="check",
+                    preparation=prepared,
+                )
+                checked = _read_json(verification / "result.json", "preparation verification")
+                return previous if checked["execution"] == "completed" else checked
+            _archive_attempt(directory)
+        self._run_item(plan, item, directory, environment, timeout, phase="prepare")
+        result = _read_json(result_path, "preparation result")
+        if result["execution"] == "completed":
+            _prepared_inputs(directory, result.get("details", {}).get("prepared", {}), reuse=False)
+        return result
 
     def _run_item(
         self,
@@ -465,6 +596,9 @@ class QualificationRunner:
         item_dir: Path,
         environment: Mapping[str, Any],
         timeout: int,
+        *,
+        phase: str = "run",
+        preparation: Mapping[str, Any] | None = None,
     ) -> None:
         request_path = item_dir / "request.json"
         result_path = item_dir / "result.json"
@@ -476,6 +610,8 @@ class QualificationRunner:
             "plan_item": item.to_json(),
             "families_root": str(plan.families_root),
             "environment": dict(environment),
+            "phase": phase,
+            "preparation": dict(preparation or {}),
         }
         _write_json(request_path, request)
         try:
@@ -485,13 +621,23 @@ class QualificationRunner:
             _write_json(result_path, _error_result(item, str(error)))
             return
         command = [
-            str(self.python),
+            str(environment["tools"]["python"]),
             str(item.executor_path),
             "--request",
             str(request_path),
             "--output",
             str(result_path),
         ]
+        _write_json(item_dir / "command.json", {"argv": command, "cwd": str(item_dir)})
+        process_env = process_environment()
+        repository = plan.families_root.parent
+        source_paths = [
+            repository / "core" / "builder",
+            repository / "apps" / "benchmark",
+            repository,
+        ]
+        if (repository / "apps" / "benchmark" / "trtmc_benchmark").is_dir():
+            process_env["PYTHONPATH"] = ":".join(str(path) for path in source_paths)
         try:
             with (
                 stdout_path.open("w", encoding="utf-8") as stdout,
@@ -500,6 +646,7 @@ class QualificationRunner:
                 completed = subprocess.run(
                     command,
                     cwd=item_dir,
+                    env=process_env,
                     stdout=stdout,
                     stderr=stderr,
                     check=False,
@@ -527,6 +674,19 @@ def load_environment(path: Path) -> dict[str, Any]:
     if raw.get("schema_version") != ENVIRONMENT_SCHEMA:
         raise QualificationError(f"environment schema_version must be {ENVIRONMENT_SCHEMA}")
     _nonempty_string(raw.get("name"), "environment name")
+    for field in ("tools", "storage", "execution"):
+        if not isinstance(raw.get(field, {}), Mapping):
+            raise QualificationError(f"environment {field} must be an object")
+    retired = {"reference_python", "hf_transformers_runner"} & set(raw.get("tools", {}))
+    if retired:
+        raise QualificationError(
+            "reference tools are family-owned; configure tools.python and optional family preparation"
+        )
+    for field in ("allow_environment_creation", "allow_build", "local_files_only"):
+        value = raw.get("execution", {}).get(field, False)
+        if not isinstance(value, bool):
+            raise QualificationError(f"execution.{field} must be a boolean")
+    _performance_target(raw.get("performance_target"))
     return raw
 
 
@@ -547,6 +707,7 @@ def load_run_configuration(path: Path) -> dict[str, Any]:
     result = {
         "kind": kind,
         "environment": environment.resolve(),
+        "performance": _performance_target(raw.get("performance")),
     }
     for field in ("models", "suites", "cases"):
         values = raw.get(field, [])
@@ -586,6 +747,11 @@ def load_plan(path: Path) -> QualificationPlan:
 
 def generate_report(plan: QualificationPlan, output_dir: Path) -> dict[str, Any]:
     output_dir = output_dir.expanduser().resolve()
+    environment_path = output_dir / "environment.json"
+    environment = (
+        _read_json(environment_path, "run environment") if environment_path.is_file() else {}
+    )
+    target = _performance_target(environment.get("performance_target"))
     rows = []
     blocking = {"pass": 0, "fail": 0, "error": 0, "missing": 0}
     observations = {"completed": 0, "error": 0, "missing": 0}
@@ -605,9 +771,17 @@ def generate_report(plan: QualificationPlan, output_dir: Path) -> dict[str, Any]
                 item, f"planned result is missing: {result_path}", execution="missing"
             )
         report_artifacts = list(result.get("artifacts", []))
+        result = {
+            **result,
+            "comparison_valid": result.get("details", {}).get(
+                "comparison_valid", result["execution"] == "completed"
+            ),
+        }
         for label, filename in (
             ("executor stdout", "executor.stdout.log"),
             ("executor stderr", "executor.stderr.log"),
+            ("Python environment", "python-environment.json"),
+            ("executor command", "command.json"),
         ):
             if not (item_dir / filename).is_symlink() and (item_dir / filename).is_file():
                 report_artifacts.append({"label": label, "path": filename})
@@ -618,6 +792,16 @@ def generate_report(plan: QualificationPlan, output_dir: Path) -> dict[str, Any]
                 "gate_policy": item.gate_policy,
                 "result_directory": item_dir.relative_to(output_dir).as_posix(),
                 "result_path": result_path.relative_to(output_dir).as_posix(),
+                "preparation_path": (
+                    "preparations/" + _item_directory_name(index, item) + "/result.json"
+                    if (
+                        output_dir
+                        / "preparations"
+                        / _item_directory_name(index, item)
+                        / "result.json"
+                    ).is_file()
+                    else None
+                ),
             }
         )
         if item.gate_policy == "blocking":
@@ -654,18 +838,55 @@ def generate_report(plan: QualificationPlan, output_dir: Path) -> dict[str, Any]
         status = "observed"
     else:
         status = "pass"
+    target_failures = 0
+    for row in rows:
+        if plan.kind == "performance" and target and row["comparison_valid"]:
+            ratio = row.get("details", {}).get("metrics", {}).get("reference_over_candidate_p50")
+            valid = (
+                isinstance(ratio, (int, float))
+                and not isinstance(ratio, bool)
+                and math.isfinite(ratio)
+                and ratio > 0
+            )
+            if not valid:
+                row["comparison_valid"] = False
+                row["execution"] = "error"
+                row["verdict"] = None
+                row["details"] = {
+                    **row.get("details", {}),
+                    "error": "Performance target requires a valid speed ratio",
+                }
+                status = "error"
+                continue
+            passed = ratio >= target["minimum_speedup"]
+            row["performance_target"] = {**target, "passed": passed, "actual_speedup": ratio}
+            target_failures += not passed
+    if target_failures and target["blocking"] and status != "error":
+        status = "fail"
     report = {
         "schema_version": REPORT_SCHEMA,
         "plan_id": plan.plan_id,
         "kind": plan.kind,
         "status": status,
         "generated_at": _now(),
+        "source": _read_json(output_dir / "source.json", "source evidence")
+        if (output_dir / "source.json").is_file()
+        else None,
+        "environment": environment,
         "summary": {
             "planned": len(plan.items),
             "results": len(actual_paths & expected_paths),
             "blocking": blocking,
             "observation_only": observations,
             "unexpected_results": len(unexpected),
+            "performance_target_failures": target_failures,
+            "completed": sum(row["execution"] == "completed" for row in rows),
+            "comparable": sum(row["comparison_valid"] is True for row in rows),
+            "inconclusive": sum(
+                row.get("details", {}).get("error") == "measurement_inconclusive" for row in rows
+            ),
+            "errors": sum(row["execution"] == "error" for row in rows),
+            "failed": sum(row["verdict"] == "fail" for row in rows),
         },
         "unexpected_results": unexpected,
         "items": rows,
@@ -698,6 +919,24 @@ def _suite_definition(
     if not definition:
         raise QualificationError(f"suite definition is empty: {definition_path}")
     return definition, definition_path
+
+
+def _performance_target(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"minimum_speedup", "blocking"}:
+        raise QualificationError("performance target requires minimum_speedup and blocking")
+    minimum = value["minimum_speedup"]
+    if (
+        isinstance(minimum, bool)
+        or not isinstance(minimum, (int, float))
+        or not math.isfinite(minimum)
+        or minimum <= 0
+    ):
+        raise QualificationError("minimum_speedup must be a finite positive number")
+    if not isinstance(value["blocking"], bool):
+        raise QualificationError("performance blocking must be a boolean")
+    return dict(value)
 
 
 def _require_local_file(path: Path, root: Path, label: str) -> None:
@@ -803,13 +1042,16 @@ def _write_html_report(report: Mapping[str, Any], path: Path) -> None:
     rows = []
     for item in report["items"]:
         detail = item.get("details", {})
+        if "performance_target" in item:
+            detail = {**detail, "performance_target": item["performance_target"]}
         error = detail.get("error", "") if isinstance(detail, Mapping) else ""
-        metrics = detail.get("metrics", {}) if isinstance(detail, Mapping) else {}
-        gates = detail.get("gate_evaluations", []) if isinstance(detail, Mapping) else []
-        evidence = html.escape(
-            json.dumps({"metrics": metrics, "gates": gates}, sort_keys=True), quote=False
-        )
+        evidence = html.escape(json.dumps(detail, sort_keys=True, indent=2), quote=False)
         artifact_links = []
+        preparation_path = item.get("preparation_path")
+        if preparation_path:
+            artifact_links.append(
+                f'<a href="{html.escape(quote(str(preparation_path), safe="/._-"))}">Preparation</a>'
+            )
         for artifact in item.get("artifacts", []):
             if not isinstance(artifact, Mapping):
                 continue
@@ -830,7 +1072,7 @@ def _write_html_report(report: Mapping[str, Any], path: Path) -> None:
             f"<td>{html.escape(str(item.get('execution', '')))}</td>"
             f"<td>{html.escape(str(item.get('verdict', '') or ''))}</td>"
             f"<td>{html.escape(str(error))}</td>"
-            f"<td><code>{evidence}</code></td>"
+            f"<td><details><summary>Metrics and evidence</summary><pre>{evidence}</pre></details></td>"
             f"<td>{'<br>'.join(artifact_links)}</td>"
             "</tr>"
         )
@@ -842,7 +1084,7 @@ body {{ font: 14px system-ui, sans-serif; margin: 2rem; color: #222; }}
 table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border: 1px solid #ddd; padding: .5rem; text-align: left; }}
 th {{ background: #f3f3f3; }}
-code {{ white-space: pre-wrap; word-break: break-word; }}
+code, pre {{ white-space: pre-wrap; word-break: break-word; }}
 </style></head><body>
 <h1>TRTMC qualification</h1>
 <p>Status: {html.escape(str(report["status"]))}</p>
@@ -897,6 +1139,7 @@ def _current_item_id(item: PlanItem) -> str:
             "manifest_sha256": _file_digest(item.manifest_path),
             "config_sha256": _file_digest(item.config_path),
             "executor_sha256": _file_digest(item.executor_path),
+            "family_sources": _qualification_sources(item.executor_path),
             "definition_sha256": (
                 _file_digest(item.definition_path) if item.definition_path else None
             ),
@@ -904,6 +1147,52 @@ def _current_item_id(item: PlanItem) -> str:
             "case": item.case,
         }
     )
+
+
+def _qualification_sources(executor: Path) -> dict[str, str]:
+    sources = sorted(executor.parent.rglob("*.py"))
+    requirements = executor.parents[2] / "requirements.txt"
+    if requirements.is_file():
+        sources.append(requirements)
+    return {str(path.relative_to(executor.parents[2])): _file_digest(path) for path in sources}
+
+
+def _prepared_inputs(directory: Path, prepared: Mapping[str, Any], *, reuse: bool) -> None:
+    paths = prepared.get("input_files", [])
+    if not isinstance(paths, list) or any(
+        not isinstance(path, str) or not Path(path).is_absolute() for path in paths
+    ):
+        raise QualificationError("prepared input_files must be absolute file paths")
+    evidence = {path: _file_digest(Path(path)) for path in paths}
+    receipt = directory / "inputs.json"
+    if reuse:
+        if evidence != _read_json(receipt, "prepared input evidence"):
+            raise QualificationError("prepared input files changed; prepare a new run")
+    else:
+        _write_json(receipt, evidence)
+
+
+def _source_evidence(root: Path) -> dict[str, Any]:
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        diff = subprocess.run(
+            ["git", "-C", str(root), "diff", "--binary", "HEAD"],
+            capture_output=True,
+            timeout=10,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"revision": None, "source": "installed or non-git catalog"}
+    return {
+        "revision": revision.stdout.strip(),
+        "working_tree_diff": hashlib.sha256(diff.stdout).hexdigest(),
+    }
 
 
 def _requested(values: Sequence[str], label: str) -> set[str]:

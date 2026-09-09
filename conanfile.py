@@ -137,6 +137,14 @@ class TensorRTModelConnectConan(ConanFile):
                 keep_path=False,
             )
         suites = package / "trtmc_benchmark" / "_suites"
+        for requirements in sorted((source / "families").glob("*/requirements.txt")):
+            copy(
+                self,
+                requirements.name,
+                src=str(requirements.parent),
+                dst=str(catalog / requirements.parent.name),
+                keep_path=False,
+            )
         for asset in sorted((source / "apps/benchmark/qualification/suites").glob("*.yaml")):
             copy(
                 self,

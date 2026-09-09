@@ -31,6 +31,6 @@ suites:
             do_sample: false
           measurement:
             warmup: 5
-            iterations: 20
+            iterations: 10
           telemetry:
             gpu: auto

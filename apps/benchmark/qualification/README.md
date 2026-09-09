@@ -5,6 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Qualification
 
+The [design](DESIGN.md) records the pre-#1093 comparison contracts and migration
+scope. The current implementation below covers GPT-2 continuation parity and
+compiled HF-vs-TensorRT Performance; it does not restore all historical datasets
+or claim MMLU answer accuracy.
+
 `trtmc-qualify` discovers optional Accuracy and Performance configuration files
 directly from model families. There is no central model-to-suite registry.
 
@@ -23,6 +28,55 @@ Each family also owns `tests/qualification/executor.py`. The high-level runner
 starts it in a fresh process for every case and understands only the result
 envelope. Dataset interpretation, reference execution, metrics, and gates remain
 inside the family.
+
+## Python environments and preparation
+
+The scheduler does not import family code or model dependencies. Executors use
+`tools.python` from the machine environment, defaulting to the scheduler's Python
+when omitted. A family may supply `tests/qualification/prepare_environment.py`;
+no central registration or per-model environment setting is needed.
+
+The optional script accepts `--request FILE --output FILE`. Its JSON request
+contains `common_python`, `family_root`, selected `cases`, a writable
+`environment_directory`, and `allow_create`. It returns `python` and optionally
+`reference_python` (default: the same Python). These are actual interpreter
+paths, including virtual-environment symlinks. The family owns installation and
+compatibility checks. Reuse root `requirements.txt` for build dependencies.
+Reference-only environments need not install the TRTMC builder package.
+
+GPT-2 reuses a CUDA-capable common environment. If the common environment is not
+compatible, its preparation script can create a private reference environment
+with Torch 2.14.0 and Transformers 5.2.0 while retaining the common build Python.
+Set `execution.allow_environment_creation: true` explicitly during preparation
+to permit this installation. Other families own their own dependency choices.
+
+The application prepares each selected family's environment once, records
+actual package versions, and starts executors with their resolved Python.
+GPT-2 invokes the benchmark/build CLI with that interpreter too. Reference
+subprocesses do not inherit another environment's `PYTHONPATH` or user-site
+packages. Family preparation must not modify the common environment.
+
+All case preparation finishes before evaluation. GPT-2 resolves an immutable HF
+snapshot and builds a fresh run-owned bundle through the public benchmark CLI.
+New runs require `execution.allow_build: true`; prepared runs reuse their
+recorded bundle without rebuilding during measurement. Preparation errors are
+family/case-local and do not stop independent selected work.
+
+Prepare without running Accuracy or Performance, then execute the prepared work:
+
+```bash
+trtmc-qualify prepare --kind performance --families-root families \
+  --model gpt2-125m \
+  --environment apps/benchmark/qualification/environments/example.yaml \
+  --output artifacts/qualification/gpt2-performance
+trtmc-qualify resume artifacts/qualification/gpt2-performance
+```
+
+`prepare` writes `preparation.json`, not an Accuracy/Performance report. `run`
+performs both stages. The executor receives `phase: prepare`, `check`, or `run`;
+preparation returns family-owned `details.prepared`. Its optional `input_files`
+list identifies immutable files whose integrity the application checks before
+reuse. `check` verifies family-specific readiness without rebuilding or measuring.
 
 Accuracy is a conversion check, not a standalone Hugging Face score. The family
 executor runs the Hugging Face model as the reference, runs the same inputs
@@ -104,13 +158,34 @@ suites:
             max_new_tokens: 64
           measurement:
             warmup: 5
-            iterations: 20
+            iterations: 10
 ```
 
 The report records both raw latency samples, both metric sets, compile evidence,
 the TensorRT bundle path, output-parity status, and
 `reference_over_candidate_p50`. Model loading, conversion, compilation, and
 warmup are excluded from timed samples on both sides.
+
+Performance preserves the historical stability rule: ten samples per side,
+first-half/last-half median drift at most 5%, and at least eight samples within
+5% of the median. An unstable pair is repeated once in fresh processes using
+the prepared bundle. Persistent instability is `measurement_inconclusive` and
+produces no speed ratio. Both attempts remain in the report. GPT-2 requires
+matching GPU identity and actual compiled graphs; compilation during measured
+iterations is an execution error.
+
+A device run may set an optional Performance target without changing family
+configuration:
+
+```yaml
+performance:
+  minimum_speedup: 0.95  # HF p50 / TensorRT p50
+  blocking: true
+```
+
+The target belongs in `runs/<name>.yaml`. Its evaluation is separate from the
+family's observation-only verdict; a blocking target failure makes the overall
+run fail. Without a target, valid timing comparisons remain observations.
 
 ## Commands
 
@@ -180,6 +255,11 @@ Completed pass/fail results are terminal. Missing or malformed results are run
 again; an `execution=error` result is archived under the case's `attempts/`
 directory before that case is retried.
 
+Resume first verifies source/configuration, actual Python package versions, and
+prepared input files. Changed inputs require a new run instead of silently
+reusing completed results. Preparation receipts and executor logs are retained
+under `preparations/` and `environments/` alongside case evidence in `items/`.
+
 Regenerate the machine-readable and HTML reports without executing cases:
 
 ```bash
@@ -191,3 +271,7 @@ cases contribute pass/fail/error status. Observation-only cases are reported
 separately and can never claim a pass or fail verdict. If no model has opted
 into the selected assessment, the valid empty plan is reported as `empty` and
 does not create a coverage failure.
+
+The report exposes completed, comparable, errored, inconclusive, and failed
+counts separately. Detailed rows retain both backends, compilation/stability
+evidence, optional run targets, and links to interpreter and preparation receipts.

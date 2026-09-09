@@ -16,8 +16,14 @@ timing:
     warmup_excluded: true
 
 comparison:
-  output_contract: exact_token_ids
   primary_metric: latency_ms.p50
+
+stability:
+  samples: 10
+  median_drift_limit: 0.05
+  within_median_fraction: 0.05
+  minimum_close_samples: 8
+  retries: 1
 
 metrics:
   - sample_count

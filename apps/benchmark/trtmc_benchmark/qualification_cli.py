@@ -38,6 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--environment", type=Path)
     run.add_argument("-o", "--output", required=True, type=Path)
 
+    prepare = commands.add_parser("prepare")
+    _selection_arguments(prepare)
+    prepare.add_argument("--environment", type=Path)
+    prepare.add_argument("-o", "--output", required=True, type=Path)
+
     resume = commands.add_parser("resume")
     resume.add_argument("run_directory", type=Path)
 
@@ -59,9 +64,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
     try:
-        if arguments.command in {"plan", "run"}:
+        if arguments.command in {"plan", "run", "prepare"}:
             kind, models, suites, cases, environment_path = _resolve_selection(
-                arguments, require_environment=arguments.command == "run"
+                arguments, require_environment=arguments.command != "plan"
             )
             plan = QualificationCatalog(arguments.families_root).plan(
                 kind,
@@ -78,7 +83,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             assert environment_path is not None
             environment = load_environment(environment_path)
-            report = QualificationRunner().run(plan, arguments.output, environment)
+            if arguments.run_config:
+                environment["performance_target"] = load_run_configuration(arguments.run_config)[
+                    "performance"
+                ]
+            report = QualificationRunner().run(
+                plan, arguments.output, environment, prepare_only=arguments.command == "prepare"
+            )
+            if arguments.command == "prepare":
+                print(f"{report['status']}: {arguments.output / 'preparation.json'}")
+                return 0 if report["status"] == "prepared" else 1
             _print_report(report, arguments.output.expanduser().resolve())
             return 0 if report["status"] in {"pass", "observed", "empty"} else 1
         if arguments.command == "resume":

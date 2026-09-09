@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,130 @@ def _environment() -> dict:
         "name": "test",
         "execution": {"timeout_seconds": 10},
     }
+
+
+def test_family_python_is_used_by_real_executor_without_inherited_packages(tmp_path, monkeypatch):
+    families = tmp_path / "families"
+    qualification = _family(families, "alpha", "model-a")
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
+    python = venv / "bin" / "python"
+    site = Path(
+        subprocess.check_output(
+            [
+                str(python),
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
+            ],
+            text=True,
+        ).strip()
+    )
+    (site / "family_dependency.py").write_text("VALUE = 'family'\n")
+    reference_venv = tmp_path / "reference-venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(reference_venv)], check=True)
+    reference_python = reference_venv / "bin" / "python"
+    reference_site = reference_venv / site.relative_to(venv)
+    (reference_site / "family_dependency.py").write_text("VALUE = 'reference'\n")
+    injected = tmp_path / "injected"
+    injected.mkdir()
+    (injected / "family_dependency.py").write_text("VALUE = 'wrong environment'\n")
+    monkeypatch.setenv("PYTHONPATH", str(injected))
+    (qualification / "executor.py").write_text(
+        "import family_dependency, subprocess\nassert family_dependency.VALUE == 'family'\n"
+        + _FAKE_EXECUTOR
+        + "\nassert subprocess.check_output([request['environment']['tools']['reference_python'], '-c', "
+        "\"import family_dependency; print(family_dependency.VALUE)\"], text=True).strip() == 'reference'\n"
+    )
+    (qualification / "prepare_environment.py").write_text(
+        "import argparse, json\nfrom pathlib import Path\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--request'); p.add_argument('--output')\n"
+        "a = p.parse_args()\n"
+        f"Path(a.output).write_text(json.dumps({{'python': {str(python)!r}, 'reference_python': {str(reference_python)!r}}}))\n"
+    )
+    plan = QualificationCatalog(families).plan("accuracy")
+    report = QualificationRunner().run(plan, tmp_path / "run", _environment())
+    assert report["status"] == "pass"
+    command = json.loads(next((tmp_path / "run" / "items").glob("*/command.json")).read_text())
+    assert command["argv"][0] == str(python)
+    receipt = json.loads((tmp_path / "run/environments/alpha/environment.json").read_text())
+    assert receipt["evidence"]["python"]["prefix"] == str(venv)
+    assert receipt["evidence"]["reference_python"]["prefix"] == str(reference_venv)
+
+    metadata = site / "changed_dependency-1.0.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text("Name: changed-dependency\nVersion: 1.0\n")
+    resumed = QualificationRunner().run(plan, tmp_path / "run", _environment(), resume=True)
+    assert resumed["status"] == "error"
+    assert all("environment changed" in row["details"]["error"] for row in resumed["items"])
+
+
+def test_environment_failure_is_family_local_and_prepare_does_not_report_accuracy(tmp_path):
+    families = tmp_path / "families"
+    _family(families, "alpha", "model-a")
+    broken = _family(families, "beta", "model-b")
+    (broken / "prepare_environment.py").write_text(
+        "raise RuntimeError('incompatible dependencies')\n"
+    )
+    plan = QualificationCatalog(families).plan("accuracy")
+    report = QualificationRunner().run(plan, tmp_path / "run", _environment())
+    assert report["status"] == "error"
+    assert all(
+        row["execution"] == "completed" for row in report["items"] if row["family"] == "alpha"
+    )
+    assert all(row["execution"] == "error" for row in report["items"] if row["family"] == "beta")
+
+    selected = QualificationCatalog(families).plan("accuracy", models=["model-a"])
+    root = tmp_path / "prepared"
+    receipt = QualificationRunner().run(selected, root, _environment(), prepare_only=True)
+    assert receipt["status"] == "prepared"
+    assert not (root / "report.json").exists()
+    assert not list((root / "items").glob("*/result.json"))
+    resumed = QualificationRunner().run(selected, root, _environment(), resume=True)
+    assert resumed["status"] == "pass"
+
+
+def test_resume_rejects_modified_prepared_input_before_reusing_completed_results(tmp_path):
+    families = tmp_path / "families"
+    qualification = _family(families, "alpha", "model-a")
+    artifact = tmp_path / "prepared.bin"
+    artifact.write_bytes(b"original")
+    source = _FAKE_EXECUTOR.replace(
+        "args.output.write_text(json.dumps(result))",
+        f"result['details']['prepared'] = {{'input_files': [{str(artifact)!r}]}}\n"
+        "args.output.write_text(json.dumps(result))",
+    )
+    (qualification / "executor.py").write_text(source)
+    plan = QualificationCatalog(families).plan("accuracy")
+    runner = QualificationRunner()
+    assert runner.run(plan, tmp_path / "run", _environment())["status"] == "pass"
+    artifact.write_bytes(b"changed")
+    report = runner.run(plan, tmp_path / "run", _environment(), resume=True)
+    assert report["status"] == "error"
+    assert report["summary"]["comparable"] == 0
+    assert all("prepared input files changed" in row["details"]["error"] for row in report["items"])
+
+
+def test_device_run_target_does_not_change_family_observation_verdict(tmp_path):
+    families = tmp_path / "families"
+    qualification = _family(families, "alpha", "model-a")
+    config = yaml.safe_load((qualification / "model-a.accuracy.yaml").read_text())
+    config["kind"] = "performance"
+    config["suites"] = [config["suites"][1]]
+    (qualification / "model-a.performance.yaml").write_text(yaml.safe_dump(config))
+    (qualification / "executor.py").write_text(
+        _FAKE_EXECUTOR.replace(
+            '"metrics": {"count": count}', '"metrics": {"reference_over_candidate_p50": 0.5}'
+        )
+    )
+    plan = QualificationCatalog(families).plan("performance")
+    report = QualificationRunner().run(
+        plan,
+        tmp_path / "run",
+        {**_environment(), "performance_target": {"minimum_speedup": 1.0, "blocking": True}},
+    )
+    assert report["status"] == "fail"
+    assert report["items"][0]["verdict"] is None
+    assert report["items"][0]["performance_target"]["passed"] is False
 
 
 def test_discovery_reads_only_explicit_family_configs_and_expands_cases(tmp_path: Path) -> None:

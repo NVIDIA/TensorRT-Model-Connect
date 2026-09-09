@@ -90,11 +90,33 @@ def _execute(request: Mapping[str, Any], item: Mapping[str, Any], item_dir: Path
     if manifest.get("name") != item.get("model") or manifest.get("family") != "gpt2":
         raise Gpt2QualificationError("plan item and GPT-2 manifest do not match")
 
+    if request.get("phase") == "prepare":
+        return _prepare_case(request, item, manifest, case, environment, item_dir)
+    prepared = request.get("preparation", {})
+    if prepared:
+        if prepared.get("plan_item_id") != item["id"] or not Path(prepared["checkpoint"]).is_dir():
+            raise Gpt2QualificationError(
+                "preparation does not match the selected case or checkpoint"
+            )
+        if not Path(prepared["bundle"]).is_file():
+            raise Gpt2QualificationError("prepared bundle is missing")
+        manifest = {**manifest, "hf_revision": prepared["hf_revision"]}
+    if request.get("phase") == "check":
+        if not prepared:
+            raise Gpt2QualificationError("a prepared bundle receipt is required")
+        return {
+            **_identity(item),
+            "schema_version": RESULT_SCHEMA,
+            "execution": "completed",
+            "verdict": "pass" if item["gate_policy"] == "blocking" else None,
+            "details": {"prepared": prepared},
+            "artifacts": [],
+        }
+
     if item["kind"] == "accuracy":
         if definition.get("implementation") != "mmlu_continuation_parity":
             raise Gpt2QualificationError(
-                "unsupported GPT-2 Accuracy implementation "
-                f"{definition.get('implementation')!r}"
+                f"unsupported GPT-2 Accuracy implementation {definition.get('implementation')!r}"
             )
         return _execute_accuracy(
             request=request,
@@ -108,8 +130,7 @@ def _execute(request: Mapping[str, Any], item: Mapping[str, Any], item_dir: Path
 
     if definition.get("implementation") != "text_generation_performance":
         raise Gpt2QualificationError(
-            "unsupported GPT-2 Performance implementation "
-            f"{definition.get('implementation')!r}"
+            f"unsupported GPT-2 Performance implementation {definition.get('implementation')!r}"
         )
     return _execute_performance(
         request=request,
@@ -120,6 +141,105 @@ def _execute(request: Mapping[str, Any], item: Mapping[str, Any], item_dir: Path
         case=case,
         environment=environment,
     )
+
+
+def _prepare_case(request, item, manifest, case, environment, item_dir):
+    if not environment.get("execution", {}).get("allow_build", False):
+        raise Gpt2QualificationError(
+            "a new GPT-2 run requires allow_build; resume a prepared run to reuse its bundle"
+        )
+    python = environment["tools"]["reference_python"]
+    snapshot_request = {
+        "repo_id": manifest["hf_id"],
+        "revision": manifest.get("hf_revision"),
+        "local_files_only": environment.get("execution", {}).get("local_files_only", False),
+    }
+    code = (
+        "import json, sys; from pathlib import Path; "
+        "from huggingface_hub import snapshot_download; "
+        "from transformers import GPT2LMHeadModel, AutoTokenizer; "
+        "import torch; "
+        "p = Path(snapshot_download(**json.loads(sys.argv[1]))); "
+        "print(json.dumps({'checkpoint': str(p), 'hf_revision': p.name}))"
+    )
+    command = [python, "-c", code, json.dumps(snapshot_request)]
+    _write_json(item_dir / "checkpoint-command.json", {"argv": command, "cwd": str(item_dir)})
+    with (
+        (item_dir / "checkpoint.stdout.log").open("w") as stdout,
+        (item_dir / "checkpoint.stderr.log").open("w") as stderr,
+    ):
+        subprocess.run(
+            command,
+            env=_reference_environment(),
+            cwd=item_dir,
+            stdout=stdout,
+            stderr=stderr,
+            check=True,
+            timeout=_timeout(environment),
+        )
+    checkpoint = _read_json(item_dir / "checkpoint.stdout.log", "checkpoint receipt")
+    revision = checkpoint.get("hf_revision", "")
+    if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
+        raise Gpt2QualificationError("HF checkpoint must resolve to an immutable revision")
+    spec = {
+        "models": [
+            {
+                "model": item["model"],
+                "cases": [
+                    {
+                        "name": "prepare",
+                        "testcase": case["candidate"]["testcase"],
+                        "measurement": {"warmup": 0, "iterations": 1},
+                    }
+                ],
+            }
+        ]
+    }
+    prepared_environment = {
+        **environment,
+        "storage": {
+            **environment.get("storage", {}),
+            "bundle_cache": str(item_dir / "bundles"),
+            "bundle_roots": [],
+        },
+    }
+    result = _run_benchmark(
+        request={**request, "preparation": checkpoint},
+        environment=prepared_environment,
+        item_dir=item_dir,
+        spec=spec,
+        label="GPT-2 bundle preparation",
+        prepare_only=True,
+    )
+    bundles = result.get("bundles", [])
+    if len(bundles) != 1 or bundles[0].get("status") != "built":
+        raise Gpt2QualificationError("preparation must build exactly one fresh GPT-2 bundle")
+    bundle = str(Path(bundles[0]["bundle"]).resolve())
+    prepared = {
+        **checkpoint,
+        "bundle": bundle,
+        "input_files": [bundle]
+        + [
+            str(path)
+            for path in sorted(Path(checkpoint["checkpoint"]).iterdir())
+            if path.is_file() and path.suffix in {".bin", ".safetensors", ".json", ".txt"}
+        ],
+        "build": bundles[0],
+        "plan_item_id": item["id"],
+    }
+    _write_json(item_dir / "bundle-receipt.json", prepared)
+    return {
+        **_identity(item),
+        "schema_version": RESULT_SCHEMA,
+        "execution": "completed",
+        "verdict": "pass" if item["gate_policy"] == "blocking" else None,
+        "details": {"prepared": prepared},
+        "artifacts": [
+            _artifact("bundle receipt", "bundle-receipt.json"),
+            _artifact("build command", "candidate-command.json"),
+            _artifact("checkpoint command", "checkpoint-command.json"),
+        ],
+    }
 
 
 def _execute_accuracy(
@@ -159,6 +279,8 @@ def _execute_accuracy(
     gate_policy = str(item["gate_policy"])
     verdict = comparison["verdict"] if gate_policy == "blocking" else None
     artifacts = [
+        _artifact("candidate command", "candidate-command.json"),
+        _artifact("reference command", "reference-command.json"),
         _artifact("selected samples", "selected-samples.jsonl"),
         _artifact("sample comparisons", "samples.jsonl"),
         _artifact("disagreements", "disagreements.jsonl"),
@@ -216,6 +338,71 @@ def _execute_performance(
     case: Mapping[str, Any],
     environment: Mapping[str, Any],
 ) -> dict[str, Any]:
+    from trtmc_benchmark.measurement_stability import measurement_stability
+
+    if definition.get("stability") != {
+        "samples": 10,
+        "median_drift_limit": 0.05,
+        "within_median_fraction": 0.05,
+        "minimum_close_samples": 8,
+        "retries": 1,
+    }:
+        raise Gpt2QualificationError("unsupported Performance stability protocol")
+    attempts = []
+    artifacts = []
+    for attempt in range(2):
+        directory = item_dir if attempt == 0 else item_dir / "retry"
+        directory.mkdir(parents=True, exist_ok=True)
+        result = _measure_performance_pair(
+            request=request,
+            item=item,
+            item_dir=directory,
+            manifest=manifest,
+            definition=definition,
+            case=case,
+            environment=environment,
+        )
+        details = result["details"]
+        stability = {
+            side: measurement_stability(details[side]["samples_ms"])
+            for side in ("candidate", "reference")
+        }
+        attempts.append(
+            {
+                "stability": stability,
+                "candidate": details["candidate"],
+                "reference": details["reference"],
+            }
+        )
+        artifacts.extend(
+            {**artifact, "path": ("retry/" if attempt else "") + artifact["path"]}
+            for artifact in result["artifacts"]
+        )
+        if all(value["stable"] for value in stability.values()):
+            break
+    stable = all(value["stable"] for value in stability.values())
+    result["artifacts"] = artifacts
+    details["measurement_attempts"] = attempts
+    details["comparison_valid"] = stable
+    details["measurement_stability"] = stability
+    if not stable:
+        result["execution"] = "error"
+        details["error"] = "measurement_inconclusive"
+        details["comparison"].pop("reference_over_candidate_p50", None)
+        details["metrics"].pop("reference_over_candidate_p50", None)
+    return result
+
+
+def _measure_performance_pair(
+    *,
+    request: Mapping[str, Any],
+    item: Mapping[str, Any],
+    item_dir: Path,
+    manifest: Mapping[str, Any],
+    definition: Mapping[str, Any],
+    case: Mapping[str, Any],
+    environment: Mapping[str, Any],
+) -> dict[str, Any]:
     if item.get("gate_policy") != "observation_only":
         raise Gpt2QualificationError(
             "GPT-2 Performance requires observation_only until an environment owns its gate"
@@ -247,9 +434,7 @@ def _execute_performance(
         raise Gpt2QualificationError(
             "TensorRT Performance sample_count does not match the requested iterations"
         )
-    samples_ms = _performance_samples(
-        cell.get("samples_ms"), requested_iterations, "TensorRT"
-    )
+    samples_ms = _performance_samples(cell.get("samples_ms"), requested_iterations, "TensorRT")
     reference = _run_performance_reference(
         manifest=manifest,
         item=item,
@@ -264,6 +449,7 @@ def _execute_performance(
         reference=reference,
     )
     comparison = _compare_performance(definition, cell, reference)
+    _validate_performance_device(candidate.get("environment", {}), reference.get("environment", {}))
     return {
         **_identity(item),
         "schema_version": RESULT_SCHEMA,
@@ -304,13 +490,13 @@ def _execute_performance(
             "metrics": {
                 "candidate_latency_ms_p50": comparison["candidate_p50_ms"],
                 "reference_latency_ms_p50": comparison["reference_p50_ms"],
-                "reference_over_candidate_p50": comparison[
-                    "reference_over_candidate_p50"
-                ],
+                "reference_over_candidate_p50": comparison["reference_over_candidate_p50"],
             },
         },
         "artifacts": [
             _artifact("TensorRT performance request", "candidate-spec.json"),
+            _artifact("TensorRT command", "candidate-command.json"),
+            _artifact("HF command", "reference-performance-command.json"),
             _artifact("TensorRT performance result", "candidate/result.json"),
             _artifact("TensorRT performance report", "candidate/report.html"),
             _artifact("TensorRT performance stdout", "candidate.stdout.log"),
@@ -326,8 +512,10 @@ def _validate_performance_metrics(
     definition: Mapping[str, Any], metrics: Mapping[str, Any]
 ) -> None:
     required = definition.get("metrics")
-    if not isinstance(required, list) or not required or not all(
-        isinstance(value, str) and value for value in required
+    if (
+        not isinstance(required, list)
+        or not required
+        or not all(isinstance(value, str) and value for value in required)
     ):
         raise Gpt2QualificationError("Performance suite metrics must be a non-empty string list")
     for field in required:
@@ -342,6 +530,24 @@ def _validate_performance_metrics(
             raise Gpt2QualificationError(f"Performance metric {field!r} must be finite")
 
 
+def _validate_performance_device(
+    candidate: Mapping[str, Any], reference: Mapping[str, Any]
+) -> None:
+    gpus = candidate.get("gpus", [])
+    allocation = candidate.get("cuda_visible_devices")
+    if allocation and "," in allocation:
+        raise Gpt2QualificationError("GPT-2 Performance requires one GPU allocation")
+    if len(gpus) > 1:
+        gpus = [gpu for gpu in gpus if allocation in {str(gpu.get("index")), gpu.get("uuid")}]
+    if len(gpus) != 1 or not gpus[0].get("uuid") or not reference.get("gpu_uuid"):
+        raise Gpt2QualificationError("Performance GPU identity is missing or ambiguous")
+    if (
+        str(gpus[0]["uuid"]).removeprefix("GPU-").lower()
+        != str(reference["gpu_uuid"]).removeprefix("GPU-").lower()
+    ):
+        raise Gpt2QualificationError("Performance candidate and reference used different GPUs")
+
+
 def _validate_performance_timing(
     definition: Mapping[str, Any], measurement_policy: Mapping[str, Any], side: str
 ) -> None:
@@ -350,8 +556,7 @@ def _validate_performance_timing(
     for field, value in expected.items():
         if measurement_policy.get(field) != value:
             raise Gpt2QualificationError(
-                f"Performance {side} measurement policy does not match "
-                f"suite timing field {field!r}"
+                f"Performance {side} measurement policy does not match suite timing field {field!r}"
             )
 
 
@@ -409,6 +614,13 @@ def _validate_performance_reference(
             raise Gpt2QualificationError(
                 f"Performance reference has invalid torch.compile evidence field {field!r}"
             )
+    graphs = evidence.get("compiled_graph_count")
+    if isinstance(graphs, bool) or not isinstance(graphs, int) or graphs < 1:
+        raise Gpt2QualificationError("Performance reference did not compile any graphs")
+    if manifest.get("hf_revision") and reference.get("revision") != manifest["hf_revision"]:
+        raise Gpt2QualificationError(
+            "Performance reference checkpoint revision differs from preparation"
+        )
     policy = _mapping(reference.get("measurement_policy"), "reference measurement policy")
     _validate_performance_timing(definition, policy, "reference")
     measurement = _mapping(
@@ -449,20 +661,26 @@ def _compare_performance(
     reference: Mapping[str, Any],
 ) -> dict[str, Any]:
     policy = _mapping(definition.get("comparison"), "Performance comparison")
-    if policy.get("output_contract") != "exact_token_ids":
-        raise Gpt2QualificationError("unsupported Performance output comparison")
     if policy.get("primary_metric") != "latency_ms.p50":
         raise Gpt2QualificationError("unsupported Performance primary metric")
     candidate_output = _mapping(candidate.get("output_summary"), "candidate output summary")
     reference_output = _mapping(reference.get("output_summary"), "reference output summary")
     candidate_ids = candidate_output.get("token_ids")
     reference_ids = reference_output.get("token_ids")
-    if not isinstance(candidate_ids, list) or not all(
-        isinstance(value, int) and not isinstance(value, bool) for value in candidate_ids
+    if (
+        not isinstance(candidate_ids, list)
+        or not candidate_ids
+        or not all(
+            isinstance(value, int) and not isinstance(value, bool) for value in candidate_ids
+        )
     ):
         raise Gpt2QualificationError("TensorRT Performance output is missing generated token ids")
-    if not isinstance(reference_ids, list) or not all(
-        isinstance(value, int) and not isinstance(value, bool) for value in reference_ids
+    if (
+        not isinstance(reference_ids, list)
+        or not reference_ids
+        or not all(
+            isinstance(value, int) and not isinstance(value, bool) for value in reference_ids
+        )
     ):
         raise Gpt2QualificationError("HF Performance output is missing generated token ids")
     if candidate_ids != reference_ids:
@@ -471,12 +689,8 @@ def _compare_performance(
         )
     candidate_metrics = _mapping(candidate.get("metrics"), "candidate metrics")
     reference_metrics = _mapping(reference.get("metrics"), "reference metrics")
-    candidate_p50 = float(
-        _mapping(candidate_metrics.get("latency_ms"), "candidate latency")["p50"]
-    )
-    reference_p50 = float(
-        _mapping(reference_metrics.get("latency_ms"), "reference latency")["p50"]
-    )
+    candidate_p50 = float(_mapping(candidate_metrics.get("latency_ms"), "candidate latency")["p50"])
+    reference_p50 = float(_mapping(reference_metrics.get("latency_ms"), "reference latency")["p50"])
     return {
         "output_contract": "exact_token_ids",
         "output_match": True,
@@ -608,24 +822,28 @@ def _run_reference(
     stderr_path = item_dir / "reference.stderr.log"
     _write_json(request_path, payload)
     timeout = _timeout(environment)
+    command = [
+        str(python),
+        str(Path(__file__).resolve()),
+        "--reference",
+        "--request",
+        str(request_path),
+        "--output",
+        str(result_path),
+    ]
+    _write_json(item_dir / "reference-command.json", {"argv": command, "cwd": str(item_dir)})
     with (
         stdout_path.open("w", encoding="utf-8") as stdout,
         stderr_path.open("w", encoding="utf-8") as stderr,
     ):
         completed = subprocess.run(
-            [
-                str(python),
-                str(Path(__file__).resolve()),
-                "--reference",
-                "--request",
-                str(request_path),
-                "--output",
-                str(result_path),
-            ],
+            command,
+            cwd=item_dir,
             stdout=stdout,
             stderr=stderr,
             check=False,
             timeout=timeout,
+            env=_reference_environment(),
         )
     if completed.returncode != 0:
         raise Gpt2QualificationError(
@@ -634,6 +852,10 @@ def _run_reference(
     result = _read_json(result_path, "GPT-2 reference result")
     if result.get("schema_version") != REFERENCE_RESULT_SCHEMA:
         raise Gpt2QualificationError("GPT-2 reference returned an unsupported result")
+    if manifest.get("hf_revision") and result.get("revision") != manifest["hf_revision"]:
+        raise Gpt2QualificationError(
+            "Accuracy reference checkpoint revision differs from preparation"
+        )
     return result
 
 
@@ -834,9 +1056,7 @@ def _run_performance_candidate(
                     {
                         "name": item["case_id"],
                         "testcase": _string(candidate.get("testcase"), "candidate.testcase"),
-                        "request": dict(
-                            _mapping(candidate.get("request"), "candidate request")
-                        ),
+                        "request": dict(_mapping(candidate.get("request"), "candidate request")),
                         "measurement": dict(
                             _mapping(candidate.get("measurement"), "candidate measurement")
                         ),
@@ -873,7 +1093,7 @@ def _run_performance_reference(
     python = Path(str(tools.get("reference_python") or sys.executable)).expanduser().absolute()
     if not python.is_file():
         raise Gpt2QualificationError(f"reference Python does not exist: {python}")
-    runner = _path(tools.get("hf_transformers_runner"), "tools.hf_transformers_runner")
+    runner = Path(__file__).with_name("hf_performance.py")
     if not runner.is_file():
         raise Gpt2QualificationError(f"HF Performance runner does not exist: {runner}")
 
@@ -929,12 +1149,17 @@ def _run_performance_reference(
         command.append("--trust-remote-code")
     if bool(execution.get("local_files_only", False)):
         command.append("--local-files-only")
+    _write_json(
+        item_dir / "reference-performance-command.json", {"argv": command, "cwd": str(item_dir)}
+    )
     with (
         stdout_path.open("w", encoding="utf-8") as stdout,
         stderr_path.open("w", encoding="utf-8") as stderr,
     ):
         completed = subprocess.run(
             command,
+            env=_reference_environment(),
+            cwd=item_dir,
             stdout=stdout,
             stderr=stderr,
             check=False,
@@ -942,19 +1167,18 @@ def _run_performance_reference(
         )
     if completed.returncode != 0:
         raise Gpt2QualificationError(
-            f"HF torch.compile Performance exited {completed.returncode}; "
-            f"see {stderr_path.name}"
+            f"HF torch.compile Performance exited {completed.returncode}; see {stderr_path.name}"
         )
     return _read_json(output_path, "HF torch.compile Performance result")
 
 
-def _conversion_evidence(
-    item: Mapping[str, Any], candidate: Mapping[str, Any]
-) -> dict[str, Any]:
+def _conversion_evidence(item: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
     preparation = _mapping(candidate.get("preparation"), "candidate preparation")
     bundles = preparation.get("bundles")
     if not isinstance(bundles, list) or len(bundles) != 1:
-        raise Gpt2QualificationError("TensorRT candidate must identify exactly one converted bundle")
+        raise Gpt2QualificationError(
+            "TensorRT candidate must identify exactly one converted bundle"
+        )
     bundle = _mapping(bundles[0], "candidate bundle")
     if bundle.get("model") != item.get("model"):
         raise Gpt2QualificationError("TensorRT candidate bundle belongs to the wrong model")
@@ -979,13 +1203,11 @@ def _run_benchmark(
     item_dir: Path,
     spec: Mapping[str, Any],
     label: str,
+    prepare_only: bool = False,
 ) -> dict[str, Any]:
     tools = _mapping(environment.get("tools"), "environment tools")
     storage = _mapping(environment.get("storage"), "environment storage")
     execution = _mapping(environment.get("execution", {}), "environment execution")
-    executable = _path(tools.get("trtmc_bench"), "tools.trtmc_bench")
-    if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise Gpt2QualificationError(f"trtmc-bench is not executable: {executable}")
     runtime_root = _path(storage.get("runtime_root"), "storage.runtime_root")
     spec_path = item_dir / "candidate-spec.json"
     output_dir = item_dir / "candidate"
@@ -993,7 +1215,9 @@ def _run_benchmark(
     stderr_path = item_dir / "candidate.stderr.log"
     _write_json(spec_path, spec)
     command = [
-        str(executable),
+        str(tools.get("python") or sys.executable),
+        "-m",
+        "trtmc_benchmark",
         "run",
         str(spec_path),
         "--manifest-root",
@@ -1016,12 +1240,21 @@ def _run_benchmark(
         command.extend(("--bundle-root", str(_path(root, "storage.bundle_roots"))))
     if not bool(execution.get("allow_build", False)):
         command.append("--no-build")
+    prepared = request.get("preparation", {})
+    if prepared.get("checkpoint"):
+        command.extend(("--model-dir", f"{spec['models'][0]['model']}={prepared['checkpoint']}"))
+    if prepare_only:
+        command.append("--prepare-only")
+    elif prepared.get("bundle"):
+        command.extend(("--bundle", str(prepared["bundle"]), "--no-build"))
+    _write_json(item_dir / "candidate-command.json", {"argv": command, "cwd": str(item_dir)})
     with (
         stdout_path.open("w", encoding="utf-8") as stdout,
         stderr_path.open("w", encoding="utf-8") as stderr,
     ):
         completed = subprocess.run(
             command,
+            cwd=item_dir,
             stdout=stdout,
             stderr=stderr,
             check=False,
@@ -1031,11 +1264,20 @@ def _run_benchmark(
         raise Gpt2QualificationError(
             f"{label} exited {completed.returncode}; see {stderr_path.name}"
         )
+    if prepare_only:
+        return _read_json(stdout_path, "bundle preparation")
     result = _read_json(output_dir / "result.json", f"{label} result")
     if result.get("schema_version") != "trtmc.benchmark-run/v2":
         raise Gpt2QualificationError(f"{label} returned an unsupported result")
     if result.get("status") != "completed":
         raise Gpt2QualificationError(f"{label} did not complete")
+    if prepared.get("bundle"):
+        bundles = result.get("preparation", {}).get("bundles", [])
+        if (
+            len(bundles) != 1
+            or Path(bundles[0].get("bundle", "")).resolve() != Path(prepared["bundle"]).resolve()
+        ):
+            raise Gpt2QualificationError("benchmark did not use the prepared bundle")
     return result
 
 
@@ -1208,10 +1450,16 @@ def _existing_artifacts(item_dir: Path) -> list[dict[str, str]]:
         ("sample comparisons", "samples.jsonl"),
         ("disagreements", "disagreements.jsonl"),
         ("candidate request", "candidate-spec.json"),
+        ("candidate command", "candidate-command.json"),
+        ("reference command", "reference-performance-command.json"),
+        ("checkpoint command", "checkpoint-command.json"),
+        ("checkpoint stdout", "checkpoint.stdout.log"),
+        ("checkpoint stderr", "checkpoint.stderr.log"),
         ("candidate result", "candidate/result.json"),
         ("candidate stdout", "candidate.stdout.log"),
         ("candidate stderr", "candidate.stderr.log"),
         ("reference request", "reference-request.json"),
+        ("Accuracy reference command", "reference-command.json"),
         ("reference result", "reference.json"),
         ("reference stdout", "reference.stdout.log"),
         ("reference stderr", "reference.stderr.log"),
@@ -1220,9 +1468,11 @@ def _existing_artifacts(item_dir: Path) -> list[dict[str, str]]:
         ("HF torch.compile stderr", "reference-performance.stderr.log"),
     )
     return [
-        _artifact(label, relative)
+        _artifact(prefix + label, prefix + relative)
+        for prefix in ("", "retry/")
         for label, relative in known
-        if not (item_dir / relative).is_symlink() and (item_dir / relative).is_file()
+        if not (item_dir / (prefix + relative)).is_symlink()
+        and (item_dir / (prefix + relative)).is_file()
     ]
 
 
@@ -1245,6 +1495,14 @@ def _string(value: Any, field: str) -> str:
 def _path(value: Any, field: str) -> Path:
     path = Path(_string(value, field)).expanduser().resolve()
     return path
+
+
+def _reference_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    for name in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
+        environment.pop(name, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    return environment
 
 
 def _timeout(environment: Mapping[str, Any]) -> int:

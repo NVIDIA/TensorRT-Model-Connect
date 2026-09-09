@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import sys
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from families.gpt2.tests.qualification import executor
+from families.gpt2.tests.qualification import executor, hf_performance, prepare_environment
 from families.gpt2.tests.qualification.executor import (
     _compare,
     _load_samples,
@@ -24,6 +26,139 @@ from trtmc_benchmark.qualification import QualificationCatalog
 REPOSITORY = Path(__file__).resolve().parents[4]
 
 
+@pytest.mark.parametrize("settles", [False, True])
+def test_unstable_performance_retries_both_sides_once_and_preserves_evidence(
+    tmp_path, monkeypatch, settles
+):
+    item = (
+        QualificationCatalog(REPOSITORY / "families")
+        .plan("performance", models=["gpt2-125m"])
+        .items[0]
+    )
+    calls = []
+
+    def measure(**kwargs):
+        calls.append(kwargs["item_dir"])
+        samples = [1.0] * 10 if settles and len(calls) == 2 else [1.0] * 5 + [2.0] * 5
+        return {
+            "execution": "completed",
+            "verdict": None,
+            "artifacts": [],
+            "details": {
+                "candidate": {"samples_ms": samples},
+                "reference": {"samples_ms": [1.0] * 10},
+                "comparison": {"reference_over_candidate_p50": 1.0},
+                "metrics": {"reference_over_candidate_p50": 1.0},
+            },
+        }
+
+    monkeypatch.setattr(executor, "_measure_performance_pair", measure)
+    result = executor._execute_performance(
+        request={},
+        item=item.to_json(),
+        item_dir=tmp_path,
+        manifest={},
+        definition=item.definition,
+        case=item.case,
+        environment={},
+    )
+    assert calls == [tmp_path, tmp_path / "retry"]
+    assert len(result["details"]["measurement_attempts"]) == 2
+    assert result["details"]["comparison_valid"] is settles
+    if not settles:
+        assert result["execution"] == "error"
+        assert result["details"]["error"] == "measurement_inconclusive"
+        assert "reference_over_candidate_p50" not in result["details"]["metrics"]
+
+
+def test_benchmark_launch_uses_selected_python_and_prepared_bundle(tmp_path, monkeypatch):
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        directory = tmp_path / "candidate"
+        directory.mkdir()
+        (directory / "result.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "trtmc.benchmark-run/v2",
+                    "status": "completed",
+                    "preparation": {"bundles": [{"bundle": "/prepared/gpt2.bundle"}]},
+                }
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(executor.subprocess, "run", run)
+    executor._run_benchmark(
+        request={
+            "families_root": str(REPOSITORY / "families"),
+            "preparation": {"checkpoint": "/cache/snapshot", "bundle": "/prepared/gpt2.bundle"},
+        },
+        environment={
+            "tools": {"python": sys.executable},
+            "storage": {"runtime_root": str(tmp_path)},
+        },
+        item_dir=tmp_path,
+        spec={"models": [{"model": "gpt2-125m"}]},
+        label="test",
+    )
+    assert commands[0][:3] == [sys.executable, "-m", "trtmc_benchmark"]
+    assert commands[0][commands[0].index("--bundle") + 1] == "/prepared/gpt2.bundle"
+    assert "--no-build" in commands[0]
+
+
+def test_performance_requires_matching_gpu_identity():
+    with pytest.raises(executor.Gpt2QualificationError, match="different GPUs"):
+        executor._validate_performance_device({"gpus": [{"uuid": "GPU-a"}]}, {"gpu_uuid": "GPU-b"})
+
+
+def test_family_reference_rejects_compilation_inside_measurement(monkeypatch):
+    evidence = {"compiled_graph_count": 1}
+    calls = []
+    monkeypatch.setitem(
+        sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(synchronize=lambda: None))
+    )
+
+    def invoke():
+        calls.append(True)
+        if len(calls) > 1:
+            evidence["compiled_graph_count"] += 1
+        return {}
+
+    with pytest.raises(RuntimeError, match="compilation occurred inside timed samples"):
+        hf_performance._measure(invoke, lambda result: result, 1, 10, evidence)
+
+
+def test_gpt2_environment_reuses_compatible_common_python(tmp_path, monkeypatch):
+    request = tmp_path / "request.json"
+    output = tmp_path / "output.json"
+    request.write_text(json.dumps({"common_python": sys.executable, "allow_create": False}))
+    monkeypatch.setattr(
+        sys, "argv", ["prepare_environment.py", "--request", str(request), "--output", str(output)]
+    )
+    monkeypatch.setattr(prepare_environment, "_compatible", lambda python: python == sys.executable)
+    prepare_environment.main()
+    assert json.loads(output.read_text()) == {
+        "python": sys.executable,
+        "reference_python": sys.executable,
+    }
+
+
+def test_packaged_family_entry_points_do_not_need_repository_imports(tmp_path):
+    for module in (executor, hf_performance, prepare_environment):
+        source = Path(module.__file__)
+        target = tmp_path / source.name
+        target.write_bytes(source.read_bytes())
+        completed = subprocess.run(
+            [sys.executable, "-I", str(target), "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "usage:" in completed.stdout
+
+
 def test_checked_in_gpt2_accuracy_suite_is_discoverable() -> None:
     plan = QualificationCatalog(REPOSITORY / "families").plan("accuracy", models=["gpt2-125m"])
 
@@ -35,9 +170,7 @@ def test_checked_in_gpt2_accuracy_suite_is_discoverable() -> None:
 
 
 def test_checked_in_gpt2_performance_suite_is_discoverable() -> None:
-    plan = QualificationCatalog(REPOSITORY / "families").plan(
-        "performance", models=["gpt2-125m"]
-    )
+    plan = QualificationCatalog(REPOSITORY / "families").plan("performance", models=["gpt2-125m"])
 
     assert [(item.suite_id, item.case_id) for item in plan.items] == [
         ("text_generation_performance", "generate_64")
@@ -45,7 +178,7 @@ def test_checked_in_gpt2_performance_suite_is_discoverable() -> None:
     assert plan.items[0].gate_policy == "observation_only"
     assert plan.items[0].case["candidate"]["measurement"] == {
         "warmup": 5,
-        "iterations": 20,
+        "iterations": 10,
     }
     assert plan.items[0].case["reference"] == {
         "implementation": "hf_transformers",
@@ -71,7 +204,7 @@ def test_gpt2_performance_compares_converted_bundle_with_hf_torch_compile(
             "warmup_excluded": True,
             "telemetry_in_timed_path": False,
         },
-        "environment": {"gpus": [{"name": "test-gpu"}]},
+        "environment": {"gpus": [{"name": "test-gpu", "uuid": "GPU-test"}]},
         "preparation": {
             "included_in_performance_metrics": False,
             "bundles": [
@@ -87,10 +220,10 @@ def test_gpt2_performance_compares_converted_bundle_with_hf_torch_compile(
                 "name": "generate_64",
                 "model": "gpt2-125m",
                 "status": "completed",
-                "samples_ms": [4.0, 5.0] * 10,
+                "samples_ms": [4.5] * 10,
                 "output_summary": {"token_ids": [1, 2], "text": "candidate"},
                 "metrics": {
-                    "sample_count": 20,
+                    "sample_count": 10,
                     "latency_ms": {"p50": 4.5, "p95": 4.95},
                     "request_throughput_per_s": 222.2,
                     "output_tokens_per_s": 14222.2,
@@ -111,6 +244,7 @@ def test_gpt2_performance_compares_converted_bundle_with_hf_torch_compile(
             "applied": True,
             "warmup_completed": True,
             "timed_callable_uses_compiled_target": True,
+            "compiled_graph_count": 1,
         },
         "model": "openai-community/gpt2",
         "revision": "revision",
@@ -121,10 +255,10 @@ def test_gpt2_performance_compares_converted_bundle_with_hf_torch_compile(
             "compile_excluded": True,
             "warmup_excluded": True,
         },
-        "samples_ms": [8.0, 10.0] * 10,
+        "samples_ms": [9.0] * 10,
         "metrics": {"latency_ms": {"p50": 9.0, "p95": 9.9}},
         "output_summary": {"token_ids": [1, 2], "output_tokens": 2, "text": "reference"},
-        "environment": {"gpu": "test-gpu"},
+        "environment": {"gpu": "test-gpu", "gpu_uuid": "GPU-test"},
     }
     monkeypatch.setattr(
         executor,
@@ -157,14 +291,10 @@ def test_gpt2_performance_compares_converted_bundle_with_hf_torch_compile(
         "reference_p50_ms": 9.0,
         "reference_over_candidate_p50": 2.0,
     }
-    assert result["details"]["candidate"]["conversion"]["bundle"] == (
-        "/tmp/gpt2-125m.bundle"
-    )
+    assert result["details"]["candidate"]["conversion"]["bundle"] == ("/tmp/gpt2-125m.bundle")
 
 
-def test_gpt2_performance_rejects_timing_without_output_parity(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_gpt2_performance_rejects_timing_without_output_parity(tmp_path: Path, monkeypatch) -> None:
     item = (
         QualificationCatalog(REPOSITORY / "families")
         .plan("performance", models=["gpt2-125m"])
@@ -193,10 +323,10 @@ def test_gpt2_performance_rejects_timing_without_output_parity(
                 "name": "generate_64",
                 "model": "gpt2-125m",
                 "status": "completed",
-                "samples_ms": [4.0, 5.0] * 10,
+                "samples_ms": [4.5] * 10,
                 "output_summary": {"token_ids": [1]},
                 "metrics": {
-                    "sample_count": 20,
+                    "sample_count": 10,
                     "latency_ms": {"p50": 4.5, "p95": 4.95},
                     "request_throughput_per_s": 222.2,
                     "output_tokens_per_s": 222.2,
@@ -217,6 +347,7 @@ def test_gpt2_performance_rejects_timing_without_output_parity(
             "applied": True,
             "warmup_completed": True,
             "timed_callable_uses_compiled_target": True,
+            "compiled_graph_count": 1,
         },
         "model": "openai-community/gpt2",
         "precision": "fp32",
@@ -226,7 +357,7 @@ def test_gpt2_performance_rejects_timing_without_output_parity(
             "compile_excluded": True,
             "warmup_excluded": True,
         },
-        "samples_ms": [8.0, 10.0] * 10,
+        "samples_ms": [9.0] * 10,
         "metrics": {"latency_ms": {"p50": 9.0, "p95": 9.9}},
         "output_summary": {"token_ids": [2], "output_tokens": 1},
         "environment": {},
@@ -246,14 +377,15 @@ def test_gpt2_performance_rejects_timing_without_output_parity(
 
 
 def test_gpt2_manifest_covers_the_accuracy_context_window() -> None:
-    item = QualificationCatalog(REPOSITORY / "families").plan(
-        "accuracy", models=["gpt2-125m"]
-    ).items[0]
+    item = (
+        QualificationCatalog(REPOSITORY / "families")
+        .plan("accuracy", models=["gpt2-125m"])
+        .items[0]
+    )
     manifest = json.loads(item.manifest_path.read_text(encoding="utf-8"))
 
     assert (
-        item.case["prompt"]["token_limit"]
-        + item.case["candidate"]["request"]["max_new_tokens"]
+        item.case["prompt"]["token_limit"] + item.case["candidate"]["request"]["max_new_tokens"]
         <= manifest["max_sequence_length"]
     )
 
@@ -361,8 +493,6 @@ def test_performance_reference_runs_torch_compile_with_the_candidate_workload(
     target.write_text("", encoding="utf-8")
     virtualenv_python = tmp_path / "venv-python"
     virtualenv_python.symlink_to(target)
-    runner = tmp_path / "hf_transformers.py"
-    runner.write_text("", encoding="utf-8")
     commands: list[list[str]] = []
 
     def run(command, **_kwargs):
@@ -398,7 +528,6 @@ def test_performance_reference_runs_torch_compile_with_the_candidate_workload(
         environment={
             "tools": {
                 "reference_python": str(virtualenv_python),
-                "hf_transformers_runner": str(runner),
             },
             "execution": {"local_files_only": True, "timeout_seconds": 1},
         },
@@ -407,6 +536,7 @@ def test_performance_reference_runs_torch_compile_with_the_candidate_workload(
 
     command = commands[0]
     assert command[0] == str(virtualenv_python)
+    assert command[1] == str(Path(executor.__file__).with_name("hf_performance.py"))
     assert command[command.index("--mode") + 1] == "torch-compile"
     assert command[command.index("--request-json") + 1] == json.dumps(
         request, ensure_ascii=True, separators=(",", ":")
