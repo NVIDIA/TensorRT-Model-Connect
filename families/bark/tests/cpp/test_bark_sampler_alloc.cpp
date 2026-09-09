@@ -17,6 +17,7 @@
 #include <cuda_runtime.h>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -97,8 +98,15 @@ int main() {
         bool threw = false;
         try {
             trtmc::BarkSampler sampler(nullptr);
-        } catch (const std::runtime_error&) {
+        } catch (const std::runtime_error& error) {
             threw = true;
+            static const char* const expected[] = {
+                "Unable to allocate bark sampler index buffer",
+                "Unable to allocate bark sampler probability buffer",
+                "Unable to allocate bark sampler token id buffer",
+            };
+            check(std::string(error.what()) == expected[failing - 1],
+                  "the error should name the buffer that actually failed");
         }
         check(threw, "construction should throw when an allocation fails");
         check(g_outstanding.empty(), "failed construction must release every allocation it made");
