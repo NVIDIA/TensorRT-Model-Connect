@@ -19,7 +19,7 @@ Tensor names MUST match what the C++ runtime expects:
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import tensorrt as trt
@@ -33,7 +33,6 @@ from .utils import const_in_work_dtype, create_builder_context
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
-    from ...quantization.context import QuantContext
 
 
 def _mark_debug_output(
@@ -55,7 +54,7 @@ def build_standard_decoder_engine(
     max_cache_length: int,
     *,
     precision: str = "fp32",
-    quant_ctx: QuantContext | None = None,
+    quant_ctx: Any | None = None,
     norm_type: str = "rmsnorm",
     mlp_type: str = "swiglu",
     position_type: str = "rope",
@@ -99,7 +98,6 @@ def build_standard_decoder_engine(
     Returns:
         Serialized engine plan bytes.
     """
-    import os as _os
     # Mark the graph as honoring the internal decoder role contract. This is
     # embedded in the mutable config for family helpers that need to branch on
     # the active engine layout while building.
@@ -119,15 +117,11 @@ def build_standard_decoder_engine(
     #   - hidden_state_output=True     (speech / Bark hidden output)
     #   - config.raw.dynamic_kv_cache  (TriAttention multi-bucket decode)
     #
-    # ``TRTMC_NO_DUAL_PROFILE=1`` is an internal escape hatch (perf A/B,
-    # bisects against the legacy graph). It is *not* intended as a
-    # supported user-facing flag.
     _dual_profile_disabled_for = (
         embed_input
         or debug_layer_outputs
         or hidden_state_output
         or bool(config.raw.get("dynamic_kv_cache", False))
-        or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
     if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
         raise NotImplementedError(
@@ -569,7 +563,7 @@ def _add_decoder_layer(
     alibi_slopes_tensor: trt.ITensor | None = None,
     alibi_indices_tensor: trt.ITensor | None = None,
     dtype: np.dtype = np.float32,
-    quant_ctx: QuantContext | None = None,
+    quant_ctx: Any | None = None,
     cos_half_tensor: trt.ITensor | None = None,
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,

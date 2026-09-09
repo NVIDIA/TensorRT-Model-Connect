@@ -256,7 +256,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.fp32_layers:
         raise NotImplementedError("MiniMax-Music3 does not support fp32_layers")
     if request.dynamic_kv_cache:
-        raise NotImplementedError("MiniMax-Music3 does not support dynamic_kv_cache")
+        raise NotImplementedError("minimax_music3 does not support dynamic_kv_cache")
     if any(
         value is not None
         for value in (request.image_height, request.image_width, request.video_num_frames)
@@ -392,6 +392,7 @@ def _build_one(engine: str, weights: dict, *, latent_length: int = 689,
     builder = trt.Builder(logger)
     network = builder.create_network()
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
 
     if engine == engines.CONDITION_ENCODER_ENGINE:
         from . import condition_encoder_builder as builder_module
