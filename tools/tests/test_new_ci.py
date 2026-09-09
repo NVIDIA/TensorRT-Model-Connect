@@ -480,7 +480,10 @@ def test_isolated_family_runtime_preserves_installed_byok(tmp_path: Path) -> Non
 
 
 def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
-    repository = Path(__file__).resolve().parents[2]
+    family = tmp_path / "families/alpha"
+    (family / "tests").mkdir(parents=True)
+    (family / "model.py").write_text("def build(request, writer): pass\n")
+    (family / "tests/test_e2e.py").write_text("def test_e2e(): pass\n")
     binary = tmp_path / "trtmc"
     binary.write_text("")
     runtime = tmp_path / "runtime"
@@ -491,14 +494,14 @@ def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
         "libtrtmc_c.so",
         "libtrtmc_c.so.1",
         "libtrtmc_backend_trt.so",
-        "libtrtmc_model_gpt2.so",
+        "libtrtmc_model_alpha.so",
     ):
         (runtime / name).write_text("")
     native_build = tmp_path / "native-build"
     native_build.mkdir()
     (native_build / "CTestTestfile.cmake").write_text("")
     context = RecordingContext(
-        repository,
+        tmp_path,
         {
             "TRTMC_BINARY": str(binary),
             "TRTMC_RUNTIME_ROOT": str(runtime),
@@ -508,7 +511,7 @@ def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
     context.missing_e2e_testcases.add("does-not-exist")
 
     with pytest.raises(CiError, match="missing requested E2E testcase: does-not-exist"):
-        E2ERunner(context)._run(("gpt2",), ("does-not-exist",))
+        E2ERunner(context)._run(("alpha",), ("does-not-exist",))
 
 
 def test_pipeline_exposes_only_active_stages(tmp_path: Path) -> None:
