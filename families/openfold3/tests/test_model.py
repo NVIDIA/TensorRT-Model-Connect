@@ -221,7 +221,7 @@ def test_family_support_owns_the_mixed_fp16_default() -> None:
 
 
 def test_malformed_msa_rank_reports_a_value_error() -> None:
-    with pytest.raises(ValueError, match="rank-3"):
+    with pytest.raises(ValueError, match="rank-4"):
         model._shape_profile({"msa": np.zeros((1,), dtype=np.float32)})
 
 
@@ -300,7 +300,9 @@ def test_pinned_ubiquitin_build_inputs_have_expected_identity() -> None:
     features = load_npz_features(features_path)
     assert features["token_mask"].shape == (1, 76)
     assert features["atom_mask"].shape == (1, 608)
+    assert features["msa"].shape == (1, 1, 76, 32)
     assert int(features["atom_mask"].sum()) == 601
+    assert model._shape_profile(features) == (76, 601, 608, 1)
     metadata = json.loads(structure_path.read_text(encoding="utf-8"))
     assert metadata["atom_count"] == 601
 

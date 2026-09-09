@@ -45,8 +45,8 @@ def _require_precision(precision: str) -> None:
 
 def _shape_profile(features: dict[str, Any]) -> tuple[int, int, int, int]:
     msa = features["msa"]
-    if msa.ndim != 3:
-        raise ValueError("OpenFold3 prepared MSA must be a rank-3 tensor")
+    if msa.ndim != 4:
+        raise ValueError("OpenFold3 prepared MSA must be a rank-4 tensor")
     token_count = int(features["token_mask"].shape[1])
     padded_atoms = int(features["atom_mask"].shape[1])
     atom_count = int(features["representative_atom_map"].shape[2])
