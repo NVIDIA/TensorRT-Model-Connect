@@ -61,6 +61,11 @@ void test_first_block_cache_tail_schedule() {
     check(trtmc::should_compute_minimax_h3_tail(1, forwards,
                                                 std::numeric_limits<float>::quiet_NaN(), threshold),
           "H3 FirstBlockCache computes an interior tail for a non-finite metric");
+    check(trtmc::should_compute_minimax_h3_tail(1, forwards, 0.0F, 0.0F),
+          "H3 FirstBlockCache zero threshold disables all interior reuse");
+    check(trtmc::should_compute_minimax_h3_tail(1, forwards, std::numeric_limits<float>::infinity(),
+                                                threshold),
+          "H3 FirstBlockCache refreshes a non-finite residual baseline");
 }
 
 void test_data_ward_euler_sign() {

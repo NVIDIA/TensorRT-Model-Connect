@@ -22,8 +22,18 @@ from . import dit_builder as dense
 from . import graph_ops as op
 from .adaln_builder import build_adaln_precompute_engine
 from .config import MiniMaxH3Config
-from .ref2va_checkpoint import REF2VA_ADALN_KEYS, REF2VA_DENOISER_KEYS
-from .ref2va_contract import Ref2VADenoiserProfile, ref2va_denoiser_profiles
+from .ref2va_checkpoint import (
+    REF2VA_ADALN_KEYS,
+    REF2VA_DENOISER_KEYS,
+    REF2VA_FINISH_KEYS,
+    REF2VA_HEAD_KEYS,
+    REF2VA_TAIL_KEYS,
+)
+from .ref2va_contract import (
+    Ref2VADenoiserProfile,
+    ref2va_denoiser_profiles,
+    ref2va_first_block_cache_abis,
+)
 
 
 trt = trt_compat.get_trt()
@@ -37,8 +47,22 @@ def adaln_checkpoint_keys() -> tuple[str, ...]:
     return REF2VA_ADALN_KEYS
 
 
+def head_checkpoint_keys() -> tuple[str, ...]:
+    return REF2VA_HEAD_KEYS
+
+
+def tail_checkpoint_keys() -> tuple[str, ...]:
+    return REF2VA_TAIL_KEYS
+
+
+def finish_checkpoint_keys() -> tuple[str, ...]:
+    return REF2VA_FINISH_KEYS
+
+
 def native_profile(
     capacity: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+    *,
+    first_block_cache: bool = False,
 ) -> MiniMaxH3Config:
     """Translate the public scatter/gather capacity to the shared H3 graph profile."""
 
@@ -55,7 +79,7 @@ def native_profile(
         text_rows=capacity.max_text_rows,
         padded_sequence_length=capacity.max_packed_rows,
         max_timestep_count=4,
-        first_block_cache=False,
+        first_block_cache=first_block_cache,
     )
     profile.validate()
     return profile
@@ -148,6 +172,35 @@ def _add_optimization_profiles(
             optimization_capacity,
             expected_index=index,
             extra_memory_target=0.0 if index else None,
+        )
+
+
+def _add_cache_optimization_profiles(
+    builder, config, capacity: Ref2VADenoiserProfile, component: str
+) -> None:
+    for index, optimization_capacity in enumerate(ref2va_denoiser_profiles(capacity)):
+        optimization = builder.create_optimization_profile()
+        if index:
+            optimization.extra_memory_target = 0.0
+        for binding in ref2va_first_block_cache_abis(optimization_capacity)[component].inputs:
+            if binding.name.startswith("block_modulation_") or binding.name == "final_modulation":
+                continue
+            _set_profile_shape(
+                optimization,
+                binding.name,
+                (binding.min_shape, binding.opt_shape, binding.max_shape),
+            )
+        if config.add_optimization_profile(optimization) != index:
+            raise RuntimeError("TensorRT rejected the MiniMax-H3 Ref2VA cache profile")
+
+
+def _require_checkpoint_partition(weights: dict, expected: tuple[str, ...], label: str) -> None:
+    missing = sorted(set(expected) - set(weights))
+    unexpected = sorted(set(weights) - set(expected))
+    if missing or unexpected:
+        raise ValueError(
+            f"MiniMax-H3 transformer_ref {label} checkpoint partition mismatch: "
+            f"missing={missing[:8]}, unexpected={unexpected[:8]}"
         )
 
 
@@ -357,3 +410,240 @@ def build_ref2va_adaln_precompute_engine(
             f"missing={missing[:8]}, unexpected={unexpected[:8]}"
         )
     return build_adaln_precompute_engine(weights, native_profile(capacity), **kwargs)
+
+
+def _target_relative_change(network, current, previous, indices):
+    # Compute each generated modality separately; unchanged conditioning rows
+    # must never dilute the decision, nor may video length mask audio changes.
+    current = op.cast(network, op.gather_rows(network, current, indices), trt.float32)
+    previous = op.cast(network, op.gather_rows(network, previous, indices), trt.float32)
+    delta = network.add_elementwise(current, previous, trt.ElementWiseOperation.SUB).get_output(0)
+    delta_abs = network.add_unary(delta, trt.UnaryOperation.ABS).get_output(0)
+    previous_abs = network.add_unary(previous, trt.UnaryOperation.ABS).get_output(0)
+    axes = (1 << 0) | (1 << 1)
+    numerator = network.add_reduce(delta_abs, trt.ReduceOperation.SUM, axes, True).get_output(0)
+    denominator = network.add_reduce(previous_abs, trt.ReduceOperation.SUM, axes, True).get_output(
+        0
+    )
+    epsilon = op.constant(network, np.full((1, 1), 1.0e-8, dtype=np.float32))
+    denominator = network.add_elementwise(
+        denominator, epsilon, trt.ElementWiseOperation.MAX
+    ).get_output(0)
+    return network.add_elementwise(numerator, denominator, trt.ElementWiseOperation.DIV).get_output(
+        0
+    )
+
+
+def _cache_metric(network, video_change, audio_change):
+    metric = network.add_elementwise(
+        video_change, audio_change, trt.ElementWiseOperation.MAX
+    ).get_output(0)
+    # MAX need not propagate NaN from both operands. Explicitly fail closed if
+    # either modality is invalid instead of allowing the other to hide it.
+    video_nan = network.add_unary(video_change, trt.UnaryOperation.ISNAN).get_output(0)
+    audio_nan = network.add_unary(audio_change, trt.UnaryOperation.ISNAN).get_output(0)
+    invalid = network.add_elementwise(video_nan, audio_nan, trt.ElementWiseOperation.OR).get_output(
+        0
+    )
+    infinity = op.constant(network, np.full((1, 1), np.inf, dtype=np.float32))
+    metric = network.add_select(invalid, infinity, metric).get_output(0)
+    reshape = network.add_shuffle(metric)
+    reshape.reshape_dims = (1,)
+    return reshape.get_output(0)
+
+
+@op.cleanup_failed_build
+def build_ref2va_dit_head_engine(
+    weights: dict,
+    capacity: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+    *,
+    verbose: bool = False,
+    consume_weights: bool = False,
+    workspace_bytes: int | None = None,
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
+    """Build Ref2VA scatter packing, block zero and a target-only cache metric."""
+
+    _require_checkpoint_partition(weights, REF2VA_HEAD_KEYS, "cache head")
+    profile = native_profile(capacity, first_block_cache=True)
+    logger, builder, network, config = dense._native_builder(  # noqa: SLF001
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
+    video = network.add_input("video_hidden_states", trt.float32, (-1, 96))
+    audio = network.add_input("audio_hidden_states", trt.float32, (-1, 32))
+    text = network.add_input("encoder_hidden_states", trt.float32, (-1, 5120))
+    positions = network.add_input("position_ids", trt.float32, (-1, 3))
+    video_indices = network.add_input("video_indices", trt.int32, (-1,))
+    audio_indices = network.add_input("audio_indices", trt.int32, (-1,))
+    text_indices = network.add_input("text_indices", trt.int32, (-1,))
+    adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
+    block_modulation = network.add_input(
+        "block_modulation_0", trt.bfloat16, (profile.adaln_table_rows, 6, profile.hidden_size)
+    )
+    previous = network.add_input("previous_head_residual", trt.bfloat16, (-1, profile.hidden_size))
+    cache_video_indices = network.add_input("cache_video_indices", trt.int32, (-1,))
+    cache_audio_indices = network.add_input("cache_audio_indices", trt.int32, (-1,))
+    _add_cache_optimization_profiles(builder, config, capacity, "ref2va_dit_head")
+    packed = _packed_hidden(
+        network,
+        video,
+        audio,
+        text,
+        positions,
+        video_indices,
+        audio_indices,
+        text_indices,
+        weights,
+        profile,
+        consume_weights=consume_weights,
+    )
+    cos, sin = dense._rope_tables(network, positions, profile)  # noqa: SLF001
+    hidden = dense._transformer_block(  # noqa: SLF001
+        network,
+        packed,
+        block_modulation,
+        adaln_indices,
+        cos,
+        sin,
+        weights,
+        profile,
+        0,
+        consume_weights=consume_weights,
+    )
+    residual = network.add_elementwise(hidden, packed, trt.ElementWiseOperation.SUB).get_output(0)
+    video_change = _target_relative_change(network, residual, previous, cache_video_indices)
+    audio_change = _target_relative_change(network, residual, previous, cache_audio_indices)
+    metric = _cache_metric(network, video_change, audio_change)
+    for tensor, name in (
+        (hidden, "head_hidden"),
+        (residual, "head_residual"),
+        (metric, "cache_metric"),
+    ):
+        tensor.name = name
+        network.mark_output(tensor)
+    op.validate_native_network(
+        network, expected_attentions=profile.num_refiner_layers + 1, label="Ref2VA cache head"
+    )
+    return dense._serialize(  # noqa: SLF001
+        logger=logger,
+        builder=builder,
+        network=network,
+        config=config,
+        weights=weights,
+        consume_weights=consume_weights,
+        label="Ref2VA cache head",
+        output_path=output_path,
+    )
+
+
+@op.cleanup_failed_build
+def build_ref2va_dit_tail_engine(
+    weights: dict,
+    capacity: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+    *,
+    verbose: bool = False,
+    consume_weights: bool = False,
+    workspace_bytes: int | None = None,
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
+    """Build Ref2VA blocks one through 49 and their reusable packed residual."""
+
+    _require_checkpoint_partition(weights, REF2VA_TAIL_KEYS, "cache tail")
+    profile = native_profile(capacity, first_block_cache=True)
+    logger, builder, network, config = dense._native_builder(  # noqa: SLF001
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
+    head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
+    positions = network.add_input("position_ids", trt.float32, (-1, 3))
+    adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
+    modulations = {
+        index: network.add_input(
+            f"block_modulation_{index}",
+            trt.bfloat16,
+            (profile.adaln_table_rows, 6, profile.hidden_size),
+        )
+        for index in range(1, profile.num_layers)
+    }
+    _add_cache_optimization_profiles(builder, config, capacity, "ref2va_dit_tail")
+    cos, sin = dense._rope_tables(network, positions, profile)  # noqa: SLF001
+    hidden = head_hidden
+    for index in range(1, profile.num_layers):
+        hidden = dense._transformer_block(  # noqa: SLF001
+            network,
+            hidden,
+            modulations[index],
+            adaln_indices,
+            cos,
+            sin,
+            weights,
+            profile,
+            index,
+            consume_weights=consume_weights,
+        )
+    residual = network.add_elementwise(
+        hidden, head_hidden, trt.ElementWiseOperation.SUB
+    ).get_output(0)
+    residual.name = "tail_residual"
+    network.mark_output(residual)
+    op.validate_native_network(
+        network, expected_attentions=profile.num_layers - 1, label="Ref2VA cache tail"
+    )
+    return dense._serialize(  # noqa: SLF001
+        logger=logger,
+        builder=builder,
+        network=network,
+        config=config,
+        weights=weights,
+        consume_weights=consume_weights,
+        label="Ref2VA cache tail",
+        output_path=output_path,
+    )
+
+
+@op.cleanup_failed_build
+def build_ref2va_dit_finish_engine(
+    weights: dict,
+    capacity: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+    *,
+    verbose: bool = False,
+    consume_weights: bool = False,
+    workspace_bytes: int | None = None,
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
+    """Apply the selected residual and gather both Ref2VA velocity outputs."""
+
+    _require_checkpoint_partition(weights, REF2VA_FINISH_KEYS, "cache finish")
+    profile = native_profile(capacity, first_block_cache=True)
+    logger, builder, network, config = dense._native_builder(  # noqa: SLF001
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
+    head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
+    tail_residual = network.add_input("tail_residual", trt.bfloat16, (-1, profile.hidden_size))
+    timestep_indices = network.add_input("timestep_indices", trt.int32, (-1,))
+    video_indices = network.add_input("video_indices", trt.int32, (-1,))
+    audio_indices = network.add_input("audio_indices", trt.int32, (-1,))
+    final_modulation = network.add_input(
+        "final_modulation", trt.bfloat16, (profile.max_timestep_count, 2, profile.hidden_size)
+    )
+    _add_cache_optimization_profiles(builder, config, capacity, "ref2va_dit_finish")
+    hidden = network.add_elementwise(
+        head_hidden, tail_residual, trt.ElementWiseOperation.SUM
+    ).get_output(0)
+    hidden = dense._final_hidden(  # noqa: SLF001
+        network, hidden, timestep_indices, final_modulation, weights, profile
+    )
+    _mark_gathered_outputs(network, hidden, weights, video_indices, audio_indices)
+    op.validate_native_network(network, expected_attentions=0, label="Ref2VA cache finish")
+    return dense._serialize(  # noqa: SLF001
+        logger=logger,
+        builder=builder,
+        network=network,
+        config=config,
+        weights=weights,
+        consume_weights=consume_weights,
+        label="Ref2VA cache finish",
+        output_path=output_path,
+    )

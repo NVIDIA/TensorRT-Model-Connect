@@ -51,6 +51,10 @@ from .provenance import (
     validate_super_resolution_source_identity,
 )
 from .ref2va_bundle_contract import REF2VA_PLAN_SECTIONS as _REF2VA_COMPONENTS
+from .ref2va_bundle_contract import (
+    REF2VA_FIRST_BLOCK_CACHE_SECTIONS as _REF2VA_FBC_COMPONENTS,
+    ref2va_plan_sections,
+)
 
 
 _MODULE = "families.minimax_h3.staged_build"
@@ -102,7 +106,9 @@ def _component_workspace_bytes(component: str, *, ref2va: bool) -> int:
 def _workspace_limits(
     components: Sequence[tuple[str, str, str]], *, ref2va: bool
 ) -> dict[str, int | str]:
-    default_max = {name for name, _filename, _section in _DENSE_FBC_COMPONENTS}
+    default_max = {
+        name for name, _filename, _section in (*_DENSE_FBC_COMPONENTS, *_REF2VA_FBC_COMPONENTS[:3])
+    }
     return {
         filename: (
             TRT_DEFAULT_WORKSPACE_POLICY
@@ -146,8 +152,7 @@ def _component_source_receipts(root: Path) -> dict[str, dict[str, int]]:
 
 def _builder_source_identity() -> dict[str, dict[str, int]]:
     return {
-        path.name: _source_file_receipt(path)
-        for path in sorted(Path(__file__).parent.glob("*.py"))
+        path.name: _source_file_receipt(path) for path in sorted(Path(__file__).parent.glob("*.py"))
     }
 
 
@@ -314,9 +319,7 @@ def _runtime_config(
         "denoiser_cache_mode": "first_block",
         "denoiser_profile_count": 3,
         "denoiser_profile_layout": "five_second_t2va_then_fl2va_then_public_dynamic",
-        "first_block_cache_threshold": float(
-            defaults.get("first_block_cache_threshold", 0.08)
-        ),
+        "first_block_cache_threshold": float(defaults.get("first_block_cache_threshold", 0.08)),
         "text_rows": profile.text_rows,
         "text_rows_min": profile.min_text_rows,
         "text_rows_opt": profile.opt_text_rows,
@@ -360,7 +363,15 @@ def _runtime_config(
     if transformer_ref_identity is not None:
         from .ref2va_bundle_contract import ref2va_bundle_metadata
 
-        config.update(ref2va_bundle_metadata(transformer_ref_identity))
+        config.update(
+            ref2va_bundle_metadata(
+                transformer_ref_identity,
+                first_block_cache=defaults.get("ref2va_first_block_cache", True),
+                first_block_cache_threshold=defaults.get(
+                    "ref2va_first_block_cache_threshold", 0.08
+                ),
+            )
+        )
     return config
 
 
@@ -431,7 +442,10 @@ def build_staged_bundle(
         )
 
     components = (
-        (*_COMPONENTS, *_REF2VA_COMPONENTS)
+        (
+            *_COMPONENTS,
+            *ref2va_plan_sections((runtime_defaults or {}).get("ref2va_first_block_cache", True)),
+        )
         if transformer_ref_identity is not None
         else _COMPONENTS
     )
@@ -459,8 +473,7 @@ def build_staged_bundle(
             "repository": CHECKPOINT_REPOSITORY,
             "revision": CHECKPOINT_REVISION,
             "components": {
-                name: _component_source_receipts(model / name)
-                for name in checkpoint_components
+                name: _component_source_receipts(model / name) for name in checkpoint_components
             },
         },
         "ref2va": (
@@ -500,9 +513,7 @@ def build_staged_bundle(
     state_path = plans / "build_state.json"
     if state_path.is_file():
         if json.loads(state_path.read_text(encoding="utf-8")) != state:
-            raise ValueError(
-                "MiniMax-H3 staged plan directory belongs to different build options"
-            )
+            raise ValueError("MiniMax-H3 staged plan directory belongs to different build options")
     elif any((plans / filename).exists() for _component, filename, _section in components):
         raise ValueError("MiniMax-H3 staged plan directory is missing build_state.json")
     else:
@@ -516,7 +527,10 @@ def build_staged_bundle(
             "verbose": verbose,
             "transformer_ref_path": transformer_ref_path,
         }
-        if quantized_transformer_path is not None and component in _QUANTIZED_TRANSFORMER_COMPONENTS:
+        if (
+            quantized_transformer_path is not None
+            and component in _QUANTIZED_TRANSFORMER_COMPONENTS
+        ):
             options["quantized_transformer_path"] = quantized_transformer_path
         if component == _SUPER_RESOLUTION_COMPONENT[0]:
             options["super_resolution_model"] = super_resolution_model_path
@@ -596,7 +610,11 @@ def _build_component(
     profile = _profile()
 
     dense_default_workspace_components = {
-        component_name for component_name, _filename, _section in (*_DENSE_FBC_COMPONENTS,)
+        component_name
+        for component_name, _filename, _section in (
+            *_DENSE_FBC_COMPONENTS,
+            *_REF2VA_FBC_COMPONENTS[:3],
+        )
     }
     common = {
         "verbose": verbose,
@@ -720,6 +738,26 @@ def _build_component(
         weights = numpy_state(state)
         del state
         result = build_ref2va_dit_engine(weights, **common)
+    elif component in {"ref2va_dit_head", "ref2va_dit_tail", "ref2va_dit_finish"}:
+        from .ref2va_dit_builder import (
+            build_ref2va_dit_finish_engine,
+            build_ref2va_dit_head_engine,
+            build_ref2va_dit_tail_engine,
+            finish_checkpoint_keys,
+            head_checkpoint_keys,
+            tail_checkpoint_keys,
+        )
+
+        builders = {
+            "ref2va_dit_head": (build_ref2va_dit_head_engine, head_checkpoint_keys),
+            "ref2va_dit_tail": (build_ref2va_dit_tail_engine, tail_checkpoint_keys),
+            "ref2va_dit_finish": (build_ref2va_dit_finish_engine, finish_checkpoint_keys),
+        }
+        builder, key_fn = builders[component]
+        state = load_selected_component_state_dict(transformer_ref_path, key_fn())
+        weights = numpy_state(state)
+        del state
+        result = builder(weights, **common)
     elif component == "ref2va_adaln_precompute":
         if transformer_ref_path is None:
             raise FileNotFoundError(
@@ -790,7 +828,12 @@ def _main(argv: Sequence[str] | None = None) -> int:
         choices=sorted(
             {
                 item[0]
-                for item in (*_COMPONENTS, *_REF2VA_COMPONENTS, _SUPER_RESOLUTION_COMPONENT)
+                for item in (
+                    *_COMPONENTS,
+                    *_REF2VA_COMPONENTS,
+                    *_REF2VA_FBC_COMPONENTS,
+                    _SUPER_RESOLUTION_COMPONENT,
+                )
             }
         ),
     )

@@ -232,6 +232,9 @@ enum class Ref2vaPlanKind {
     kAudioVaeEncoder,
     kAdalnPrecompute,
     kDenoiser,
+    kDenoiserHead,
+    kDenoiserTail,
+    kDenoiserFinish,
 };
 
 // Performs strict name/direction/dtype/profile validation. Unknown, legacy,
@@ -267,6 +270,16 @@ struct Ref2vaVelocities {
     std::vector<float> video;
     std::vector<float> audio;
 };
+
+// Cache decisions observe only generated rows, independently for video/audio.
+// Fixed references and text must not dilute the measured residual change.
+struct Ref2vaCacheIndices {
+    std::vector<int32_t> video;
+    std::vector<int32_t> audio;
+};
+
+Ref2vaCacheIndices make_ref2va_cache_indices(const Ref2vaPackedLayout& layout);
+void validate_ref2va_denoiser_inputs(const Ref2vaDenoiserInputs& inputs);
 
 Ref2vaVelocities run_ref2va_denoiser(ITrtModule& module, Ref2vaDenoiserInputs& inputs,
                                      Ref2vaModulations& modulations);

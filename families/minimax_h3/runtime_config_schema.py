@@ -10,6 +10,13 @@ import math
 
 _VALIDATORS = {
     "first_block_cache": lambda value: isinstance(value, bool),
+    "ref2va_first_block_cache": lambda value: isinstance(value, bool),
+    "ref2va_first_block_cache_threshold": lambda value: (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    ),
     "first_block_cache_threshold": lambda value: (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
@@ -22,9 +29,7 @@ _VALIDATORS = {
     "super_resolution_weak_model": lambda value: isinstance(value, str),
     "retain_engines": lambda value: isinstance(value, bool),
     "retained_tail_weight_budget_gib": lambda value: (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and 0 < value <= ((2**63 - 1) >> 30)
+        isinstance(value, int) and not isinstance(value, bool) and 0 < value <= ((2**63 - 1) >> 30)
     ),
 }
 _RUNTIME_ONLY = {"retain_engines", "retained_tail_weight_budget_gib"}

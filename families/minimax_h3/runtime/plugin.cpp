@@ -86,10 +86,17 @@ PlanMap index_plans(const BundleReader& bundle, const nlohmann::json& config,
         require_declared_plan(bundle, plans, "fl2va_keyframe_vae_encoder_plan");
     }
     if (declares_workflow(config, "ref2va")) {
-        for (const char* name :
-             {"ref2va_denoiser_plan", "ref2va_adaln_precompute_plan",
-              "ref2va_video_vae_encoder_plan", "ref2va_audio_vae_encoder_plan"}) {
+        for (const char* name : {"ref2va_adaln_precompute_plan", "ref2va_video_vae_encoder_plan",
+                                 "ref2va_audio_vae_encoder_plan"}) {
             require_declared_plan(bundle, plans, name);
+        }
+        const auto cache = config.value("ref2va_first_block_cache", nlohmann::json::object());
+        if (cache.value("enabled", false)) {
+            for (const char* name :
+                 {"ref2va_dit_head_plan", "ref2va_dit_tail_plan", "ref2va_dit_finish_plan"})
+                require_declared_plan(bundle, plans, name);
+        } else {
+            require_declared_plan(bundle, plans, "ref2va_denoiser_plan");
         }
     }
     if (sr.enabled)
@@ -248,6 +255,9 @@ MiniMaxH3Ref2VAConfig load_ref2va_config(const nlohmann::json& config) {
     result.guidance_scale = scheduler.at("guidance_scale").get<float>();
     result.guidance_distilled = scheduler.at("guidance_distilled").get<bool>();
     result.denoiser_profile_count = config.value("ref2va_denoiser_profile_count", 1);
+    const auto cache = config.value("ref2va_first_block_cache", nlohmann::json::object());
+    result.first_block_cache = cache.value("enabled", false);
+    result.first_block_cache_threshold = cache.value("threshold", 0.08F);
     result.audio_latent_mean = read_audio_array(config, "audio_latents_mean", false);
     result.audio_latent_std = read_audio_array(config, "audio_latents_std", true);
     return result;

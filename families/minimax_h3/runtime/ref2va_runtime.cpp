@@ -1555,35 +1555,76 @@ void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
                            {12, 6, 5376});
         require_output(module, "final_modulation", DType::kBFloat16, {4, 2, 5376});
         return;
-    case Ref2vaPlanKind::kDenoiser: {
+    case Ref2vaPlanKind::kDenoiser:
+    case Ref2vaPlanKind::kDenoiserHead:
+    case Ref2vaPlanKind::kDenoiserTail:
+    case Ref2vaPlanKind::kDenoiserFinish: {
+        const bool dense = kind == Ref2vaPlanKind::kDenoiser;
+        const bool head = kind == Ref2vaPlanKind::kDenoiserHead;
+        const bool tail = kind == Ref2vaPlanKind::kDenoiserTail;
+        const bool finish = kind == Ref2vaPlanKind::kDenoiserFinish;
         const int32_t profile_count = module.optimization_profile_count();
         if (profile_count != 1 && profile_count != 2)
             throw std::runtime_error(
                 "MiniMax-H3 Ref2VA denoiser has an unexpected optimization-profile count");
-        require_counts(module, 60, 2, "denoiser", profile_count);
+        require_counts(module,
+                       dense  ? 60
+                       : head ? 12
+                       : tail ? 52
+                              : 6,
+                       head   ? 3
+                       : tail ? 1
+                              : 2,
+                       "denoiser", profile_count);
         const auto require_profile = [&](int32_t profile_index, int32_t min_video,
                                          int32_t opt_video, int32_t max_video, int32_t min_audio,
                                          int32_t opt_audio, int32_t max_audio, int32_t min_text,
                                          int32_t opt_text, int32_t max_text, int32_t min_packed,
                                          int32_t opt_packed, int32_t max_packed) {
-            require_dynamic_input(module, "video_hidden_states", DType::kFloat32, {min_video, 96},
-                                  {opt_video, 96}, {max_video, 96}, profile_index, profile_count);
-            require_dynamic_input(module, "audio_hidden_states", DType::kFloat32, {min_audio, 32},
-                                  {opt_audio, 32}, {max_audio, 32}, profile_index, profile_count);
-            require_dynamic_input(module, "encoder_hidden_states", DType::kFloat32,
-                                  {min_text, 5120}, {opt_text, 5120}, {max_text, 5120},
-                                  profile_index, profile_count);
-            require_dynamic_input(module, "position_ids", DType::kFloat32, {min_packed, 3},
-                                  {opt_packed, 3}, {max_packed, 3}, profile_index, profile_count);
-            require_dynamic_input(module, "video_indices", DType::kInt32, {min_video}, {opt_video},
-                                  {max_video}, profile_index, profile_count);
-            require_dynamic_input(module, "audio_indices", DType::kInt32, {min_audio}, {opt_audio},
-                                  {max_audio}, profile_index, profile_count);
-            require_dynamic_input(module, "text_indices", DType::kInt32, {min_text}, {opt_text},
-                                  {max_text}, profile_index, profile_count);
-            for (const char* name : {"adaln_indices", "timestep_indices"})
-                require_dynamic_input(module, name, DType::kInt32, {min_packed}, {opt_packed},
-                                      {max_packed}, profile_index, profile_count);
+            if (dense || head) {
+                require_dynamic_input(module, "video_hidden_states", DType::kFloat32,
+                                      {min_video, 96}, {opt_video, 96}, {max_video, 96},
+                                      profile_index, profile_count);
+                require_dynamic_input(module, "audio_hidden_states", DType::kFloat32,
+                                      {min_audio, 32}, {opt_audio, 32}, {max_audio, 32},
+                                      profile_index, profile_count);
+                require_dynamic_input(module, "encoder_hidden_states", DType::kFloat32,
+                                      {min_text, 5120}, {opt_text, 5120}, {max_text, 5120},
+                                      profile_index, profile_count);
+                require_dynamic_input(module, "text_indices", DType::kInt32, {min_text}, {opt_text},
+                                      {max_text}, profile_index, profile_count);
+            }
+            if (!finish)
+                require_dynamic_input(module, "position_ids", DType::kFloat32, {min_packed, 3},
+                                      {opt_packed, 3}, {max_packed, 3}, profile_index,
+                                      profile_count);
+            if (!tail) {
+                require_dynamic_input(module, "video_indices", DType::kInt32, {min_video},
+                                      {opt_video}, {max_video}, profile_index, profile_count);
+                require_dynamic_input(module, "audio_indices", DType::kInt32, {min_audio},
+                                      {opt_audio}, {max_audio}, profile_index, profile_count);
+            }
+            if (!finish)
+                require_dynamic_input(module, "adaln_indices", DType::kInt32, {min_packed},
+                                      {opt_packed}, {max_packed}, profile_index, profile_count);
+            if (dense || finish)
+                require_dynamic_input(module, "timestep_indices", DType::kInt32, {min_packed},
+                                      {opt_packed}, {max_packed}, profile_index, profile_count);
+            if (!dense) {
+                require_dynamic_input(module, head ? "previous_head_residual" : "head_hidden",
+                                      DType::kBFloat16, {min_packed, 5376}, {opt_packed, 5376},
+                                      {max_packed, 5376}, profile_index, profile_count);
+                if (finish)
+                    require_dynamic_input(module, "tail_residual", DType::kBFloat16,
+                                          {min_packed, 5376}, {opt_packed, 5376},
+                                          {max_packed, 5376}, profile_index, profile_count);
+                if (head) {
+                    require_dynamic_input(module, "cache_video_indices", DType::kInt32, {1},
+                                          {opt_video}, {max_video}, profile_index, profile_count);
+                    require_dynamic_input(module, "cache_audio_indices", DType::kInt32, {1},
+                                          {opt_audio}, {max_audio}, profile_index, profile_count);
+                }
+            }
         };
         if (profile_count == 2) {
             require_profile(0, kMinVideoRows, kFiveSecondOptVideoRows,
@@ -1596,13 +1637,26 @@ void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
                         kMinAudioRows, kOptAudioRows, kRef2vaMaxAudioRows, kMinTextRows,
                         kOptTextRows, kRef2vaMaxTextRows, kMinPackedRows, kOptPackedRows,
                         kRef2vaMaxPackedRows);
-        for (int32_t layer = 0; layer < 50; ++layer)
+        for (int32_t layer = tail ? 1 : 0; layer < (finish ? 0 : head ? 1 : 50); ++layer)
             require_static_input(module, "block_modulation_" + std::to_string(layer),
                                  DType::kBFloat16, {12, 6, 5376});
-        require_static_input(module, "final_modulation", DType::kBFloat16, {4, 2, 5376});
+        if (dense || finish)
+            require_static_input(module, "final_modulation", DType::kBFloat16, {4, 2, 5376});
         const bool selected_fast_profile = profile_count == 2 && module.profile_idx() == 0;
         if (module.profile_idx() < 0 || module.profile_idx() >= profile_count)
             throw std::runtime_error("MiniMax-H3 Ref2VA denoiser selected an invalid profile");
+        const int64_t max_packed =
+            selected_fast_profile ? kRef2vaFiveSecondMaxPackedRows : kRef2vaMaxPackedRows;
+        if (head) {
+            require_output(module, "head_hidden", DType::kBFloat16, {max_packed, 5376});
+            require_output(module, "head_residual", DType::kBFloat16, {max_packed, 5376});
+            require_output(module, "cache_metric", DType::kFloat32, {1});
+            return;
+        }
+        if (tail) {
+            require_output(module, "tail_residual", DType::kBFloat16, {max_packed, 5376});
+            return;
+        }
         require_output(
             module, "video_velocity", DType::kFloat32,
             {selected_fast_profile ? kRef2vaFiveSecondMaxVideoRows : kRef2vaMaxVideoRows, 96});
@@ -1646,9 +1700,20 @@ Ref2vaModulations run_ref2va_adaln_precompute(ITrtModule& module,
     return result;
 }
 
-Ref2vaVelocities run_ref2va_denoiser(ITrtModule& module, Ref2vaDenoiserInputs& inputs,
-                                     Ref2vaModulations& modulations) {
-    validate_ref2va_plan(module, Ref2vaPlanKind::kDenoiser);
+Ref2vaCacheIndices make_ref2va_cache_indices(const Ref2vaPackedLayout& layout) {
+    if (layout.condition_video_rows < 0 || layout.condition_audio_rows < 0 ||
+        static_cast<std::size_t>(layout.condition_video_rows) >= layout.video_indices.size() ||
+        static_cast<std::size_t>(layout.condition_audio_rows) >= layout.audio_indices.size())
+        throw std::invalid_argument("MiniMax-H3 Ref2VA cache requires generated video/audio rows");
+    Ref2vaCacheIndices result;
+    result.video.assign(layout.video_indices.begin() + layout.condition_video_rows,
+                        layout.video_indices.end());
+    result.audio.assign(layout.audio_indices.begin() + layout.condition_audio_rows,
+                        layout.audio_indices.end());
+    return result;
+}
+
+void validate_ref2va_denoiser_inputs(const Ref2vaDenoiserInputs& inputs) {
     const int32_t sequence_rows = inputs.layout.sequence_length();
     const int32_t video_rows = checked_i32(inputs.layout.video_indices.size(), "video rows");
     const int32_t audio_rows = checked_i32(inputs.layout.audio_indices.size(), "audio rows");
@@ -1676,6 +1741,16 @@ Ref2vaVelocities run_ref2va_denoiser(ITrtModule& module, Ref2vaDenoiserInputs& i
     }
     if (std::find(coverage.begin(), coverage.end(), 0) != coverage.end())
         throw std::invalid_argument("MiniMax-H3 Ref2VA scatter indices are not exhaustive");
+}
+
+Ref2vaVelocities run_ref2va_denoiser(ITrtModule& module, Ref2vaDenoiserInputs& inputs,
+                                     Ref2vaModulations& modulations) {
+    validate_ref2va_plan(module, Ref2vaPlanKind::kDenoiser);
+    validate_ref2va_denoiser_inputs(inputs);
+    const int32_t sequence_rows = inputs.layout.sequence_length();
+    const int32_t video_rows = checked_i32(inputs.layout.video_indices.size(), "video rows");
+    const int32_t audio_rows = checked_i32(inputs.layout.audio_indices.size(), "audio rows");
+    const int32_t text_rows = checked_i32(inputs.layout.text_indices.size(), "text rows");
 
     TensorMap tensor_inputs;
     tensor_inputs.emplace(

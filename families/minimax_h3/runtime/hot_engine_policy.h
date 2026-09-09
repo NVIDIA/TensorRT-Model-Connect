@@ -27,7 +27,9 @@ inline bool uses_serial_execution_context(std::string_view name) {
     // TRT-RTX user-managed arena so every context is sized from its live shape;
     // the three split contexts additionally share one high-water allocation.
     return name == "denoiser_head_plan" || name == "denoiser_tail_plan" ||
-           name == "denoiser_finish_plan" || name == "ref2va_denoiser_plan";
+           name == "denoiser_finish_plan" || name == "ref2va_denoiser_plan" ||
+           name == "ref2va_dit_head_plan" || name == "ref2va_dit_tail_plan" ||
+           name == "ref2va_dit_finish_plan";
 }
 
 inline std::int64_t staged_plan_weight_streaming_budget(std::string_view name,

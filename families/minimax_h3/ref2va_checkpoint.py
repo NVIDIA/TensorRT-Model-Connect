@@ -131,6 +131,21 @@ def _adaln_checkpoint_keys() -> tuple[str, ...]:
 REF2VA_DENOISER_KEYS = _dit_checkpoint_keys()
 REF2VA_ADALN_KEYS = _adaln_checkpoint_keys()
 REF2VA_ALL_KEYS = REF2VA_DENOISER_KEYS + REF2VA_ADALN_KEYS
+REF2VA_FINISH_KEYS = tuple(
+    name
+    for name in REF2VA_DENOISER_KEYS
+    if name.startswith(("norm_out.", "proj_out.", "audio_proj_out."))
+)
+REF2VA_TAIL_KEYS = tuple(
+    name
+    for name in REF2VA_DENOISER_KEYS
+    if name.startswith("transformer_blocks.") and not name.startswith("transformer_blocks.0.")
+)
+REF2VA_HEAD_KEYS = tuple(
+    name
+    for name in REF2VA_DENOISER_KEYS
+    if name not in REF2VA_FINISH_KEYS and name not in REF2VA_TAIL_KEYS
+)
 
 
 def download_command(local_dir: str = "MiniMax-H3") -> str:

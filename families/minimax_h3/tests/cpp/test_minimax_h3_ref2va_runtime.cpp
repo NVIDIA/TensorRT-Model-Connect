@@ -255,6 +255,88 @@ FakeModule make_video_vae_module() {
     return module;
 }
 
+FakeModule make_cached_denoiser_module(trtmc::minimax_h3::Ref2vaPlanKind kind) {
+    using Kind = trtmc::minimax_h3::Ref2vaPlanKind;
+    auto module = make_denoiser_module();
+    const bool head = kind == Kind::kDenoiserHead;
+    const bool tail = kind == Kind::kDenoiserTail;
+    const bool finish = kind == Kind::kDenoiserFinish;
+    for (int32_t layer = 0; layer < 50; ++layer) {
+        if (finish || (head && layer > 0) || (tail && layer == 0))
+            module.tensors.erase("block_modulation_" + std::to_string(layer));
+    }
+    if (!finish) {
+        for (const char* name :
+             {"timestep_indices", "final_modulation", "video_velocity", "audio_velocity"})
+            module.tensors.erase(name);
+    }
+    if (!head) {
+        for (const char* name : {"video_hidden_states", "audio_hidden_states",
+                                 "encoder_hidden_states", "text_indices"})
+            module.tensors.erase(name);
+    }
+    if (tail) {
+        module.tensors.erase("video_indices");
+        module.tensors.erase("audio_indices");
+    }
+    if (finish) {
+        module.tensors.erase("position_ids");
+        module.tensors.erase("adaln_indices");
+    }
+    module.add_dynamic(head ? "previous_head_residual" : "head_hidden", trtmc::DType::kBFloat16,
+                       {19285, 5376}, {52439, 5376}, {630310, 5376});
+    if (finish)
+        module.add_dynamic("tail_residual", trtmc::DType::kBFloat16, {19285, 5376}, {52439, 5376},
+                           {630310, 5376});
+    if (head) {
+        module.add_dynamic("cache_video_indices", trtmc::DType::kInt32, {1}, {44592}, {364608});
+        module.add_dynamic("cache_audio_indices", trtmc::DType::kInt32, {1}, {414}, {3558});
+        module.add_output("head_hidden", trtmc::DType::kBFloat16, {630310, 5376});
+        module.add_output("head_residual", trtmc::DType::kBFloat16, {630310, 5376});
+        module.add_output("cache_metric", trtmc::DType::kFloat32, {1});
+    }
+    if (tail)
+        module.add_output("tail_residual", trtmc::DType::kBFloat16, {630310, 5376});
+    return module;
+}
+
+void test_first_block_cache_contract() {
+    using namespace trtmc::minimax_h3;
+    for (const auto kind : {Ref2vaPlanKind::kDenoiserHead, Ref2vaPlanKind::kDenoiserTail,
+                            Ref2vaPlanKind::kDenoiserFinish}) {
+        auto module = make_cached_denoiser_module(kind);
+        validate_ref2va_plan(module, kind);
+        module.add_static("unexpected_input", trtmc::DType::kFloat32, {1});
+        require(rejects([&] { validate_ref2va_plan(module, kind); }),
+                "Ref2VA cached denoiser accepted an incompatible engine ABI");
+    }
+    auto head = make_cached_denoiser_module(Ref2vaPlanKind::kDenoiserHead);
+    head.tensors.at("cache_audio_indices").dtype = trtmc::DType::kFloat32;
+    require(rejects([&] { validate_ref2va_plan(head, Ref2vaPlanKind::kDenoiserHead); }),
+            "Ref2VA cache accepted floating-point gather indices");
+
+    Ref2vaPackedLayout layout;
+    layout.video_indices = {4, 9, 2, 7};
+    layout.audio_indices = {8, 3, 10};
+    layout.condition_video_rows = 2;
+    layout.condition_audio_rows = 1;
+    auto indices = make_ref2va_cache_indices(layout);
+    require(indices.video == std::vector<int32_t>({2, 7}) &&
+                indices.audio == std::vector<int32_t>({3, 10}),
+            "Ref2VA cache metric included fixed references or lost packed row ordering");
+    layout.condition_video_rows = 0;
+    layout.condition_audio_rows = 0;
+    indices = make_ref2va_cache_indices(layout);
+    require(indices.video == layout.video_indices && indices.audio == layout.audio_indices,
+            "Ref2VA cache dropped generated rows without reference prefixes");
+    layout.condition_video_rows = static_cast<int32_t>(layout.video_indices.size());
+    require(rejects([&] { (void)make_ref2va_cache_indices(layout); }),
+            "Ref2VA cache accepted an empty generated video group");
+    layout.condition_video_rows = -1;
+    require(rejects([&] { (void)make_ref2va_cache_indices(layout); }),
+            "Ref2VA cache accepted a negative reference prefix");
+}
+
 FakeModule make_audio_vae_module() {
     FakeModule module(ForwardKind::kAudioVae);
     module.add_dynamic("audio_samples", trtmc::DType::kFloat32, {2, 1, 64000}, {2, 1, 165600},
@@ -621,6 +703,7 @@ int main() {
         test_denoiser_profile_selection_rejects_mixed_schema_and_engine();
         test_request_boundary_validation();
         test_strict_plan_abi_and_fake_end_to_end();
+        test_first_block_cache_contract();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

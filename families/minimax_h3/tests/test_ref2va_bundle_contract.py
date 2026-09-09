@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 
 from families.minimax_h3.ref2va_bundle_contract import (
+    REF2VA_FIRST_BLOCK_CACHE_SECTIONS,
     REF2VA_PLAN_SECTIONS,
     REF2VA_SHARED_SECTIONS,
     ref2va_bundle_metadata,
@@ -117,3 +118,36 @@ def test_bundle_metadata_requires_strict_transformer_ref_identity() -> None:
         ref2va_bundle_metadata(replace(_identity(), revision="main"))
     with pytest.raises(TypeError, match="validated transformer_ref"):
         ref2va_bundle_metadata(object())  # type: ignore[arg-type]
+
+
+def test_cache_metadata_uses_split_engines_and_independent_threshold() -> None:
+    metadata = ref2va_bundle_metadata(_identity(), first_block_cache=True)
+    assert metadata["ref2va_schema_version"] == 5
+    assert metadata["ref2va_first_block_cache"] == {"enabled": True, "threshold": 0.08}
+    assert metadata["ref2va_plan_sections"] == {
+        name: section for name, _filename, section in REF2VA_FIRST_BLOCK_CACHE_SECTIONS
+    }
+    abis = metadata["ref2va_plan_abis"]
+    assert "ref2va_denoiser_plan" not in abis
+    assert len(abis) == 6
+    head = abis["ref2va_dit_head_plan"]
+    assert {item["name"] for item in head["outputs"]} == {
+        "head_hidden",
+        "head_residual",
+        "cache_metric",
+    }
+    assert {"cache_video_indices", "cache_audio_indices"} <= {
+        item["name"] for item in head["inputs"]
+    }
+    assert (
+        ref2va_bundle_metadata(_identity(), first_block_cache=True, first_block_cache_threshold=0)[
+            "ref2va_first_block_cache"
+        ]["threshold"]
+        == 0.0
+    )
+
+
+@pytest.mark.parametrize("threshold", [-0.1, float("nan"), float("inf"), True, "0.08"])
+def test_cache_metadata_rejects_invalid_threshold(threshold) -> None:
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        ref2va_bundle_metadata(_identity(), first_block_cache_threshold=threshold)

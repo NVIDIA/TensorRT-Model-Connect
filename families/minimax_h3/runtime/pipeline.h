@@ -80,6 +80,8 @@ struct MiniMaxH3Ref2VAConfig {
     float guidance_scale{1.0F};
     bool guidance_distilled{true};
     int32_t denoiser_profile_count{1};
+    bool first_block_cache{false};
+    float first_block_cache_threshold{0.08F};
     std::array<float, 32> audio_latent_mean{};
     std::array<float, 32> audio_latent_std{};
 };

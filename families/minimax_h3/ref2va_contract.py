@@ -1046,3 +1046,69 @@ def ref2va_denoiser_abi(profile: Ref2VADenoiserProfile = Ref2VADenoiserProfile()
             binding("audio_velocity", "float32", audio_shape),
         ),
     )
+
+
+def ref2va_first_block_cache_abis(
+    profile: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+) -> dict[str, PlanAbi]:
+    """Native split DiT ABI with separate generated-video/audio cache metrics.
+
+    Cache index arrays address generated rows in the packed sequence, not
+    reference or text rows. Taking the larger modality-relative change avoids
+    a long reference or video sequence masking changes in the generated audio.
+    """
+
+    dense = ref2va_denoiser_abi(profile)
+    inputs = {value.name: value for value in dense.inputs}
+    packed_rows = (profile.min_packed_rows, profile.opt_packed_rows, profile.max_packed_rows)
+
+    def hidden(name: str) -> TensorAbi:
+        shapes = tuple((rows, 5376) for rows in packed_rows)
+        return TensorAbi(name, "bfloat16", *shapes)
+
+    def cache_indices(name: str, opt_rows: int, max_rows: int) -> TensorAbi:
+        return TensorAbi(name, "int32", (1,), (opt_rows,), (max_rows,))
+
+    return {
+        "ref2va_dit_head": PlanAbi(
+            filename="ref2va_dit_head.plan",
+            inputs=(
+                *(value for value in dense.inputs[:8]),
+                inputs["block_modulation_0"],
+                hidden("previous_head_residual"),
+                cache_indices(
+                    "cache_video_indices", profile.opt_video_rows, profile.max_video_rows
+                ),
+                cache_indices(
+                    "cache_audio_indices", profile.opt_audio_rows, profile.max_audio_rows
+                ),
+            ),
+            outputs=(
+                hidden("head_hidden"),
+                hidden("head_residual"),
+                TensorAbi("cache_metric", "float32", (1,), (1,), (1,)),
+            ),
+        ),
+        "ref2va_dit_tail": PlanAbi(
+            filename="ref2va_dit_tail.plan",
+            inputs=(
+                hidden("head_hidden"),
+                inputs["position_ids"],
+                inputs["adaln_indices"],
+                *(inputs[f"block_modulation_{index}"] for index in range(1, 50)),
+            ),
+            outputs=(hidden("tail_residual"),),
+        ),
+        "ref2va_dit_finish": PlanAbi(
+            filename="ref2va_dit_finish.plan",
+            inputs=(
+                hidden("head_hidden"),
+                hidden("tail_residual"),
+                inputs["timestep_indices"],
+                inputs["video_indices"],
+                inputs["audio_indices"],
+                inputs["final_modulation"],
+            ),
+            outputs=dense.outputs,
+        ),
+    }

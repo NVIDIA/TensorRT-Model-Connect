@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 from .fl2va_contract import PlanAbi, TensorAbi
 from .ref2va_checkpoint import (
     CHECKPOINT_REVISION,
@@ -24,6 +26,7 @@ from .ref2va_contract import (
     Ref2VADenoiserProfile,
     ref2va_denoiser_abi,
     ref2va_denoiser_profiles,
+    ref2va_first_block_cache_abis,
 )
 from .ref2va_qwen_contract import ref2va_shared_qwen_profile_metadata
 
@@ -49,6 +52,18 @@ REF2VA_PLAN_SECTIONS = (
         "ref2va_audio_vae_encoder_plan",
     ),
 )
+
+REF2VA_FIRST_BLOCK_CACHE_SECTIONS = (
+    ("ref2va_dit_head", "ref2va_dit_head.plan", "ref2va_dit_head_plan"),
+    ("ref2va_dit_tail", "ref2va_dit_tail.plan", "ref2va_dit_tail_plan"),
+    ("ref2va_dit_finish", "ref2va_dit_finish.plan", "ref2va_dit_finish_plan"),
+    *REF2VA_PLAN_SECTIONS[1:],
+)
+
+
+def ref2va_plan_sections(first_block_cache: bool) -> tuple[tuple[str, str, str], ...]:
+    return REF2VA_FIRST_BLOCK_CACHE_SECTIONS if first_block_cache else REF2VA_PLAN_SECTIONS
+
 
 REF2VA_SHARED_SECTIONS = {
     "text_encoder": "text_encoder_plan",
@@ -153,6 +168,8 @@ def _ref2va_audio_encoder_abi() -> PlanAbi:
 
 def ref2va_plan_abi_metadata(
     profile: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+    *,
+    first_block_cache: bool = False,
 ) -> dict[str, object]:
     """Serialize every dedicated plan binding without importing TensorRT."""
 
@@ -167,8 +184,13 @@ def ref2va_plan_abi_metadata(
             "max_shape": list(binding.max_shape),
         }
 
+    denoiser = (
+        tuple((f"{name}_plan", abi) for name, abi in ref2va_first_block_cache_abis(profile).items())
+        if first_block_cache
+        else (("ref2va_denoiser_plan", ref2va_denoiser_abi(profile)),)
+    )
     plans = (
-        ("ref2va_denoiser_plan", ref2va_denoiser_abi(profile)),
+        *denoiser,
         ("ref2va_adaln_precompute_plan", _ref2va_adaln_abi()),
         ("ref2va_video_vae_encoder_plan", _ref2va_video_encoder_abi()),
         ("ref2va_audio_vae_encoder_plan", _ref2va_audio_encoder_abi()),
@@ -211,10 +233,22 @@ def _capacity(profile: Ref2VADenoiserProfile) -> dict[str, list[int]]:
 def ref2va_bundle_metadata(
     transformer_ref: TransformerRefIdentity,
     profile: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+    *,
+    first_block_cache: bool = False,
+    first_block_cache_threshold: float = 0.08,
 ) -> dict[str, object]:
     """Produce path-free metadata only after strict checkpoint validation."""
 
     profile.validate()
+    if not isinstance(first_block_cache, bool):
+        raise ValueError("MiniMax-H3 ref2va_first_block_cache must be a boolean")
+    if (
+        not isinstance(first_block_cache_threshold, (int, float))
+        or isinstance(first_block_cache_threshold, bool)
+        or not math.isfinite(first_block_cache_threshold)
+        or first_block_cache_threshold < 0.0
+    ):
+        raise ValueError("MiniMax-H3 Ref2VA cache threshold must be finite and nonnegative")
     if not isinstance(transformer_ref, TransformerRefIdentity):
         raise TypeError("MiniMax-H3 Ref2VA metadata requires validated transformer_ref identity")
     if (
@@ -231,8 +265,12 @@ def ref2va_bundle_metadata(
         else ("public_dynamic",)
     )
     return {
-        "ref2va_schema_version": 4,
+        "ref2va_schema_version": 5 if first_block_cache else 4,
         "ref2va_supported": True,
+        "ref2va_first_block_cache": {
+            "enabled": first_block_cache,
+            "threshold": float(first_block_cache_threshold),
+        },
         "ref2va_scheduler": {
             "sigma_grid_points": REF2VA_SCHEDULER_GRID_POINTS,
             "transformer_forwards": REF2VA_TRANSFORMER_FORWARDS,
@@ -243,9 +281,10 @@ def ref2va_bundle_metadata(
         },
         "ref2va_transformer_ref": transformer_ref.bundle_metadata(),
         "ref2va_plan_sections": {
-            component: section for component, _filename, section in REF2VA_PLAN_SECTIONS
+            component: section
+            for component, _filename, section in ref2va_plan_sections(first_block_cache)
         },
-        "ref2va_plan_abis": ref2va_plan_abi_metadata(profile),
+        "ref2va_plan_abis": ref2va_plan_abi_metadata(profile, first_block_cache=first_block_cache),
         "ref2va_denoiser_profile_count": len(denoiser_profiles),
         "ref2va_denoiser_profile_layout": "_then_".join(denoiser_profile_names),
         "ref2va_denoiser_profiles": [

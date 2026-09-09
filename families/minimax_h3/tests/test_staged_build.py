@@ -128,6 +128,58 @@ def test_staged_component_contract_includes_ref_and_super_resolution_sections() 
     assert sections[-1] == "video_super_resolution_plan"
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_ref2va_build_selects_matching_cache_plans_and_metadata(
+    tmp_path: Path, monkeypatch, enabled: bool
+) -> None:
+    from families.minimax_h3 import ref2va_checkpoint
+
+    model = _model(tmp_path)
+    reference = model / "transformer_ref"
+    reference.mkdir()
+    identity = ref2va_checkpoint.TransformerRefIdentity(
+        ref2va_checkpoint.MODEL_ID,
+        ref2va_checkpoint.CHECKPOINT_REVISION,
+        "transformer_ref",
+        ref2va_checkpoint.TOTAL_TENSOR_BYTES,
+        638,
+        {},
+    )
+    monkeypatch.setattr(
+        ref2va_checkpoint, "validate_transformer_ref_checkpoint", lambda _path: identity
+    )
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_version", lambda: "1.6.1")
+    monkeypatch.setattr(staged_build.trt_compat, "tensorrt_abi", lambda _version: "1.6")
+
+    def build(component, _model, plan, **_options):
+        plan.write_bytes(component.encode())
+
+    monkeypatch.setattr(staged_build, "_run_component", build)
+    output = tmp_path / "h3.bundle"
+    writer = _writer(output)
+    # Omission exercises the default-enabled public build path.
+    defaults = {"ref2va_first_block_cache_threshold": 0.05}
+    if not enabled:
+        defaults["ref2va_first_block_cache"] = False
+    staged_build.build_staged_bundle(
+        model,
+        writer,
+        plans_dir=tmp_path / "plans",
+        transformer_ref=reference,
+        runtime_defaults=defaults,
+    )
+    writer.finish()
+    _header, sections = _read_bundle(output)
+    runtime = json.loads(sections["runtime.json"])
+    assert runtime["ref2va_first_block_cache"] == {"enabled": enabled, "threshold": 0.05}
+    assert runtime["first_block_cache_threshold"] == 0.08
+    assert ("ref2va_dit_head_plan" in sections) is enabled
+    assert ("ref2va_denoiser_plan" in sections) is not enabled
+    assert set(runtime["ref2va_plan_sections"].values()) <= set(sections)
+    if enabled:
+        assert runtime["workspace_limit_bytes"]["ref2va_dit_tail.plan"] == "trt_default_max"
+
+
 @pytest.mark.parametrize(
     "changed", ["weights", "config", "builder", "profile", "sr_weights", "sr_weak", "ref", "quant"]
 )

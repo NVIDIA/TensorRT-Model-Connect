@@ -346,6 +346,12 @@ class MiniMaxH3Plugin:
         }
         if transformer_ref_path is not None:
             staged_options["transformer_ref"] = transformer_ref_path
+            staged_options["runtime_defaults"].update(
+                ref2va_first_block_cache=raw.get("ref2va_first_block_cache", True),
+                ref2va_first_block_cache_threshold=raw.get(
+                    "ref2va_first_block_cache_threshold", 0.08
+                ),
+            )
         if quantized_transformer_path is not None:
             staged_options["quantized_transformer"] = quantized_transformer_path
         if super_resolution_model is not None:

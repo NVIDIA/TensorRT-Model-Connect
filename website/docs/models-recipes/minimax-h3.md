@@ -166,6 +166,17 @@ To select it, append `--quantization int8_tensorwise_convrot` and
 keeping `--precision bf16`. Ref2VA uses its separate BF16
 transformer. Use a distinct bundle output path for each configuration.
 
+New Ref2VA bundles enable FirstBlockCache by default, with a separate threshold
+of `0.08`. The C++ runtime reuses the remaining transformer blocks only when
+both generated video and audio pass the change check; reference rows do not
+participate in this decision. The first and last steps always run all blocks.
+Caching is approximate and can change the result. For an uncached reference,
+append `--set minimax_h3.ref2va_first_block_cache=false` when building. To tune
+only Ref2VA, use `--set minimax_h3.ref2va_first_block_cache_threshold=0.08`;
+zero forces all blocks to execute even with the split engines. These options
+do not change T2VA/FL2VA. Dense Ref2VA bundles using the current bundle format
+remain supported but must be rebuilt to enable FirstBlockCache.
+
 Plans are staged on disk and compatible completed stages can be reused after
 an interrupted build. The final bundle includes plans and runtime metadata;
 checkpoint files and Python are not needed to run it. The model weights are
