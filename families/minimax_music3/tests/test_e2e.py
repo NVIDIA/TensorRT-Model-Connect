@@ -84,6 +84,7 @@ def test_minimax_music3_native_audio(case_name, request, tmp_path: Path) -> None
             family=FAMILY,
             task="audio_generation",
             precision=MANIFEST["precision"],
+            tensor_parallel_size=MANIFEST["tensor_parallel_size"],
             max_sequence_length=MANIFEST["max_sequence_length"],
         )
     )
