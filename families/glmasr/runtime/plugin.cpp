@@ -40,8 +40,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto cache_shape = decoder.module->tensor_shape("cache_k_0");
     const auto kv_dim = cache_shape.empty() ? 0 : static_cast<int32_t>(cache_shape.back());
     auto state = std::make_unique<GlmAsrKvCache>(
-        json.value("num_layers", 1), config.max_cache_length, kv_dim, decoder.module->stream(),
-        decoder.module->tensor_dtype("cache_k_0"));
+        json.value("num_hidden_layers", 1), config.max_cache_length, kv_dim,
+        decoder.module->stream(), decoder.module->tensor_dtype("cache_k_0"));
     auto mel = load_mel_filterbank(context.reader);
     auto tokenizer = create_tokenizer_from_bundle(context.reader);
     return new GlmAsrPipeline(std::move(encoder.module), std::move(decoder.module),

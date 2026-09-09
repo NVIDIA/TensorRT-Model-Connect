@@ -98,6 +98,12 @@ std::vector<int32_t> GlmAsrPipeline::tokenize_instruction() const {
 }
 
 int32_t GlmAsrPipeline::run_decode_step(int32_t token_id, const float* audio_embed) {
+    // Bisection aid: dump every debug_hidden_{layer} output at one decode
+    // step, to localize a mismatch to a specific layer. Not part of the
+    // normal path; inert unless the variable is set.
+    static int32_t debug_step_index = -1;
+    ++debug_step_index;
+
     TensorMap inputs;
     int32_t token = token_id;
     inputs["token_id"] = Tensor{&token, {1}, DType::kInt32};
@@ -120,6 +126,25 @@ int32_t GlmAsrPipeline::run_decode_step(int32_t token_id, const float* audio_emb
 
     ++stats_.decode_launches;
     TensorMap outputs = decoder_->forward(inputs);
+    if (const char* dump_step = std::getenv("TRTMC_GLMASR_DUMP_LAYERS_STEP")) {
+        if (debug_step_index == std::atoi(dump_step)) {
+            const char* dir = std::getenv("TRTMC_GLMASR_DUMP_LAYERS_DIR");
+            const std::string base = dir ? dir : "/tmp";
+            for (const auto& [name, tensor] : outputs) {
+                if ((name.rfind("debug_", 0) != 0 && name.rfind("present_k_", 0) != 0 &&
+                     name.rfind("present_v_", 0) != 0) ||
+                    tensor.data == nullptr)
+                    continue;
+                std::ofstream out(base + "/" + name + ".bin", std::ios::binary);
+                out.write(static_cast<const char*>(tensor.data),
+                          static_cast<std::streamsize>(tensor.nbytes()));
+                std::cerr << "[glmasr] dump " << name << " ptr=" << tensor.data
+                          << " nbytes=" << tensor.nbytes() << std::endl;
+            }
+            std::cerr << "[glmasr] dumped per-layer hidden states at step " << debug_step_index
+                      << std::endl;
+        }
+    }
     state_->advance();
     return host_argmax_logits(outputs, config_.vocab_size);
 }

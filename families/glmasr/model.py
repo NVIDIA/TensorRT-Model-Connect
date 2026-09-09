@@ -17,6 +17,7 @@ any extra discriminator.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -220,6 +221,11 @@ class GlmAsrPlugin:
             activation="silu",
             embed_input=True,
             verbose=verbose,
+            # Bisection aid: TRTMC_GLMASR_DEBUG_LAYERS=1 marks every layer's
+            # hidden state as an engine output, for a numeric diff against a
+            # reference implementation layer by layer. Off by default -- it
+            # adds outputs the normal path never reads.
+            debug_layer_outputs=os.environ.get("TRTMC_GLMASR_DEBUG_LAYERS") == "1",
         )
 
     def build_extra_engines(
