@@ -107,7 +107,12 @@ def _prepared_package(source: Path, destination: Path) -> Path:
         try:
             os.link(path, destination / name)
         except OSError as error:
-            if error.errno != errno.EXDEV:
+            if error.errno not in (
+                errno.EXDEV,
+                errno.EPERM,
+                errno.EMLINK,
+                errno.EOPNOTSUPP,
+            ):
                 raise
             shutil.copyfile(path, destination / name)
     shutil.copyfile(
