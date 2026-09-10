@@ -7,6 +7,10 @@ MiniMax H3 uses the ModelConnect C++ runtime and TensorRT-RTX. Python and
 PyTorch are build-time dependencies. On Windows, the CLI decodes reference
 media and writes H.264/AAC MP4 files through Media Foundation.
 
+For clean-machine setup, exact evaluation inputs, CLI/C++ reproduction commands,
+and measured results with explicit cache conditions, see the
+[performance reproduction report](./minimax-h3-performance.md).
+
 ## Capabilities and inputs
 
 | Capability | Required inputs | Bundle option |
