@@ -113,7 +113,12 @@ def _record_reference_comparison(structure: Path, reference: Path, accuracy: Pat
                 ("plddt_mean_abs", "Mean pLDDT difference", "<=", "plddt_mean_abs_max"),
                 ("confidence_score_abs", "Confidence score difference", "<=", "confidence_score_abs_max"),
                 ("complex_plddt_abs", "Complex pLDDT difference", "<=", "complex_plddt_abs_max"),
+                ("complex_iplddt_abs", "Complex interface pLDDT difference", "<=", "complex_iplddt_abs_max"),
                 ("ptm_abs", "pTM difference", "<=", "ptm_abs_max"),
+                ("iptm_abs", "ipTM difference", "<=", "iptm_abs_max"),
+                ("protein_iptm_abs", "Protein ipTM difference", "<=", "protein_iptm_abs_max"),
+                ("chains_ptm_max_abs", "Largest per-chain pTM difference", "<=", "chains_ptm_max_abs_max"),
+                ("pair_chains_iptm_max_abs", "Largest chain-pair ipTM difference", "<=", "pair_chains_iptm_max_abs_max"),
             )
         )
         record_evidence(
