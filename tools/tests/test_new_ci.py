@@ -496,7 +496,12 @@ def test_internal_bridge_waits_for_the_exact_run_until_the_job_timeout() -> None
     assert "gh run download" not in source
     assert "tools.public_failure" not in source
     assert "policy_sha" not in source
-    assert "Protected failure details are not transferred to the public repository." in source
+    assert "trtmc-internal-ci-result" not in source
+    assert "/comments" not in source
+    assert "public-failure" not in source
+    jobs = yaml.safe_load(source)["jobs"]
+    assert jobs["announce"]["permissions"] == {"statuses": "write"}
+    assert jobs["publish"]["permissions"] == {"pull-requests": "read", "statuses": "write"}
 
 
 def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:

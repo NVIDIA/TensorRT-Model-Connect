@@ -130,7 +130,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      pull-requests: write
       statuses: write
 
     steps:
@@ -146,22 +145,6 @@ jobs:
             -f context="TRTMC Internal CI / Automated premerge gate" \
             -f description="Automated internal CI is running" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-
-      - name: Remove the previous automated failure comment
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
-        run: |
-          set -euo pipefail
-          gh api --paginate \
-            "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
-            --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- trtmc-internal-ci-result -->")) | .id' \
-            | while read -r comment_id; do
-                [[ "$comment_id" =~ ^[1-9][0-9]*$ ]] || continue
-                gh api --silent --method DELETE \
-                  "/repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" || true
-              done
 
   dispatch:
     name: Internal CI dispatch
@@ -292,8 +275,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      actions: read
-      pull-requests: write
+      pull-requests: read
       statuses: write
 
     steps:
@@ -309,8 +291,7 @@ jobs:
         run: |
           set -euo pipefail
           state=failure
-          description="Automated internal CI did not complete; details withheld"
-          publish_comment=true
+          description="Automated internal CI did not complete"
 
           snapshot_current=false
           if pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
@@ -327,7 +308,6 @@ jobs:
               snapshot_current=true
             elif [ "$current_head" != "$HEAD_SHA" ]; then
               description="Automated internal CI result was superseded by a newer PR head"
-              publish_comment=false
             elif [ "$current_base" != "$BASE_SHA" ]; then
               description="The PR base changed during internal CI; rerun is required"
             fi
@@ -338,13 +318,12 @@ jobs:
               success)
                 state=success
                 description="Automated internal CI passed"
-                publish_comment=false
                 ;;
               failure)
-                description="Automated internal CI failed; details withheld"
+                description="Automated internal CI failed"
                 ;;
               cancelled|timed_out|skipped|neutral|action_required|unknown|"")
-                description="Automated internal CI did not complete; details withheld"
+                description="Automated internal CI did not complete"
                 ;;
             esac
           fi
@@ -352,42 +331,7 @@ jobs:
           {
             echo "state=$state"
             echo "description=$description"
-            echo "publish_comment=$publish_comment"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Prepare the contributor-visible log and comment
-        if: ${{ steps.result.outputs.state != 'success' }}
-        env:
-          PUBLIC_FAILURE_LOG: ${{ runner.temp }}/contributor-result/public-failure.log
-          COMMENT_BODY: ${{ runner.temp }}/internal-ci-comment.md
-          DESCRIPTION: ${{ steps.result.outputs.description }}
-          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
-          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$PUBLIC_FAILURE_LOG")"
-          {
-            echo "TRTMC Protected CI result"
-            echo "========================="
-            echo
-            echo "Status: FAILED"
-            echo "Pull request: #$PR_NUMBER"
-            echo "Head commit: $HEAD_SHA"
-            echo "Reason: $DESCRIPTION"
-            echo
-            echo "Protected failure details are not transferred to the public repository."
-          } > "$PUBLIC_FAILURE_LOG"
-          {
-            echo '<!-- trtmc-internal-ci-result -->'
-            echo 'This is an automated Internal CI result; no review from an individual maintainer is requested.'
-            echo
-            echo '```text'
-            sed -n '1,240p' "$PUBLIC_FAILURE_LOG"
-            echo '```'
-            echo
-            echo 'Open the public Source Actions run from the automated status link above.'
-          } > "$COMMENT_BODY"
-          [ "$(wc -c < "$COMMENT_BODY")" -le 60000 ]
 
       - name: Publish the terminal automated status
         env:
@@ -403,50 +347,6 @@ jobs:
             -f context="TRTMC Internal CI / Automated premerge gate" \
             -f description="$DESCRIPTION" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-
-      - name: Print public-failure.log
-        if: ${{ steps.result.outputs.state != 'success' }}
-        run: cat "${{ runner.temp }}/contributor-result/public-failure.log"
-
-      - name: Upload public failure summary
-        if: ${{ steps.result.outputs.state != 'success' }}
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: public-failure-log
-          path: ${{ runner.temp }}/contributor-result/public-failure.log
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upsert the automated failure comment
-        if: ${{ steps.result.outputs.state != 'success' && steps.result.outputs.publish_comment == 'true' }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
-          COMMENT_BODY: ${{ runner.temp }}/internal-ci-comment.md
-        run: |
-          set -euo pipefail
-          mapfile -t comment_ids < <(
-            gh api --paginate \
-              "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
-              --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- trtmc-internal-ci-result -->")) | .id'
-          )
-          payload="$RUNNER_TEMP/internal-ci-comment.json"
-          jq -n --rawfile body "$COMMENT_BODY" '{body: $body}' > "$payload"
-          if [ "${#comment_ids[@]}" -eq 0 ]; then
-            gh api --silent --method POST \
-              "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              --input "$payload"
-          else
-            gh api --silent --method PATCH \
-              "/repos/$GITHUB_REPOSITORY/issues/comments/${comment_ids[0]}" \
-              --input "$payload"
-            for comment_id in "${comment_ids[@]:1}"; do
-              gh api --silent --method DELETE \
-                "/repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" || true
-            done
-          fi
 
       - name: Preserve the failed automated verdict
         if: ${{ steps.result.outputs.state != 'success' }}
