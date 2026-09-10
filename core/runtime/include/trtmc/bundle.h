@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -43,6 +44,12 @@ class BundleReader {
     const BundleInfo& info() const noexcept { return info_; }
     const BundleSectionInfo* find_section(std::string_view name) const noexcept;
     std::vector<char> read_section(std::string_view name) const;
+
+    /// Copy a named section to an output stream using bounded working memory.
+    /// @param name Validated bundle section name.
+    /// @param output Caller-owned stream; may contain partial data on failure.
+    /// @throws std::runtime_error If the section is absent or input/output fails.
+    void copy_section(std::string_view name, std::ostream& output) const;
 
   private:
     std::string path_;

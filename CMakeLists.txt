@@ -3,6 +3,9 @@
 
 cmake_minimum_required(VERSION 3.20)
 project(tensorrt_model_connect VERSION 0.1.0 LANGUAGES CXX CUDA)
+if(CMAKE_CROSSCOMPILING)
+  message(FATAL_ERROR "TensorRT Model Connect does not support cross compilation")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,6 +41,8 @@ find_library(TRTMC_TRT_LIBRARY
   PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu lib/x86_64-linux-gnu
   REQUIRED
 )
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/EdgeLLM.cmake")
 
 option(TRTMC_ENABLE_BYOK "Enable the optional TVM-FFI BYOK bridge" ON)
 set(TRTMC_HAS_TVM_FFI OFF)
@@ -245,6 +250,9 @@ option(TRTMC_BUILD_TESTS "Build tests" ON)
 option(TRTMC_BUILD_EXAMPLES "Build examples" ON)
 if(TRTMC_BUILD_TESTS)
   enable_testing()
+  add_test(NAME test_edgellm_package_contract
+    COMMAND "${CMAKE_COMMAND}" "-DTEST_ROOT=${PROJECT_BINARY_DIR}/edgellm-package-contract"
+      -P "${PROJECT_SOURCE_DIR}/cmake/edgellm/tests/package_contract.cmake")
 endif()
 
 # A family owns its target, sources, dependencies, warnings, and installation.

@@ -80,7 +80,7 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: Qwen38Model, **
     return {name: runtime[name] for name in fields}
 
 
-def build(request, writer) -> None:
+def _build_native(request, writer) -> None:
     """Build one Qwen3.8 hybrid text-generation bundle."""
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen3_8 does not support dynamic_kv_cache")
@@ -148,3 +148,10 @@ def build(request, writer) -> None:
         path = model_dir / filename
         if path.is_file():
             writer.add_bytes(filename, path.read_bytes())
+
+
+def build(request, writer) -> None:
+    """Select a family-owned complete-network adapter or the native builder."""
+    from .dispatch import build as dispatch_build
+
+    dispatch_build(request, writer, _build_native)
