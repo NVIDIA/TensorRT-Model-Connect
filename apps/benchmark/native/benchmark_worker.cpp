@@ -421,14 +421,15 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
     return measure(
         timing, [&]() { return interface.generate_audio(prompt, config); },
         [](const trtmc::AudioResult& result) {
-            const double seconds =
-                result.sample_rate > 0
-                    ? static_cast<double>(result.samples.size()) / result.sample_rate
-                    : 0.0;
+            const double seconds = result.sample_rate > 0 && result.num_channels > 0
+                                       ? static_cast<double>(result.samples.size()) /
+                                             result.num_channels / result.sample_rate
+                                       : 0.0;
             return Json{{"output_samples", result.samples.size()},
                         {"num_samples", result.samples.size()},
                         {"output_audio_seconds", seconds},
-                        {"sample_rate", result.sample_rate}};
+                        {"sample_rate", result.sample_rate},
+                        {"num_channels", result.num_channels}};
         });
 }
 
@@ -458,13 +459,14 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
         [](const auto& value) {
             const auto& result = value.first;
             return Json{{"input_audio_seconds", value.second},
-                        {"output_audio_seconds",
-                         result.sample_rate > 0
-                             ? static_cast<double>(result.samples.size()) / result.sample_rate
-                             : 0.0},
+                        {"output_audio_seconds", result.sample_rate > 0 && result.num_channels > 0
+                                                     ? static_cast<double>(result.samples.size()) /
+                                                           result.num_channels / result.sample_rate
+                                                     : 0.0},
                         {"output_samples", result.samples.size()},
                         {"num_samples", result.samples.size()},
-                        {"sample_rate", result.sample_rate}};
+                        {"sample_rate", result.sample_rate},
+                        {"num_channels", result.num_channels}};
         });
 }
 

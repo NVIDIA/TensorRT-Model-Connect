@@ -33,6 +33,25 @@ contract. The backend owns TensorRT runtime objects, not model policy.
 returning or copy the lightweight `BundleReader` into the pipeline for deferred
 reads; it must not retain a reference to the temporary factory context.
 
+## Audio output contract
+
+`AudioResult` carries interleaved float PCM. `num_channels` defaults to one;
+for stereo the buffer order is `L0, R0, L1, R1, ...`. `num_samples` counts total
+scalar samples, not frames per channel; zero leaves the count unspecified and
+consumers use `samples.size()`. A nonzero count must match the buffer size.
+The sample rate is in frames per second, so duration is
+`samples.size() / num_channels / sample_rate`. Buffers must contain whole frames.
+
+The CLI WAV writer preserves the channel count and writes float32 PCM. Its WAV
+reader intentionally still averages input channels to mono for existing speech
+tasks. `AudioChunkCallback` also remains mono; this result contract does not add
+multichannel streaming support.
+
+The appended field preserves existing three-field aggregate initialization and
+mono behavior at source level. It changes the C++ struct layout: rebuild clients
+and family DSOs together rather than mixing binaries compiled against different
+versions of `task.h`.
+
 ## Optional load settings
 
 Runtime-sized KV capacity is passed directly to compatible families.
