@@ -195,7 +195,7 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict, tmp_
             timeout=1800,
         )
         record_evidence(
-            "native_process",
+            "qualification_process",
             {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
         )
         summary.update(json.loads(completed.stdout))

@@ -357,6 +357,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         from families.lance.tests.vision_oracle import native_vision_features
 
         vision_features = native_vision_features(bundle, _asset(case["test_image"]))
+        record_evidence("native_vision_features", vision_features)
     with evidence_stage("compare"):
         _assert_native_vision_health(vision_features)
     with evidence_stage("native"):
