@@ -206,13 +206,14 @@ class _RecordingConfig:
         self.cleared.append(flag)
 
 
-def test_fp32_builds_switch_off_the_reduced_precision_path() -> None:
+def test_fp32_builds_switch_off_the_reduced_precision_path(monkeypatch) -> None:
     """An fp32 build must not silently run convolutions in TF32.
 
     TF32 keeps ten mantissa bits. On res2net50_26w_8s that is enough to change
     the predicted class against timm, so fp32 has to mean fp32.
     """
-    import tensorrt as trt
+    trt = SimpleNamespace(BuilderFlag=SimpleNamespace(TF32=object()))
+    monkeypatch.setattr(model, "trt", trt)
 
     config = _RecordingConfig()
     model._configure_precision(config, "fp32")
