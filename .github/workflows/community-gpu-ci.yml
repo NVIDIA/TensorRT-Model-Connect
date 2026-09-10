@@ -222,7 +222,7 @@ jobs:
     timeout-minutes: 60
     permissions: {}
     outputs:
-      conclusion: ${{ steps.result.outputs.conclusion }}
+      conclusion: ${{ steps.record_failure.outputs.conclusion || steps.record_success.outputs.conclusion }}
 
     steps:
       - name: Install the Brev CLI
@@ -296,15 +296,19 @@ jobs:
             | tee /tmp/gpu-ci-output.log
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
-      - name: Record the step conclusion
-        if: always()
-        id: result
-        run: |
-          if [ "${{ failure() }}" = "true" ]; then
-            echo "conclusion=failure" >> "$GITHUB_OUTPUT"
-          else
-            echo "conclusion=${{ steps.test.outputs.conclusion || 'success' }}" >> "$GITHUB_OUTPUT"
-          fi
+      # success()/failure() are only valid in a step's own `if:`, not inside
+      # a run script's ${{ }} expression (that is invalid syntax and
+      # silently breaks the entire workflow file for every trigger, not
+      # just this step) so record the two outcomes as separate steps.
+      - name: Record failure
+        if: failure()
+        id: record_failure
+        run: echo "conclusion=failure" >> "$GITHUB_OUTPUT"
+
+      - name: Record success
+        if: success()
+        id: record_success
+        run: echo "conclusion=${{ steps.test.outputs.conclusion || 'success' }}" >> "$GITHUB_OUTPUT"
 
       - name: Always tear down the GPU instance
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
