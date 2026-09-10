@@ -14,7 +14,11 @@ from tensorrt_model_connect import build_cli
 
 
 def _stub_family_resolution(monkeypatch) -> None:
-    support = SimpleNamespace(tasks=("example_task",), default_task="example_task")
+    support = SimpleNamespace(
+        tasks=("example_task",),
+        default_task="example_task",
+        default_precision="fp32",
+    )
     monkeypatch.setattr(build_cli, "load_model_metadata", lambda _model_dir: object())
     monkeypatch.setattr(
         build_cli,

@@ -63,7 +63,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    source_is_local = Path(args.model).is_dir()
+    if args.command == "build" and source_is_local and not args.checkpoint_id:
+        raise ValueError("--checkpoint-id is required when MODEL is a local directory")
     model_dir = _resolve_model(args.model, args.revision)
+    if args.command == "build":
+        checkpoint_revision = _checkpoint_revision(model_dir, requested=args.revision)
     family, support = resolve_family(load_model_metadata(model_dir))
     if args.command == "prepare-structure":
         if "structure_prediction" not in support.tasks:
@@ -82,10 +87,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command != "build":
         raise AssertionError(f"unhandled command: {args.command}")
-    source_is_local = Path(args.model).is_dir()
-    if source_is_local and not args.checkpoint_id:
-        raise ValueError("--checkpoint-id is required when MODEL is a local directory")
-    checkpoint_revision = _checkpoint_revision(model_dir, requested=args.revision)
     task = args.task or support.default_task
     if task not in support.tasks:
         raise ValueError(
