@@ -1528,3 +1528,15 @@ def test_recording_error_keeps_outcome_when_terminal_sink_fails(tmp_path):
         ("trtmc_evidence_error", "Could not write evidence: OSError: record unavailable")
     ]
     assert recorder.data["evidence_status"] == "partial"
+
+
+def test_structure_file_is_copied_as_bounded_inert_evidence(tmp_path):
+    source = tmp_path / "prediction.cif"
+    payload = "data_example\n_atom_site.Cartn_x 1.0\n"
+    source.write_text(payload)
+    recorder = _recorder(tmp_path)
+    recorder.record("native", {"structure": str(source)})
+    saved = recorder.data["native"]["structure"]
+    assert saved["artifact"].endswith(".cif")
+    assert (recorder.directory / saved["artifact"]).read_text() == payload
+    assert source.read_text() == payload
