@@ -161,3 +161,58 @@ def test_reference_rejects_an_untied_text_encoder() -> None:
     )
     with pytest.raises(RuntimeError, match=r"tie_weights\(\) did not bind embeddings"):
         e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+
+
+def test_reference_restores_shared_inputs_without_changing_output_tying() -> None:
+    shared = SimpleNamespace(weight=_Weight(1))
+    encoder = SimpleNamespace(embed_tokens=SimpleNamespace(weight=_Weight(2)))
+    configuration = SimpleNamespace(tie_word_embeddings=False)
+    calls = []
+
+    def set_input_embeddings(value):
+        calls.append(value)
+        encoder.embed_tokens = value
+
+    text_encoder = SimpleNamespace(
+        shared=shared,
+        encoder=encoder,
+        config=configuration,
+        tie_weights=lambda: None,
+        set_input_embeddings=set_input_embeddings,
+    )
+    e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+    assert calls == [shared]
+    assert encoder.embed_tokens is shared
+    assert configuration.tie_word_embeddings is False
+
+
+def test_reference_rejects_missing_or_mismatched_embeddings() -> None:
+    shared = SimpleNamespace(weight=_Weight(1))
+    with pytest.raises(RuntimeError, match="no shared embedding binding"):
+        e2e._tie_wan_text_encoder(
+            SimpleNamespace(text_encoder=SimpleNamespace(shared=shared, tie_weights=lambda: None))
+        )
+
+    mismatched = _Weight(2)
+    mismatched.shape = (9, 4)
+    calls = []
+    text_encoder = SimpleNamespace(
+        shared=shared,
+        encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=mismatched)),
+        tie_weights=lambda: None,
+        set_input_embeddings=calls.append,
+    )
+    with pytest.raises(RuntimeError, match="embedding shapes do not match"):
+        e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+    assert calls == []
+
+
+def test_reference_rejects_an_ineffective_input_setter() -> None:
+    text_encoder = SimpleNamespace(
+        shared=SimpleNamespace(weight=_Weight(1)),
+        encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=_Weight(2))),
+        tie_weights=lambda: None,
+        set_input_embeddings=lambda value: None,
+    )
+    with pytest.raises(RuntimeError, match=r"tie_weights\(\) did not bind embeddings"):
+        e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
