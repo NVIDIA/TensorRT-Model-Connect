@@ -130,7 +130,7 @@ jobs:
       - name: Check out the base branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: main
+          ref: ${{ steps.snapshot.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -153,17 +153,23 @@ jobs:
           BASE_SHA: ${{ steps.snapshot.outputs.base_sha }}
         run: |
           set -euo pipefail
-          git checkout --quiet "$HEAD_SHA"
-          python3 -m tools.community_ci impact --base "$BASE_SHA" | tee /tmp/impact.json
-          # tools.community_ci already writes the "families" output; scope
-          # ("changed" vs "all", e.g. a shared/root file was touched) is not
-          # exposed as an action output, so read it from the same JSON here.
-          python3 -c "
+          # Execute only the captured trusted base's classifier. The PR head
+          # is an argument to git diff, never a checkout or Python import.
+          # Families absent from the base inventory conservatively select all.
+          python3 -m tools.test_impact --base "$BASE_SHA" --head "$HEAD_SHA" \
+            | tee "$RUNNER_TEMP/trtmc-gpu-impact.json"
+          python3 - <<'PY'
           import json
-          with open('/tmp/impact.json') as f:
-              summary = json.load(f)
-          print(f\"scope={summary['scope']}\")
-          " >> "$GITHUB_OUTPUT"
+          import os
+          from pathlib import Path
+
+          summary = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "trtmc-gpu-impact.json").read_text()
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print("families=" + json.dumps(summary["families"], separators=(",", ":")), file=output)
+              print("scope=" + summary["scope"], file=output)
+          PY
 
       # Security boundary, not a style choice: FAMILIES comes from directory
       # names under families/ in the pull request, which the contributor
@@ -245,8 +251,10 @@ jobs:
           instance_name="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # L40/L40S/L4 (Ada Lovelace, compute capability 8.9). Falls back
           # across providers/types automatically; see `brev create --help`.
-          brev create "$instance_name" -g L40 --timeout 600
+          # Publish the intended name before provisioning, so cleanup also
+          # runs when creation times out after an instance has been allocated.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
+          brev create "$instance_name" -g L40 --timeout 600
 
       - name: Build the GPU image, clone the PR head, and run the smoke test
         id: test
@@ -299,12 +307,23 @@ jobs:
       - name: Record the step conclusion
         if: always()
         id: result
+        env:
+          JOB_STATUS: ${{ job.status }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          TEST_CONCLUSION: ${{ steps.test.outputs.conclusion }}
         run: |
-          if [ "${{ failure() }}" = "true" ]; then
-            echo "conclusion=failure" >> "$GITHUB_OUTPUT"
-          else
-            echo "conclusion=${{ steps.test.outputs.conclusion || 'success' }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          # Status-check functions are only valid in if expressions. Require
+          # an explicit completed test; skipped or missing results fail closed.
+          conclusion=failure
+          if [ "$JOB_STATUS" = "cancelled" ]; then
+            conclusion=cancelled
+          elif [ "$JOB_STATUS" = "success" ] \
+            && [ "$TEST_OUTCOME" = "success" ] \
+            && [ "$TEST_CONCLUSION" = "success" ]; then
+            conclusion=success
           fi
+          echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
 
       - name: Always tear down the GPU instance
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
@@ -337,11 +356,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           CONCLUSION: ${{ needs.provision-and-test.outputs.conclusion }}
+          JOB_RESULT: ${{ needs.provision-and-test.result }}
         run: |
           set -euo pipefail
           state=failure
           description="GPU smoke test did not complete"
-          if [ "$CONCLUSION" = "success" ]; then
+          if [ "$JOB_RESULT" = "success" ] && [ "$CONCLUSION" = "success" ]; then
             state=success
             description="GPU smoke test passed"
           fi

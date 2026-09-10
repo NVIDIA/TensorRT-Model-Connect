@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the contributor-visible Community CPU entrypoint."""
+"""Tests for the contributor-visible Community CI entrypoints."""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -316,3 +317,295 @@ def test_cpu_image_builds_from_the_minimal_requirements_context(
 
     assert calls[0][:3] == ["docker", "build", "--file"]
     assert calls[0][-1] == "requirements"
+
+
+@pytest.mark.parametrize(
+    ("job_status", "test_outcome", "test_conclusion", "expected"),
+    [
+        ("success", "success", "success", "success"),
+        ("failure", "skipped", "", "failure"),
+        ("failure", "failure", "", "failure"),
+        ("failure", "success", "success", "failure"),
+        ("success", "skipped", "", "failure"),
+        ("success", "success", "", "failure"),
+        ("success", "failure", "success", "failure"),
+        ("cancelled", "cancelled", "", "cancelled"),
+        ("cancelled", "success", "success", "cancelled"),
+        ("", "", "", "failure"),
+    ],
+)
+def test_gpu_step_conclusion_requires_completed_success(
+    tmp_path: Path,
+    job_status: str,
+    test_outcome: str,
+    test_conclusion: str,
+    expected: str,
+) -> None:
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-gpu-ci.yml", "provision-and-test", "Record the step conclusion"
+            ),
+        ],
+        env={
+            **os.environ,
+            "JOB_STATUS": job_status,
+            "TEST_OUTCOME": test_outcome,
+            "TEST_CONCLUSION": test_conclusion,
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.read_text(encoding="utf-8") == f"conclusion={expected}\n"
+
+
+@pytest.mark.parametrize(
+    ("job_result", "conclusion", "expected_state"),
+    [
+        ("success", "success", "success"),
+        ("failure", "success", "failure"),
+        ("cancelled", "success", "failure"),
+        ("skipped", "", "failure"),
+        ("success", "failure", "failure"),
+        ("success", "cancelled", "failure"),
+        ("success", "", "failure"),
+    ],
+)
+def test_gpu_published_status_requires_job_and_test_success(
+    tmp_path: Path, job_result: str, conclusion: str, expected_state: str
+) -> None:
+    output = tmp_path / "status-args"
+    gh = tmp_path / "gh"
+    gh.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$STATUS_ARGS"\n', encoding="utf-8")
+    gh.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script("community-gpu-ci.yml", "publish", "Publish the terminal status"),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "STATUS_ARGS": str(output),
+            "JOB_RESULT": job_result,
+            "CONCLUSION": conclusion,
+            "GITHUB_REPOSITORY": "example/model-connect",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "123",
+            "HEAD_SHA": "a" * 40,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"state={expected_state}" in output.read_text(encoding="utf-8").splitlines()
+
+
+def test_gpu_status_contexts_and_cleanup_remain_unconditional() -> None:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/community-gpu-ci.yml").read_text(encoding="utf-8")
+    )
+    job = workflow["jobs"]["provision-and-test"]
+    steps = {step["name"]: step for step in job["steps"]}
+    result = steps["Record the step conclusion"]
+    assert result["if"] == "always()"
+    assert result["env"] == {
+        "JOB_STATUS": "${{ job.status }}",
+        "TEST_OUTCOME": "${{ steps.test.outcome }}",
+        "TEST_CONCLUSION": "${{ steps.test.outputs.conclusion }}",
+    }
+    assert "${{" not in result["run"]
+    cleanup = steps["Always tear down the GPU instance"]
+    assert cleanup["if"] == "${{ always() && steps.reserve.outputs.instance_name != '' }}"
+    assert cleanup["env"] == {"INSTANCE_NAME": "${{ steps.reserve.outputs.instance_name }}"}
+    assert cleanup["run"] == 'brev delete "$INSTANCE_NAME" || true'
+    assert job["outputs"] == {"conclusion": "${{ steps.result.outputs.conclusion }}"}
+    publish = workflow["jobs"]["publish"]["steps"][0]
+    assert publish["env"]["JOB_RESULT"] == "${{ needs.provision-and-test.result }}"
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "expected_scope", "expected_families"),
+    [
+        ("families/bert/model.py", "families", ["bert"]),
+        ("families/new_family/model.py", "all", ["bert", "gpt2"]),
+        ("README.md", "docs", []),
+    ],
+)
+def test_gpu_impact_executes_only_trusted_base_code(
+    tmp_path: Path,
+    changed_path: str,
+    expected_scope: str,
+    expected_families: list[str],
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for family in ("bert", "gpt2"):
+        root = repository / "families" / family
+        root.mkdir(parents=True)
+        (root / "model.py").write_text("# trusted base\n", encoding="utf-8")
+    tools = repository / "tools"
+    tools.mkdir()
+    (tools / "__init__.py").write_text("", encoding="utf-8")
+    (tools / "test_impact.py").write_text(
+        (REPO_ROOT / "tools/test_impact.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (repository / "README.md").write_text("Trusted documentation\n", encoding="utf-8")
+
+    def git(*arguments: str) -> str:
+        """Run fixture Git commands, returning stdout and raising on failure."""
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=repository,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_NAME": "CI Test",
+                "GIT_AUTHOR_EMAIL": "test@example.invalid",
+                "GIT_COMMITTER_NAME": "CI Test",
+                "GIT_COMMITTER_EMAIL": "test@example.invalid",
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    git("init")
+    git("add", ".")
+    git("-c", "core.hooksPath=/dev/null", "commit", "-m", "trusted fixture")
+    base = git("rev-parse", "HEAD")
+    changed = repository / changed_path
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("# pull-request content\n", encoding="utf-8")
+    git("add", changed_path)
+    git("-c", "core.hooksPath=/dev/null", "commit", "-m", "untrusted fixture")
+    head = git("rev-parse", "HEAD")
+    # A poison import on the PR branch must never execute on the trusted runner.
+    sentinel = tmp_path / "untrusted-code-executed"
+    (tools / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\nraise RuntimeError('untrusted')\n",
+        encoding="utf-8",
+    )
+    git("add", "tools/__init__.py")
+    git("-c", "core.hooksPath=/dev/null", "commit", "-m", "poison fixture")
+    poisoned_head = git("rev-parse", "HEAD")
+    git("checkout", "--detach", base)
+    output = tmp_path / "output"
+    script = _workflow_step_script(
+        "community-gpu-ci.yml", "authorize", "Resolve the changed model families"
+    )
+    for revision in (head, poisoned_head):
+        output.write_text("", encoding="utf-8")
+        result = subprocess.run(
+            ["bash", "-c", script],
+            cwd=repository,
+            env={
+                **os.environ,
+                "PYTHONPATH": "",
+                "BASE_SHA": base,
+                "HEAD_SHA": revision,
+                "RUNNER_TEMP": str(tmp_path),
+                "GITHUB_OUTPUT": str(output),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not sentinel.exists()
+        assert git("rev-parse", "HEAD") == base
+        summary = json.loads(result.stdout)
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        if revision == poisoned_head:
+            assert summary["scope"] == "all"
+            assert summary["families"] == ["bert", "gpt2"]
+        else:
+            assert summary["scope"] == expected_scope
+            assert summary["families"] == expected_families
+        assert json.loads(values["families"]) == summary["families"]
+        assert values["scope"] == summary["scope"]
+
+
+def test_gpu_authorization_uses_exact_trusted_base_and_cpu_prerequisite() -> None:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/community-gpu-ci.yml").read_text(encoding="utf-8")
+    )
+    authorize = workflow["jobs"]["authorize"]
+    steps = {step["name"]: step for step in authorize["steps"]}
+    checkout = steps["Check out the base branch"]
+    assert checkout["with"] == {
+        "ref": "${{ steps.snapshot.outputs.base_sha }}",
+        "fetch-depth": 0,
+        "persist-credentials": False,
+    }
+    snapshot = steps["Capture the exact pull-request snapshot"]["run"]
+    assert 'test "$base_repo" = "$GITHUB_REPOSITORY"' in snapshot
+    assert 'test "$base_ref" = "main"' in snapshot
+    assert "community-cpu.yml/runs?event=pull_request&head_sha=$head_sha" in snapshot
+    assert 'select(.conclusion == "success")' in snapshot
+    assert "Validate the changed family names" in steps
+
+
+@pytest.mark.parametrize("create_exitcode", [0, 1])
+def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
+    tmp_path: Path, create_exitcode: int
+) -> None:
+    output = tmp_path / "output"
+    calls = tmp_path / "brev-calls"
+    brev = tmp_path / "brev"
+    brev.write_text(
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> "$BREV_CALLS"\n'
+        'if [ "$1" = "create" ]; then exit "$CREATE_EXITCODE"; fi\n',
+        encoding="utf-8",
+    )
+    brev.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "BREV_CALLS": str(calls),
+        "CREATE_EXITCODE": str(create_exitcode),
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "GITHUB_OUTPUT": str(output),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-gpu-ci.yml", "provision-and-test", "Reserve a GPU instance"
+            ),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == create_exitcode, result.stdout + result.stderr
+    instance_name = "trtmc-gpu-ci-123-2"
+    assert output.read_text(encoding="utf-8") == f"instance_name={instance_name}\n"
+    cleanup = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-gpu-ci.yml", "provision-and-test", "Always tear down the GPU instance"
+            ),
+        ],
+        env={**environment, "INSTANCE_NAME": instance_name},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        f"create {instance_name} -g L40 --timeout 600",
+        f"delete {instance_name}",
+    ]
