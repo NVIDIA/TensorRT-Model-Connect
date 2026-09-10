@@ -530,6 +530,16 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME family_cli COMMAND test_family_cli $<TARGET_FILE:trtmc_test_cli_fixture>)
   set_tests_properties(family_cli PROPERTIES LABELS cpu)
 
+  add_executable(test_audio_io apps/cli/tests/test_audio_io.cpp apps/cli/io.cpp)
+  target_include_directories(test_audio_io PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${PROJECT_SOURCE_DIR}/apps
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_compile_options(test_audio_io PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME audio_io COMMAND test_audio_io)
+  set_tests_properties(audio_io PROPERTIES LABELS "cpu")
+
   set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
   add_library(trtmc_test_backend_fake SHARED core/runtime/tests/fake_backend.cpp)
   target_include_directories(trtmc_test_backend_fake PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
