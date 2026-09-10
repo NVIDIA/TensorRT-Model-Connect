@@ -43,6 +43,11 @@ excluded_profiles:
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
       into the release performance runner.
+  - model: dpn92-mx-in1k
+    reason: >-
+      Functional and timm reference-parity qualification is present for every
+      published DPN width, but the release-performance workload and receipt
+      were collected only for dpn68b.
 
 entries:
   - id: albert.encode
@@ -1132,6 +1137,19 @@ entries:
     model: crossvit-9-240-in1k
     workload:
       testcase: crossvit-9-240-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_dpn.classify
+    family: timm_dpn
+    operation: classify
+    model: dpn68b-ra-in1k
+    workload:
+      testcase: dpn68b-ra-in1k
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision

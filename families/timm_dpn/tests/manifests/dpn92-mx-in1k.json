@@ -1,0 +1,18 @@
+{
+  "name": "dpn92-mx-in1k",
+  "hf_id": "timm/dpn92.mx_in1k",
+  "hf_revision": "8f2a71d2525254e14b0830a97250d841d5c4cae8",
+  "bundle": "dpn92-mx-in1k.bundle",
+  "family": "timm_dpn",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "dpn92-mx-in1k",
+      "premerge": false,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}
