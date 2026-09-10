@@ -108,6 +108,8 @@ ITask* create(const FamilyContext& context) {
 
 } // namespace trtmc::openfold3
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("openfold3")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     return trtmc::openfold3::create(context);
 }
