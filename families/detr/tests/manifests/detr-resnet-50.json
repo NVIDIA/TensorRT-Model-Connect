@@ -1,0 +1,19 @@
+{
+  "name": "detr-resnet-50",
+  "hf_id": "facebook/detr-resnet-50",
+  "hf_revision": "1d5f47bd3bdd2c4bbfa585418ffe6da5028b4c0b",
+  "bundle": "detr-resnet-50.bundle",
+  "family": "detr",
+  "task": "object_detection",
+  "precision": "fp32",
+  "input_size": 800,
+  "testcases": [
+    {
+      "name": "detr-resnet-50",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}
