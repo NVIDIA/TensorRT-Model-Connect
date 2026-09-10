@@ -201,7 +201,7 @@ def _media(path: str, root: Path, media_type: str, budget: list[int]) -> tuple[s
     budget[0] -= len(data)
     uri = f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
     if mime.startswith("image/"):
-        return f'<img loading="lazy" alt="Recorded output" src="{uri}">', None
+        return f'<img loading="lazy" alt="Recorded media" src="{uri}">', None
     element = "audio" if mime.startswith("audio/") else "video"
     return f'<{element} controls preload="none" src="{uri}"></{element}>', None
 
@@ -825,6 +825,21 @@ def _artifact_references(value: Any) -> set[str]:
     return set()
 
 
+def _media_pair_key(title: str) -> tuple[str, int, str] | None:
+    """Read an explicit view index and role, never infer one from a filename."""
+    match = re.fullmatch(
+        r"(frame|sample)\s+([0-9]{1,12})\s*/\s*(native|reference)", title.strip(), re.I | re.ASCII
+    )
+    if match:
+        return match[1].lower(), int(match[2]), match[3].lower()
+    match = re.fullmatch(
+        r"(native|reference)\s+(frame|sample)\s+([0-9]{1,12})", title.strip(), re.I | re.ASCII
+    )
+    if match:
+        return match[2].lower(), int(match[3]), match[1].lower()
+    return None
+
+
 def _media_role(artifact: dict[str, Any], title: str, references: dict[str, set[str]]) -> str:
     for role, paths in references.items():
         if str(artifact.get("path", "")) in paths:
@@ -832,114 +847,263 @@ def _media_role(artifact: dict[str, Any], title: str, references: dict[str, set[
     recorded = str(artifact.get("role", "")).lower()
     if recorded in ("inputs", "native", "reference"):
         return recorded
+    fields = set(re.split(r"[/\s]+", recorded + " " + title.lower()))
+    if fields & {
+        "native_process",
+        "reference_process",
+        "process",
+        "argv",
+        "command",
+        "commands",
+        "stdout",
+        "stderr",
+    }:
+        return "additional"
     words = title.lower().replace("/", " ").replace("_", " ").split()
-    for role in ("reference", "native", "input"):
+    if "input" in words or "inputs" in words:
+        return "inputs"
+    for role in ("reference", "native"):
         if role in words:
-            return "inputs" if role == "input" else role
+            return role
     return "additional"
 
 
-def _artifacts(data: dict[str, Any], root: Path, budget: list[int]) -> tuple[dict[str, str], str]:
-    titles, captions, notes = {}, {}, []
-    for view in data.get("views", []) if isinstance(data.get("views"), list) else []:
-        if not isinstance(view, dict):
-            continue
-        referenced = False
-        for kind in ("image", "audio", "video"):
-            media = view.get(kind)
-            if isinstance(media, dict) and media.get("artifact"):
-                titles[media["artifact"]] = view.get("title", "Recorded view")
-                captions[media["artifact"]] = view.get("caption", "")
-                referenced = True
-        if not referenced and view.get("caption"):
-            notes.append(
-                f"<p class='note'><strong>{_escape(view.get('title', 'Evidence note'))}</strong>: {_escape(view['caption'])}</p>"
-            )
+def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
+    """Prefer current view metadata while retaining explicit historical roles."""
+    observations = [row for row in data.get("observations", []) if isinstance(row, dict)]
+    views, seen_views = {}, set()
+    sources = [data.get("views", [])] + [
+        row.get("value") for row in observations if row.get("name") == "views"
+    ]
+    for priority, source in enumerate(sources):
+        for view in source if isinstance(source, list) else []:
+            if not isinstance(view, dict):
+                continue
+            for kind in ("image", "audio", "video"):
+                value = view.get(kind)
+                if not isinstance(value, dict) or not isinstance(value.get("artifact"), str):
+                    continue
+                path, title, caption = (
+                    value["artifact"],
+                    str(view.get("title", "Recorded view")),
+                    str(view.get("caption", "")),
+                )
+                key = (path, title, caption)
+                if key not in seen_views:
+                    seen_views.add(key)
+                    views.setdefault(path, []).append((title, caption, priority))
     references = {
         role: _artifact_references(data.get(role)) for role in ("inputs", "native", "reference")
     }
     historical_inputs = set()
-    for observation in data.get("observations", []):
-        if isinstance(observation, dict) and observation.get("name") == "inputs":
-            historical_inputs.update(_artifact_references(observation.get("value")))
-    preview, extra, files = {}, [], []
-    artifacts = data.get("artifacts", [])
-    current = set().union(*references.values())
-    artifacts = sorted(
-        artifacts,
-        key=lambda item: (
-            str(item.get("path", "")) not in current if isinstance(item, dict) else True,
-            "overlay" not in str(titles.get(str(item.get("path", "")), "")).lower()
-            if isinstance(item, dict)
-            else True,
-        ),
-    )
-    seen_media: dict[str, str] = {}
+    for row in observations:
+        if row.get("name") == "inputs":
+            historical_inputs.update(_artifact_references(row.get("value")))
+    items = []
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             continue
         path = str(artifact.get("path", ""))
-        label = (
-            titles.get(path) or f"{artifact.get('role', 'output')} / {artifact.get('label', path)}"
+        fallback = str(artifact.get("role", "Recorded media"))
+        if artifact.get("label"):
+            fallback += " / " + str(artifact["label"])
+        for title, caption, priority in views.get(
+            path, [(fallback, str(artifact.get("caption", "")), len(sources))]
+        ):
+            pair = _media_pair_key(title) if path in views or not artifact.get("label") else None
+            roles = (
+                [pair[2]] if pair else [role for role, paths in references.items() if path in paths]
+            )
+            if pair and path in references["inputs"]:
+                roles.append("inputs")
+            if not roles:
+                role = _media_role(artifact, title, references)
+                roles = ["inputs" if role == "additional" and path in historical_inputs else role]
+            for role in roles:
+                logical_input = pair is not None and role == "inputs"
+                items.append(
+                    {
+                        "artifact": artifact,
+                        "path": path,
+                        "role": role,
+                        "title": "Input" if logical_input else title,
+                        "caption": ""
+                        if logical_input
+                        else caption.split("Original file:", 1)[0].strip(),
+                        "pair": pair[:2] if pair and not logical_input else None,
+                        "priority": priority,
+                        "view": path in views and not logical_input,
+                    }
+                )
+    latest_inputs = {}
+    for item in items:
+        if item["role"] == "inputs":
+            latest_inputs[re.sub(r"^\d+-", "", item["path"].rsplit("/", 1)[-1])] = item["path"]
+    current_inputs = references["inputs"] or set(latest_inputs.values())
+    for item in items:
+        item["current_input"] = item["path"] in current_inputs
+    return sorted(
+        items,
+        key=lambda item: (
+            0
+            if item["role"] == "inputs"
+            else 1
+            if item["pair"]
+            else 2
+            if item["role"] in {"native", "reference"}
+            else 3,
+            not item["current_input"] if item["role"] == "inputs" else False,
+            item["pair"] or ("", -1),
+            item["role"] == "reference",
+            item["priority"],
+            "overlay" not in item["title"].lower(),
+        ),
+    )
+
+
+def _media_duplicate(item: dict[str, Any], fingerprint: str, seen: set) -> bool:
+    scope = item["pair"] or (item["title"] if item["view"] else None)
+    key = (item["role"], scope, fingerprint)
+    if key in seen:
+        return True
+    seen.add(key)
+    return False
+
+
+def _media_figure(item: dict[str, Any], body: str) -> str:
+    title = item["title"]
+    if item["pair"]:
+        kind, index = item["pair"]
+        title = f"{kind.title()} {index} / {item['role'].title()}"
+    caption = f"<p class='note'>{_escape(item['caption'])}</p>" if item["caption"] else ""
+    return f'<figure data-media-role="{_escape(item["role"])}"><figcaption>{_escape(title)}</figcaption>{body}{caption}</figure>'
+
+
+def _media_layout(
+    items: list[dict[str, Any]], input_limit: int = 1
+) -> tuple[dict[str, str], list[str], str]:
+    """Keep each declared index together; only unambiguous same-index pairs compare."""
+    groups = {}
+    for item in items:
+        if item["pair"] and item.get("previewable", True):
+            groups.setdefault(item["pair"], {"native": [], "reference": []})[item["role"]].append(
+                item["figure"]
+            )
+    paired = [
+        key
+        for key, roles in sorted(groups.items())
+        if all(len(roles[role]) == 1 for role in ("native", "reference"))
+    ]
+    first = (
+        paired[0]
+        if paired
+        else next((key for key, roles in sorted(groups.items()) if roles["native"]), None)
+    )
+    first_reference = (
+        next((key for key, roles in sorted(groups.items()) if roles["reference"]), None)
+        if first is None
+        else None
+    )
+    previews, extra, legends = {}, [], []
+    for (kind, index), roles in sorted(groups.items()):
+        complete = (kind, index) in paired
+        label = f"{kind.title()} {index}"
+        note = (
+            ""
+            if complete
+            else '<p class="note">No unambiguous native/reference pair recorded for this index.</p>'
         )
+        body = (
+            '<div class="pair">' + "".join(roles["native"] + roles["reference"]) + "</div>"
+            if complete
+            else "".join(roles["native"] + roles["reference"])
+        )
+        group = f'<section class="media-sample" data-media-kind="{kind}" data-media-index="{index}" data-media-paired="{str(complete).lower()}"><h4>{label}</h4>{note}{body}</section>'
+        if (kind, index) == first:
+            previews["native"], previews["reference"] = group, ""
+        elif (kind, index) == first_reference:
+            previews["reference"] = group
+        else:
+            extra.append(group)
+    input_count = 0
+    for item in items:
+        if item["pair"] and item.get("previewable", True):
+            continue
+        role, figure = item["role"], item["figure"]
+        if item["title"].casefold() in {
+            "class color key",
+            "class colour key",
+            "legend",
+            "color legend",
+            "colour legend",
+            "color key",
+            "colour key",
+        }:
+            legends.append(figure)
+        elif (
+            role == "inputs"
+            and item["current_input"]
+            and input_count < input_limit
+            and item.get("previewable", True)
+        ):
+            previews[role] = previews.get(role, "") + figure
+            input_count += 1
+        elif (
+            role in {"native", "reference"}
+            and role not in previews
+            and item.get("previewable", True)
+        ):
+            previews[role] = figure
+        else:
+            extra.append('<section class="media-unpaired">' + figure + "</section>")
+    return previews, extra, "".join(legends)
+
+
+def _artifacts(data: dict[str, Any], root: Path, budget: list[int]) -> tuple[dict[str, str], str]:
+    notes, files, rendered_items, seen = [], [], [], set()
+    for view in data.get("views", []) if isinstance(data.get("views"), list) else []:
+        if (
+            isinstance(view, dict)
+            and view.get("caption")
+            and not any(
+                isinstance(view.get(kind), dict) and view[kind].get("artifact")
+                for kind in ("image", "audio", "video")
+            )
+        ):
+            notes.append(
+                f"<p class='note'><strong>{_escape(view.get('title', 'Evidence note'))}</strong>: {_escape(view['caption'])}</p>"
+            )
+    for item in _media_items(data, data.get("artifacts", [])):
+        artifact, path = item["artifact"], item["path"]
         before = budget[0]
         rendered, issue = _media(path, root, str(artifact.get("media_type", "")), budget)
         if rendered:
-            role = _media_role(artifact, str(label), references)
-            if role == "additional" and path in historical_inputs:
-                role = "inputs"
-            fingerprint = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-            if fingerprint in seen_media:
+            if _media_duplicate(item, hashlib.sha256(rendered.encode("utf-8")).hexdigest(), seen):
                 budget[0] = before
-                original_role = seen_media[fingerprint]
-                if role in {"inputs", "native", "reference"} and role not in preview:
-                    original = {
-                        "inputs": "Input",
-                        "native": "Output",
-                        "reference": "Reference",
-                    }.get(original_role, "recorded media in Details")
-                    preview[role] = (
-                        f'<p class="note">Same recorded media as {_escape(original)}.</p>'
-                    )
-                    if role == "reference":
-                        preview["reference_same"] = original_role
                 continue
-            seen_media[fingerprint] = role
-            caption = f"<p class='note'>{_escape(captions[path])}</p>" if captions.get(path) else ""
-            figure = (
-                f"<figure><figcaption>{_escape(label)}</figcaption>{rendered}{caption}</figure>"
-            )
-            if str(label).casefold() in {
-                "class color key",
-                "class colour key",
-                "legend",
-                "color legend",
-                "colour legend",
-            }:
-                preview["legend"] = preview.get("legend", "") + figure
-            elif role != "additional" and role not in preview:
-                preview[role] = figure
-            else:
-                extra.append(figure)
+            rendered_items.append({**item, "figure": _media_figure(item, rendered)})
         else:
             suffix = f" — {_escape(issue)}" if issue else " — retained in the evidence directory"
             files.append(f"<li><code>{_escape(path)}</code>{suffix}</li>")
+    previews, extra, legends = _media_layout(rendered_items)
+    if legends:
+        previews["legend"] = legends
     more = "".join(notes)
     if extra:
         more += (
             "<details><summary>More recorded media ("
             + str(len(extra))
-            + ")</summary><div class='pair'>"
+            + ')</summary><div class="media-samples">'
             + "".join(extra)
             + "</div></details>"
         )
     if files:
         more += (
             "<details><summary>Raw evidence files</summary><ul>"
-            + "".join(files)
+            + "".join(dict.fromkeys(files))
             + "</ul></details>"
         )
-    return preview, more
+    return previews, more
 
 
 def _result_summary(data: dict[str, Any]) -> str:
@@ -1453,7 +1617,7 @@ def _demo_nonfinite(value: Any) -> str:
 
 def _demo_output(value: Any, *, role: str, task: str, media: str = "", peer: Any = None) -> str:
     """Show one useful output representation instead of generic tensor metadata."""
-    if value is None or _mapping(value).get("mode") == "contract_only":
+    if (value is None or _mapping(value).get("mode") == "contract_only") and not media:
         return ""
     if "classification" in task:
         chosen = value.get("top_class") if isinstance(value, dict) else value
@@ -2154,7 +2318,12 @@ def _content(
             '<p class="note partial-note">Partial evidence; some details are unavailable.</p>'
         )
     reference_detail = ""
-    if native is not None or previews.get("native") or _demo_text_value(reference, "reference"):
+    if (
+        native is not None
+        or previews.get("native")
+        or previews.get("reference")
+        or _demo_text_value(reference, "reference")
+    ):
         primary = _demo_output(native, role="native", task=task, media=previews.get("native", ""))
         other = _demo_output(
             reference, role="reference", task=task, media=previews.get("reference", "")
@@ -2185,6 +2354,13 @@ def _content(
                 reference_detail = "<h3>Reference media</h3>" + previews["reference"]
         elif other:
             reference_detail = "<h3>Reference output</h3>" + other
+        if previews.get("reference") and not previews.get("native") and not text_comparison:
+            primary = (
+                (primary or '<p class="note">No native output was recorded.</p>')
+                + "<h4>Reference output</h4>"
+                + other
+            )
+            reference_detail = ""
         if "forecast" in task:
             primary += '<p class="note">Last recorded window; all windows are in Details.</p>'
         primary += _demo_stress_output(display)

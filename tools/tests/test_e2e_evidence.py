@@ -8,6 +8,7 @@ import copy
 import unittest
 import json
 import struct
+import zlib
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -597,7 +598,7 @@ def test_run_settings_use_human_labels_and_original_keys(tmp_path: Path) -> None
     assert "Missing fields have no assumed defaults" in report
 
 
-def test_media_uses_recorded_references_and_embeds_each_file_once(tmp_path: Path) -> None:
+def test_media_preserves_identical_bytes_in_distinct_recorded_roles(tmp_path: Path) -> None:
     data = _case()
     gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
     paths = ["input.gif", "native.gif", "reference.gif", "earlier.gif"]
@@ -606,13 +607,318 @@ def test_media_uses_recorded_references_and_embeds_each_file_once(tmp_path: Path
     data["inputs"]["asset"] = {"artifact": paths[0]}
     data["native"] = {"artifact": paths[1]}
     data["reference"] = {"artifact": paths[2]}
-    data["artifacts"] = [{"path": path, "role": "observations", "label": path} for path in paths]
+    data["artifacts"] = [
+        {"path": path, "role": "native" if path == "earlier.gif" else "observations", "label": path}
+        for path in paths
+    ]
     report = render_case(data, tmp_path)
-    assert report.count("data:image/gif;base64,") == 1
-    assert "Same recorded media as Input" in report
+    assert report.count("data:image/gif;base64,") == 3
+    assert "Same recorded media as Input" not in report
     assert "More recorded media" not in report
     assert all(path in report for path in paths)
     assert all((tmp_path / path).read_bytes() == gif for path in paths)
+
+
+def _rgb_png(path: Path, rgb: tuple[int, int, int]) -> str:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload))
+        )
+
+    pixels = (b"\0" + bytes(rgb) * 2) * 2
+    content = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(pixels))
+        + chunk(b"IEND", b"")
+    )
+    path.write_bytes(content)
+    return "data:image/png;base64," + base64.b64encode(content).decode("ascii")
+
+
+class _MediaMarkup(HTMLParser):
+    """Inspect visible media roles and their containing frame groups."""
+
+    def __init__(self, report: str) -> None:
+        super().__init__()
+        self.groups = []
+        self.figures = []
+        self.sections = []
+        self.details = 0
+        self.figure = None
+        self.in_caption = False
+        self.feed(report)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "details":
+            self.details += 1
+        if tag == "section":
+            group = None
+            if "data-media-index" in attrs:
+                group = {
+                    "kind": attrs["data-media-kind"],
+                    "index": int(attrs["data-media-index"]),
+                    "paired": attrs["data-media-paired"] == "true",
+                    "in_details": bool(self.details),
+                    "figures": [],
+                }
+                self.groups.append(group)
+            self.sections.append(group)
+        if tag == "figure":
+            self.figure = {
+                "role": attrs.get("data-media-role"),
+                "caption": "",
+                "images": [],
+                "in_details": bool(self.details),
+            }
+            self.figures.append(self.figure)
+            group = next((item for item in reversed(self.sections) if item is not None), None)
+            if group is not None:
+                group["figures"].append(self.figure)
+        if tag == "figcaption":
+            self.in_caption = True
+        if tag == "img" and self.figure is not None:
+            self.figure["images"].append(attrs["src"])
+
+    def handle_endtag(self, tag):
+        if tag == "details":
+            self.details -= 1
+        if tag == "section":
+            self.sections.pop()
+        if tag == "figcaption":
+            self.in_caption = False
+        if tag == "figure":
+            self.figure = None
+
+    def handle_data(self, value):
+        if self.in_caption and self.figure is not None:
+            self.figure["caption"] += value
+
+
+def _video_evidence(views: list[dict], artifacts: list[dict]) -> dict:
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "world_model_generation"
+    data["native"] = {"frames_count": 2}
+    data["reference"] = {"frame_count": 2}
+    data["views"] = views
+    data["artifacts"] = artifacts
+    return data
+
+
+def test_media_process_inputs_cannot_replace_generated_output(tmp_path: Path) -> None:
+    input_image = _rgb_png(tmp_path / "input.png", (220, 30, 20))
+    (tmp_path / "process-input.png").write_bytes((tmp_path / "input.png").read_bytes())
+    native_image = _rgb_png(tmp_path / "generated.png", (30, 40, 220))
+    reference_image = _rgb_png(tmp_path / "reference.png", (20, 210, 40))
+    data = _video_evidence(
+        [
+            {"title": "Frame 0 / native", "image": {"artifact": "generated.png"}},
+            {"title": "Frame 0 / reference", "image": {"artifact": "reference.png"}},
+        ],
+        [
+            {"path": "input.png", "role": "inputs"},
+            {"path": "process-input.png", "role": "native_process", "label": "argv / image"},
+            {"path": "generated.png", "role": "views"},
+            {"path": "reference.png", "role": "views"},
+        ],
+    )
+    data["inputs"]["image"] = {"artifact": "input.png"}
+    data["native_process"] = {"argv": ["generate-world", {"artifact": "process-input.png"}]}
+    original = copy.deepcopy(data)
+    report = render_case(data, tmp_path)
+    assert "Same recorded media as Input" not in _visible(report)
+    markup = _MediaMarkup(report)
+    default = [figure for figure in markup.figures if not figure["in_details"]]
+    assert not any(
+        input_image in figure["images"]
+        for figure in markup.figures
+        if figure["role"] in {"native", "reference"}
+    )
+    assert [figure["images"] for figure in default if figure["role"] == "inputs"] == [[input_image]]
+    assert [figure["images"] for figure in default if figure["role"] == "native"] == [
+        [native_image]
+    ]
+    assert [figure["images"] for figure in default if figure["role"] == "reference"] == [
+        [reference_image]
+    ]
+    assert data == original
+
+
+def test_media_canonical_frames_survive_earlier_identical_previews(tmp_path: Path) -> None:
+    native_image = _rgb_png(tmp_path / "early-preview.png", (40, 70, 150))
+    (tmp_path / "paired-native.png").write_bytes((tmp_path / "early-preview.png").read_bytes())
+    reference_image = _rgb_png(tmp_path / "paired-reference.png", (120, 60, 30))
+    canonical = [
+        {
+            "title": "Frame 64 / native",
+            "image": {"artifact": "paired-native.png"},
+            "caption": "Current native result",
+        },
+        {
+            "title": "Frame 64 / reference",
+            "image": {"artifact": "paired-reference.png"},
+            "caption": "Current reference result",
+        },
+    ]
+    data = _video_evidence(
+        canonical,
+        [
+            {"path": "early-preview.png", "role": "views", "label": "image"},
+            {"path": "paired-native.png", "role": "views", "label": "image"},
+            {"path": "paired-reference.png", "role": "views", "label": "image"},
+        ],
+    )
+    data["observations"] = [
+        {
+            "name": "views",
+            "value": [
+                {
+                    "title": "Native frame 64",
+                    "image": {"artifact": "early-preview.png"},
+                    "caption": "Earlier preview",
+                }
+            ],
+        },
+        {"name": "views", "value": canonical},
+    ]
+    report = render_case(data, tmp_path)
+    assert "Frame 64 / Native" in _visible(report)
+    assert "Current native result" in _visible(report)
+    groups = _MediaMarkup(report).groups
+    assert len(groups) == 1 and groups[0]["paired"] and not groups[0]["in_details"]
+    assert [(figure["role"], figure["images"]) for figure in groups[0]["figures"]] == [
+        ("native", [native_image]),
+        ("reference", [reference_image]),
+    ]
+
+
+@pytest.mark.parametrize("same_path", [False, True], ids=["copied-files", "shared-file"])
+def test_media_identical_bytes_keep_both_roles_at_each_frame(
+    tmp_path: Path, same_path: bool
+) -> None:
+    image = _rgb_png(tmp_path / "shared.png", (80, 90, 100))
+    views, artifacts = [], []
+    for index in (0, 64):
+        for role in ("native", "reference"):
+            path = "shared.png" if same_path else f"{role}-{index}.png"
+            (tmp_path / path).write_bytes((tmp_path / "shared.png").read_bytes())
+            views.append({"title": f"Frame {index} / {role}", "image": {"artifact": path}})
+            if not same_path:
+                artifacts.append({"path": path, "role": "views"})
+    if same_path:
+        artifacts.append({"path": "shared.png", "role": "views"})
+    groups = _MediaMarkup(render_case(_video_evidence(views, artifacts), tmp_path)).groups
+    assert [(group["index"], group["paired"], group["in_details"]) for group in groups] == [
+        (0, True, False),
+        (64, True, True),
+    ]
+    for group in groups:
+        assert [(figure["role"], figure["images"]) for figure in group["figures"]] == [
+            ("native", [image]),
+            ("reference", [image]),
+        ]
+
+
+def test_media_more_views_compare_the_same_recorded_frame_index(tmp_path: Path) -> None:
+    entries = [
+        ("reference", 64),
+        ("native", 128),
+        ("native", 0),
+        ("reference", 128),
+        ("reference", 0),
+        ("native", 64),
+    ]
+    views, artifacts, expected = [], [], {}
+    for position, (role, index) in enumerate(entries):
+        path = f"recorded-{position}.png"
+        expected[role, index] = _rgb_png(tmp_path / path, (20 + position * 30, 60, 120))
+        views.append({"title": f"Frame {index} / {role}", "image": {"artifact": path}})
+        artifacts.append({"path": path, "role": "views"})
+    report = render_case(_video_evidence(views, artifacts), tmp_path)
+    groups = _MediaMarkup(report).groups
+    assert [(group["index"], group["in_details"]) for group in groups] == [
+        (0, False),
+        (64, True),
+        (128, True),
+    ]
+    for group in groups:
+        assert group["paired"]
+        assert [
+            (figure["role"], figure["caption"], figure["images"]) for figure in group["figures"]
+        ] == [
+            (role, f"Frame {group['index']} / {role.title()}", [expected[role, group["index"]]])
+            for role in ("native", "reference")
+        ]
+
+
+@pytest.mark.parametrize(
+    "titles",
+    [
+        ["Frame 0 / native", "Frame 1 / reference"],
+        ["Frame 0 / native", "Sample 0 / reference"],
+        ["Frame 0 / native", "Frame 0 / native", "Frame 0 / reference"],
+        ["Native preview", "Frame 0 / reference"],
+    ],
+    ids=["mismatched-index", "different-kind", "ambiguous-native", "filename-is-not-index"],
+)
+def test_media_unmatched_views_never_invent_a_frame_pair(tmp_path: Path, titles: list[str]) -> None:
+    views, artifacts = [], []
+    for index, title in enumerate(titles):
+        path = f"frame-0-{index}.png"
+        _rgb_png(tmp_path / path, (30 + index * 70, 50, 90))
+        views.append({"title": title, "image": {"artifact": path}})
+        artifacts.append({"path": path, "role": "views"})
+    report = render_case(_video_evidence(views, artifacts), tmp_path)
+    markup = _MediaMarkup(report)
+    assert markup.groups and not any(group["paired"] for group in markup.groups)
+    assert sum(len(figure["images"]) for figure in markup.figures) == len(titles)
+    assert "No unambiguous native/reference pair recorded for this index." in _expanded(report)
+
+
+@pytest.mark.parametrize("status", ["passed", "failed"])
+def test_media_reference_only_frame_remains_visible_without_expanding(
+    tmp_path: Path, status: str
+) -> None:
+    image = _rgb_png(tmp_path / "reference.png", (20, 80, 160))
+    data = _video_evidence(
+        [{"title": "Frame 64 / reference", "image": {"artifact": "reference.png"}}],
+        [{"path": "reference.png", "role": "views"}],
+    )
+    data["native"] = {}
+    data["status"] = status
+    report = render_case(data, tmp_path)
+    markup = _MediaMarkup(report)
+    default = [figure for figure in markup.figures if not figure["in_details"]]
+    assert [(figure["role"], figure["images"]) for figure in default] == [("reference", [image])]
+    assert not any(group["paired"] for group in markup.groups)
+    if status == "failed":
+        assert 'data-execution-status="failed"' in report
+        assert 'data-status="failed"' in report
+
+
+def test_media_shared_input_and_indexed_outputs_keep_all_three_roles(tmp_path: Path) -> None:
+    image = _rgb_png(tmp_path / "shared.png", (70, 110, 150))
+    data = _video_evidence(
+        [
+            {"title": "Frame 0 / native", "image": {"artifact": "shared.png"}},
+            {"title": "Frame 0 / reference", "image": {"artifact": "shared.png"}},
+        ],
+        [{"path": "shared.png", "role": "views"}],
+    )
+    data["inputs"]["image"] = {"artifact": "shared.png"}
+    markup = _MediaMarkup(render_case(data, tmp_path))
+    default = [figure for figure in markup.figures if not figure["in_details"]]
+    assert sorted((figure["role"], figure["images"]) for figure in default) == [
+        ("inputs", [image]),
+        ("native", [image]),
+        ("reference", [image]),
+    ]
+    assert len(markup.groups) == 1 and markup.groups[0]["paired"]
+    assert [figure["role"] for figure in markup.groups[0]["figures"]] == ["native", "reference"]
 
 
 def test_long_text_stays_readable_and_full_evidence_is_expandable(tmp_path: Path) -> None:
@@ -1021,7 +1327,7 @@ def test_demo_has_one_outer_details_and_no_execution_bookkeeping(tmp_path: Path)
     assert "<h3>Reference output</h3>" not in card.split('<details class="case-details">', 1)[1]
 
 
-def test_demo_keeps_unique_media_and_only_collapses_repeated_bytes(tmp_path: Path) -> None:
+def test_demo_collapses_same_role_duplicates_without_losing_other_media(tmp_path: Path) -> None:
     data = _case()
     gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
     paths = ["native.gif", "reference.gif", "extra.gif", "duplicate.gif"]
@@ -1030,7 +1336,10 @@ def test_demo_keeps_unique_media_and_only_collapses_repeated_bytes(tmp_path: Pat
         (tmp_path / path).write_bytes(blob)
     data["native"] = {"artifact": paths[0]}
     data["reference"] = {"artifact": paths[1]}
-    data["artifacts"] = [{"path": path, "label": path} for path in paths]
+    data["artifacts"] = [
+        {"path": path, "label": path, **({"role": "native"} if path == "duplicate.gif" else {})}
+        for path in paths
+    ]
     report = render_case(data, tmp_path)
     assert report.count("data:image/gif;base64,") == 3
     default = report.split('<details class="case-details">', 1)[0]
