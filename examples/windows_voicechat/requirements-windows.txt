@@ -1,0 +1,14 @@
+# Python 3.12: bundle authoring, pinned model downloads, and verification.
+# The native desktop app does not require Python at runtime.
+tensorrt-rtx==1.6.1.120
+numpy==2.5.3
+ml_dtypes==0.6.0
+safetensors==0.8.0
+huggingface_hub==1.30.0
+httpx==0.28.1
+sentencepiece==0.2.2
+cmake==4.4.3
+ninja==1.13.2
+pytest==9.1.1
+cuda-python==13.4.1
+soundfile==0.14.0

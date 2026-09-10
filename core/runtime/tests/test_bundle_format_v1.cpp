@@ -9,9 +9,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 
 namespace {
 
@@ -25,11 +25,14 @@ void check(bool condition, const char* name) {
 }
 
 std::filesystem::path temp_dir() {
-    char pattern[] = "/tmp/trtmc_bundle_v1_XXXXXX";
-    char* path = mkdtemp(pattern);
-    if (path == nullptr)
-        throw std::runtime_error("mkdtemp failed");
-    return path;
+    std::random_device random;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const auto path = std::filesystem::temp_directory_path() /
+                          ("trtmc_bundle_v1_" + std::to_string(random()));
+        if (std::filesystem::create_directory(path))
+            return path;
+    }
+    throw std::runtime_error("Unable to create bundle test directory");
 }
 
 void write_bundle(const std::filesystem::path& path, const std::string& header,
@@ -82,6 +85,12 @@ int main() {
     const auto lazy_plan = reader.read_section("engine.plan");
     check(std::string(lazy_plan.begin(), lazy_plan.end()) == "PLAN",
           "file-backed reader owns an absolute path");
+
+    const auto unicode_bundle = directory / std::filesystem::u8path(u8"voice-\u97f3\u58f0.bundle");
+    std::filesystem::copy_file(valid, unicode_bundle);
+    const trtmc::BundleReader unicode_reader(unicode_bundle.u8string());
+    check(unicode_reader.read_section("engine.plan").size() == 4,
+          "UTF-8 bundle path loads and reads lazy sections");
 
     const auto old_size = directory / "old-size.bundle";
     write_bundle(

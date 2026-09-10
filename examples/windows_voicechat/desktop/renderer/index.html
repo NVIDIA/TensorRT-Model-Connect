@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:">
+  <meta name="color-scheme" content="dark">
+  <title>Nemotron Voice Lab</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <defs>
+      <symbol id="i-wave" viewBox="0 0 24 24"><path d="M3 10v4m4-8v12m5-16v20m5-16v12m4-8v4"/></symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></symbol>
+      <symbol id="i-muted" viewBox="0 0 24 24"><path d="m2 2 20 20M9 9v3a3 3 0 0 0 5 2m1-5V5a3 3 0 0 0-5-2M5 10v2a7 7 0 0 0 12 5m2-5v-2M12 19v3m-4 0h8"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
+      <symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5a1 1 0 0 1 1-1h5l3 3h8a1 1 0 0 1 1 1v11H3Z"/></symbol>
+      <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/><path d="M10 10h4v4h-4z"/></symbol>
+      <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 10a9 9 0 1 1 1 7M3 4v6h6"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+      <symbol id="i-screen" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M12 17v4m-4 0h8m-1-14 4 3-4 3z"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
+    </defs>
+  </svg>
+
+  <div class="app-shell">
+    <aside class="rail" aria-label="Application tools">
+      <a class="brand-mark" href="#" aria-label="Nemotron Voice Lab home"><span></span><span></span><span></span></a>
+      <div class="rail-center">
+        <button class="rail-button selected" aria-label="Voice conversation" title="Voice conversation"><svg><use href="#i-wave"/></svg></button>
+        <button class="rail-button" id="railSettings" aria-label="Open settings" title="Settings"><svg><use href="#i-settings"/></svg></button>
+      </div>
+      <span class="rail-caption">BUILT ON RTX</span>
+      <span class="rail-dot" aria-hidden="true"></span>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="wordmark"><strong>NEMOTRON</strong><span class="wordmark-divider"></span><span>VOICE LAB</span><span class="preview-tag">EXPERIMENTAL</span></div>
+        <div class="topbar-actions">
+          <span class="local-badge"><span class="tiny-dot"></span>ON-DEVICE AI</span>
+          <button class="text-button" id="streamButton" aria-pressed="false" title="Hide controls for your stream"><svg><use href="#i-screen"/></svg><span>Stream mode</span></button>
+          <button class="icon-button" id="fullscreenButton" title="Toggle fullscreen" aria-label="Toggle fullscreen"><svg><use href="#i-expand"/></svg></button>
+        </div>
+      </header>
+
+      <main class="main-grid">
+        <section class="voice-stage" aria-label="Voice session">
+          <div class="stage-heading">
+            <p class="eyebrow"><span class="eyebrow-line"></span> THE NEXT INTERFACE IS A CONVERSATION</p>
+            <h1>Give your ideas <span>a voice.</span></h1>
+            <p class="stage-description">Nemotron. Your voice. The power of local RTX.</p>
+          </div>
+
+          <div class="visualizer-wrap" id="visualizerWrap">
+            <canvas id="orbCanvas" aria-label="Animated voice visualization" role="img"></canvas>
+            <div class="orb-center"><span class="orb-monogram" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span></div>
+            <span class="orbit-label orbit-label-left">AUDIO IN<span id="inputLevel">STANDBY</span></span>
+            <span class="orbit-label orbit-label-right">AUDIO OUT<span id="outputLevel">STANDBY</span></span>
+            <span class="orb-coordinate">N / 01</span>
+            <span class="orb-crosshair" aria-hidden="true">+</span>
+          </div>
+
+          <div class="session-info">
+            <div class="session-state"><span class="state-dot" id="stateDot"></span><span id="sessionState" aria-live="polite">Ready when you are</span><span class="rehearsal-badge" id="rehearsalBadge" hidden>VISUAL REHEARSAL</span></div>
+            <p id="sessionHint">Connect a local model bundle to start the conversation.</p>
+          </div>
+
+          <div class="session-controls">
+            <button class="secondary-button mute-button" id="muteButton" disabled title="Mute microphone (Space)" aria-label="Mute microphone" aria-pressed="false"><svg><use href="#i-mic"/></svg></button>
+            <button class="secondary-button interrupt-button" id="interruptButton" disabled title="Stop speaking; microphone stays on (I)" aria-keyshortcuts="I"><svg><use href="#i-stop"/></svg><span>Stop speaking</span><kbd>I</kbd></button>
+            <button class="primary-button" id="connectButton"><span id="connectLabel">Start conversation</span><svg><use href="#i-arrow"/></svg></button>
+            <button class="secondary-button" id="settingsButton" title="Model settings" aria-label="Model settings"><svg><use href="#i-settings"/></svg></button>
+          </div>
+          <button class="rehearsal-link" id="rehearsalButton">Explore the visuals <span>Visual rehearsal</span><svg><use href="#i-arrow"/></svg></button>
+          <div class="stream-session-caption" id="streamSessionCaption">FULL-DUPLEX VOICE · LOCAL RTX INFERENCE</div>
+
+          <div class="stage-bottom">
+            <div class="technology"><span class="technology-mark" aria-hidden="true">▰</span><span>Powered by <strong>TensorRT ModelConnect</strong></span></div>
+            <span class="stage-bottom-note">SPEAK. INTERRUPT. CREATE.</span>
+          </div>
+        </section>
+
+        <aside class="conversation-panel" aria-label="Conversation transcript">
+          <div class="panel-header"><div><span class="eyebrow">THE CONVERSATION</span><h2>Live transcript<span id="transcriptCount">00</span></h2></div><button class="icon-button" id="clearTranscript" aria-label="Clear transcript" title="Clear displayed transcript"><svg><use href="#i-reset"/></svg></button></div>
+          <div class="transcript-toolbar"><span><i id="transcriptDot"></i><span id="transcriptMode">AWAITING CONNECTION</span></span><time id="sessionTimer" aria-label="Session duration">00:00</time></div>
+          <div class="transcript-scroll" id="transcriptScroll" role="log" aria-label="Transcript" aria-live="polite" aria-relevant="additions text" tabindex="0">
+            <div class="transcript-empty" id="transcriptEmpty"><span class="empty-quote" aria-hidden="true">“</span><h3>Start with a thought.</h3><p>A question. A wild idea.<br/>Something you want to make.</p><span class="empty-rule"></span><p class="empty-detail">Your conversation appears here<br/>as you speak with Nemotron.</p></div>
+          </div>
+          <div class="transcript-bottom"><svg><use href="#i-wave"/></svg><span id="transcriptFootnote">Speak naturally. Press I to stop a response.</span><span class="live-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span></div>
+          <div class="model-card"><div class="model-icon"><svg><use href="#i-chip"/></svg></div><div class="model-card-copy"><span class="eyebrow">LOCAL MODEL</span><strong>Nemotron VoiceChat</strong><span id="modelDetail">Select your TensorRT-RTX bundle</span></div><span class="model-status-dot" id="modelStatusDot"></span></div>
+        </aside>
+      </main>
+
+      <footer class="statusbar">
+        <div class="backend-status"><span class="tiny-dot" id="backendDot"></span><strong>TensorRT-RTX</strong><span class="statusbar-separator">/</span><span id="backendStatus">Not connected</span></div>
+        <div class="pipeline" aria-label="Audio processing pipeline"><span id="pipelineMic">MIC</span><b>→</b><span id="pipelineModel">NEMOTRON</span><b>→</b><span id="pipelineOutput">VOICE</span></div>
+        <div class="telemetry"><span id="latencyMetric">LATENCY <strong>—</strong></span><span id="gpuMetric">GPU <strong>—</strong></span><span class="windows-label">WINDOWS / LOCAL</span></div>
+      </footer>
+    </div>
+  </div>
+
+  <button class="stream-exit secondary-button" id="streamExit" hidden><svg><use href="#i-screen"/></svg>Exit stream mode <kbd>Esc</kbd></button>
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <dialog id="settingsDialog" aria-labelledby="settingsTitle">
+    <form id="settingsForm">
+      <div class="dialog-heading"><div><p class="eyebrow">MAKE THE CONNECTION</p><h2 id="settingsTitle">Your local voice lab.</h2></div><button type="button" class="icon-button" id="closeSettings" aria-label="Close settings"><svg><use href="#i-close"/></svg></button></div>
+      <p class="dialog-intro">Load a Nemotron VoiceChat bundle built for <strong>TensorRT-RTX</strong> and connect to the native Windows runtime.</p>
+      <label for="bundlePath">Model bundle file <span>REQUIRED</span></label>
+      <div class="path-field"><input id="bundlePath" name="bundlePath" type="text" placeholder="D:\Models\nemotron-voicechat-rtx.bundle" spellcheck="false" autocomplete="off"><button type="button" id="browseBundle" class="secondary-button" title="Choose model bundle file" aria-label="Choose model bundle file"><svg><use href="#i-folder"/></svg></button></div>
+      <p class="field-hint">A .bundle file containing TensorRT-RTX engines and VoiceChat assets.</p>
+      <label for="bridgePath">Native bridge executable</label>
+      <div class="path-field"><input id="bridgePath" name="bridgePath" type="text" placeholder="Auto-detect installed bridge" spellcheck="false" autocomplete="off"><button type="button" id="browseBridge" class="secondary-button" title="Choose native bridge executable" aria-label="Choose native bridge executable"><svg><use href="#i-folder"/></svg></button></div>
+      <p class="field-hint">Use the bridge built with this example, or keep the detected location.</p>
+      <label for="systemPrompt">Conversation instructions</label>
+      <textarea id="systemPrompt" name="systemPrompt" rows="3" placeholder="You are a helpful voice assistant. Keep your responses natural and concise."></textarea>
+      <div class="settings-note"><svg><use href="#i-info"/></svg><p>Audio processing and inference run on this PC. The first connection may take longer while the local engines initialize.</p></div>
+      <div class="dialog-actions"><button type="button" class="text-button" id="settingsRehearsal">Try visual rehearsal</button><button type="submit" class="primary-button">Save settings<svg><use href="#i-check"/></svg></button></div>
+    </form>
+  </dialog>
+  <script src="app.js"></script>
+</body>
+</html>

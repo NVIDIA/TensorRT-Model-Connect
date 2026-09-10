@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <iostream>
@@ -321,6 +322,478 @@ void test_bounded_finish_tail_policy() {
           "live callers can choose a smaller explicit tail bound");
 }
 
+void test_bounded_pending_transcript_prefers_newest_distinct_text() {
+    std::string pending;
+    const bool accepted_first = voicechat::append_bounded_transcript(pending, "first request");
+    const bool accepted_duplicate = voicechat::append_bounded_transcript(pending, "first request");
+    check(accepted_first && !accepted_duplicate && pending == "first request",
+          "bounded transcript reports and ignores an exact duplicate final transcript");
+
+    voicechat::append_bounded_transcript(pending, "second request");
+    check(pending == "first request / second request",
+          "bounded transcript separates distinct finalized fragments");
+    voicechat::append_bounded_transcript(pending, "second request");
+    check(pending == "first request / second request",
+          "bounded transcript ignores a duplicate newest fragment");
+
+    voicechat::append_bounded_transcript(pending, "second request", 14);
+    check(pending == "second request",
+          "a smaller bound keeps the exact duplicate newest fragment without a broken separator");
+
+    voicechat::append_bounded_transcript(pending, "third", 22);
+    check(pending == "second request / third" && pending.size() == 22,
+          "bounded transcript trims its oldest bytes and retains the newest text");
+
+    voicechat::append_bounded_transcript(pending, "", 22);
+    check(pending == "second request / third",
+          "bounded transcript ignores an empty final transcript");
+
+    voicechat::append_bounded_transcript(pending, "discarded", 0);
+    check(pending.empty(), "zero transcript capacity retains no pending text");
+
+    voicechat::append_bounded_transcript(pending, std::string(5000, 'n'));
+    check(pending.size() == voicechat::kDefaultPendingTranscriptMaxBytes &&
+              pending == std::string(voicechat::kDefaultPendingTranscriptMaxBytes, 'n'),
+          "default transcript capacity bounds an oversized newest fragment");
+}
+
+void test_bounded_pending_transcript_trims_at_utf8_boundaries() {
+    std::string pending;
+    voicechat::append_bounded_transcript(pending, u8"甲乙丙丁", 7);
+    check(pending == u8"丙丁" && pending.size() == 6,
+          "oversized newest transcript keeps a valid UTF-8 suffix");
+
+    voicechat::append_bounded_transcript(pending, u8"新", 9);
+    check(pending == u8"丁 / 新" && pending.size() == 9,
+          "combined transcript trimming preserves UTF-8 and the newest fragment");
+}
+
+std::vector<float> reference_linear_resample(const std::vector<float>& source, int source_rate,
+                                             int target_rate) {
+    const auto output_size = static_cast<std::size_t>(
+        std::llround(static_cast<double>(source.size()) * target_rate / source_rate));
+    std::vector<float> output;
+    output.reserve(output_size);
+    for (std::size_t index = 0; index < output_size; ++index) {
+        const double position = static_cast<double>(index) * source_rate / target_rate;
+        const auto left = std::min(static_cast<std::size_t>(position), source.size() - 1);
+        const auto right = std::min(left + 1, source.size() - 1);
+        const float fraction = static_cast<float>(position - static_cast<double>(left));
+        output.push_back(source[left] + fraction * (source[right] - source[left]));
+    }
+    return output;
+}
+
+void test_streaming_resampler_preserves_phase_with_bounded_tail() {
+    std::vector<float> source(640U * 5U);
+    for (std::size_t index = 0; index < source.size(); ++index)
+        source[index] = static_cast<float>((index * 17U) % 101U) / 101.0F;
+
+    voicechat::StreamingLinearResampler resampler(8000, 16000);
+    std::vector<float> streamed;
+    for (std::size_t offset = 0; offset < source.size(); offset += 640U) {
+        resampler.append(source.data() + offset, 640);
+        auto next = resampler.drain(false);
+        streamed.insert(streamed.end(), next.begin(), next.end());
+        check(resampler.buffered_source_samples() <= 1,
+              "upsampling retains only its next interpolation source sample");
+    }
+    auto tail = resampler.drain(true);
+    streamed.insert(streamed.end(), tail.begin(), tail.end());
+    const auto expected = reference_linear_resample(source, 8000, 16000);
+    bool equal = streamed.size() == expected.size();
+    for (std::size_t index = 0; equal && index < streamed.size(); ++index)
+        equal = std::abs(streamed[index] - expected[index]) < 1.0e-6F;
+    check(equal, "bounded 8-kHz streaming resampling matches one-shot phase and values");
+    check(resampler.buffered_source_samples() == 0,
+          "final resampler drain releases its interpolation tail");
+
+    voicechat::StreamingLinearResampler identity(16000, 16000);
+    identity.append(source.data(), static_cast<int32_t>(source.size()));
+    check(identity.drain(false) == source && identity.buffered_source_samples() == 0,
+          "identity streaming resampling releases source storage immediately");
+
+    for (const int source_rate : {44100, 48000}) {
+        for (const std::size_t chunk_size : {1U, 137U}) {
+            voicechat::StreamingLinearResampler downsampler(source_rate, 16000);
+            std::vector<float> downsampled;
+            std::size_t max_buffered = 0;
+            for (std::size_t offset = 0; offset < source.size(); offset += chunk_size) {
+                const auto count = std::min(chunk_size, source.size() - offset);
+                downsampler.append(source.data() + offset, static_cast<int32_t>(count));
+                auto next = downsampler.drain(false);
+                downsampled.insert(downsampled.end(), next.begin(), next.end());
+                max_buffered = std::max(max_buffered, downsampler.buffered_source_samples());
+            }
+            auto final = downsampler.drain(true);
+            downsampled.insert(downsampled.end(), final.begin(), final.end());
+            const auto reference = reference_linear_resample(source, source_rate, 16000);
+            bool downsample_equal = downsampled.size() == reference.size();
+            for (std::size_t index = 0; downsample_equal && index < downsampled.size(); ++index)
+                downsample_equal = std::abs(downsampled[index] - reference[index]) < 1.0e-6F;
+            check(downsample_equal, "streaming downsampling matches final rounded one-shot output");
+            check(max_buffered <= 4 && downsampler.buffered_source_samples() == 0,
+                  "streaming downsampling retains only a bounded interpolation tail");
+        }
+    }
+}
+
+void test_rolling_cache_position_wraps_without_exhaustion() {
+    const auto empty = voicechat::rolling_cache_position(0, 4);
+    const auto partial = voicechat::rolling_cache_position(3, 4);
+    const auto full = voicechat::rolling_cache_position(4, 4);
+    const auto wrapped = voicechat::rolling_cache_position(9, 4);
+
+    check(empty.valid_rows == 0 && empty.write_row == 0,
+          "rolling cache starts empty at its first physical row");
+    check(partial.valid_rows == 3 && partial.write_row == 3,
+          "rolling cache appends sequentially before reaching capacity");
+    check(full.valid_rows == 4 && full.write_row == 0,
+          "rolling cache exposes every row and wraps at capacity");
+    check(wrapped.valid_rows == 4 && wrapped.write_row == 1,
+          "rolling cache keeps a full mask while logical positions continue");
+
+    const auto pinned_partial = voicechat::rolling_cache_position(3, 8, 3);
+    const auto pinned_last = voicechat::rolling_cache_position(7, 8, 3);
+    const auto pinned_wrap = voicechat::rolling_cache_position(8, 8, 3);
+    const auto pinned_next = voicechat::rolling_cache_position(9, 8, 3);
+    const auto pinned_end = voicechat::rolling_cache_position(12, 8, 3);
+    const auto pinned_again = voicechat::rolling_cache_position(13, 8, 3);
+    check(pinned_partial.valid_rows == 3 && pinned_partial.write_row == 3 &&
+              pinned_last.valid_rows == 7 && pinned_last.write_row == 7,
+          "pinned rolling cache still appends sequentially before capacity");
+    check(pinned_wrap.valid_rows == 8 && pinned_wrap.write_row == 3 && pinned_next.write_row == 4 &&
+              pinned_end.write_row == 7 && pinned_again.write_row == 3,
+          "pinned rolling cache wraps only within its unpinned suffix");
+    bool prefix_preserved = true;
+    for (std::int64_t position = 8; position < 80; ++position)
+        prefix_preserved =
+            prefix_preserved && voicechat::rolling_cache_position(position, 8, 3).write_row >= 3;
+    check(prefix_preserved, "rolling cache never overwrites pinned conditioning rows");
+
+    bool rejected = false;
+    try {
+        (void)voicechat::rolling_cache_position(-1, 4);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "rolling cache rejects negative logical positions");
+
+    rejected = false;
+    try {
+        (void)voicechat::rolling_cache_position(0, 0);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "rolling cache rejects non-positive capacity");
+
+    rejected = false;
+    try {
+        (void)voicechat::rolling_cache_position(0, 4, -1);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "rolling cache rejects a negative pinned prefix");
+
+    rejected = false;
+    try {
+        (void)voicechat::rolling_cache_position(0, 4, 4);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "rolling cache requires at least one rolling suffix row");
+}
+
+void test_tts_prompt_remains_pinned_across_compact_cache_wraps() {
+    constexpr int32_t kCacheRows = 512;
+    constexpr int32_t kPromptRows = 37;
+    constexpr int32_t kHardSegmentFrames = 1375;
+    constexpr int32_t kMaximumResponseFrames = 256;
+    constexpr int32_t kMaximumLivePosition =
+        kPromptRows + kHardSegmentFrames + kMaximumResponseFrames;
+    static_assert(kMaximumLivePosition < 7500,
+                  "live TTS rollover must precede the checkpoint's local-attention window");
+    bool prefix_preserved = true;
+    bool entire_suffix_used = true;
+    std::vector<bool> suffix_rows(static_cast<std::size_t>(kCacheRows - kPromptRows), false);
+    for (int32_t position = kCacheRows; position < kMaximumLivePosition; ++position) {
+        const auto cache = voicechat::rolling_cache_position(position, kCacheRows, kPromptRows);
+        prefix_preserved = prefix_preserved && cache.write_row >= kPromptRows;
+        suffix_rows[static_cast<std::size_t>(cache.write_row - kPromptRows)] = true;
+    }
+    for (const bool used : suffix_rows)
+        entire_suffix_used = entire_suffix_used && used;
+    check(prefix_preserved,
+          "compact EAR-TTS cache never overwrites the speaker-conditioning prompt");
+    check(entire_suffix_used,
+          "compact EAR-TTS cache rolls through every non-prompt row during a segment");
+
+    // Model the logical position stored in every physical row and verify the
+    // complete visible set at both sides of several ring boundaries. This
+    // catches mappings that preserve the prefix but silently retain a stale
+    // or non-contiguous generated suffix.
+    constexpr std::array<int32_t, 8> kQueryPositions = {
+        511, 512, 513, 986, 987, 1162, 1418, kMaximumLivePosition,
+    };
+    for (const int32_t query_position : kQueryPositions) {
+        std::vector<int32_t> physical_rows(static_cast<std::size_t>(kCacheRows), -1);
+        for (int32_t logical_position = 0; logical_position < query_position; ++logical_position) {
+            const auto cache =
+                voicechat::rolling_cache_position(logical_position, kCacheRows, kPromptRows);
+            physical_rows[static_cast<std::size_t>(cache.write_row)] = logical_position;
+        }
+
+        std::vector<int32_t> visible;
+        for (const int32_t logical_position : physical_rows) {
+            if (logical_position >= 0)
+                visible.push_back(logical_position);
+        }
+        std::sort(visible.begin(), visible.end());
+
+        std::vector<int32_t> expected;
+        if (query_position <= kCacheRows) {
+            for (int32_t logical_position = 0; logical_position < query_position;
+                 ++logical_position)
+                expected.push_back(logical_position);
+        } else {
+            for (int32_t logical_position = 0; logical_position < kPromptRows; ++logical_position)
+                expected.push_back(logical_position);
+            const int32_t suffix_begin = query_position - (kCacheRows - kPromptRows);
+            for (int32_t logical_position = suffix_begin; logical_position < query_position;
+                 ++logical_position)
+                expected.push_back(logical_position);
+        }
+        check(visible == expected,
+              "compact EAR-TTS cache exposes the prompt and exact newest generated suffix");
+    }
+}
+
+bool observe_tokens(voicechat::RepetitionWatchdog& watchdog, const std::vector<int32_t>& tokens) {
+    bool tripped = false;
+    for (const int32_t token : tokens)
+        tripped = watchdog.observe(token);
+    return tripped;
+}
+
+std::vector<int32_t> repeat_block(const std::vector<int32_t>& block, int repetitions) {
+    std::vector<int32_t> tokens;
+    tokens.reserve(block.size() * static_cast<std::size_t>(repetitions));
+    for (int repetition = 0; repetition < repetitions; ++repetition)
+        tokens.insert(tokens.end(), block.begin(), block.end());
+    return tokens;
+}
+
+void test_repetition_watchdog_thresholds_and_reset() {
+    voicechat::RepetitionWatchdog watchdog;
+
+    check(!observe_tokens(watchdog, std::vector<int32_t>(7, 41)) && watchdog.observe(41) &&
+              watchdog.tripped(),
+          "repetition watchdog detects one token repeated eight times");
+    check(watchdog.observe(99), "repetition watchdog remains tripped until reset");
+
+    watchdog.reset();
+    check(!watchdog.tripped() && !observe_tokens(watchdog, std::vector<int32_t>(7, 41)),
+          "repetition watchdog reset clears its latch and token history");
+
+    watchdog.reset();
+    const std::vector<int32_t> three_token_block = {1, 2, 3};
+    check(!observe_tokens(watchdog, repeat_block(three_token_block, 2)) &&
+              observe_tokens(watchdog, three_token_block),
+          "repetition watchdog detects a three-token block repeated three times");
+
+    watchdog.reset();
+    const std::vector<int32_t> seven_token_block = {11, 12, 13, 14, 15, 16, 17};
+    check(!observe_tokens(watchdog, repeat_block(seven_token_block, 2)) &&
+              observe_tokens(watchdog, seven_token_block),
+          "repetition watchdog detects a seven-token block repeated three times");
+
+    watchdog.reset();
+    const std::vector<int32_t> eight_token_block = {21, 22, 23, 24, 25, 26, 27, 28};
+    check(!observe_tokens(watchdog, eight_token_block) &&
+              observe_tokens(watchdog, eight_token_block),
+          "repetition watchdog detects an eight-token block repeated twice");
+
+    watchdog.reset();
+    std::vector<int32_t> forty_eight_token_block(48);
+    for (std::size_t index = 0; index < forty_eight_token_block.size(); ++index)
+        forty_eight_token_block[index] = 1000 + static_cast<int32_t>(index);
+    check(!observe_tokens(watchdog, forty_eight_token_block) &&
+              observe_tokens(watchdog, forty_eight_token_block),
+          "repetition watchdog detects a forty-eight-token block repeated twice");
+}
+
+void test_repetition_watchdog_ignores_near_misses() {
+    voicechat::RepetitionWatchdog watchdog;
+    check(!observe_tokens(watchdog, {1, 2, 1, 2, 1, 2}),
+          "repetition watchdog ignores short two-token cycles below its long-block threshold");
+
+    watchdog.reset();
+    check(!observe_tokens(watchdog, {3, 4, 5, 3, 4, 5, 3, 4, 6}),
+          "repetition watchdog requires exact equality in a repeated block");
+
+    watchdog.reset();
+    std::vector<int32_t> unique_tokens(200);
+    for (std::size_t index = 0; index < unique_tokens.size(); ++index)
+        unique_tokens[index] = static_cast<int32_t>(index);
+    check(!observe_tokens(watchdog, unique_tokens),
+          "repetition watchdog permits long non-repeating output with bounded history");
+}
+
+void test_repetition_watchdog_catches_three_long_near_repeats() {
+    voicechat::RepetitionWatchdog watchdog;
+    std::vector<int32_t> original(24);
+    for (std::size_t index = 0; index < original.size(); ++index)
+        original[index] = 100 + static_cast<int32_t>(index);
+    auto second = original;
+    auto third = original;
+    second[5] = 999;
+    third[17] = 888;
+    check(!observe_tokens(watchdog, original) && !observe_tokens(watchdog, second),
+          "two merely similar long passages do not trip the approximate rule");
+    check(observe_tokens(watchdog, third),
+          "three long near-identical passages trip despite small token changes");
+    watchdog.reset();
+    for (int block = 0; block < 20; ++block) {
+        auto varied = original;
+        for (int index = 0; index < 8; ++index)
+            varied[static_cast<std::size_t>(index)] = 1000 + block * 8 + index;
+        check(!observe_tokens(watchdog, varied),
+              "substantially different long passages remain valid");
+    }
+}
+
+void test_admitted_barge_in_supersedes_request_without_erasing_new_partial() {
+    voicechat::PendingUserRequest request;
+    request.append_final("An old request which was interrupted");
+    check(request.take_automatic_retry(), "old request initially has one retry");
+    voicechat::RnntTurnDetector detector({2, 3, 3, 3});
+    std::string rnnt_partial;
+    const std::vector<std::string> partials = {"Please", "Please stop", "Please stop and listen"};
+    bool interrupted = false;
+    for (std::size_t frame = 0; frame < partials.size(); ++frame) {
+        rnnt_partial = partials[frame];
+        const auto decision = detector.observe(true, true, static_cast<std::int64_t>(frame));
+        if (decision.speech_started)
+            request.begin_utterance();
+        interrupted = interrupted || decision.interrupt_agent;
+    }
+    check(interrupted && request.empty() && rnnt_partial == partials.back(),
+          "admitted new speech clears only the old finalized request, preserving its RNNT partial");
+    const auto stopped = detector.finalize_utterance(false, 3);
+    check(stopped.speech_stopped && stopped.start_agent,
+          "the interrupted speaker's new utterance remains eligible for a response");
+    request.append_final(rnnt_partial);
+    check(request.text() == "Please stop and listen" && request.take_automatic_retry(),
+          "only the new request is retained and receives its own bounded retry");
+}
+
+void test_automatic_recovery_is_bounded_across_many_clean_rollovers() {
+    voicechat::PendingUserRequest request;
+    check(!request.take_automatic_retry(), "silence cannot schedule an automatic answer");
+    for (int turn = 0; turn < 100; ++turn) {
+        request.begin_utterance();
+        const auto text = "New user question " + std::to_string(turn);
+        request.append_final(text);
+        check(request.take_automatic_retry(), "new speech allows exactly one automatic retry");
+        check(!request.append_final(text) && !request.take_automatic_retry(),
+              "duplicate ASR finals cannot replenish the retry budget");
+        for (int rollover = 0; rollover < 5; ++rollover)
+            check(!request.take_automatic_retry() && request.text() == text,
+                  "rebuilding model context does not replenish a used retry");
+        request.clear();
+        check(request.empty() && !request.take_automatic_retry(),
+              "exhausted recovery waits for a new request instead of looping");
+    }
+}
+
+void test_cancel_preserves_explicit_retry_but_new_speech_forgets_it() {
+    voicechat::PendingUserRequest request;
+    request.append_final("An existing committed user request");
+    request.response_started();
+    request.response_cancelled();
+    check(request.text() == "An existing committed user request",
+          "explicit cancellation preserves the request for API create_response");
+    request.response_started();
+    check(!request.begin_utterance(),
+          "an explicitly recreated answer consumes the pending cancellation");
+    request.append_final("Another user request");
+    request.response_started();
+    request.response_cancelled();
+    check(request.begin_utterance() && request.empty(),
+          "fresh speech after cancellation requests clean context and discards abandoned text");
+    request.append_final("Please answer my new question");
+    check(request.text() == "Please answer my new question" && request.take_automatic_retry(),
+          "the replacement utterance alone is recoverable after explicit cancellation");
+}
+
+void test_early_native_response_attaches_only_its_own_later_transcript() {
+    voicechat::PendingUserRequest pending;
+    voicechat::ResponseUserRequest response;
+    pending.begin_utterance();
+    // Real event order: partial Hello, native BOS, then final Hello.
+    response.begin(1, pending.text());
+    check(response.text().empty(), "native BOS may start before the matching RNNT final");
+    pending.append_final("Hello");
+    check(response.observe_final(1, pending.text()) && response.text() == "Hello",
+          "the matching late final attaches to an already-started response");
+    pending.begin_utterance();
+    pending.append_final("Stop and answer this different question");
+    check(!response.observe_final(2, pending.text()) && response.text() == "Hello",
+          "new barge-in speech cannot relabel the existing response owner");
+
+    response.clear();
+    response.begin(2, {});
+    check(!response.observe_final(3, "A different utterance") && response.text().empty(),
+          "even an empty response owner rejects a final from a newer utterance");
+    check(response.observe_final(2, "The response's own utterance"),
+          "only the original utterance may fill an empty owner");
+    response.clear();
+    response.begin(0, {});
+    check(!response.observe_final(1, "First user speech") && response.text().empty(),
+          "an unsolicited initial greeting is not relabelled by later user speech");
+    response.begin(4, "Final text already known at host-forced BOS");
+    check(!response.observe_final(4, "Conflicting duplicate") &&
+              response.text() == "Final text already known at host-forced BOS",
+          "host-forced response ownership remains stable after duplicate finals");
+}
+
+void test_speech_recognized_after_response_eos_uses_candidate_onset() {
+    voicechat::ResponseBoundaryRecovery boundary;
+    check(!boundary.needs_clean_context(0), "first user speech has no older response to discard");
+    boundary.response_finished(100);
+    check(boundary.needs_clean_context(98),
+          "speech already underway when the model yielded requests clean context");
+    check(boundary.needs_clean_context(101) && boundary.needs_clean_context(104),
+          "RNNT recognition within four frames of natural EOS is an acoustic interruption");
+    check(!boundary.needs_clean_context(105) && !boundary.needs_clean_context(200),
+          "ordinary later user turns preserve the current conversation segment");
+
+    voicechat::PendingUserRequest pending;
+    pending.append_final("The old story request");
+    // Actual trace: first Stop token follows EOS by one native frame, but
+    // sustained-speech admission happens several frames later.
+    voicechat::RnntTurnDetector detector({3, 3, 3, 3});
+    (void)detector.observe(true, false, 101);
+    (void)detector.observe(false, false, 102);
+    (void)detector.observe(true, false, 103);
+    (void)detector.observe(false, false, 104);
+    const auto admitted = detector.observe(true, false, 105);
+    check(admitted.speech_started && admitted.speech_start_frame == 101 &&
+              boundary.needs_clean_context(admitted.speech_start_frame) &&
+              !boundary.needs_clean_context(105),
+          "late speech confirmation still uses the candidate onset near the previous EOS");
+    pending.begin_utterance();
+    check(pending.empty() && detector.utterance_active(),
+          "refresh is deferred while the interrupting utterance is still being transcribed");
+    const auto final = detector.finalize_utterance(false, 106);
+    pending.append_final("Stop that story and tell me what seven plus five is");
+    check(final.start_agent &&
+              pending.text() == "Stop that story and tell me what seven plus five is",
+          "the deferred clean response carries only the fully transcribed replacement question");
+    boundary.clear();
+    check(!boundary.needs_clean_context(101), "completed context rebuild clears the old boundary");
+}
+
 void test_rnnt_turn_detector_rejects_noise_and_invalid_policy() {
     voicechat::RnntTurnPolicy invalid;
     invalid.end_of_utterance_blank_frames = 0;
@@ -356,6 +829,43 @@ void test_rnnt_turn_detector_rejects_noise_and_invalid_policy() {
         rejected = true;
     }
     check(rejected, "RNNT turn observations require increasing frame indices");
+}
+
+void test_rnnt_turn_detector_reports_expired_subthreshold_candidate_once() {
+    voicechat::RnntTurnPolicy policy;
+    policy.first_utterance_min_speech_frames = 3;
+    policy.subsequent_utterance_min_speech_frames = 4;
+    policy.end_of_utterance_blank_frames = 2;
+    policy.beginning_of_utterance_speech_frames = 3;
+    voicechat::RnntTurnDetector detector(policy);
+
+    const auto initial_blank = detector.observe(false, false, 0);
+    check(!initial_blank.discarded_candidate,
+          "ordinary RNNT silence does not report a discarded candidate");
+
+    const auto subthreshold = detector.observe(true, false, 1);
+    const auto unknown_or_blank = detector.observe(false, false, 2);
+    const auto expired = detector.observe(false, false, 3);
+    check(!subthreshold.speech_started && !unknown_or_blank.discarded_candidate &&
+              expired.discarded_candidate && !expired.speech_started && !expired.speech_stopped &&
+              !expired.start_agent && !expired.interrupt_agent,
+          "EOU reports a subthreshold or unknown-interrupted RNNT candidate for discard");
+    check(!detector.utterance_active() && detector.speech_frames() == 0 &&
+              detector.completed_utterances() == 0,
+          "discarding a candidate clears noise without consuming an utterance");
+
+    const auto following_blank = detector.observe(false, false, 4);
+    check(!following_blank.discarded_candidate,
+          "an expired RNNT candidate emits its discard signal exactly once");
+
+    (void)detector.observe(true, false, 5);
+    (void)detector.observe(true, false, 6);
+    const auto confirmed_start = detector.observe(true, false, 7);
+    (void)detector.observe(false, false, 8);
+    const auto confirmed_stop = detector.observe(false, false, 9);
+    check(confirmed_start.speech_started && confirmed_stop.speech_stopped &&
+              confirmed_stop.start_agent && !confirmed_stop.discarded_candidate,
+          "a confirmed RNNT utterance preserves normal start and stop behavior");
 }
 
 void test_rnnt_first_and_subsequent_utterances() {
@@ -395,6 +905,25 @@ void test_rnnt_first_and_subsequent_utterances() {
               second_stop.speech_start_frame == 6 && second_stop.speech_end_frame == 9 &&
               detector.completed_utterances() == 2,
           "explicit utterance finalization flushes an active RNNT turn");
+}
+
+void test_rnnt_stream_frontier_reset_preserves_conversation_threshold() {
+    voicechat::RnntTurnPolicy policy;
+    policy.first_utterance_min_speech_frames = 1;
+    policy.subsequent_utterance_min_speech_frames = 3;
+    policy.end_of_utterance_blank_frames = 1;
+    voicechat::RnntTurnDetector detector(policy);
+
+    check(detector.observe(true, false, 0).speech_started &&
+              detector.observe(false, false, 1).speech_stopped &&
+              detector.completed_utterances() == 1,
+          "RNNT test establishes a completed first conversation utterance");
+    detector.reset_stream_frontier();
+    check(detector.completed_utterances() == 1 &&
+              !detector.observe(true, false, 50).speech_started &&
+              !detector.observe(true, false, 51).speech_started &&
+              detector.observe(true, false, 52).speech_started,
+          "transparent frontier reset retains the subsequent-turn threshold");
 }
 
 void test_rnnt_barge_in_and_reset() {
@@ -485,8 +1014,23 @@ int main() {
     test_priority_controls_are_fifo_ahead_of_audio();
     test_interruption_filter_preserves_completed_epochs();
     test_bounded_finish_tail_policy();
+    test_bounded_pending_transcript_prefers_newest_distinct_text();
+    test_bounded_pending_transcript_trims_at_utf8_boundaries();
+    test_streaming_resampler_preserves_phase_with_bounded_tail();
+    test_rolling_cache_position_wraps_without_exhaustion();
+    test_tts_prompt_remains_pinned_across_compact_cache_wraps();
+    test_repetition_watchdog_thresholds_and_reset();
+    test_repetition_watchdog_ignores_near_misses();
+    test_repetition_watchdog_catches_three_long_near_repeats();
+    test_admitted_barge_in_supersedes_request_without_erasing_new_partial();
+    test_automatic_recovery_is_bounded_across_many_clean_rollovers();
+    test_cancel_preserves_explicit_retry_but_new_speech_forgets_it();
+    test_early_native_response_attaches_only_its_own_later_transcript();
+    test_speech_recognized_after_response_eos_uses_candidate_onset();
     test_rnnt_turn_detector_rejects_noise_and_invalid_policy();
+    test_rnnt_turn_detector_reports_expired_subthreshold_candidate_once();
     test_rnnt_first_and_subsequent_utterances();
+    test_rnnt_stream_frontier_reset_preserves_conversation_threshold();
     test_rnnt_barge_in_and_reset();
     test_rnnt_single_frame_bou_policy();
     test_rnnt_bou_counts_only_agent_overlap();

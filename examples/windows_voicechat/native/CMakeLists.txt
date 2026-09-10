@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+cmake_minimum_required(VERSION 3.20)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(trtmc_windows_voicechat LANGUAGES CXX)
+endif()
+
+option(TRTMC_VOICECHAT_PROTOCOL_TEST_ONLY "Build device-free audio protocol tests without CUDA" OFF)
+option(TRTMC_VOICECHAT_BUILD_PROTOCOL_TEST "Build device-free audio protocol tests" ON)
+
+if(NOT TRTMC_VOICECHAT_PROTOCOL_TEST_ONLY)
+  if(NOT TARGET trtmc_runtime)
+    get_filename_component(_trtmc_root "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+    set(TRTMC_SOURCE_DIR "${_trtmc_root}" CACHE PATH "TensorRT-Model-Connect source directory")
+    set(TRTMC_BUILD_WINDOWS_VOICECHAT OFF CACHE BOOL "" FORCE)
+    set(TRTMC_BUILD_BACKEND_TRT OFF CACHE BOOL "" FORCE)
+    set(TRTMC_BUILD_BACKEND_RTX ON CACHE BOOL "" FORCE)
+    set(TRTMC_FAMILIES nemotron_voicechat CACHE STRING "" FORCE)
+    set(TRTMC_ENABLE_BYOK OFF CACHE BOOL "" FORCE)
+    set(TRTMC_BUILD_CLI OFF CACHE BOOL "" FORCE)
+    set(TRTMC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(TRTMC_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${TRTMC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/trtmc")
+  endif()
+
+  if(NOT TRTMC_BUILD_BACKEND_RTX OR TRTMC_BUILD_BACKEND_TRT)
+    message(FATAL_ERROR "The Windows VoiceChat bridge requires only the TensorRT-RTX backend")
+  endif()
+  find_package(Threads REQUIRED)
+  find_package(nlohmann_json 3.11 REQUIRED)
+  add_executable(trtmc_voicechat_bridge main.cpp)
+  target_compile_features(trtmc_voicechat_bridge PRIVATE cxx_std_17)
+  target_link_libraries(trtmc_voicechat_bridge PRIVATE
+    trtmc_nemotron_voicechat_live_control
+    trtmc_runtime trtmc_core nlohmann_json::nlohmann_json Threads::Threads)
+  if(MSVC)
+    target_compile_options(trtmc_voicechat_bridge PRIVATE /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(trtmc_voicechat_bridge PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  if(TARGET trtmc_backend_rtx)
+    add_dependencies(trtmc_voicechat_bridge trtmc_backend_rtx)
+  endif()
+  if(TARGET trtmc_model_nemotron_voicechat)
+    add_dependencies(trtmc_voicechat_bridge trtmc_model_nemotron_voicechat)
+  endif()
+  install(TARGETS trtmc_voicechat_bridge RUNTIME DESTINATION bin)
+endif()
+
+if(TRTMC_VOICECHAT_BUILD_PROTOCOL_TEST OR TRTMC_VOICECHAT_PROTOCOL_TEST_ONLY)
+  enable_testing()
+  add_executable(test_trtmc_voicechat_audio_protocol test_audio_protocol.cpp)
+  target_compile_features(test_trtmc_voicechat_audio_protocol PRIVATE cxx_std_17)
+  add_test(NAME trtmc_voicechat_audio_protocol COMMAND test_trtmc_voicechat_audio_protocol)
+endif()

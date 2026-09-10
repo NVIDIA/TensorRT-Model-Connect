@@ -437,6 +437,10 @@ enum class SpeechSessionEventKind {
     kFunctionCallStarted,
     kFunctionResponseFinished,
     kInputCleared,
+    // The model-owned recurrent context was transparently rebuilt at a safe
+    // conversation boundary. Already-published media remains valid, input
+    // stays open, and text carries the rollover reason and segment number.
+    kContextRolled,
 };
 
 struct SpeechSessionEvent {

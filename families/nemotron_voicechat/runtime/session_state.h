@@ -15,6 +15,8 @@
 #include <deque>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -55,6 +57,128 @@ std::optional<Work> take_priority_fifo(std::deque<Work>& queue, Predicate is_pri
 bool is_agent_output_event(SpeechSessionEventKind kind);
 int32_t resolve_finish_tail_frames(int32_t requested_frames, int32_t model_max_frames);
 
+inline constexpr std::size_t kDefaultPendingTranscriptMaxBytes = 4096;
+
+// Adds one finalized RNNT transcript to a bounded pending-turn string. Exact
+// consecutive duplicates are ignored. Distinct fragments are separated by
+// " / ", and overflow is removed from the oldest side at UTF-8 boundaries so
+// the newest transcript remains available for conversation memory.
+// Returns true only when a distinct non-empty fragment was accepted. Callers
+// can use this to avoid treating a duplicate final ASR event as fresh speech.
+bool append_bounded_transcript(std::string& pending, std::string_view final_text,
+                               std::size_t max_bytes = kDefaultPendingTranscriptMaxBytes);
+
+// A newly admitted utterance supersedes an unanswered older request. This
+// state deliberately excludes the in-progress RNNT decoder: admitting speech
+// must not erase the partial transcript that caused that admission.
+class PendingUserRequest {
+  public:
+    // Returns true when new speech follows explicit response cancellation;
+    // that new request must start from clean model state. A caller may still
+    // explicitly restart the cancelled response before providing new speech.
+    bool begin_utterance() noexcept;
+    void response_cancelled() noexcept { cancelled_response_ = true; }
+    void response_started() noexcept { cancelled_response_ = false; }
+    bool append_final(std::string_view text);
+    bool take_automatic_retry() noexcept;
+    void clear() noexcept;
+    bool empty() const noexcept { return text_.empty(); }
+    const std::string& text() const noexcept { return text_; }
+
+  private:
+    std::string text_;
+    bool retry_used_{false};
+    bool cancelled_response_{false};
+};
+
+// Native BOS may precede the final RNNT transcript. Attach that final only
+// when it belongs to the same decoder utterance that the response started
+// with; an interrupting utterance cannot claim an older response.
+class ResponseUserRequest {
+  public:
+    void begin(std::uint64_t utterance_id, std::string_view known_text);
+    bool observe_final(std::uint64_t utterance_id, std::string_view text);
+    void clear() noexcept;
+    const std::string& text() const noexcept { return text_; }
+
+  private:
+    std::uint64_t utterance_id_{0};
+    std::string text_;
+};
+
+// The Thinker can emit EOS in reaction to user audio before RNNT admits that
+// speech. Candidate onset, rather than its later confirmation frame, detects
+// this acoustic interruption across the response boundary.
+class ResponseBoundaryRecovery {
+  public:
+    void response_finished(std::int64_t observation_frame) noexcept;
+    bool needs_clean_context(std::int64_t speech_start_frame) const noexcept;
+    void clear() noexcept { last_finished_frame_.reset(); }
+
+  private:
+    std::optional<std::int64_t> last_finished_frame_;
+};
+
+// Linear streaming sample-rate conversion with an absolute phase and a
+// bounded interpolation tail. drain(false) retains only source samples needed
+// by the next output, so a long-running microphone does not accumulate its
+// complete recording in host memory.
+class StreamingLinearResampler {
+  public:
+    StreamingLinearResampler(int32_t source_rate, int32_t target_rate);
+
+    void append(const float* samples, int32_t count);
+    std::vector<float> drain(bool final);
+    void reset();
+
+    std::size_t buffered_source_samples() const noexcept { return source_.size(); }
+
+  private:
+    std::size_t source_end() const;
+    std::size_t stable_output_count() const;
+    void compact_source(bool final);
+
+    int32_t source_rate_{0};
+    int32_t target_rate_{0};
+    std::vector<float> source_;
+    std::size_t source_origin_{0};
+    std::size_t produced_{0};
+};
+
+// Maps a monotonic model position onto a bounded physical KV cache. Once the
+// cache is full, every row remains visible and the rolling suffix overwrites
+// its oldest row while the conditioning prefix remains pinned. VoiceChat's
+// single-query attention does not depend on physical row order as long as each
+// K/V pair stays together.
+struct RollingCachePosition {
+    int32_t valid_rows{0};
+    int32_t write_row{0};
+};
+
+RollingCachePosition rolling_cache_position(std::int64_t logical_position, int32_t capacity,
+                                            int32_t pinned_prefix_rows = 0);
+
+// Detects deterministic decoder collapse from the bounded suffix of generated
+// text tokens. The thresholds intentionally become stricter for shorter
+// patterns so ordinary duplicated words and phrases do not stop a response.
+// Once tripped, the watchdog remains tripped until reset() starts a new segment.
+class RepetitionWatchdog {
+  public:
+    bool observe(int32_t token);
+    void reset() noexcept;
+
+    bool tripped() const noexcept { return tripped_; }
+
+  private:
+    bool has_repeated_suffix(std::size_t block_tokens, std::size_t repetitions) const;
+    bool has_near_repeated_suffix(std::size_t block_tokens) const;
+
+    // Near repeats require three long copies; short repeats remain exact.
+    static constexpr std::size_t kHistoryTokens = 144;
+    std::deque<int32_t> tokens_;
+    bool tripped_{false};
+};
+
 // Host-only RNNT turn-taking policy. One observation represents one 80 ms
 // VoiceChat frame after blank and unknown tokens have been filtered out.
 struct RnntTurnPolicy {
@@ -69,6 +193,10 @@ struct RnntTurnDecision {
     bool speech_stopped{false};
     bool start_agent{false};
     bool interrupt_agent{false};
+    // A candidate containing too few speech frames expired at the EOU
+    // boundary. The session can use this one-shot signal to discard partial
+    // RNNT decoder state without treating the noise as a completed utterance.
+    bool discarded_candidate{false};
     std::int64_t speech_start_frame{-1};
     std::int64_t speech_end_frame{-1};
 };
@@ -82,6 +210,9 @@ class RnntTurnDetector {
 
     RnntTurnDecision observe(bool has_speech_token, bool agent_speaking, std::int64_t frame_index);
     RnntTurnDecision finalize_utterance(bool agent_speaking, std::int64_t frame_index);
+    // Clears stream-local recurrent timing at a transparent model rollover
+    // while retaining whether the first conversation utterance has occurred.
+    void reset_stream_frontier();
     void reset();
 
     bool utterance_active() const { return utterance_active_; }

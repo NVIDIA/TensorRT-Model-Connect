@@ -572,6 +572,8 @@ const char* event_kind_name(SpeechSessionEventKind kind) {
         return "function_response_finished";
     case SpeechSessionEventKind::kInputCleared:
         return "input_cleared";
+    case SpeechSessionEventKind::kContextRolled:
+        return "context_rolled";
     }
     throw std::logic_error("unknown speech event kind");
 }

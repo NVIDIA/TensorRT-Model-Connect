@@ -42,6 +42,8 @@ CHECKPOINT_PREFIX = "tts_model.tts_model."
 NUM_REFINEMENT_STEPS = 8
 FRAME_SECONDS = 0.08
 TEXT_MODEL_ID = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
+TEXT_MODEL_REVISION = "6533e8de2c68e4536bf7c411d7a3ce5734111476"
+_LINEAR_PRECISIONS = frozenset(("fp16", "fp32"))
 
 
 @dataclass(frozen=True)
@@ -353,6 +355,8 @@ class _GraphContext:
     weights: NativeTTSWeights
     work_trt_dtype: Any
     work_np_dtype: Any
+    linear_trt_dtype: Any
+    linear_np_dtype: Any
     constants: dict[tuple[Any, ...], Any] = field(default_factory=dict)
 
     def constant(
@@ -394,6 +398,16 @@ def _cast(ctx: _GraphContext, tensor: Any, dtype: Any) -> Any:
     return ctx.network.add_cast(tensor, dtype).get_output(0)
 
 
+def _normalize_linear_precision(linear_precision: str) -> str:
+    normalized = str(linear_precision).strip().lower()
+    if normalized not in _LINEAR_PRECISIONS:
+        raise ValueError(
+            "VoiceChat TTS linear_precision must be 'fp32' or 'fp16', "
+            f"got {linear_precision!r}"
+        )
+    return normalized
+
+
 def _shuffle(
     ctx: _GraphContext,
     tensor: Any,
@@ -407,20 +421,28 @@ def _shuffle(
     return layer.get_output(0)
 
 
-def _linear(ctx: _GraphContext, tensor: Any, weight_name: str, bias_name: str | None = None) -> Any:
+def _linear(
+    ctx: _GraphContext,
+    tensor: Any,
+    weight_name: str,
+    bias_name: str | None = None,
+) -> Any:
+    """Apply one static projection, confining optional FP16 to its matmul."""
     weight = ctx.weights[weight_name]
     if weight.ndim != 2:
         raise ValueError(f"linear weight {weight_name} must be rank two")
     out_size, in_size = weight.shape
     rank = len(tuple(tensor.shape))
     rhs_shape = (1,) * max(rank - 2, 0) + (in_size, out_size)
-    rhs = ctx.work_constant(
-        ("linear", weight_name, rhs_shape),
+    rhs = ctx.constant(
+        ("linear", weight_name, rhs_shape, np.dtype(ctx.linear_np_dtype).str),
         weight.T,
+        dtype=ctx.linear_np_dtype,
         shape=rhs_shape,
     )
+    linear_input = _cast(ctx, tensor, ctx.linear_trt_dtype)
     output = ctx.network.add_matrix_multiply(
-        tensor,
+        linear_input,
         ctx.trt.MatrixOperation.NONE,
         rhs,
         ctx.trt.MatrixOperation.NONE,
@@ -1294,9 +1316,11 @@ def add_native_tts_step_graph(
     *,
     max_cache_length: int,
     config: NativeTTSConfig = EXACT_CONFIG,
+    linear_precision: str = "fp32",
 ) -> dict[str, Any]:
-    """Populate a strongly typed network with one 80 ms EAR-TTS frame step."""
+    """Populate one EAR-TTS step, optionally using FP16 only for static linears."""
     config.validate()
+    linear_precision = _normalize_linear_precision(linear_precision)
     if max_cache_length < 1:
         raise ValueError("EAR-TTS max_cache_length must be positive")
     if max_cache_length > config.sliding_window:
@@ -1314,7 +1338,15 @@ def add_native_tts_step_graph(
             f"native TTS weights are incomplete: missing={missing[:4]}, extra={extra[:4]}"
         )
 
-    ctx = _GraphContext(network, trt, weights, trt.float32, np.float32)
+    ctx = _GraphContext(
+        network,
+        trt,
+        weights,
+        trt.float32,
+        np.float32,
+        trt.float16 if linear_precision == "fp16" else trt.float32,
+        np.float16 if linear_precision == "fp16" else np.float32,
+    )
 
     prev_codes = network.add_input("prev_codes", trt.int32, (config.num_quantizers,))
     subword_id = network.add_input("subword_id", trt.int32, (1,))
@@ -1400,9 +1432,11 @@ def build_native_tts_engine_from_weights(
     *,
     max_cache_length: int,
     config: NativeTTSConfig = EXACT_CONFIG,
+    linear_precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build a serialized strongly typed TensorRT EAR-TTS step engine."""
+    linear_precision = _normalize_linear_precision(linear_precision)
     severity = trt.Logger.VERBOSE if verbose else trt.Logger.WARNING
     logger = trt.Logger(severity)
     builder = trt.Builder(logger)
@@ -1419,6 +1453,7 @@ def build_native_tts_engine_from_weights(
         tables,
         max_cache_length=max_cache_length,
         config=config,
+        linear_precision=linear_precision,
     )
 
     profile = builder.create_optimization_profile()
@@ -1441,7 +1476,8 @@ def build_native_tts_engine_from_weights(
         print(
             "[trtmc build] VoiceChat native EAR-TTS: "
             f"layers={config.num_hidden_layers}, hidden={config.hidden_size}, "
-            f"kv={config.kv_width}, cache={max_cache_length}",
+            f"kv={config.kv_width}, cache={max_cache_length}, "
+            f"linear_precision={linear_precision}",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, builder_config)
@@ -1455,15 +1491,18 @@ def build_native_tts_engine(
     tokenizer_dir: str | Path,
     *,
     max_cache_length: int,
+    linear_precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Load public assets and build the runtime-only TensorRT TTS engine."""
+    linear_precision = _normalize_linear_precision(linear_precision)
     weights = load_native_tts_weights(model_dir)
     tables = build_subword_tables(tokenizer_dir)
     return build_native_tts_engine_from_weights(
         weights,
         tables,
         max_cache_length=max_cache_length,
+        linear_precision=linear_precision,
         verbose=verbose,
     )
 
@@ -1476,6 +1515,7 @@ def _resolve_tokenizer_snapshot(tokenizer_dir: str | Path | None) -> Path:
     return Path(
         snapshot_download(
             repo_id=TEXT_MODEL_ID,
+            revision=TEXT_MODEL_REVISION,
             allow_patterns=["tokenizer.json"],
         )
     )
@@ -1546,6 +1586,7 @@ def build_tts_sections(
     *,
     tokenizer_dir: str | Path | None = None,
     max_cache_length: int = EXACT_CONFIG.sliding_window,
+    linear_precision: str = "fp32",
     verbose: bool = False,
 ) -> list[tuple[str, bytes]]:
     """Model.py integration entrypoint for the native VoiceChat TTS sections.
@@ -1556,11 +1597,13 @@ def build_tts_sections(
     nested training configuration.
     """
     del raw_config
+    linear_precision = _normalize_linear_precision(linear_precision)
     resolved_tokenizer = _resolve_tokenizer_snapshot(tokenizer_dir)
     engine = build_native_tts_engine(
         model_dir,
         resolved_tokenizer,
         max_cache_length=max_cache_length,
+        linear_precision=linear_precision,
         verbose=verbose,
     )
     silence, control = _load_runtime_code_assets(model_dir)

@@ -7,7 +7,11 @@
 #include "trtmc/runtime/family_loader.h"
 
 #include <cstdint>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -62,18 +66,30 @@ bool rtx_options_throw(const std::filesystem::path& bundle, const std::string& r
 
 void check_rtx_options(const std::filesystem::path& runtime_root,
                        const std::string& expected_cache_path, bool expected_cuda_graphs) {
+#ifdef _WIN32
+    const auto library_path = runtime_root / "trtmc_backend_trt_rtx.dll";
+    const auto handle = LoadLibraryW(library_path.c_str());
+#else
     const auto library_path = runtime_root / "libtrtmc_backend_trt_rtx.so";
     void* handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
     check(handle != nullptr, "fake RTX backend remains loaded");
     if (handle == nullptr)
         return;
 
     using CachePathFn = const char* (*)();
     using CudaGraphsFn = bool (*)();
+#ifdef _WIN32
+    const auto cache_path = reinterpret_cast<CachePathFn>(
+        GetProcAddress(handle, "trtmc_test_backend_last_runtime_cache_path"));
+    const auto cuda_graphs = reinterpret_cast<CudaGraphsFn>(
+        GetProcAddress(handle, "trtmc_test_backend_last_cuda_graphs"));
+#else
     const auto cache_path =
         reinterpret_cast<CachePathFn>(dlsym(handle, "trtmc_test_backend_last_runtime_cache_path"));
     const auto cuda_graphs =
         reinterpret_cast<CudaGraphsFn>(dlsym(handle, "trtmc_test_backend_last_cuda_graphs"));
+#endif
     check(cache_path != nullptr, "fake RTX cache-path probe is exported");
     check(cuda_graphs != nullptr, "fake RTX CUDA-graphs probe is exported");
     if (cache_path != nullptr)
@@ -81,7 +97,11 @@ void check_rtx_options(const std::filesystem::path& runtime_root,
     if (cuda_graphs != nullptr)
         check(cuda_graphs() == expected_cuda_graphs,
               "CUDA-graphs option reaches delayed module creation");
+#ifdef _WIN32
+    FreeLibrary(handle);
+#else
     dlclose(handle);
+#endif
 }
 
 } // namespace

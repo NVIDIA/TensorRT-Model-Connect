@@ -1,0 +1,54 @@
+# This example is distributed as source. Setup downloads dependencies and
+# generates the local application outside this directory by default.
+dependencies/
+node_modules/
+vendor/
+third_party/
+third-party/
+models/
+runtime/
+logs/
+licenses/
+Nemotron Voice Lab/
+build/
+build-*/
+dist/
+out/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.exe
+*.dll
+*.lib
+*.pdb
+*.obj
+*.whl
+*.zip
+*.7z
+*.nupkg
+*.msi
+*.msix
+*.asar
+*.pak
+*.bin
+*.dat
+*.safetensors
+*.onnx
+*.plan
+*.engine
+*.bundle
+*.cache
+*.jsonl
+*.log
+*.wav
+*.mp3
+*.flac
+*.png
+*.jpg
+*.webp
+*.woff*
+*.ttf
+*.otf
+Start Voice Lab.ps1

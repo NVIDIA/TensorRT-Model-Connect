@@ -5,6 +5,7 @@
 
 #include "families/nemotron_voicechat/runtime/thinker_hybrid_state.h"
 
+#include <stdexcept>
 #include <utility>
 
 namespace trtmc {
@@ -34,6 +35,30 @@ void VoiceChatThinkerHybridState::advance() {
 
 bool VoiceChatThinkerHybridState::ok() const {
     return kv_ && kv_->ok() && mamba_ && mamba_->ok();
+}
+
+void VoiceChatThinkerHybridState::pin_kv_prefix() {
+    if (!kv_)
+        throw std::logic_error("VoiceChat thinker KV state is unavailable");
+    kv_->pin_current_prefix();
+}
+
+void VoiceChatThinkerHybridState::capture_prompt_snapshot() {
+    if (!kv_ || !mamba_)
+        throw std::logic_error("VoiceChat thinker hybrid state is unavailable");
+    kv_->capture_prompt_snapshot();
+    mamba_->capture_prompt_snapshot();
+}
+
+void VoiceChatThinkerHybridState::restore_prompt_snapshot() {
+    if (!prompt_snapshot_ready())
+        throw std::logic_error("VoiceChat thinker prompt snapshot is unavailable");
+    kv_->restore_prompt_snapshot();
+    mamba_->restore_prompt_snapshot();
+}
+
+bool VoiceChatThinkerHybridState::prompt_snapshot_ready() const noexcept {
+    return kv_ && mamba_ && kv_->prompt_snapshot_ready() && mamba_->prompt_snapshot_ready();
 }
 
 } // namespace trtmc

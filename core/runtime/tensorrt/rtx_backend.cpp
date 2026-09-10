@@ -12,6 +12,7 @@
 #include "trtmc/runtime/trt_backend.h"
 
 #include <NvInfer.h>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -55,7 +56,7 @@ class RuntimeCacheState {
         if (cache_ == nullptr)
             throw std::runtime_error("[trtmc] Failed to create TensorRT-RTX runtime cache");
 
-        std::ifstream input(path_, std::ios::binary | std::ios::ate);
+        std::ifstream input(std::filesystem::u8path(path_), std::ios::binary | std::ios::ate);
         if (!input)
             return;
         const auto end = input.tellg();
@@ -76,7 +77,8 @@ class RuntimeCacheState {
     ~RuntimeCacheState() {
         auto* serialized = cache_ != nullptr ? cache_->serialize() : nullptr;
         if (serialized != nullptr && serialized->size() > 0) {
-            std::ofstream output(path_, std::ios::binary | std::ios::trunc);
+            std::ofstream output(std::filesystem::u8path(path_),
+                                 std::ios::binary | std::ios::trunc);
             if (output) {
                 output.write(static_cast<const char*>(serialized->data()),
                              static_cast<std::streamsize>(serialized->size()));

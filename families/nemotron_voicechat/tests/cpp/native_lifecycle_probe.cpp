@@ -156,6 +156,8 @@ const char* event_kind_name(EventKind kind) {
         return "function_response_finished";
     case EventKind::kInputCleared:
         return "input_cleared";
+    case EventKind::kContextRolled:
+        return "context_rolled";
     }
     return "unknown";
 }

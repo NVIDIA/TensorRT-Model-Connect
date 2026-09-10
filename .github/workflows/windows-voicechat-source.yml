@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Windows VoiceChat source
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'examples/windows_voicechat/**'
+      - '.github/workflows/windows-voicechat-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Audit source files in the Git index
+        run: python examples/windows_voicechat/audit_source.py --staged
+      - name: Test desktop protocol, lifecycle, and relocation
+        run: node --test examples/windows_voicechat/desktop/tests/*.test.js
+      - name: Parse Windows PowerShell scripts and inspect setup plan
+        shell: powershell
+        run: |
+          Get-ChildItem examples/windows_voicechat -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          }
+          ./examples/windows_voicechat/Setup.ps1 -WorkspaceRoot (Join-Path $env:RUNNER_TEMP 'voice-lab-plan') -Plan
