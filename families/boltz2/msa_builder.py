@@ -109,10 +109,10 @@ def define_msa_network(
     token_count: int,
     msa_depth: int,
 ):
-    """Define the four-block, depth-one qualified MSA graph."""
+    """Define the four-block static-depth MSA graph."""
 
-    if msa_depth != 1:
-        raise ValueError("the initial Boltz-2 TensorRT MSA profile requires depth 1")
+    if msa_depth <= 0:
+        raise ValueError("Boltz-2 TensorRT MSA depth must be positive")
     bf16 = getattr(trt, "bfloat16", None)
     if bf16 is None:
         raise RuntimeError("Boltz-2 requires TensorRT with strongly typed BF16 support")
