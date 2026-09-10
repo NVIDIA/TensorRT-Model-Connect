@@ -362,6 +362,7 @@ def _official_reference(
         "guidance_scale": float(case.get("guidance_scale", 5.0)),
         "latents": reference_latents,
         "generator": generator,
+        "output_type": "pil",
     }
     if int(manifest.get("video_num_frames", 1)) > 1:
         kwargs["num_frames"] = int(manifest["video_num_frames"])
