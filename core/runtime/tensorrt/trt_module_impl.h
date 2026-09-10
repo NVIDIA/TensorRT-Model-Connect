@@ -34,6 +34,7 @@ class ITrtActivationArena {
                         std::int64_t required_bytes) = 0;
     virtual void begin_enqueue(nvinfer1::IExecutionContext* context) = 0;
     virtual void end_enqueue() noexcept = 0;
+    virtual void invalidate_shapes(nvinfer1::IExecutionContext* context) = 0;
     virtual void detach(nvinfer1::IExecutionContext* context) noexcept = 0;
 };
 
@@ -95,6 +96,10 @@ class TrtModuleImpl final : public ITrtModule {
         bool is_input{true};
         bool is_external{false};
         bool is_dynamic{false};
+        bool lazy_input{false};
+        std::size_t input_capacity_bytes{0};
+        bool lazy_output{false};
+        std::size_t output_capacity_bytes{0};
     };
     struct TimingEvent {
         cudaEvent_t start{nullptr};
@@ -154,9 +159,13 @@ class TrtModuleImpl final : public ITrtModule {
                                 int32_t num_profiles);
     void allocate_single_input(nvinfer1::ICudaEngine* engine, const std::string& name,
                                int32_t num_profiles);
+    void prepare_input_buffer(const std::string& name, BufferEntry& entry,
+                              const std::vector<int64_t>& shape, DType dtype);
     void ensure_input_buffer(const std::string& name, BufferEntry& entry);
     void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void allocate_single_output(nvinfer1::ICudaEngine* engine, const std::string& name);
+    void ensure_output_buffers();
+    void ensure_output_buffer(const std::string& name, BufferEntry& entry);
     void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                   nvinfer1::OptProfileSelector selector);
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,

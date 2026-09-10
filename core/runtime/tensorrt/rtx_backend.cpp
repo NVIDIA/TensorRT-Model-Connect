@@ -18,6 +18,7 @@
 #include <NvInfer.h>
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +27,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -54,6 +56,49 @@ namespace fs = std::filesystem;
 struct StreamSetup {
     cudaStream_t stream{nullptr};
     std::shared_ptr<void> owner;
+};
+
+class AccumulateWallTime {
+  public:
+    explicit AccumulateWallTime(double* milliseconds)
+        : milliseconds_(milliseconds),
+          start_(milliseconds ? Clock::now() : Clock::time_point{}) {}
+    ~AccumulateWallTime() {
+        if (milliseconds_)
+            *milliseconds_ += std::chrono::duration<double, std::milli>(Clock::now() - start_).count();
+    }
+
+  private:
+    using Clock = std::chrono::steady_clock;
+    double* milliseconds_;
+    Clock::time_point start_;
+};
+
+struct FilePlanLoadTiming {
+    std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
+    std::uint64_t read_calls{0}, host_read_bytes{0}, device_read_bytes{0};
+    double reader_open_ms{0}, retained_lock_ms{0}, deserialize_ms{0}, read_callback_ms{0};
+    double file_read_ms{0}, upload_ms{0}, weight_budget_ms{0}, runtime_config_ms{0};
+    double runtime_cache_ms{0}, context_ms{0}, module_init_ms{0};
+
+    void log(std::uint64_t plan_bytes, std::int32_t profile, bool retained_hit) const {
+        const double total_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                .count();
+        // Deserialize contains reader callbacks; callbacks contain file reads and uploads.
+        // Runtime-config contains runtime-cache time. These nested fields are not additive.
+        std::ostringstream line;
+        line << "[trtmc.rtx_plan_load] plan_bytes=" << plan_bytes << " profile=" << profile
+             << " retained_hit=" << retained_hit << " total_ms=" << total_ms
+             << " reader_open_ms=" << reader_open_ms << " retained_lock_ms=" << retained_lock_ms
+             << " deserialize_ms=" << deserialize_ms << " read_calls=" << read_calls
+             << " host_read_bytes=" << host_read_bytes << " device_read_bytes=" << device_read_bytes
+             << " read_callback_ms=" << read_callback_ms << " file_read_ms=" << file_read_ms
+             << " upload_ms=" << upload_ms << " weight_budget_ms=" << weight_budget_ms
+             << " runtime_config_ms=" << runtime_config_ms << " runtime_cache_ms=" << runtime_cache_ms
+             << " context_ms=" << context_ms << " module_init_ms=" << module_init_ms << '\n';
+        std::cerr << line.str();
+    }
 };
 
 #if defined(_WIN32)
@@ -174,6 +219,9 @@ class PlanFileMutationGuard final {
 
     const fs::path& path() const noexcept { return path_; }
     const std::string& cache_identity() const noexcept { return file_identity_; }
+#if defined(_WIN32)
+    HANDLE handle() const noexcept { return handle_; }
+#endif
 
     void verify_unchanged() const {
 #if !defined(_WIN32)
@@ -239,36 +287,74 @@ ReaderDestination classify_reader_destination(void* destination) noexcept {
     return ReaderDestination::invalid;
 }
 
-void read_host_bytes(std::ifstream& file, void* destination, std::uint64_t requested) {
+#if defined(_WIN32)
+using PlanReadFile = HANDLE;
+#else
+using PlanReadFile = std::ifstream&;
+#endif
+
+std::uint64_t read_plan_bytes(PlanReadFile file, void* destination, std::uint64_t requested,
+                              FilePlanLoadTiming& timing) {
+    AccumulateWallTime elapsed(&timing.file_read_ms);
+#if defined(_WIN32)
+    // Avoid MSVC filebuf's small fread loop for multi-GiB binary plans.
+    std::uint64_t completed = 0;
+    while (completed < requested) {
+        const auto chunk = static_cast<DWORD>(
+            std::min<std::uint64_t>(requested - completed, 64U << 20));
+        DWORD received = 0;
+        if (!ReadFile(file, static_cast<unsigned char*>(destination) + completed, chunk,
+                      &received, nullptr)) {
+            throw std::runtime_error("[trtmc] Failed to read RTX plan bytes");
+        }
+        completed += received;
+        if (received != chunk)
+            break;
+    }
+    return completed;
+#else
     file.read(static_cast<char*>(destination), static_cast<std::streamsize>(requested));
-    if (file.gcount() != static_cast<std::streamsize>(requested))
+    const auto received = file.gcount();
+    return received > 0 ? static_cast<std::uint64_t>(received) : 0;
+#endif
+}
+
+void read_host_bytes(PlanReadFile file, void* destination, std::uint64_t requested,
+                     FilePlanLoadTiming& timing) {
+    const auto received = read_plan_bytes(file, destination, requested, timing);
+    timing.host_read_bytes += received;
+    if (received != requested)
         throw std::runtime_error("[trtmc] Failed to read RTX plan bytes into host memory");
 }
 
-void read_device_bytes(std::ifstream& file, std::vector<char>& staging, void* destination,
-                       std::uint64_t requested) {
+void read_device_bytes(PlanReadFile file, std::vector<char>& staging, void* destination,
+                       std::uint64_t requested, FilePlanLoadTiming& timing) {
     std::uint64_t copied = 0;
     while (copied < requested) {
         const auto chunk = std::min<std::uint64_t>(staging.size(), requested - copied);
-        file.read(staging.data(), static_cast<std::streamsize>(chunk));
-        if (file.gcount() != static_cast<std::streamsize>(chunk))
+        const auto received = read_plan_bytes(file, staging.data(), chunk, timing);
+        timing.device_read_bytes += received;
+        if (received != chunk)
             throw std::runtime_error("[trtmc] Failed to stage RTX plan bytes");
-        if (cudaMemcpy(static_cast<unsigned char*>(destination) + copied, staging.data(),
-                       static_cast<std::size_t>(chunk), cudaMemcpyHostToDevice) != cudaSuccess) {
-            throw std::runtime_error("[trtmc] Failed to copy RTX plan bytes to the device");
+        {
+            AccumulateWallTime elapsed(&timing.upload_ms);
+            if (cudaMemcpy(static_cast<unsigned char*>(destination) + copied, staging.data(),
+                           static_cast<std::size_t>(chunk), cudaMemcpyHostToDevice) != cudaSuccess) {
+                throw std::runtime_error("[trtmc] Failed to copy RTX plan bytes to the device");
+            }
         }
         copied += chunk;
     }
 }
 
-void read_destination_bytes(std::ifstream& file, std::vector<char>& staging, void* destination,
-                            std::uint64_t requested) {
+void read_destination_bytes(PlanReadFile file, std::vector<char>& staging, void* destination,
+                            std::uint64_t requested, FilePlanLoadTiming& timing) {
     switch (classify_reader_destination(destination)) {
     case ReaderDestination::host:
-        read_host_bytes(file, destination, requested);
+        read_host_bytes(file, destination, requested, timing);
         return;
     case ReaderDestination::device:
-        read_device_bytes(file, staging, destination, requested);
+        read_device_bytes(file, staging, destination, requested, timing);
         return;
     case ReaderDestination::invalid:
         throw std::runtime_error("[trtmc] Unsupported RTX plan reader destination");
@@ -279,9 +365,16 @@ void read_destination_bytes(std::ifstream& file, std::vector<char>& staging, voi
 // within the stream. Restrict every operation to the validated bundle section.
 class BoundedPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
   public:
-    BoundedPlanStreamReader(const char* path, std::uint64_t offset, std::uint64_t size)
-        : mutation_guard_(path), offset_(offset), size_(size), staging_(4U << 20) {
+    BoundedPlanStreamReader(const char* path, std::uint64_t offset, std::uint64_t size,
+                            FilePlanLoadTiming& timing)
+        : mutation_guard_(path), offset_(offset), size_(size), staging_(4U << 20), timing_(timing) {
         validate_plan_description(size_);
+#if defined(_WIN32)
+        LARGE_INTEGER end{};
+        if (!GetFileSizeEx(mutation_guard_.handle(), &end) || end.QuadPart < 0)
+            throw std::runtime_error("[trtmc] Failed to determine RTX plan file size");
+        const auto file_size = static_cast<std::uint64_t>(end.QuadPart);
+#else
         file_.open(mutation_guard_.path(), std::ios::binary | std::ios::ate);
         if (!file_)
             throw std::runtime_error("[trtmc] Failed to open RTX plan file");
@@ -289,6 +382,7 @@ class BoundedPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
         if (end < 0)
             throw std::runtime_error("[trtmc] Failed to determine RTX plan file size");
         const auto file_size = static_cast<std::uint64_t>(static_cast<std::streamoff>(end));
+#endif
         validate_plan_file_range(offset_, size_, file_size);
     }
 
@@ -303,6 +397,8 @@ class BoundedPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
 
     int64_t read(void* destination, int64_t nb_bytes, cudaStream_t stream) noexcept override {
         (void)stream;
+        AccumulateWallTime elapsed(&timing_.read_callback_ms);
+        ++timing_.read_calls;
         if (destination == nullptr || nb_bytes < 0)
             return -1;
         if (nb_bytes == 0)
@@ -348,21 +444,35 @@ class BoundedPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
             std::min<std::uint64_t>(static_cast<std::uint64_t>(nb_bytes), size_ - cursor_);
         if (requested == 0)
             return 0;
+#if defined(_WIN32)
+        LARGE_INTEGER offset{};
+        offset.QuadPart = static_cast<LONGLONG>(offset_ + cursor_);
+        LARGE_INTEGER position{};
+        if (!SetFilePointerEx(mutation_guard_.handle(), offset, &position, FILE_BEGIN) ||
+            position.QuadPart != offset.QuadPart) {
+            throw std::runtime_error("[trtmc] Failed to seek in the RTX plan section");
+        }
+        read_destination_bytes(mutation_guard_.handle(), staging_, destination, requested, timing_);
+#else
         file_.clear();
         file_.seekg(static_cast<std::streamoff>(offset_ + cursor_), std::ios::beg);
         if (!file_)
             throw std::runtime_error("[trtmc] Failed to seek in the RTX plan section");
-        read_destination_bytes(file_, staging_, destination, requested);
+        read_destination_bytes(file_, staging_, destination, requested, timing_);
+#endif
         cursor_ += requested;
         return static_cast<int64_t>(requested);
     }
 
     PlanFileMutationGuard mutation_guard_;
+#if !defined(_WIN32)
     std::ifstream file_;
+#endif
     std::uint64_t offset_{0};
     std::uint64_t size_{0};
     std::uint64_t cursor_{0};
     std::vector<char> staging_;
+    FilePlanLoadTiming& timing_;
 };
 
 void apply_weight_streaming_budget(nvinfer1::ICudaEngine& engine, std::int64_t budget,
@@ -432,8 +542,8 @@ struct ActivationArenaKeyHash {
 // One arena is shared only by explicitly marked contexts on one CUDA stream.
 // Context creation records each profile upper bound. Allocation is deferred to
 // the first enqueue, after that context has received its request shapes. Each
-// serial context is shape-sized once during its lifetime so repeated forwards
-// avoid repartitioning TensorRT's internal activation memory.
+// serial context caches its shape-sized requirement until its input shapes
+// change, so repeated forwards avoid repartitioning activation memory.
 class RtxActivationArena final : public ITrtActivationArena {
   public:
     RtxActivationArena(int device, cudaStream_t stream) : device_(device), stream_(stream) {}
@@ -499,6 +609,11 @@ class RtxActivationArena final : public ITrtActivationArena {
     }
 
     void end_enqueue() noexcept override { mutex_.unlock(); }
+
+    void invalidate_shapes(nvinfer1::IExecutionContext* context) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        shaped_requirements_.erase(context);
+    }
 
     void detach(nvinfer1::IExecutionContext* context) noexcept override {
         if (context == nullptr)
@@ -799,12 +914,16 @@ class RtxBackend final : public IBackend {
                                  const std::vector<ModuleExternalBinding>& external_bindings,
                                  std::int64_t weight_streaming_budget_bytes, bool retain_engine,
                                  bool serial_execution_context) {
+        FilePlanLoadTiming timing;
         validate_serial_execution_context(options, serial_execution_context);
         if (weight_streaming_budget_bytes >= 0 && options.cuda_graphs) {
             throw std::invalid_argument(
                 "[trtmc] RTX weight streaming is incompatible with CUDA graph capture");
         }
-        BoundedPlanStreamReader reader(plan_path, plan_offset, plan_size);
+        BoundedPlanStreamReader reader = [&] {
+            AccumulateWallTime elapsed(&timing.reader_open_ms);
+            return BoundedPlanStreamReader(plan_path, plan_offset, plan_size, timing);
+        }();
         // Stable file and section identity prevents retained-engine reuse across
         // bundle files or after an in-place plan replacement.
         const std::string cache_key =
@@ -815,33 +934,48 @@ class RtxBackend final : public IBackend {
             // Serialize retained-engine creation. Two concurrent deserializations
             // of the same multi-GiB plan can exceed the device-memory envelope
             // before the losing insertion is released.
-            retained_lock = std::unique_lock<std::mutex>(retained_engines_mutex_);
+            {
+                AccumulateWallTime elapsed(&timing.retained_lock_ms);
+                retained_lock = std::unique_lock<std::mutex>(retained_engines_mutex_);
+            }
             const auto hit = retained_engines_.find(cache_key);
             if (hit != retained_engines_.end()) {
                 reader.verify_unchanged();
                 std::cerr << "[trtmc.rtx_engine_cache] hit=1\n";
-                return create_single_module_from_engine(hit->second, options, external_bindings,
-                                                        true, serial_execution_context);
+                auto module = create_single_module_from_engine(
+                    hit->second, options, external_bindings, true, serial_execution_context, &timing);
+                timing.log(plan_size, options.optimization_profile, true);
+                return module;
             }
         }
-        TrtUniquePtr<nvinfer1::ICudaEngine> engine(
-            file_backed_runtime().deserializeCudaEngine(reader));
+        TrtUniquePtr<nvinfer1::ICudaEngine> engine;
+        {
+            AccumulateWallTime elapsed(&timing.deserialize_ms);
+            engine.reset(file_backed_runtime().deserializeCudaEngine(reader));
+        }
         reader.verify_unchanged();
         if (!engine)
             throw std::runtime_error("[trtmc] Failed to stream-deserialize engine (RTX)");
         if (retain_engine) {
             std::shared_ptr<nvinfer1::ICudaEngine> retained(
                 engine.release(), [](nvinfer1::ICudaEngine* value) { delete value; });
-            apply_weight_streaming_budget(*retained, weight_streaming_budget_bytes,
-                                          options.cuda_graphs);
+            {
+                AccumulateWallTime elapsed(&timing.weight_budget_ms);
+                apply_weight_streaming_budget(*retained, weight_streaming_budget_bytes,
+                                              options.cuda_graphs);
+            }
             auto module = create_single_module_from_engine(retained, options, external_bindings,
-                                                           true, serial_execution_context);
+                                                           true, serial_execution_context, &timing);
             retained_engines_.emplace(cache_key, retained);
             std::cerr << "[trtmc.rtx_engine_cache] hit=0 retained=1\n";
+            timing.log(plan_size, options.optimization_profile, false);
             return module;
         }
-        return create_single_module(engine.release(), options, external_bindings,
-                                    weight_streaming_budget_bytes, true, serial_execution_context);
+        auto module = create_single_module(engine.release(), options, external_bindings,
+                                           weight_streaming_budget_bytes, true,
+                                           serial_execution_context, &timing);
+        timing.log(plan_size, options.optimization_profile, false);
+        return module;
     }
 
     nvinfer1::IRuntime& file_backed_runtime() {
@@ -867,12 +1001,13 @@ class RtxBackend final : public IBackend {
     std::unique_ptr<ITrtModule> create_single_module_from_engine(
         const std::shared_ptr<nvinfer1::ICudaEngine>& engine, const ModuleCreateOptions& options,
         const std::vector<ModuleExternalBinding>& external_bindings,
-        bool use_synchronous_allocator = false, bool serial_execution_context = false) {
+        bool use_synchronous_allocator = false, bool serial_execution_context = false,
+        FilePlanLoadTiming* timing = nullptr) {
         validate_optimization_profile(*engine, options.optimization_profile);
         const StreamSetup stream_setup = resolve_stream(options.stream);
-        auto config = create_runtime_config(*engine, options, serial_execution_context);
+        auto config = create_runtime_config(*engine, options, serial_execution_context, timing);
         return create_execution_module(engine, config, stream_setup, options, external_bindings,
-                                       use_synchronous_allocator, serial_execution_context);
+                                       use_synchronous_allocator, serial_execution_context, timing);
     }
 
     std::unique_ptr<ITrtModule>
@@ -880,24 +1015,31 @@ class RtxBackend final : public IBackend {
                          const std::vector<ModuleExternalBinding>& external_bindings,
                          std::int64_t weight_streaming_budget_bytes,
                          bool use_synchronous_allocator = false,
-                         bool serial_execution_context = false) {
+                         bool serial_execution_context = false,
+                         FilePlanLoadTiming* timing = nullptr) {
         std::shared_ptr<nvinfer1::ICudaEngine> engine(
             engine_raw, [](nvinfer1::ICudaEngine* value) { delete value; });
-        apply_weight_streaming_budget(*engine, weight_streaming_budget_bytes, options.cuda_graphs);
+        {
+            AccumulateWallTime elapsed(timing ? &timing->weight_budget_ms : nullptr);
+            apply_weight_streaming_budget(*engine, weight_streaming_budget_bytes, options.cuda_graphs);
+        }
         return create_single_module_from_engine(engine, options, external_bindings,
                                                 use_synchronous_allocator,
-                                                serial_execution_context);
+                                                serial_execution_context, timing);
     }
 
     std::shared_ptr<nvinfer1::IRuntimeConfig>
     create_runtime_config(nvinfer1::ICudaEngine& engine, const ModuleCreateOptions& options,
-                          bool serial_execution_context) {
+                          bool serial_execution_context, FilePlanLoadTiming* timing = nullptr) {
+        AccumulateWallTime elapsed(timing ? &timing->runtime_config_ms : nullptr);
         std::shared_ptr<nvinfer1::IRuntimeConfig> config(
             engine.createRuntimeConfig(), [](nvinfer1::IRuntimeConfig* value) { delete value; });
         if (!config)
             throw std::runtime_error("[trtmc] Failed to create RTX runtime config");
-        if (options.runtime_cache_path && options.runtime_cache_path[0] != '\0')
+        if (options.runtime_cache_path && options.runtime_cache_path[0] != '\0') {
+            AccumulateWallTime cache_elapsed(timing ? &timing->runtime_cache_ms : nullptr);
             ensure_runtime_cache(config.get(), options.runtime_cache_path);
+        }
         if (serial_execution_context) {
             config->setExecutionContextAllocationStrategy(
                 nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED);
@@ -940,7 +1082,8 @@ class RtxBackend final : public IBackend {
                             const std::shared_ptr<nvinfer1::IRuntimeConfig>& config,
                             const StreamSetup& stream_setup, const ModuleCreateOptions& options,
                             const std::vector<ModuleExternalBinding>& external_bindings,
-                            bool use_synchronous_allocator, bool serial_execution_context) {
+                            bool use_synchronous_allocator, bool serial_execution_context,
+                            FilePlanLoadTiming* timing = nullptr) {
         const auto activation_arena =
             resolve_activation_arena(serial_execution_context, stream_setup.stream);
         const std::int64_t activation_memory_bytes =
@@ -948,8 +1091,11 @@ class RtxBackend final : public IBackend {
                              : 0;
         if (activation_memory_bytes < 0)
             throw std::runtime_error("[trtmc] Invalid RTX activation memory requirement");
-        std::unique_ptr<nvinfer1::IExecutionContext> context(
-            engine->createExecutionContext(config.get()));
+        std::unique_ptr<nvinfer1::IExecutionContext> context;
+        {
+            AccumulateWallTime elapsed(timing ? &timing->context_ms : nullptr);
+            context.reset(engine->createExecutionContext(config.get()));
+        }
         if (!context)
             throw std::runtime_error("[trtmc] Failed to create RTX execution context");
 #if defined(_WIN32)
@@ -959,9 +1105,14 @@ class RtxBackend final : public IBackend {
 #else
         (void)use_synchronous_allocator;
 #endif
-        auto module = std::make_unique<TrtModuleImpl>(
-            engine.get(), context.get(), stream_setup.stream, options.optimization_profile, nullptr,
-            external_bindings, options.cuda_graphs, activation_arena, activation_memory_bytes);
+        auto module = [&] {
+            // Includes profile selection, activation attachment, and I/O-buffer initialization.
+            AccumulateWallTime elapsed(timing ? &timing->module_init_ms : nullptr);
+            return std::make_unique<TrtModuleImpl>(
+                engine.get(), context.get(), stream_setup.stream, options.optimization_profile,
+                nullptr, external_bindings, options.cuda_graphs, activation_arena,
+                activation_memory_bytes);
+        }();
         // A completed TrtModuleImpl owns (or has already rejected and deleted)
         // the context. Before that point the local owner handles exceptions.
         (void)context.release();

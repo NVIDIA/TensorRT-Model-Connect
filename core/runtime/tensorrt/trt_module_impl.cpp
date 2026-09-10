@@ -224,7 +224,7 @@ void TrtModuleImpl::assign_initial_input_storage(const std::string& name, Buffer
 }
 
 void TrtModuleImpl::assign_initial_output_storage(const std::string& name, BufferEntry& entry) {
-    if (attach_initial_external_binding(name, entry) || entry.nbytes == 0)
+    if (attach_initial_external_binding(name, entry) || entry.nbytes == 0 || entry.lazy_output)
         return;
     if (cudaMalloc(&entry.d_ptr, entry.nbytes) != cudaSuccess) {
         entry.d_ptr = nullptr;
@@ -351,6 +351,8 @@ void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& e
     if (!ctx_->setInputShape(name.c_str(), dims))
         throw std::runtime_error("TensorRT rejected dynamic input shape for '" + name + "'");
     entry.shape = new_shape;
+    if (activation_arena_)
+        activation_arena_->invalidate_shapes(ctx_);
 }
 
 std::size_t TrtModuleImpl::compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
@@ -422,6 +424,8 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     entry.nbytes = nbytes;
     entry.is_input = true;
     entry.is_dynamic = is_dynamic;
+    entry.lazy_input = activation_arena_ && !backend_managed_cuda_graph_ && is_dynamic &&
+                       should_allocate_input(name, nbytes);
     entry.shape = is_dynamic ? dims_to_shape(init_dims) : shape;
 
     assign_initial_input_storage(name, entry);
@@ -436,18 +440,79 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
                                  "'");
 }
 
-void TrtModuleImpl::ensure_input_buffer(const std::string& name, BufferEntry& entry) {
-    if (entry.d_ptr != nullptr || entry.is_external || !should_allocate_input(name, entry.nbytes))
-        return;
-    const cudaError_t error = cudaMalloc(&entry.d_ptr, entry.nbytes);
-    if (error != cudaSuccess)
-        throw std::runtime_error("Unable to allocate TensorRT input buffer for '" + name + "'");
-    cudaMemsetAsync(entry.d_ptr, 0, entry.nbytes, stream_);
-    if (!bind_tensor_address(name, entry)) {
-        cudaFree(entry.d_ptr);
-        entry.d_ptr = nullptr;
-        throw std::runtime_error("TensorRT rejected input buffer for '" + name + "'");
+void TrtModuleImpl::prepare_input_buffer(const std::string& name, BufferEntry& entry,
+                                        const std::vector<int64_t>& shape, DType dtype) {
+    if (!ctx_)
+        throw std::runtime_error("TensorRT execution context is unavailable");
+    if (entry.lazy_input && !entry.is_external) {
+        const auto minimum = engine_->getProfileShape(name.c_str(), profile_idx_,
+                                                       nvinfer1::OptProfileSelector::kMIN);
+        const auto maximum = engine_->getProfileShape(name.c_str(), profile_idx_,
+                                                       nvinfer1::OptProfileSelector::kMAX);
+        if (dtype != entry.dtype || minimum.nbDims < 0 || minimum.nbDims != maximum.nbDims ||
+            shape.size() != static_cast<std::size_t>(maximum.nbDims)) {
+            throw std::invalid_argument("TensorRT input dtype or rank mismatch for '" + name +
+                                        "'");
+        }
+        for (int32_t axis = 0; axis < maximum.nbDims; ++axis) {
+            if (shape[axis] < minimum.d[axis] || shape[axis] > maximum.d[axis]) {
+                throw std::invalid_argument("TensorRT input shape exceeds its profile for '" +
+                                            name + "'");
+            }
+        }
     }
+    const auto previous_shape = entry.shape;
+    update_dynamic_shape(name, entry, shape);
+    try {
+        ensure_input_buffer(name, entry);
+    } catch (...) {
+        // A failed growth must not leave a larger live shape bound to the
+        // smaller, still-owned allocation from the preceding forward.
+        if (entry.lazy_input && !entry.is_external) {
+            try {
+                update_dynamic_shape(name, entry, previous_shape);
+            } catch (...) {
+                destroy_execution_context();
+            }
+        }
+        throw;
+    }
+}
+
+void TrtModuleImpl::ensure_input_buffer(const std::string& name, BufferEntry& entry) {
+    if (entry.is_external || !should_allocate_input(name, entry.nbytes))
+        return;
+    std::size_t required_bytes = entry.nbytes;
+    if (entry.lazy_input) {
+        required_bytes = dtype_size(entry.dtype);
+        for (const auto dim : entry.shape)
+            required_bytes *= static_cast<std::size_t>(std::max(dim, int64_t{1}));
+        if (required_bytes > entry.nbytes)
+            throw std::runtime_error("TensorRT input shape exceeds its profile capacity for '" +
+                                     name + "'");
+    }
+    if (entry.d_ptr && (!entry.lazy_input || required_bytes <= entry.input_capacity_bytes))
+        return;
+
+    // The previous forward may still reference this input. Preserve its
+    // allocation and binding until a replacement has been initialized.
+    if (entry.d_ptr && cudaStreamSynchronize(stream_) != cudaSuccess)
+        throw std::runtime_error("Unable to synchronize TensorRT input growth for '" + name +
+                                 "'");
+    BufferEntry candidate = entry;
+    candidate.d_ptr = nullptr;
+    if (cudaMalloc(&candidate.d_ptr, required_bytes) != cudaSuccess)
+        throw std::runtime_error("Unable to allocate TensorRT input buffer for '" + name + "'");
+    if (cudaMemsetAsync(candidate.d_ptr, 0, required_bytes, stream_) != cudaSuccess ||
+        !bind_tensor_address(name, candidate)) {
+        cudaFree(candidate.d_ptr);
+        throw std::runtime_error("Unable to initialize TensorRT input buffer for '" + name + "'");
+    }
+    void* const previous_ptr = entry.d_ptr;
+    candidate.input_capacity_bytes = required_bytes;
+    entry = std::move(candidate);
+    if (previous_ptr)
+        cudaFree(previous_ptr);
 }
 
 void TrtModuleImpl::allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
@@ -498,14 +563,62 @@ void TrtModuleImpl::allocate_single_output(nvinfer1::ICudaEngine* engine, const 
         return;
     }
 
+    // Only serial, non-graph contexts opt into live-shape output storage.
+    // Keep MAX metadata for profile validation and external-buffer contracts.
+    // Data-dependent outputs retain their existing allocation policy.
+    entry.lazy_output = activation_arena_ && !backend_managed_cuda_graph_ &&
+                        dims_are_dynamic(engine->getTensorShape(name.c_str())) &&
+                        out_dims.nbDims >= 0 && !dims_are_dynamic(out_dims);
     assign_initial_output_storage(name, entry);
 
     if (entry.d_ptr)
         bind_tensor_address(name, entry);
 
-    allocate_host_output_staging(host_output_staging_, name, nbytes, entry.is_external);
+    if (!entry.lazy_output)
+        allocate_host_output_staging(host_output_staging_, name, nbytes, entry.is_external);
 
     buffers_[name] = std::move(entry);
+}
+
+void TrtModuleImpl::ensure_output_buffers() {
+    for (auto& [name, entry] : buffers_) {
+        if (entry.lazy_output && !entry.is_external)
+            ensure_output_buffer(name, entry);
+    }
+}
+
+void TrtModuleImpl::ensure_output_buffer(const std::string& name, BufferEntry& entry) {
+    const auto dims = ctx_->getTensorShape(name.c_str());
+    if (dims.nbDims < 0 || dims_are_dynamic(dims))
+        throw std::runtime_error("TensorRT output shape is unresolved for '" + name + "'");
+    std::vector<int64_t> runtime_shape;
+    const auto required_bytes = compute_alloc_bytes(dims, entry.dtype, runtime_shape);
+    if (required_bytes > entry.nbytes)
+        throw std::runtime_error("TensorRT output shape exceeds its profile capacity for '" +
+                                 name + "'");
+    if (entry.d_ptr && required_bytes <= entry.output_capacity_bytes)
+        return;
+
+    // An earlier async forward may still use the old address. Keep it valid
+    // until completion, and retain the old allocation if growth fails.
+    if (entry.d_ptr && cudaStreamSynchronize(stream_) != cudaSuccess)
+        throw std::runtime_error("Unable to synchronize TensorRT output growth for '" + name +
+                                 "'");
+    BufferEntry candidate = entry;
+    candidate.d_ptr = nullptr;
+    if (cudaMalloc(&candidate.d_ptr, required_bytes) != cudaSuccess)
+        throw std::runtime_error("Unable to allocate TensorRT output buffer for '" + name + "'");
+    if (cudaMemsetAsync(candidate.d_ptr, 0, required_bytes, stream_) != cudaSuccess ||
+        !bind_tensor_address(name, candidate)) {
+        cudaFree(candidate.d_ptr);
+        throw std::runtime_error("Unable to initialize TensorRT output buffer for '" + name +
+                                 "'");
+    }
+    void* const previous_ptr = entry.d_ptr;
+    candidate.output_capacity_bytes = required_bytes;
+    entry = std::move(candidate);
+    if (previous_ptr)
+        cudaFree(previous_ptr);
 }
 
 // --- Buffer allocation ---
@@ -515,7 +628,8 @@ void TrtModuleImpl::allocate_buffers(nvinfer1::ICudaEngine* engine) {
     const int32_t num_profiles = engine->getNbOptimizationProfiles();
     detect_dynamic_shapes(engine, num_io);
 
-    // Pass 1: allocate input buffers (use profile-0 max shape for dynamic inputs).
+    // Pass 1: record selected-profile input capacity. Dynamic input storage is
+    // deferred until forward; serial contexts allocate only the live shape.
     allocate_input_buffers(engine, num_io, num_profiles);
 
     // Pass 2: allocate output buffers. For dynamic shapes, temporarily set
@@ -662,6 +776,8 @@ TensorMap TrtModuleImpl::forward(const TensorMap& inputs) {
         }
 
         auto& staging = host_output_staging_[name];
+        if (entry.lazy_output)
+            staging.resize(runtime_nbytes);
         cudaMemcpy(staging.data(), entry.d_ptr, runtime_nbytes, cudaMemcpyDeviceToHost);
 
         Tensor t;
@@ -696,13 +812,13 @@ void TrtModuleImpl::forward_async(const TensorMap& inputs) {
         if (!entry.is_input)
             continue;
 
-        ensure_input_buffer(name, entry);
+        prepare_input_buffer(name, entry, tensor.shape, tensor.dtype);
         if (!entry.d_ptr)
             continue;
 
-        update_dynamic_shape(name, entry, tensor.shape);
-
-        auto copy_bytes = std::min(tensor.nbytes(), entry.nbytes);
+        const auto capacity = entry.lazy_input && !entry.is_external ? entry.input_capacity_bytes
+                                                                    : entry.nbytes;
+        auto copy_bytes = std::min(tensor.nbytes(), capacity);
         if (copy_bytes > 0 && tensor.data) {
             cudaMemcpyAsync(entry.d_ptr, tensor.data, copy_bytes, cudaMemcpyHostToDevice, stream_);
         }
@@ -718,6 +834,8 @@ void TrtModuleImpl::execute_enqueue() {
         validate_alias_groups_bound();
         alias_groups_ready_ = true;
     }
+    if (activation_arena_)
+        ensure_output_buffers();
     if (!activation_arena_) {
         record_timed_enqueue();
         return;
@@ -850,14 +968,15 @@ void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
         if (!entry.is_input)
             continue;
 
-        ensure_input_buffer(name, entry);
+        prepare_input_buffer(name, entry, dt_ptr->shape(), dt_ptr->dtype());
         if (!entry.d_ptr)
             continue;
 
-        update_dynamic_shape(name, entry, dt_ptr->shape());
-
         if (dt_ptr->data() != entry.d_ptr) {
-            auto copy_bytes = std::min(dt_ptr->nbytes(), entry.nbytes);
+            const auto capacity = entry.lazy_input && !entry.is_external
+                                      ? entry.input_capacity_bytes
+                                      : entry.nbytes;
+            auto copy_bytes = std::min(dt_ptr->nbytes(), capacity);
             if (copy_bytes > 0) {
                 cudaMemcpyAsync(entry.d_ptr, dt_ptr->data(), copy_bytes, cudaMemcpyDeviceToDevice,
                                 stream_);

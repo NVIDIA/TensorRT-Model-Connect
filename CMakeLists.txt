@@ -519,7 +519,16 @@ if(TRTMC_BUILD_TESTS)
     add_test(NAME windows_media COMMAND test_windows_media)
   endif()
 
+  if(TRTMC_BUILD_BACKEND_TRT OR TRTMC_BUILD_BACKEND_RTX)
   if(TRTMC_BUILD_BACKEND_TRT)
+    set(_trtmc_dynamic_test_backend trtmc_backend_trt)
+    set(_trtmc_dynamic_test_include ${TRTMC_TRT_INCLUDE_DIR})
+    set(_trtmc_dynamic_test_library ${TRTMC_TRT_LIBRARY})
+  else()
+    set(_trtmc_dynamic_test_backend trtmc_backend_rtx)
+    set(_trtmc_dynamic_test_include ${TRTMC_RTX_INCLUDE_DIR})
+    set(_trtmc_dynamic_test_library ${TRTMC_RTX_LIBRARY})
+  endif()
   add_executable(test_trt_module_dynamic_input
     core/runtime/tests/test_trt_module_dynamic_input.cpp
   )
@@ -528,13 +537,13 @@ if(TRTMC_BUILD_TESTS)
     ${PROJECT_SOURCE_DIR}/core
   )
   target_include_directories(test_trt_module_dynamic_input SYSTEM PRIVATE
-    ${TRTMC_TRT_INCLUDE_DIR}
+    ${_trtmc_dynamic_test_include}
     ${CUDAToolkit_INCLUDE_DIRS}
   )
   target_link_libraries(test_trt_module_dynamic_input PRIVATE
-    trtmc_backend_trt
+    ${_trtmc_dynamic_test_backend}
     trtmc_core
-    ${TRTMC_TRT_LIBRARY}
+    ${_trtmc_dynamic_test_library}
     ${TRTMC_CUDART_LIBRARY}
   )
   target_compile_options(test_trt_module_dynamic_input PRIVATE ${TRTMC_CXX_WARNINGS})

@@ -57,6 +57,11 @@ from families.minimax_h3.ref2va_contract import (
     validate_reference_request,
     video_resample_source_indices,
 )
+from families.minimax_h3.ref2va_qwen_contract import (
+    REF2VA_SHARED_TEXT_PROFILE,
+    REF2VA_SHARED_VISION_PROFILE,
+    ref2va_shared_qwen_profile_metadata,
+)
 
 
 def _image() -> ReferenceSpec:
@@ -75,6 +80,19 @@ def _video(duration: float = 5.0, *, audio: bool = False) -> ReferenceSpec:
 
 def _audio(duration: float = 5.0) -> ReferenceSpec:
     return ReferenceSpec("audio", duration_seconds=duration)
+
+
+def test_shared_conditioning_keeps_full_dynamic_shape_envelope() -> None:
+    REF2VA_SHARED_TEXT_PROFILE.validate()
+    REF2VA_SHARED_VISION_PROFILE.validate()
+    metadata = ref2va_shared_qwen_profile_metadata()
+    text = metadata["text_encoder_plan"]
+    vision = metadata["vision_encoder_plan"]
+    assert text["sequence_rows"] == [1, 1_144, 262_144]
+    assert text["compact_vision_rows"] == [1, 1_008, 262_144]
+    assert vision["patch_rows_per_call"] == [1_620, 4_032, 65_536]
+    assert text["sequence_chunking_allowed"] is False
+    assert vision["spatial_chunking_allowed"] is False
 
 
 def test_public_reference_limits_and_soundtrack_identity() -> None:

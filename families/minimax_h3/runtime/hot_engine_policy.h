@@ -21,15 +21,16 @@ inline bool should_retain_hot_engine(std::string_view name, bool retain_engines)
 
 inline bool uses_serial_execution_context(std::string_view name) {
     // The original-weight FirstBlockCache head, tail, and finish execute
-    // strictly in sequence on one stream. Ref2VA likewise invokes one dynamic
-    // denoiser repeatedly. Dynamic profiles otherwise reserve max-shape
-    // activation memory even for a much smaller request. Reuse the native
-    // TRT-RTX user-managed arena so every context is sized from its live shape;
+    // strictly in sequence on one stream. The shared text and vision engines
+    // also execute serially, including Ref2VA conditioning. Dynamic profiles
+    // otherwise reserve max-shape activation memory for smaller requests.
+    // Use the native TRT-RTX arena to size every context from its live shape;
     // the three split contexts additionally share one high-water allocation.
     return name == "denoiser_head_plan" || name == "denoiser_tail_plan" ||
            name == "denoiser_finish_plan" || name == "ref2va_denoiser_plan" ||
            name == "ref2va_dit_head_plan" || name == "ref2va_dit_tail_plan" ||
-           name == "ref2va_dit_finish_plan";
+           name == "ref2va_dit_finish_plan" || name == "text_encoder_plan" ||
+           name == "vision_encoder_plan";
 }
 
 inline std::int64_t staged_plan_weight_streaming_budget(std::string_view name,

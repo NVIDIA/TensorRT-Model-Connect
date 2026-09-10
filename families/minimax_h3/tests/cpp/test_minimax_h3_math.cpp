@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/minimax_h3/runtime/hot_engine_policy.h"
 #include "families/minimax_h3/runtime/pipeline.h"
 
 #include <array>
@@ -26,6 +27,37 @@ void check(bool condition, const char* label) {
 
 void check_near(float actual, float expected, float tolerance, const char* label) {
     check(std::abs(actual - expected) <= tolerance, label);
+}
+
+void test_shared_conditioning_activation_policy() {
+    using namespace trtmc::minimax_h3;
+    constexpr std::int64_t bundle_budget = 32LL << 30;
+    constexpr std::int64_t tail_budget = 24LL << 30;
+    for (const char* name : {"text_encoder_plan", "vision_encoder_plan"}) {
+        check(uses_serial_execution_context(name),
+              "H3 shared conditioning uses live-shape activation memory");
+        for (bool retain : {false, true}) {
+            check(!should_retain_hot_engine(name, retain),
+                  "H3 conditioning activation policy does not retain extra engines");
+            check(staged_plan_weight_streaming_budget(name, bundle_budget, retain, tail_budget) ==
+                      bundle_budget,
+                  "H3 conditioning activation policy preserves the weight-streaming budget");
+        }
+    }
+    for (const char* name : {"denoiser_head_plan", "denoiser_tail_plan", "denoiser_finish_plan",
+                            "ref2va_denoiser_plan", "ref2va_dit_head_plan", "ref2va_dit_tail_plan",
+                            "ref2va_dit_finish_plan"}) {
+        check(uses_serial_execution_context(name),
+              "H3 existing denoiser live-shape activation policy is unchanged");
+    }
+    for (const char* name : {"adaln_precompute_plan", "ref2va_adaln_precompute_plan",
+                            "fl2va_keyframe_vae_encoder_plan", "vae_tile_decoder_plan",
+                            "audio_vae_decoder_plan", "video_super_resolution_plan",
+                            "ref2va_shared_text_encoder_plan", "ref2va_shared_vision_encoder_plan",
+                            "unknown_plan"}) {
+        check(!uses_serial_execution_context(name),
+              "H3 activation policy selects exact plan names, not timing labels or other stages");
+    }
 }
 
 void test_pinned_schedules() {
@@ -545,6 +577,7 @@ void test_audio_decoder_channel_duplication() {
 } // namespace
 
 int main() {
+    test_shared_conditioning_activation_policy();
     test_pinned_schedules();
     test_first_block_cache_tail_schedule();
     test_data_ward_euler_sign();
