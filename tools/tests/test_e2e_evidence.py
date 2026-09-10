@@ -173,7 +173,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
 """)
     result = pytester.runpytest(str(path), "-q", "-p", "no:cacheprovider")
     result.assert_outcomes(failed=1)
-    evidence = json.loads((evidence_root / "evidence/example/example-case/evidence.json").read_text())
+    evidence = json.loads(
+        (evidence_root / "evidence/example/example-case/evidence.json").read_text()
+    )
     assert evidence["status"] == "failed"
     assert evidence["source_revision"] == "b" * 40
     assert evidence["workflow_run_attempt"] == 2
@@ -360,7 +362,9 @@ def test_e2e(case_name):
     if outcome == "failed":
         assert "the original assertion failure" in output
     if failure == "captured_output":
-        evidence = json.loads((evidence_root / "evidence/example/example-case/evidence.json").read_text())
+        evidence = json.loads(
+            (evidence_root / "evidence/example/example-case/evidence.json").read_text()
+        )
         assert evidence["status"] == outcome and evidence["evidence_status"] == "partial"
 
 
@@ -1648,3 +1652,216 @@ def test_family_observations_cannot_replace_recorder_metadata(tmp_path):
     assert isinstance(saved["duration_seconds"], float)
     for name in ("environment", "repro", "workflow_run_attempt", "nodeid"):
         assert saved[name] == trusted[name]
+
+
+def _library_comparison(label="original"):
+    return {
+        "label": label,
+        "scope": "independent_reference",
+        "enforced": True,
+        "native": {"artifact": f"artifacts/{label}.cif", "size_bytes": 100},
+        "reference": {"artifact": f"artifacts/{label}.npz", "size_bytes": 200},
+        "checks": [
+            {
+                "name": "Finite outputs",
+                "scope": "contract",
+                "actual": True,
+                "operator": "==",
+                "expected": True,
+                "passed": True,
+            },
+            {
+                "name": "Count",
+                "scope": "contract",
+                "actual": 8,
+                "operator": "==",
+                "expected": 8,
+                "passed": True,
+            },
+            {
+                "name": "Similarity",
+                "scope": "independent_reference",
+                "actual": 0.95,
+                "operator": ">=",
+                "expected": 0.9,
+                "passed": True,
+            },
+            {
+                "name": "Aligned error",
+                "scope": "independent_reference",
+                "actual": 0.02,
+                "operator": "<=",
+                "expected": 0.1,
+                "passed": True,
+            },
+        ],
+    }
+
+
+def _library_case():
+    first, second = _library_comparison(), _library_comparison("variant")
+    return {
+        "family": "example",
+        "case": "example-case",
+        "status": "passed",
+        "checks": [],
+        "inputs": {
+            "manifest": {
+                "name": "example-recipe",
+                "hf_id": "example/checkpoint",
+                "task": "structure_prediction",
+                "precision": "fp16",
+            },
+            "text": "Protein A\nACDEFGHI",
+        },
+        "native": {"confidence_score": 0.9},
+        "reference_comparison": second,
+        "observations": [
+            {"name": "reference_comparison", "value": first},
+            {"name": "reference_comparison", "value": second},
+        ],
+    }
+
+
+def test_enforced_library_comparisons_need_no_duplicate_pytest_assertions(tmp_path):
+    from tools.e2e_report import _assess_reference_comparisons
+
+    data = _library_case()
+    original = copy.deepcopy(data)
+    result = assessment(data)
+    assert result["kind"] == "reference"
+    assert (
+        "2 recorded comparisons" in result["summary"] and "4 reference checks" in result["summary"]
+    )
+    assert [record["label"] for record in _assess_reference_comparisons(data)] == [
+        "original",
+        "variant",
+    ]
+    document = render_case(data, tmp_path)
+    assert "Reference checks passed" in _visible(document)
+    assert "Recorded reference comparisons" not in _visible(document)
+    expanded = _expanded(document)
+    for value in (
+        "original",
+        "variant",
+        "Actual",
+        "Limit",
+        "Recorded result",
+        "0.95",
+        "0.9",
+        "0.02",
+        "0.1",
+    ):
+        assert value in expanded
+    assert document.count("<h4>variant</h4>") == 1
+    assert document.index("<h4>original</h4>") < document.index("<h4>variant</h4>")
+    assert data == original
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("scope", "contract_only"),
+        ("enforced", False),
+        ("enforced", 1),
+        ("label", ""),
+        ("native", None),
+        ("reference", {"path": "missing.npz", "available": False}),
+        ("reference", {"artifact": "artifacts/original.cif", "size_bytes": 100}),
+        ("reference", {"artifact": "../outside.npz", "size_bytes": 100}),
+        (
+            "reference",
+            {"artifact": "artifacts/reference.npz", "size_bytes": 100, "omitted": "size limit"},
+        ),
+        ("checks", []),
+    ],
+)
+def test_library_comparison_requires_complete_enforced_distinct_evidence(field, value):
+    record = _library_comparison()
+    record[field] = value
+    data = {"status": "passed", "reference_comparison": record}
+    assert assessment(data)["kind"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("actual", 0.5),
+        ("actual", float("nan")),
+        ("actual", float("inf")),
+        ("actual", 10**1000),
+        ("actual", "0.95"),
+        ("expected", None),
+        ("passed", False),
+        ("passed", "true"),
+        ("operator", ">"),
+        ("operator", {}),
+        ("scope", {}),
+        ("name", ""),
+    ],
+)
+def test_library_comparison_rejects_inconsistent_or_nonfinite_check_rows(field, value):
+    record = _library_comparison()
+    record["checks"][2][field] = value
+    assert assessment({"status": "passed", "reference_comparison": record})["kind"] == "unverified"
+
+
+def test_library_comparisons_do_not_promote_contracts_or_bare_pass_flags():
+    record = _library_comparison()
+    record["checks"] = record["checks"][:2]
+    assert assessment({"status": "passed", "reference_comparison": record})["kind"] == "unverified"
+    record["checks"][0]["scope"] = "independent_reference"
+    assert assessment({"status": "passed", "reference_comparison": record})["kind"] == "unverified"
+    data = _library_case()
+    data["reference"] = {"mode": "contract_only"}
+    assert assessment(data)["kind"] != "reference"
+    data = _library_case()
+    del data["reference_comparison"]
+    data["observations"] = []
+    data["metrics"] = {"qualification": {"passed": True}}
+    data["reference"] = {"artifact": "reference.npz"}
+    assert assessment(data)["kind"] == "unverified"
+
+
+def test_library_comparison_cannot_hide_an_incomplete_or_failed_record():
+    data = _library_case()
+    del data["observations"][0]["value"]["checks"][2]["expected"]
+    assert assessment(data)["kind"] == "unverified"
+    data = _library_case()
+    data["reference_comparison"]["checks"].append(
+        copy.deepcopy(data["reference_comparison"]["checks"][0])
+    )
+    assert assessment(data)["kind"] == "unverified"
+    data = _library_case()
+    data.update(status="failed", failure_stage="compare")
+    assert assessment(data)["kind"] == "failed"
+    assert assessment(data, "passed")["kind"] == "failed"
+    data["status"] = "skipped"
+    assert assessment(data, "passed")["kind"] == "unverified"
+
+
+def test_library_comparison_details_keep_failed_verdicts_and_escape_text(tmp_path):
+    data = _library_case()
+    record = data["observations"][0]["value"]
+    record["label"] = "<script>untrusted()</script>"
+    record["checks"][2].update(actual=0.5, passed=False)
+    data.update(status="failed", failure_stage="compare")
+    document = render_case(data, tmp_path)
+    assert "Check failed" in _visible(document)
+    assert "Failed" in _expanded(document) and "0.5" in _expanded(document)
+    assert "<script>untrusted()</script>" not in document
+    assert "&lt;script&gt;untrusted()&lt;/script&gt;" in document
+
+
+def test_library_comparison_uses_human_labels_without_changing_check_identity():
+    from tools.e2e_report import _assess_reference_details
+
+    data = _library_case()
+    check = data["observations"][0]["value"]["checks"][2]
+    check.update(name="raw_similarity_key", label="Readable similarity")
+    display = _assess_reference_details(data)
+    assert "Readable similarity" in display and "raw_similarity_key" not in display
+    del check["label"]
+    assert "raw similarity key" in _assess_reference_details(data)
+    data["observations"][0]["value"]["checks"].append({**check, "label": "Another label"})
+    assert assessment(data)["kind"] == "unverified"

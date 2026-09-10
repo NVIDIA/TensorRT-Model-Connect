@@ -119,6 +119,33 @@ alongside bounded, embedded media; any omitted or truncated evidence is marked.
 The standalone report embeds up to 32 MiB per media file and 256 MiB across the
 report. Full-size raw data stays in the testcase evidence directory.
 
+When a library enforces the comparison itself, record every original check
+without adding duplicate pytest assertions. Use `independent_reference` for
+native/reference output comparisons and `contract` for counts or finiteness:
+
+```python
+record_evidence("reference_comparison", {
+    "label": "original request",
+    "scope": "independent_reference",
+    "enforced": True,
+    "native": native_path,       # Path to an existing output file
+    "reference": reference_path, # Path to a distinct retained reference file
+    "checks": [{
+        "name": "similarity", "label": "Similarity",
+        "scope": "independent_reference",
+        "actual": metrics["similarity"], "operator": ">=",
+        "expected": thresholds["similarity_min"],
+        "passed": checks["similarity"],
+    }],  # Include all checks from the enforced library comparison.
+})
+```
+
+Emit each request's comparison separately, retaining its measured values,
+limits, and original verdicts. Supported operators are `==`, `>=`, and `<=`.
+The report requires complete, consistent check rows and a passed testcase;
+`passed` alone, a reference file alone, or only contract checks cannot establish
+reference verification. Record diagnostics without replacing library failures.
+
 Distinguish a testcase's actual execution result from certification of its
 whole family or pipeline. A family can fail while some of its cases pass.
 Also distinguish correctness from the latency and throughput measurements in

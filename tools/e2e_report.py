@@ -134,6 +134,7 @@ _INLINE_BUDGET = 256 * 1024 * 1024
 _CSS = """
 :root{font:15px/1.45 system-ui,sans-serif;color:#172b42;background:#f5f7fa;color-scheme:light}
 *{box-sizing:border-box}body{max-width:1280px;margin:24px auto;padding:0 24px}h1{font-size:28px;letter-spacing:-.03em;margin:0}h2{font-size:20px;margin:0;overflow-wrap:anywhere}h3{font-size:13px;margin:0 0 8px;color:#52657a}h4{font-size:12px;margin:0 0 6px}p{margin:6px 0}a{color:#086e80;text-underline-offset:3px}.case{border:1px solid #dce3eb;border-radius:12px;background:#fff;margin:16px 0;padding:18px;scroll-margin-top:86px}.case-head{display:flex;gap:12px;align-items:start;justify-content:space-between}.badge{display:inline-block;border-radius:6px;padding:4px 8px;font-size:12px;font-weight:650;flex-shrink:0}.reference,.passed{color:#12644b;background:#e7f5ef}.failed,.error{color:#a12630;background:#fff0f1}.limited,.unverified,.skipped,.partial,.running{color:#815309;background:#fff5df}.meta,.note,.key{color:#596b7d;font-size:12px}.key{display:block;font:11px ui-monospace,monospace;margin-top:2px}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#596b7d;margin:0 0 3px}.result-basis{font-size:13px;margin:5px 0}.recipe-line{margin:0 0 14px}.io-grid,.demo-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:14px}.io-panel{min-width:0;border:1px solid #e2e8ee;border-radius:8px;padding:12px;background:#fbfcfd}.readable{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px;line-height:1.45;max-height:132px;overflow:auto;margin:0}.facts{margin:4px 0}.facts div{padding:2px 0;overflow-wrap:anywhere}.facts dt{display:inline;color:#596b7d;font-size:12px}.facts dt:after{content:': '}.facts dd{display:inline;margin:0;font-weight:550}.pair,.output-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}figure{margin:4px 0 0;display:flex;flex-direction:column}figure>img,figure>audio,figure>video,figure>svg{order:0}figcaption{font-weight:500;font-size:11px;margin:4px 0;order:1}figure>.note{font-size:11px;margin:2px 0;order:2}img,video{display:block;max-width:100%;width:100%;height:170px;object-fit:contain;border-radius:5px;background:#eef2f6}audio{width:100%;max-width:100%;height:42px}svg{display:block;width:100%;height:120px}svg text{fill:#596b7d}.native-key{color:#0b7687}.reference-key{color:#b45e1c}.series-key{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}.series-key:before{content:"";display:inline-block;width:23px;border-top:5px solid currentColor}.series-key.reference-key:before{border-top:2px dashed currentColor}.overlap-note{font-weight:600}.text-demo>.io-panel{margin-bottom:12px}.numeric-preview table{font-size:12px}.numeric-preview td,.numeric-preview th{padding:3px 7px}.readable.text-excerpt{max-height:none}.excerpt-gap{display:block;color:#596b7d;font-size:11px;margin:4px 0}.class-result{font-size:16px}.class-result strong{display:block;font-size:34px;font-weight:650;line-height:1.2}.case-details{margin:12px 0 0;border-top:1px solid #e2e8ee;padding-top:9px}.case-details>summary{font-size:13px}.case-details h3{margin-top:15px}details{margin:10px 0}summary{cursor:pointer;font-weight:600;min-height:22px}summary:hover{color:#086e80}details details{margin:12px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:12px;border-radius:6px;font:12px/1.5 ui-monospace,monospace;max-height:400px;overflow:auto}code{overflow-wrap:anywhere}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;vertical-align:top;padding:8px;border-bottom:1px solid #e2e8ee;overflow-wrap:anywhere}th{color:#596b7d;font-weight:600}.table-scroll{overflow-x:auto}.filters{display:flex;gap:10px;position:sticky;top:0;z-index:1;padding:10px 0;background:#f5f7fa}input,select{min-width:0;font:inherit;padding:8px 10px;border:1px solid #bac7d3;border-radius:6px;background:white}input{flex:1}.counts{display:flex;gap:16px;margin:8px 0;font-size:13px}.count strong{margin-right:4px}.empty{padding:12px;background:#fff5df;border-radius:6px}.failure-summary{color:#a12630}.partial-note{color:#815309}.index td:first-child{min-width:170px}[hidden]{display:none!important}
+.reference-comparison{min-width:650px}.reference-comparison th,.reference-comparison td:not(:first-child){white-space:nowrap}
 @media(max-width:650px){body{padding:0 12px;margin:16px auto}.case{padding:14px;scroll-margin-top:12px}.case-head{flex-wrap:wrap;gap:5px}.io-grid,.demo-grid{grid-template-columns:1fr;gap:10px}.io-panel{padding:10px}.filters{position:static;flex-wrap:wrap}.filters input{flex-basis:100%}h1{font-size:25px}h2{font-size:18px}.readable{max-height:116px}img,video{height:150px}svg{height:105px}.pair,.text-comparison{grid-template-columns:1fr}.recipe-line{margin-bottom:10px}}
 """
 _JS = """
@@ -1576,6 +1577,164 @@ def _assess_records(data: dict, name: str) -> list:
     return values
 
 
+def _assess_reference_comparisons(data: dict) -> list:
+    """Keep comparison observations in order, without repeating the latest mirror."""
+    values = (
+        [
+            item.get("value")
+            for item in data.get("observations", [])
+            if isinstance(item, dict) and item.get("name") == "reference_comparison"
+        ]
+        if isinstance(data.get("observations"), list)
+        else []
+    )
+    if "reference_comparison" in data:
+        values.append(data["reference_comparison"])
+    result, seen = [], set()
+    for value in values:
+        try:
+            key = json.dumps(value, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError, OverflowError):
+            result.append(value)
+            continue
+        if key not in seen:
+            result.append(value)
+            seen.add(key)
+    return result
+
+
+def _assess_comparison_artifact(value: Any) -> str | None:
+    if not isinstance(value, dict) or value.get("available") is False or value.get("omitted"):
+        return None
+    path, size = value.get("artifact"), value.get("size_bytes")
+    if (
+        not isinstance(path, str)
+        or not path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or any(character in path for character in ("\\", ":", "\x00"))
+        or type(size) is not int
+        or size <= 0
+    ):
+        return None
+    return path
+
+
+def _assess_comparison_check(check: Any) -> bool | None:
+    """Validate a recorded library check without inventing its family-owned limit."""
+    if not isinstance(check, dict) or not isinstance(check.get("name"), str) or not check["name"]:
+        return None
+    scope, op = check.get("scope"), check.get("operator")
+    if (
+        not isinstance(scope, str)
+        or not isinstance(op, str)
+        or scope not in {"contract", "independent_reference"}
+        or op not in {"==", ">=", "<="}
+    ):
+        return None
+    if type(check.get("passed")) is not bool:
+        return None
+    actual, expected = check.get("actual"), check.get("expected")
+    if type(actual) is bool or type(expected) is bool:
+        if scope != "contract" or op != "==" or type(actual) is not type(expected):
+            return None
+    else:
+        try:
+            if not all(
+                type(value) in (int, float) and math.isfinite(value) for value in (actual, expected)
+            ):
+                return None
+        except OverflowError:
+            return None
+    evaluated = (
+        actual == expected
+        if op == "=="
+        else actual >= expected
+        if op == ">="
+        else actual <= expected
+    )
+    return check["passed"] if evaluated is check["passed"] else None
+
+
+def _assess_reference_record(value: Any) -> dict | None:
+    if (
+        not isinstance(value, dict)
+        or value.get("scope") != "independent_reference"
+        or value.get("enforced") is not True
+    ):
+        return None
+    if not isinstance(value.get("label"), str) or not value["label"]:
+        return None
+    native = _assess_comparison_artifact(value.get("native"))
+    reference = _assess_comparison_artifact(value.get("reference"))
+    if native is None or reference is None or native == reference:
+        return None
+    checks = value.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return None
+    outcomes = [_assess_comparison_check(check) for check in checks]
+    if any(outcome is None for outcome in outcomes):
+        return None
+    names = [check["name"] for check in checks]
+    if len(set(names)) != len(names):
+        return None
+    return {
+        "passed": all(outcomes),
+        "reference_checks": sum(check["scope"] == "independent_reference" for check in checks),
+    }
+
+
+def _assess_reference_details(data: dict) -> str:
+    records = _assess_reference_comparisons(data)
+    if not records:
+        return ""
+    parts = ["<h3>Recorded reference comparisons</h3>"]
+    for index, raw in enumerate(records, 1):
+        record = _mapping(raw)
+        parts.append(f"<h4>{_escape(record.get('label') or f'Comparison {index}')}</h4>")
+        if _assess_reference_record(raw) is None:
+            parts.append(
+                '<p class="note">Incomplete or inconsistent comparison evidence; this record cannot establish verification.</p>'
+            )
+        rows = []
+        checks = record.get("checks")
+        for check in checks if isinstance(checks, list) else []:
+            if not isinstance(check, dict):
+                continue
+            raw_scope = check.get("scope")
+            scope = (
+                {"contract": "Contract", "independent_reference": "Reference"}.get(
+                    raw_scope, "Not recorded"
+                )
+                if isinstance(raw_scope, str)
+                else "Not recorded"
+            )
+            verdict = (
+                "Passed"
+                if check.get("passed") is True
+                else "Failed"
+                if check.get("passed") is False
+                else "Not recorded"
+            )
+            label = check.get("label")
+            if not isinstance(label, str) or not label:
+                label = str(check.get("name", "Unnamed check")).replace("_", " ")
+            values = [label, scope]
+            values.extend(
+                check.get(key, "Not recorded") for key in ("actual", "operator", "expected")
+            )
+            values.append(verdict)
+            rows.append(
+                "<tr>" + "".join(f"<td>{_escape(value)}</td>" for value in values) + "</tr>"
+            )
+        if rows:
+            parts.append(
+                '<div class="table-scroll"><table class="reference-comparison"><thead><tr><th>Check</th><th>Scope</th><th>Actual</th><th>Rule</th><th>Limit</th><th>Recorded result</th></tr></thead><tbody>'
+                + "".join(rows)
+                + "</tbody></table></div>"
+            )
+    return "".join(parts)
+
+
 def _assess_field(values: list, name: str):
     for value in values:
         if isinstance(value, dict) and value.get(name) is not None:
@@ -1646,8 +1805,8 @@ def _assessment(data, status=None) -> dict:
     """Return kind in reference/limited/failed/unverified, label, and one why.
 
     status is the individual case execution status, never family certification.
-    A 'reference' result requires a successful recognized comparison assertion
-    and native/reference output context. All categories describe this test only.
+    A 'reference' result requires a recognized comparison assertion or complete
+    enforced library comparison records. All categories describe this test only.
     """
     data = data if isinstance(data, dict) else {}
     checks = (
@@ -1703,8 +1862,9 @@ def _assessment(data, status=None) -> dict:
             thresholds.update(value)
     expressions = [str(item["expression"])[:5000] for item in passed]
     joined = "\n".join(expressions)
+    comparisons = _assess_reference_comparisons(data)
 
-    if not passed or not native:
+    if (not passed or not native) and not comparisons:
         return _assess_result(
             "unverified",
             "Not verified",
@@ -1735,6 +1895,24 @@ def _assessment(data, status=None) -> dict:
             "limited",
             "Contract checks passed",
             "Expected response and runtime checks passed; no upstream output comparison.",
+        )
+
+    if comparisons:
+        outcomes = [_assess_reference_record(record) for record in comparisons]
+        if data.get("status", state) == "passed" and all(
+            result is not None and result["passed"] and result["reference_checks"] > 0
+            for result in outcomes
+        ):
+            count = sum(result["reference_checks"] for result in outcomes)
+            return _assess_result(
+                "reference",
+                "Reference checks passed",
+                f"{len(outcomes)} recorded comparisons with an independent reference passed ({count} reference checks).",
+            )
+        return _assess_result(
+            "unverified",
+            "Not verified",
+            "Recorded library comparisons are incomplete, inconsistent, or do not establish a passed independent reference check.",
         )
 
     # A successful second-place exception is explicitly different from top-1
@@ -2043,6 +2221,7 @@ def _content(
         '<details class="case-details"><summary>Details</summary>' + reference_detail + more
     )
     parts.append(_settings(data))
+    parts.append(_assess_reference_details(data))
     parts.append("<h3>Checks</h3>" + _checks(data))
     if data.get("failure"):
         parts.append(
