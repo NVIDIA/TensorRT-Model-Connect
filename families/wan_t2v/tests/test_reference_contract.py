@@ -110,6 +110,32 @@ def test_every_wan_reference_is_fp32() -> None:
     assert {case["reference_precision"] for _, _, case in e2e.CASES.values()} == {"fp32"}
 
 
+def test_reference_transformer_loads_checkpoint_with_fp32_modules(tmp_path: Path) -> None:
+    import torch
+
+    diffusers = pytest.importorskip("diffusers")
+    model = diffusers.WanTransformer3DModel(
+        num_attention_heads=2,
+        attention_head_dim=8,
+        in_channels=4,
+        out_channels=4,
+        text_dim=8,
+        freq_dim=8,
+        ffn_dim=16,
+        num_layers=1,
+    )
+    model.save_pretrained(tmp_path)
+    # This is the submodel loader used by WanPipeline.from_pretrained. It must
+    # retain the reference's FP32 modules instead of falling back when the
+    # family's accelerate dependency is missing.
+    restored = diffusers.WanTransformer3DModel.from_pretrained(
+        tmp_path, torch_dtype=torch.float32, local_files_only=True, low_cpu_mem_usage=True
+    )
+    assert not any(parameter.is_meta for parameter in restored.parameters())
+    for name, expected in model.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], expected, rtol=0, atol=0)
+
+
 def test_native_receives_the_exact_raw_latents(monkeypatch, tmp_path: Path) -> None:
     _, manifest, case = e2e.CASES["wan21-t2v-1.3b-l0"]
     latents = e2e._initial_latents(manifest, case)
