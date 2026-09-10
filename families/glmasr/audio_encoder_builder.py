@@ -223,6 +223,11 @@ def build_audio_encoder_engine(
     )
 
     # Stack MERGE_FACTOR consecutive frames into one projector input row.
+    if projector.in_features != hidden * MERGE_FACTOR:
+        raise ValueError(
+            f"projector input width {projector.in_features} must equal "
+            f"encoder hidden {hidden} * MERGE_FACTOR {MERGE_FACTOR}"
+        )
     stacked = network.add_shuffle(hs)
     stacked.reshape_dims = (merged, projector.in_features)
     hs = stacked.get_output(0)

@@ -36,15 +36,21 @@ std::vector<float> resample_linear(const float* samples, int32_t count, int32_t 
     return out;
 }
 
-// Pick the highest-scoring vocabulary entry from a logits output.
+// Pick the highest-scoring vocabulary entry from a logits output. Bounded by
+// the tensor's own element count, not the runtime-declared vocab_size: the
+// engine's actual output width is w_out.shape[1] from the checkpoint, which
+// can differ from config.vocab_size (see standard_decoder_builder.py).
 int32_t host_argmax_logits(const TensorMap& outputs, int32_t vocab_size) {
     const auto found = outputs.find("logits");
     if (found == outputs.end() || found->second.data == nullptr)
         return -1;
     const auto* logits = static_cast<const float*>(found->second.data);
+    const auto limit = std::min<int32_t>(vocab_size, static_cast<int32_t>(found->second.numel()));
+    if (limit <= 0)
+        return -1;
     int32_t best = 0;
     float best_value = logits[0];
-    for (int32_t index = 1; index < vocab_size; ++index) {
+    for (int32_t index = 1; index < limit; ++index) {
         if (logits[index] > best_value) {
             best_value = logits[index];
             best = index;
@@ -217,7 +223,8 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
     // real audio covers become prompt placeholders. This mirrors the reference
     // processor, which derives the placeholder count from the unpadded length.
     const int32_t real_mel_frames =
-        glmasr::mel_frames_for_samples(sample_count, config_.mel_hop_length);
+        glmasr::mel_frames_for_samples(sample_count, config_.mel_hop_length, config_.mel_n_fft,
+                                       config_.mel_chunk_length, config_.mel_sampling_rate);
     const int32_t num_audio_embeddings =
         std::min(glmasr::audio_embedding_count(real_mel_frames, config_.audio_merge_factor),
                  config_.max_audio_embeddings);

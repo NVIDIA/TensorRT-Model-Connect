@@ -104,6 +104,10 @@ class GlmAsrKvCache : public GlmAsrInferenceState {
     std::vector<DeviceTensor> cache_v_;   // [num_layers]
     std::vector<DeviceTensor> present_k_; // [num_layers], shape [1, kv_dim] (single step output)
     std::vector<DeviceTensor> present_v_; // [num_layers]
+    // Scratch for the cache-full shift in advance(): cudaMemcpyAsync forbids
+    // overlapping source/destination, so the shift stages through here one
+    // layer at a time instead of copying a cache buffer onto itself.
+    DeviceTensor shift_scratch_; // shape [max_length - 1, kv_dim]
     int32_t num_layers_{0};
     int32_t max_length_{0};
     int32_t kv_dim_{0};

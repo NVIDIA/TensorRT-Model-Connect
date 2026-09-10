@@ -46,7 +46,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         decoder.module->stream(), decoder.module->tensor_dtype("cache_k_0"));
     auto mel = load_mel_filterbank(context.reader);
     auto tokenizer = create_tokenizer_from_bundle(context.reader);
+    const cudaStream_t decoder_stream = decoder.module->stream();
     return new GlmAsrPipeline(std::move(encoder.module), std::move(decoder.module),
-                              std::move(state), std::move(config), std::move(mel),
-                              decoder.module->stream(), std::move(tokenizer), "");
+                              std::move(state), std::move(config), std::move(mel), decoder_stream,
+                              std::move(tokenizer), "");
 }

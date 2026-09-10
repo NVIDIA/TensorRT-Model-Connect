@@ -44,13 +44,16 @@ constexpr int32_t kNewline = 10;
 const std::vector<int32_t> kPromptTokens{14215, 1700, 8091, 643, 14812, 1636, 2815};
 
 void test_audio_embedding_count_matches_processor() {
-    // Three seconds at 16 kHz with hop 160 gives 300 mel frames, which the
-    // processor expands into 37 audio placeholders.
-    check(trtmc::glmasr::mel_frames_for_samples(16000 * 3, 160) == 300,
-          "glmasr mel frame count follows the hop length");
-    check(trtmc::glmasr::encoder_output_frames(300) == 150,
-          "glmasr conv front-end halves 300 mel frames");
-    check(trtmc::glmasr::audio_embedding_count(300, 4) == 37,
+    // Three seconds at 16 kHz, centered/padded per extract_mel_spectrogram,
+    // gives 302 mel frames, which the processor expands into 37 audio
+    // placeholders -- the same count a plain floor-division estimate of 300
+    // frames also happens to give here, but the two diverge for some short
+    // clips, which is why mel_frames_for_samples mirrors the real framing.
+    check(trtmc::glmasr::mel_frames_for_samples(16000 * 3, 160, 400, 30, 16000) == 302,
+          "glmasr mel frame count follows the centered/padded framing");
+    check(trtmc::glmasr::encoder_output_frames(302) == 151,
+          "glmasr conv front-end halves 302 mel frames");
+    check(trtmc::glmasr::audio_embedding_count(302, 4) == 37,
           "glmasr audio embedding count matches GlmAsrProcessor for three seconds");
 
     // A full 30 second chunk fills the encoder's declared position budget.

@@ -326,6 +326,24 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
     }
 
 
+def _eot_token_id(config: ModelConfig) -> int:
+    """Resolve the decoder's EOS id.
+
+    The checkpoint keeps it under ``text_config`` (config.raw is the
+    unmerged JSON), and it can be a list of alternates rather than a single
+    id. The runtime only supports one stop id, so this picks the first.
+    """
+    text_config = config.raw.get("text_config")
+    sources = [text_config, config.raw] if isinstance(text_config, dict) else [config.raw]
+    for source in sources:
+        value = source.get("eos_token_id")
+        if isinstance(value, (list, tuple)) and value:
+            return int(value[0])
+        if value is not None:
+            return int(value)
+    raise ValueError("glmasr checkpoint declares no eos_token_id")
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build a GLM-ASR bundle using the family-owned encoder and decoder."""
     if request.task != "transcription":
@@ -334,6 +352,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("glmasr supports only batch=1 and context_parallel_size=1")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("glmasr does not support quantization")
+    if request.precision == "bf16":
+        # The audio encoder's weight constants are materialized in
+        # work_np_dtype (np.float16 for this branch, not ml_dtypes.bfloat16),
+        # so a BF16 build would silently reinterpret FP16 bit patterns as
+        # BF16. Not GPU-verified; reject rather than ship a silent
+        # correctness bug.
+        raise NotImplementedError("glmasr does not support precision=bf16")
     if request.dynamic_kv_cache:
         raise NotImplementedError("glmasr does not support dynamic_kv_cache")
     if request.image_height is not None:
@@ -352,6 +377,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     weights = plugin.load_weights(str(model_dir), config, precision=request.precision)
     max_length = int(request.max_sequence_length or 256)
+    audio_rows = int((plugin.get_vl_config(config) or {}).get("num_audio_embeddings", 0))
+    if max_length <= audio_rows:
+        raise ValueError(
+            f"max_sequence_length={max_length} cannot hold {audio_rows} audio "
+            f"embeddings plus prompt and generated tokens"
+        )
     writer.set_header(family="glmasr", task=request.task, backend=request.backend)
     writer.add_bytes(
         "engine.plan",
@@ -369,7 +400,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "tensor_parallel_size": parallel.tp_size,
         "hidden_size": config.hidden_size,
         "max_cache_length": max_length,
-        "eot_token_id": config.raw.get("eos_token_id", 2),
+        "eot_token_id": _eot_token_id(config),
         "mel_frontend": "whisper",
         "mel_n_fft": _MEL_DEFAULTS["n_fft"],
         "mel_hop_length": _MEL_DEFAULTS["hop_length"],

@@ -10,6 +10,7 @@
 
 #include "families/glmasr/runtime/glmasr_config.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -50,10 +51,19 @@ inline int32_t audio_embedding_count(int32_t mel_frames, int32_t merge_factor) {
 }
 
 // Mel frames the front-end produces for a sample count at the bundle's hop.
-inline int32_t mel_frames_for_samples(int32_t num_samples, int32_t hop_length) {
-    if (num_samples <= 0 || hop_length <= 0)
+// Mirrors extract_mel_spectrogram's centered/padded framing exactly (see
+// glmasr_mel_spectrogram.cpp) rather than a plain floor division: the two
+// disagree for some short clips (e.g. 761 samples at these defaults), which
+// would otherwise under-count the audio placeholders the prompt needs.
+inline int32_t mel_frames_for_samples(int32_t num_samples, int32_t hop_length, int32_t n_fft,
+                                      int32_t chunk_length_s, int32_t sample_rate) {
+    if (hop_length <= 0)
         return 0;
-    return num_samples / hop_length;
+    const int32_t chunk_samples = chunk_length_s * sample_rate;
+    const int32_t valid_audio = std::min(std::max(num_samples, 0), chunk_samples);
+    if (valid_audio <= 0)
+        return 0;
+    return 1 + (n_fft / 2 + valid_audio - 1) / hop_length;
 }
 
 struct PromptPlan {

@@ -10,6 +10,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 namespace trtmc {
@@ -170,6 +171,10 @@ std::vector<float> compute_mel_spectrogram(const std::vector<float>& padded,
                                            int32_t hop_length, int32_t n_freq_bins,
                                            int32_t n_mel_bins, int32_t frames_to_compute,
                                            int32_t& n_frames_raw) {
+    if (hop_length <= 0) {
+        n_frames_raw = 0;
+        return {};
+    }
     n_frames_raw = 1 + (static_cast<int32_t>(padded.size()) - n_fft) / hop_length;
     std::vector<float> mel_spec(static_cast<std::size_t>(n_mel_bins) * n_frames_raw, 0.0F);
     std::vector<float> windowed(n_fft);
@@ -261,7 +266,10 @@ MelResult extract_mel_spectrogram(const float* samples, int32_t n_samples, const
                                   int32_t n_freq_bins, int32_t n_mel_bins, int32_t n_fft,
                                   int32_t hop_length, int32_t chunk_length_s, int32_t sample_rate) {
     const int32_t expected_freq_bins = n_fft / 2 + 1;
-    const int32_t freq_bins = n_freq_bins == expected_freq_bins ? n_freq_bins : expected_freq_bins;
+    if (n_freq_bins != expected_freq_bins) {
+        throw std::runtime_error("glmasr mel: filterbank n_freq_bins does not match n_fft/2+1");
+    }
+    const int32_t freq_bins = n_freq_bins;
     const int32_t chunk_samples = chunk_length_s * sample_rate;
     const int32_t valid_audio = std::min(std::max(n_samples, 0), chunk_samples);
     const int32_t pad_size = n_fft / 2;
