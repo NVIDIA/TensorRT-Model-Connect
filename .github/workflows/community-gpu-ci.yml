@@ -6,18 +6,34 @@ name: Community GPU CI
 run-name: >-
   PR #${{ github.event.pull_request.number || inputs.pr_number }} · community GPU smoke test
 
-# Community-facing GPU smoke test. Unlike TRTMC Internal CI (GB300, private
+# Community-facing GPU smoke test, self-service: it starts automatically for
+# every pull request, the same way Community CPU does, with no maintainer
+# approval required per run. Unlike TRTMC Internal CI (GB300, private
 # runners), this reserves a short-lived external GPU instance through Brev
 # (https://brev.nvidia.com/) on x86_64 hardware (L4/L40/L40S) and runs there.
 # A GitHub-hosted runner only orchestrates: it never checks out or executes
 # pull-request code itself. It asks Brev to create the instance, has that
 # instance clone the exact PR head SHA and run the tests, then tears the
 # instance down. This mirrors the trust boundary already used by
-# internal-ci-bridge.yml (trusted dispatcher, untrusted code runs elsewhere).
+# internal-ci-bridge.yml (trusted dispatcher, untrusted code runs elsewhere),
+# with one addition: since there is no human approval gate before a run,
+# every value that originates from pull-request content (model family names,
+# taken from directory names the contributor controls under families/) is
+# validated against a strict allowlist pattern in the authorize job before
+# it is allowed anywhere near a shell command on this trusted runner. Do not
+# remove that validation or pass FAMILIES-derived values into a shell command
+# without it; family names are exactly the kind of contributor-controlled
+# string command injection needs.
+#
+# Known gap, not yet solved: concurrency below bounds one PR to one run at a
+# time, but not how many different PRs can run GPU CI simultaneously across
+# the whole repo. Enough concurrent PRs could still exhaust the org's $30/hr
+# Brev resource cap. Add a real global concurrency limit before relying on
+# this for high PR volume.
 on:
   pull_request_target:
     branches: [main]
-    types: [labeled]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -40,8 +56,7 @@ jobs:
         github.event_name == 'workflow_dispatch' ||
         (
           github.event_name == 'pull_request_target' &&
-          github.ref == 'refs/heads/main' &&
-          github.event.label.name == 'run-gpu-ci'
+          github.ref == 'refs/heads/main'
         )
       )
     runs-on: ubuntu-24.04
@@ -49,7 +64,7 @@ jobs:
     permissions:
       actions: read
       contents: read
-      pull-requests: write
+      pull-requests: read
     outputs:
       pr_number: ${{ steps.snapshot.outputs.pr_number }}
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
@@ -65,26 +80,12 @@ jobs:
         id: snapshot
         env:
           GH_TOKEN: ${{ github.token }}
-          ACTOR: ${{ github.actor }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
-
-          actor_role="$(
-            gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
-              --jq '.role_name'
-          )"
-          case "$actor_role" in
-            maintain|admin) ;;
-            *)
-              echo "::error::Only actors with maintain or admin access may dispatch GPU CI."
-              exit 1
-              ;;
-          esac
 
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
             [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -164,15 +165,27 @@ jobs:
           print(f\"scope={summary['scope']}\")
           " >> "$GITHUB_OUTPUT"
 
-      - name: Consume the trusted trigger label
-        if: ${{ success() && github.event_name == 'pull_request_target' }}
+      # Security boundary, not a style choice: FAMILIES comes from directory
+      # names under families/ in the pull request, which the contributor
+      # fully controls. It later gets embedded into shell commands the
+      # provision-and-test job runs on this trusted runner. Reject anything
+      # that is not a plain lowercase identifier before it goes anywhere
+      # near a shell, so a family directory name can never carry shell
+      # metacharacters into a trusted command.
+      - name: Validate the changed family names
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          FAMILIES: ${{ steps.impact.outputs.families }}
         run: |
           set -euo pipefail
-          gh api --silent --method DELETE \
-            "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-gpu-ci"
+          python3 -c "
+          import json, os, re, sys
+          pattern = re.compile(r'^[a-z][a-z0-9_]*\$')
+          families = json.loads(os.environ['FAMILIES'])
+          invalid = [name for name in families if not pattern.match(name)]
+          if invalid:
+              print('::error::Rejecting unsafe family name(s): ' + ', '.join(invalid))
+              sys.exit(1)
+          "
 
   announce:
     name: Publish pending result
@@ -316,7 +329,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      pull-requests: write
       statuses: write
 
     steps:
