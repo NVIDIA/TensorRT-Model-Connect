@@ -110,8 +110,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("thresholds", {"top1_match": True})
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
-    assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
-    assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
+    with evidence_stage("setup"):
+        assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
+        assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
     model_dir = _model_dir(manifest)
     record_evidence(
         "checkpoint",
