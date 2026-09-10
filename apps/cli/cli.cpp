@@ -80,6 +80,9 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"classify", {CommandKind::kClassify, {"--image"}}},
         {"detect", {CommandKind::kDetect, {"--image"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
+        {"predict-structure",
+         {CommandKind::kPredictStructure,
+          {"--input", "--output", "--output-json", "--num-steps", "--seed"}}},
         {"disparity", {CommandKind::kDisparity, {"--left", "--right"}}},
         {"geometry", {CommandKind::kGeometry, {"--image", "--output"}}},
         {"segment", {CommandKind::kSegment, {"--image"}}},
@@ -863,6 +866,49 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
                             {"pooler_output_shape", result.pooler_output_shape}});
         return EXIT_SUCCESS;
     }
+    case CommandKind::kPredictStructure: {
+        const std::string input_path = require_option(command, "--input");
+        std::ifstream input(input_path, std::ios::binary);
+        if (!input)
+            throw std::runtime_error("unable to open structure request: " + input_path);
+        StructurePredictionRequest request;
+        request.document.assign(std::istreambuf_iterator<char>(input),
+                                std::istreambuf_iterator<char>());
+        if (request.document.empty())
+            throw std::invalid_argument("structure request must not be empty");
+        request.source_path = input_path;
+        request.config.sampling_steps =
+            int_option(command, "--num-steps", request.config.sampling_steps, 1);
+        request.config.seed = int_option(command, "--seed", request.config.seed);
+
+        auto& predictor = require_interface<IStructurePrediction>(task);
+        const auto result = predictor.predict_structure(request);
+
+        const fs::path structure_path = require_option(command, "--output");
+        if (!structure_path.parent_path().empty())
+            fs::create_directories(structure_path.parent_path());
+        std::ofstream structure(structure_path, std::ios::binary);
+        structure.write(result.structure.data(),
+                        static_cast<std::streamsize>(result.structure.size()));
+        if (!structure)
+            throw std::runtime_error("failed to write structure output: " +
+                                     structure_path.string());
+        const fs::path metadata_path = has_option(command, "--output-json")
+                                           ? command.options.at("--output-json")
+                                           : structure_path.string() + ".metadata.json";
+        std::ofstream metadata(metadata_path, std::ios::binary);
+        metadata.write(result.metadata_json.data(),
+                       static_cast<std::streamsize>(result.metadata_json.size()));
+        if (!metadata)
+            throw std::runtime_error("failed to write structure metadata: " +
+                                     metadata_path.string());
+        write_json(output, {{"structure_path", structure_path.string()},
+                            {"metadata_path", metadata_path.string()},
+                            {"confidence_score", result.confidence.confidence_score},
+                            {"complex_plddt", result.confidence.complex_plddt},
+                            {"ptm", result.confidence.ptm}});
+        return EXIT_SUCCESS;
+    }
     case CommandKind::kDisparity: {
         const io::LoadedImage left = read_image(require_option(command, "--left"));
         const io::LoadedImage right = read_image(require_option(command, "--right"));
@@ -1290,8 +1336,8 @@ void print_usage(std::ostream& output) {
               "  trtmc inspect BUNDLE\n"
               "  trtmc COMMAND BUNDLE [--runtime-root DIR] [OPTIONS]\n\n"
               "Execution commands:\n"
-              "  run, encode, embed, rerank, classify, detect, extract-features, disparity,\n"
-              "  geometry,\n"
+              "  run, encode, embed, rerank, classify, detect, extract-features,\n"
+              "  predict-structure, disparity, geometry,\n"
               "  segment,\n"
               "  segment-prompted, video-segment, generate-audio, transcribe,\n"
               "  transcribe-batch, transcribe-streaming, speak, speech-session, generate-image,\n"

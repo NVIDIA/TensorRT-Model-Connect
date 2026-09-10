@@ -1,0 +1,18 @@
+{
+  "name": "res2next50-in1k",
+  "hf_id": "timm/res2next50.in1k",
+  "hf_revision": "a8fe0f89e842b6dfa74b96deed2254d4fb7bf625",
+  "bundle": "res2next50-in1k.bundle",
+  "family": "timm_res2net",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "res2next50-in1k",
+      "premerge": false,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

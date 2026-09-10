@@ -1,0 +1,18 @@
+{
+  "name": "yolov10x",
+  "hf_id": "jameslahm/yolov10x",
+  "hf_revision": "6d7c9b6871ffa50dfd2764fa896bc0e33294233c",
+  "bundle": "yolov10x.bundle",
+  "family": "yolov10",
+  "task": "object_detection",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "yolov10x",
+      "premerge": false,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

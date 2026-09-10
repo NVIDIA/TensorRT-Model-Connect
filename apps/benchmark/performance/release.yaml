@@ -48,6 +48,20 @@ excluded_profiles:
       Functional and timm reference-parity qualification is present for every
       published DPN width, but the release-performance workload and receipt
       were collected only for dpn68b.
+  - model: res2net50d-in1k
+    reason: &res2net_performance_exclusion >-
+      Functional and timm reference-parity qualification is present for every
+      published Res2Net checkpoint, but the release-performance workload and
+      receipt were collected only for res2net50_26w_4s.
+  - model: res2next50-in1k
+    reason: *res2net_performance_exclusion
+  - model: yolov10s
+    reason: &yolov10_performance_exclusion >-
+      Functional and reference-parity qualification against ultralytics is
+      present for every published YOLOv10 width, but the release-performance
+      workload and receipt were collected only for yolov10n.
+  - model: yolov10x
+    reason: *yolov10_performance_exclusion
 
 entries:
   - id: albert.encode
@@ -1155,6 +1169,32 @@ entries:
       adapter: hf-transformers-vision
       mode: hf-eager
       reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_res2net.classify
+    family: timm_res2net
+    operation: classify
+    model: res2net50-26w-4s-in1k
+    workload:
+      testcase: res2net50-26w-4s-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: yolov10.detect
+    family: yolov10
+    operation: detect
+    model: yolov10n
+    workload:
+      testcase: yolov10n
+    baseline:
+      runner: task-reference
+      adapter: ultralytics-detection
+      mode: torch-eager
+      reference_backend: ultralytics
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_repvgg.classify
