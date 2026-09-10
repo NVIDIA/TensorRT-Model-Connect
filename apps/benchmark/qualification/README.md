@@ -144,12 +144,15 @@ interpreting their contents.
 
 Performance uses the same discovery path. Every Performance case measures both
 the converted TensorRT bundle and its reference backend with the same workload.
-GPT-2 and Chronos-Bolt both compile the official model's `forward` method with
-`torch.compile`. Generated token IDs must match for GPT-2; Chronos-Bolt requires
-the forecast tensors to satisfy its numeric-parity gates. A timing comparison is
-accepted only after that conversion check. The two sides run sequentially on the
-GPU selected by the high-level environment; model files never select or exclude
-a device.
+GPT-2 compiles the official model's `forward` method with `torch.compile`.
+Chronos-Bolt prefers the same compiled reference and falls back to eager official
+PyTorch when compilation, output parity, or the two-attempt stability protocol
+cannot produce a valid compiled comparison. Generated token IDs must match for
+GPT-2; Chronos-Bolt requires the forecast tensors to satisfy its numeric-parity
+gates with the selected reference. The report retains every attempted mode and
+states whether fallback was used. A timing comparison is accepted only after
+that conversion check. The two sides run sequentially on the GPU selected by the
+high-level environment; model files never select or exclude a device.
 
 Until a high-level device run owns a threshold, the timing comparison is
 observation-only and does not claim a pass or fail verdict:

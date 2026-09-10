@@ -89,6 +89,7 @@ def test_checked_in_chronos_performance_suite_is_discoverable() -> None:
     assert plan.items[0].case["reference"] == {
         "implementation": "chronos_bolt",
         "mode": "torch-compile",
+        "fallback": "eager",
         "compile_scope": "model.forward",
         "precision": "fp32",
     }

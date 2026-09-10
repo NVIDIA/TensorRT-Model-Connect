@@ -31,6 +31,10 @@ class ChronosQualificationError(RuntimeError):
     """Chronos-Bolt qualification cannot produce valid evidence."""
 
 
+class PerformanceReferenceError(ChronosQualificationError):
+    """One Performance reference mode cannot produce valid comparison evidence."""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", type=Path, required=True)
@@ -458,6 +462,7 @@ def _run_reference(
     prepared: Mapping[str, Any],
     item_dir: Path,
     samples: Sequence[Mapping[str, Any]] = (),
+    performance_mode: str | None = None,
 ) -> dict[str, Any]:
     tools = _mapping(environment.get("tools"), "environment tools")
     execution = _mapping(environment.get("execution", {}), "environment execution")
@@ -484,11 +489,14 @@ def _run_reference(
     else:
         candidate = _mapping(case.get("candidate"), "case candidate")
         benchmark_request = _mapping(candidate.get("request"), "candidate request")
+        mode = performance_mode or str(configured.get("mode"))
         payload.update(
             {
                 "case_name": case["id"],
-                "mode": configured.get("mode"),
-                "compile_scope": configured.get("compile_scope"),
+                "mode": mode,
+                "compile_scope": (
+                    configured.get("compile_scope") if mode == "torch-compile" else None
+                ),
                 "past_values": benchmark_request.get("past_values"),
                 "frequency": benchmark_request.get("frequency", 0),
                 "measurement": dict(
@@ -799,47 +807,108 @@ def _execute_performance(
     }
     if definition.get("stability") != expected_stability:
         raise ChronosQualificationError("unsupported Performance stability protocol")
+    preferred_mode, fallback_mode = _performance_reference_modes(case)
     attempts = []
     artifacts = []
-    result = None
-    stability = {}
-    for attempt in range(2):
-        directory = item_dir if attempt == 0 else item_dir / "retry"
-        directory.mkdir(parents=True, exist_ok=True)
-        result = _performance_attempt(
-            request, item, manifest, definition, case, environment, prepared, directory
-        )
-        details = _mapping(result.get("details"), "Performance details")
-        stability = {
-            side: measurement_stability(details[side]["samples_ms"])
-            for side in ("candidate", "reference")
-        }
-        attempts.append(
-            {
-                "stability": stability,
-                "candidate": details["candidate"],
-                "reference": details["reference"],
+    for mode in (preferred_mode, fallback_mode):
+        directory_name = "compiled" if mode == "torch-compile" else "eager"
+        for attempt in range(2):
+            relative_root = f"{directory_name}/attempt-{attempt + 1}/"
+            directory = item_dir / relative_root
+            directory.mkdir(parents=True, exist_ok=True)
+            try:
+                result = _performance_attempt(
+                    request,
+                    item,
+                    manifest,
+                    definition,
+                    case,
+                    environment,
+                    prepared,
+                    directory,
+                    reference_mode=mode,
+                )
+            except PerformanceReferenceError as error:
+                failed = {
+                    "mode": mode,
+                    "attempt": attempt + 1,
+                    "execution": "error",
+                    "error": str(error),
+                }
+                parity_path = directory / "reference-parity.json"
+                if parity_path.is_file():
+                    failed["output_parity"] = _read_json(parity_path, "Performance output parity")
+                attempts.append(failed)
+                artifacts.extend(
+                    {**artifact, "path": relative_root + artifact["path"]}
+                    for artifact in _existing_artifacts(directory)
+                )
+                break
+
+            details = _mapping(result.get("details"), "Performance details")
+            stability = {
+                side: measurement_stability(details[side]["samples_ms"])
+                for side in ("candidate", "reference")
             }
+            attempts.append(
+                {
+                    "mode": mode,
+                    "attempt": attempt + 1,
+                    "execution": "completed",
+                    "stability": stability,
+                    "candidate": details["candidate"],
+                    "reference": details["reference"],
+                }
+            )
+            artifacts.extend(
+                {**artifact, "path": relative_root + artifact["path"]}
+                for artifact in result["artifacts"]
+            )
+            if not all(value["stable"] for value in stability.values()):
+                continue
+
+            result["artifacts"] = artifacts
+            details["measurement_attempts"] = attempts
+            details["measurement_stability"] = stability
+            details["comparison_valid"] = True
+            details["reference_selection"] = {
+                "policy": "prefer_torch_compile_then_eager",
+                "preferred_mode": preferred_mode,
+                "fallback_mode": fallback_mode,
+                "selected_mode": mode,
+                "fallback_used": mode == fallback_mode,
+            }
+            return result
+
+    return {
+        **_identity(item),
+        "schema_version": RESULT_SCHEMA,
+        "execution": "error",
+        "verdict": None,
+        "details": {
+            "error": "all_performance_references_failed",
+            "measurement_attempts": attempts,
+            "reference_selection": {
+                "policy": "prefer_torch_compile_then_eager",
+                "preferred_mode": preferred_mode,
+                "fallback_mode": fallback_mode,
+                "selected_mode": None,
+                "fallback_used": False,
+            },
+        },
+        "artifacts": artifacts,
+    }
+
+
+def _performance_reference_modes(case: Mapping[str, Any]) -> tuple[str, str]:
+    configured = _mapping(case.get("reference"), "case reference")
+    preferred = configured.get("mode")
+    fallback = configured.get("fallback")
+    if preferred != "torch-compile" or fallback != "eager":
+        raise ChronosQualificationError(
+            "Chronos-Bolt Performance requires torch-compile with eager fallback"
         )
-        prefix = "retry/" if attempt else ""
-        artifacts.extend(
-            {**artifact, "path": prefix + artifact["path"]} for artifact in result["artifacts"]
-        )
-        if all(value["stable"] for value in stability.values()):
-            break
-    assert result is not None
-    result["artifacts"] = artifacts
-    details = result["details"]
-    details["measurement_attempts"] = attempts
-    details["measurement_stability"] = stability
-    stable = all(value["stable"] for value in stability.values())
-    details["comparison_valid"] = stable
-    if not stable:
-        result["execution"] = "error"
-        details["error"] = "measurement_inconclusive"
-        details["comparison"].pop("reference_over_candidate_p50", None)
-        details["metrics"].pop("reference_over_candidate_p50", None)
-    return result
+    return str(preferred), str(fallback)
 
 
 def _performance_attempt(
@@ -851,6 +920,8 @@ def _performance_attempt(
     environment: Mapping[str, Any],
     prepared: Mapping[str, Any],
     item_dir: Path,
+    *,
+    reference_mode: str,
 ) -> dict[str, Any]:
     if item.get("gate_policy") != "observation_only":
         raise ChronosQualificationError(
@@ -905,17 +976,6 @@ def _performance_attempt(
     measurement = _mapping(candidate_config.get("measurement"), "candidate measurement")
     iterations = int(measurement.get("iterations"))
     candidate_samples = _performance_samples(cell.get("samples_ms"), iterations, "TensorRT")
-    reference = _run_reference(
-        purpose="performance",
-        manifest=manifest,
-        case=case,
-        environment=environment,
-        prepared=prepared,
-        item_dir=item_dir,
-    )
-    reference_metrics = _validate_performance_reference(
-        definition, case, manifest, reference, iterations
-    )
     direct_candidate = _run_candidate_forecasts(
         samples=[
             {
@@ -928,20 +988,41 @@ def _performance_attempt(
         prepared=prepared,
         item_dir=item_dir,
     )
-    parity = _compare_samples(
-        [{"sample_id": item["case_id"], **reference["output_summary"]}],
-        direct_candidate,
-        case,
-        parity_field="parity",
-    )
-    if parity["verdict"] != "pass":
-        raise ChronosQualificationError(
-            "Performance result is invalid because TensorRT and compiled reference outputs differ"
+    try:
+        reference = _run_reference(
+            purpose="performance",
+            manifest=manifest,
+            case=case,
+            environment=environment,
+            prepared=prepared,
+            item_dir=item_dir,
+            performance_mode=reference_mode,
         )
-    _validate_performance_device(
-        _mapping(candidate.get("environment"), "candidate environment"),
-        _mapping(reference.get("environment"), "reference environment"),
-    )
+        reference_metrics = _validate_performance_reference(
+            definition,
+            case,
+            manifest,
+            reference,
+            iterations,
+            expected_mode=reference_mode,
+        )
+        parity = _compare_samples(
+            [{"sample_id": item["case_id"], **reference["output_summary"]}],
+            direct_candidate,
+            case,
+            parity_field="parity",
+        )
+        _write_json(item_dir / "reference-parity.json", parity)
+        if parity["verdict"] != "pass":
+            raise ChronosQualificationError(
+                f"TensorRT and {reference_mode} reference outputs differ"
+            )
+        _validate_performance_device(
+            _mapping(candidate.get("environment"), "candidate environment"),
+            _mapping(reference.get("environment"), "reference environment"),
+        )
+    except (ChronosQualificationError, subprocess.TimeoutExpired) as error:
+        raise PerformanceReferenceError(f"{reference_mode} reference failed: {error}") from error
     candidate_p50 = float(_mapping(metrics.get("latency_ms"), "candidate latency")["p50"])
     reference_p50 = float(_mapping(reference_metrics.get("latency_ms"), "reference latency")["p50"])
     ratio = reference_p50 / candidate_p50
@@ -964,7 +1045,7 @@ def _performance_attempt(
             "reference": {
                 "backend": "official_pytorch",
                 "mode": reference["mode"],
-                "compile_scope": reference["compile_scope"],
+                "compile_scope": reference.get("compile_scope"),
                 "compile_evidence": dict(reference["compile_evidence"]),
                 "model": reference["model"],
                 "revision": reference["revision"],
@@ -978,6 +1059,7 @@ def _performance_attempt(
                 "output_contract": "time_series_tensor_parity",
                 "output_match": True,
                 "output_metrics": parity["metrics"],
+                "reference_mode": reference_mode,
                 "candidate_p50_ms": candidate_p50,
                 "reference_p50_ms": reference_p50,
                 "reference_over_candidate_p50": ratio,
@@ -997,11 +1079,12 @@ def _performance_attempt(
             _artifact("TensorRT performance stderr", "candidate.stderr.log"),
             _artifact("TensorRT parity command", "candidate-commands.jsonl"),
             _artifact("TensorRT parity output", "candidate-forecasts.json"),
-            _artifact("compiled reference request", "reference-performance-request.json"),
-            _artifact("compiled reference command", "reference-performance-command.json"),
-            _artifact("compiled reference result", "reference-performance.json"),
-            _artifact("compiled reference stdout", "reference-performance.stdout.log"),
-            _artifact("compiled reference stderr", "reference-performance.stderr.log"),
+            _artifact("reference output parity", "reference-parity.json"),
+            _artifact("reference request", "reference-performance-request.json"),
+            _artifact("reference command", "reference-performance-command.json"),
+            _artifact("reference result", "reference-performance.json"),
+            _artifact("reference stdout", "reference-performance.stdout.log"),
+            _artifact("reference stderr", "reference-performance.stderr.log"),
         ],
     }
 
@@ -1012,39 +1095,55 @@ def _validate_performance_reference(
     manifest: Mapping[str, Any],
     reference: Mapping[str, Any],
     iterations: int,
+    *,
+    expected_mode: str,
 ) -> dict[str, Any]:
     if reference.get("status") != "completed" or reference.get("backend") != "chronos-bolt":
-        raise ChronosQualificationError("compiled Chronos-Bolt reference did not complete")
+        raise ChronosQualificationError("Chronos-Bolt Performance reference did not complete")
     configured = _mapping(case.get("reference"), "case reference")
-    if reference.get("mode") != "torch-compile":
-        raise ChronosQualificationError("Performance reference did not use torch.compile")
-    if reference.get("compile_scope") != configured.get("compile_scope"):
-        raise ChronosQualificationError("Performance reference compiled the wrong callable")
+    if expected_mode not in _performance_reference_modes(case):
+        raise ChronosQualificationError("Performance reference mode is not configured")
+    if reference.get("mode") != expected_mode:
+        raise ChronosQualificationError("Performance reference used the wrong mode")
     if reference.get("model") != manifest.get("hf_id"):
         raise ChronosQualificationError("Performance reference used the wrong HF model")
     if reference.get("precision") != configured.get("precision"):
         raise ChronosQualificationError("Performance reference precision differs from the case")
     evidence = _mapping(reference.get("compile_evidence"), "compile evidence")
-    required = {
-        "api": "torch.compile",
-        "target": "model.forward",
-        "backend": "inductor",
-        "dynamic": False,
-        "applied": True,
-        "warmup_completed": True,
-        "timed_callable_uses_compiled_target": True,
-    }
+    if expected_mode == "torch-compile":
+        if reference.get("compile_scope") != configured.get("compile_scope"):
+            raise ChronosQualificationError("Performance reference compiled the wrong callable")
+        required = {
+            "api": "torch.compile",
+            "target": "model.forward",
+            "backend": "inductor",
+            "dynamic": False,
+            "applied": True,
+            "warmup_completed": True,
+            "timed_callable_uses_compiled_target": True,
+        }
+    else:
+        if reference.get("compile_scope") is not None:
+            raise ChronosQualificationError("eager Performance reference has a compile scope")
+        required = {
+            "api": "none",
+            "applied": False,
+            "compiled_graph_count": 0,
+            "warmup_completed": True,
+            "timed_callable_uses_compiled_target": False,
+        }
     for field, expected in required.items():
         if evidence.get(field) != expected:
             raise ChronosQualificationError(
                 f"Performance reference has invalid compile evidence field {field!r}"
             )
-    graphs = evidence.get("compiled_graph_count")
-    if isinstance(graphs, bool) or not isinstance(graphs, int) or graphs < 1:
-        raise ChronosQualificationError("Performance reference compiled no graphs")
+    if expected_mode == "torch-compile":
+        graphs = evidence.get("compiled_graph_count")
+        if isinstance(graphs, bool) or not isinstance(graphs, int) or graphs < 1:
+            raise ChronosQualificationError("Performance reference compiled no graphs")
     policy = _mapping(reference.get("measurement_policy"), "reference measurement policy")
     _validate_timing(definition, policy, "reference")
-    samples = _performance_samples(reference.get("samples_ms"), iterations, "compiled reference")
+    samples = _performance_samples(reference.get("samples_ms"), iterations, expected_mode)
     metrics = dict(_mapping(reference.get("metrics"), "reference metrics"))
     _validate_performance_metrics(definition, metrics)
     if int(metrics.get("sample_count", -1)) != len(samples):
@@ -1280,6 +1379,7 @@ def _existing_artifacts(item_dir: Path) -> list[dict[str, str]]:
         ("candidate report", "candidate/report.html"),
         ("candidate stdout", "candidate.stdout.log"),
         ("candidate stderr", "candidate.stderr.log"),
+        ("reference output parity", "reference-parity.json"),
         ("reference request", "reference-request.json"),
         ("reference command", "reference-command.json"),
         ("reference result", "reference.json"),
@@ -1291,9 +1391,17 @@ def _existing_artifacts(item_dir: Path) -> list[dict[str, str]]:
         ("Performance reference stdout", "reference-performance.stdout.log"),
         ("Performance reference stderr", "reference-performance.stderr.log"),
     )
+    prefixes = (
+        "",
+        "retry/",
+        "compiled/attempt-1/",
+        "compiled/attempt-2/",
+        "eager/attempt-1/",
+        "eager/attempt-2/",
+    )
     return [
         _artifact(prefix + label, prefix + relative)
-        for prefix in ("", "retry/")
+        for prefix in prefixes
         for label, relative in known
         if not (item_dir / (prefix + relative)).is_symlink()
         and (item_dir / (prefix + relative)).is_file()

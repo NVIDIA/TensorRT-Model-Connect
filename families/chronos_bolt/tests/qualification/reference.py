@@ -178,9 +178,11 @@ def _measure(
     for _ in range(warmup):
         last = invoke()
     torch.cuda.synchronize()
-    compiled_graphs = int(compile_evidence["compiled_graph_count"])
-    if compiled_graphs < 1:
-        raise RuntimeError("warmup did not execute any compiled graphs")
+    compiled_graphs = None
+    if compile_evidence.get("applied"):
+        compiled_graphs = int(compile_evidence["compiled_graph_count"])
+        if compiled_graphs < 1:
+            raise RuntimeError("warmup did not execute any compiled graphs")
     samples = []
     for _ in range(iterations):
         torch.cuda.synchronize()
@@ -190,7 +192,10 @@ def _measure(
         samples.append((time.perf_counter() - started) * 1000.0)
     if last is None or not all(math.isfinite(value) and value > 0.0 for value in samples):
         raise RuntimeError("reference produced no finite positive timing observations")
-    if int(compile_evidence["compiled_graph_count"]) != compiled_graphs:
+    if (
+        compiled_graphs is not None
+        and int(compile_evidence["compiled_graph_count"]) != compiled_graphs
+    ):
         raise RuntimeError("model compilation occurred inside timed samples")
     return samples, last
 
@@ -217,13 +222,26 @@ def _performance(request: Mapping[str, Any]) -> dict[str, Any]:
     import torch
     import transformers
 
-    if str(request.get("mode")) != "torch-compile":
-        raise ValueError("Chronos-Bolt Performance reference requires torch.compile")
-    if str(request.get("compile_scope")) != "model.forward":
+    mode = str(request.get("mode"))
+    if mode not in {"torch-compile", "eager"}:
+        raise ValueError("Chronos-Bolt Performance reference mode must be torch-compile or eager")
+    if mode == "torch-compile" and str(request.get("compile_scope")) != "model.forward":
         raise ValueError("Chronos-Bolt Performance must compile model.forward")
+    if mode == "eager" and request.get("compile_scope") is not None:
+        raise ValueError("Chronos-Bolt eager Performance reference cannot have a compile scope")
     device = _device(torch, "cuda")
     pipeline = _pipeline(request, device)
-    compile_evidence = _compile(pipeline)
+    compile_evidence = (
+        _compile(pipeline)
+        if mode == "torch-compile"
+        else {
+            "api": "none",
+            "target": None,
+            "backend": None,
+            "compiled_graph_count": 0,
+            "applied": False,
+        }
+    )
     values = request.get("past_values")
     if not isinstance(values, list) or not values:
         raise ValueError("Performance reference requires past_values")
@@ -244,15 +262,15 @@ def _performance(request: Mapping[str, Any]) -> dict[str, Any]:
         compile_evidence,
     )
     compile_evidence["warmup_completed"] = True
-    compile_evidence["timed_callable_uses_compiled_target"] = True
+    compile_evidence["timed_callable_uses_compiled_target"] = mode == "torch-compile"
     output_summary = _tensor_result(output)
     elapsed_seconds = sum(samples) / 1000.0
     return {
         "schema_version": PERFORMANCE_RESULT_SCHEMA,
         "status": "completed",
         "backend": "chronos-bolt",
-        "mode": "torch-compile",
-        "compile_scope": "model.forward",
+        "mode": mode,
+        "compile_scope": "model.forward" if mode == "torch-compile" else None,
         "compile_evidence": compile_evidence,
         "model": request["model"],
         "revision": request["revision"],

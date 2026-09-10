@@ -265,3 +265,152 @@ def test_chronos_compile_specializes_the_fixed_benchmark_shape(monkeypatch) -> N
     assert call["fullgraph"] is False
     assert call["dynamic"] is False
     assert evidence["dynamic"] is False
+
+
+def test_eager_reference_measurement_requires_no_compiled_graph(monkeypatch) -> None:
+    import torch
+
+    calls = []
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+
+    samples, output = reference._measure(
+        lambda: calls.append("invoke") or "forecast",
+        warmup=2,
+        iterations=3,
+        compile_evidence={"applied": False, "compiled_graph_count": 0},
+    )
+
+    assert calls == ["invoke"] * 5
+    assert len(samples) == 3
+    assert output == "forecast"
+
+
+def _performance_definition() -> dict:
+    return {
+        "stability": {
+            "samples": 10,
+            "median_drift_limit": 0.05,
+            "within_median_fraction": 0.05,
+            "minimum_close_samples": 8,
+            "retries": 1,
+        }
+    }
+
+
+def _performance_item() -> dict:
+    return {
+        "id": "item",
+        "family": "chronos_bolt",
+        "model": "chronos-bolt-tiny-official",
+        "kind": "performance",
+        "suite_id": "time_series_performance",
+        "case_id": "forecast_64",
+    }
+
+
+def _performance_case() -> dict:
+    return {"reference": {"mode": "torch-compile", "fallback": "eager"}}
+
+
+def _performance_result(item: dict, mode: str, samples: list[float]) -> dict:
+    return {
+        **executor._identity(item),
+        "schema_version": executor.RESULT_SCHEMA,
+        "execution": "completed",
+        "verdict": None,
+        "details": {
+            "candidate": {"samples_ms": samples},
+            "reference": {"mode": mode, "samples_ms": samples},
+            "comparison": {"reference_over_candidate_p50": 1.0},
+            "metrics": {"reference_over_candidate_p50": 1.0},
+        },
+        "artifacts": [{"label": "attempt", "path": "result.json"}],
+    }
+
+
+def _execute_performance(tmp_path: Path, monkeypatch, behavior) -> tuple[dict, list[str]]:
+    calls = []
+
+    def fake_attempt(*args, reference_mode, **kwargs):
+        calls.append(reference_mode)
+        return behavior(args[1], reference_mode)
+
+    monkeypatch.setattr(executor, "_performance_attempt", fake_attempt)
+    result = executor._execute_performance(
+        {},
+        _performance_item(),
+        {},
+        _performance_definition(),
+        _performance_case(),
+        {},
+        {},
+        tmp_path,
+    )
+    return result, calls
+
+
+def test_performance_prefers_a_valid_compiled_reference(tmp_path, monkeypatch) -> None:
+    result, calls = _execute_performance(
+        tmp_path,
+        monkeypatch,
+        lambda item, mode: _performance_result(item, mode, [100.0] * 10),
+    )
+
+    assert calls == ["torch-compile"]
+    assert result["execution"] == "completed"
+    assert result["details"]["reference_selection"] == {
+        "policy": "prefer_torch_compile_then_eager",
+        "preferred_mode": "torch-compile",
+        "fallback_mode": "eager",
+        "selected_mode": "torch-compile",
+        "fallback_used": False,
+    }
+
+
+def test_performance_falls_back_to_eager_when_compiled_reference_fails(
+    tmp_path, monkeypatch
+) -> None:
+    def behavior(item, mode):
+        if mode == "torch-compile":
+            raise executor.PerformanceReferenceError("compiled output parity failed")
+        return _performance_result(item, mode, [100.0] * 10)
+
+    result, calls = _execute_performance(tmp_path, monkeypatch, behavior)
+
+    assert calls == ["torch-compile", "eager"]
+    assert result["execution"] == "completed"
+    assert result["details"]["reference"]["mode"] == "eager"
+    assert result["details"]["reference_selection"]["fallback_used"] is True
+    assert result["details"]["measurement_attempts"][0]["error"] == (
+        "compiled output parity failed"
+    )
+
+
+def test_performance_falls_back_after_compiled_measurements_stay_unstable(
+    tmp_path, monkeypatch
+) -> None:
+    unstable = [100.0] * 5 + [106.0] * 5
+
+    def behavior(item, mode):
+        samples = unstable if mode == "torch-compile" else [100.0] * 10
+        return _performance_result(item, mode, samples)
+
+    result, calls = _execute_performance(tmp_path, monkeypatch, behavior)
+
+    assert calls == ["torch-compile", "torch-compile", "eager"]
+    assert result["execution"] == "completed"
+    assert result["details"]["reference_selection"]["selected_mode"] == "eager"
+
+
+def test_performance_errors_only_after_compiled_and_eager_references_fail(
+    tmp_path, monkeypatch
+) -> None:
+    def behavior(_item, mode):
+        raise executor.PerformanceReferenceError(f"{mode} failed")
+
+    result, calls = _execute_performance(tmp_path, monkeypatch, behavior)
+
+    assert calls == ["torch-compile", "eager"]
+    assert result["execution"] == "error"
+    assert result["details"]["error"] == "all_performance_references_failed"
+    assert result["details"]["reference_selection"]["selected_mode"] is None

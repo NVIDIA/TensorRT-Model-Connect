@@ -13,6 +13,7 @@ suites:
         reference:
           implementation: chronos_bolt
           mode: torch-compile
+          fallback: eager
           compile_scope: model.forward
           precision: fp32
         parity:
