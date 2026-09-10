@@ -2323,6 +2323,11 @@ def _content(
         or previews.get("native")
         or previews.get("reference")
         or _demo_text_value(reference, "reference")
+        or (
+            "classification" in task
+            and reference is not None
+            and _mapping(reference).get("mode") != "contract_only"
+        )
     ):
         primary = _demo_output(native, role="native", task=task, media=previews.get("native", ""))
         other = _demo_output(
@@ -2346,15 +2351,29 @@ def _content(
             if first is not None and second is not None and first[1:] == second[1:]:
                 combined = _demo_numeric_comparison(native, reference, task)
         text_comparison = _demo_text_comparison(native, reference, task)
+        classification_comparison = "classification" in task and bool(other) and not text_comparison
         if combined:
             notices = dict.fromkeys((_demo_nonfinite(native), _demo_nonfinite(reference)))
             primary = combined + "".join(notices)
         elif text_comparison:
             if previews.get("reference"):
                 reference_detail = "<h3>Reference media</h3>" + previews["reference"]
+        elif classification_comparison:
+            primary = (
+                '<div class="output-pair classification-comparison"><div><h4>Native output</h4>'
+                + (primary or '<p class="note">No native output was recorded.</p>')
+                + "</div><div><h4>Reference output</h4>"
+                + other
+                + "</div></div>"
+            )
         elif other:
             reference_detail = "<h3>Reference output</h3>" + other
-        if previews.get("reference") and not previews.get("native") and not text_comparison:
+        if (
+            previews.get("reference")
+            and not previews.get("native")
+            and not text_comparison
+            and not classification_comparison
+        ):
             primary = (
                 (primary or '<p class="note">No native output was recorded.</p>')
                 + "<h4>Reference output</h4>"

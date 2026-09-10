@@ -561,6 +561,118 @@ def test_classification_preserves_ids_and_raw_score_meaning(tmp_path: Path) -> N
     assert "confidence" not in visible.lower() and "probability" not in visible.lower()
 
 
+@pytest.mark.parametrize(
+    "native_class,reference_class,status,checked",
+    [
+        (0, 0, "passed", True),
+        (80, 80, "passed", True),
+        (7, 80, "failed", False),
+        (7, 80, "passed", False),
+    ],
+)
+def test_classification_reference_is_visible_beside_native(
+    tmp_path: Path, native_class: int, reference_class: int, status: str, checked: bool
+) -> None:
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "classification"
+    data["native"] = {"top_class": native_class}
+    data["reference"] = {
+        "top_class": reference_class,
+        "logits": {"shape": [128], "preview": [0.0] * 64},
+    }
+    data["status"] = status
+    data["checks"] = (
+        [{"status": "passed", "expression": 'int(actual["top_class"]) == int(np.argmax(expected))'}]
+        if checked
+        else []
+    )
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    before_details = report.split('<details class="case-details">', 1)[0]
+    assert 'class="output-pair classification-comparison"' in before_details
+    assert "Native output" in visible and "Reference output" in visible
+    assert visible.count("Class ID") == 2
+    assert f"Class ID <strong>{native_class}</strong>" in before_details
+    assert f"Class ID <strong>{reference_class}</strong>" in before_details
+    assert "128" not in visible and "logits" in report
+    if status == "failed":
+        assert 'data-status="failed"' in report
+        assert 'class="badge reference"' not in before_details
+    elif checked:
+        assert "Top class matched the reference; full-logit equality is not asserted." in visible
+    else:
+        assert 'data-status="unverified"' in report
+        assert 'class="badge reference"' not in before_details
+
+
+def test_classification_scalar_reference_zero_is_visible(tmp_path: Path) -> None:
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "image_classification"
+    data["native"] = {"top_class": 0}
+    data["reference"] = 0
+    report = render_case(data, tmp_path)
+    assert _visible(report).count("Class ID") == 2
+    assert (
+        report.split('<details class="case-details">', 1)[0].count("Class ID <strong>0</strong>")
+        == 2
+    )
+
+
+@pytest.mark.parametrize("reference,expected_class", [({"top_class": 7}, 7), (0, 0)])
+def test_classification_reference_only_stays_visible_on_failure(
+    tmp_path: Path, reference: dict | int, expected_class: int
+) -> None:
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "classification"
+    data["native"] = None
+    data["reference"] = reference
+    data["status"] = "failed"
+    data["failure_stage"] = "native"
+    report = render_case(data, tmp_path)
+    before_details = report.split('<details class="case-details">', 1)[0]
+    assert f"Class ID <strong>{expected_class}</strong>" in before_details
+    assert _visible(report).count("Class ID") == 1
+    assert "No native output was recorded" in _visible(report)
+    assert 'data-status="failed"' in report
+
+
+def test_classification_partial_reference_logits_do_not_invent_a_class(tmp_path: Path) -> None:
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "classification"
+    data["native"] = {"top_class": 7}
+    data["reference"] = {"logits": {"shape": [128], "preview": [0, 10, 2]}}
+    data["checks"] = []
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert visible.count("Class ID") == 1
+    assert "Class preview unavailable" in visible
+    assert 'data-status="unverified"' in report
+
+
+@pytest.mark.parametrize("reference", [None, {"mode": "contract_only"}])
+def test_classification_without_reference_does_not_invent_a_pair(
+    tmp_path: Path, reference: dict | None
+) -> None:
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "classification"
+    data["native"] = {"top_class": 0}
+    data["reference"] = reference
+    report = render_case(data, tmp_path)
+    assert "classification-comparison" not in report
+    assert _visible(report).count("Class ID") == 1
+
+
+def test_classification_with_explicit_text_keeps_existing_text_layout(tmp_path: Path) -> None:
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "classification"
+    data["native"]["top_class"] = 7
+    data["reference"]["top_class"] = 7
+    report = render_case(data, tmp_path)
+    assert 'class="output-pair text-comparison"' in report
+    assert "classification-comparison" not in report
+    assert _visible(report).count("Reference output") == 1
+
+
 def test_contract_reference_and_failure_are_never_a_paired_pass(tmp_path: Path) -> None:
     data = _case()
     data["status"] = "failed"
@@ -1122,10 +1234,14 @@ def test_saved_complete_logits_supply_class_index_without_mutating_evidence(tmp_
     original = copy.deepcopy(data)
     report = render_case(data, tmp_path)
     visible = _visible(report)
-    reference = report.split("<h3>Reference output</h3>")[1].split("<details>")[0]
+    reference = (
+        report.split('<details class="case-details">', 1)[0]
+        .split("<h4>Reference output</h4>")[1]
+        .split("</div>")[0]
+    )
     assert "From complete saved logits" in reference and "777" in reference
-    assert "777" not in visible
-    assert "Class ID" in visible and data == original
+    assert "777" in visible
+    assert visible.count("Class ID") == 2 and data == original
     assert "values" not in descriptor
 
 

@@ -185,6 +185,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         pixels = transform(Image.open(_asset(case)).convert("RGB")).unsqueeze(0).to("cuda")
         with torch.no_grad():
             expected = reference(pixels).float().cpu().numpy()
-    record_evidence("reference", {"logits": expected})
+    record_evidence("reference", {"top_class": int(np.argmax(expected)), "logits": expected})
     with evidence_stage("compare"):
         assert int(actual["top_class"]) == int(np.argmax(expected))

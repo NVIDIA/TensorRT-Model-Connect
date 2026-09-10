@@ -281,6 +281,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("native", actual)
     with evidence_stage("reference"):
         expected = _official_reference(model_dir, manifest, case, tmp_path)
-    record_evidence("reference", expected)
+    record_evidence("reference", {**expected, "top_class": int(np.argmax(expected["logits"]))})
     with evidence_stage("compare"):
         _assert_parity(actual, expected)
