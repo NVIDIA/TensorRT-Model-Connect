@@ -288,12 +288,12 @@ def _thresholds(case_name: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
 
 
-def _asset(raw: str) -> Path:
+def _asset(raw: str, *, report_role: str = "inputs") -> Path:
     path = Path(raw)
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
-    record_evidence("inputs", {"asset": path})
+    record_evidence(report_role, {str(raw): path})
     return path
 
 
@@ -354,7 +354,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     manifest["task"]
     backend = case.get("reference_backend")
     if backend == "golden_snapshot":
-        reference_tokens = _asset(case["speech_reference_tokens"])
+        reference_tokens = _asset(case["speech_reference_tokens"], report_role="reference_assets")
         return {"speech_tokens": np.load(reference_tokens, allow_pickle=False)}
     assert backend == "personaplex_official", f"unsupported PersonaPlex reference: {backend!r}"
     return generate_official_reference(

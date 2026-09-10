@@ -217,7 +217,7 @@ def _asset(raw: str) -> Path:
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
-    record_evidence("inputs", {"asset": path})
+    record_evidence("reference_assets", {"reference_audio": path})
     return path
 
 

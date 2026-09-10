@@ -227,12 +227,12 @@ def _thresholds(case_name: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
 
 
-def _asset(raw: str) -> Path:
+def _asset(raw: str, *, report_role: str = "inputs") -> Path:
     path = Path(raw)
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
-    record_evidence("inputs", {"asset": path})
+    record_evidence(report_role, {str(raw): path})
     return path
 
 
@@ -366,7 +366,7 @@ def _golden_reference(case: dict) -> dict:
     assert isinstance(value, str) and value, (
         f"{case['name']} golden reference requires metadata.golden_snapshot_path"
     )
-    path = _asset(value)
+    path = _asset(value, report_role="reference_assets")
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(payload, dict), f"{case['name']} golden reference must be an object: {path}"
     assert isinstance(payload.get("text"), str) and payload["text"].strip(), (

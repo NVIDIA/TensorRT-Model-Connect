@@ -237,17 +237,19 @@ def _thresholds(case_name: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
 
 
-def _asset(raw: str) -> Path:
+def _asset(
+    raw: str, *, report_key: str | None = None, report_role: str = "inputs"
+) -> Path:
     path = Path(raw)
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
-    record_evidence("inputs", {"asset": path})
+    record_evidence(report_role, {report_key or str(raw): path})
     return path
 
 
 def _case_text(case: dict) -> str:
-    path = _asset(case["prompt_file"])
+    path = _asset(case["prompt_file"], report_key="prompt_file")
     if path.suffix == ".json":
         value = str(json.loads(path.read_text(encoding="utf-8"))["prompt"])
     else:
@@ -275,7 +277,7 @@ def _native(
         "--prompt",
         _case_text(case),
         "--image",
-        str(_asset(case["test_image"])),
+        str(_asset(case["test_image"], report_key="image")),
         "--output",
         str(output),
         "--intrinsics",
@@ -343,11 +345,17 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         sys.executable,
         str(entrypoint),
         "--image",
-        str(_asset(case["test_image"])),
+        str(_asset(case["test_image"], report_key="image")),
         "--prompt",
-        str(_asset(case["prompt_file"])),
+        str(_asset(case["prompt_file"], report_key="prompt_file")),
         "--intrinsics",
-        str(_asset(case["camera_intrinsics_file"])),
+        str(
+            _asset(
+                case["camera_intrinsics_file"],
+                report_key="camera_intrinsics_file",
+                report_role="reference_inputs",
+            )
+        ),
         "--action",
         str(case["action"]),
         "--translation_speed",
