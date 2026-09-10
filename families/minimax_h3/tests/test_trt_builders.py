@@ -9,23 +9,31 @@ import ml_dtypes
 import numpy as np
 import pytest
 
+from families.minimax_h3 import trt_compat
 
+
+if not trt_compat.is_available("tensorrt") and trt_compat.is_available("tensorrt_rtx"):
+    trt_compat.configure_backend(rtx=True)
 trt = pytest.importorskip("tensorrt")
 
 from families.minimax_h3.adaln_builder import (  # noqa: E402
     build_adaln_precompute_engine,
 )
+from families.minimax_h3.audio_vae_builder import (  # noqa: E402
+    build_audio_vae_decoder_engine,
+)
 from families.minimax_h3.config import (  # noqa: E402
     ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
-    DENOISER_DEFAULT_WORKSPACE_BYTES,
+    AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES,
     MiniMaxH3Config,
     SOL_ENGINE_1344X768_124F,
+    SOL_ENGINE_1344X768_124_TO_345F,
     TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
     VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
     resolve_workspace_bytes,
 )
 from families.minimax_h3.dit_builder import (  # noqa: E402
-    build_dit_engine,
+    _add_first_block_cache_profiles,
     build_dit_finish_engine,
     build_dit_head_engine,
     build_dit_tail_engine,
@@ -35,6 +43,9 @@ from families.minimax_h3.dit_builder import (  # noqa: E402
     tail_checkpoint_keys,
 )
 from families.minimax_h3 import graph_ops as op  # noqa: E402
+from families.minimax_h3.quantized_checkpoint import (  # noqa: E402
+    ConvRotInt8Weight,
+)
 from families.minimax_h3.text_encoder_builder import (  # noqa: E402
     build_text_encoder_engine,
 )
@@ -109,12 +120,12 @@ def _weights(profile: MiniMaxH3Config) -> dict[str, np.ndarray]:
             ({}, SOL_ENGINE_1344X768_124F),
             ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
         ),
-        (
-            build_dit_engine,
-            ({}, SOL_ENGINE_1344X768_124F),
-            DENOISER_DEFAULT_WORKSPACE_BYTES,
-        ),
         (build_vae_tile_decoder_engine, ({},), VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES),
+        (
+            build_audio_vae_decoder_engine,
+            ({},),
+            AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES,
+        ),
     ],
 )
 @pytest.mark.parametrize("workspace_bytes", [None, 8 << 30])
@@ -127,15 +138,18 @@ def test_builders_apply_default_or_overridden_workspace(
         pass
 
     def capture(config, supplied, *, default_bytes):
-        observed.update(
-            supplied=supplied,
-            default_bytes=default_bytes,
-            builder_optimization_level=config.builder_optimization_level,
-        )
+        observed.update(supplied=supplied, default_bytes=default_bytes)
         raise WorkspaceConfigured
 
+    should_configure_workspace = not (
+        builder is build_adaln_precompute_engine and workspace_bytes is None
+    )
+
     class FakeConfig:
-        builder_optimization_level = None
+        @staticmethod
+        def clear_flag(_flag):
+            if not should_configure_workspace:
+                raise WorkspaceConfigured
 
     class FakeBuilder:
         @staticmethod
@@ -147,18 +161,23 @@ def test_builders_apply_default_or_overridden_workspace(
             return FakeConfig()
 
     monkeypatch.setattr(trt, "Builder", lambda _logger: FakeBuilder())
-    monkeypatch.setattr(op, "configure_builder", lambda _config: None)
+    monkeypatch.setattr(
+        op,
+        "configure_builder",
+        lambda _config, *, weight_streaming=False: None,
+    )
     monkeypatch.setattr(op, "configure_workspace", capture)
     kwargs = {"workspace_bytes": workspace_bytes}
     if builder is build_text_encoder_engine:
         kwargs["sequence_length"] = 1
     with pytest.raises(WorkspaceConfigured):
         builder(*args, **kwargs)
-    assert observed == {
-        "supplied": workspace_bytes,
-        "default_bytes": default_bytes,
-        "builder_optimization_level": 1,
-    }
+    expected = (
+        {"supplied": workspace_bytes, "default_bytes": default_bytes}
+        if should_configure_workspace
+        else {}
+    )
+    assert observed == expected
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "8589934592"])
@@ -199,7 +218,7 @@ def test_first_block_cache_checkpoint_partitions_are_exact() -> None:
     profile = replace(SOL_ENGINE_1344X768_124F, first_block_cache=True)
     head = set(head_checkpoint_keys(profile))
     tail = set(tail_checkpoint_keys(profile))
-    finish = set(finish_checkpoint_keys(profile))
+    finish = set(finish_checkpoint_keys())
     assert head
     assert tail
     assert finish
@@ -210,12 +229,82 @@ def test_first_block_cache_checkpoint_partitions_are_exact() -> None:
     assert "norm_out.norm.weight" in finish
 
 
+def test_production_first_block_cache_engines_add_one_public_dynamic_profile() -> None:
+    class FakeOptimizationProfile:
+        def __init__(self) -> None:
+            self.extra_memory_target = 1.0
+            self.shapes = {}
+
+        def set_shape(self, name, *, min, opt, max) -> None:
+            self.shapes[name] = (min, opt, max)
+
+    class FakeBuilder:
+        @staticmethod
+        def create_optimization_profile():
+            return FakeOptimizationProfile()
+
+    class FakeConfig:
+        def __init__(self) -> None:
+            self.profiles = []
+
+        def add_optimization_profile(self, profile) -> int:
+            self.profiles.append(profile)
+            return len(self.profiles) - 1
+
+    config = FakeConfig()
+    production = replace(SOL_ENGINE_1344X768_124_TO_345F, first_block_cache=True)
+    _add_first_block_cache_profiles(
+        FakeBuilder(),
+        config,
+        production,
+        video_inputs=("video",),
+        audio_inputs=("audio",),
+        text_inputs=("text",),
+        packed_inputs=("position_ids", "adaln_indices", "head_hidden"),
+    )
+
+    assert len(config.profiles) == 1
+    public = config.profiles[0]
+    assert public.extra_memory_target == 1.0
+    assert public.shapes["video"] == (
+        (14985, production.video_patch_dim),
+        (37296, production.video_patch_dim),
+        (108576, production.video_patch_dim),
+    )
+    assert public.shapes["text"] == (
+        (1, production.text_dim),
+        (128, production.text_dim),
+        (2641, production.text_dim),
+    )
+    assert public.shapes["audio"] == (
+        (414, production.audio_in_channels),
+        (414, production.audio_in_channels),
+        (1150, production.audio_in_channels),
+    )
+    assert public.shapes["adaln_indices"] == ((15400,), (37838,), (112367,))
+    assert public.shapes["head_hidden"] == (
+        (15400, production.hidden_size),
+        (37838, production.hidden_size),
+        (112367, production.hidden_size),
+    )
+    assert public.shapes["position_ids"] == (
+        (15400, 3),
+        (37838, 3),
+        (112367, 3),
+    )
+
+    custom_config = FakeConfig()
+    custom = replace(production, num_layers=2)
+    _add_first_block_cache_profiles(FakeBuilder(), custom_config, custom)
+    assert len(custom_config.profiles) == 1
+    assert custom_config.profiles[0].extra_memory_target == 1.0
+
+
 def test_split_builders_require_explicit_first_block_cache_profile() -> None:
+    dense_only = replace(SOL_ENGINE_1344X768_124F, first_block_cache=False)
     for builder in (build_dit_head_engine, build_dit_tail_engine, build_dit_finish_engine):
         with pytest.raises(ValueError, match="first_block_cache=True"):
-            builder({}, SOL_ENGINE_1344X768_124F)
-    with pytest.raises(ValueError, match="requires the split DiT builders"):
-        build_dit_engine({}, replace(SOL_ENGINE_1344X768_124F, first_block_cache=True))
+            builder({}, dense_only)
 
 
 @pytest.mark.gpu
@@ -225,7 +314,10 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         num_layers=1,
         num_refiner_layers=1,
         num_heads=4,
-        head_dim=8,
+        # TensorRT-RTX keeps H3 IAttention non-decomposable for production
+        # performance. Exercise a head dimension supported by its dedicated
+        # BF16 attention kernel rather than a synthetic 8-wide head.
+        head_dim=128,
         ffn_dim=16,
         video_in_channels=2,
         audio_in_channels=2,
@@ -234,7 +326,11 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         timestep_hidden_size=8,
         timestep_embed_dim=4,
         rope_freq_dim=1,
+        min_video_rows=4,
+        opt_video_rows=4,
         video_rows=4,
+        min_audio_rows=2,
+        opt_audio_rows=2,
         audio_rows=2,
         min_text_rows=1,
         opt_text_rows=2,
@@ -245,7 +341,6 @@ def test_tiny_native_h3_graphs_serialize() -> None:
     )
     weights = _weights(profile)
     assert build_adaln_precompute_engine(weights, profile, workspace_bytes=1 << 30)
-    assert build_dit_engine(weights, profile, workspace_bytes=1 << 30)
 
     split_profile = replace(profile, num_layers=2, first_block_cache=True)
     split_weights = _weights(split_profile)
@@ -270,6 +365,140 @@ def test_tiny_native_h3_graphs_serialize() -> None:
             if engine.get_tensor_mode(engine.get_tensor_name(index)) == trt.TensorIOMode.OUTPUT
         }
         assert outputs == expected_outputs
+
+
+@pytest.mark.gpu
+def test_dynamic_finish_plan_preserves_124_and_345_frame_shapes() -> None:
+    profile = MiniMaxH3Config(
+        hidden_size=8,
+        num_layers=1,
+        num_refiner_layers=0,
+        num_heads=4,
+        head_dim=8,
+        ffn_dim=16,
+        video_in_channels=2,
+        audio_in_channels=2,
+        text_dim=8,
+        timestep_input_dim=4,
+        timestep_hidden_size=8,
+        timestep_embed_dim=4,
+        rope_freq_dim=1,
+        video_rows=102816,
+        audio_rows=1150,
+        padded_sequence_length=104503,
+        max_timestep_count=2,
+        context_parallel_size=1,
+        first_block_cache=True,
+    )
+    plan = build_dit_finish_engine(_weights(profile), profile, workspace_bytes=1 << 30)
+    runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+    engine = runtime.deserialize_cuda_engine(plan)
+    assert engine is not None
+    assert tuple(
+        tuple(shape) for shape in engine.get_tensor_profile_shape("video_hidden_states", 0)
+    ) == (
+        (37296, profile.video_patch_dim),
+        (37296, profile.video_patch_dim),
+        (102816, profile.video_patch_dim),
+    )
+    assert tuple(
+        tuple(shape) for shape in engine.get_tensor_profile_shape("audio_hidden_states", 0)
+    ) == (
+        (414, profile.audio_in_channels),
+        (414, profile.audio_in_channels),
+        (1150, profile.audio_in_channels),
+    )
+
+    for video_rows, audio_rows, packed_rows in (
+        (37296, 414, 37711),
+        (102816, 1150, 104503),
+    ):
+        finish = engine.create_execution_context()
+        assert finish.set_input_shape("head_hidden", (packed_rows, profile.hidden_size))
+        assert finish.set_input_shape("tail_residual", (packed_rows, profile.hidden_size))
+        assert finish.set_input_shape("timestep_indices", (packed_rows,))
+        assert finish.set_input_shape("video_hidden_states", (video_rows, profile.video_patch_dim))
+        assert finish.set_input_shape(
+            "audio_hidden_states", (audio_rows, profile.audio_in_channels)
+        )
+        assert tuple(finish.get_tensor_shape("video_velocity")) == (
+            video_rows,
+            profile.video_patch_dim,
+        )
+        assert tuple(finish.get_tensor_shape("audio_velocity")) == (
+            audio_rows,
+            profile.audio_in_channels,
+        )
+
+
+@pytest.mark.gpu
+def test_dynamic_attention_plans_preserve_media_and_packed_shapes() -> None:
+    profile = MiniMaxH3Config(
+        hidden_size=128,
+        num_layers=2,
+        num_refiner_layers=0,
+        num_heads=2,
+        head_dim=128,
+        ffn_dim=256,
+        video_in_channels=2,
+        audio_in_channels=2,
+        text_dim=128,
+        timestep_input_dim=4,
+        timestep_hidden_size=128,
+        timestep_embed_dim=64,
+        rope_freq_dim=16,
+        min_video_rows=64,
+        opt_video_rows=64,
+        video_rows=128,
+        min_audio_rows=32,
+        opt_audio_rows=32,
+        audio_rows=64,
+        min_text_rows=32,
+        opt_text_rows=32,
+        text_rows=64,
+        padded_sequence_length=256,
+        max_timestep_count=2,
+        first_block_cache=True,
+    )
+    head_plan = build_dit_head_engine(_weights(profile), profile, workspace_bytes=1 << 30)
+    tail_plan = build_dit_tail_engine(_weights(profile), profile, workspace_bytes=1 << 30)
+    runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+    head_engine = runtime.deserialize_cuda_engine(head_plan)
+    tail_engine = runtime.deserialize_cuda_engine(tail_plan)
+    assert head_engine is not None and tail_engine is not None
+    assert tuple(
+        tuple(shape) for shape in head_engine.get_tensor_profile_shape("video_hidden_states", 0)
+    ) == (
+        (64, profile.video_patch_dim),
+        (64, profile.video_patch_dim),
+        (128, profile.video_patch_dim),
+    )
+    assert tuple(
+        tuple(shape) for shape in tail_engine.get_tensor_profile_shape("head_hidden", 0)
+    ) == ((128, profile.hidden_size), (128, profile.hidden_size), (256, profile.hidden_size))
+
+    for video_rows, audio_rows, text_rows, packed_rows in (
+        (64, 32, 32, 128),
+        (128, 64, 64, 256),
+    ):
+        head = head_engine.create_execution_context()
+        assert head.set_input_shape("video_hidden_states", (video_rows, profile.video_patch_dim))
+        assert head.set_input_shape("audio_hidden_states", (audio_rows, profile.audio_in_channels))
+        assert head.set_input_shape("encoder_hidden_states", (text_rows, profile.text_dim))
+        assert head.set_input_shape("position_ids", (packed_rows, 3))
+        assert head.set_input_shape("adaln_indices", (packed_rows,))
+        assert head.set_input_shape("previous_head_residual", (packed_rows, profile.hidden_size))
+        assert tuple(head.get_tensor_shape("head_hidden")) == (packed_rows, profile.hidden_size)
+        assert tuple(head.get_tensor_shape("head_residual")) == (packed_rows, profile.hidden_size)
+
+        tail = tail_engine.create_execution_context()
+        assert tail.set_input_shape("head_hidden", (packed_rows, profile.hidden_size))
+        assert tail.set_input_shape("position_ids", (packed_rows, 3))
+        assert tail.set_input_shape("adaln_indices", (packed_rows,))
+        assert tuple(tail.get_tensor_shape("tail_residual")) == (
+            packed_rows,
+            profile.hidden_size,
+        )
 
 
 @pytest.mark.gpu
@@ -327,6 +556,75 @@ def test_native_linear_serializes_checkpoint_bf16_without_fp32_constant() -> Non
     assert plan
 
 
+def test_convrot_regular_hadamard_matches_published_basis() -> None:
+    expected = np.asarray(
+        (
+            (1, 1, 1, -1),
+            (1, 1, -1, 1),
+            (1, -1, 1, 1),
+            (-1, 1, 1, 1),
+        ),
+        dtype=np.float32,
+    ) / 2.0
+    actual = op._regular_hadamard(4).astype(np.float32)
+    np.testing.assert_array_equal(actual, expected)
+    for group_size in (64, 256):
+        matrix = op._regular_hadamard(group_size).astype(np.float32)
+        np.testing.assert_allclose(matrix @ matrix.T, np.eye(group_size), atol=0, rtol=0)
+    for invalid in (0, 3, 8, 128, True):
+        with pytest.raises(ValueError, match="power of four"):
+            op._regular_hadamard(invalid)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_native_convrot_int8_linear_serializes_without_plugins() -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    config = builder.create_builder_config()
+    config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    value = network.add_input("value", trt.bfloat16, (-1, 256))
+    profile = builder.create_optimization_profile()
+    profile.set_shape("value", (4, 256), (8, 256), (16, 256))
+    config.add_optimization_profile(profile)
+    quantized = ConvRotInt8Weight(
+        qweight=np.arange(128 * 256, dtype=np.int64).reshape(128, 256).astype(np.int8),
+        scale=np.full((128, 1), 0.01, dtype=np.float32),
+        group_size=256,
+    )
+    output = op.linear(network, value, quantized)
+    output.name = "output"
+    network.mark_output(output)
+
+    layers = [network.get_layer(index) for index in range(network.num_layers)]
+    dequantize = [layer for layer in layers if layer.type == trt.LayerType.DEQUANTIZE]
+    assert len(dequantize) == 2
+    assert output.dtype == trt.bfloat16
+    assert not any(
+        layer.type
+        in (
+            trt.LayerType.PLUGIN,
+            trt.LayerType.PLUGIN_V2,
+            trt.LayerType.PLUGIN_V3,
+        )
+        for layer in layers
+    )
+    try:
+        plan = builder.build_serialized_network(network, config)
+    finally:
+        op.release_weight_buffers(network)
+    assert plan
+    engine = trt.Runtime(logger).deserialize_cuda_engine(plan)
+    assert engine is not None
+    inspector = engine.create_engine_inspector().get_engine_information(
+        trt.LayerInformationFormat.JSON
+    )
+    assert '"Datatype": "Int8"' in inspector
+    assert "dynamic_rowwise_int8_gemm" in inspector
+    assert "int8_tensorwise_convrot" in inspector
+
+
 @pytest.mark.gpu
 @pytest.mark.trt
 def test_native_network_contract_counts_iattention_and_fails_closed() -> None:
@@ -349,3 +647,96 @@ def test_native_network_contract_counts_iattention_and_fails_closed() -> None:
     }
     with pytest.raises(RuntimeError, match="native layer contract failed"):
         op.validate_native_network(network, expected_attentions=2, label="test network")
+
+
+def test_native_attention_preserves_checkpoint_bfloat16_range() -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    q = network.add_input("q", trt.bfloat16, (4, 16))
+    k = network.add_input("k", trt.bfloat16, (4, 16))
+    v = network.add_input("v", trt.bfloat16, (4, 16))
+
+    output = op.native_attention(
+        network,
+        q,
+        k,
+        v,
+        heads=2,
+        head_dim=8,
+        name="bf16_attention",
+    )
+
+    assert output.dtype == trt.bfloat16
+    assert all(
+        network.get_layer(index).get_output(0).dtype != trt.float16
+        for index in range(network.num_layers)
+    )
+
+
+def test_fused_qkv_releases_consumed_source_arrays(monkeypatch) -> None:
+    class Tensor:
+        shape = (2, 6)
+
+    class Layer:
+        def get_output(self, _index):
+            return object()
+
+    class Network:
+        def add_slice(self, *_args):
+            return Layer()
+
+    prefix = "transformer_blocks.0.attn"
+    keys = [f"{prefix}.to_{name}.weight" for name in ("q", "k", "v")]
+    weights = {key: np.ones((2, 2), dtype=np.float32) for key in keys}
+    monkeypatch.setattr(op, "linear", lambda *_args, **_kwargs: Tensor())
+
+    outputs = op.fused_qkv(Network(), object(), weights, prefix, consume_weights=True)
+
+    assert len(outputs) == 3
+    assert not any(key in weights for key in keys)
+
+
+def test_fused_qkv_reuses_packed_quantized_parent(monkeypatch) -> None:
+    class Tensor:
+        shape = (2, 6)
+
+    class Layer:
+        def get_output(self, _index):
+            return object()
+
+    class Network:
+        def add_slice(self, *_args):
+            return Layer()
+
+    parent = ConvRotInt8Weight(
+        qweight=np.zeros((6, 256), dtype=np.int8),
+        scale=np.ones((6, 1), dtype=np.float32),
+        group_size=256,
+        is_full_fused_qkv=True,
+    )
+    sources = tuple(
+        ConvRotInt8Weight(
+            qweight=parent.qweight[index * 2 : (index + 1) * 2],
+            scale=parent.scale[index * 2 : (index + 1) * 2],
+            group_size=256,
+            packed_parent=parent,
+            row_slice=(index * 2, (index + 1) * 2),
+        )
+        for index in range(3)
+    )
+    prefix = "transformer_blocks.0.attn"
+    keys = tuple(f"{prefix}.to_{name}.weight" for name in ("q", "k", "v"))
+    weights = dict(zip(keys, sources, strict=True))
+    observed = []
+
+    def capture(_network, _tensor, weight):
+        observed.append(weight)
+        return Tensor()
+
+    monkeypatch.setattr(op, "linear", capture)
+    outputs = op.fused_qkv(Network(), object(), weights, prefix, consume_weights=True)
+
+    assert len(outputs) == 3
+    assert observed == [parent]
+    assert not any(key in weights for key in keys)

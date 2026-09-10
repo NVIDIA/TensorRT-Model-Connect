@@ -5,13 +5,13 @@
 
 #include "runtime/bundle/bundle_format.h"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 
 namespace {
 
@@ -25,10 +25,11 @@ void check(bool condition, const char* name) {
 }
 
 std::filesystem::path temp_dir() {
-    char pattern[] = "/tmp/trtmc_bundle_v1_XXXXXX";
-    char* path = mkdtemp(pattern);
-    if (path == nullptr)
-        throw std::runtime_error("mkdtemp failed");
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path =
+        std::filesystem::temp_directory_path() / ("trtmc-bundle-v1-" + std::to_string(nonce));
+    if (!std::filesystem::create_directory(path))
+        throw std::runtime_error("failed to create temporary test directory");
     return path;
 }
 

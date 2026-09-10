@@ -13,6 +13,7 @@
 
 #include <NvInfer.h>
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
@@ -24,6 +25,18 @@ namespace trtmc {
 class CudaGraphExec;
 class TrtModuleImplTestPeer;
 
+// Optional TensorRT-RTX coordinator for execution contexts which run serially
+// on one stream and share a user-managed activation allocation.
+class ITrtActivationArena {
+  public:
+    virtual ~ITrtActivationArena() = default;
+    virtual void attach(nvinfer1::IExecutionContext* context, cudaStream_t stream,
+                        std::int64_t required_bytes) = 0;
+    virtual void begin_enqueue(nvinfer1::IExecutionContext* context) = 0;
+    virtual void end_enqueue() noexcept = 0;
+    virtual void detach(nvinfer1::IExecutionContext* context) noexcept = 0;
+};
+
 class TrtModuleImpl final : public ITrtModule {
   public:
     // Backend creates engine + context, passes them in.
@@ -32,7 +45,9 @@ class TrtModuleImpl final : public ITrtModule {
                   cudaStream_t stream, int32_t profile_idx = 0,
                   void* distributed_communicator = nullptr,
                   const std::vector<ModuleExternalBinding>& external_bindings = {},
-                  bool backend_managed_cuda_graph = false);
+                  bool backend_managed_cuda_graph = false,
+                  std::shared_ptr<ITrtActivationArena> activation_arena = {},
+                  std::int64_t activation_memory_bytes = 0);
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -91,6 +106,7 @@ class TrtModuleImpl final : public ITrtModule {
     cudaStream_t stream_{nullptr};
     int32_t profile_idx_{0};
     void* distributed_communicator_{nullptr};
+    std::shared_ptr<ITrtActivationArena> activation_arena_;
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
     bool backend_managed_cuda_graph_{false};
@@ -98,6 +114,7 @@ class TrtModuleImpl final : public ITrtModule {
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
     std::unordered_map<std::string, void*> initial_external_bindings_;
+    std::unordered_map<std::string, std::size_t> initial_external_binding_capacities_;
     std::unordered_map<std::string, BufferEntry> buffers_;
     std::unordered_map<std::string, std::string> alias_input_by_output_;
     std::unordered_map<std::string, std::vector<std::string>> alias_outputs_by_input_;
@@ -106,11 +123,25 @@ class TrtModuleImpl final : public ITrtModule {
     std::string timing_label_{"engine"};
     std::vector<TimingEvent> timing_events_;
 
+    void initialize_module(nvinfer1::ICudaEngine* engine,
+                           const std::vector<ModuleExternalBinding>& external_bindings,
+                           std::int64_t activation_memory_bytes);
+    void select_optimization_profile();
+    void cleanup_failed_initialization() noexcept;
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
     void discover_tensor_aliases(nvinfer1::ICudaEngine* engine);
     void
     validate_initial_external_bindings(nvinfer1::ICudaEngine* engine,
                                        const std::vector<ModuleExternalBinding>& external_bindings);
+    void validate_initial_external_binding_identity(nvinfer1::ICudaEngine* engine,
+                                                    const ModuleExternalBinding& binding) const;
+    std::size_t initial_external_binding_required_bytes(nvinfer1::ICudaEngine* engine,
+                                                        const ModuleExternalBinding& binding) const;
+    static void validate_external_binding_capacity(const std::string& name, std::size_t available,
+                                                   std::size_t required);
+    bool attach_initial_external_binding(const std::string& name, BufferEntry& entry);
+    void assign_initial_input_storage(const std::string& name, BufferEntry& entry);
+    void assign_initial_output_storage(const std::string& name, BufferEntry& entry);
     void bind_alias_group(const std::string& input_name, void* ptr);
     bool should_allocate_input(const std::string& name, std::size_t nbytes) const;
     void validate_alias_outputs_exist(const std::vector<std::string>& output_names) const;
@@ -125,11 +156,13 @@ class TrtModuleImpl final : public ITrtModule {
                                int32_t num_profiles);
     void ensure_input_buffer(const std::string& name, BufferEntry& entry);
     void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
+    void allocate_single_output(nvinfer1::ICudaEngine* engine, const std::string& name);
     void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                   nvinfer1::OptProfileSelector selector);
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
     void execute_enqueue();
+    void destroy_execution_context() noexcept;
     void flush_timing_events();
     bool begin_timing_event(TimingEvent& event);
     void finish_timing_event(TimingEvent event);

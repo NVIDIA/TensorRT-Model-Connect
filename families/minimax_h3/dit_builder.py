@@ -8,10 +8,12 @@ from __future__ import annotations
 import gc
 import math
 import sys
+from pathlib import Path
 
 import numpy as np
 
 import tensorrt as trt
+from . import trt_compat
 
 from . import graph_ops as op
 from .config import (
@@ -85,9 +87,7 @@ def tail_checkpoint_keys(
     return _block_checkpoint_keys(range(1, profile.num_layers))
 
 
-def finish_checkpoint_keys(
-    profile: MiniMaxH3Config = SOL_ENGINE_1344X768_124F,
-) -> tuple[str, ...]:
+def finish_checkpoint_keys() -> tuple[str, ...]:
     """Weights used by the final norm and modality-specific projections."""
 
     return (
@@ -107,11 +107,11 @@ def checkpoint_keys(
     return (
         *head_checkpoint_keys(profile),
         *tail_checkpoint_keys(profile),
-        *finish_checkpoint_keys(profile),
+        *finish_checkpoint_keys(),
     )
 
 
-def _slice_modulation(network, selected, index: int, rows: int, width: int):
+def _slice_modulation(network, selected, index: int, width: int):
     value = op.dynamic_slice(network, selected, (0, index, 0), (None, 1, width))
     reshape = network.add_shuffle(value)
     reshape.reshape_dims = (-1, width)
@@ -129,7 +129,7 @@ def _per_head_norm(network, tensor, weight, profile: MiniMaxH3Config, rows: int)
     return flatten.get_output(0)
 
 
-def _rope_tables(network, position_ids, profile: MiniMaxH3Config, rows: int):
+def _rope_tables(network, position_ids, profile: MiniMaxH3Config):
     positions = op.cast(network, position_ids, trt.float32)
     position_shape = network.add_shuffle(positions)
     position_shape.reshape_dims = (-1, 3, 1)
@@ -152,9 +152,9 @@ def _rope_tables(network, position_ids, profile: MiniMaxH3Config, rows: int):
 
 
 def _native_attention(network, q, k, v, *, rows: int, profile: MiniMaxH3Config, name: str):
-    q4 = op.rows_to_heads(network, q, rows, profile.num_heads, profile.head_dim)
-    k4 = op.rows_to_heads(network, k, rows, profile.num_heads, profile.head_dim)
-    v4 = op.rows_to_heads(network, v, rows, profile.num_heads, profile.head_dim)
+    q4 = op.rows_to_heads(network, q, profile.num_heads, profile.head_dim)
+    k4 = op.rows_to_heads(network, k, profile.num_heads, profile.head_dim)
+    v4 = op.rows_to_heads(network, v, profile.num_heads, profile.head_dim)
     scale = op.constant(
         network,
         np.full((1, 1, 1, 1), 1.0 / math.sqrt(profile.head_dim), dtype=np.float32),
@@ -168,7 +168,7 @@ def _native_attention(network, q, k, v, *, rows: int, profile: MiniMaxH3Config, 
     attention.metadata = f"trtmc.native_op=IAttention;source={name}"
     attention.get_output(0).name = f"{name}.output"
     attention.decomposable = False
-    return op.heads_to_rows(network, attention.get_output(0), rows, profile.attention_size)
+    return op.heads_to_rows(network, attention.get_output(0), profile.attention_size)
 
 
 def _attention_block(
@@ -181,8 +181,15 @@ def _attention_block(
     *,
     cos=None,
     sin=None,
+    consume_weights: bool = False,
 ):
-    q, k, v = op.fused_qkv(network, hidden, weights, f"{prefix}.attn")
+    q, k, v = op.fused_qkv(
+        network,
+        hidden,
+        weights,
+        f"{prefix}.attn",
+        consume_weights=consume_weights,
+    )
     q = _per_head_norm(network, q, weights[f"{prefix}.attn.norm_q.weight"], profile, rows)
     k = _per_head_norm(network, k, weights[f"{prefix}.attn.norm_k.weight"], profile, rows)
     if cos is not None:
@@ -192,7 +199,6 @@ def _attention_block(
             q,
             cos,
             sin,
-            rows=rows,
             heads=profile.num_heads,
             head_dim=profile.head_dim,
             rotary_dim=rotary_dim,
@@ -202,7 +208,6 @@ def _attention_block(
             k,
             cos,
             sin,
-            rows=rows,
             heads=profile.num_heads,
             head_dim=profile.head_dim,
             rotary_dim=rotary_dim,
@@ -212,7 +217,6 @@ def _attention_block(
             q,
             k,
             v,
-            rows=rows,
             heads=profile.num_heads,
             head_dim=profile.head_dim,
             name=f"{prefix}.attn.native_attention",
@@ -230,7 +234,14 @@ def _attention_block(
     return op.linear(network, attended, weights[f"{prefix}.attn.to_out.0.weight"])
 
 
-def _refine_text(network, text, weights, profile: MiniMaxH3Config):
+def _refine_text(
+    network,
+    text,
+    weights,
+    profile: MiniMaxH3Config,
+    *,
+    consume_weights: bool = False,
+):
     hidden = op.linear(
         network, text, weights["context_embedder.weight"], weights["context_embedder.bias"]
     )
@@ -244,7 +255,15 @@ def _refine_text(network, text, weights, profile: MiniMaxH3Config):
             profile.hidden_size,
             profile.norm_eps,
         )
-        update = _attention_block(network, normalized, weights, prefix, profile, rows)
+        update = _attention_block(
+            network,
+            normalized,
+            weights,
+            prefix,
+            profile,
+            rows,
+            consume_weights=consume_weights,
+        )
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
         normalized = op.rms_norm(
             network,
@@ -270,10 +289,25 @@ def _refine_text(network, text, weights, profile: MiniMaxH3Config):
     )
 
 
-def _packed_hidden(network, video, audio, text, weights, profile: MiniMaxH3Config):
+def _packed_hidden(
+    network,
+    video,
+    audio,
+    text,
+    weights,
+    profile: MiniMaxH3Config,
+    *,
+    consume_weights: bool = False,
+):
     """Project and pack text | audio | video exactly like the Diffusers model."""
 
-    text_hidden = _refine_text(network, text, weights, profile)
+    text_hidden = _refine_text(
+        network,
+        text,
+        weights,
+        profile,
+        consume_weights=consume_weights,
+    )
     audio_hidden = op.linear(
         network, audio, weights["audio_proj_in.weight"], weights["audio_proj_in.bias"], bf16=False
     )
@@ -297,6 +331,8 @@ def _transformer_block(
     weights,
     profile: MiniMaxH3Config,
     index: int,
+    *,
+    consume_weights: bool = False,
 ):
     """Add one native H3 transformer block and return its residual stream."""
 
@@ -304,7 +340,7 @@ def _transformer_block(
     prefix = f"transformer_blocks.{index}"
     selected = op.gather_rows(network, block_modulation, adaln_indices)
     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-        _slice_modulation(network, selected, part, rows, profile.hidden_size) for part in range(6)
+        _slice_modulation(network, selected, part, profile.hidden_size) for part in range(6)
     )
     normalized = op.rms_norm(
         network,
@@ -323,6 +359,7 @@ def _transformer_block(
         rows,
         cos=cos,
         sin=sin,
+        consume_weights=consume_weights,
     )
     hidden = op.gated_residual(network, hidden, update, gate_msa)
 
@@ -345,10 +382,9 @@ def _transformer_block(
 
 
 def _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile):
-    rows = -1
     selected = op.gather_rows(network, final_modulation, timestep_indices)
-    final_shift = _slice_modulation(network, selected, 0, rows, profile.hidden_size)
-    final_scale = _slice_modulation(network, selected, 1, rows, profile.hidden_size)
+    final_shift = _slice_modulation(network, selected, 0, profile.hidden_size)
+    final_scale = _slice_modulation(network, selected, 1, profile.hidden_size)
     hidden = op.rms_norm(
         network, hidden, weights["norm_out.norm.weight"], profile.hidden_size, profile.norm_eps
     )
@@ -356,37 +392,13 @@ def _final_hidden(network, hidden, timestep_indices, final_modulation, weights, 
     return op.cast(network, hidden, trt.float32)
 
 
-def _mark_full_velocity_outputs(network, hidden, weights):
-    """Preserve the original monolithic plan's full packed-sequence outputs."""
-
-    video_all = op.linear(
-        network, hidden, weights["proj_out.weight"], weights["proj_out.bias"], bf16=False
-    )
-    audio_all = op.linear(
-        network,
-        hidden,
-        weights["audio_proj_out.weight"],
-        weights["audio_proj_out.bias"],
-        bf16=False,
-    )
-    video_all.name = "video_velocity"
-    audio_all.name = "audio_velocity"
-    network.mark_output(video_all)
-    network.mark_output(audio_all)
-
-
-def _mark_sliced_velocity_outputs(network, hidden, weights, profile: MiniMaxH3Config):
+def _mark_sliced_velocity_outputs(network, hidden, weights, video_reference, audio_reference):
     """Project only rows consumed by the audio and video scheduler updates."""
 
-    audio_hidden = op.slice_rows_from_end(
-        network,
-        hidden,
-        offset=profile.audio_rows + profile.video_rows,
-        rows=profile.audio_rows,
+    audio_hidden = op.slice_rows_like_from_end(
+        network, hidden, audio_reference, trailing_reference=video_reference
     )
-    video_hidden = op.slice_rows_from_end(
-        network, hidden, offset=profile.video_rows, rows=profile.video_rows
-    )
+    video_hidden = op.slice_rows_like_from_end(network, hidden, video_reference)
     video = op.linear(
         network,
         video_hidden,
@@ -407,18 +419,27 @@ def _mark_sliced_velocity_outputs(network, hidden, weights, profile: MiniMaxH3Co
     network.mark_output(audio)
 
 
-def _native_builder(verbose: bool, workspace_bytes: int | None):
+def _native_builder(
+    verbose: bool,
+    workspace_bytes: int | None,
+    *,
+    weight_streaming: bool = False,
+):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
-    op.configure_builder(config)
-    op.configure_workspace(
-        config,
-        workspace_bytes,
-        default_bytes=DENOISER_DEFAULT_WORKSPACE_BYTES,
-    )
+    op.configure_builder(config, weight_streaming=weight_streaming)
+    # Leave TensorRT-RTX at its device-derived maximum unless the caller
+    # explicitly asks for a smaller tactic workspace. The largest dense plans
+    # use the TensorRT default workspace limit.
+    if workspace_bytes is not None:
+        op.configure_workspace(
+            config,
+            workspace_bytes,
+            default_bytes=DENOISER_DEFAULT_WORKSPACE_BYTES,
+        )
     # Hugging Face keeps TF32 disabled for the FP32 input/output projections.
     config.clear_flag(trt.BuilderFlag.TF32)
     return logger, builder, network, config
@@ -429,6 +450,8 @@ def _add_dynamic_profile(
     config,
     profile: MiniMaxH3Config,
     *,
+    video_inputs: tuple[str, ...] = (),
+    audio_inputs: tuple[str, ...] = (),
     text_inputs: tuple[str, ...] = (),
     packed_inputs: tuple[str, ...] = (),
 ) -> None:
@@ -443,6 +466,20 @@ def _add_dynamic_profile(
         profile.opt_sequence_length,
         profile.sequence_length,
     )
+    for name in video_inputs:
+        optimization.set_shape(
+            name,
+            min=(profile.min_video_rows, profile.video_patch_dim),
+            opt=(profile.opt_video_rows, profile.video_patch_dim),
+            max=(profile.video_rows, profile.video_patch_dim),
+        )
+    for name in audio_inputs:
+        optimization.set_shape(
+            name,
+            min=(profile.min_audio_rows, profile.audio_in_channels),
+            opt=(profile.opt_audio_rows, profile.audio_in_channels),
+            max=(profile.audio_rows, profile.audio_in_channels),
+        )
     for name in text_inputs:
         optimization.set_shape(
             name,
@@ -460,6 +497,17 @@ def _add_dynamic_profile(
     config.add_optimization_profile(optimization)
 
 
+def _add_first_block_cache_profiles(
+    builder,
+    config,
+    profile: MiniMaxH3Config,
+    **binding_groups,
+) -> None:
+    """Use one dynamic profile for the complete requested media envelope."""
+
+    _add_dynamic_profile(builder, config, profile, **binding_groups)
+
+
 def _serialize(
     *,
     logger,
@@ -469,109 +517,26 @@ def _serialize(
     weights: dict,
     consume_weights: bool,
     label: str,
-) -> bytes:
+    output_path: str | Path | None,
+) -> bytes | dict[str, int | str]:
+    plan = None
+    record = None
     try:
-        plan = builder.build_serialized_network(network, config)
+        if output_path is None:
+            plan = builder.build_serialized_network(network, config)
+        else:
+            record = trt_compat.build_serialized_network_to_file(
+                builder, network, config, output_path
+            )
     finally:
         op.release_weight_buffers(network)
         if consume_weights:
             weights.clear()
-    if plan is None:
+    if output_path is None and plan is None:
         raise RuntimeError(f"TensorRT failed to build MiniMax-H3 {label} engine")
     del network, config, builder, logger
     gc.collect()
-    return bytes(plan)
-
-
-def build_dit_engine(
-    weights: dict,
-    profile: MiniMaxH3Config,
-    *,
-    verbose: bool = False,
-    consume_weights: bool = False,
-    workspace_bytes: int | None = None,
-) -> bytes:
-    """Build the full-sequence single-device H3 TensorRT plan."""
-
-    profile.validate()
-    if profile.first_block_cache:
-        raise ValueError("MiniMax-H3 first_block_cache profile requires the split DiT builders")
-    rows = -1
-    logger, builder, network, config = _native_builder(verbose, workspace_bytes)
-
-    video = network.add_input(
-        "video_hidden_states", trt.float32, (profile.video_rows, profile.video_patch_dim)
-    )
-    audio = network.add_input(
-        "audio_hidden_states", trt.float32, (profile.audio_rows, profile.audio_in_channels)
-    )
-    text = network.add_input("encoder_hidden_states", trt.float32, (-1, profile.text_dim))
-    positions = network.add_input("position_ids", trt.float32, (-1, 3))
-    adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
-    timestep_indices = network.add_input("timestep_indices", trt.int32, (-1,))
-    _add_dynamic_profile(
-        builder,
-        config,
-        profile,
-        text_inputs=("encoder_hidden_states",),
-        packed_inputs=("position_ids", "adaln_indices", "timestep_indices"),
-    )
-    block_modulations = [
-        network.add_input(
-            f"block_modulation_{index}",
-            trt.bfloat16,
-            (profile.adaln_table_rows, 6, profile.hidden_size),
-        )
-        for index in range(profile.num_layers)
-    ]
-    final_modulation = network.add_input(
-        "final_modulation", trt.bfloat16, (profile.max_timestep_count, 2, profile.hidden_size)
-    )
-    # The public single-device FL2VA profile is packed as text | audio | video.
-    # Projection, text refinement, packing, and full-sequence attention all
-    # remain native TensorRT operations on one device.
-    hidden = _packed_hidden(network, video, audio, text, weights, profile)
-
-    cos, sin = _rope_tables(network, positions, profile, rows)
-    # The dynamic packed sequence contains live rows only, like Diffusers, so
-    # its attention mask remains None for every supported prompt length.
-    for index in range(profile.num_layers):
-        hidden = _transformer_block(
-            network,
-            hidden,
-            block_modulations[index],
-            adaln_indices,
-            cos,
-            sin,
-            weights,
-            profile,
-            index,
-        )
-
-    hidden = _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile)
-    _mark_sliced_velocity_outputs(network, hidden, weights, profile)
-
-    op.validate_native_network(
-        network,
-        expected_attentions=profile.num_refiner_layers + profile.num_layers,
-        label="DiT",
-    )
-
-    print(
-        f"[minimax-h3] building native DiT: layers={profile.num_layers}, "
-        f"packed={profile.min_sequence_length}..{profile.sequence_length} "
-        f"(opt={profile.opt_sequence_length}), devices=1",
-        file=sys.stderr,
-    )
-    return _serialize(
-        logger=logger,
-        builder=builder,
-        network=network,
-        config=config,
-        weights=weights,
-        consume_weights=consume_weights,
-        label="DiT",
-    )
+    return record if record is not None else bytes(plan)
 
 
 def _require_first_block_cache_profile(profile: MiniMaxH3Config) -> None:
@@ -580,6 +545,7 @@ def _require_first_block_cache_profile(profile: MiniMaxH3Config) -> None:
         raise ValueError("MiniMax-H3 split DiT plans require profile.first_block_cache=True")
 
 
+@op.cleanup_failed_build
 def build_dit_head_engine(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -587,17 +553,20 @@ def build_dit_head_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     """Build packing, text refinement, block zero, and the native cache metric."""
 
     _require_first_block_cache_profile(profile)
-    rows = -1
-    logger, builder, network, config = _native_builder(verbose, workspace_bytes)
+    logger, builder, network, config = _native_builder(
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
     video = network.add_input(
-        "video_hidden_states", trt.float32, (profile.video_rows, profile.video_patch_dim)
+        "video_hidden_states", trt.float32, (-1, profile.video_patch_dim)
     )
     audio = network.add_input(
-        "audio_hidden_states", trt.float32, (profile.audio_rows, profile.audio_in_channels)
+        "audio_hidden_states", trt.float32, (-1, profile.audio_in_channels)
     )
     text = network.add_input("encoder_hidden_states", trt.float32, (-1, profile.text_dim))
     positions = network.add_input("position_ids", trt.float32, (-1, 3))
@@ -610,16 +579,26 @@ def build_dit_head_engine(
     previous_head_residual = network.add_input(
         "previous_head_residual", trt.bfloat16, (-1, profile.hidden_size)
     )
-    _add_dynamic_profile(
+    _add_first_block_cache_profiles(
         builder,
         config,
         profile,
+        video_inputs=("video_hidden_states",),
+        audio_inputs=("audio_hidden_states",),
         text_inputs=("encoder_hidden_states",),
         packed_inputs=("position_ids", "adaln_indices", "previous_head_residual"),
     )
 
-    pre_block_hidden = _packed_hidden(network, video, audio, text, weights, profile)
-    cos, sin = _rope_tables(network, positions, profile, rows)
+    pre_block_hidden = _packed_hidden(
+        network,
+        video,
+        audio,
+        text,
+        weights,
+        profile,
+        consume_weights=consume_weights,
+    )
+    cos, sin = _rope_tables(network, positions, profile)
     head_hidden = _transformer_block(
         network,
         pre_block_hidden,
@@ -630,6 +609,7 @@ def build_dit_head_engine(
         weights,
         profile,
         0,
+        consume_weights=consume_weights,
     )
     head_residual = network.add_elementwise(
         head_hidden, pre_block_hidden, trt.ElementWiseOperation.SUB
@@ -687,9 +667,11 @@ def build_dit_head_engine(
         weights=weights,
         consume_weights=consume_weights,
         label="DiT FirstBlockCache head",
+        output_path=output_path,
     )
 
 
+@op.cleanup_failed_build
 def build_dit_tail_engine(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -697,16 +679,19 @@ def build_dit_tail_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     """Build blocks one through 49 and expose their reusable total residual."""
 
     _require_first_block_cache_profile(profile)
-    rows = -1
-    logger, builder, network, config = _native_builder(verbose, workspace_bytes)
+    logger, builder, network, config = _native_builder(
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
     head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
     positions = network.add_input("position_ids", trt.float32, (-1, 3))
     adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
-    _add_dynamic_profile(
+    _add_first_block_cache_profiles(
         builder,
         config,
         profile,
@@ -720,7 +705,7 @@ def build_dit_tail_engine(
         )
         for index in range(1, profile.num_layers)
     }
-    cos, sin = _rope_tables(network, positions, profile, rows)
+    cos, sin = _rope_tables(network, positions, profile)
     hidden = head_hidden
     for index in range(1, profile.num_layers):
         hidden = _transformer_block(
@@ -733,6 +718,7 @@ def build_dit_tail_engine(
             weights,
             profile,
             index,
+            consume_weights=consume_weights,
         )
     tail_residual = network.add_elementwise(
         hidden, head_hidden, trt.ElementWiseOperation.SUB
@@ -757,9 +743,11 @@ def build_dit_tail_engine(
         weights=weights,
         consume_weights=consume_weights,
         label="DiT FirstBlockCache tail",
+        output_path=output_path,
     )
 
 
+@op.cleanup_failed_build
 def build_dit_finish_engine(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -767,18 +755,30 @@ def build_dit_finish_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     """Apply a selected tail residual, final norm, and consumed-row projections."""
 
     _require_first_block_cache_profile(profile)
-    logger, builder, network, config = _native_builder(verbose, workspace_bytes)
+    logger, builder, network, config = _native_builder(
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
     head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
     tail_residual = network.add_input("tail_residual", trt.bfloat16, (-1, profile.hidden_size))
     timestep_indices = network.add_input("timestep_indices", trt.int32, (-1,))
-    _add_dynamic_profile(
+    video = network.add_input(
+        "video_hidden_states", trt.float32, (-1, profile.video_patch_dim)
+    )
+    audio = network.add_input(
+        "audio_hidden_states", trt.float32, (-1, profile.audio_in_channels)
+    )
+    _add_first_block_cache_profiles(
         builder,
         config,
         profile,
+        video_inputs=("video_hidden_states",),
+        audio_inputs=("audio_hidden_states",),
         packed_inputs=("head_hidden", "tail_residual", "timestep_indices"),
     )
     final_modulation = network.add_input(
@@ -788,7 +788,7 @@ def build_dit_finish_engine(
         head_hidden, tail_residual, trt.ElementWiseOperation.SUM
     ).get_output(0)
     hidden = _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile)
-    _mark_sliced_velocity_outputs(network, hidden, weights, profile)
+    _mark_sliced_velocity_outputs(network, hidden, weights, video, audio)
     op.validate_native_network(
         network,
         expected_attentions=0,
@@ -807,4 +807,5 @@ def build_dit_finish_engine(
         weights=weights,
         consume_weights=consume_weights,
         label="DiT FirstBlockCache finish",
+        output_path=output_path,
     )

@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import gc
 import sys
+from pathlib import Path
 
 import tensorrt as trt
+from . import trt_compat
 
 from . import graph_ops as op
 from .config import (
@@ -41,6 +43,7 @@ def checkpoint_keys(
     return tuple(names)
 
 
+@op.cleanup_failed_build
 def build_adaln_precompute_engine(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -48,19 +51,24 @@ def build_adaln_precompute_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     profile.validate()
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
-    op.configure_builder(config)
-    op.configure_workspace(
-        config,
-        workspace_bytes,
-        default_bytes=ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
-    )
+    op.configure_builder(config, weight_streaming=weight_streaming)
+    # Let TensorRT-RTX use its native maximum pools by default. An explicit
+    # override remains useful for constrained build hosts and unit tests.
+    if workspace_bytes is not None:
+        op.configure_workspace(
+            config,
+            workspace_bytes,
+            default_bytes=ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
+        )
     # Match PyTorch's default FP32 matmul policy used by the reference.
     config.clear_flag(trt.BuilderFlag.TF32)
 
@@ -126,14 +134,21 @@ def build_adaln_precompute_engine(
         f"timesteps={profile.max_timestep_count}",
         file=sys.stderr,
     )
+    plan = None
+    record = None
     try:
-        plan = builder.build_serialized_network(network, config)
+        if output_path is None:
+            plan = builder.build_serialized_network(network, config)
+        else:
+            record = trt_compat.build_serialized_network_to_file(
+                builder, network, config, output_path
+            )
     finally:
         op.release_weight_buffers(network)
         if consume_weights:
             weights.clear()
-    if plan is None:
+    if output_path is None and plan is None:
         raise RuntimeError("TensorRT failed to build MiniMax-H3 AdaLN precompute engine")
     del network, config, builder
     gc.collect()
-    return bytes(plan)
+    return record if record is not None else bytes(plan)
