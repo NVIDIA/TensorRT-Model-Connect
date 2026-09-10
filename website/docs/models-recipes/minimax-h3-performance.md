@@ -1,92 +1,181 @@
 ---
-title: MiniMax H3 performance reproduction
-description: Two-page performance summary and deployment entry points for native MiniMax H3.
+title: MiniMax H3 performance and Quick Start
+description: Six measured configurations, native CLI commands, and clean Windows setup.
 ---
 
-September 10, 2026 | [PR #1241](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1241) | Branch: `codex/minimax-h3-performance`
+September 10, 2026 · [PR #1241](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1241) · Branch: `codex/minimax-h3-performance`
 
-## 1. Results
+## 1. Six configurations: performance and commands
 
-**12/12 configurations completed**, plus two empty-cache checks and a nine-request resident sequence. One runtime supports T2VA, FL2VA and REF2VA, with dynamic prompts and duration. Choose a normal bundle or an explicitly enabled SR bundle.
+**End-to-end minutes, including engine loading and MP4 writing.** Each result is one fresh-process run with a prepared RTX disk cache, not a repeated-prompt hot request. Both FBC thresholds are **0.3**.
 
-**E2E minutes, including engine loading and MP4 writing:**
+| Configuration | 124 frames | 345 frames | Output resolution |
+| --- | ---: | ---: | --- |
+| Normal T2VA | 9.51 min | 46.99 min | 1344 x 768 |
+| Normal FL2VA | 10.03 min | 50.71 min | 1344 x 768 |
+| Normal REF2VA | 16.01 min | 82.33 min | 1344 x 768 |
+| SR T2VA | 3.63 min | 12.37 min | 1296 x 720 |
+| SR FL2VA | 3.66 min | 11.62 min | 1296 x 720 |
+| SR REF2VA | 7.87 min | 29.18 min | 1296 x 720 |
 
-| Mode | Normal, 124 frames | Normal, 345 frames | SR, 124 frames | SR, 345 frames |
-| --- | ---: | ---: | ---: | ---: |
-| T2VA | 9.51 | 46.99 | 3.63 | 12.37 |
-| FL2VA | 10.03 | 50.71 | 3.66 | 11.62 |
-| REF2VA | 16.01 | 82.33 | 7.87 | 29.18 |
+All outputs include **32 kHz stereo audio**. At 24 fps, 124 / 345 frames are 5.167 / 14.375 seconds. SR explicitly generates at **864 x 480**, then upscales; normal never applies SR.
 
-Normal: **1344 x 768**. SR: **864 x 480 -> 1296 x 720**. Outputs are **5.167 / 14.375 seconds**, 24 fps, with 32 kHz stereo audio.
+After Quick Start below, choose **one** command. Set `$Frames = 120` for the measured 124-frame output, or `$Frames = 345` for 345 frames. The argument arrays only shorten ordinary CLI commands; no wrapper script is required.
 
-**Measurement conditions:** fresh process, copied seeded RTX disk cache, seed 0, 50 schedule points, guidance 1, and **both FBC thresholds 0.3**. Each cell is one unprofiled observation; download, build, cache preparation and QA are excluded. OS/driver caches were not cleared and clocks were not locked. Empty-cache short T2VA took 9.67 min normal / 4.04 min SR; these are not fully cold-machine measurements.
+**Normal generation**
 
-**Optimization:** bulk plan reads and request-sized I/O, activation and cache storage. Normal short T2VA decreased from 693.56 to 570.80 seconds versus PR #1240 in the single matched observation (17.7% less wall time). Most other baseline pairs were not measured. The baseline Nsight trace put 63% of denoiser GPU time in attention; long native REF2VA still spends 94.8% of generation in denoising. Model weights and sampling mathematics were unchanged.
+```powershell
+# T2VA
+& $Trtmc generate-video @Normal @T2VA @Run --num-frames $Frames
+# FL2VA
+& $Trtmc generate-video @Normal @FL2VA @Run --num-frames $Frames
+# REF2VA
+& $Trtmc generate-video @Normal @REF2VA @Run --num-frames $Frames
+```
 
-## 2. Deployment
+**Super resolution**
 
-**Tested runtime:** `aa594f6010bd59204c2edc3061fc6e5042572c0d`. Documentation commits do not change that measured revision. Follow [Windows setup](./minimax-h3.md#windows-setup), then the checkpoint-download block in [Build](./minimax-h3.md#build-normal-or-super-resolution). Use the 0.3 build commands below instead of the guide's default builds.
+```powershell
+# T2VA
+& $Trtmc generate-video @SR @T2VA @Run --num-frames $Frames
+# FL2VA
+& $Trtmc generate-video @SR @FL2VA @Run --num-frames $Frames
+# REF2VA
+& $Trtmc generate-video @SR @REF2VA @Run --num-frames $Frames
+```
 
-- Windows; **PowerShell 7.2+**: run `pwsh -NoProfile` from x64 VS 2022 Developer PowerShell.
-- CUDA **12.9**, TensorRT-RTX **1.6.1.120**, matching SDK DLL/wheel and a compatible NVIDIA driver.
-- Recorded build tools: MSVC 19.44, CMake 3.31.6, Ninja 1.12.1, Python 3.13.5.
-- Finished bundles occupy about **117.61 GiB each**; checkpoints and build staging need additional space. Hardware/driver identities are not disclosed, so identical latency on another machine is not guaranteed.
+Run sequentially, not concurrently. Prepare a fresh output/cache directory before each selected command; do not execute these blocks as a batch.
 
-**Weights/runtime:** full Comfy INT8 denoisers; NVFP4-AWQ text weights decoded to **BF16 matmul**, not native FP4 GEMM. Vision, VAEs and Real-ESRGAN remain floating-point. Runtime is ModelConnect **C++/CUDA + TRT-RTX**, including CUDA scheduler/VAE helpers and Windows Media Foundation media I/O. No Python, PyTorch, ComfyUI or FFmpeg is needed for generation; Python is build-time.
+---
 
-After setup defines `$Checkpoint` and `$ArtifactRoot`, build either or both bundles into fresh output paths:
+## 2. Quick Start
+
+### A. Install ModelConnect
+
+Install **VS 2022 C++ tools**, Git, CMake, Ninja, x64 Python 3.12+, **CUDA 12.9**, **TensorRT-RTX 1.6.1.120** and a compatible NVIDIA driver. Open x64 VS Developer PowerShell, then `pwsh -NoProfile` (**PowerShell 7.4+**). Use the matching RTX SDK DLL and Python wheel.
+
+```powershell
+git clone --branch codex/minimax-h3-performance --single-branch `
+  https://github.com/yifeif-nv/TensorRT-Model-Connect-fork.git ModelConnect
+$RepoRoot = (Resolve-Path './ModelConnect').Path
+$CudaRoot = '<CUDA-root>'; $RtxRoot = '<TensorRT-RTX-root>'
+$ArtifactRoot = (New-Item -ItemType Directory '<new-artifact-directory>').FullName
+$BuildRoot = "$ArtifactRoot/build"; $InstallRoot = "$ArtifactRoot/install"
+$env:PATH = "$RtxRoot/bin;$RtxRoot/lib;$CudaRoot/bin;$env:PATH"
+$PSNativeCommandUseErrorActionPreference = $true; $ErrorActionPreference = 'Stop'
+```
+
+Install the CMake dependency, then build only the native CLI, RTX backend and H3 family. Adjust RTX library/DLL directories if your SDK uses a different layout.
+
+```powershell
+$JsonRoot = "$ArtifactRoot/json"; $JsonInstall = "$ArtifactRoot/dependencies"
+git clone --depth 1 --branch v3.11.3 https://github.com/nlohmann/json.git $JsonRoot
+cmake -S $JsonRoot -B "$JsonRoot/build" -DJSON_BuildTests=OFF `
+  "-DCMAKE_INSTALL_PREFIX=$JsonInstall"
+cmake --install "$JsonRoot/build"
+$Cxx = (Get-Command cl.exe).Source -replace '\\', '/'
+cmake -S $RepoRoot -B $BuildRoot -G Ninja -DCMAKE_BUILD_TYPE=Release `
+  "-DCMAKE_CXX_COMPILER=$Cxx" "-DCMAKE_CUDA_HOST_COMPILER=$Cxx" `
+  "-DCMAKE_CUDA_COMPILER=$CudaRoot/bin/nvcc.exe" "-DCUDAToolkit_ROOT=$CudaRoot" `
+  "-DCMAKE_PREFIX_PATH=$JsonInstall" -DCMAKE_CUDA_ARCHITECTURES=native `
+  -DCMAKE_CUDA_RUNTIME_LIBRARY=Static -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+  -DTRTMC_RUNTIME_MODELS=minimax_h3 -DTRTMC_BUILD_BACKEND_TRT=OFF `
+  -DTRTMC_BUILD_BACKEND_RTX=ON "-DTRTMC_RTX_INCLUDE_DIR=$RtxRoot/include" `
+  "-DTRTMC_RTX_LIBRARY_DIR=$RtxRoot/lib" "-DTRTMC_RTX_RUNTIME_DIR=$RtxRoot/bin" `
+  -DTRTMC_ENABLE_BYOK=OFF -DTRTMC_BUILD_TESTS=OFF -DTRTMC_BUILD_EXAMPLES=OFF
+cmake --build $BuildRoot --parallel --target `
+  trtmc trtmc_core trtmc_backend_rtx trtmc_model_minimax_h3
+cmake --install $BuildRoot --prefix $InstallRoot --config Release
+```
+
+Install build-time Python dependencies; generation itself uses native C++/CUDA, TRT-RTX and Windows Media Foundation, without Python.
+
+```powershell
+$PythonTag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"
+$Wheel = @(Get-ChildItem "$RtxRoot/python/tensorrt_rtx-*-$PythonTag-none-win_amd64.whl")
+if ($Wheel.Count -ne 1) { throw 'Select the matching RTX Python wheel' }
+python -m pip install $Wheel[0].FullName
+python -m pip install -r "$RepoRoot/families/minimax_h3/requirements.txt"
+python -m pip install 'torch>=2.6' 'safetensors>=0.4' 'numpy>=1.24' `
+  'ml_dtypes>=0.4' 'onnx>=1.16' 'huggingface_hub>=0.23' 'sentencepiece>=0.1.99' `
+  'cuda-python>=13.0.3,<14' 'apache-tvm-ffi==0.1.12' 'PyYAML>=6.0'
+python -m pip install --no-deps -e $RepoRoot -C py-only=true
+```
+
+### B. Download weights and build bundles
+
+Run the [checkpoint-download block](./minimax-h3.md#build-normal-or-super-resolution) to define `$Checkpoint` and download the original configuration/tokenizer/VAEs. **Then use these builds**, not the guide's default-FBC commands. Comfy INT8 denoisers and the NVFP4-AWQ text checkpoint download automatically; SR also downloads its Real-ESRGAN weights.
+
 ```powershell
 $FBC = @('--set', 'minimax_h3.first_block_cache_threshold=0.3',
          '--set', 'minimax_h3.ref2va_first_block_cache_threshold=0.3')
 python -m tensorrt_model_connect build $Checkpoint --backend trt_rtx `
   --precision bf16 --output "$ArtifactRoot/normal.bundle" @FBC
-if ($LASTEXITCODE) { throw 'Normal build failed' }
 python -m tensorrt_model_connect build $Checkpoint --backend trt_rtx `
   --precision bf16 --output "$ArtifactRoot/sr.bundle" @FBC `
   --set minimax_h3.super_resolution=true
-if ($LASTEXITCODE) { throw 'SR build failed' }
 ```
+
+Build only the bundle(s) you need; each supports all three modes and occupies about **117.61 GiB**, plus checkpoint/staging space. Text weights are decoded to **BF16 matmul**, not native FP4 compute; denoiser linears use INT8. Vision/VAEs/SR remain floating-point.
 
 ---
 
-## 3. Run and reproduce
+### C. Set inputs and run
 
-Use the [recorded prompts, input files and cache protocol](https://github.com/yifeif-nv/TensorRT-Model-Connect-fork/blob/f030c5107bdd8e36298dde184681ca146c0de418/website/docs/models-recipes/minimax-h3-performance.md#exact-evaluation-inputs) for benchmark reproduction. The authorized local package contains the original images/audio and the nine-request C++ manifest. Historical cache seeds are not distributed; the protocol explains how to create a separately labelled local seed. Rebuilt engines/seeds do not guarantee identical historical timings.
+For the recorded benchmark, extract the separately supplied, authorized reproduction package into `$ArtifactRoot`. It supplies `resident-requests.json` and `inputs/first.png`, `last.png`, `audio.wav`. The branch alone does **not** include these media. Your own prompts/media work, but are a different benchmark.
 
-The common native command is below. Set `$Prompt` for the chosen mode, `$Cache` to a fresh copy of the matching bundle's seed, and `$Output` to an unused MP4 path. Cache copying is outside timing.
 ```powershell
-$RuntimeRoot = Join-Path $InstallRoot 'bin'
-$Trtmc = Join-Path $RuntimeRoot 'trtmc.exe'
-& $Trtmc generate-video "$ArtifactRoot/normal.bundle" `
-  --runtime-root $RuntimeRoot --prompt $Prompt `
-  --height 768 --width 1344 --num-frames 120 --seed 0 `
-  --num-steps 50 --guidance-scale 1 `
-  --runtime-cache $Cache --output $Output
-if ($LASTEXITCODE) { throw 'Generation failed' }
+$Eval = Get-Content "$ArtifactRoot/resident-requests.json" -Raw | ConvertFrom-Json
+$InputRoot = "$ArtifactRoot/inputs"
+$T2VA = @('--prompt', $Eval.requests[0].prompt)
+$FL2VA = @('--prompt', $Eval.requests[5].prompt,
+  '--first-frame', "$InputRoot/first.png", '--last-frame', "$InputRoot/last.png")
+$REF2VA = @('--prompt', $Eval.requests[6].prompt,
+  '--reference-image', "$InputRoot/first.png", '--reference-audio', "$InputRoot/audio.wav")
+$RuntimeRoot = "$InstallRoot/bin"; $Trtmc = "$RuntimeRoot/trtmc.exe"
+$Normal = @("$ArtifactRoot/normal.bundle", '--height', '768', '--width', '1344')
+$SR = @("$ArtifactRoot/sr.bundle", '--height', '480', '--width', '864')
 ```
 
-Before executing, append the selected mode's input flags to the generation command (before the exit-code check):
+**Before each run**, select the duration and prepare fresh paths:
 
-| Mode | Input flags |
-| --- | --- |
-| T2VA | None beyond `--prompt` |
-| FL2VA | `--first-frame "$ArtifactRoot/inputs/first.png" --last-frame "$ArtifactRoot/inputs/last.png"` (either endpoint may be omitted) |
-| REF2VA | `--reference-image "$ArtifactRoot/inputs/first.png" --reference-audio "$ArtifactRoot/inputs/audio.wav"`; preserve reference order and prompt tags |
+```powershell
+$Frames = 120 # 124 output frames; change to 345 for the long output
+$RunRoot = New-Item -ItemType Directory (Join-Path $ArtifactRoot ([guid]::NewGuid().ToString('N')))
+$Cache = Join-Path $RunRoot.FullName 'runtime.rtxcache'
+$Run = @('--runtime-root', $RuntimeRoot, '--seed', '0',
+  '--num-steps', '50', '--guidance-scale', '1', '--runtime-cache', $Cache,
+  '--output', (Join-Path $RunRoot.FullName 'video.mp4'))
+```
 
-**Select the other configurations:** change `--num-frames 120` to `345` for long output. For SR, select `sr.bundle` and change dimensions to `--height 480 --width 864`. These two lengths x two bundles x three modes cover the twelve results. SR is never selected automatically from resolution. For empty-cache testing, use a new absent cache path and report it separately.
+Now run **one command from section 1**. Find `video.mp4` in `$RunRoot.FullName`. For another mode or duration, repeat the fresh-path block first.
 
-**Inputs remain dynamic:**
+### D. Reproduce the timing conditions
 
-- Output rounds up to `17*n + 5` within **124-345 frames**; 120 requested frames produce 124.
-- T2VA: up to **2641 text tokens**. FL2VA: **2641 combined text/endpoint rows**. REF2VA: **262144 combined text/reference rows**, with **1-12 ordered references**.
-- Normal uses the supported finite canvas set, not arbitrary dimensions. SR requires the fixed **864 x 480** base. See the [model input limits](./minimax-h3.md#capabilities-and-inputs) for reference counts, durations and aspect ratios.
+Set the aliases below, then run the [three-mode seed procedure](https://github.com/yifeif-nv/TensorRT-Model-Connect-fork/blob/f030c5107bdd8e36298dde184681ca146c0de418/website/docs/models-recipes/minimax-h3-performance.md#optional-deterministic-request-order-for-creating-local-seeds) once to prepare a compatible cache per bundle. Preparation is not timed; historical seeds are not distributed.
 
-**C++ API:** use `trtmc::load_task` and `IVideoGeneration::generate_video(request)`; keep the task alive for repeated requests. The [complete C++ example](./minimax-h3.md#c-api) includes compilation and conditioning fields. It returns frames/audio in memory; applications own media decoding/container writing. The [native resident consumer](https://github.com/yifeif-nv/TensorRT-Model-Connect-fork/blob/f030c5107bdd8e36298dde184681ca146c0de418/families/minimax_h3/tools/README.md) also handles MP4 I/O and ordered requests. Resident request timings are not fresh-process E2E timings.
+```powershell
+$NormalBundle = $Normal[0]; $SrBundle = $SR[0]
+$T2vaPrompt = $T2VA[1]; $Fl2vaPrompt = $FL2VA[1]; $Ref2vaPrompt = $REF2VA[1]
+$SeedRoot = "$ArtifactRoot/cache-seeds"
+$OutputRoot = (New-Item -ItemType Directory -Force "$ArtifactRoot/outputs").FullName
+```
 
-## 4. Quality and limits
+Create fresh paths in C, then copy the matching seed **before** timing. Example for normal T2VA; change the seed and command together for other configurations:
 
-All twelve outputs passed full audio/video decode, finite-audio checks and sampled visual inspection. No obvious sampled corruption or replacement scene was found. **Detail and framing can differ**, especially long REF2VA; outputs are not pixel-identical. Full-motion playback and listening were not completed.
+```powershell
+Copy-Item "$SeedRoot/normal.rtxcache" $Cache
+$Timer = [Diagnostics.Stopwatch]::StartNew()
+& $Trtmc generate-video @Normal @T2VA @Run --num-frames $Frames
+$Timer.Stop()
+if ($LASTEXITCODE) { throw 'Generation failed; do not report a successful timing' }
+$Timer.Elapsed.TotalSeconds
+```
 
-FBC is approximate; **0.3 is the measured build setting, not the product default (0.08)**. SR is not pixel-equivalent to native-resolution generation. The tested subset is not exhaustive, and these timings are not universal hardware or quality guarantees. PR #1241 remains Draft pending review.
+Use a new process and fresh seed copy for each measurement. Do not add a full-generation warmup or require a repeated prompt. Keep seed 0, 50 schedule points, guidance 1, FBC 0.3, the exact prompts/media and recorded dimensions. Never time profiler runs as ordinary E2E.
 
-**More detail only when needed:** [all twelve exact commands, source pins, stage timings and validation evidence](https://github.com/yifeif-nv/TensorRT-Model-Connect-fork/blob/f030c5107bdd8e36298dde184681ca146c0de418/website/docs/models-recipes/minimax-h3-performance.md). Raw logs/traces and unapproved fixtures stay private.
+Recorded runtime: `aa594f6010bd59204c2edc3061fc6e5042572c0d`; later commits are documentation-only. Each table cell is **n=1**. Build/download/cache preparation/QA are excluded; OS/driver caches were not cleared and clocks were not locked. Different hardware, rebuilt engines or local cache seeds can change latency.
+
+**Scope:** dynamic prompts and the 124–345-frame grid remain supported; SR requires the fixed 864 x 480 base. All twelve outputs passed full media decode and sampled visual checks, not full-motion/listening qualification. FBC 0.3 is approximate (default: 0.08); detail/framing can differ, and SR is not pixel-equivalent to native output.
+
+[C++ API example](./minimax-h3.md#c-api) · [Input limits](./minimax-h3.md#capabilities-and-inputs) · [Detailed measurement evidence](https://github.com/yifeif-nv/TensorRT-Model-Connect-fork/blob/f030c5107bdd8e36298dde184681ca146c0de418/website/docs/models-recipes/minimax-h3-performance.md)
