@@ -218,6 +218,8 @@ ITask* create(const FamilyContext& context) {
 
 } // namespace trtmc::k2_horizon_uno
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("k2_horizon_uno")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("k2_horizon_uno does not support --kv-cache-size");
