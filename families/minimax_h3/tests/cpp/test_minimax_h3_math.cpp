@@ -100,6 +100,72 @@ void test_first_block_cache_tail_schedule() {
           "H3 FirstBlockCache refreshes a non-finite residual baseline");
 }
 
+void test_first_block_cache_request_capacity() {
+    struct Request {
+        int32_t frames;
+        int32_t height;
+        int32_t width;
+        int32_t text_rows;
+        int32_t keyframes;
+        std::size_t expected_bytes;
+    };
+    // One tensor; the runtime owns four with identical request-sized capacity.
+    for (const auto& request : {
+             Request{124, 768, 1344, 94, 0, 406468608U},
+             Request{345, 768, 1344, 94, 0, 1118853120U},
+             Request{124, 480, 864, 94, 0, 166580736U},
+             Request{345, 480, 864, 94, 0, 457540608U},
+             Request{124, 480, 864, 938, 2, 184364544U},
+             Request{345, 480, 864, 938, 2, 475324416U},
+             Request{124, 768, 1344, 2144, 2, 450186240U},
+             Request{345, 768, 1344, 2144, 2, 1162570752U}}) {
+        auto geometry = trtmc::make_minimax_h3_geometry(
+            request.frames, request.height, request.width);
+        if (request.keyframes != 0)
+            geometry = trtmc::make_minimax_h3_fl2va_geometry(geometry, request.keyframes);
+        check(trtmc::minimax_h3_cache_tensor_bytes(request.text_rows, geometry) ==
+                  request.expected_bytes,
+              "H3 cache capacity follows actual T2VA/FL2VA text, media, and condition rows");
+    }
+
+    const auto short_geometry = trtmc::make_minimax_h3_geometry(124, 480, 864);
+    const auto minimum = trtmc::minimax_h3_cache_tensor_bytes(1, short_geometry);
+    const auto longer_prompt = trtmc::minimax_h3_cache_tensor_bytes(2641, short_geometry);
+    check(minimum == 15400U * 5376U * sizeof(uint16_t),
+          "H3 cache accepts the broad dynamic profile minimum");
+    check(longer_prompt - minimum == 2640U * 5376U * sizeof(uint16_t) &&
+              trtmc::minimax_h3_cache_tensor_bytes(1, short_geometry) == minimum,
+          "H3 cache byte requirement grows and shrinks with the current prompt");
+    const auto maximum_geometry = trtmc::make_minimax_h3_fl2va_geometry(
+        trtmc::make_minimax_h3_geometry(345, 576, 1856), 2);
+    check(trtmc::minimax_h3_cache_tensor_bytes(2641, maximum_geometry) == 1208169984U,
+          "H3 cache retains the complete public dynamic profile maximum");
+
+    for (const int32_t text_rows : {0, 2642, std::numeric_limits<int32_t>::max()}) {
+        bool rejected = false;
+        try {
+            (void)trtmc::minimax_h3_cache_tensor_bytes(text_rows, short_geometry);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "H3 cache rejects invalid prompt rows before allocation");
+    }
+    for (const auto [video_rows, audio_rows] : {
+             std::pair<int32_t, int32_t>{14984, 414}, {108577, 414},
+             {14985, 413}, {14985, 1151}, {std::numeric_limits<int32_t>::max(), 414}}) {
+        auto invalid_geometry = short_geometry;
+        invalid_geometry.video_rows = video_rows;
+        invalid_geometry.audio_rows = audio_rows;
+        bool rejected = false;
+        try {
+            (void)trtmc::minimax_h3_cache_tensor_bytes(94, invalid_geometry);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "H3 cache rejects per-modality profile overflow before allocation");
+    }
+}
+
 void test_data_ward_euler_sign() {
     std::vector<float> sample = {1.0F, -2.0F};
     const std::vector<float> velocity = {0.5F, 0.25F};
@@ -580,6 +646,7 @@ int main() {
     test_shared_conditioning_activation_policy();
     test_pinned_schedules();
     test_first_block_cache_tail_schedule();
+    test_first_block_cache_request_capacity();
     test_data_ward_euler_sign();
     test_variable_text_position_layout();
     test_prompt_token_profile_boundaries();

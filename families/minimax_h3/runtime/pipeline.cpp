@@ -844,6 +844,16 @@ bool device_tensors_ready(std::initializer_list<const DeviceTensor*> tensors) {
     });
 }
 
+bool cache_tensors_fit(std::initializer_list<const DeviceTensor*> tensors,
+                       std::size_t required_bytes) {
+    for (const auto* tensor : tensors) {
+        if (tensor == nullptr || !tensor->ok() || tensor->dtype() != DType::kBFloat16 ||
+            tensor->nbytes() < required_bytes)
+            return false;
+    }
+    return true;
+}
+
 class Ref2vaFirstBlockCache {
   public:
     Ref2vaFirstBlockCache(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
@@ -854,26 +864,27 @@ class Ref2vaFirstBlockCache {
           max_rows_(profile_count == 2 && profile_index == 0
                         ? minimax_h3::kRef2vaFiveSecondMaxPackedRows
                         : minimax_h3::kRef2vaMaxPackedRows),
-          head_hidden_({max_rows_, kHidden}, DType::kBFloat16, stream),
-          head_residual_({max_rows_, kHidden}, DType::kBFloat16, stream),
-          previous_head_residual_({max_rows_, kHidden}, DType::kBFloat16, stream),
-          tail_residual_({max_rows_, kHidden}, DType::kBFloat16, stream), synchronize_(stream) {
-        if (!device_tensors_ready(
-                {&head_hidden_, &head_residual_, &previous_head_residual_, &tail_residual_}))
-            throw std::runtime_error("MiniMax-H3 Ref2VA failed to allocate cache buffers");
-        head_ = loader("ref2va_dit_head_plan", stream,
-                       {external_binding("head_hidden", head_hidden_),
-                        external_binding("head_residual", head_residual_),
-                        external_binding("previous_head_residual", previous_head_residual_)},
-                       profile_index);
-        tail_ = loader("ref2va_dit_tail_plan", stream,
-                       {external_binding("head_hidden", head_hidden_),
-                        external_binding("tail_residual", tail_residual_)},
-                       profile_index);
-        finish_ = loader("ref2va_dit_finish_plan", stream,
-                         {external_binding("head_hidden", head_hidden_),
-                          external_binding("tail_residual", tail_residual_)},
-                         profile_index);
+          cache_tensor_bytes_(minimax_h3::ref2va_cache_tensor_bytes(
+              sequence_rows_, profile_index, profile_count)),
+          head_hidden_({sequence_rows_, kHidden}, DType::kBFloat16, stream),
+          head_residual_({sequence_rows_, kHidden}, DType::kBFloat16, stream),
+          previous_head_residual_({sequence_rows_, kHidden}, DType::kBFloat16, stream),
+          tail_residual_({sequence_rows_, kHidden}, DType::kBFloat16, stream), synchronize_(stream) {
+        const std::vector<int64_t> cache_shape{sequence_rows_, kHidden};
+        for (const DeviceTensor* buffer :
+             {&head_hidden_, &head_residual_, &previous_head_residual_, &tail_residual_}) {
+            if (!buffer->ok() || buffer->dtype() != DType::kBFloat16 ||
+                buffer->shape() != cache_shape || buffer->nbytes() != cache_tensor_bytes_)
+                throw std::runtime_error("MiniMax-H3 Ref2VA request cache allocation is invalid");
+        }
+        // Initial external bindings require profile-MAX capacity. Instead,
+        // borrow these checked request-sized buffers after module creation.
+        // Serial contexts defer owned dynamic I/O, so no MAX-sized duplicate
+        // is allocated. No enqueue occurs until forward inputs and cache
+        // shapes have been bound.
+        head_ = loader("ref2va_dit_head_plan", stream, {}, profile_index);
+        tail_ = loader("ref2va_dit_tail_plan", stream, {}, profile_index);
+        finish_ = loader("ref2va_dit_finish_plan", stream, {}, profile_index);
         head_->set_timing_label("ref2va_dit_head_plan");
         tail_->set_timing_label("ref2va_dit_tail_plan");
         finish_->set_timing_label("ref2va_dit_finish_plan");
@@ -904,6 +915,12 @@ class Ref2vaFirstBlockCache {
         if (cudaMemsetAsync(previous_head_residual_.data(), 0, sequence_bytes(), stream_) !=
             cudaSuccess)
             throw std::runtime_error("MiniMax-H3 Ref2VA failed to reset cache state");
+        std::cerr << "[minimax-h3.ref2va_cache_memory] requested_rows=" << sequence_rows_
+                  << " profile_max_rows=" << max_rows_
+                  << " requested_cache_bytes=" << cache_tensor_bytes_ * 4U
+                  << " profile_max_cache_bytes="
+                  << static_cast<std::size_t>(max_rows_) * kHidden * sizeof(uint16_t) * 4U
+                  << '\n';
     }
 
     minimax_h3::Ref2vaVelocities forward(minimax_h3::Ref2vaDenoiserInputs& inputs,
@@ -973,13 +990,14 @@ class Ref2vaFirstBlockCache {
 
   private:
     std::size_t sequence_bytes() const {
-        return static_cast<std::size_t>(sequence_rows_) * kHidden * sizeof(uint16_t);
+        return cache_tensor_bytes_;
     }
 
     cudaStream_t stream_;
     int64_t sequence_rows_;
     minimax_h3::Ref2vaCacheIndices cache_indices_;
     int64_t max_rows_;
+    std::size_t cache_tensor_bytes_;
     DeviceTensor head_hidden_;
     DeviceTensor head_residual_;
     DeviceTensor previous_head_residual_;
@@ -1021,6 +1039,19 @@ int32_t select_minimax_h3_denoiser_profile(
     // Every supported layout ends with the broad public dynamic profile.
     // Retain compatibility without executing older fixed or short profiles.
     return optimization_profile_count - 1;
+}
+
+std::size_t minimax_h3_cache_tensor_bytes(int32_t text_rows,
+                                           const MiniMaxH3Geometry& geometry) {
+    validate_text_rows(text_rows);
+    if (geometry.video_rows < kMinVideoRows || geometry.video_rows > kMaxVideoRows ||
+        geometry.audio_rows < kMinAudioRows || geometry.audio_rows > kMaxAudioRows)
+        throw std::invalid_argument("MiniMax-H3 cache request exceeds dynamic profile bounds");
+    const int64_t sequence_rows =
+        static_cast<int64_t>(text_rows) + geometry.audio_rows + geometry.video_rows;
+    if (sequence_rows < kMinPackedRows || sequence_rows > kMaxSequenceRows)
+        throw std::invalid_argument("MiniMax-H3 cache rows exceed the dynamic profile");
+    return static_cast<std::size_t>(sequence_rows) * kHidden * sizeof(uint16_t);
 }
 
 MiniMaxH3VaeTileLayout make_minimax_h3_vae_tile_layout(int32_t output_height,
@@ -1259,7 +1290,7 @@ struct MiniMaxH3Pipeline::ResidentState {
 
     void release_denoiser_stage(bool preserve_video_rows);
     void release_vae_stage();
-    bool denoiser_is_resident(int32_t profile_index) const;
+    bool denoiser_is_resident(int32_t profile_index, std::size_t cache_bytes) const;
     void load_first_block_cache_denoiser(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
                                          const MiniMaxH3Geometry& geometry, int32_t profile_index,
                                          int32_t profile_count);
@@ -1399,37 +1430,39 @@ void MiniMaxH3Pipeline::ResidentState::load_modulations(const MiniMaxH3Schedule&
     module->sync();
 }
 
-bool MiniMaxH3Pipeline::ResidentState::denoiser_is_resident(int32_t profile_index) const {
+bool MiniMaxH3Pipeline::ResidentState::denoiser_is_resident(int32_t profile_index,
+                                                           std::size_t cache_bytes) const {
     return denoiser_profile_index == profile_index && denoiser_head != nullptr &&
            denoiser_tail != nullptr && denoiser_finish != nullptr &&
-           device_tensors_ready({head_hidden.get(), head_residual.get(),
-                                 previous_head_residual.get(), tail_residual.get(),
-                                 video_rows.get(), audio_rows.get(), video_velocity.get(),
+           cache_tensors_fit({head_hidden.get(), head_residual.get(),
+                               previous_head_residual.get(), tail_residual.get()}, cache_bytes) &&
+           device_tensors_ready({video_rows.get(), audio_rows.get(), video_velocity.get(),
                                  audio_velocity.get()});
 }
 
 void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     const MiniMaxH3ModuleLoader& loader, cudaStream_t stream, const MiniMaxH3Geometry& geometry,
     int32_t profile_index, int32_t profile_count) {
-    if (text_rows < kMinTextRows || text_rows > kMaxTextRows)
-        throw std::logic_error("MiniMax-H3 text embeddings are not prepared");
+    const std::size_t cache_bytes = minimax_h3_cache_tensor_bytes(text_rows, geometry);
+    const int64_t sequence_rows =
+        static_cast<int64_t>(text_rows) + geometry.audio_rows + geometry.video_rows;
     constexpr int64_t profile_sequence_rows = kMaxSequenceRows;
     constexpr int64_t profile_video_rows = kMaxVideoRows;
     constexpr int64_t profile_audio_rows = kMaxAudioRows;
     std::cerr << "[minimax-h3] denoiser optimization_profile=" << profile_index << '/'
               << profile_count << " packed_rows=" << profile_sequence_rows << '\n';
 
-    DeviceTensor new_head_hidden({profile_sequence_rows, kHidden}, DType::kBFloat16, stream);
-    DeviceTensor new_head_residual({profile_sequence_rows, kHidden}, DType::kBFloat16, stream);
-    DeviceTensor new_previous_head_residual({profile_sequence_rows, kHidden}, DType::kBFloat16,
-                                            stream);
-    DeviceTensor new_tail_residual({profile_sequence_rows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_head_hidden({sequence_rows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_head_residual({sequence_rows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_previous_head_residual({sequence_rows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_tail_residual({sequence_rows, kHidden}, DType::kBFloat16, stream);
     DeviceTensor new_video_rows({profile_video_rows, kPatchDim}, DType::kFloat32, stream);
     DeviceTensor new_audio_rows({profile_audio_rows, kAudioChannels}, DType::kFloat32, stream);
     DeviceTensor new_video_velocity({profile_video_rows, kPatchDim}, DType::kFloat32, stream);
     DeviceTensor new_audio_velocity({profile_audio_rows, kAudioChannels}, DType::kFloat32, stream);
-    if (!device_tensors_ready({&new_head_hidden, &new_head_residual, &new_previous_head_residual,
-                               &new_tail_residual, &new_video_rows, &new_audio_rows,
+    if (!cache_tensors_fit({&new_head_hidden, &new_head_residual, &new_previous_head_residual,
+                            &new_tail_residual}, cache_bytes) ||
+        !device_tensors_ready({&new_video_rows, &new_audio_rows,
                                &new_video_velocity, &new_audio_velocity}))
         throw std::runtime_error("MiniMax-H3 failed to allocate FirstBlockCache buffers");
 
@@ -1443,30 +1476,21 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     auto resident_video_velocity = std::make_unique<DeviceTensor>(std::move(new_video_velocity));
     auto resident_audio_velocity = std::make_unique<DeviceTensor>(std::move(new_audio_velocity));
 
-    // Prebind max-capacity buffers during deserialization so dynamic plans do
-    // not first allocate a second set of max-profile buffers. Runtime shapes
-    // are selected immediately after module creation below.
+    // Keep auxiliary buffers prebound at profile MAX. The four request-sized
+    // cache tensors are late-bound below, after validating their live capacity
+    // and the unchanged MAX plan ABI.
     const std::vector<ModuleExternalBinding> head_bindings = {
-        external_binding("head_hidden", *resident_head_hidden),
-        external_binding("head_residual", *resident_head_residual),
-        external_binding("previous_head_residual", *resident_previous_head_residual),
         external_binding("video_hidden_states", *resident_video_rows),
         external_binding("audio_hidden_states", *resident_audio_rows),
     };
-    const std::vector<ModuleExternalBinding> tail_bindings = {
-        external_binding("head_hidden", *resident_head_hidden),
-        external_binding("tail_residual", *resident_tail_residual),
-    };
     const std::vector<ModuleExternalBinding> finish_bindings = {
-        external_binding("head_hidden", *resident_head_hidden),
-        external_binding("tail_residual", *resident_tail_residual),
         external_binding("video_hidden_states", *resident_video_rows),
         external_binding("audio_hidden_states", *resident_audio_rows),
         external_binding("video_velocity", *resident_video_velocity),
         external_binding("audio_velocity", *resident_audio_velocity),
     };
     auto head = loader("denoiser_head_plan", stream, head_bindings, profile_index);
-    auto tail = loader("denoiser_tail_plan", stream, tail_bindings, profile_index);
+    auto tail = loader("denoiser_tail_plan", stream, {}, profile_index);
     auto finish = loader("denoiser_finish_plan", stream, finish_bindings, profile_index);
     head->set_timing_label("denoiser_head_plan");
     tail->set_timing_label("denoiser_tail_plan");
@@ -1496,12 +1520,22 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     audio_velocity = std::move(resident_audio_velocity);
     denoiser_profile_index = profile_index;
     bind_first_block_cache_shapes(geometry);
+    std::cerr << "[minimax-h3.cache_memory] requested_rows=" << sequence_rows
+              << " profile_max_rows=" << profile_sequence_rows
+              << " requested_cache_bytes=" << cache_bytes * 4U
+              << " profile_max_cache_bytes="
+              << static_cast<std::size_t>(profile_sequence_rows) * kHidden * sizeof(uint16_t) * 4U
+              << '\n';
 }
 
 void MiniMaxH3Pipeline::ResidentState::bind_first_block_cache_shapes(
     const MiniMaxH3Geometry& geometry) {
     if (!denoiser_head || !denoiser_tail || !denoiser_finish)
         throw std::logic_error("MiniMax-H3 split denoiser is not loaded");
+    const std::size_t cache_bytes = minimax_h3_cache_tensor_bytes(text_rows, geometry);
+    if (!cache_tensors_fit({head_hidden.get(), head_residual.get(),
+                            previous_head_residual.get(), tail_residual.get()}, cache_bytes))
+        throw std::logic_error("MiniMax-H3 cache buffers are smaller than the current request");
     const int64_t sequence_rows =
         static_cast<int64_t>(text_rows) + geometry.audio_rows + geometry.video_rows;
     const int32_t profile_count = denoiser_head->optimization_profile_count();
@@ -1555,7 +1589,8 @@ bool MiniMaxH3Pipeline::ResidentState::prepare_denoiser(const MiniMaxH3ModuleLoa
                                            config.optimization_profile_layout);
     const bool same_shape = denoiser_geometry.video_rows == geometry.video_rows &&
                             denoiser_geometry.audio_rows == geometry.audio_rows;
-    const bool resident_hit = same_shape && denoiser_is_resident(profile_index);
+    const std::size_t cache_bytes = minimax_h3_cache_tensor_bytes(text_rows, geometry);
+    const bool resident_hit = same_shape && denoiser_is_resident(profile_index, cache_bytes);
     if (!resident_hit)
         release_denoiser_stage(/*preserve_video_rows=*/false);
     if (resident_hit) {

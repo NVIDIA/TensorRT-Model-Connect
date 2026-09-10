@@ -1481,6 +1481,20 @@ int32_t select_ref2va_denoiser_profile(int32_t optimization_profile_count, int32
                : 1;
 }
 
+std::size_t ref2va_cache_tensor_bytes(int64_t sequence_rows, int32_t profile_index,
+                                      int32_t profile_count) {
+    if ((profile_count != 1 && profile_count != 2) || profile_index < 0 ||
+        profile_index >= profile_count)
+        throw std::invalid_argument("MiniMax-H3 Ref2VA cache profile is invalid");
+    const int64_t maximum = profile_count == 2 && profile_index == 0
+                                ? kRef2vaFiveSecondMaxPackedRows
+                                : kRef2vaMaxPackedRows;
+    if (sequence_rows < kMinPackedRows || sequence_rows > maximum)
+        throw std::invalid_argument("MiniMax-H3 Ref2VA cache rows exceed the selected profile");
+    return checked_product({static_cast<std::size_t>(sequence_rows), 5376U, sizeof(uint16_t)},
+                           "request cache tensor");
+}
+
 void validate_ref2va_denoiser_profile_selection(ITrtModule& module, int32_t expected_profile_count,
                                                 int32_t expected_profile_index) {
     if ((expected_profile_count != 1 && expected_profile_count != 2) ||

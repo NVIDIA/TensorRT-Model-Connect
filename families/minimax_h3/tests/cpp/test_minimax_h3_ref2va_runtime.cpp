@@ -712,6 +712,35 @@ void test_strict_plan_abi_and_fake_end_to_end() {
             "Ref2VA fake native plan path did not complete scatter/gather output");
 }
 
+void test_request_sized_cache_capacity() {
+    using trtmc::minimax_h3::ref2va_cache_tensor_bytes;
+    constexpr std::size_t row_bytes = 5376U * sizeof(uint16_t);
+    for (const int64_t rows : {int64_t{15400}, int64_t{86662}})
+        require(ref2va_cache_tensor_bytes(rows, 0, 2) ==
+                    static_cast<std::size_t>(rows) * row_bytes,
+                "short-profile cache capacity does not follow its actual request");
+    for (const int64_t rows : {int64_t{15400}, int64_t{118793}, int64_t{630310}}) {
+        const auto expected = static_cast<std::size_t>(rows) * row_bytes;
+        require(ref2va_cache_tensor_bytes(rows, 1, 2) == expected &&
+                    ref2va_cache_tensor_bytes(rows, 0, 1) == expected,
+                "public/legacy cache capacity does not preserve its dynamic request range");
+    }
+    require(ref2va_cache_tensor_bytes(118793, 1, 2) <
+                ref2va_cache_tensor_bytes(630310, 1, 2),
+            "request-sized cache still reserves public profile MAX");
+    for (const int64_t rows : {int64_t{-1}, int64_t{0}, int64_t{15399}, int64_t{630311}})
+        require(rejects([&] { (void)ref2va_cache_tensor_bytes(rows, 1, 2); }),
+                "public cache accepted out-of-profile rows");
+    require(rejects([] { (void)ref2va_cache_tensor_bytes(86663, 0, 2); }),
+            "short cache accepted rows belonging to the public fallback");
+    for (const auto profile : {std::pair<int32_t, int32_t>{-1, 2}, {2, 2}, {1, 1}, {0, 0},
+                               {0, 3}})
+        require(rejects([&] {
+                    (void)ref2va_cache_tensor_bytes(15400, profile.first, profile.second);
+                }),
+                "request cache accepted an invalid profile selection");
+}
+
 } // namespace
 
 int main() {
@@ -726,6 +755,7 @@ int main() {
         test_request_boundary_validation();
         test_strict_plan_abi_and_fake_end_to_end();
         test_first_block_cache_contract();
+        test_request_sized_cache_capacity();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

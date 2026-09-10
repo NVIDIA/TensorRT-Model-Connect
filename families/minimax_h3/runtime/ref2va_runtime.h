@@ -10,6 +10,7 @@
 #include "trtmc/runtime/trt_module.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -220,6 +221,11 @@ Ref2vaTimestepTable pad_ref2va_timesteps(const std::vector<float>& unique_timest
 // public fallback. Legacy one-profile bundles always select profile zero.
 int32_t select_ref2va_denoiser_profile(int32_t optimization_profile_count, int32_t video_rows,
                                        int32_t audio_rows, int32_t text_rows);
+
+// One request owns four BF16 [sequence_rows, 5376] cache tensors. Capacity
+// follows that request; the selected engine's full profile remains unchanged.
+std::size_t ref2va_cache_tensor_bytes(int64_t sequence_rows, int32_t profile_index,
+                                      int32_t profile_count);
 
 void validate_ref2va_denoiser_profile_selection(ITrtModule& module, int32_t expected_profile_count,
                                                 int32_t expected_profile_index);

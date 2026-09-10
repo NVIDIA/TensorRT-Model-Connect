@@ -13,6 +13,7 @@
 #include "trtmc/task.h"
 
 #include <array>
+#include <cstddef>
 #include <cuda_runtime_api.h>
 #include <functional>
 #include <memory>
@@ -112,6 +113,9 @@ MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output
                                            int32_t output_width);
 MiniMaxH3Geometry make_minimax_h3_fl2va_geometry(const MiniMaxH3Geometry& target_geometry,
                                                  int32_t keyframe_count);
+// Each of the four BF16 cache tensors follows the current request, not profile MAX.
+std::size_t minimax_h3_cache_tensor_bytes(int32_t text_rows,
+                                           const MiniMaxH3Geometry& geometry);
 MiniMaxH3DenoiserMetadata make_minimax_h3_denoiser_metadata(int32_t text_rows,
                                                             const MiniMaxH3Geometry& geometry);
 MiniMaxH3DenoiserProfileLayout parse_minimax_h3_denoiser_profile_layout(
