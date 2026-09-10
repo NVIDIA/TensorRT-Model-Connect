@@ -16,6 +16,7 @@ const TASKS = {
   image_generation: ['Image generation', 'Computer Vision', 'text-to-image', 'generate-image'],
   image_generation_batch: ['Batch image generation', 'Computer Vision', 'text-to-image', 'generate-image-batch'],
   monocular_geometry: ['Monocular geometry', 'Computer Vision', 'depth-estimation', 'geometry'],
+  object_detection: ['Object detection', 'Computer Vision', 'object-detection', 'detect'],
   pose_hypothesis_refinement: ['Pose hypothesis refinement', 'Robotics', 'robotics', null],
   prompted_segmentation: ['Prompted segmentation', 'Computer Vision', 'mask-generation', 'segment'],
   reranking: ['Text ranking', 'Natural Language Processing', 'text-ranking', 'rerank'],
