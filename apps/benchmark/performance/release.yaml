@@ -62,6 +62,11 @@ excluded_profiles:
       workload and receipt were collected only for yolov10n.
   - model: yolov10x
     reason: *yolov10_performance_exclusion
+  - model: dm-nfnet-f3-dm-in1k
+    reason: >-
+      Functional and timm reference-parity qualification is present for every
+      published dm_nfnet checkpoint, but the release-performance workload and
+      receipt were collected only for dm_nfnet_f0.
 
 entries:
   - id: albert.encode
@@ -1195,6 +1200,19 @@ entries:
       adapter: ultralytics-detection
       mode: torch-eager
       reference_backend: ultralytics
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_nfnet.classify
+    family: timm_nfnet
+    operation: classify
+    model: dm-nfnet-f0-dm-in1k
+    workload:
+      testcase: dm-nfnet-f0-dm-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_repvgg.classify
