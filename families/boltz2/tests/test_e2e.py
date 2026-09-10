@@ -36,6 +36,27 @@ def _cases() -> dict[str, tuple[dict, dict]]:
 CASES = _cases()
 
 
+def test_multichain_protein_request_contract() -> None:
+    from families.boltz2.contracts import parse_request_yaml
+
+    request = parse_request_yaml(
+        """version: 1
+sequences:
+  - protein:
+      id: [A, B]
+      sequence: ACDE
+      msa: shared.a3m
+  - protein:
+      id: C
+      sequence: FGHIK
+      msa: chain-c.a3m
+"""
+    )
+    assert request.token_count == 13
+    assert request.sequences[0].chain_ids == ("A", "B")
+    assert request.sequences[1].chain_ids == ("C",)
+
+
 def pytest_generate_tests(metafunc) -> None:
     if "case_name" not in metafunc.fixturenames:
         return
@@ -252,17 +273,35 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
         bundle_stat.st_mtime_ns,
         bundle_stat.st_ctime_ns,
     )
+    from families.boltz2.contracts import parse_request_yaml
+
     variant_request = TEST_ROOT / "data/protein_monomer_variant/protein_monomer_variant.yaml"
-    prepared = tmp_path / "protein_monomer_variant.b2rq"
+    variant = parse_request_yaml(variant_request.read_text(encoding="utf-8"))
+    complex_sequence = variant.sequences[0].sequence[:50]
+    complex_root = tmp_path / "protein-complex"
+    complex_root.mkdir()
+    complex_a3m = complex_root / "protein_complex.a3m"
+    complex_a3m.write_text(f">query\n{complex_sequence}\n", encoding="utf-8")
+    complex_request = complex_root / "protein_complex.yaml"
+    complex_request.write_text(
+        "version: 1\n"
+        "sequences:\n"
+        "  - protein:\n"
+        "      id: [A, B]\n"
+        f"      sequence: {complex_sequence}\n"
+        f"      msa: {complex_a3m.name}\n",
+        encoding="utf-8",
+    )
+    prepared = tmp_path / "protein_complex.b2rq"
     request_cache = tmp_path / "request-cache"
     preparation = prepare_structure_request(
         model_dir,
-        variant_request,
+        complex_request,
         prepared,
         cache_dir=request_cache,
     )
-    variant_structure = tmp_path / "variant.cif"
-    variant_metadata = tmp_path / "variant.json"
+    complex_structure = tmp_path / "complex.cif"
+    complex_metadata = tmp_path / "complex.json"
     completed = subprocess.run(
         [
             str(binary),
@@ -273,9 +312,9 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
             "--input",
             str(prepared),
             "--output",
-            str(variant_structure),
+            str(complex_structure),
             "--output-json",
-            str(variant_metadata),
+            str(complex_metadata),
         ],
         check=True,
         capture_output=True,
@@ -292,25 +331,27 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
         bundle_stat.st_mtime_ns,
         bundle_stat.st_ctime_ns,
     ) == bundle_identity
-    assert json.loads(variant_metadata.read_text(encoding="utf-8"))["profile"] == (
-        "tokens_117_atoms_928"
-    )
+    complex_details = json.loads(complex_metadata.read_text(encoding="utf-8"))
+    assert complex_details["profile"] == "tokens_117_atoms_928"
+    assert complex_details["active_token_count"] == 100
+    assert complex_details["active_atom_count"] == 794
+    assert complex_details["chain_pair_confidence"] == []
     _assert_live_reference_parity(
         model_dir,
         request_cache
         / str(preparation["cache_key"])[:2]
         / str(preparation["cache_key"])
         / "work/processed",
-        variant_structure,
-        variant_metadata,
-        tmp_path / "variant-reference",
-        atom_count=thresholds["atom_count"],
-        token_count=thresholds["token_count"],
+        complex_structure,
+        complex_metadata,
+        tmp_path / "complex-reference",
+        atom_count=794,
+        token_count=100,
     )
     cached = prepare_structure_request(
         model_dir,
-        variant_request,
-        tmp_path / "protein_monomer_variant-cached.b2rq",
+        complex_request,
+        tmp_path / "protein_complex-cached.b2rq",
         cache_dir=request_cache,
     )
     assert cached["cache_hit"] is True
