@@ -146,28 +146,30 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             text=True,
             timeout=600,
         )
-    record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
-    actual = json.loads(completed.stdout)
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
+        actual = json.loads(completed.stdout)
     record_evidence("native", actual)
 
-    import timm
-    import torch
-    from PIL import Image
-    from timm.data import create_transform, resolve_model_data_config
-
-    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    reference = timm.create_model(
-        config["architecture"],
-        pretrained=False,
-        pretrained_cfg=config["pretrained_cfg"],
-        num_classes=int(config["num_classes"]),
-        checkpoint_path=str(model_dir / "model.safetensors"),
-    )
-    reference = reference.to("cuda").eval()
-    transform = create_transform(**resolve_model_data_config(reference), is_training=False)
-    pixels = transform(Image.open(_asset(case)).convert("RGB")).unsqueeze(0).to("cuda")
     with evidence_stage("reference"):
+        import timm
+        import torch
+        from PIL import Image
+        from timm.data import create_transform, resolve_model_data_config
+
+        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+        reference = timm.create_model(
+            config["architecture"],
+            pretrained=False,
+            pretrained_cfg=config["pretrained_cfg"],
+            num_classes=int(config["num_classes"]),
+            checkpoint_path=str(model_dir / "model.safetensors"),
+        )
+        reference = reference.to("cuda").eval()
+        transform = create_transform(**resolve_model_data_config(reference), is_training=False)
+        pixels = transform(Image.open(_asset(case)).convert("RGB")).unsqueeze(0).to("cuda")
         with torch.no_grad():
             expected = reference(pixels).float().cpu().numpy()
             record_evidence("reference", {"logits": expected})

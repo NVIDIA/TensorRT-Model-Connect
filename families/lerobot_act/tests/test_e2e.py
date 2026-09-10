@@ -137,65 +137,73 @@ def _qualification_binary() -> tuple[Path, Path]:
 
 
 def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict, tmp_path: Path):
-    output = tmp_path / "actions.f32"
-    completed = subprocess.run(
-        [
-            str(binary),
-            "control",
-            str(bundle),
-            "--runtime-root",
-            str(runtime_root),
-            "--image",
-            str(_asset(case, "image")),
-            "--state",
-            str(_asset(case, "state")),
-            "--output",
-            str(output),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=1800,
-    )
-    record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
-    summary = json.loads(completed.stdout)
-    actions = np.fromfile(output, dtype="<f4").reshape(100, 14)
-
-    qualification_binary, qualification_root = _qualification_binary()
-    qualification_output = tmp_path / "qualification-actions.f32"
-    environment = os.environ.copy()
-    environment["LD_LIBRARY_PATH"] = ":".join(
-        value
-        for value in (
-            str(qualification_root),
-            str(runtime_root),
-            environment.get("LD_LIBRARY_PATH", ""),
+    with evidence_stage("native"):
+        output = tmp_path / "actions.f32"
+        completed = subprocess.run(
+            [
+                str(binary),
+                "control",
+                str(bundle),
+                "--runtime-root",
+                str(runtime_root),
+                "--image",
+                str(_asset(case, "image")),
+                "--state",
+                str(_asset(case, "state")),
+                "--output",
+                str(output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=1800,
         )
-        if value
-    )
-    completed = subprocess.run(
-        [
-            str(qualification_binary),
-            str(bundle),
-            str(qualification_root),
-            str(_asset(case, "image")),
-            str(_asset(case, "state")),
-            str(qualification_output),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-        timeout=1800,
-    )
-    record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
-    summary.update(json.loads(completed.stdout))
-    qualification_actions = np.fromfile(qualification_output, dtype="<f4").reshape(100, 14)
-    assert np.array_equal(actions, qualification_actions)
-    assert summary["num_actions"] == 100
-    assert summary["action_dim"] == 14
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
+        summary = json.loads(completed.stdout)
+        actions = np.fromfile(output, dtype="<f4").reshape(100, 14)
+
+    with evidence_stage("build"):
+        qualification_binary, qualification_root = _qualification_binary()
+    with evidence_stage("qualification"):
+        qualification_output = tmp_path / "qualification-actions.f32"
+        environment = os.environ.copy()
+        environment["LD_LIBRARY_PATH"] = ":".join(
+            value
+            for value in (
+                str(qualification_root),
+                str(runtime_root),
+                environment.get("LD_LIBRARY_PATH", ""),
+            )
+            if value
+        )
+        completed = subprocess.run(
+            [
+                str(qualification_binary),
+                str(bundle),
+                str(qualification_root),
+                str(_asset(case, "image")),
+                str(_asset(case, "state")),
+                str(qualification_output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=1800,
+        )
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
+        summary.update(json.loads(completed.stdout))
+        qualification_actions = np.fromfile(qualification_output, dtype="<f4").reshape(100, 14)
+    with evidence_stage("compare"):
+        assert np.array_equal(actions, qualification_actions)
+        assert summary["num_actions"] == 100
+        assert summary["action_dim"] == 14
     return summary, actions
 
 
@@ -333,8 +341,7 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
             )
         )
 
-    with evidence_stage("native"):
-        summary, actual = _run_native(binary, runtime_root, bundle, case, tmp_path)
+    summary, actual = _run_native(binary, runtime_root, bundle, case, tmp_path)
     record_evidence("native", {"summary": summary, "actions": actual})
     with evidence_stage("reference"):
         expected = _run_reference(model_dir, case, tmp_path)

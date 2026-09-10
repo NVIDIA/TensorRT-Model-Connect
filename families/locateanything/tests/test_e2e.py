@@ -195,8 +195,10 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
-    record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native_process",
+        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -397,10 +399,12 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         _build(model_dir, bundle, manifest)
-    from families.locateanything.tests.vision_oracle import native_vision_features
+    with evidence_stage("native"):
+        from families.locateanything.tests.vision_oracle import native_vision_features
 
+        vision_features = native_vision_features(bundle, _asset(case["test_image"]))
     with evidence_stage("compare"):
-        _assert_native_vision_health(native_vision_features(bundle, _asset(case["test_image"])))
+        _assert_native_vision_health(vision_features)
     with evidence_stage("native"):
         actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
     record_evidence("native", actual)

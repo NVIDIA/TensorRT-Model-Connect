@@ -377,7 +377,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
                 expected = _official_reference(model_dir, manifest, window_case, window_root)
             record_evidence("reference", expected)
             with evidence_stage("compare"):
-                _assert_parity(actual, expected, manifest, window_case, gates(case_name))
+                _assert_parity(actual, expected, manifest, window_case, record_evidence("thresholds", gates(case_name)))
         return
     with evidence_stage("native"):
         actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)

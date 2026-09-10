@@ -142,8 +142,10 @@ def _inspect_bundle(binary: Path, bundle: Path) -> None:
         text=True,
         timeout=30,
     )
-    record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native_process",
+        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+    )
     payload = json.loads(completed.stdout)
     assert payload["family"] == _FAMILY
     assert payload["task"] == "monocular_geometry"
@@ -213,8 +215,10 @@ def _run_native(
         text=True,
         timeout=1800,
     )
-    record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native_process",
+        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+    )
     return _load_native_geometry(output_dir, completed.stdout)
 
 
@@ -245,8 +249,10 @@ def _run_reference(
         text=True,
         timeout=1800,
     )
-    record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("reference", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "reference_process",
+        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+    )
     assert json.loads(completed.stdout)["num_tokens"] == 1800
     with np.load(output, allow_pickle=False) as payload:
         return {
@@ -359,8 +365,8 @@ def _thresholds(case_name: str) -> dict[str, float]:
 @pytest.mark.parametrize("case_name", sorted(_CASES))
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
-    record_evidence("inputs", {"manifest": manifest, "case": _CASES[case_name][-1]})
     _require_selected(case_name, manifest, request.config)
+    record_evidence("inputs", {"manifest": manifest, "case": _CASES[case_name][-1]})
     binary, runtime_root, source_root = _required_environment()
     model_dir = _checkpoint(manifest)
     record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
@@ -375,7 +381,8 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
 
     with evidence_stage("build"):
         _build_bundle(manifest, model_dir, bundle)
-    _inspect_bundle(binary, bundle)
+    with evidence_stage("inspect"):
+        _inspect_bundle(binary, bundle)
     with evidence_stage("native"):
         actual = _run_native(binary, runtime_root, bundle, image, tmp_path / "native")
     record_evidence("native", actual)

@@ -146,8 +146,11 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             text=True,
             timeout=600,
         )
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
         actual = json.loads(completed.stdout)
-    record_evidence("commands", {"argv": completed.args})
     record_evidence("native", actual)
 
     with evidence_stage("reference"):

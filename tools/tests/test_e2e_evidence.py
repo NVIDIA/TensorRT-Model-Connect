@@ -224,6 +224,137 @@ def test_e2e(case_name):
     assert not (evidence_root / "evidence/not-selected").exists()
 
 
+@pytest.mark.parametrize("outcome", ["passed", "failed", "skipped"])
+@pytest.mark.parametrize("failure", ["finish", "json", "write", "render", "captured_output"])
+def test_reporting_failures_preserve_pytest_outcomes(pytester, monkeypatch, outcome, failure):
+    from tools import e2e_report
+
+    evidence_root = pytester.path / "captured"
+    monkeypatch.setenv("TRTMC_E2E_ARTIFACT_DIR", str(evidence_root))
+    monkeypatch.setenv("TRTMC_E2E_SOURCE_REVISION", "a" * 40)
+    monkeypatch.setattr(e2e_evidence, "_environment", lambda: {})
+    original_finish = Evidence.finish
+    original_record = Evidence.record
+
+    def broken_finish(self, *args, **kwargs):
+        if failure == "finish":
+            raise OSError("synthetic finish failure")
+        if failure == "json":
+            self.data["unsupported_json_value"] = object()
+        if failure == "write":
+            self.directory.mkdir(parents=True, exist_ok=True)
+            (self.directory / ".evidence.tmp").mkdir()
+        return original_finish(self, *args, **kwargs)
+
+    def broken_render(*args, **kwargs):
+        raise ValueError("synthetic render failure")
+
+    def broken_record(self, name, value):
+        if name == "captured_output":
+            raise OSError("synthetic captured output failure")
+        return original_record(self, name, value)
+
+    monkeypatch.setattr(Evidence, "finish", broken_finish)
+    if failure == "render":
+        monkeypatch.setattr(e2e_report, "render_case", broken_render)
+    if failure == "captured_output":
+        monkeypatch.setattr(Evidence, "record", broken_record)
+    pytester.makeini("[pytest]\nenable_assertion_pass_hook = true\n")
+    pytester.makeconftest('pytest_plugins = ("tools.e2e_evidence",)')
+    path = pytester.path / "families/example/tests/test_e2e.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"""
+import pytest
+from tools.e2e_evidence import record_evidence
+@pytest.mark.parametrize("case_name", ["example-case"])
+def test_e2e(case_name):
+    record_evidence("inputs", {{"prompt": "A synthetic prompt"}})
+    print("A captured diagnostic")
+    if {outcome!r} == "skipped":
+        pytest.skip("the original skip")
+    assert {outcome!r} != "failed", "the original assertion failure"
+""")
+    junit = pytester.path / "results.xml"
+    result = pytester.runpytest(
+        str(path), "-q", "-W", "error", "-p", "no:cacheprovider", f"--junitxml={junit}"
+    )
+
+    result.assert_outcomes(**{outcome: 1}, errors=0)
+    assert result.ret == (1 if outcome == "failed" else 0)
+    output = result.stdout.str()
+    assert "[evidence]" in output and "Could not" in output
+    assert "INTERNALERROR" not in output and "PluggyTeardownRaisedWarning" not in output
+    assert 'name="trtmc_evidence_error"' in junit.read_text()
+    if outcome == "failed":
+        assert "the original assertion failure" in output
+    if failure == "captured_output":
+        evidence = json.loads((evidence_root / "evidence/example-case/evidence.json").read_text())
+        assert evidence["status"] == outcome and evidence["evidence_status"] == "partial"
+
+
+@pytest.mark.parametrize("selection", ["model", "models_file", "not_enabled"])
+def test_unselected_skip_with_captured_output_preserves_existing_evidence(
+    pytester, monkeypatch, selection
+):
+    evidence_root = pytester.path / "captured"
+    previous = evidence_root / "evidence/example-case/evidence.json"
+    previous.parent.mkdir(parents=True)
+    previous.write_text('{"retained": "previous evidence"}\n')
+    original = previous.read_bytes()
+    monkeypatch.setenv("TRTMC_E2E_ARTIFACT_DIR", str(evidence_root))
+    monkeypatch.setenv("TRTMC_E2E_SOURCE_REVISION", "a" * 40)
+    monkeypatch.delenv("TRTMC_E2E", raising=False)
+    monkeypatch.setattr(e2e_evidence, "_environment", lambda: {})
+    pytester.makeini("[pytest]\nenable_assertion_pass_hook = true\n")
+    pytester.makeconftest("""
+import pytest
+pytest_plugins = ("tools.e2e_evidence",)
+def pytest_addoption(parser):
+    parser.addoption("--e2e-model", action="append", default=[])
+    parser.addoption("--e2e-models-file")
+@pytest.fixture(autouse=True)
+def captured_setup_and_teardown():
+    print("captured setup output")
+    yield
+    print("captured teardown output")
+""")
+    path = pytester.path / "families/example/tests/test_e2e.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("""
+import os
+from pathlib import Path
+import pytest
+from tools.e2e_evidence import record_evidence
+@pytest.mark.parametrize("case_name", ["example-case"])
+def test_e2e(case_name, request):
+    print("captured call output")
+    selected = set(request.config.getoption("--e2e-model"))
+    models_file = request.config.getoption("--e2e-models-file")
+    if models_file:
+        selected.update(Path(models_file).read_text().splitlines())
+    if not selected and os.environ.get("TRTMC_E2E") != "1":
+        pytest.skip("E2E is disabled")
+    if selected and case_name not in selected:
+        pytest.skip("not selected")
+    record_evidence("inputs", {"prompt": "Selected input"})
+    assert True
+""")
+    options = []
+    if selection == "model":
+        options = ["--e2e-model", "another-case"]
+    elif selection == "models_file":
+        models_file = pytester.path / "selected-models.txt"
+        models_file.write_text("another-case\n")
+        options = ["--e2e-models-file", str(models_file)]
+
+    result = pytester.runpytest(str(path), *options, "-q", "-W", "error", "-p", "no:cacheprovider")
+
+    result.assert_outcomes(skipped=1, errors=0)
+    assert result.ret == 0
+    assert previous.read_bytes() == original
+    assert sorted(path.name for path in previous.parent.iterdir()) == ["evidence.json"]
+
+
 class _DefaultText(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -1375,3 +1506,25 @@ def test_repeat_summary_never_overrides_different_actual_input():
     assert "differs from the repeat configuration" in _demo_input(data)
     data["reference"] = {"text": "Saved reference"}
     assert assessment(data)["label"] != "Runtime stress test passed"
+
+
+def test_recording_error_keeps_outcome_when_terminal_sink_fails(tmp_path):
+    from types import SimpleNamespace
+    from tools.e2e_evidence import _report_evidence_error
+
+    def unavailable(*args, **kwargs):
+        raise OSError("terminal unavailable")
+
+    terminal = SimpleNamespace(write_line=unavailable)
+    item = SimpleNamespace(
+        nodeid="sample",
+        config=SimpleNamespace(pluginmanager=SimpleNamespace(get_plugin=lambda name: terminal)),
+    )
+    report = SimpleNamespace(outcome="passed", sections=[], user_properties=[])
+    recorder = _recorder(tmp_path)
+    _report_evidence_error(item, report, recorder, "write", OSError("record unavailable"))
+    assert report.outcome == "passed"
+    assert report.user_properties == [
+        ("trtmc_evidence_error", "Could not write evidence: OSError: record unavailable")
+    ]
+    assert recorder.data["evidence_status"] == "partial"

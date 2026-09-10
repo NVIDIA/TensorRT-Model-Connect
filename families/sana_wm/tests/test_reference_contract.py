@@ -93,6 +93,13 @@ def test_raw_snapshot_calls_declared_official_entrypoint(monkeypatch, tmp_path: 
     assert not (model_dir / "model_index.json").exists()
     monkeypatch.setenv("TRTMC_REFERENCE_SOURCE_DIR", str(source))
     captured = {}
+    observations = {}
+
+    def record(name, value):
+        observations[name] = value
+        return value
+
+    monkeypatch.setattr(e2e, "record_evidence", record)
 
     def run(command, **kwargs):
         captured["command"] = command
@@ -100,7 +107,9 @@ def test_raw_snapshot_calls_declared_official_entrypoint(monkeypatch, tmp_path: 
         output = Path(command[command.index("--output_dir") + 1])
         output.mkdir()
         (output / "reference_generated.mp4").write_bytes(b"video")
-        return e2e.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return e2e.subprocess.CompletedProcess(
+            command, 0, stdout="reference progress\n", stderr="reference diagnostic\n"
+        )
 
     def decode(video_path: Path, frames_dir: Path):
         captured["video_path"] = video_path
@@ -149,6 +158,11 @@ def test_raw_snapshot_calls_declared_official_entrypoint(monkeypatch, tmp_path: 
     assert captured["kwargs"]["env"]["PYTHONPATH"] == str(source)
     assert captured["video_path"] == tmp_path / "reference-video/reference_generated.mp4"
     assert len(result["frame_paths"]) == 3
+    assert observations["reference_process"] == {
+        "argv": command,
+        "stdout": "reference progress\n",
+        "stderr": "reference diagnostic\n",
+    }
 
 
 def test_official_reference_dependency_failure_is_not_hidden(monkeypatch, tmp_path: Path) -> None:

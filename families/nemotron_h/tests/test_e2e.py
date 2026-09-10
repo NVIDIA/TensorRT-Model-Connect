@@ -584,8 +584,8 @@ def test_golden_reference_fails_closed_for_missing_or_invalid_data(tmp_path: Pat
 @pytest.mark.parametrize("case_name", sorted(_CASES))
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
-    record_evidence("inputs", {"manifest": manifest, "case": _CASES[case_name][-1]})
     _require_selected(case_name, manifest, request.config)
+    record_evidence("inputs", {"manifest": manifest, "case": _CASES[case_name][-1]})
     tp_size = manifest["tensor_parallel_size"]
     binary, runtime_root, torch = _required_environment(tp_size)
     model_dir = _checkpoint(manifest)

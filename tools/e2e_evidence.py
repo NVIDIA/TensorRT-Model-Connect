@@ -504,20 +504,28 @@ def _capture_e2e_evidence(request):
         _ACTIVE.reset(token)
 
 
+def _report_evidence_error(item, report, recorder: Evidence, operation: str, error: Exception):
+    message = f"Could not {operation} evidence: {type(error).__name__}: {error}"
+    recorder.data["issues"].append(message)
+    recorder.data["evidence_status"] = "partial"
+    report.sections.append(("evidence", message))
+    report.user_properties.append(("trtmc_evidence_error", message))
+    terminal = item.config.pluginmanager.get_plugin("terminalreporter")
+    if terminal is not None:
+        try:
+            terminal.write_line(f"[evidence] {item.nodeid}: {message}", yellow=True)
+        except Exception:
+            # The report section and JUnit property retain the diagnostic even
+            # when a terminal sink is unavailable. Keep the test outcome intact.
+            pass
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
     setattr(item, f"_trtmc_{report.when}_report", report)
     recorder = getattr(item, "_trtmc_evidence", None)
-    if recorder is not None and report.sections:
-        recorder.record(
-            "captured_output",
-            [
-                {"stream": name, "text": content[-12000:], "truncated": len(content) > 12000}
-                for name, content in report.sections
-            ],
-        )
     if (
         recorder is not None
         and report.failed
@@ -550,9 +558,35 @@ def pytest_runtest_makereport(item, call):
         )
         if status == "skipped" and not recorder.data["observations"]:
             return
+        # Logs alone must not prepare or replace a skipped testcase directory.
+        # Pytest repeats earlier phase sections; keep each named stream once.
+        sections = {
+            name: content
+            for value in reports
+            if value is not None
+            for name, content in value.sections
+        }
+        if sections:
+            try:
+                recorder.record(
+                    "captured_output",
+                    [
+                        {
+                            "stream": name,
+                            "text": content[-12000:],
+                            "truncated": len(content) > 12000,
+                        }
+                        for name, content in sections.items()
+                    ],
+                )
+            except Exception as error:
+                _report_evidence_error(item, report, recorder, "record captured output for", error)
         if failures and recorder.data["failure_stage"] is None:
             recorder.data["failure_stage"] = failures[0].when
-        recorder.finish(status, failure="\n".join(str(value.longrepr) for value in failures))
+        try:
+            recorder.finish(status, failure="\n".join(str(value.longrepr) for value in failures))
+        except Exception as error:
+            _report_evidence_error(item, report, recorder, "write", error)
 
 
 def pytest_assertion_pass(item, lineno, orig, expl):

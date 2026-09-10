@@ -403,9 +403,9 @@ def _assert_correctness(
 @pytest.mark.parametrize("case_name", sorted(_CASES))
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
+    _require_selected(case_name, manifest, request.config)
     record_evidence("inputs", {"manifest": manifest, "case": _CASES[case_name][-1]})
     record_evidence("thresholds", {"exact_token_ids": not _is_sampling(case), "max_new_tokens": case["max_new_tokens"], "case_contract": case})
-    _require_selected(case_name, manifest, request.config)
     tp_size = manifest["tensor_parallel_size"]
     binary, runtime_root, torch = _required_environment(tp_size)
     model_dir = _checkpoint(manifest)

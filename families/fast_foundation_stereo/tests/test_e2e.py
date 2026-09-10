@@ -435,7 +435,7 @@ def test_middlebury_q_task_accuracy_e2e(case_name: str, request, tmp_path: Path)
         with evidence_stage("compare"):
             _assert_parity(actual, expected, manifest, case, thresholds)
         truth, valid = ground_truth(case["inputs"])
-        record_evidence("reference", {"ground_truth": truth, "valid_mask": valid})
+        record_evidence("ground_truth", {"ground_truth": truth, "valid_mask": valid})
         statistics.append(scene_statistics(_disparity(actual), _disparity(expected), truth, valid))
 
     aggregate = aggregate_task_accuracy(
