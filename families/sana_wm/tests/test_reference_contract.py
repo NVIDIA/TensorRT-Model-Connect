@@ -20,7 +20,7 @@ def test_official_source_dependencies_are_family_owned() -> None:
     }
     assert {
         "flash-linear-attention>=0.4.2",
-        "imageio[pyav]",
+        "imageio[pyav,ffmpeg]",
         "mmcv==1.7.2",
         "pyrallis",
         "pytz",
