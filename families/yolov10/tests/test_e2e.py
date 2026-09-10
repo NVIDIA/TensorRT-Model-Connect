@@ -113,6 +113,13 @@ def _reference_yaml(model_dir: Path) -> str:
     return model
 
 
+def _reference_tensors(model_dir: Path) -> dict:
+    from families.yolov10.checkpoint import Checkpoint
+
+    checkpoint = Checkpoint.open(model_dir, framework="pt")
+    return {name: reader.get_tensor(name) for name, reader in checkpoint.tensor_map.items()}
+
+
 def _record_reference_boxes(rows, scale: float, pad_x: float, pad_y: float) -> None:
     if not evidence_enabled():
         return
@@ -188,9 +195,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         # quietly downloads its own weights instead, which would compare the engine
         # against a different model.
         reference = YOLO(_reference_yaml(model_dir), task="detect").model
-        from safetensors.torch import load_file
-
-        raw = load_file(str(model_dir / "model.safetensors"))
+        raw = _reference_tensors(model_dir)
         state = {key[len("model."):]: value for key, value in raw.items() if key.startswith("model.")}
         missing, unexpected = reference.load_state_dict(state, strict=False)
         assert not missing, f"reference is missing checkpoint tensors: {missing[:5]}"
