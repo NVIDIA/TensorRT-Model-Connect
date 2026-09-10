@@ -27,6 +27,11 @@
 
 ## 💻 Example Code
 
+Try [Nemotron Voice Lab for Windows](examples/windows_voicechat/README.md) for a
+local voice application with TensorRT-RTX, live transcripts, audio-reactive visuals,
+and stream mode. The example contains source and setup scripts; dependencies and
+model weights are downloaded separately on the user's PC.
+
 ```bash
 python -m tensorrt_model_connect build Qwen/Qwen3-0.6B \
   --max-sequence-length 16384 \

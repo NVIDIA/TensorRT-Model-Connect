@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/NVIDIA/TensorRT-Model-Connect",
+  "pullRequest": "https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1218",
+  "headRepository": "https://github.com/yifeif-nv/TensorRT-Model-Connect-fork",
+  "headBranch": "codex/voicechat-w8a8-sm86",
+  "headCommit": "7458623963a038fa1ae1f1bac28eee6a5c792514",
+  "checkpoint": "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
+  "checkpointRevision": "359ada7b1c60851e40ff08065f9b0340244f27e0",
+  "textAssetRevision": "6533e8de2c68e4536bf7c411d7a3ce5734111476",
+  "backend": "trt_rtx",
+  "electron": "44.3.0",
+  "tensorrtRtx": "1.6.1.120"
+}

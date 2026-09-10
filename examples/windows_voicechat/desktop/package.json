@@ -1,0 +1,11 @@
+{
+  "name": "nemotron-voice-lab",
+  "productName": "Nemotron Voice Lab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Windows Nemotron VoiceChat studio powered by TensorRT-RTX",
+  "main": "main.js",
+  "scripts": {"test": "node --test tests/*.test.js", "start": "electron ."},
+  "devDependencies": {"electron": "44.3.0"},
+  "license": "Apache-2.0"
+}

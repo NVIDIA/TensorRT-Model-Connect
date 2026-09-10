@@ -5,6 +5,7 @@
 
 #include "families/nemotron_voicechat/runtime/audio_helpers.h"
 #include "families/nemotron_voicechat/runtime/pipeline.h"
+#include "families/nemotron_voicechat/runtime/session_state.h"
 
 #include <array>
 #include <cmath>
@@ -244,6 +245,81 @@ void test_equal_rate_stream_rebase_is_sample_exact() {
           "an early recovery rollover preserves an undersized mel prefix verbatim");
 }
 
+void test_repeated_live_context_resets_preserve_capture_frontier() {
+    trtmc::voicechat_audio::MelSpectrogramOptions options;
+    options.n_fft = 8;
+    options.win_length = 8;
+    options.hop_length = 160;
+    options.chunk_length_s = 60;
+    options.sample_rate = 16000;
+    options.center_window_in_fft = true;
+    options.preemphasis = 0.73F;
+    options.log_scale = trtmc::voicechat_audio::MelLogScale::kNaturalLog;
+    const std::array<float, 5> filterbank = {0.8F, 0.2F, 0.5F, 0.3F, 0.7F};
+    const std::array<float, 8> exact_window = {0.2F, 0.5F, 0.8F, 1.0F, 1.0F, 0.8F, 0.5F, 0.2F};
+    auto make_mel = [&] {
+        return trtmc::voicechat_audio::IncrementalMelSpectrogram(
+            filterbank.data(), 5, 1, options, options.sample_rate, exact_window.data(),
+            static_cast<int32_t>(exact_window.size()));
+    };
+    auto baseline = make_mel();
+    auto refreshed = make_mel();
+    voicechat::FrameScheduler scheduler;
+    int32_t baseline_next = 0;
+    int32_t refreshed_next = 0;
+    int32_t processed_frames = 0;
+    bool first_step = true;
+    bool exact = true;
+    bool bounded = true;
+    for (int32_t packet = 0; packet < 400; ++packet) {
+        std::array<float, 320> capture{};
+        for (std::size_t sample = 0; sample < capture.size(); ++sample) {
+            const auto absolute = packet * 320 + static_cast<int32_t>(sample);
+            capture[sample] = static_cast<float>((absolute * 7 % 23) - 11) * 0.031F;
+        }
+        scheduler.append(capture.data(), static_cast<int32_t>(capture.size()));
+        if (auto frame = scheduler.pop()) {
+            baseline.accept_audio(frame->samples.data(), frame->valid_input_samples);
+            refreshed.accept_audio(frame->samples.data(), frame->valid_input_samples);
+            const auto original_step = voicechat::make_streaming_mel_step(
+                first_step, baseline_next, baseline.available_frames(), false);
+            const auto refreshed_step = voicechat::make_streaming_mel_step(
+                first_step, refreshed_next, refreshed.available_frames(), false);
+            exact = exact && original_step.engine_frames == refreshed_step.engine_frames;
+            baseline.ensure_frames(baseline_next + original_step.valid_new_frames, false);
+            refreshed.ensure_frames(refreshed_next + refreshed_step.valid_new_frames, false);
+            for (int32_t column = 0; column < original_step.engine_frames; ++column) {
+                const int32_t original_index =
+                    baseline_next - original_step.history_frames + column;
+                const int32_t refreshed_index =
+                    refreshed_next - refreshed_step.history_frames + column;
+                const float expected =
+                    original_index < 0 ? 0.0F : baseline.value(0, original_index);
+                const float actual =
+                    refreshed_index < 0 ? 0.0F : refreshed.value(0, refreshed_index);
+                exact = exact && std::memcmp(&expected, &actual, sizeof(float)) == 0;
+            }
+            baseline_next += original_step.valid_new_frames;
+            refreshed_next += refreshed_step.valid_new_frames;
+            first_step = false;
+            ++processed_frames;
+        }
+        // Reset at every 20-ms capture boundary, including three calls with
+        // no intervening audio. Partial 80-ms input frames remain in place.
+        const auto pending_before = scheduler.pending_samples();
+        for (int32_t repeat = 0; repeat < 3; ++repeat)
+            refreshed_next = voicechat::rebase_streaming_mel(refreshed, refreshed_next);
+        exact = exact && scheduler.pending_samples() == pending_before;
+        bounded = bounded && refreshed_next <= 10 && refreshed.available_frames() <= 18;
+    }
+    check(processed_frames == 100 && scheduler.pending_samples() == 0,
+          "repeated context resets retain every partial 20-ms capture packet across 100 model "
+          "frames");
+    check(exact,
+          "all first/steady mel inputs remain bitwise equal through repeated live context resets");
+    check(bounded, "repeated live context resets retain a fixed mel history and guard prefix");
+}
+
 } // namespace
 
 int main() {
@@ -253,5 +329,6 @@ int main() {
     test_resampled_stream_crosses_physical_tts_cache_boundary();
     test_checkpoint_window_and_reflect_boundary();
     test_equal_rate_stream_rebase_is_sample_exact();
+    test_repeated_live_context_resets_preserve_capture_frontier();
     return failures;
 }

@@ -73,6 +73,13 @@ class ConversationMemory {
                               std::string_view unresolved_user = {},
                               bool* unresolved_user_included = nullptr) const;
 
+    // Recovery must not feed a previously accepted but degraded answer back
+    // into a fresh recurrent state. Forget all prior turns/facts and carry
+    // only the latest unanswered user request, if there is one.
+    std::string forget_and_build_capsule(const TokenCounter& count_tokens, std::size_t token_budget,
+                                         std::string_view unresolved_user = {},
+                                         bool* unresolved_user_included = nullptr);
+
     std::size_t turn_count() const noexcept { return turns_.size(); }
     std::size_t stable_fact_count() const noexcept { return stable_facts_.size(); }
 
@@ -82,6 +89,26 @@ class ConversationMemory {
     ConversationMemoryLimits limits_;
     std::deque<ConversationTurn> turns_;
     std::vector<StableConversationFact> stable_facts_;
+};
+
+// Bounded detector-only history. These strings are never prompt context.
+// Long copied passages are recognized during generation despite casing,
+// punctuation, or a small number of inserted/changed words. Short factual
+// answers and explicit requests to repeat a previous answer remain allowed.
+class ResponseRepetitionGuard {
+  public:
+    bool repeated(std::string_view user, std::string_view response, bool is_final = false) const;
+    void remember(std::string_view user, std::string_view response, bool rejected);
+    void clear() noexcept { history_.clear(); }
+    std::size_t size() const noexcept { return history_.size(); }
+
+  private:
+    struct Entry {
+        std::vector<std::string> user;
+        std::vector<std::string> response;
+        bool rejected{false};
+    };
+    std::deque<Entry> history_;
 };
 
 } // namespace trtmc::nemotron_voicechat

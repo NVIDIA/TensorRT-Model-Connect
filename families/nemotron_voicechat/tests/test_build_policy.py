@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+import numpy as np
 
 from families.nemotron_voicechat import model
 
@@ -193,3 +195,75 @@ def test_runtime_records_compression_and_omits_it_by_default(
         "thinker_embedding_precision",
         "thinker_lm_head_precision",
     }.isdisjoint(default_runtime)
+
+
+@pytest.mark.parametrize("backend", ["trt", "trt_rtx"])
+def test_complete_build_preserves_explicit_backend_in_header_and_runtime(
+    backend: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Exercise family orchestration while replacing expensive engine compilers."""
+    from tensorrt_model_connect.build import BuildRequest
+
+    stt, speech = _voicechat_sections()
+    stt["pretrained_llm"] = model.TEXT_MODEL_ID
+    raw = {"model": {"stt": {"model": stt}, "speech_generation": {"model": speech}}}
+    (tmp_path / "config.json").write_text(json.dumps(raw), encoding="utf-8")
+    (tmp_path / "rnnt_tokenizer").mkdir()
+    (tmp_path / "rnnt_tokenizer/vocab.json").write_text('["hello"]', encoding="utf-8")
+    _write_text_asset_fixtures(tmp_path)
+    monkeypatch.setattr(model, "_resolve_text_assets", lambda: tmp_path)
+    quant_context = object()
+    monkeypatch.setattr(model, "_build_thinker_quant_context", lambda _: quant_context)
+    built = []
+
+    def module(name: str, **members):
+        result = ModuleType(f"families.nemotron_voicechat.{name}")
+        result.__dict__.update(members)
+        monkeypatch.setitem(sys.modules, result.__name__, result)
+        monkeypatch.setattr(sys.modules["families.nemotron_voicechat"], name, result, raising=False)
+        return result
+
+    def thinker_engine(_config, _weights, cache_length, **kwargs):
+        assert cache_length == 512
+        assert kwargs["quant_ctx"] is quant_context
+        built.append("thinker")
+        return b"compiled-thinker"
+
+    module(
+        "native_core",
+        VoiceChatThinkerBuilder=lambda: SimpleNamespace(load_weights=lambda *_: {}),
+        build_thinker_engine=thinker_engine,
+        load_perception_weights=lambda *_: {
+            "mel_filterbank": np.zeros((257, 128), dtype=np.float32),
+            "mel_window": np.zeros(400, dtype=np.float32),
+        },
+        load_rnnt_weights=lambda *_: {},
+        build_rnnt_predictor=lambda *_args, **_kwargs: b"compiled-rnnt-predictor",
+        build_rnnt_joint=lambda *_args, **_kwargs: b"compiled-rnnt-joint",
+        _parse_layer_types=lambda pattern: [
+            {"M": "mamba2", "-": "mlp", "*": "attention"}[character] for character in pattern
+        ],
+    )
+    module("streaming_perception", _build_streaming_encoder=lambda *_args, **_kwargs: b"compiled-perception")
+    module("native_tts", build_tts_sections=lambda *_args, **_kwargs: [("tts.plan", b"compiled-tts")])
+    module("native_codec", build_codec_engine_from_checkpoint=lambda *_args, **_kwargs: b"compiled-codec")
+    header, sections = {}, {}
+    writer = SimpleNamespace(
+        set_header=lambda **kwargs: header.update(kwargs),
+        add_bytes=lambda name, payload: sections.update({name: payload}),
+        add_json=lambda name, payload: sections.update({name: payload}),
+    )
+    request = BuildRequest(
+        model_dir=tmp_path, output_path=tmp_path / "voice.bundle",
+        family="nemotron_voicechat", task="speech_session", precision="fp32",
+        backend=backend, quantization="int8", max_sequence_length=512,
+    )
+    model.build(request, writer)
+    assert built == ["thinker"]
+    assert header == {"family": "nemotron_voicechat", "task": "speech_session", "backend": backend}
+    assert sections["runtime.json"]["engine_backend"] == backend
+    assert sections["runtime.json"]["max_cache_length"] == 512
+    assert sections["runtime.json"]["quantization"]["scheme"] == "w8a8"
+    assert sections["engine.plan"] == b"compiled-thinker"
+    assert sections["codec.plan"] == b"compiled-codec"
+    assert sections["tokenizer.json"] == b"fixture:tokenizer.json"

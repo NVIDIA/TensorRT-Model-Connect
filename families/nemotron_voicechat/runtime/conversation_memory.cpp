@@ -6,6 +6,7 @@
 #include "families/nemotron_voicechat/runtime/conversation_memory.h"
 
 #include <algorithm>
+#include <cctype>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -192,6 +193,102 @@ fit_latest_turn(const ConversationTurn& turn, const std::vector<StableConversati
 
 } // namespace
 
+namespace {
+
+std::vector<std::string> normalized_words(std::string_view text) {
+    std::vector<std::string> words;
+    std::string word;
+    for (const unsigned char byte : text) {
+        if (byte >= 0x80U || std::isalnum(byte)) {
+            // Bound both individual words and retained history even for
+            // adversarial transcripts lacking whitespace.
+            if (word.size() < 128)
+                word.push_back(byte < 0x80U ? static_cast<char>(std::tolower(byte))
+                                            : static_cast<char>(byte));
+        } else if (!word.empty()) {
+            words.push_back(std::move(word));
+            word.clear();
+            if (words.size() == 256)
+                return words;
+        }
+    }
+    if (!word.empty())
+        words.push_back(std::move(word));
+    return words;
+}
+
+bool requests_repetition(const std::vector<std::string>& words) {
+    // Only affirmative leading requests qualify; "do not repeat" and
+    // complaints about repetition must still benefit from recovery.
+    const std::vector<std::vector<std::string>> starts = {{"repeat"},
+                                                          {"please", "repeat"},
+                                                          {"could", "you", "repeat"},
+                                                          {"can", "you", "repeat"},
+                                                          {"say", "that", "again"},
+                                                          {"say", "it", "again"}};
+    return std::any_of(starts.begin(), starts.end(), [&](const auto& prefix) {
+        return words.size() >= prefix.size() &&
+               std::equal(prefix.begin(), prefix.end(), words.begin());
+    });
+}
+
+std::size_t common_word_subsequence(const std::vector<std::string>& left,
+                                    const std::vector<std::string>& right) {
+    std::vector<std::size_t> row(right.size() + 1, 0);
+    for (const auto& word : left) {
+        std::size_t diagonal = 0;
+        for (std::size_t index = 0; index < right.size(); ++index) {
+            const auto previous = row[index + 1];
+            row[index + 1] =
+                word == right[index] ? diagonal + 1 : std::max(row[index], row[index + 1]);
+            diagonal = previous;
+        }
+    }
+    return row.back();
+}
+
+} // namespace
+
+bool ResponseRepetitionGuard::repeated(std::string_view user, std::string_view response,
+                                       bool is_final) const {
+    const auto request = normalized_words(user);
+    const auto answer = normalized_words(response);
+    // Allow common openers, concise facts, and short confirmations. A long
+    // copied prefix is sufficient; waiting for the complete response lets a
+    // collapsed decoder monopolize an entire audio turn.
+    constexpr std::size_t kMinimumWords = 24;
+    constexpr std::size_t kMinimumExactWords = 12;
+    if (request.empty() || answer.size() < kMinimumExactWords)
+        return false;
+    const bool requested_repeat = requests_repetition(request);
+    for (const auto& prior : history_) {
+        if (!prior.rejected && (request == prior.user || requested_repeat))
+            continue;
+        // Shorter complete repeated sentences also indicate collapse. Check
+        // them only at EOS: a shared sentence opener may still lead to a
+        // different, valid answer as generation continues.
+        if (is_final && answer == prior.response)
+            return true;
+        if (answer.size() < kMinimumWords || prior.response.size() < kMinimumWords)
+            continue;
+        const auto common = common_word_subsequence(answer, prior.response);
+        if (common >= kMinimumWords && common * 100 >= answer.size() * 90)
+            return true;
+    }
+    return false;
+}
+
+void ResponseRepetitionGuard::remember(std::string_view user, std::string_view response,
+                                       bool rejected) {
+    auto request = normalized_words(user);
+    auto answer = normalized_words(response);
+    if (request.empty() || answer.size() < 12)
+        return;
+    history_.push_back({std::move(request), std::move(answer), rejected});
+    while (history_.size() > 3)
+        history_.pop_front();
+}
+
 ConversationMemory::ConversationMemory(ConversationMemoryLimits limits) : limits_(limits) {
     if (limits_.max_entry_bytes < 4)
         throw std::invalid_argument(
@@ -251,6 +348,14 @@ void ConversationMemory::clear_turns() noexcept {
 void ConversationMemory::clear() noexcept {
     clear_turns();
     stable_facts_.clear();
+}
+
+std::string ConversationMemory::forget_and_build_capsule(const TokenCounter& count_tokens,
+                                                         std::size_t token_budget,
+                                                         std::string_view unresolved_user,
+                                                         bool* unresolved_user_included) {
+    clear();
+    return build_capsule(count_tokens, token_budget, unresolved_user, unresolved_user_included);
 }
 
 std::string ConversationMemory::build_capsule(const TokenCounter& count_tokens,

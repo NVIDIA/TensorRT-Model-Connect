@@ -68,6 +68,57 @@ inline constexpr std::size_t kDefaultPendingTranscriptMaxBytes = 4096;
 bool append_bounded_transcript(std::string& pending, std::string_view final_text,
                                std::size_t max_bytes = kDefaultPendingTranscriptMaxBytes);
 
+// A newly admitted utterance supersedes an unanswered older request. This
+// state deliberately excludes the in-progress RNNT decoder: admitting speech
+// must not erase the partial transcript that caused that admission.
+class PendingUserRequest {
+  public:
+    // Returns true when new speech follows explicit response cancellation;
+    // that new request must start from clean model state. A caller may still
+    // explicitly restart the cancelled response before providing new speech.
+    bool begin_utterance() noexcept;
+    void response_cancelled() noexcept { cancelled_response_ = true; }
+    void response_started() noexcept { cancelled_response_ = false; }
+    bool append_final(std::string_view text);
+    bool take_automatic_retry() noexcept;
+    void clear() noexcept;
+    bool empty() const noexcept { return text_.empty(); }
+    const std::string& text() const noexcept { return text_; }
+
+  private:
+    std::string text_;
+    bool retry_used_{false};
+    bool cancelled_response_{false};
+};
+
+// Native BOS may precede the final RNNT transcript. Attach that final only
+// when it belongs to the same decoder utterance that the response started
+// with; an interrupting utterance cannot claim an older response.
+class ResponseUserRequest {
+  public:
+    void begin(std::uint64_t utterance_id, std::string_view known_text);
+    bool observe_final(std::uint64_t utterance_id, std::string_view text);
+    void clear() noexcept;
+    const std::string& text() const noexcept { return text_; }
+
+  private:
+    std::uint64_t utterance_id_{0};
+    std::string text_;
+};
+
+// The Thinker can emit EOS in reaction to user audio before RNNT admits that
+// speech. Candidate onset, rather than its later confirmation frame, detects
+// this acoustic interruption across the response boundary.
+class ResponseBoundaryRecovery {
+  public:
+    void response_finished(std::int64_t observation_frame) noexcept;
+    bool needs_clean_context(std::int64_t speech_start_frame) const noexcept;
+    void clear() noexcept { last_finished_frame_.reset(); }
+
+  private:
+    std::optional<std::int64_t> last_finished_frame_;
+};
+
 // Linear streaming sample-rate conversion with an absolute phase and a
 // bounded interpolation tail. drain(false) retains only source samples needed
 // by the next output, so a long-running microphone does not accumulate its
@@ -120,9 +171,10 @@ class RepetitionWatchdog {
 
   private:
     bool has_repeated_suffix(std::size_t block_tokens, std::size_t repetitions) const;
+    bool has_near_repeated_suffix(std::size_t block_tokens) const;
 
-    // Two copies of the longest watched block are sufficient for every rule.
-    static constexpr std::size_t kHistoryTokens = 96;
+    // Near repeats require three long copies; short repeats remain exact.
+    static constexpr std::size_t kHistoryTokens = 144;
     std::deque<int32_t> tokens_;
     bool tripped_{false};
 };

@@ -231,6 +231,62 @@ RollingCachePosition rolling_cache_position(std::int64_t logical_position, int32
     };
 }
 
+bool PendingUserRequest::begin_utterance() noexcept {
+    const bool needs_clean_context = cancelled_response_;
+    clear();
+    return needs_clean_context;
+}
+
+bool PendingUserRequest::append_final(std::string_view text) {
+    const bool changed = append_bounded_transcript(text_, text);
+    if (changed)
+        retry_used_ = false;
+    return changed;
+}
+
+bool PendingUserRequest::take_automatic_retry() noexcept {
+    if (text_.empty() || retry_used_)
+        return false;
+    retry_used_ = true;
+    return true;
+}
+
+void PendingUserRequest::clear() noexcept {
+    text_.clear();
+    retry_used_ = false;
+    cancelled_response_ = false;
+}
+
+void ResponseUserRequest::begin(std::uint64_t utterance_id, std::string_view known_text) {
+    utterance_id_ = utterance_id;
+    text_ = known_text;
+}
+
+bool ResponseUserRequest::observe_final(std::uint64_t utterance_id, std::string_view text) {
+    if (!text_.empty() || utterance_id == 0 || utterance_id != utterance_id_ || text.empty())
+        return false;
+    text_ = text;
+    return true;
+}
+
+void ResponseUserRequest::clear() noexcept {
+    utterance_id_ = 0;
+    text_.clear();
+}
+
+void ResponseBoundaryRecovery::response_finished(std::int64_t observation_frame) noexcept {
+    if (observation_frame >= 0)
+        last_finished_frame_ = observation_frame;
+}
+
+bool ResponseBoundaryRecovery::needs_clean_context(std::int64_t speech_start_frame) const noexcept {
+    if (!last_finished_frame_.has_value() || speech_start_frame < 0)
+        return false;
+    constexpr std::int64_t kRecognitionLagFrames = 4; // 320 ms at the native 12.5 Hz cadence.
+    return speech_start_frame <= *last_finished_frame_ ||
+           speech_start_frame - *last_finished_frame_ <= kRecognitionLagFrames;
+}
+
 bool RepetitionWatchdog::has_repeated_suffix(std::size_t block_tokens,
                                              std::size_t repetitions) const {
     const std::size_t required_tokens = block_tokens * repetitions;
@@ -243,6 +299,23 @@ bool RepetitionWatchdog::has_repeated_suffix(std::size_t block_tokens,
             if (tokens_[start + offset] != tokens_[start + repetition * block_tokens + offset])
                 return false;
         }
+    }
+    return true;
+}
+
+bool RepetitionWatchdog::has_near_repeated_suffix(std::size_t block_tokens) const {
+    if (tokens_.size() < 3 * block_tokens)
+        return false;
+    const auto start = tokens_.size() - 3 * block_tokens;
+    // Three copies with at most ten percent substitutions in each copy are
+    // strong collapse evidence. Two similar sentences or short refrains are
+    // insufficient to trip this rule.
+    for (std::size_t copy = 1; copy < 3; ++copy) {
+        std::size_t different = 0;
+        for (std::size_t offset = 0; offset < block_tokens; ++offset)
+            different += tokens_[start + offset] != tokens_[start + copy * block_tokens + offset];
+        if (different * 10 > block_tokens)
+            return false;
     }
     return true;
 }
@@ -267,6 +340,12 @@ bool RepetitionWatchdog::observe(int32_t token) {
     }
     for (std::size_t block_tokens = 8; block_tokens <= 48; ++block_tokens) {
         if (has_repeated_suffix(block_tokens, 2)) {
+            tripped_ = true;
+            return true;
+        }
+    }
+    for (std::size_t block_tokens = 12; block_tokens <= 48; ++block_tokens) {
+        if (has_near_repeated_suffix(block_tokens)) {
             tripped_ = true;
             return true;
         }

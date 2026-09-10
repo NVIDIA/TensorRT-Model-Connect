@@ -25,6 +25,10 @@
 
 namespace trtmc {
 
+namespace voicechat_audio {
+class IncrementalMelSpectrogram;
+}
+
 namespace nemotron_voicechat {
 
 struct StreamingMelStep {
@@ -39,6 +43,11 @@ struct StreamingMelStep {
 // the engine input remains fixed and the missing tail columns stay zero.
 StreamingMelStep make_streaming_mel_step(bool first_step, int32_t next_mel_frame,
                                          int32_t available_mel_frames, bool final);
+
+// Preserve the nine-row streaming overlap, including repeated resets before
+// another audio frame arrives, without changing the first/steady plan phase.
+int32_t rebase_streaming_mel(voicechat_audio::IncrementalMelSpectrogram& mel,
+                             int32_t next_mel_frame);
 
 int32_t streaming_frontend_capacity_seconds(const Config& config);
 

@@ -37,6 +37,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <trtmc/nemotron_voicechat/live_control.h>
 #include <utility>
 #include <vector>
 
@@ -70,6 +71,15 @@ int32_t voicechat::streaming_frontend_capacity_seconds(const Config& config) {
     return static_cast<int32_t>((samples + config.input_sample_rate - 1) /
                                 config.input_sample_rate) +
            1;
+}
+
+int32_t voicechat::rebase_streaming_mel(voicechat_audio::IncrementalMelSpectrogram& mel,
+                                        int32_t next_mel_frame) {
+    // A preceding rebase discards computed features but retains their exact
+    // raw-audio prefix. Materialize it if Stop is pressed again before the
+    // next input frame; otherwise rebase_streaming would reject that frontier.
+    mel.ensure_frames(next_mel_frame, false);
+    return mel.rebase_streaming(next_mel_frame, 9);
 }
 
 namespace {
@@ -548,6 +558,7 @@ enum class SpeechSessionMode { kLive, kBatch };
 
 class NemotronVoiceChatSession final : public ISpeechSession,
                                        public ISpeechRealtimeControl,
+                                       public INemotronVoiceChatLiveControl,
                                        public ISpeechToolSession {
   private:
     enum class WorkKind {
@@ -576,6 +587,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         std::uint64_t response_epoch{0};
         std::int64_t played_output_samples{0};
         bool create_response{true};
+        bool preserve_audio_frontend{false};
         std::vector<int32_t> forced_function_tokens;
         std::chrono::steady_clock::time_point enqueued_at{};
     };
@@ -807,6 +819,48 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         work_cv_.notify_all();
         reset_cv_.notify_all();
 
+        std::unique_lock<std::mutex> lock(mutex_);
+        reset_cv_.wait(lock, [this, serial] {
+            return completed_reset_serial_ >= serial || worker_done_ || worker_error_;
+        });
+        rethrow_worker_error_locked();
+    }
+
+    void reset_conversation_context() override {
+        std::unique_lock<std::mutex> reset_lock(reset_mutex_);
+        std::uint64_t serial = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            rethrow_worker_error_locked();
+            if (!is_live() || public_input_finished_ || !conversation_.can_accept_audio())
+                throw std::logic_error("VoiceChat context reset requires an open live stream");
+            WorkItem work;
+            work.kind = WorkKind::kReset;
+            work.work_epoch = work_epochs_.current();
+            work.serial = serial = requested_reset_serial_ + 1;
+            work.preserve_audio_frontend = true;
+            work_queue_.push_front(std::move(work));
+            requested_reset_serial_ = serial;
+            reset_in_progress_ = true;
+            suppressed_response_epoch_ = conversation_.epoch();
+            clear_pending_tools_locked();
+            events_.clear();
+            queued_output_audio_samples_ = 0;
+            // A reset owns reset_mutex_, so synchronous controls have already
+            // completed. Discard asynchronous model controls while retaining
+            // every queued PCM packet and its sample reservation verbatim.
+            work_queue_.erase(std::remove_if(work_queue_.begin(), work_queue_.end(),
+                                             [](const WorkItem& item) {
+                                                 return item.kind != WorkKind::kAudio &&
+                                                        item.kind != WorkKind::kReset;
+                                             }),
+                              work_queue_.end());
+        }
+        // Do not invalidate work_epochs_ here: a perception call may already
+        // have advanced mel/caches. Let that one bounded work item complete,
+        // then reset generation at the worker boundary with its exact acoustic
+        // frontier intact. Output is suppressed until the barrier completes.
+        work_cv_.notify_all();
         std::unique_lock<std::mutex> lock(mutex_);
         reset_cv_.wait(lock, [this, serial] {
             return completed_reset_serial_ >= serial || worker_done_ || worker_error_;
@@ -1260,7 +1314,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     }
 
     bool response_accepts_output_locked(std::uint64_t output_epoch) const {
-        return conversation_.accepts_output(output_epoch) &&
+        return !reset_in_progress_ && conversation_.accepts_output(output_epoch) &&
                suppressed_response_epoch_ != output_epoch;
     }
 
@@ -1565,6 +1619,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
             worker_error_ = error;
             worker_initialized_ = true;
             worker_done_ = true;
+            reset_in_progress_ = false;
             conversation_.cancel();
             (void)work_epochs_.invalidate();
             work_queue_.clear();
@@ -1614,7 +1669,20 @@ class NemotronVoiceChatSession final : public ISpeechSession,
 
     void process_reset_work(const WorkItem& work) {
         if (work_is_current(work.work_epoch)) {
-            initialize_host_state();
+            if (work.preserve_audio_frontend) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    conversation_.reset();
+                    public_input_finished_ = false;
+                    worker_input_finished_ = false;
+                    input_clear_pending_ = false;
+                    suppressed_response_epoch_.reset();
+                    events_.clear();
+                    queued_output_audio_samples_ = 0;
+                }
+                (void)reset_frontend_for_context_rollover();
+            }
+            initialize_host_state(work.preserve_audio_frontend);
             initialize_model_state();
             SpeechSessionEvent event;
             event.kind = SpeechSessionEventKind::kReset;
@@ -1782,10 +1850,9 @@ class NemotronVoiceChatSession final : public ISpeechSession,
             restore_model_marker(*input_buffer_start_marker_);
         input_buffer_start_marker_.reset();
         reset_processed_input_frontier(work_epoch);
-        pending_user_text_.clear();
+        pending_user_request_.clear();
         rollover_carries_unresolved_user_ = false;
         start_response_after_rollover_ = false;
-        automatic_retry_count_ = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!work_is_current(work_epoch))
@@ -1829,7 +1896,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
             return;
         }
         finish_opaque_response_before_rollover_ =
-            context_rollover_due() && pending_user_text_.empty();
+            context_rollover_due() && pending_user_request_.empty();
         suppress_native_agent_start_ = false;
         turn_control_.consume_response();
         process_model_frame(zero_audio_embedding_, work_epoch, runtime_->config.bos_token_id);
@@ -1841,7 +1908,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         flush_committed_input(work.work_epoch);
         finalize_committed_input(work.work_epoch);
         input_buffer_start_marker_.reset();
-        if (context_rollover_due() && !pending_user_text_.empty()) {
+        if (context_rollover_due() && !pending_user_request_.empty()) {
             rollover_carries_unresolved_user_ = true;
             start_response_after_rollover_ =
                 work.create_response && turn_control_.response_available();
@@ -1855,7 +1922,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         if (response_active())
             process_cancel_response(work_epoch);
         suppress_native_agent_start_ = false;
-        if (context_rollover_due() && !pending_user_text_.empty()) {
+        if (context_rollover_due() && !pending_user_request_.empty()) {
             if (!turn_control_.response_available())
                 throw std::logic_error("VoiceChat has no committed input turn awaiting a response");
             rollover_carries_unresolved_user_ = true;
@@ -1863,7 +1930,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
             return;
         }
         finish_opaque_response_before_rollover_ =
-            context_rollover_due() && pending_user_text_.empty();
+            context_rollover_due() && pending_user_request_.empty();
         turn_control_.consume_response();
         process_model_frame(zero_audio_embedding_, work_epoch, runtime_->config.bos_token_id);
     }
@@ -1877,6 +1944,8 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         agent_text_tokens_.clear();
         agent_turn_frames_ = 0;
         agent_turn_text_tokens_ = 0;
+        repetition_watchdog_.reset();
+        response_failed_ = false;
         suppress_synthesis_until_turn_started_ = true;
         suppress_native_agent_start_ = true;
         finish_opaque_response_before_rollover_ = false;
@@ -1962,6 +2031,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         replay_cancelled_timeline(replay_audio);
         yield_truncated_response(response_epoch, checkpoint.response_end_sample, reason);
         turn_control_.restore_response();
+        pending_user_request_.response_cancelled();
         reset_response_tracking();
     }
 
@@ -2058,15 +2128,17 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         return options;
     }
 
-    void initialize_host_state() {
+    void initialize_host_state(bool preserve_audio_frontend = false) {
         const auto& config = runtime_->config;
-        scheduler_.reset();
-        resampler_.reset();
-        mel_.reset();
-        first_perception_step_ = true;
+        if (!preserve_audio_frontend) {
+            scheduler_.reset();
+            resampler_.reset();
+            mel_.reset();
+            first_perception_step_ = true;
+            next_mel_frame_ = 0;
+            perception_cache_length_ = 0;
+        }
         clock_armed_ = false;
-        next_mel_frame_ = 0;
-        perception_cache_length_ = 0;
         output_sample_cursor_ = 0;
         frame_index_ = 0;
         rnnt_observation_frame_index_ = 0;
@@ -2093,16 +2165,17 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         codec_replay_.clear();
         timeline_replay_.clear();
         conversation_memory_.clear();
-        pending_user_text_.clear();
+        pending_user_request_.clear();
+        response_user_request_.clear();
+        rnnt_utterance_id_ = 0;
+        response_boundary_recovery_.clear();
         continuation_capsule_.clear();
         rollover_reason_.clear();
         rollover_carries_unresolved_user_ = false;
         start_response_after_rollover_ = false;
         response_failed_ = false;
         finish_opaque_response_before_rollover_ = false;
-        automatic_retry_count_ = 0;
-        last_completed_user_text_.clear();
-        last_completed_agent_tokens_.clear();
+        response_repetition_guard_.clear();
         repetition_watchdog_.reset();
         segment_id_ = 0;
         response_checkpoints_.clear();
@@ -2129,8 +2202,10 @@ class NemotronVoiceChatSession final : public ISpeechSession,
             config.perception_att_context_left * config.perception_hidden_size;
         const std::size_t time_elements = static_cast<std::size_t>(config.perception_num_layers) *
                                           config.perception_hidden_size * 8U;
-        perception_channel_cache_.assign(channel_elements, 0.0F);
-        perception_time_cache_.assign(time_elements, 0.0F);
+        if (!preserve_audio_frontend) {
+            perception_channel_cache_.assign(channel_elements, 0.0F);
+            perception_time_cache_.assign(time_elements, 0.0F);
+        }
         const std::size_t rnnt_state_elements =
             static_cast<std::size_t>(config.rnnt_pred_num_layers) * config.rnnt_pred_hidden_size;
         rnnt_h_.assign(rnnt_state_elements, 0.0F);
@@ -2244,6 +2319,8 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     bool response_active() const noexcept { return response_epoch_ != 0; }
 
     void begin_response_tracking(std::uint64_t epoch, const ModelStateMarker& start) {
+        response_user_request_.begin(rnnt_utterance_id_, pending_user_request_.text());
+        pending_user_request_.response_started();
         if (epoch == 0)
             throw std::invalid_argument("VoiceChat response epoch must be non-zero");
         response_epoch_ = epoch;
@@ -2256,6 +2333,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     }
 
     void reset_response_tracking() {
+        response_user_request_.clear();
         response_epoch_ = 0;
         response_checkpoints_.clear();
         current_frame_start_marker_.reset();
@@ -2382,22 +2460,22 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         }
     }
 
-    ContinuationCapsuleBuild build_continuation_capsule() const {
+    ContinuationCapsuleBuild build_continuation_capsule() {
         const auto count_tokens = [this](std::string_view text) {
             return runtime_->tokenizer->encode(std::string(text)).size();
         };
         ContinuationCapsuleBuild result;
-        result.text = conversation_memory_.build_capsule(
-            count_tokens, continuation_capsule_token_budget(), pending_user_text_,
+        result.text = conversation_memory_.forget_and_build_capsule(
+            count_tokens, continuation_capsule_token_budget(), pending_user_request_.text(),
             &result.unresolved_user_included);
         return result;
     }
 
     bool context_rollover_is_safe(std::uint64_t work_epoch) {
         const bool opaque_committed_audio =
-            pending_user_text_.empty() && turn_control_.response_available();
+            pending_user_request_.empty() && turn_control_.response_available();
         const bool unresolved_user_is_recoverable =
-            pending_user_text_.empty() ||
+            pending_user_request_.empty() ||
             (rollover_carries_unresolved_user_ && start_response_after_rollover_);
         if (!is_live() || !work_is_current(work_epoch) || response_active() ||
             function_channel_.active() || turn_detector_.utterance_active() ||
@@ -2437,13 +2515,14 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         // resampler retains at most the interpolation tail. Preserve both so
         // queued capture and non-16-kHz phase remain continuous across the
         // model/frontend rebuild.
-        constexpr int32_t kHistoryFrames = 9;
-        next_mel_frame_ = mel_.rebase_streaming(next_mel_frame_, kHistoryFrames);
+        next_mel_frame_ = voicechat::rebase_streaming_mel(mel_, next_mel_frame_);
 
         // Perception is a bounded streaming encoder: its channel/time caches
         // already contain only the fixed left context. Keep those caches and
-        // the resident steady plan across a Thinker rollover. The boundary is
-        // admitted only in listening silence. Rebase the host mel frontend
+        // the resident steady plan across a Thinker rollover. Automatic rolls
+        // occur in listening silence; explicit context resets instead wait for
+        // the current worker item and separately clear the RNNT/turn state.
+        // Rebase the host mel frontend
         // with an aligned raw-audio tail that recomputes its nine history rows
         // exactly, keeping both memory and sample phase bounded indefinitely.
         input_buffer_start_marker_.reset();
@@ -2452,6 +2531,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     }
 
     void rebuild_generation_state_for_context_rollover(bool rebase_input_buffer) {
+        response_boundary_recovery_.clear();
         record_replay_state_ = false;
         thinker_replay_.clear();
         tts_replay_.clear();
@@ -2493,6 +2573,14 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     }
 
     void enforce_hard_context_boundary(std::uint64_t work_epoch) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // A synchronous reset already owns the next worker boundary.
+            // Do not generate a forced EOS or finalize another RNNT turn in
+            // the old segment before that barrier clears its state.
+            if (reset_in_progress_)
+                return;
+        }
         if (!hard_context_limit_reached() || !work_is_current(work_epoch))
             return;
         request_context_rollover("age-hard");
@@ -2538,7 +2626,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
                 reset_rnnt_utterance_decoder();
             }
         }
-        if (!pending_user_text_.empty()) {
+        if (!pending_user_request_.empty()) {
             rollover_carries_unresolved_user_ = true;
             start_response_after_rollover_ = !turn_control_.response_available();
         }
@@ -2577,6 +2665,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
             event.frame_index = frame_index_;
             event.is_final = true;
             event.text = "segment=" + std::to_string(segment_id_) + " reason=" + reason +
+                         " memory_policy=latest-request-only" +
                          " prior_steps=" + std::to_string(old_steps) +
                          " memory_tokens=" + std::to_string(memory_tokens) +
                          " rebuild_ms=" + std::to_string(elapsed_ms);
@@ -2670,6 +2759,11 @@ class NemotronVoiceChatSession final : public ISpeechSession,
                 throw std::runtime_error("VoiceChat RNNT emitted an invalid token");
             const bool speech_token = token_id != rnnt_unk_token_id_;
             activity.emitted_speech_token = activity.emitted_speech_token || speech_token;
+            if (rnnt_tokens_.empty()) {
+                ++rnnt_utterance_id_;
+                if (rnnt_utterance_id_ == 0)
+                    ++rnnt_utterance_id_;
+            }
             rnnt_tokens_.push_back(token_id);
             {
                 std::lock_guard<std::mutex> runtime_lock(runtime_->inference_mutex);
@@ -2687,11 +2781,10 @@ class NemotronVoiceChatSession final : public ISpeechSession,
             return;
         rnnt_text_ = decoded;
         if (is_final && !decoded.empty()) {
-            if (voicechat::append_bounded_transcript(pending_user_text_, decoded)) {
-                // New speech gives one fresh automatic recovery attempt even
-                // if an answer to an older fragment had already collapsed.
-                automatic_retry_count_ = 0;
-            }
+            (void)pending_user_request_.append_final(decoded);
+            if (response_active())
+                (void)response_user_request_.observe_final(rnnt_utterance_id_,
+                                                           pending_user_request_.text());
         }
         if (!session_config_.emit_user_transcript)
             return;
@@ -2761,12 +2854,19 @@ class NemotronVoiceChatSession final : public ISpeechSession,
             yielded.text = "barge-in";
             enqueue_event_locked(std::move(yielded));
         }
+        response_repetition_guard_.remember(response_user_request_.text(),
+                                            runtime_->tokenizer->decode(agent_text_tokens_), true);
+        // Wait for the interrupting utterance to finish, then answer its
+        // transcript from clean state. Otherwise the interrupted assistant
+        // passage remains in recurrent memory and can resume after a stop.
+        request_context_rollover("barge-in");
         function_channel_.reset();
         forced_function_tokens_.clear();
         on_hold_token_queue_.clear();
         agent_idle_ = true;
         agent_text_tokens_.clear();
         repetition_watchdog_.reset();
+        response_failed_ = false;
         suppress_synthesis_until_turn_started_ = true;
         suppress_native_agent_start_ = true;
         finish_opaque_response_before_rollover_ = false;
@@ -2778,6 +2878,15 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     std::optional<int32_t> apply_turn_decision(const voicechat::RnntTurnDecision& decision,
                                                std::uint64_t work_epoch) {
         if (decision.speech_started) {
+            // RNNT has admitted a real new utterance. Its partial tokens are
+            // already present and must remain intact; only the older finalized
+            // request and its automatic retry are superseded.
+            if (pending_user_request_.begin_utterance())
+                request_context_rollover("cancelled-response");
+            if (response_boundary_recovery_.needs_clean_context(decision.speech_start_frame))
+                request_context_rollover("speech-after-response");
+            rollover_carries_unresolved_user_ = false;
+            start_response_after_rollover_ = false;
             publish_user_speech_event(SpeechSessionEventKind::kUserSpeechStarted,
                                       decision.speech_start_frame, false, work_epoch);
         }
@@ -2795,7 +2904,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
                                   decision.speech_end_frame, true, work_epoch);
         reset_rnnt_utterance_decoder();
         if (decision.start_agent && context_rollover_due()) {
-            rollover_carries_unresolved_user_ = !pending_user_text_.empty();
+            rollover_carries_unresolved_user_ = !pending_user_request_.empty();
             start_response_after_rollover_ = rollover_carries_unresolved_user_;
             // Consume the EOU audio embedding without starting a response in
             // the old segment. The worker-boundary rollover will inject the
@@ -3491,6 +3600,16 @@ class NemotronVoiceChatSession final : public ISpeechSession,
             response_failed_ = true;
             decision.text_token = runtime_->config.eos_token_id;
         }
+        if (response_active() && is_agent_text_token(decision.text_token)) {
+            auto candidate = agent_text_tokens_;
+            candidate.push_back(decision.text_token);
+            if (response_repetition_guard_.repeated(response_user_request_.text(),
+                                                    runtime_->tokenizer->decode(candidate))) {
+                request_context_rollover("repeated-response");
+                response_failed_ = true;
+                decision.text_token = runtime_->config.eos_token_id;
+            }
+        }
         if (model_frame_should_force_eos(decision))
             decision.text_token = runtime_->config.eos_token_id;
         return true;
@@ -3572,10 +3691,12 @@ class NemotronVoiceChatSession final : public ISpeechSession,
 
     void finish_agent_turn(std::uint64_t work_epoch, std::uint64_t output_epoch) {
         const std::string final_text_value = runtime_->tokenizer->decode(agent_text_tokens_);
-        const bool repeated_across_distinct_turns =
-            agent_text_tokens_.size() >= 8 && agent_text_tokens_ == last_completed_agent_tokens_ &&
-            !pending_user_text_.empty() && pending_user_text_ != last_completed_user_text_;
-        const bool rejected_response = response_failed_ || repeated_across_distinct_turns;
+        const bool repeated_across_distinct_turns = response_repetition_guard_.repeated(
+            response_user_request_.text(), final_text_value, true);
+        const bool empty_answer =
+            !response_user_request_.text().empty() && final_text_value.empty();
+        const bool rejected_response =
+            response_failed_ || repeated_across_distinct_turns || empty_answer;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!work_is_current(work_epoch) || !response_accepts_output_locked(output_epoch))
@@ -3612,23 +3733,22 @@ class NemotronVoiceChatSession final : public ISpeechSession,
                 (void)conversation_.finish_agent_turn();
             }
         }
-        if (!rejected_response && !pending_user_text_.empty() && !final_text_value.empty()) {
-            conversation_memory_.add_turn(pending_user_text_, final_text_value);
-            last_completed_user_text_ = pending_user_text_;
-            last_completed_agent_tokens_ = agent_text_tokens_;
-            pending_user_text_.clear();
-            automatic_retry_count_ = 0;
+        response_repetition_guard_.remember(response_user_request_.text(), final_text_value,
+                                            rejected_response);
+        if (!rejected_response)
+            response_boundary_recovery_.response_finished(rnnt_observation_frame_index_ - 1);
+        if (!rejected_response && pending_user_request_.text() == response_user_request_.text()) {
+            pending_user_request_.clear();
         }
-        if (rejected_response && !pending_user_text_.empty()) {
-            if (automatic_retry_count_ == 0) {
+        if (rejected_response && !pending_user_request_.empty()) {
+            if (pending_user_request_.take_automatic_retry()) {
                 rollover_carries_unresolved_user_ = true;
                 start_response_after_rollover_ = true;
-                ++automatic_retry_count_;
             } else {
                 // One failed retry is enough evidence that this request is not
                 // recoverable automatically. Roll cleanly and wait for fresh
                 // speech instead of creating an endless retry loop.
-                pending_user_text_.clear();
+                pending_user_request_.clear();
                 rollover_carries_unresolved_user_ = false;
                 start_response_after_rollover_ = false;
             }
@@ -3757,6 +3877,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     voicechat::RealtimeTurnControlState turn_control_;
     voicechat::ConversationMemory conversation_memory_;
     voicechat::RepetitionWatchdog repetition_watchdog_;
+    voicechat::ResponseRepetitionGuard response_repetition_guard_;
     std::vector<PendingToolCall> pending_tool_calls_;
     std::deque<std::vector<float>> deferred_audio_embeddings_;
     std::vector<ThinkerReplayStep> thinker_replay_;
@@ -3786,13 +3907,14 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     std::vector<float> rnnt_predictor_output_;
     std::vector<int32_t> rnnt_tokens_;
     std::string rnnt_text_;
-    std::string pending_user_text_;
+    voicechat::PendingUserRequest pending_user_request_;
+    voicechat::ResponseUserRequest response_user_request_;
+    voicechat::ResponseBoundaryRecovery response_boundary_recovery_;
+    std::uint64_t rnnt_utterance_id_{0};
     std::string continuation_capsule_;
     std::string rollover_reason_;
-    std::string last_completed_user_text_;
     std::vector<float> zero_audio_embedding_;
     std::vector<int32_t> agent_text_tokens_;
-    std::vector<int32_t> last_completed_agent_tokens_;
     int32_t previous_text_token_{0};
     int32_t previous_function_token_{0};
     int32_t next_mel_frame_{0};
@@ -3805,7 +3927,6 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     int64_t frame_index_{0};
     int64_t rnnt_observation_frame_index_{0};
     std::uint64_t segment_id_{0};
-    std::uint32_t automatic_retry_count_{0};
     bool first_perception_step_{true};
     bool public_input_finished_{false};
     bool worker_input_finished_{false};

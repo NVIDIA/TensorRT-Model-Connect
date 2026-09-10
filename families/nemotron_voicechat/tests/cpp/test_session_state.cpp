@@ -639,6 +639,161 @@ void test_repetition_watchdog_ignores_near_misses() {
           "repetition watchdog permits long non-repeating output with bounded history");
 }
 
+void test_repetition_watchdog_catches_three_long_near_repeats() {
+    voicechat::RepetitionWatchdog watchdog;
+    std::vector<int32_t> original(24);
+    for (std::size_t index = 0; index < original.size(); ++index)
+        original[index] = 100 + static_cast<int32_t>(index);
+    auto second = original;
+    auto third = original;
+    second[5] = 999;
+    third[17] = 888;
+    check(!observe_tokens(watchdog, original) && !observe_tokens(watchdog, second),
+          "two merely similar long passages do not trip the approximate rule");
+    check(observe_tokens(watchdog, third),
+          "three long near-identical passages trip despite small token changes");
+    watchdog.reset();
+    for (int block = 0; block < 20; ++block) {
+        auto varied = original;
+        for (int index = 0; index < 8; ++index)
+            varied[static_cast<std::size_t>(index)] = 1000 + block * 8 + index;
+        check(!observe_tokens(watchdog, varied),
+              "substantially different long passages remain valid");
+    }
+}
+
+void test_admitted_barge_in_supersedes_request_without_erasing_new_partial() {
+    voicechat::PendingUserRequest request;
+    request.append_final("An old request which was interrupted");
+    check(request.take_automatic_retry(), "old request initially has one retry");
+    voicechat::RnntTurnDetector detector({2, 3, 3, 3});
+    std::string rnnt_partial;
+    const std::vector<std::string> partials = {"Please", "Please stop", "Please stop and listen"};
+    bool interrupted = false;
+    for (std::size_t frame = 0; frame < partials.size(); ++frame) {
+        rnnt_partial = partials[frame];
+        const auto decision = detector.observe(true, true, static_cast<std::int64_t>(frame));
+        if (decision.speech_started)
+            request.begin_utterance();
+        interrupted = interrupted || decision.interrupt_agent;
+    }
+    check(interrupted && request.empty() && rnnt_partial == partials.back(),
+          "admitted new speech clears only the old finalized request, preserving its RNNT partial");
+    const auto stopped = detector.finalize_utterance(false, 3);
+    check(stopped.speech_stopped && stopped.start_agent,
+          "the interrupted speaker's new utterance remains eligible for a response");
+    request.append_final(rnnt_partial);
+    check(request.text() == "Please stop and listen" && request.take_automatic_retry(),
+          "only the new request is retained and receives its own bounded retry");
+}
+
+void test_automatic_recovery_is_bounded_across_many_clean_rollovers() {
+    voicechat::PendingUserRequest request;
+    check(!request.take_automatic_retry(), "silence cannot schedule an automatic answer");
+    for (int turn = 0; turn < 100; ++turn) {
+        request.begin_utterance();
+        const auto text = "New user question " + std::to_string(turn);
+        request.append_final(text);
+        check(request.take_automatic_retry(), "new speech allows exactly one automatic retry");
+        check(!request.append_final(text) && !request.take_automatic_retry(),
+              "duplicate ASR finals cannot replenish the retry budget");
+        for (int rollover = 0; rollover < 5; ++rollover)
+            check(!request.take_automatic_retry() && request.text() == text,
+                  "rebuilding model context does not replenish a used retry");
+        request.clear();
+        check(request.empty() && !request.take_automatic_retry(),
+              "exhausted recovery waits for a new request instead of looping");
+    }
+}
+
+void test_cancel_preserves_explicit_retry_but_new_speech_forgets_it() {
+    voicechat::PendingUserRequest request;
+    request.append_final("An existing committed user request");
+    request.response_started();
+    request.response_cancelled();
+    check(request.text() == "An existing committed user request",
+          "explicit cancellation preserves the request for API create_response");
+    request.response_started();
+    check(!request.begin_utterance(),
+          "an explicitly recreated answer consumes the pending cancellation");
+    request.append_final("Another user request");
+    request.response_started();
+    request.response_cancelled();
+    check(request.begin_utterance() && request.empty(),
+          "fresh speech after cancellation requests clean context and discards abandoned text");
+    request.append_final("Please answer my new question");
+    check(request.text() == "Please answer my new question" && request.take_automatic_retry(),
+          "the replacement utterance alone is recoverable after explicit cancellation");
+}
+
+void test_early_native_response_attaches_only_its_own_later_transcript() {
+    voicechat::PendingUserRequest pending;
+    voicechat::ResponseUserRequest response;
+    pending.begin_utterance();
+    // Real event order: partial Hello, native BOS, then final Hello.
+    response.begin(1, pending.text());
+    check(response.text().empty(), "native BOS may start before the matching RNNT final");
+    pending.append_final("Hello");
+    check(response.observe_final(1, pending.text()) && response.text() == "Hello",
+          "the matching late final attaches to an already-started response");
+    pending.begin_utterance();
+    pending.append_final("Stop and answer this different question");
+    check(!response.observe_final(2, pending.text()) && response.text() == "Hello",
+          "new barge-in speech cannot relabel the existing response owner");
+
+    response.clear();
+    response.begin(2, {});
+    check(!response.observe_final(3, "A different utterance") && response.text().empty(),
+          "even an empty response owner rejects a final from a newer utterance");
+    check(response.observe_final(2, "The response's own utterance"),
+          "only the original utterance may fill an empty owner");
+    response.clear();
+    response.begin(0, {});
+    check(!response.observe_final(1, "First user speech") && response.text().empty(),
+          "an unsolicited initial greeting is not relabelled by later user speech");
+    response.begin(4, "Final text already known at host-forced BOS");
+    check(!response.observe_final(4, "Conflicting duplicate") &&
+              response.text() == "Final text already known at host-forced BOS",
+          "host-forced response ownership remains stable after duplicate finals");
+}
+
+void test_speech_recognized_after_response_eos_uses_candidate_onset() {
+    voicechat::ResponseBoundaryRecovery boundary;
+    check(!boundary.needs_clean_context(0), "first user speech has no older response to discard");
+    boundary.response_finished(100);
+    check(boundary.needs_clean_context(98),
+          "speech already underway when the model yielded requests clean context");
+    check(boundary.needs_clean_context(101) && boundary.needs_clean_context(104),
+          "RNNT recognition within four frames of natural EOS is an acoustic interruption");
+    check(!boundary.needs_clean_context(105) && !boundary.needs_clean_context(200),
+          "ordinary later user turns preserve the current conversation segment");
+
+    voicechat::PendingUserRequest pending;
+    pending.append_final("The old story request");
+    // Actual trace: first Stop token follows EOS by one native frame, but
+    // sustained-speech admission happens several frames later.
+    voicechat::RnntTurnDetector detector({3, 3, 3, 3});
+    (void)detector.observe(true, false, 101);
+    (void)detector.observe(false, false, 102);
+    (void)detector.observe(true, false, 103);
+    (void)detector.observe(false, false, 104);
+    const auto admitted = detector.observe(true, false, 105);
+    check(admitted.speech_started && admitted.speech_start_frame == 101 &&
+              boundary.needs_clean_context(admitted.speech_start_frame) &&
+              !boundary.needs_clean_context(105),
+          "late speech confirmation still uses the candidate onset near the previous EOS");
+    pending.begin_utterance();
+    check(pending.empty() && detector.utterance_active(),
+          "refresh is deferred while the interrupting utterance is still being transcribed");
+    const auto final = detector.finalize_utterance(false, 106);
+    pending.append_final("Stop that story and tell me what seven plus five is");
+    check(final.start_agent &&
+              pending.text() == "Stop that story and tell me what seven plus five is",
+          "the deferred clean response carries only the fully transcribed replacement question");
+    boundary.clear();
+    check(!boundary.needs_clean_context(101), "completed context rebuild clears the old boundary");
+}
+
 void test_rnnt_turn_detector_rejects_noise_and_invalid_policy() {
     voicechat::RnntTurnPolicy invalid;
     invalid.end_of_utterance_blank_frames = 0;
@@ -866,6 +1021,12 @@ int main() {
     test_tts_prompt_remains_pinned_across_compact_cache_wraps();
     test_repetition_watchdog_thresholds_and_reset();
     test_repetition_watchdog_ignores_near_misses();
+    test_repetition_watchdog_catches_three_long_near_repeats();
+    test_admitted_barge_in_supersedes_request_without_erasing_new_partial();
+    test_automatic_recovery_is_bounded_across_many_clean_rollovers();
+    test_cancel_preserves_explicit_retry_but_new_speech_forgets_it();
+    test_early_native_response_attaches_only_its_own_later_transcript();
+    test_speech_recognized_after_response_eos_uses_candidate_onset();
     test_rnnt_turn_detector_rejects_noise_and_invalid_policy();
     test_rnnt_turn_detector_reports_expired_subthreshold_candidate_once();
     test_rnnt_first_and_subsequent_utterances();

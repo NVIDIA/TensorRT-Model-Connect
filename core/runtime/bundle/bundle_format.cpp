@@ -142,12 +142,12 @@ std::uint64_t checked_section_file_offset(const BundleSectionInfo& section,
 
 BundleReader::BundleReader(std::string bundle_path) {
     std::error_code error;
-    path_ = std::filesystem::absolute(std::filesystem::path(bundle_path), error)
+    path_ = std::filesystem::absolute(std::filesystem::u8path(bundle_path), error)
                 .lexically_normal()
-                .string();
+                .u8string();
     if (error)
         throw std::runtime_error("Failed to resolve bundle path: " + error.message());
-    std::ifstream in(path_, std::ios::binary);
+    std::ifstream in(std::filesystem::u8path(path_), std::ios::binary);
     if (!in) {
         throw std::runtime_error("Failed to open bundle file: " + path_);
     }
@@ -203,7 +203,7 @@ std::vector<char> BundleReader::read_section(std::string_view name) const {
     std::vector<char> data(static_cast<std::size_t>(section->length));
     if (data.empty())
         return data;
-    std::ifstream in(path_, std::ios::binary);
+    std::ifstream in(std::filesystem::u8path(path_), std::ios::binary);
     if (!in)
         throw std::runtime_error("Failed to open bundle file: " + path_);
     in.seekg(static_cast<std::streamoff>(file_offset));

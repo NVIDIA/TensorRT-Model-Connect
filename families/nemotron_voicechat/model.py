@@ -171,6 +171,7 @@ def _runtime_config(
     tts_linear_precision: str,
     max_cache_length: int,
     mel_length: int,
+    backend: str = "trt",
 ) -> dict[str, Any]:
     from . import native_core
 
@@ -188,7 +189,7 @@ def _runtime_config(
         "model_type": "nemotron_voicechat",
         "architectures": ["NemotronVoiceChatForConditionalGeneration"],
         "runtime_strategy": "nemotron_voicechat_full_duplex",
-        "engine_backend": "trt",
+        "engine_backend": backend,
         "precision": precision,
         "vocab_size": thinker.vocab_size,
         "hidden_size": thinker.hidden_size,
@@ -326,8 +327,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("nemotron_voicechat supports only task=speech_session")
     if request.precision != "fp32":
         raise ValueError("Nemotron VoiceChat requires precision=fp32")
-    if request.backend != "trt":
-        raise ValueError("Nemotron VoiceChat requires the TensorRT backend")
+    if request.backend not in {"trt", "trt_rtx"}:
+        raise ValueError("Nemotron VoiceChat requires the TensorRT or TensorRT-RTX backend")
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("Nemotron VoiceChat requires tensor_parallel_size=1")
     quantization = _normalize_quantization(request.quantization)
@@ -458,6 +459,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tts_linear_precision=tts_linear_precision,
         max_cache_length=max_cache_length,
         mel_length=mel_length,
+        backend=request.backend,
     )
     writer.add_json("runtime.json", runtime_config)
     writer.add_json(

@@ -9,13 +9,18 @@
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 
@@ -52,16 +57,37 @@ fs::path explicit_runtime_root(const std::string& runtime_root) {
     if (runtime_root.empty())
         throw std::invalid_argument("runtime_root must be explicit and non-empty");
     std::error_code error;
-    fs::path root = fs::absolute(fs::path(runtime_root), error);
+    fs::path root = fs::absolute(fs::u8path(runtime_root), error);
     if (error)
         throw std::runtime_error("Unable to resolve runtime_root '" + runtime_root +
                                  "': " + error.message());
     return root.lexically_normal();
 }
 
+fs::path library_path(const fs::path& runtime_root, const std::string& stem) {
+#ifdef _WIN32
+    return runtime_root / (stem + ".dll");
+#elif defined(__APPLE__)
+    return runtime_root / ("lib" + stem + ".dylib");
+#else
+    return runtime_root / ("lib" + stem + ".so");
+#endif
+}
+
 class SharedLibrary {
   public:
-    explicit SharedLibrary(const fs::path& path) : path_(path.string()) {
+    explicit SharedLibrary(const fs::path& path) : path_(path.u8string()) {
+#ifdef _WIN32
+        // Resolve sibling dependencies beside this absolute DLL path. SDK DLLs
+        // may also be supplied in the application's configured DLL directories.
+        handle_ =
+            LoadLibraryExW(path.c_str(), nullptr,
+                           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        if (handle_ == nullptr) {
+            throw std::runtime_error("Unable to load '" + path_ +
+                                     "': " + std::system_category().message(GetLastError()));
+        }
+#else
         dlerror();
         handle_ = dlopen(path_.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (handle_ == nullptr) {
@@ -69,21 +95,32 @@ class SharedLibrary {
             throw std::runtime_error("Unable to load '" + path_ +
                                      "': " + (error != nullptr ? error : "unknown dlopen error"));
         }
+#endif
     }
 
     SharedLibrary(const SharedLibrary&) = delete;
     SharedLibrary& operator=(const SharedLibrary&) = delete;
 
     ~SharedLibrary() {
-        if (handle_ != nullptr)
+        if (handle_ != nullptr) {
+#ifdef _WIN32
+            FreeLibrary(handle_);
+#else
             dlclose(handle_);
+#endif
+        }
     }
 
     void* require_symbol(const char* name) const {
+#ifdef _WIN32
+        void* symbol = reinterpret_cast<void*>(GetProcAddress(handle_, name));
+        if (symbol == nullptr) {
+#else
         dlerror();
         void* symbol = dlsym(handle_, name);
         const char* error = dlerror();
         if (error != nullptr || symbol == nullptr) {
+#endif
             throw std::runtime_error("Library '" + path_ + "' is missing required symbol '" + name +
                                      "'");
         }
@@ -92,13 +129,17 @@ class SharedLibrary {
 
   private:
     std::string path_;
+#ifdef _WIN32
+    HMODULE handle_{nullptr};
+#else
     void* handle_{nullptr};
+#endif
 };
 
 class BackendLibrary {
   public:
     BackendLibrary(const fs::path& runtime_root, const std::string& backend_id)
-        : library_(runtime_root / ("libtrtmc_backend_" + backend_id + ".so")) {
+        : library_(library_path(runtime_root, "trtmc_backend_" + backend_id)) {
         const auto create =
             reinterpret_cast<CreateBackendFn>(library_.require_symbol("trtmc_create_backend"));
         destroy_ =
@@ -136,7 +177,7 @@ class BackendLibrary {
 class FamilyLibrary {
   public:
     FamilyLibrary(const fs::path& runtime_root, const std::string& family_id)
-        : library_(runtime_root / ("libtrtmc_model_" + family_id + ".so")),
+        : library_(library_path(runtime_root, "trtmc_model_" + family_id)),
           create_(reinterpret_cast<CreateFamilyFn>(library_.require_symbol(kCreateFamilySymbol))) {}
 
     FamilyLibrary(const FamilyLibrary&) = delete;
@@ -228,7 +269,7 @@ RuntimeLibraryCache& runtime_library_cache() {
 }
 
 IBackend& cached_backend(const fs::path& runtime_root, const std::string& backend_id) {
-    const std::string path = (runtime_root / ("libtrtmc_backend_" + backend_id + ".so")).string();
+    const std::string path = library_path(runtime_root, "trtmc_backend_" + backend_id).u8string();
     auto& cache = runtime_library_cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
     const auto found = cache.backends.find(path);
@@ -258,7 +299,7 @@ IBackend& cached_configured_backend(IBackend& backend, const std::string& runtim
 }
 
 FamilyLibrary& cached_family(const fs::path& runtime_root, const std::string& family_id) {
-    const std::string path = (runtime_root / ("libtrtmc_model_" + family_id + ".so")).string();
+    const std::string path = library_path(runtime_root, "trtmc_model_" + family_id).u8string();
     auto& cache = runtime_library_cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
     const auto found = cache.families.find(path);

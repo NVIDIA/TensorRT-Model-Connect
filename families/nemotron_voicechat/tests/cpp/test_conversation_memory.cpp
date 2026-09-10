@@ -259,6 +259,110 @@ void test_turn_storage_and_invalid_inputs_are_bounded() {
     check(rejected, "capsule requires the caller tokenizer counter");
 }
 
+void test_clean_rollover_forgets_old_answers_and_only_carries_current_request() {
+    voicechat::ConversationMemory memory;
+    for (int segment = 0; segment < 100; ++segment) {
+        memory.add_turn("An earlier request", "A stale answer that must never be replayed");
+        memory.set_stable_fact("previous topic", "obsolete");
+        const auto current = "Current unanswered request " + std::to_string(segment);
+        bool represented = false;
+        const auto capsule =
+            memory.forget_and_build_capsule(count_words, 96, current, &represented);
+        check(represented && capsule.find(current) != std::string::npos,
+              "each clean rollover preserves the latest unanswered request");
+        check(memory.turn_count() == 0 && memory.stable_fact_count() == 0 &&
+                  capsule.find("stale answer") == std::string::npos &&
+                  capsule.find("obsolete") == std::string::npos &&
+                  capsule.find("Recent complete turns:") == std::string::npos,
+              "clean rollover never reinjects an old assistant answer or fact");
+    }
+    const auto idle = memory.forget_and_build_capsule(count_words, 96);
+    check(idle.find("Latest unanswered user request:") == std::string::npos &&
+              idle.find("Do not greet or introduce yourself again") != std::string::npos,
+          "idle refresh waits for new speech without reviving an answered request");
+}
+
+void test_cross_turn_repetition_catches_long_variants_before_completion() {
+    voicechat::ResponseRepetitionGuard guard;
+    const std::string original =
+        "The small explorer walked through the quiet garden beside the river and watched "
+        "the bright birds gather near the tall trees while the gentle wind moved slowly "
+        "through the leaves above the winding path.";
+    guard.remember("Tell me an original story", original, false);
+    const std::string changed_prefix =
+        "THE small explorer walked through the peaceful garden, beside the river and watched "
+        "the bright birds gather near the tall trees while the gentle wind moved slowly";
+    check(guard.repeated("Explain how a computer stores numbers", changed_prefix),
+          "long copied prefix is rejected despite changed wording and punctuation");
+    check(guard.repeated("Do not repeat that story", original),
+          "a rejection of repetition is not mistaken for permission to repeat");
+    check(!guard.repeated("Tell me an original story", original) &&
+              !guard.repeated("Please repeat your previous answer", original),
+          "same request and affirmative repeat requests may reuse a successful answer");
+    guard.remember("Explain how a computer stores numbers", changed_prefix, true);
+    check(guard.repeated("Explain how a computer stores numbers", changed_prefix),
+          "a retry cannot reuse its own rejected response");
+    check(!guard.repeated("Name the capital again", "The capital of France is Paris."),
+          "short factual answers do not trigger cross-turn recovery");
+    const std::string different =
+        "The small explorer walked through the quiet garden and then asked about computer "
+        "memory. Each stored bit represents a binary choice. Groups of bits encode numbers "
+        "using place values, and programs interpret those values according to a data type.";
+    check(!guard.repeated("Explain computer memory", different),
+          "a shared opener followed by a distinct explanation is not decoder collapse");
+    guard.clear();
+    check(!guard.repeated("Explain something else", original),
+          "explicit session reset clears detector-only history");
+}
+
+void test_cross_turn_history_is_bounded_and_never_enters_capsules() {
+    voicechat::ResponseRepetitionGuard guard;
+    voicechat::ConversationMemory memory;
+    for (int turn = 0; turn < 50; ++turn) {
+        std::string response;
+        for (int word = 0; word < 40; ++word)
+            response += "word" + std::to_string(turn * 40 + word) + " ";
+        const auto request = "Topic " + std::to_string(turn);
+        check(!guard.repeated(request, response),
+              "varied long responses do not accumulate false trips");
+        guard.remember(request, response, false);
+        check(guard.size() <= 3, "response signatures remain bounded across many rollovers");
+        const auto capsule = memory.forget_and_build_capsule(count_words, 96, request);
+        check(capsule.find("word") == std::string::npos,
+              "detector-only assistant history is never model conditioning");
+    }
+}
+
+void test_reported_short_repetitive_reply_is_rejected_across_refusals() {
+    voicechat::ResponseRepetitionGuard guard;
+    const std::string reported =
+        "I am just saying, if you ever want to hear the lullaby, it is here.";
+    guard.remember("No, I do not want to hear that", reported, false);
+    check(!guard.repeated("Please stop bringing that up", reported, false),
+          "a shorter shared phrase is not rejected before its response is complete");
+    check(guard.repeated("Please stop bringing that up", reported, true),
+          "the user's actual repetitive reply is rejected across distinct refusals");
+    const std::string normalized_variant =
+        "I AM just saying! If you ever want to hear the lullaby... it is here.";
+    check(guard.repeated("Talk about something different", normalized_variant, true),
+          "complete shorter copies remain detectable despite casing and punctuation changes");
+    check(!guard.repeated("Please repeat what you said", reported, true),
+          "explicit repetition of a previously successful sentence remains allowed");
+    guard.remember("Please stop bringing that up", reported, true);
+    check(guard.repeated("Please stop bringing that up", reported, true),
+          "automatic retry cannot emit the same rejected short answer");
+    check(
+        !guard.repeated("Explain a new topic", reported + " Now let us discuss computer memory.",
+                        true),
+        "the final-only exact rule does not classify an extended distinct answer as an exact copy");
+
+    voicechat::ResponseRepetitionGuard facts;
+    const std::string fact = "The capital of France is Paris.";
+    facts.remember("What is the capital of France?", fact, false);
+    check(!facts.repeated("Name the French capital", fact, true),
+          "short factual answers remain valid across differently worded questions");
+}
+
 } // namespace
 
 int main() {
@@ -270,5 +374,9 @@ int main() {
     test_stable_facts_are_explicit_updatable_and_survive_turn_clear();
     test_untrusted_text_is_sanitized_quoted_and_byte_bounded();
     test_turn_storage_and_invalid_inputs_are_bounded();
+    test_clean_rollover_forgets_old_answers_and_only_carries_current_request();
+    test_cross_turn_repetition_catches_long_variants_before_completion();
+    test_cross_turn_history_is_bounded_and_never_enters_capsules();
+    test_reported_short_repetitive_reply_is_rejected_across_refusals();
     return failures;
 }

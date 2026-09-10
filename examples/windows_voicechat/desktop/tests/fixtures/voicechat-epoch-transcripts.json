@@ -1,0 +1,517 @@
+{
+  "source": "Normalized events captured from the packaged Windows app using actual Nemotron VoiceChat on TensorRT-RTX, with a recorded test microphone fixture.",
+  "capturedAt": "2026-09-10T10:02:18.299Z",
+  "events": [
+    {
+      "type": "state",
+      "state": "listening",
+      "backend": "trt_rtx",
+      "inputSampleRate": 16000
+    },
+    {
+      "epoch": 1,
+      "sequence": 0,
+      "type": "transcript",
+      "role": "user",
+      "text": "Hell",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 1,
+      "sequence": 1,
+      "type": "transcript",
+      "role": "user",
+      "text": "Hello.",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 1,
+      "sequence": 2,
+      "type": "state",
+      "state": "listening"
+    },
+    {
+      "epoch": 2,
+      "sequence": 0,
+      "type": "state",
+      "state": "thinking"
+    },
+    {
+      "epoch": 2,
+      "sequence": 3,
+      "type": "transcript",
+      "role": "assistant",
+      "text": "Hi",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 2,
+      "sequence": 5,
+      "type": "transcript",
+      "role": "assistant",
+      "text": "!",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 2,
+      "sequence": 7,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " How",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 2,
+      "sequence": 9,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " can",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 2,
+      "sequence": 11,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " I",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 2,
+      "sequence": 12,
+      "type": "transcript",
+      "role": "user",
+      "text": "Hello.",
+      "final": true,
+      "delta": false
+    },
+    {
+      "epoch": 2,
+      "sequence": 15,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " help",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 2,
+      "sequence": 17,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " you",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 2,
+      "sequence": 19,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " today",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 2,
+      "sequence": 21,
+      "type": "transcript",
+      "role": "assistant",
+      "text": "?",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 2,
+      "sequence": 33,
+      "type": "transcript",
+      "role": "user",
+      "text": "What",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 2,
+      "sequence": 35,
+      "type": "transcript",
+      "role": "assistant",
+      "text": "Hi! How can I help you today?",
+      "final": true,
+      "delta": false
+    },
+    {
+      "epoch": 2,
+      "sequence": 36,
+      "type": "state",
+      "state": "listening"
+    },
+    {
+      "epoch": 3,
+      "sequence": 0,
+      "type": "transcript",
+      "role": "user",
+      "text": "What is",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 3,
+      "sequence": 1,
+      "type": "transcript",
+      "role": "user",
+      "text": "What is the",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 3,
+      "sequence": 2,
+      "type": "state",
+      "state": "listening"
+    },
+    {
+      "epoch": 3,
+      "sequence": 3,
+      "type": "transcript",
+      "role": "user",
+      "text": "What is the cap",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 3,
+      "sequence": 4,
+      "type": "transcript",
+      "role": "user",
+      "text": "What is the capital",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 3,
+      "sequence": 5,
+      "type": "transcript",
+      "role": "user",
+      "text": "What is the capital of",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 3,
+      "sequence": 6,
+      "type": "transcript",
+      "role": "user",
+      "text": "What is the capital of France",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 3,
+      "sequence": 7,
+      "type": "transcript",
+      "role": "user",
+      "text": "What is the capital of France?",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 3,
+      "sequence": 8,
+      "type": "transcript",
+      "role": "user",
+      "text": "What is the capital of France?",
+      "final": true,
+      "delta": false
+    },
+    {
+      "epoch": 4,
+      "sequence": 0,
+      "type": "state",
+      "state": "thinking"
+    },
+    {
+      "epoch": 4,
+      "sequence": 3,
+      "type": "transcript",
+      "role": "assistant",
+      "text": "The",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 4,
+      "sequence": 5,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " capital",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 4,
+      "sequence": 7,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " of",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 4,
+      "sequence": 9,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " France",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 4,
+      "sequence": 11,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " is",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 4,
+      "sequence": 13,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " Paris",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 4,
+      "sequence": 15,
+      "type": "transcript",
+      "role": "assistant",
+      "text": ".",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 4,
+      "sequence": 20,
+      "type": "transcript",
+      "role": "assistant",
+      "text": "The capital of France is Paris.",
+      "final": true,
+      "delta": false
+    },
+    {
+      "epoch": 4,
+      "sequence": 21,
+      "type": "state",
+      "state": "listening"
+    },
+    {
+      "epoch": 5,
+      "sequence": 0,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 1,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 2,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and answ",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 3,
+      "type": "state",
+      "state": "listening"
+    },
+    {
+      "epoch": 5,
+      "sequence": 4,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and answer",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 5,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and answer in",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 6,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and answer in one",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 7,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and answer in one short",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 8,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and answer in one short sent",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 9,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and answer in one short sentence",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 10,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and answer in one short sentence.",
+      "final": false,
+      "delta": false
+    },
+    {
+      "epoch": 5,
+      "sequence": 11,
+      "type": "transcript",
+      "role": "user",
+      "text": "Please and answer in one short sentence.",
+      "final": true,
+      "delta": false
+    },
+    {
+      "epoch": 6,
+      "sequence": 0,
+      "type": "state",
+      "state": "thinking"
+    },
+    {
+      "epoch": 6,
+      "sequence": 3,
+      "type": "transcript",
+      "role": "assistant",
+      "text": "Paris",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 6,
+      "sequence": 5,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " is",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 6,
+      "sequence": 7,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " the",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 6,
+      "sequence": 9,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " capital",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 6,
+      "sequence": 11,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " of",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 6,
+      "sequence": 13,
+      "type": "transcript",
+      "role": "assistant",
+      "text": " France",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 6,
+      "sequence": 15,
+      "type": "transcript",
+      "role": "assistant",
+      "text": ".",
+      "final": false,
+      "delta": true
+    },
+    {
+      "epoch": 6,
+      "sequence": 120,
+      "type": "transcript",
+      "role": "assistant",
+      "text": "Paris is the capital of France.",
+      "final": true,
+      "delta": false
+    },
+    {
+      "epoch": 6,
+      "sequence": 121,
+      "type": "state",
+      "state": "listening"
+    }
+  ],
+  "expectedUserTexts": [
+    "Hello.",
+    "What is the capital of France?",
+    "Please and answer in one short sentence."
+  ],
+  "expectedAssistantTexts": [
+    "Hi! How can I help you today?",
+    "The capital of France is Paris.",
+    "Paris is the capital of France."
+  ]
+}
