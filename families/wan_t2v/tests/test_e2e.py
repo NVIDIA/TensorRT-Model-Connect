@@ -264,6 +264,13 @@ def _tie_wan_text_encoder(pipeline) -> None:
     if shared.weight.shape != embedded.weight.shape:
         raise RuntimeError("Wan reference text encoder embedding shapes do not match")
     if shared.weight.data_ptr() != embedded.weight.data_ptr():
+        # Wan stores the input embedding as shared.weight even when its config
+        # disables output-word-embedding tying. Restore the loaded input alias.
+        set_input_embeddings = getattr(text_encoder, "set_input_embeddings", None)
+        if callable(set_input_embeddings):
+            set_input_embeddings(shared)
+            embedded = text_encoder.encoder.embed_tokens
+    if shared.weight.data_ptr() != embedded.weight.data_ptr():
         raise RuntimeError("Wan reference text encoder tie_weights() did not bind embeddings")
 
 
@@ -344,6 +351,7 @@ def _official_reference(
         "guidance_scale": float(case.get("guidance_scale", 5.0)),
         "latents": reference_latents,
         "generator": generator,
+        "output_type": "pil",
     }
     if int(manifest.get("video_num_frames", 1)) > 1:
         kwargs["num_frames"] = int(manifest["video_num_frames"])

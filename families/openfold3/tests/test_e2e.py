@@ -166,6 +166,16 @@ def _run_native(
 ) -> tuple[str, dict]:
     structure = output_root / f"prediction-{index}.cif"
     metadata = output_root / f"prediction-{index}.json"
+    # The qualification executable is built separately from the selected wheel.
+    # Resolve the staged core so copied and symlinked roots both select its
+    # companion loader instead of the executable's source-build RUNPATH.
+    library_root = (runtime_root / "libtrtmc_core.so").resolve(strict=True).parent
+    loader = library_root / "libtrtmc_runtime.so"
+    assert loader.is_file(), f"OpenFold3 runtime is missing its companion loader: {loader}"
+    environment = os.environ.copy()
+    environment["LD_LIBRARY_PATH"] = os.pathsep.join(
+        path for path in (str(library_root), environment.get("LD_LIBRARY_PATH", "")) if path
+    )
     subprocess.run(
         [
             str(qualification),
@@ -177,6 +187,7 @@ def _run_native(
         ],
         check=True,
         timeout=timeout,
+        env=environment,
     )
     return structure.read_text(encoding="utf-8"), json.loads(metadata.read_text(encoding="utf-8"))
 
