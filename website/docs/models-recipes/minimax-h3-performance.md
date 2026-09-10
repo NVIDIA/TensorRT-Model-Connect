@@ -3,13 +3,13 @@ title: MiniMax H3 performance reproduction
 description: Reproduce native T2VA, FL2VA, and REF2VA with dynamic inputs, explicit super resolution, and defined cache conditions.
 ---
 
-Draft: eleven of twelve primary configurations are complete on the current request-memory candidate: all six short cases and five long cases, including SR REF2VA at 345 frames. The nine-request resident sequence and both short T2VA empty-cache checks are also complete. Only normal REF2VA at 345 frames remains unfinished and is running; its timing is not estimated. Completed outputs passed full media checks and sampled scene inspections; no full-motion or listening pass is claimed. Earlier runtime variants are retained separately. This is not a completed qualification report.
+Delivery snapshot: **12 of 12 primary configurations are complete** on the current request-memory candidate: all six short cases and all six long cases. The nine-request resident sequence and both short T2VA empty-cache checks are also complete. All primary outputs passed full media checks and scoped sampled scene inspection. No full-motion or listening pass is claimed. Earlier runtime variants are retained separately. This snapshot does not establish comprehensive performance or quality qualification.
 
 ## Delivery and comparison scope
 
 - Baseline source: PR #1240, commit `19e37595033d802c7dedfed77f2a8f42b1d4a992`.
-- Published PR state: `codex/minimax-h3-performance`, runtime commit `aa594f6010bd59204c2edc3061fc6e5042572c0d`; draft PR [#1241](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1241). Runtime-source publication was verified on September 10, 2026. Documentation-only follow-up commits do not change the measured runtime revision. The baseline PR is unchanged, and this optimization PR remains Draft while the remaining tests run.
-- Current measurement candidate: request-sized family-cache commit `aa594f6010bd59204c2edc3061fc6e5042572c0d`, built in a separate immutable measurement worktree. It has passed 14 CPU tests and eleven primary GPU cases with full media decode and sampled visual inspection; only normal REF2VA at 345 frames remains unfinished. The single-process nine-request resident sequence and both short T2VA empty-cache checks also completed with full media checks and sampled visual inspection; findings and limitations are recorded below. It has not completed the primary matrix. Its results use the distinct `memory-` prefix; `bulk-` results remain measurements of the preceding `4dcfdc79` commit and are not relabelled.
+- Published PR state: `codex/minimax-h3-performance`, runtime commit `aa594f6010bd59204c2edc3061fc6e5042572c0d`; draft PR [#1241](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1241). Runtime-source publication was verified on September 10, 2026. Documentation-only follow-up commits do not change the measured runtime revision. The baseline PR is unchanged, and this optimization PR remains Draft pending review.
+- Current measurement candidate: request-sized family-cache commit `aa594f6010bd59204c2edc3061fc6e5042572c0d`, built in a separate immutable measurement worktree. It has passed 14 CPU tests and completed all twelve primary GPU cases with full media decode; scoped visual findings are recorded below. The single-process nine-request resident sequence and both short T2VA empty-cache checks also completed with full media checks and sampled visual inspection. Completion of this selected matrix is not comprehensive qualification. Its results use the distinct `memory-` prefix; `bulk-` results remain measurements of the preceding `4dcfdc79` commit and are not relabelled.
 - One normal bundle and one explicitly enabled SR bundle each contain T2VA, FL2VA, and REF2VA. There is no per-mode build, fixed-prompt selection, or user-selected optimization profile.
 - Baseline and candidate comparisons use the same engine payloads, tokenizer, request, seed, canvas, and both FirstBlockCache thresholds set to **0.3**. Only the native runtime changes. Do not independently rebuild engines for one side of a runtime-only comparison.
 - Candidate changes concern shared text/vision activation memory, actual-shape input/output allocation, activation-shape invalidation, Windows bulk plan-file reads, and request-sized family cache tensors. They do not change checkpoints, precision, attention mathematics, denoising schedule, dynamic profile ranges, weight-streaming budgets, or FBC thresholds.
@@ -20,12 +20,12 @@ The branch's `website/docs/models-recipes/minimax-h3.md` is the public model gui
 
 ### Runtime changes under evaluation
 
-| Change | Intended mechanism | Evidence still required |
+| Change | Intended mechanism | Evidence and remaining limits |
 | --- | --- | --- |
 | Live-shape text/vision activation storage | Extend the existing serial-context allocation policy to text/vision, sizing activation requirements from actual inputs. Coexisting serial contexts can share the arena; this does not promise persistence across destroyed modules. | Matched full-workflow timing and shape/mode transition checks. |
-| Actual-shape input/output allocation | Allocate and initialize the requested tensor shapes while retaining the public dynamic ranges; invalidate cached activation requirements when shapes change. | Nine short resident requests with prompt/mode/reference transitions and five one-shot long cases completed, including SR REF2VA; quality findings are below. Normal REF2VA at 345 frames remains pending. |
-| Request-sized family FirstBlockCache tensors (current candidate) | Allocate four BF16 hidden/cache tensors at validated live row counts; late-bind them while preserving profile-MAX ABI and initial-binding capacity validation. Auxiliary bindings and release policies remain unchanged. | Separate build and 14 CPU tests passed. Eleven primary cases and the nine-request resident sequence completed with automatic media checks and sampled review; normal REF2VA at 345 frames remains pending. |
-| Windows bulk plan reads | Replace the plan reader's MSVC `ifstream` path with checked `SetFilePointerEx` and `ReadFile`, reusing the existing read-only, write/delete-protected file handle. Host reads use chunks no larger than 64 MiB; device destinations keep the existing 4 MiB staging/upload path. Linux remains on `ifstream`. | Completed short results and five current-candidate long results are listed below; remaining paired workflows/lengths are pending. |
+| Actual-shape input/output allocation | Allocate and initialize the requested tensor shapes while retaining the public dynamic ranges; invalidate cached activation requirements when shapes change. | Nine short resident requests with prompt/mode/reference transitions and all six one-shot long cases completed; scoped quality findings are below. |
+| Request-sized family FirstBlockCache tensors (current candidate) | Allocate four BF16 hidden/cache tensors at validated live row counts; late-bind them while preserving profile-MAX ABI and initial-binding capacity validation. Auxiliary bindings and release policies remain unchanged. | Separate build and 14 CPU tests passed. All twelve primary cases and the nine-request resident sequence completed with automatic media checks; scoped visual findings and limitations are below. |
+| Windows bulk plan reads | Replace the plan reader's MSVC `ifstream` path with checked `SetFilePointerEx` and `ReadFile`, reusing the existing read-only, write/delete-protected file handle. Host reads use chunks no larger than 64 MiB; device destinations keep the existing 4 MiB staging/upload path. Linux remains on `ifstream`. | All six short and six current-candidate long results are listed below; most matched original-PR timing pairs were not measured. |
 | Load diagnostics | Record file-read bytes/wall time, upload wall time, deserialization, weight-budget setup, runtime cache/configuration, context creation, and module initialization. | Retained as generic runtime logging; nested durations are not additive. |
 
 The inspected public MSVC 14.44 standard-library source, `__msvc_filebuf.hpp` (`xsgetn`), services this large `ifstream.read` path through approximately 4 KiB `fread` iterations, including binary reads. This identifies avoidable per-read overhead; the source observation alone does not establish a speedup or prove that physical storage is slow. Measured results are listed below. The bulk reader retains section bounds, seek/short-read failure handling, file identity, and the existing mutation guard; it does not alter engine bytes or model computation.
@@ -34,7 +34,7 @@ Pre-bulk runs, bulk-reader runs and profiler traces are retained as separately l
 
 The native 1344×768 long REF2VA request has 118,793 packed rows, whereas its broad dynamic profile allows 630,310. Source-level accounting shows that the four family cache tensors reserve 25.247 GiB at profile MAX but require 4.758 GiB for this request: 20.488 GiB of avoidable allocation. This is not a measured speedup. Read-only memory samples did not establish sustained hard-disk paging; high page-fault rates include soft faults. The old `bulk-normal-ref2va-345` diagnostic also overlapped CPU compilation of the separate candidate. Its observed duration will be preserved, but it is not a controlled formal comparison.
 
-The eleven completed primary request-memory cases logged the following aggregate capacities for the four family cache tensors. These are request allocation sizes versus the preserved profile-MAX contract, not whole-process GPU-memory peaks or proof of a corresponding latency reduction.
+The twelve completed primary request-memory cases logged the following aggregate capacities for the four family cache tensors. These are request allocation sizes versus the preserved profile-MAX contract, not whole-process GPU-memory peaks or proof of a corresponding latency reduction.
 
 | Current-candidate case | Requested rows | Profile-MAX rows | Allocated cache bytes | Profile-MAX cache bytes |
 | --- | ---: | ---: | ---: | ---: |
@@ -46,6 +46,7 @@ The eleven completed primary request-memory cases logged the following aggregate
 | SR REF2VA, 124 frames | 30,224 | 86,662 | 1,299,873,792 | 3,727,159,296 |
 | Normal T2VA, 345 frames | 104,060 | 112,367 | 4,475,412,480 | 4,832,679,936 |
 | Normal FL2VA, 345 frames | 108,126 | 112,367 | 4,650,283,008 | 4,832,679,936 |
+| Normal REF2VA, 345 frames | 118,793 | 630,310 | 5,109,049,344 | 27,108,372,480 |
 | SR T2VA, 345 frames | 42,554 | 112,367 | 1,830,162,432 | 4,832,679,936 |
 | SR FL2VA, 345 frames | 44,208 | 112,367 | 1,901,297,664 | 4,832,679,936 |
 | SR REF2VA, 345 frames | 57,287 | 630,310 | 2,463,799,296 | 27,108,372,480 |
@@ -404,7 +405,7 @@ Keep native runtime directory and executable together. `--runtime-root` selects 
 
 To switch the measured implementation, set **both** `$RuntimeRoot` to that implementation's installed `bin` directory and `$Trtmc = Join-Path $RuntimeRoot 'trtmc.exe'`; `$RuntimeLabel` only names the result and does not select binaries. Build/install baseline and candidate separately, then reuse the same `$NormalBundle`, `$SrBundle` and frozen per-delivery seeds. Each repeat needs a new result name, for example `$RuntimeLabel = 'candidate-repeat2'`; the helper refuses existing output directories. Record source commit, bundle/build provenance, exact arguments, cache condition/seed recipe, run order and exit status alongside the wall result. Do not reuse a measured run's updated cache as the next side's starting seed.
 
-## Results to fill from completed receipts
+## Completed measurements and comparison coverage
 
 Dimensions below are width×height. Every normal primary row uses native 1344×768; the FL2VA first/last fixtures are also 1344×768. Every SR primary row uses a 864×480 base and 1296×720 output.
 
@@ -413,19 +414,19 @@ Every candidate cell in this primary matrix refers to the single current runtime
 | Bundle | Mode | Output frames | Base → output canvas | PR #1240 baseline wall s | Current candidate wall s | Current candidate generation s | Quality / status |
 | --- | --- | ---: | --- | --- | --- | --- | --- |
 | Normal | T2VA | 124 | 1344×768 → same | 693.563 | 570.797 | 562.484 | Full decode; sampled continuity preserved; versus bulk: PSNR 33.130097 dB / SSIM 0.956300 |
-| Normal | FL2VA | 124 | 1344×768 → same | Pending | 601.877 | 596.361 | Full decode; sampled continuity preserved; no paired 1344×768 baseline |
-| Normal | REF2VA | 124 | 1344×768 → same | Pending | 960.365 | 954.824 | Full decode; sampled scene retained; versus historical native2: PSNR 26.922813 dB / SSIM 0.834018 |
-| SR | T2VA | 124 | 864×480 → 1296×720 | Pending | 218.031 | 212.987 | Full decode; sampled continuity preserved; versus historical native2: PSNR 32.334520 dB / SSIM 0.939048 |
-| SR | FL2VA | 124 | 864×480 → 1296×720 | Pending | 219.617 | 214.338 | Full decode; sampled continuity preserved; versus historical native2: PSNR 42.010766 dB / SSIM 0.983258 |
-| SR | REF2VA | 124 | 864×480 → 1296×720 | Pending | 472.491 | 467.342 | Full decode; sampled continuity preserved; versus bulk: PSNR 29.575921 dB / SSIM 0.888277 |
+| Normal | FL2VA | 124 | 1344×768 → same | Not measured | 601.877 | 596.361 | Full decode; sampled continuity preserved; no paired 1344×768 baseline |
+| Normal | REF2VA | 124 | 1344×768 → same | Not measured | 960.365 | 954.824 | Full decode; sampled scene retained; versus historical native2: PSNR 26.922813 dB / SSIM 0.834018 |
+| SR | T2VA | 124 | 864×480 → 1296×720 | Not measured | 218.031 | 212.987 | Full decode; sampled continuity preserved; versus historical native2: PSNR 32.334520 dB / SSIM 0.939048 |
+| SR | FL2VA | 124 | 864×480 → 1296×720 | Not measured | 219.617 | 214.338 | Full decode; sampled continuity preserved; versus historical native2: PSNR 42.010766 dB / SSIM 0.983258 |
+| SR | REF2VA | 124 | 864×480 → 1296×720 | Not measured | 472.491 | 467.342 | Full decode; sampled continuity preserved; versus bulk: PSNR 29.575921 dB / SSIM 0.888277 |
 | Normal | T2VA | 345 | 1344×768 → same | Not measured | 2819.268 | 2809.620 | Full decode; sampled scene continuity preserved; no paired 345-frame baseline |
 | Normal | FL2VA | 345 | 1344×768 → same | Not measured | 3042.447 | 3032.232 | Full decode; sampled scene consistent with endpoints; no paired 345-frame baseline |
-| Normal | REF2VA | 345 | 1344×768 → same | Pending | Pending | Pending | Running; result pending |
+| Normal | REF2VA | 345 | 1344×768 → same | Not measured | 4940.005 | 4929.568 | Full decode; sampled scene retained, precise framing differs; versus intermediate bulk: PSNR 24.978547 dB / SSIM 0.823267 |
 | SR | T2VA | 345 | 864×480 → 1296×720 | Not measured | 742.129 | 732.879 | Full decode; sampled scene continuity preserved; no paired 345-frame baseline |
 | SR | FL2VA | 345 | 864×480 → 1296×720 | Not measured | 697.108 | 687.752 | Full decode; sampled scene consistent with endpoints; no paired 345-frame baseline |
 | SR | REF2VA | 345 | 864×480 → 1296×720 | Not measured | 1750.920 | 1741.642 | Full decode; sampled scene retained with substantial forward camera move; no paired 345-frame baseline |
 
-Eleven of twelve primary configurations are complete: all six short cases and five long cases, including SR REF2VA. The nine-request resident sequence and both short T2VA empty-cache cases remain complete. Normal REF2VA at 345 frames is running and is the only unfinished primary case; no result is estimated for it. Additional optional baseline comparisons remain unrun or queued. A running or queued case is not a performance or quality pass.
+All twelve primary configurations are complete: six short cases and six long cases, with full media checks and scoped sampled visual review. The nine-request resident sequence and both short T2VA empty-cache cases are also complete. Each primary timing is one observation (`n=1`); other original-PR baseline comparisons are not measured. Neither these completed runs nor their sampled reviews establish comprehensive qualification.
 
 Only calculate a speedup for a matched, completed pair. If a baseline long case is not run, mark it **not measured**, not estimated from a short result. Do not mix original BF16 bundle timings into this table. Earlier short INT8 delivery runs are historical evidence until the matching executable, cache seed, and measurement boundary are established.
 
@@ -518,6 +519,30 @@ The runtime selected denoiser profile **1 of 2 (zero-based)** and packed **57,28
 Full video/audio decode passed: **345 H.264 frames at 1296×720 and 24 fps (14.375 s)**, with **stereo 32 kHz AAC and 460800 decoded samples/channel (14.400 s)**. Audio RMS is −29.787400 / −29.747068 dBFS (left/right), −29.767187 overall; peak is −14.142183 dBFS, with no NaN/Inf samples. The scene-change diagnostic scored 345 frames, flagged zero events and had maximum score 0.861 at threshold 10; this remains an inspection aid rather than a continuity guarantee.
 
 Reference/contact inspection at frames 0, 31, …, 341 retained the supplied waterfall, rocks, pool and foliage, ending in a closer view of the same rocks and water. The forward camera move is substantial: the framing is not unchanged. No obvious sampled garbling, replacement scene or abrupt composition jump was observed. The final three decoded frames are not sampled. No matched long-output reference, pixel parity, full-motion playback or listening pass is claimed; scoped QA and raw receipts/logs remain private evidence.
+
+### Completed normal REF2VA long case, 345 frames
+
+Case `memory-normal-ref2va-345` completed with exit 0 on `aa594f60`, using the normal bundle, the exact REF2VA prompt and original ordered image/audio references, seed 0, 345 requested/output frames, native **1344×768**, 50 schedule points, guidance 1 and FBC 0.3. It was an unprofiled fresh-process run with an independent copy of the normal RTX disk-cache seed. Receipt wall-clock markers are September 10, 2026, 06:34:36.4534772–07:56:56.6015318 (UTC−07:00). The complete command took **4940.0052086 s (82.333 min)** and the family pipeline took **4929.567827 s**. No original PR #1240 matched long REF2VA timing baseline was measured.
+
+| Logged stage | Stage wall s, including load | Engine-execution s within stage | Engine launches |
+| --- | ---: | ---: | --- |
+| Shared text and vision encoding | 58.314781 | 16.355333 | 1 vision / 1 text |
+| Reference image/audio encoding | 4.602564 | 3.293916 | 7 image VAE / 1 audio VAE |
+| AdaLN precomputation | 9.670724 | 3.154041 | 49 |
+| Denoising | 4672.632863 | 4650.855335 | 49 head / 9 tail / 49 finish |
+| Video VAE decoding | 174.825516 | 163.679110 | 20 |
+| Super-resolution, disabled | 0.000001 | Not applicable | 0 |
+| Audio VAE decoding | 9.274648 | 7.152364 | 2 |
+
+Across **188 engine launches**, logged execution totaled **4844.490100 s**, already included in stage wall times. Denoising engine times were 569.553868 s for heads, 4069.134500 s for tails and 12.166966 s for finishes. FBC executed **9 full / 40 skipped** tails. Denoising occupied **94.79%** of the family pipeline; its logged engine execution occupied about **99.53%** of that stage. This is an execution-dominated long request, not a fresh attention-specific profile. The disabled-SR entry is call overhead, not super-resolution work.
+
+The request packed **118,793 live rows** within a 630,310-row profile MAX. Its four family cache tensors allocated **5,109,049,344 bytes**, against the **27,108,372,480-byte** profile-MAX contract. The RTX disk cache loaded 25,438,048 bytes and saved 30,435,779 bytes. These allocation/cache observations do not prove full specialization coverage or establish a latency improvement by themselves.
+
+Full video/audio decode passed: **345 H.264 frames at 1344×768 and 24 fps (14.375 s)**, with **stereo 32 kHz AAC and 460800 decoded samples/channel (14.400 s)**. Audio RMS is −29.390001 / −29.276883 dBFS (left/right), −29.333074 overall; peak is −13.779859 dBFS, with no NaN/Inf samples. The all-frame scene-change diagnostic scored 345 frames, flagged zero events and reached maximum score 1.432 at threshold 10; this is an inspection aid, not a motion-quality guarantee.
+
+The direct all-frame comparison against the **intermediate `4dcfdc79` bulk output** produced PSNR **24.978547 dB** (per-frame minimum 20.483076, maximum 34.630736) and SSIM **0.823267**. All 49 full/skip FBC decisions matched. Aligned decoded-audio subtraction had RMS −44.750563 dBFS and peak −21.639181 dBFS, with finite samples. These are quality-only comparisons, not an original-PR baseline. The older bulk run's 5473.4675169-second wall overlapped CPU compilation, so no controlled speedup is calculated from it.
+
+Inspection of the original image and both matching twelve-frame contact sheets (0, 31, …, 341) retained the same waterfall, moss-covered rocks, pool and foliage with a substantial forward camera move. Fine water/foliage detail and precise framing/progression differ, particularly in later close-ups. No obvious sampled garbling or replacement scene was observed; this is not near-pixel reproduction or an assertion of unchanged framing. The final three frames are not sampled. No full-motion playback or listening pass is claimed. Raw receipts, comparison logs and the scoped QA record remain private evidence.
 
 ### Completed short T2VA empty-cache checks
 
@@ -842,7 +867,7 @@ Prompt changes can alter both cache hits and FBC full/skip decisions. In particu
 - **Nsight:** traces are diagnostic. Profiled application wall times and trace collection/export time are excluded from formal timing tables. Do not publish raw traces, local paths, environment dumps, device identities, or raw kernel identifiers.
 - **Concurrency:** run one GPU workload at a time; use the same runtime/SDK/driver and comparable system load for a pair. Record any deviation rather than applying an invented correction.
 - **Media gate:** require exit 0 and a finished MP4, decode every frame, verify expected dimensions/count/fps and stereo audio metadata, inspect same-time frames across baseline/candidate, and listen to beginning/middle/end audio. Check motion/scene continuity and correspondence to references; a scalar similarity score alone is not a quality guarantee. Record any nonfinite samples, decoding failures, flashes, cuts, or changed content.
-- **Code checks by revision:** the preceding bulk runtime compiled; 14 focused CPU tests and the dynamic input/output GPU regression passed. Its real RTX shared-arena test also passed with two contexts, nonzero activation requirements, and 8→512→8 shape transitions with verified softmax results. These generic GPU checks are evidence for that revision, not newly rerun tests of `aa594f60`. The current request-memory revision separately built and passed 14 CPU tests, including live-capacity/profile-bound cases; eleven primary cases, all nine resident requests and both short T2VA empty-cache cases completed with full media checks and sampled scene inspection. Remaining manual-review limits are recorded above. Only normal REF2VA at 345 frames remains unfinished in the primary matrix. Two resident manifests (seven/nine requests, longest prompt 1662 tokens) previously passed native input validation; the nine-request manifest has now also executed in one task. On the current published revision, `python tools/legal_headers.py --check` found zero issues and `git diff --check 19e37595...HEAD` passed. No current-head remote premerge pass is claimed. None of these checks replaces the pending full-workflow, motion or listening qualification.
+- **Code checks by revision:** the preceding bulk runtime compiled; 14 focused CPU tests and the dynamic input/output GPU regression passed. Its real RTX shared-arena test also passed with two contexts, nonzero activation requirements, and 8→512→8 shape transitions with verified softmax results. These generic GPU checks are evidence for that revision, not newly rerun tests of `aa594f60`. The current request-memory revision separately built and passed 14 CPU tests, including live-capacity/profile-bound cases; all twelve primary cases, all nine resident requests and both short T2VA empty-cache cases completed with full media checks. Scoped visual findings and remaining manual-review limits are recorded above. Two resident manifests (seven/nine requests, longest prompt 1662 tokens) previously passed native input validation; the nine-request manifest has now also executed in one task. On the current published revision, `python tools/legal_headers.py --check` found zero issues and `git diff --check 19e37595...HEAD` passed. No current-head remote premerge pass is claimed. None of these checks replaces comprehensive input coverage, full-motion review or listening qualification.
 
 ## Full-run Nsight findings
 
@@ -905,12 +930,11 @@ The twelve-case matrix tests two output lengths, two canvas/delivery combination
 - FL2VA accepts first-only, last-only, or both endpoints. REF2VA accepts 1–12 ordered inputs: at most 9 images, 3 videos, and 3 explicit audio files, including audio-only requests. REF2VA image/video aspect ratios must be within 1:4–4:1. Video/audio inputs must be 2–15 seconds; each aggregate category of video, video soundtrack, and explicit audio duration is limited to 15 seconds. Keep reference tags aligned with ordered inputs. Endpoint inputs cannot be mixed with references.
 - The fixed sampling configuration is 50 schedule points, guidance scale 1, and 24 fps; seed is adjustable. Negative prompts and supplied initial latents are unsupported. H3-Context-IR and H3-Regenerate-2K are not included.
 
-## Finalization checklist
+## Delivery status and remaining limits
 
-- Replace pending branch commit, environment fields, and each measured result; explicitly mark omitted runs.
-- Supply the original reference fixtures separately to authorized recipients with appropriate permission; do not upload unapproved fixtures publicly. Identify the cache condition or reproducible seeding procedure.
-- Include the exact resident manifest and source/bundle/seed provenance in that local delivery. Publish only approved, sanitized metadata; disclose that historical RTX seeds are absent unless approved compatible files are actually supplied.
-- Keep unapproved host/driver identifiers private and state the remaining limit on reproducing absolute latency on other hardware.
-- Attach approved baseline/candidate videos and concise quality findings; keep raw local receipts and traces private.
-- Confirm all published timings are unprofiled and have the stated boundary, request, bundle, and FBC settings.
-- Do not advertise a performance or quality improvement until the matched evidence supports it.
+- The measured runtime is `aa594f6010bd59204c2edc3061fc6e5042572c0d`; documentation-only follow-up commits are not new runtime measurements. PR #1241 remains Draft pending review. All 12 primary configurations, nine resident requests and two short empty-cache checks completed; scoped quality-review status is recorded above.
+- Each primary result is a single observation (`n=1`), not a latency distribution. Most original-PR baseline pairs were not measured; historical quality references and the CPU-build-confounded long bulk run do not supply those missing timing baselines. No unmeasured speedup is implied.
+- Full media decode, metadata, finite-audio checks and sampled visual review are the completed media evidence. Full-motion playback and listening remain outside this report's completed review. The tested inputs do not exhaust supported prompts, references, durations or canvases, and similarity metrics are not a universal quality guarantee.
+- Exact reference fixtures, resident manifests and source/bundle/seed provenance are retained in the authorized local evidence. Do not publicly upload unapproved fixtures, videos, raw receipts or traces. Historical RTX cache seeds are not distributed; the report documents an explicit seeding recipe rather than promising identical seed bytes.
+- Undisclosed host and driver details remain private. The setup describes how to reproduce the workflow and cache condition, not a guarantee of identical absolute latency on arbitrary hardware or I/O systems.
+- Formal one-shot timings are unprofiled launch-to-exit observations with the stated request, bundle and FBC 0.3 settings. Resident request boundaries and diagnostic trace/export timings are separate. Keep these boundaries distinct when quoting results or attaching approved media and concise QA findings.
