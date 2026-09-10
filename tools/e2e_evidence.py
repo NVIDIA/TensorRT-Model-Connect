@@ -57,6 +57,9 @@ _EXTENSIONS = frozenset(
         ".log",
         ".csv",
         ".cif",
+        ".yaml",
+        ".a3m",
+        ".b2rq",
         ".raw",
         ".ppm",
     }

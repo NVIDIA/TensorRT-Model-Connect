@@ -1602,16 +1602,24 @@ def test_recording_error_keeps_outcome_when_terminal_sink_fails(tmp_path):
     assert recorder.data["evidence_status"] == "partial"
 
 
-def test_structure_file_is_copied_as_bounded_inert_evidence(tmp_path):
-    source = tmp_path / "prediction.cif"
-    payload = "data_example\n_atom_site.Cartn_x 1.0\n"
-    source.write_text(payload)
+@pytest.mark.parametrize(
+    ("suffix", "payload"),
+    [
+        (".cif", b"data_example\n_atom_site.Cartn_x 1.0\n"),
+        (".yaml", b"sequences:\n  - protein:\n      sequence: ACD\n"),
+        (".a3m", b">example\nACD\n"),
+        (".b2rq", b"\x00B2RQ\x01"),
+    ],
+)
+def test_structure_file_is_copied_as_bounded_inert_evidence(tmp_path, suffix, payload):
+    source = tmp_path / f"structure{suffix}"
+    source.write_bytes(payload)
     recorder = _recorder(tmp_path)
     recorder.record("native", {"structure": str(source)})
     saved = recorder.data["native"]["structure"]
-    assert saved["artifact"].endswith(".cif")
-    assert (recorder.directory / saved["artifact"]).read_text() == payload
-    assert source.read_text() == payload
+    assert saved["artifact"].endswith(suffix)
+    assert (recorder.directory / saved["artifact"]).read_bytes() == payload
+    assert source.read_bytes() == payload
 
 
 def test_family_observations_cannot_replace_recorder_metadata(tmp_path):
