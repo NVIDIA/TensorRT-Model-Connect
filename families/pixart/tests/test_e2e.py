@@ -617,7 +617,7 @@ def test_semantic_artifacts_are_paired(monkeypatch, tmp_path: Path) -> None:
     }
 
 
-@pytest.mark.parametrize("threshold_case", sorted(CASES))
+@pytest.mark.parametrize("threshold_case", sorted(CASES), ids=lambda name: f"pixel-layout-control-{name}")
 def test_reference_metrics_reject_rearranged_pixels(
     threshold_case: str, tmp_path: Path
 ) -> None:

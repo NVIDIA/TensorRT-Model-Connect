@@ -51,7 +51,6 @@ def _csv_values(values: list[str]) -> set[str]:
 
 def _selection(config) -> set[str]:
     selected = _csv_values(config.getoption("--e2e-model", default=[]) or [])
-    selected |= _csv_values(config.getoption("--e2e-testcase", default=[]) or [])
     models_file = config.getoption("--e2e-models-file", default=None)
     if models_file:
         path = Path(models_file)
@@ -66,9 +65,12 @@ def _selection(config) -> set[str]:
 
 def _require_selected(case_name: str, manifest: dict, config) -> None:
     selected = _selection(config)
+    testcases = _csv_values(config.getoption("--e2e-testcase", default=[]) or [])
     enabled = os.environ.get("TRTMC_E2E") == "1"
-    if not enabled and not selected:
+    if not enabled and not selected and not testcases:
         pytest.skip("real family E2E requires TRTMC_E2E=1 or an explicit E2E selection")
+    if testcases and case_name not in testcases:
+        pytest.skip(f"{case_name} was not selected")
     if selected and not ({_FAMILY, manifest["name"], case_name} & selected):
         pytest.skip(f"{case_name} was not selected")
 
