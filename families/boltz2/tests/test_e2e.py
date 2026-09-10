@@ -84,34 +84,36 @@ def _record_reference_comparison(structure: Path, reference: Path, accuracy: Pat
         checks = [
             {
                 "name": name,
+                "label": label,
                 "scope": "contract",
                 "actual": metrics[name],
                 "operator": "==",
                 "expected": expected,
                 "passed": outcomes[name],
             }
-            for name, expected in (
-                ("all_outputs_finite", True),
-                ("atom_count", thresholds["atom_count"]),
-                ("token_count", thresholds["token_count"]),
+            for name, label, expected in (
+                ("all_outputs_finite", "Finite outputs", True),
+                ("atom_count", "Atom count", thresholds["atom_count"]),
+                ("token_count", "Token count", thresholds["token_count"]),
             )
         ]
         checks.extend(
             {
                 "name": name,
+                "label": label,
                 "scope": "independent_reference",
                 "actual": metrics[name],
                 "operator": operator,
                 "expected": thresholds[threshold],
                 "passed": outcomes[name],
             }
-            for name, operator, threshold in (
-                ("lddt", ">=", "lddt_min"),
-                ("kabsch_rmsd_angstrom", "<=", "kabsch_rmsd_angstrom_max"),
-                ("plddt_mean_abs", "<=", "plddt_mean_abs_max"),
-                ("confidence_score_abs", "<=", "confidence_score_abs_max"),
-                ("complex_plddt_abs", "<=", "complex_plddt_abs_max"),
-                ("ptm_abs", "<=", "ptm_abs_max"),
+            for name, label, operator, threshold in (
+                ("lddt", "lDDT", ">=", "lddt_min"),
+                ("kabsch_rmsd_angstrom", "Aligned RMSD (Å)", "<=", "kabsch_rmsd_angstrom_max"),
+                ("plddt_mean_abs", "Mean pLDDT difference", "<=", "plddt_mean_abs_max"),
+                ("confidence_score_abs", "Confidence score difference", "<=", "confidence_score_abs_max"),
+                ("complex_plddt_abs", "Complex pLDDT difference", "<=", "complex_plddt_abs_max"),
+                ("ptm_abs", "pTM difference", "<=", "ptm_abs_max"),
             )
         )
         record_evidence(
