@@ -10,6 +10,7 @@ import html
 import json
 import math
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
@@ -115,8 +116,36 @@ def _history_key(
 ) -> str | None:
     environment = _environment(run.get("environment"))
     model = _mapping(resolved.get("model"))
+    measurement = _mapping(resolved.get("measurement"))
+    checkpoint = model.get("hf_id")
+    revision = model.get("hf_revision")
+    preparations = _mapping(run.get("preparation")).get("bundles", [])
+    managed = isinstance(preparations, list) and any(
+        isinstance(item, Mapping)
+        and item.get("model") == cell.get("model")
+        and item.get("bundle") == resolved.get("bundle_path")
+        and isinstance(item.get("build_identity"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", item["build_identity"]) is not None
+        for item in preparations
+    )
     if (
         not resolved.get("request")
+        or not managed
+        or not isinstance(checkpoint, str)
+        or not checkpoint
+        or not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        or any(
+            measurement.get(key) is None
+            for key in (
+                "warmup",
+                "iterations",
+                "telemetry",
+                "telemetry_interval_ms",
+                "timing_scope",
+                "asset_loading_included",
+            )
+        )
         or not environment["gpus"]
         or not all(gpu.get("name") and gpu.get("driver_version") for gpu in environment["gpus"])
         or not environment.get("python")
@@ -135,8 +164,11 @@ def _history_key(
             _scope(cell, run),
             cell.get("asset_loading_included"),
             resolved.get("request"),
-            _mapping(resolved.get("model")).get("build"),
-            _mapping(resolved.get("model")).get("precision"),
+            checkpoint,
+            revision,
+            model.get("build"),
+            model.get("precision"),
+            measurement,
             environment,
             run.get("measurement_policy"),
         ],
@@ -177,7 +209,7 @@ def _row(
             "request": resolved.get("request"),
             "model": {
                 key: model[key]
-                for key in ("name", "family", "hf_id", "precision", "task", "build")
+                for key in ("name", "family", "hf_id", "hf_revision", "precision", "task", "build")
                 if key in model
             },
         }
@@ -241,7 +273,7 @@ Loading and warmup are excluded where declared in the recorded timing contract. 
 <div class="scroll"><table><thead><tr><th>Run</th><th>Model</th><th>Case</th><th>Operation</th><th>Status</th>
 <th>p50</th><th>p95</th><th>Task rate</th><th>Timing scope</th><th>p50 change</th><th>Evidence</th></tr></thead><tbody>"""
     document += "".join(rows) + "</tbody></table></div>"
-    document += "<p>p50 change compares runs only when the schema, workload, build settings, timing policy, and recorded GPU/software fields match. Negative is faster. This is a comparison of recorded measurements, not a correctness gate. Missing comparison evidence is shown as —; different timing scopes are never combined.</p>"
+    document += "<p>p50 change compares runs only when the schema, pinned checkpoint revision, workload, build settings, measurement settings, timing policy, and recorded GPU/software fields match. Negative is faster. This is a comparison of recorded measurements, not a correctness gate. Missing comparison evidence is shown as —; different timing scopes are never combined. Runs using local checkpoints, external bundles, or older records without a managed build identity remain readable without a historical delta.</p>"
     document += "".join(contexts)
     document += """<script>
 function filterRows(){const query=document.querySelector('#filter').value.toLowerCase();
@@ -296,6 +328,7 @@ def generate_collection_report(
                 "started_at",
                 "finished_at",
                 "measurement_policy",
+                "preparation",
                 "environment",
             )
         }

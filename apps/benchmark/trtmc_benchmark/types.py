@@ -65,6 +65,7 @@ class ModelDescriptor:
         value = {
             "name": self.name,
             "hf_id": self.hf_id,
+            "hf_revision": self.hf_revision,
             "bundle_name": self.bundle_name,
             "family": self.family,
             "task": self.task,

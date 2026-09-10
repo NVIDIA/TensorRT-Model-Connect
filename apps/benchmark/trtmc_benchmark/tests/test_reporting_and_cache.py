@@ -137,9 +137,22 @@ def _run(root, run_id, schema="v2", scope="public_task_call_wall", p50=10.0):
     (case / "resolved-case.json").write_text(
         json.dumps(
             {
+                "bundle_path": str(root / "managed.bundle"),
                 "request": {"prompt": "Hello", "max_new_tokens": 8},
-                "model": {"precision": "fp16", "build": {"max_sequence_length": 64}},
-                "measurement": {"warmup": 3, "iterations": 10},
+                "model": {
+                    "hf_id": "example/model",
+                    "hf_revision": "a" * 40,
+                    "precision": "fp16",
+                    "build": {"max_sequence_length": 64},
+                },
+                "measurement": {
+                    "warmup": 3,
+                    "iterations": 10,
+                    "telemetry": "off",
+                    "telemetry_interval_ms": 1000,
+                    "timing_scope": scope,
+                    "asset_loading_included": False,
+                },
             }
         )
     )
@@ -150,6 +163,15 @@ def _run(root, run_id, schema="v2", scope="public_task_call_wall", p50=10.0):
         "status": "completed",
         "started_at": "2026-01-0" + run_id + "T00:00:00Z",
         "measurement_policy": {"timing_scope": scope, "load_excluded": True},
+        "preparation": {
+            "bundles": [
+                {
+                    "model": "example <model>",
+                    "bundle": str(root / "managed.bundle"),
+                    "build_identity": "c" * 64,
+                }
+            ]
+        },
         "environment": {
             "hostname": "synthetic-host-secret",
             "worker": "/private/worker",
@@ -216,6 +238,102 @@ def test_history_compares_only_matching_workloads_and_timing(tmp_path):
     changed.write_text(json.dumps(request))
     generate_collection_report([tmp_path], tmp_path / "report")
     assert "% vs" not in (tmp_path / "report/report.html").read_text()
+
+
+@pytest.mark.parametrize(
+    "section, field, replacement",
+    [
+        ("model", "hf_id", "example/different-model"),
+        ("model", "hf_revision", "b" * 40),
+        ("measurement", "warmup", 0),
+        ("measurement", "iterations", 100),
+        ("measurement", "telemetry", "auto"),
+        ("measurement", "telemetry_interval_ms", 500),
+        ("measurement", "timing_scope", "different_scope"),
+        ("measurement", "asset_loading_included", True),
+    ],
+)
+def test_history_does_not_compare_changed_checkpoint_or_measurement(
+    tmp_path, section, field, replacement
+):
+    _run(tmp_path / "first", "1", p50=10.0)
+    _run(tmp_path / "second", "2", p50=8.0)
+    changed = tmp_path / "second/case/resolved-case.json"
+    resolved = json.loads(changed.read_text())
+    resolved[section][field] = replacement
+    changed.write_text(json.dumps(resolved))
+
+    generate_collection_report([tmp_path], tmp_path / "report")
+
+    document = (tmp_path / "report/report.html").read_text()
+    assert "% vs" not in document
+    assert "10.000 ms" in document and "8.000 ms" in document
+
+
+@pytest.mark.parametrize("schema", ["v1", "v2"])
+@pytest.mark.parametrize(
+    "section, field, replacement",
+    [
+        ("model", "hf_id", None),
+        ("model", "hf_revision", None),
+        ("model", "hf_revision", "main"),
+        ("measurement", "warmup", None),
+        ("measurement", "iterations", None),
+        ("measurement", "telemetry", None),
+        ("measurement", "telemetry_interval_ms", None),
+        ("measurement", "timing_scope", None),
+        ("measurement", "asset_loading_included", None),
+    ],
+)
+def test_history_keeps_incomplete_or_unpinned_records_readable_without_delta(
+    tmp_path, schema, section, field, replacement
+):
+    for name, run_id, p50 in (("first", "1", 10.0), ("second", "2", 8.0)):
+        _run(tmp_path / name, run_id, schema=schema, p50=p50)
+        path = tmp_path / name / "case/resolved-case.json"
+        resolved = json.loads(path.read_text())
+        if replacement is None:
+            del resolved[section][field]
+        else:
+            resolved[section][field] = replacement
+        path.write_text(json.dumps(resolved))
+
+    report, warnings = generate_collection_report([tmp_path], tmp_path / "report")
+
+    document = (tmp_path / "report/report.html").read_text()
+    assert not warnings and report["summary"]["runs"] == 2
+    assert "% vs" not in document
+    assert "10.000 ms" in document and "8.000 ms" in document
+
+
+@pytest.mark.parametrize("change", ["local", "external", "other_bundle", "other_model", "legacy"])
+def test_history_requires_the_current_bundle_to_have_an_immutable_build_identity(tmp_path, change):
+    for name, run_id, p50 in (("first", "1", 10.0), ("second", "2", 8.0)):
+        payload = _run(tmp_path / name, run_id, p50=p50)
+        receipt = payload["preparation"]["bundles"][0]
+        if change in {"local", "external"}:
+            receipt["build_identity"] = None
+        elif change == "other_bundle":
+            receipt["bundle"] += ".other"
+        elif change == "other_model":
+            receipt["model"] += " other"
+        else:
+            del payload["preparation"]
+        (tmp_path / name / "result.json").write_text(json.dumps(payload))
+
+    report, warnings = generate_collection_report([tmp_path], tmp_path / "report")
+
+    document = (tmp_path / "report/report.html").read_text()
+    assert not warnings and report["summary"]["runs"] == 2
+    assert "% vs" not in document
+    assert "10.000 ms" in document and "8.000 ms" in document
+    assert "local checkpoints, external bundles" in document
+
+
+def test_resolved_case_records_the_declared_checkpoint_revision(tmp_path, monkeypatch):
+    _, case, _, _, _ = _cache_fixture(tmp_path, monkeypatch)
+    case = replace(case, model=replace(case.model, hf_revision="a" * 40))
+    assert case.to_json()["model"]["hf_revision"] == "a" * 40
 
 
 def test_legacy_result_without_id_remains_renderable(tmp_path):
