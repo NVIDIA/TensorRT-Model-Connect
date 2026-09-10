@@ -167,7 +167,11 @@ class Evidence:
     def _prepare(self) -> None:
         if self._prepared:
             return
-        if self.directory.parent.is_symlink() or self.directory.is_symlink():
+        if (
+            self.directory.parent.parent.is_symlink()
+            or self.directory.parent.is_symlink()
+            or self.directory.is_symlink()
+        ):
             raise ValueError("case evidence destination must not be a symlink")
         if self.directory.exists():
             shutil.rmtree(self.directory)
@@ -316,7 +320,15 @@ class Evidence:
             "family",
             "case",
             "source_revision",
+            "nodeid",
             "status",
+            "failure",
+            "failure_stage",
+            "duration_seconds",
+            "evidence_status",
+            "environment",
+            "repro",
+            "workflow_run_attempt",
             "checks",
             "timing",
             "artifacts",
@@ -475,8 +487,9 @@ def _capture_e2e_evidence(request):
         return
     if not _SAFE_NAME.fullmatch(family) or not _SAFE_NAME.fullmatch(case):
         raise ValueError("evidence family and case must be safe path components")
-    directory = Path(root_value) / "evidence" / case
-    if directory.parent.is_symlink():
+    evidence_root = Path(root_value) / "evidence"
+    directory = evidence_root / family / case
+    if evidence_root.is_symlink() or directory.parent.is_symlink():
         raise ValueError("evidence root must not be a symlink")
     recorder = Evidence(
         directory,

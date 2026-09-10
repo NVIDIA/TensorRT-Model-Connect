@@ -173,7 +173,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
 """)
     result = pytester.runpytest(str(path), "-q", "-p", "no:cacheprovider")
     result.assert_outcomes(failed=1)
-    evidence = json.loads((evidence_root / "evidence/example-case/evidence.json").read_text())
+    evidence = json.loads((evidence_root / "evidence/example/example-case/evidence.json").read_text())
     assert evidence["status"] == "failed"
     assert evidence["source_revision"] == "b" * 40
     assert evidence["workflow_run_attempt"] == 2
@@ -189,7 +189,79 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         check["status"] == "failed" and "0.9" in check["explanation"]
         for check in evidence["checks"]
     )
-    assert (evidence_root / "evidence/example-case/report.html").is_file()
+    assert (evidence_root / "evidence/example/example-case/report.html").is_file()
+
+
+def test_same_case_in_different_families_preserves_each_result(pytester, monkeypatch) -> None:
+    from tools.e2e_report import main as render_main
+
+    evidence_root = pytester.path / "captured"
+    monkeypatch.setenv("TRTMC_E2E_ARTIFACT_DIR", str(evidence_root))
+    monkeypatch.setenv("TRTMC_E2E_SOURCE_REVISION", "b" * 40)
+    monkeypatch.setenv("EVIDENCE_TEST_GENERATION", "first")
+    monkeypatch.setattr(e2e_evidence, "_environment", lambda: {})
+    pytester.makeini("[pytest]\nenable_assertion_pass_hook = true\n")
+    pytester.makeconftest('pytest_plugins = ("tools.e2e_evidence",)')
+    paths = []
+    for family in ("alpha", "beta"):
+        path = pytester.path / "families" / family / "tests/test_e2e.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"""
+import os
+import pytest
+from tools.e2e_evidence import record_evidence
+@pytest.mark.parametrize("case_name", ["shared-case"])
+def test_e2e(case_name):
+    record_evidence("inputs", {{"prompt": "{family} input"}})
+    record_evidence("native", {{"text": "{family} " + os.environ["EVIDENCE_TEST_GENERATION"]}})
+    assert 1 == 1
+""")
+        paths.append(str(path))
+
+    pytester.runpytest(*paths, "--import-mode=importlib", "-q").assert_outcomes(passed=2)
+    alpha = evidence_root / "evidence/alpha/shared-case"
+    beta = evidence_root / "evidence/beta/shared-case"
+    beta_json = (beta / "evidence.json").read_bytes()
+    beta_html = (beta / "report.html").read_bytes()
+    assert json.loads((alpha / "evidence.json").read_text())["native"] == {"text": "alpha first"}
+    assert json.loads(beta_json)["native"] == {"text": "beta first"}
+    stale = alpha / "stale.txt"
+    stale.write_text("previous attempt")
+
+    monkeypatch.setenv("EVIDENCE_TEST_GENERATION", "second")
+    pytester.runpytest(paths[0], "--import-mode=importlib", "-q").assert_outcomes(passed=1)
+    assert json.loads((alpha / "evidence.json").read_text())["native"] == {"text": "alpha second"}
+    assert not stale.exists()
+    assert (beta / "evidence.json").read_bytes() == beta_json
+    assert (beta / "report.html").read_bytes() == beta_html
+    report = pytester.path / "combined.html"
+    assert render_main([str(evidence_root), "-o", str(report)]) == 0
+    assert "2 cases shown" in report.read_text()
+    assert "alpha second" in report.read_text() and "beta first" in report.read_text()
+
+
+@pytest.mark.parametrize("component", ["evidence", "family", "case"])
+def test_case_cleanup_rejects_symlinked_namespace(tmp_path: Path, component: str) -> None:
+    root = tmp_path / "evidence"
+    target = tmp_path / "retained"
+    target.mkdir()
+    preserved = target / "keep.txt"
+    preserved.write_text("original")
+    if component == "evidence":
+        root.symlink_to(target, target_is_directory=True)
+    elif component == "family":
+        root.mkdir()
+        (root / "alpha").symlink_to(target, target_is_directory=True)
+    else:
+        (root / "alpha").mkdir(parents=True)
+        (root / "alpha/shared-case").symlink_to(target, target_is_directory=True)
+    recorder = Evidence(
+        root / "alpha/shared-case", family="alpha", case="shared-case", source_revision="a" * 40
+    )
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        recorder.record("native", {"text": "new result"})
+    assert preserved.read_text() == "original"
+    assert list(target.iterdir()) == [preserved]
 
 
 def test_exact_selection_does_not_write_unselected_skipped_evidence(pytester, monkeypatch) -> None:
@@ -220,8 +292,8 @@ def test_e2e(case_name):
         str(path), "--e2e-testcase", "selected", "-q", "-p", "no:cacheprovider"
     )
     result.assert_outcomes(passed=1, skipped=1)
-    assert (evidence_root / "evidence/selected/evidence.json").is_file()
-    assert not (evidence_root / "evidence/not-selected").exists()
+    assert (evidence_root / "evidence/example/selected/evidence.json").is_file()
+    assert not (evidence_root / "evidence/example/not-selected").exists()
 
 
 @pytest.mark.parametrize("outcome", ["passed", "failed", "skipped"])
@@ -288,7 +360,7 @@ def test_e2e(case_name):
     if outcome == "failed":
         assert "the original assertion failure" in output
     if failure == "captured_output":
-        evidence = json.loads((evidence_root / "evidence/example-case/evidence.json").read_text())
+        evidence = json.loads((evidence_root / "evidence/example/example-case/evidence.json").read_text())
         assert evidence["status"] == outcome and evidence["evidence_status"] == "partial"
 
 
@@ -297,7 +369,7 @@ def test_unselected_skip_with_captured_output_preserves_existing_evidence(
     pytester, monkeypatch, selection
 ):
     evidence_root = pytester.path / "captured"
-    previous = evidence_root / "evidence/example-case/evidence.json"
+    previous = evidence_root / "evidence/example/example-case/evidence.json"
     previous.parent.mkdir(parents=True)
     previous.write_text('{"retained": "previous evidence"}\n')
     original = previous.read_bytes()
@@ -1540,3 +1612,31 @@ def test_structure_file_is_copied_as_bounded_inert_evidence(tmp_path):
     assert saved["artifact"].endswith(".cif")
     assert (recorder.directory / saved["artifact"]).read_text() == payload
     assert source.read_text() == payload
+
+
+def test_family_observations_cannot_replace_recorder_metadata(tmp_path):
+    recorder = _recorder(tmp_path)
+    recorder.data.update(
+        environment={"python": "recorded-python"},
+        repro={"command": "recorded-command"},
+        workflow_run_attempt=2,
+    )
+    trusted = dict(recorder.data)
+    names = [*trusted, "failure", "duration_seconds", "evidence_status"]
+    for name in names:
+        recorder.record(name, {"value": "family observation"})
+        if name != "observations":
+            assert recorder.data.get(name) == trusted.get(name)
+    assert recorder.data["observations"] == [
+        {"name": name, "value": {"value": "family observation"}} for name in names
+    ]
+    recorder.stage = "reference"
+    recorder.finish("failed", failure="actual reference failure")
+    saved = json.loads((recorder.directory / "evidence.json").read_text())
+    assert saved["status"] == "failed"
+    assert saved["failure"] == {"message": "actual reference failure"}
+    assert saved["failure_stage"] == "reference"
+    assert saved["evidence_status"] == "recorded"
+    assert isinstance(saved["duration_seconds"], float)
+    for name in ("environment", "repro", "workflow_run_attempt", "nodeid"):
+        assert saved[name] == trusted[name]

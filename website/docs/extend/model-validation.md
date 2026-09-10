@@ -106,10 +106,10 @@ python3 -m tools.e2e_report /tmp/trtmc-e2e \
 ```
 
 Open the HTML directly in a browser. Each testcase also writes its own
-`evidence/<case>/evidence.json` and `report.html`; failure paths retain the
+`evidence/<family>/<case>/evidence.json` and `report.html`; failure paths retain the
 observations produced before the failure. Use a fresh artifact directory for
-each campaign. Reusing a directory replaces the selected case's earlier
-evidence, while untouched cases remain from their original runs.
+each campaign. Reusing a directory replaces earlier evidence for the selected
+family and case, while untouched cases remain from their original runs.
 
 The report records existing assertions; it does not replace a family's oracle
 or change thresholds. A contract-only check is identified as such instead of
