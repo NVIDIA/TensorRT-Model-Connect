@@ -58,10 +58,20 @@ class SourceQualityChecks:
         self.context = context
 
     def run(self) -> None:
+        self.legal_compliance()
         self.family_coverage()
         self.complexity()
         self.lint_changed_files()
         self.architecture_contracts()
+
+    def legal_compliance(self) -> None:
+        base = self.context.env.get("CI_BASE_REF", "")
+        if not base:
+            raise CiError("CI_BASE_REF is required")
+        self.context.run(["python", "tools/legal_headers.py", "--check"])
+        self.context.run(
+            ["git", "diff", "--exit-code", "--name-only", base, "--", "LICENSE", "NOTICE"]
+        )
 
     def family_coverage(self) -> None:
         self.context.run(["python", "-m", "tools.model_ci", "validate"])
