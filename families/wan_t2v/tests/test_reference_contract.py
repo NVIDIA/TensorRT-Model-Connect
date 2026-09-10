@@ -67,6 +67,10 @@ def _framework(monkeypatch) -> tuple[dict, object]:
         def tie_weights(self):
             self.tied = True
 
+        def set_input_embeddings(self, shared):
+            self.shared = shared
+            self.encoder.embed_tokens = shared
+
     class Pipeline:
         def __init__(self):
             self.text_encoder = TextEncoder()
@@ -158,6 +162,59 @@ def test_reference_rejects_an_untied_text_encoder() -> None:
         shared=SimpleNamespace(weight=_Weight(1)),
         encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=_Weight(2))),
         tie_weights=lambda: None,
+        set_input_embeddings=lambda shared: None,
     )
     with pytest.raises(RuntimeError, match=r"tie_weights\(\) did not bind embeddings"):
         e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+
+
+def test_reference_rejects_mismatched_embedding_shapes() -> None:
+    embedded = _Weight(2)
+    embedded.shape = (16, 4)
+    text_encoder = SimpleNamespace(
+        shared=SimpleNamespace(weight=_Weight(1)),
+        encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=embedded)),
+        tie_weights=lambda: None,
+    )
+    with pytest.raises(RuntimeError, match="embedding shapes do not match"):
+        e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+
+
+def test_reference_restores_checkpoint_shared_embedding(tmp_path: Path) -> None:
+    import torch
+    from safetensors.torch import save_file
+    from transformers import UMT5Config, UMT5EncoderModel
+
+    config = UMT5Config(
+        vocab_size=16,
+        d_model=8,
+        d_kv=4,
+        d_ff=16,
+        num_layers=1,
+        num_heads=2,
+        dropout_rate=0.0,
+        tie_word_embeddings=False,
+    )
+    reference = UMT5EncoderModel(config).eval()
+    # Wan checkpoints store the shared input embedding only, even though the
+    # config disables input/output word embedding tying.
+    reference.encoder.embed_tokens = reference.shared
+    state = {
+        name: tensor.clone()
+        for name, tensor in reference.state_dict().items()
+        if name != "encoder.embed_tokens.weight"
+    }
+    config.save_pretrained(tmp_path)
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+
+    loaded = UMT5EncoderModel.from_pretrained(tmp_path, local_files_only=True).eval()
+    e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=loaded))
+
+    assert loaded.config.tie_word_embeddings is False
+    assert loaded.encoder.embed_tokens.weight.data_ptr() == loaded.shared.weight.data_ptr()
+    torch.testing.assert_close(loaded.shared.weight, state["shared.weight"], rtol=0, atol=0)
+    tokens = torch.tensor([[1, 2, 3]])
+    with torch.no_grad():
+        expected = reference(tokens).last_hidden_state
+        actual = loaded(tokens).last_hidden_state
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

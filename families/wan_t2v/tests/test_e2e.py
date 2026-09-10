@@ -255,7 +255,6 @@ def _tie_wan_text_encoder(pipeline) -> None:
     tie_weights = getattr(text_encoder, "tie_weights", None)
     if not callable(tie_weights):
         raise RuntimeError("Wan reference text encoder does not expose tie_weights()")
-    tie_weights()
     shared = getattr(text_encoder, "shared", None)
     encoder = getattr(text_encoder, "encoder", None)
     embedded = getattr(encoder, "embed_tokens", None)
@@ -263,6 +262,12 @@ def _tie_wan_text_encoder(pipeline) -> None:
         raise RuntimeError("Wan reference text encoder has no shared embedding binding")
     if shared.weight.shape != embedded.weight.shape:
         raise RuntimeError("Wan reference text encoder embedding shapes do not match")
+    # Wan stores the input embedding as shared.weight. Transformers 5 can load
+    # encoder.embed_tokens separately when tie_word_embeddings is false; its
+    # tie_weights() then leaves that newly initialized embedding untouched.
+    text_encoder.set_input_embeddings(shared)
+    tie_weights()
+    embedded = text_encoder.encoder.embed_tokens
     if shared.weight.data_ptr() != embedded.weight.data_ptr():
         raise RuntimeError("Wan reference text encoder tie_weights() did not bind embeddings")
 
