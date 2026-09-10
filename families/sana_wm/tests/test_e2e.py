@@ -398,8 +398,11 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     frame_paths = _decode_reference_video(
         video_dir / "reference_generated.mp4", tmp_path / "reference-frames"
     )
+    # The official refiner drops the clean sink anchor at input frame zero.
+    # Native and reference outputs therefore contain one fewer frame than the
+    # input trajectory, with contiguous output filenames starting at zero.
     expected_names = [
-        f"frame_{index:04d}.png" for index in range(int(manifest["video_num_frames"]))
+        f"frame_{index:04d}.png" for index in range(int(manifest["video_num_frames"]) - 1)
     ]
     assert [path.name for path in frame_paths] == expected_names
     return {"frame_paths": frame_paths}
