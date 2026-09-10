@@ -9,7 +9,7 @@ import random
 import subprocess
 import sys
 
-from families.chronos_bolt.tests.qualification import executor, prepare_environment
+from families.chronos_bolt.tests.qualification import executor, prepare_environment, reference
 
 
 def _environment(data_root: Path) -> dict:
@@ -239,3 +239,29 @@ def test_reference_entrypoint_has_no_repository_import_requirement() -> None:
     )
 
     assert "usage:" in completed.stdout
+
+
+def test_chronos_compile_specializes_the_fixed_benchmark_shape(monkeypatch) -> None:
+    import torch
+    from torch._dynamo.backends import registry
+
+    forward = object()
+    pipeline = type("Pipeline", (), {})()
+    pipeline.model = type("Model", (), {"forward": forward})()
+    call = {}
+
+    def fake_compile(target, **options):
+        call.update({"target": target, **options})
+        return "compiled-forward"
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    monkeypatch.setattr(registry, "lookup_backend", lambda name: f"{name}-backend")
+
+    evidence = reference._compile(pipeline)
+
+    assert pipeline.model.forward == "compiled-forward"
+    assert call["target"] is forward
+    assert callable(call["backend"])
+    assert call["fullgraph"] is False
+    assert call["dynamic"] is False
+    assert evidence["dynamic"] is False

@@ -1029,6 +1029,7 @@ def _validate_performance_reference(
         "api": "torch.compile",
         "target": "model.forward",
         "backend": "inductor",
+        "dynamic": False,
         "applied": True,
         "warmup_completed": True,
         "timed_callable_uses_compiled_target": True,

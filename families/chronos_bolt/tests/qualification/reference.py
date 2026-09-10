@@ -125,11 +125,13 @@ def _compile(pipeline: Any) -> dict[str, Any]:
         evidence["compiled_graph_count"] += 1
         return compiled
 
+    # Each Performance case measures one fixed input shape. Specialization also
+    # avoids Inductor's symbolic divisibility failure in Chronos patch padding.
     pipeline.model.forward = torch.compile(
         pipeline.model.forward,
         backend=compile_graph,
         fullgraph=False,
-        dynamic=True,
+        dynamic=False,
     )
     evidence.update(
         {
@@ -138,7 +140,7 @@ def _compile(pipeline: Any) -> dict[str, Any]:
             "backend": "inductor",
             "mode": "default",
             "fullgraph": False,
-            "dynamic": True,
+            "dynamic": False,
             "applied": True,
         }
     )
