@@ -113,9 +113,7 @@ def _asset(case: dict, name: str) -> Path:
 
 @cache
 def _qualification_binary() -> tuple[Path, Path]:
-    build_dir = _required_path(
-        os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR"
-    )
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
     subprocess.run(
         [
             "cmake",
@@ -241,7 +239,6 @@ def _assert_operational_summary(summary: dict) -> None:
         "chunk_inference_p50_ms",
         "chunk_inference_p95_ms",
         "chunk_throughput_per_second",
-        "gpu_memory_delta_mib",
         "gpu_memory_total_mib",
         "peak_resident_memory_mib",
         "startup_ms",
@@ -253,7 +250,17 @@ def _assert_operational_summary(summary: dict) -> None:
     jitter = float(summary["control_p99_abs_jitter_ms"])
     assert np.isfinite(jitter) and 0.0 <= jitter <= 5.0
     assert int(summary["control_missed_deadlines"]) == 0
-    assert float(summary["gpu_memory_delta_mib"]) <= 1024.0
+    assert summary["gpu_memory_measurement_scope"] == "device_global"
+    free_before = float(summary["gpu_memory_free_before_mib"])
+    free_after = float(summary["gpu_memory_free_after_mib"])
+    total = float(summary["gpu_memory_total_mib"])
+    assert np.isfinite(free_before) and 0.0 <= free_before <= total
+    assert np.isfinite(free_after) and 0.0 <= free_after <= total
+    delta = float(summary["gpu_memory_delta_mib"])
+    assert np.isfinite(delta) and delta == max(free_before - free_after, 0.0)
+    # This retained 1 GiB check is a device-net-growth heuristic. Concurrent
+    # allocations/releases can affect it; it does not certify a process cap.
+    assert delta <= 1024.0
     assert float(summary["peak_resident_memory_mib"]) <= 2048.0
     assert float(summary["startup_ms"]) <= 5000.0
 
@@ -270,6 +277,9 @@ def test_operational_summary_keeps_the_old_limits() -> None:
             "control_p99_abs_jitter_ms": 1.0,
             "control_missed_deadlines": 0,
             "gpu_memory_delta_mib": 1.0,
+            "gpu_memory_measurement_scope": "device_global",
+            "gpu_memory_free_before_mib": 512.0,
+            "gpu_memory_free_after_mib": 511.0,
             "gpu_memory_total_mib": 1024.0,
             "peak_resident_memory_mib": 1.0,
             "startup_ms": 1.0,
@@ -288,6 +298,9 @@ def test_operational_summary_rejects_invalid_active_invariants() -> None:
         "control_p99_abs_jitter_ms": 1.0,
         "control_missed_deadlines": 0,
         "gpu_memory_delta_mib": 1.0,
+        "gpu_memory_measurement_scope": "device_global",
+        "gpu_memory_free_before_mib": 512.0,
+        "gpu_memory_free_after_mib": 511.0,
         "gpu_memory_total_mib": 1024.0,
         "peak_resident_memory_mib": 1.0,
         "startup_ms": 1.0,
@@ -301,6 +314,57 @@ def test_operational_summary_rejects_invalid_active_invariants() -> None:
         _assert_operational_summary({**summary, "control_p99_abs_jitter_ms": -0.1})
     with pytest.raises(AssertionError):
         _assert_operational_summary({**summary, "control_effective_hz": np.inf})
+
+
+@pytest.mark.parametrize(
+    ("memory", "valid"),
+    [
+        ({"gpu_memory_free_after_mib": 2304.0, "gpu_memory_delta_mib": 0.0}, True),
+        ({"gpu_memory_free_after_mib": 2048.0, "gpu_memory_delta_mib": 0.0}, True),
+        ({"gpu_memory_delta_mib": 0.0}, False),
+        ({"gpu_memory_delta_mib": -1.0}, False),
+        ({"gpu_memory_free_after_mib": 1023.0, "gpu_memory_delta_mib": 1025.0}, False),
+        ({"gpu_memory_delta_mib": np.nan}, False),
+        ({"gpu_memory_free_before_mib": np.nan}, False),
+        ({"gpu_memory_free_after_mib": 4097.0, "gpu_memory_delta_mib": 0.0}, False),
+        ({"gpu_memory_measurement_scope": "process"}, False),
+    ],
+    ids=[
+        "released",
+        "unchanged",
+        "false-zero",
+        "negative",
+        "over-limit",
+        "nan-delta",
+        "nan-free",
+        "invalid-free",
+        "wrong-scope",
+    ],
+)
+def test_device_memory_delta_requires_consistent_observations(memory, valid) -> None:
+    summary = {
+        "control_frequency_hz": 50.0,
+        "action_step_capacity_hz": 100.0,
+        "chunk_inference_p50_ms": 1.0,
+        "chunk_inference_p95_ms": 2.0,
+        "chunk_throughput_per_second": 1000.0,
+        "control_effective_hz": 50.0,
+        "control_p99_abs_jitter_ms": 1.0,
+        "control_missed_deadlines": 0,
+        "gpu_memory_delta_mib": 1.0,
+        "gpu_memory_total_mib": 4096.0,
+        "gpu_memory_measurement_scope": "device_global",
+        "gpu_memory_free_before_mib": 2048.0,
+        "gpu_memory_free_after_mib": 2047.0,
+        "peak_resident_memory_mib": 1.0,
+        "startup_ms": 1.0,
+        **memory,
+    }
+    if valid:
+        _assert_operational_summary(summary)
+    else:
+        with pytest.raises(AssertionError):
+            _assert_operational_summary(summary)
 
 
 def _assert_actions_in_training_bounds(actions: np.ndarray) -> None:
@@ -328,7 +392,14 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     model_dir = _model_dir(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         build(

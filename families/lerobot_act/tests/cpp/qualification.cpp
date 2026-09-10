@@ -171,6 +171,9 @@ int main(int argc, char** argv) {
             std::chrono::duration<double>(emitted.back() - emitted.front()).count();
         const double effective_hz = static_cast<double>(emitted.size() - 1) / elapsed;
         const auto memory_after = gpu_memory();
+        // cudaMemGetInfo observes the entire device, including allocations and
+        // releases by other processes. This is net device growth, not an
+        // allocation count or a per-process memory peak.
         const double gpu_delta =
             memory_before.first >= memory_after.first
                 ? static_cast<double>(memory_before.first - memory_after.first) / (1024.0 * 1024.0)
@@ -191,6 +194,11 @@ int main(int argc, char** argv) {
                              {"control_p99_abs_jitter_ms", percentile(jitter_ms, 0.99)},
                              {"control_missed_deadlines", missed_deadlines},
                              {"gpu_memory_delta_mib", gpu_delta},
+                             {"gpu_memory_measurement_scope", "device_global"},
+                             {"gpu_memory_free_before_mib",
+                              static_cast<double>(memory_before.first) / (1024.0 * 1024.0)},
+                             {"gpu_memory_free_after_mib",
+                              static_cast<double>(memory_after.first) / (1024.0 * 1024.0)},
                              {"gpu_memory_total_mib",
                               static_cast<double>(memory_after.second) / (1024.0 * 1024.0)},
                              {"peak_resident_memory_mib", peak_resident_memory_mib()},
