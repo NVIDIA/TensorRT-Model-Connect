@@ -107,7 +107,7 @@ def _model_dir(manifest: dict) -> Path:
 def _asset(case: dict, name: str) -> Path:
     path = TEST_ROOT / case["inputs"][name]
     assert path.is_file(), path
-    record_evidence("inputs", {"asset": path})
+    record_evidence("inputs", {name: path})
     return path
 
 
