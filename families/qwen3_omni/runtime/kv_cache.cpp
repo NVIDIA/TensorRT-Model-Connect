@@ -129,22 +129,23 @@ void Qwen3OmniKvCache::prepare_step(TensorMap& inputs, std::int32_t sequence_len
 void Qwen3OmniKvCache::write_prefill_kv(const std::vector<const void*>& keys,
                                         const std::vector<const void*>& values,
                                         std::int32_t sequence_length) {
-    if (position_ != 0 || sequence_length <= 0 || sequence_length > max_length_ ||
+    if (sequence_length <= 0 || sequence_length > max_length_ - position_ ||
         keys.size() != static_cast<std::size_t>(num_layers_) ||
         values.size() != static_cast<std::size_t>(num_layers_)) {
         throw std::runtime_error("Qwen3-Omni prefill KV write has invalid dimensions");
     }
     const auto bytes = static_cast<std::size_t>(sequence_length) * kv_dim_ * element_size_;
+    const auto offset = static_cast<std::size_t>(position_) * kv_dim_ * element_size_;
     for (std::int32_t layer = 0; layer < num_layers_; ++layer) {
         const auto index = static_cast<std::size_t>(layer);
         if (keys[index] == nullptr || values[index] == nullptr)
             throw std::runtime_error("Qwen3-Omni prefill KV output is null");
-        cudaMemcpyAsync(cache_k_[index].data(), keys[index], bytes, cudaMemcpyDeviceToDevice,
-                        stream_);
-        cudaMemcpyAsync(cache_v_[index].data(), values[index], bytes, cudaMemcpyDeviceToDevice,
-                        stream_);
+        cudaMemcpyAsync(static_cast<std::uint8_t*>(cache_k_[index].data()) + offset, keys[index],
+                        bytes, cudaMemcpyDeviceToDevice, stream_);
+        cudaMemcpyAsync(static_cast<std::uint8_t*>(cache_v_[index].data()) + offset, values[index],
+                        bytes, cudaMemcpyDeviceToDevice, stream_);
     }
-    position_ = sequence_length;
+    position_ += sequence_length;
 }
 
 void Qwen3OmniKvCache::advance(std::int32_t tokens) {

@@ -43,12 +43,16 @@ class FixedTokenizer final : public trtmc::ITokenizer {
 struct ModuleStats {
     std::int32_t launches{0};
     std::unordered_map<std::string, std::vector<std::int64_t>> input_shapes;
+    std::vector<std::vector<std::int32_t>> token_batches;
+    std::vector<std::vector<std::int32_t>> positions;
 };
 
 class FakeThinkerModule final : public trtmc::ITrtModule {
   public:
-    FakeThinkerModule(bool prefill, std::shared_ptr<ModuleStats> stats, cudaStream_t stream)
-        : prefill_(prefill), stats_(std::move(stats)), stream_(stream),
+    FakeThinkerModule(bool prefill, std::shared_ptr<ModuleStats> stats, cudaStream_t stream,
+                      std::int32_t opt_prefill_tokens = 32)
+        : prefill_(prefill), opt_prefill_tokens_(opt_prefill_tokens), stats_(std::move(stats)),
+          stream_(stream),
           present_k_(std::vector<std::int64_t>{32, 1}, trtmc::DType::kFloat32, stream),
           present_v_(std::vector<std::int64_t>{32, 1}, trtmc::DType::kFloat32, stream),
           logits_(8, -100.0F) {
@@ -66,6 +70,10 @@ class FakeThinkerModule final : public trtmc::ITrtModule {
         for (const auto& [name, tensor] : inputs)
             stats_->input_shapes[name] = tensor.shape;
         const auto rows = inputs.at("token_id").shape.at(0);
+        const auto* tokens = static_cast<const std::int32_t*>(inputs.at("token_id").data);
+        const auto* positions = static_cast<const std::int32_t*>(inputs.at("position_id").data);
+        stats_->token_batches.emplace_back(tokens, tokens + rows);
+        stats_->positions.emplace_back(positions, positions + rows);
         present_host_.assign(static_cast<std::size_t>(rows), 0.0F);
         return {
             {"logits", trtmc::Tensor{logits_.data(), {1, 8}, trtmc::DType::kFloat32}},
@@ -113,9 +121,12 @@ class FakeThinkerModule final : public trtmc::ITrtModule {
         return {};
     }
 
-    std::vector<std::int64_t> input_profile_shape(const std::string&, std::int32_t,
-                                                  trtmc::ProfileShapeSelector) const override {
-        return {};
+    std::vector<std::int64_t>
+    input_profile_shape(const std::string& name, std::int32_t,
+                        trtmc::ProfileShapeSelector selector) const override {
+        if (name != "token_id")
+            return {};
+        return {selector == trtmc::ProfileShapeSelector::kOpt ? opt_prefill_tokens_ : 32};
     }
     std::int32_t optimization_profile_count() const override { return 1; }
 
@@ -149,6 +160,7 @@ class FakeThinkerModule final : public trtmc::ITrtModule {
 
   private:
     bool prefill_{false};
+    std::int32_t opt_prefill_tokens_{32};
     std::shared_ptr<ModuleStats> stats_;
     cudaStream_t stream_{nullptr};
     mutable std::unordered_map<std::string, void*> bindings_;
@@ -175,10 +187,13 @@ trtmc::Qwen3OmniRuntimeConfig make_config() {
     return config;
 }
 
-std::unique_ptr<trtmc::Qwen3OmniTextPipeline>
-make_pipeline(cudaStream_t stream, PipelineStats& stats, bool omit_prefill = false) {
-    auto prefill = omit_prefill ? std::unique_ptr<FakeThinkerModule>{}
-                                : std::make_unique<FakeThinkerModule>(true, stats.prefill, stream);
+std::unique_ptr<trtmc::Qwen3OmniTextPipeline> make_pipeline(cudaStream_t stream,
+                                                            PipelineStats& stats,
+                                                            bool omit_prefill = false,
+                                                            std::int32_t chunk_size = 32) {
+    auto prefill =
+        omit_prefill ? std::unique_ptr<FakeThinkerModule>{}
+                     : std::make_unique<FakeThinkerModule>(true, stats.prefill, stream, chunk_size);
     auto decode = std::make_unique<FakeThinkerModule>(false, stats.decode, stream);
     auto cache =
         std::make_unique<trtmc::Qwen3OmniKvCache>(1, 32, 1, stream, trtmc::DType::kFloat32);
@@ -234,12 +249,80 @@ void test_batched_prefill_and_argmax() {
           "Qwen3-Omni preserves batched prefill token, position, and causal-mask shapes");
 }
 
+void test_chunked_prefill_preserves_tokens_and_positions() {
+    StreamFixture fixture;
+    PipelineStats stats;
+    auto pipeline = make_pipeline(fixture.stream, stats, false, 2);
+    trtmc::TextGenerationConfig config;
+    config.max_new_tokens = 2;
+    const auto result = pipeline->generate("question", config);
+    check(result.text == "hello" && result.token_ids == std::vector<std::int32_t>({1}),
+          "Qwen3-Omni chunking preserves greedy output and EOS handling");
+    check(stats.prefill->token_batches == std::vector<std::vector<std::int32_t>>({{4, 5}, {6}}),
+          "Qwen3-Omni prefill includes every prompt token exactly once");
+    check(stats.prefill->positions == std::vector<std::vector<std::int32_t>>({{0, 1}, {2}}) &&
+              stats.decode->positions == std::vector<std::vector<std::int32_t>>({{3}}),
+          "Qwen3-Omni preserves absolute positions across prefill and decode");
+    check(stats.prefill->launches == 2 && stats.decode->launches == 1,
+          "Qwen3-Omni bounds each prefill chunk and decodes after the final chunk");
+}
+
+void test_prefill_cache_appends_rows_and_masks_previous_chunks() {
+    StreamFixture fixture;
+    trtmc::Qwen3OmniKvCache cache(1, 32, 1, fixture.stream, trtmc::DType::kFloat32);
+    trtmc::DeviceTensor source({3, 1}, trtmc::DType::kFloat32, fixture.stream);
+    const float rows[] = {11.0F, 12.0F, 13.0F};
+    cudaMemcpyAsync(source.data(), rows, sizeof(rows), cudaMemcpyHostToDevice, fixture.stream);
+    cache.write_prefill_kv({source.data()}, {source.data()}, 2);
+    try {
+        auto* last = static_cast<float*>(source.data()) + 2;
+        cache.write_prefill_kv({last}, {last}, 1);
+    } catch (const std::runtime_error&) {
+        check(false, "Qwen3-Omni appends a second prefill chunk");
+        return;
+    }
+    auto stats = std::make_shared<ModuleStats>();
+    FakeThinkerModule module(true, stats, fixture.stream);
+    cache.bind_cache_inputs(module);
+    float keys[3] = {};
+    float values[3] = {};
+    cudaMemcpyAsync(keys, module.device_ptr("cache_k_0"), sizeof(keys), cudaMemcpyDeviceToHost,
+                    fixture.stream);
+    cudaMemcpyAsync(values, module.device_ptr("cache_v_0"), sizeof(values), cudaMemcpyDeviceToHost,
+                    fixture.stream);
+    cudaStreamSynchronize(fixture.stream);
+    check(std::equal(std::begin(rows), std::end(rows), std::begin(keys)) &&
+              std::equal(std::begin(rows), std::end(rows), std::begin(values)),
+          "Qwen3-Omni appends K/V without overwriting preceding chunks");
+    trtmc::TensorMap inputs;
+    cache.prepare_step(inputs, 2);
+    const auto* mask = static_cast<const float*>(inputs.at("attention_mask").data);
+    bool correct_mask = true;
+    for (int query = 0; query < 2; ++query) {
+        for (int key = 0; key < 34; ++key) {
+            const bool visible = key < 3 || (key >= 32 && key <= 32 + query);
+            correct_mask &= mask[query * 34 + key] == (visible ? 0.0F : -1.0e4F);
+        }
+    }
+    check(cache.position() == 3 && correct_mask,
+          "Qwen3-Omni chunk masks expose preceding tokens and remain causal");
+    bool overflow = false;
+    try {
+        cache.write_prefill_kv({source.data()}, {source.data()}, 30);
+    } catch (const std::runtime_error&) {
+        overflow = true;
+    }
+    check(overflow, "Qwen3-Omni rejects chunk writes beyond the original KV capacity");
+}
+
 } // namespace
 
 int main() {
     test_pipeline_construction();
     test_validates_thinker();
     test_batched_prefill_and_argmax();
+    test_chunked_prefill_preserves_tokens_and_positions();
+    test_prefill_cache_appends_rows_and_masks_previous_chunks();
     if (failures != 0)
         std::cerr << failures << " Qwen3-Omni pipeline test(s) failed\n";
     return failures;

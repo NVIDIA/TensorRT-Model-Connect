@@ -67,4 +67,7 @@ def _get_tensor(readers: _ReaderCollection, name: str):
 
 
 def _load_tensor(readers: _ReaderCollection, name: str) -> np.ndarray:
-    return np.asarray(_get_tensor(readers, name), dtype=np.float32)
+    tensor = np.asarray(_get_tensor(readers, name))
+    if tensor.dtype == np.dtype(ml_dtypes.bfloat16):
+        return tensor
+    return np.asarray(tensor, dtype=np.float32)
