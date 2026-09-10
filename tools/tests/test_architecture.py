@@ -350,6 +350,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_coderabbit_config.py",
         "tools/tests/test_community_ci.py",
         "tools/tests/test_devtoolkit.py",
+        "tools/tests/test_devtoolkit_capabilities.py",
         "tools/tests/test_family_impact.py",
         "tools/tests/test_new_ci.py",
         "tools/tests/test_pr_metadata.py",
@@ -1399,7 +1400,7 @@ def test_family_mpirun_launchers_export_the_native_loader_path() -> None:
 def test_every_manifest_task_has_a_concrete_family_implementation() -> None:
     violations: list[str] = []
     task_header = (REPO / "core/runtime/include/trtmc/task.h").read_text(encoding="utf-8")
-    task_interfaces = dict(
+    core_task_interfaces = dict(
         re.findall(
             r"class\s+(I[A-Za-z0-9_]+)\s*:\s*public virtual ITask\s*\{.*?"
             r'kTask\s*=\s*"([a-z0-9_]+)"',
@@ -1409,6 +1410,16 @@ def test_every_manifest_task_has_a_concrete_family_implementation() -> None:
     )
     interface_pattern = re.compile(r"public\s+(I[A-Z][A-Za-z0-9_]+)")
     for family in family_dirs():
+        task_interfaces = dict(core_task_interfaces)
+        for header in (family / "include").rglob("*.h"):
+            task_interfaces.update(
+                re.findall(
+                    r"class\s+(I[A-Za-z0-9_]+)\s*:\s*public virtual ITask\s*\{.*?"
+                    r'kTask\s*=\s*"([a-z0-9_]+)"',
+                    header.read_text(encoding="utf-8", errors="ignore"),
+                    flags=re.DOTALL,
+                )
+            )
         runtime_source = "\n".join(
             path.read_text(encoding="utf-8", errors="ignore")
             for path in (family / "runtime").rglob("*")

@@ -1,0 +1,18 @@
+{
+  "name": "crossvit-9-240-in1k",
+  "hf_id": "timm/crossvit_9_240.in1k",
+  "hf_revision": "df3051d20d8addd16d03c4230046128c17e32826",
+  "bundle": "crossvit-9-240-in1k.bundle",
+  "family": "timm_crossvit",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "crossvit-9-240-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

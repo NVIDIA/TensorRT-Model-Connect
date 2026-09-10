@@ -1,0 +1,18 @@
+{
+  "name": "dpn68b-ra-in1k",
+  "hf_id": "timm/dpn68b.ra_in1k",
+  "hf_revision": "fb49a617159bd2a0d6099742a6c57ef2d884dad9",
+  "bundle": "dpn68b-ra-in1k.bundle",
+  "family": "timm_dpn",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "dpn68b-ra-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

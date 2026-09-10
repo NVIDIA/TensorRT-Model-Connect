@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+experiment_settings:
+  seeds:
+    - 42
+  use_msa_server: false
+  use_templates: false
+
+pl_trainer_args:
+  precision: bf16-mixed
+
+data_module_args:
+  batch_size: 1
+  num_workers: 0
+  num_workers_validation: 0
+
+model_update:
+  presets:
+    - predict
+    - low_mem
+
+output_writer_settings:
+  structure_format: cif
+  full_confidence_output_format: json
+  full_confidence_output_dtype: float32
+  write_features: false
+  write_latent_outputs: false
+  write_full_confidence_scores: true

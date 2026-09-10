@@ -1,0 +1,18 @@
+{
+  "name": "swin-tiny-patch4-window7-224-ms-in1k",
+  "hf_id": "timm/swin_tiny_patch4_window7_224.ms_in1k",
+  "hf_revision": "4cc3a7275b50b53a7bec45f32c236ebe64227cff",
+  "bundle": "swin-tiny-patch4-window7-224-ms-in1k.bundle",
+  "family": "timm_swin",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "swin-tiny-patch4-window7-224-ms-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

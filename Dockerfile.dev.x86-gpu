@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# x86_64 GPU development image for the community GPU CI pipeline (L4 / L40 / L40S,
+# Ada Lovelace, compute capability 8.9). The internal root Dockerfile targets
+# GB300 (aarch64, compute capability 10.0) only and cannot build on x86_64 hosts;
+# this file is the x86_64 counterpart used for CUDA-enabled testing on
+# externally reserved (Brev) GPU instances.
+ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a
+FROM ${TENSORRT_IMAGE}
+
+ARG TORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
+ARG TORCH_VERSION=2.12.0+cu130
+ARG TORCHVISION_VERSION=0.27.0+cu130
+ARG TORCHAUDIO_VERSION=2.11.0+cu130
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_NO_CACHE_DIR=1
+ENV TORCH_CUDA_ARCH_LIST=8.9
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      git \
+      ninja-build \
+      nlohmann-json3-dev \
+      patchelf \
+      pkg-config \
+      python3.12-dev \
+      python3.12-venv && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3.12 -m venv --system-site-packages ${VIRTUAL_ENV} && \
+    ln -s /usr/bin/cmake ${VIRTUAL_ENV}/bin/cmake
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+COPY community-ci.txt /tmp/trtmc-community-ci.txt
+
+RUN pip install -U pip && \
+    pip install \
+      "cuda-python>=13.0.3,<14" \
+      "huggingface_hub>=0.23" \
+      "ml_dtypes>=0.4" \
+      "numpy>=1.24,<2.5" \
+      "onnx>=1.16" \
+      "PyYAML>=6.0" \
+      "safetensors>=0.4" \
+      "sentencepiece>=0.1.99" \
+      "transformers==5.2.0" && \
+    pip install \
+      "torch==${TORCH_VERSION}" \
+      "torchvision==${TORCHVISION_VERSION}" \
+      "torchaudio==${TORCHAUDIO_VERSION}" \
+      --index-url "${TORCH_CUDA_INDEX}" && \
+    pip install "setuptools>=80,<82" && \
+    pip install --requirement /tmp/trtmc-community-ci.txt && \
+    rm -f /tmp/trtmc-community-ci.txt
+
+ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu
+ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu
+ENV LD_LIBRARY_PATH="${TRT_LIB_DIR}:/usr/local/cuda/lib64"
+
+# Not verified here: apache-tvm-ffi / libtvm_ffi.so. It backs the native
+# C++ runtime build, which this GPU smoke-test image does not build; whether
+# it is present depends entirely on the checked-out branch's
+# requirements/community-ci.txt.
+RUN cmake --version && \
+    python3.12 -c \
+      "import onnx, tensorrt, torch; assert tensorrt.__version__ == '11.1.0.106'; assert hasattr(tensorrt, 'CausalMaskKind'); assert torch.__version__ == '${TORCH_VERSION}'; assert torch.version.cuda is not None" && \
+    test -f "${TRT_INC_DIR}/NvInferVersion.h" && \
+    test -f "${TRT_LIB_DIR}/libnvinfer.so.11"
+
+WORKDIR /workspace/tensorrt-model-connect
+
+CMD ["bash"]

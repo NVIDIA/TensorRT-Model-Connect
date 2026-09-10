@@ -7,6 +7,7 @@
 // Encoder-decoder text-to-text pipeline for BART models.
 
 #include "families/bart/runtime/decode_runtime.h"
+#include "families/bart/runtime/device_buffer.h"
 #include "families/bart/runtime/distributed_runtime.h"
 #include "families/bart/runtime/kv_cache.h"
 #include "families/bart/runtime/plugin_helpers.h"
@@ -157,22 +158,16 @@ class BartPipeline final : public ITextGeneration {
 
         cross_kv_bytes_ = static_cast<std::size_t>(max_source_length_) *
                           static_cast<std::size_t>(hidden_size_) * sizeof(float);
-        cross_k_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
-        cross_v_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
+        cross_k_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_));
+        cross_v_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_));
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-            cudaMalloc(&cross_k_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
-            cudaMalloc(&cross_v_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
-        }
-    }
-
-    ~BartPipeline() override {
-        for (auto* ptr : cross_k_ptrs_) {
-            if (ptr)
-                cudaFree(ptr);
-        }
-        for (auto* ptr : cross_v_ptrs_) {
-            if (ptr)
-                cudaFree(ptr);
+            const std::size_t layer = static_cast<std::size_t>(i);
+            if (cross_k_ptrs_[layer].allocate(cross_kv_bytes_) != cudaSuccess)
+                throw std::runtime_error(
+                    "BartPipeline: unable to allocate cross-attention key buffer");
+            if (cross_v_ptrs_[layer].allocate(cross_kv_bytes_) != cudaSuccess)
+                throw std::runtime_error(
+                    "BartPipeline: unable to allocate cross-attention value buffer");
         }
     }
 
@@ -250,13 +245,17 @@ class BartPipeline final : public ITextGeneration {
             throw std::runtime_error("BartPipeline: no encoder_output");
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
             auto idx = static_cast<std::size_t>(i);
-            cudaMemcpy(cross_k_ptrs_[idx], enc_out, cross_kv_bytes_, cudaMemcpyDeviceToDevice);
-            cudaMemcpy(cross_v_ptrs_[idx], enc_out, cross_kv_bytes_, cudaMemcpyDeviceToDevice);
+            cudaMemcpy(cross_k_ptrs_[idx].get(), enc_out, cross_kv_bytes_,
+                       cudaMemcpyDeviceToDevice);
+            cudaMemcpy(cross_v_ptrs_[idx].get(), enc_out, cross_kv_bytes_,
+                       cudaMemcpyDeviceToDevice);
         }
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
             std::string s = "_" + std::to_string(i);
-            decoder_->bind_external("cross_k" + s, cross_k_ptrs_[static_cast<std::size_t>(i)]);
-            decoder_->bind_external("cross_v" + s, cross_v_ptrs_[static_cast<std::size_t>(i)]);
+            decoder_->bind_external("cross_k" + s,
+                                    cross_k_ptrs_[static_cast<std::size_t>(i)].get());
+            decoder_->bind_external("cross_v" + s,
+                                    cross_v_ptrs_[static_cast<std::size_t>(i)].get());
         }
     }
 
@@ -316,8 +315,8 @@ class BartPipeline final : public ITextGeneration {
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
-    std::vector<void*> cross_k_ptrs_;
-    std::vector<void*> cross_v_ptrs_;
+    std::vector<bart::DeviceBuffer> cross_k_ptrs_;
+    std::vector<bart::DeviceBuffer> cross_v_ptrs_;
     std::vector<float> encoder_attention_mask_;
     std::size_t cross_kv_bytes_{0};
 };

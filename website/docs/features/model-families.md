@@ -27,6 +27,45 @@ calls its plain `build(request, writer)` function. The family owns config and
 weight interpretation, TensorRT graph topology, precision/quantization policy,
 engine construction, and bundle-section semantics.
 
+### K2-Horizon-Uno task contract
+
+`IFM/K2-Horizon-7B-Uno` is an adapter-only checkpoint. The independent
+`k2_horizon_uno` family resolves its pinned `IFM/K2-Horizon-7B` base and
+compiles the rank-128 conditional LoRA into one BF16 TensorRT engine. Build it
+directly from the adapter ID:
+
+```bash
+python -m tensorrt_model_connect build IFM/K2-Horizon-7B-Uno \
+  --revision ec92bbd768f4a404319625204544782e3377bcd7 \
+  --precision bf16 \
+  -o k2-horizon-7b-uno.bundle
+```
+
+Run the qualified high-reasoning chat path with the family-owned linear mode:
+
+```bash
+trtmc run k2-horizon-7b-uno.bundle \
+  --runtime-root /opt/trtmc/lib \
+  --prompt "Reply with the word OK." \
+  --max-new-tokens 26 \
+  --temperature 0 \
+  --top-k 1 \
+  --generation-mode linear_spec_lora \
+  --block-length 8 \
+  --use-chat-template true \
+  --enable-thinking true
+```
+
+The initial runtime supports batch-one deterministic greedy generation with
+linear Psi-Spec and block lengths from 1 through 8. Block 8 is the qualified
+default. It also supports the pinned single-user, high-reasoning chat template
+and an autoregressive control mode. String prompts are currently limited to
+ASCII and fail closed before tokenization otherwise. Stochastic sampling, tree
+verification, batching, tensor parallelism, quantization, the 0.9B adapter, and
+long-context qualification remain outside this contract. The
+committed-token-per-forward receipt is an algorithmic diagnostic, not a
+wall-clock speedup claim.
+
 ## Runtime and validation
 
 The directory name is also the runtime DSO identity:

@@ -90,6 +90,7 @@ def test_build_command_uses_the_family_owned_default_task(monkeypatch, tmp_path:
 
     assert captured[0].family == "gpt2"
     assert captured[0].task == "text_generation"
+    assert captured[0].precision == "fp32"
 
 
 def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_path: Path) -> None:
