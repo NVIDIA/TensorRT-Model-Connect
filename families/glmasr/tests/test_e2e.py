@@ -131,6 +131,7 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
             task=manifest["task"],
             precision=manifest["precision"],
             max_sequence_length=manifest.get("max_sequence_length"),
+            tensor_parallel_size=int(manifest.get("tensor_parallel_size", 1)),
         )
     )
 
