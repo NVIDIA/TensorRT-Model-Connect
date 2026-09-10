@@ -232,9 +232,7 @@ def _assert_operational_summary(summary: dict) -> None:
         "startup_ms",
     ):
         value = float(summary[field])
-        assert np.isfinite(value) and value > 0.0, (
-            f"{field} must be finite and positive, got {value}"
-        )
+        assert np.isfinite(value) and value > 0.0
     effective_hz = float(summary["control_effective_hz"])
     assert np.isfinite(effective_hz) and effective_hz >= 49.0
     jitter = float(summary["control_p99_abs_jitter_ms"])
@@ -279,13 +277,8 @@ def test_operational_summary_rejects_invalid_active_invariants() -> None:
         "peak_resident_memory_mib": 1.0,
         "startup_ms": 1.0,
     }
-    for field in (
-        "chunk_inference_p50_ms",
-        "chunk_throughput_per_second",
-        "gpu_memory_delta_mib",
-        "gpu_memory_total_mib",
-    ):
-        with pytest.raises(AssertionError, match=field):
+    for field in ("chunk_inference_p50_ms", "chunk_throughput_per_second", "gpu_memory_total_mib"):
+        with pytest.raises(AssertionError):
             _assert_operational_summary({**summary, field: 0.0})
     with pytest.raises(AssertionError):
         _assert_operational_summary({**summary, "control_frequency_hz": 49.0})

@@ -264,8 +264,9 @@ def _tie_wan_text_encoder(pipeline) -> None:
     if shared.weight.shape != embedded.weight.shape:
         raise RuntimeError("Wan reference text encoder embedding shapes do not match")
     if shared.weight.data_ptr() != embedded.weight.data_ptr():
-        # Wan stores the input embedding as shared.weight even when its config
-        # disables output-word-embedding tying. Restore the loaded input alias.
+        # UMT5's encoder shares the checkpoint embedding even when the config
+        # disables output-word-embedding tying. Restore that input alias through
+        # the official setter when tie_weights() leaves it separate.
         set_input_embeddings = getattr(text_encoder, "set_input_embeddings", None)
         if callable(set_input_embeddings):
             set_input_embeddings(shared)

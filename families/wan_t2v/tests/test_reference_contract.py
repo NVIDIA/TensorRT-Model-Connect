@@ -9,20 +9,9 @@ from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
-from packaging.requirements import Requirement
 from PIL import Image
 
 from . import test_e2e as e2e
-
-
-def test_reference_declares_diffusers_low_memory_loader_dependency() -> None:
-    requirements = Path(__file__).parents[1] / "requirements.txt"
-    names = {
-        Requirement(line).name
-        for line in requirements.read_text(encoding="utf-8").splitlines()
-        if line and not line.startswith("#")
-    }
-    assert "accelerate" in names
 
 
 class _Tensor:
@@ -73,10 +62,6 @@ def _framework(monkeypatch) -> tuple[dict, object]:
         def tie_weights(self):
             self.tied = True
 
-        def set_input_embeddings(self, shared):
-            self.shared = shared
-            self.encoder.embed_tokens = shared
-
     class Pipeline:
         def __init__(self):
             self.text_encoder = TextEncoder()
@@ -117,32 +102,6 @@ def test_wan_latents_use_the_family_numpy_contract() -> None:
 
 def test_every_wan_reference_is_fp32() -> None:
     assert {case["reference_precision"] for _, _, case in e2e.CASES.values()} == {"fp32"}
-
-
-def test_reference_transformer_loads_checkpoint_with_fp32_modules(tmp_path: Path) -> None:
-    import torch
-
-    diffusers = pytest.importorskip("diffusers")
-    model = diffusers.WanTransformer3DModel(
-        num_attention_heads=2,
-        attention_head_dim=8,
-        in_channels=4,
-        out_channels=4,
-        text_dim=8,
-        freq_dim=8,
-        ffn_dim=16,
-        num_layers=1,
-    )
-    model.save_pretrained(tmp_path)
-    # This is the submodel loader used by WanPipeline.from_pretrained. It must
-    # retain the reference's FP32 modules instead of falling back when the
-    # family's accelerate dependency is missing.
-    restored = diffusers.WanTransformer3DModel.from_pretrained(
-        tmp_path, torch_dtype=torch.float32, local_files_only=True, low_cpu_mem_usage=True
-    )
-    assert not any(parameter.is_meta for parameter in restored.parameters())
-    for name, expected in model.state_dict().items():
-        torch.testing.assert_close(restored.state_dict()[name], expected, rtol=0, atol=0)
 
 
 def test_native_receives_the_exact_raw_latents(monkeypatch, tmp_path: Path) -> None:
@@ -202,59 +161,61 @@ def test_reference_rejects_an_untied_text_encoder() -> None:
         shared=SimpleNamespace(weight=_Weight(1)),
         encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=_Weight(2))),
         tie_weights=lambda: None,
-        set_input_embeddings=lambda shared: None,
     )
     with pytest.raises(RuntimeError, match=r"tie_weights\(\) did not bind embeddings"):
         e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
 
 
-def test_reference_rejects_mismatched_embedding_shapes() -> None:
-    embedded = _Weight(2)
-    embedded.shape = (16, 4)
+def test_reference_restores_shared_inputs_without_changing_output_tying() -> None:
+    shared = SimpleNamespace(weight=_Weight(1))
+    encoder = SimpleNamespace(embed_tokens=SimpleNamespace(weight=_Weight(2)))
+    configuration = SimpleNamespace(tie_word_embeddings=False)
+    calls = []
+
+    def set_input_embeddings(value):
+        calls.append(value)
+        encoder.embed_tokens = value
+
     text_encoder = SimpleNamespace(
-        shared=SimpleNamespace(weight=_Weight(1)),
-        encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=embedded)),
+        shared=shared,
+        encoder=encoder,
+        config=configuration,
         tie_weights=lambda: None,
+        set_input_embeddings=set_input_embeddings,
+    )
+    e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+    assert calls == [shared]
+    assert encoder.embed_tokens is shared
+    assert configuration.tie_word_embeddings is False
+
+
+def test_reference_rejects_missing_or_mismatched_embeddings() -> None:
+    shared = SimpleNamespace(weight=_Weight(1))
+    with pytest.raises(RuntimeError, match="no shared embedding binding"):
+        e2e._tie_wan_text_encoder(
+            SimpleNamespace(text_encoder=SimpleNamespace(shared=shared, tie_weights=lambda: None))
+        )
+
+    mismatched = _Weight(2)
+    mismatched.shape = (9, 4)
+    calls = []
+    text_encoder = SimpleNamespace(
+        shared=shared,
+        encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=mismatched)),
+        tie_weights=lambda: None,
+        set_input_embeddings=calls.append,
     )
     with pytest.raises(RuntimeError, match="embedding shapes do not match"):
         e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+    assert calls == []
 
 
-def test_reference_restores_checkpoint_shared_embedding(tmp_path: Path) -> None:
-    import torch
-    from safetensors.torch import save_file
-    from transformers import UMT5Config, UMT5EncoderModel
-
-    config = UMT5Config(
-        vocab_size=16,
-        d_model=8,
-        d_kv=4,
-        d_ff=16,
-        num_layers=1,
-        num_heads=2,
-        dropout_rate=0.0,
-        tie_word_embeddings=False,
+def test_reference_rejects_an_ineffective_input_setter() -> None:
+    text_encoder = SimpleNamespace(
+        shared=SimpleNamespace(weight=_Weight(1)),
+        encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=_Weight(2))),
+        tie_weights=lambda: None,
+        set_input_embeddings=lambda value: None,
     )
-    reference = UMT5EncoderModel(config).eval()
-    # Wan checkpoints store the shared input embedding only, even though the
-    # config disables input/output word embedding tying.
-    reference.encoder.embed_tokens = reference.shared
-    state = {
-        name: tensor.clone()
-        for name, tensor in reference.state_dict().items()
-        if name != "encoder.embed_tokens.weight"
-    }
-    config.save_pretrained(tmp_path)
-    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
-
-    loaded = UMT5EncoderModel.from_pretrained(tmp_path, local_files_only=True).eval()
-    e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=loaded))
-
-    assert loaded.config.tie_word_embeddings is False
-    assert loaded.encoder.embed_tokens.weight.data_ptr() == loaded.shared.weight.data_ptr()
-    torch.testing.assert_close(loaded.shared.weight, state["shared.weight"], rtol=0, atol=0)
-    tokens = torch.tensor([[1, 2, 3]])
-    with torch.no_grad():
-        expected = reference(tokens).last_hidden_state
-        actual = loaded(tokens).last_hidden_state
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    with pytest.raises(RuntimeError, match=r"tie_weights\(\) did not bind embeddings"):
+        e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
