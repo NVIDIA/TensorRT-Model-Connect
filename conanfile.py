@@ -114,20 +114,43 @@ class TensorRTModelConnectConan(ConanFile):
         catalog = package / "trtmc_benchmark" / "_catalog"
         source_suffixes = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".py", ".pyc"}
         for asset in sorted((source / "families").glob("*/tests/**/*")):
+            family_relative = asset.relative_to(source / "families")
+            family = family_relative.parts[0]
+            relative = asset.relative_to(source / "families" / family / "tests")
+            qualification_python = (
+                asset.suffix == ".py"
+                and "qualification" in relative.parts
+                and not asset.name.startswith("test_")
+            )
             if (
                 not asset.is_file()
-                or asset.suffix in source_suffixes
+                or (asset.suffix in source_suffixes and not qualification_python)
                 or "__pycache__" in asset.parts
             ):
                 continue
-            family = asset.relative_to(source / "families").parts[0]
-            relative = asset.relative_to(source / "families" / family / "tests")
             destination = catalog / family / "tests" / relative.parent
             copy(
                 self,
                 asset.name,
                 src=str(asset.parent),
                 dst=str(destination),
+                keep_path=False,
+            )
+        suites = package / "trtmc_benchmark" / "_suites"
+        for requirements in sorted((source / "families").glob("*/requirements.txt")):
+            copy(
+                self,
+                requirements.name,
+                src=str(requirements.parent),
+                dst=str(catalog / requirements.parent.name),
+                keep_path=False,
+            )
+        for asset in sorted((source / "apps/benchmark/qualification/suites").glob("*.yaml")):
+            copy(
+                self,
+                asset.name,
+                src=str(asset.parent),
+                dst=str(suites),
                 keep_path=False,
             )
 

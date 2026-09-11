@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: gpt2-125m
+kind: accuracy
+
+suites:
+  - benchmark: mmlu_continuation_parity
+    gate_policy: blocking
+    cases:
+      - id: smoke
+        sample_limit: 10
+        reference:
+          implementation: hf_transformers
+          precision: fp32
+        prompt:
+          token_limit: 960
+          truncation_side: left
+        gate:
+          min_pass_rate: 0.9
+          min_allowed_failures: 1
+        candidate:
+          testcase: gpt2-125m
+          request:
+            max_new_tokens: 64
+            temperature: 1.0
+            top_k: 1
+            top_p: 1.0
+            min_p: 0.0
+            seed: -1
+            repetition_penalty: 1.0
+            use_chat_template: false
+            enable_thinking: false
+            do_sample: false
