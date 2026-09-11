@@ -988,34 +988,58 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         const std::string path = require_option(command, "--output");
         if (streaming) {
             const int32_t chunk_frames = int_option(command, "--chunk-frames", 32, 1);
+            auto* multichannel = dynamic_cast<IMultichannelStreamingAudioGeneration*>(&task);
+            auto* mono = dynamic_cast<IStreamingAudioGeneration*>(&task);
+            if (multichannel == nullptr && mono == nullptr)
+                throw std::invalid_argument("task does not support streaming audio generation");
             std::ofstream stream(path, std::ios::binary | std::ios::trunc);
             if (!stream)
                 throw std::runtime_error("unable to open streaming audio output: " + path);
             int32_t sample_rate = 0;
-            const int32_t total =
-                require_interface<IStreamingAudioGeneration>(task).generate_audio_streaming(
-                    require_option(command, "--prompt"), config,
-                    [&](const float* samples, int32_t num_samples, int32_t rate) {
-                        if (samples == nullptr || num_samples <= 0 || rate <= 0)
-                            throw std::runtime_error(
-                                "streaming audio family returned an invalid chunk");
-                        if (sample_rate != 0 && sample_rate != rate)
-                            throw std::runtime_error(
-                                "streaming audio sample rate changed mid-stream");
-                        sample_rate = rate;
-                        stream.write(reinterpret_cast<const char*>(samples),
-                                     static_cast<std::streamsize>(num_samples) * sizeof(float));
-                        if (!stream)
-                            throw std::runtime_error("failed to write streaming audio output: " +
-                                                     path);
-                    },
-                    chunk_frames);
+            int32_t num_channels = 0;
+            std::int64_t observed_samples = 0;
+            const auto write_chunk = [&](const AudioChunkView& chunk) {
+                if (chunk.samples == nullptr || chunk.num_samples <= 0 || chunk.sample_rate <= 0 ||
+                    chunk.num_channels <= 0 || chunk.num_samples % chunk.num_channels != 0)
+                    throw std::runtime_error("streaming audio family returned an invalid chunk");
+                if ((sample_rate != 0 && sample_rate != chunk.sample_rate) ||
+                    (num_channels != 0 && num_channels != chunk.num_channels))
+                    throw std::runtime_error("streaming audio format changed mid-stream");
+                for (int32_t index = 0; index < chunk.num_samples; ++index)
+                    if (!std::isfinite(chunk.samples[index]))
+                        throw std::runtime_error("streaming audio contains non-finite samples");
+                if (observed_samples > std::numeric_limits<std::int64_t>::max() - chunk.num_samples)
+                    throw std::runtime_error("streaming audio sample count overflow");
+                sample_rate = chunk.sample_rate;
+                num_channels = chunk.num_channels;
+                stream.write(reinterpret_cast<const char*>(chunk.samples),
+                             static_cast<std::streamsize>(chunk.num_samples) * sizeof(float));
+                if (!stream)
+                    throw std::runtime_error("failed to write streaming audio output: " + path);
+                observed_samples += chunk.num_samples;
+            };
+            const auto& prompt = require_option(command, "--prompt");
+            const std::int64_t total =
+                multichannel != nullptr
+                    ? multichannel->generate_audio_streaming(prompt, config, write_chunk,
+                                                             chunk_frames)
+                    : mono->generate_audio_streaming(
+                          prompt, config,
+                          [&](const float* samples, int32_t count, int32_t rate) {
+                              write_chunk({samples, count, rate, 1});
+                          },
+                          chunk_frames);
             stream.close();
-            if (total <= 0 || sample_rate <= 0)
+            if (!stream)
+                throw std::runtime_error("failed to close streaming audio output: " + path);
+            if (total <= 0 || observed_samples == 0)
                 throw std::runtime_error("streaming audio family produced no samples");
+            if (total != observed_samples)
+                throw std::runtime_error("streaming audio sample count does not match chunks");
             write_json(output, {{"output", path},
                                 {"format", "float32le"},
                                 {"sample_rate", sample_rate},
+                                {"num_channels", num_channels},
                                 {"num_samples", total}});
             return EXIT_SUCCESS;
         }

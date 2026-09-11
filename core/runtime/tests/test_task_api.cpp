@@ -19,6 +19,7 @@ static_assert(std::is_abstract_v<trtmc::IImageBatchGeneration>);
 static_assert(std::is_abstract_v<trtmc::IWorldModelGeneration>);
 static_assert(std::is_abstract_v<trtmc::IAudioGeneration>);
 static_assert(std::is_abstract_v<trtmc::IStreamingAudioGeneration>);
+static_assert(std::is_abstract_v<trtmc::IMultichannelStreamingAudioGeneration>);
 static_assert(std::is_abstract_v<trtmc::ITranscription>);
 static_assert(std::is_abstract_v<trtmc::IBatchTranscription>);
 static_assert(std::is_abstract_v<trtmc::IStreamingTranscription>);

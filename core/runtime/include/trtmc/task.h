@@ -404,6 +404,17 @@ struct AudioGenerationConfig {
 using AudioChunkCallback =
     std::function<void(const float* samples, std::int32_t num_samples, std::int32_t sample_rate)>;
 
+// Borrowed interleaved float PCM, valid only during the callback. num_samples
+// counts scalar samples (not frames); each nonempty chunk contains whole frames.
+struct AudioChunkView {
+    const float* samples{nullptr};
+    std::int32_t num_samples{0};
+    std::int32_t sample_rate{0};
+    std::int32_t num_channels{1};
+};
+
+using MultichannelAudioChunkCallback = std::function<void(const AudioChunkView& chunk)>;
+
 struct SpeechToSpeechConfig {
     std::int32_t max_new_tokens{128};
     std::int32_t seed{-1};
@@ -568,6 +579,21 @@ class IStreamingAudioGeneration {
     virtual std::int32_t generate_audio_streaming(const std::string& prompt,
                                                   const AudioGenerationConfig& config,
                                                   AudioChunkCallback callback,
+                                                  std::int32_t chunk_frames) = 0;
+};
+
+// Optional channel-aware capability; existing mono implementations need not
+// change. Callbacks are synchronous, ordered, and non-concurrent. Rate/channel
+// count stay fixed for a call. Return signals completion and reports the total
+// scalar samples delivered. Callback exceptions must stop generation and escape
+// the call; implementations must not retain the callback after returning.
+class IMultichannelStreamingAudioGeneration {
+  public:
+    static constexpr const char* kTask = IAudioGeneration::kTask;
+    virtual ~IMultichannelStreamingAudioGeneration() = default;
+    virtual std::int64_t generate_audio_streaming(const std::string& prompt,
+                                                  const AudioGenerationConfig& config,
+                                                  MultichannelAudioChunkCallback callback,
                                                   std::int32_t chunk_frames) = 0;
 };
 
