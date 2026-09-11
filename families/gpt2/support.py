@@ -3,6 +3,9 @@
 
 """Family-owned model and task support for gpt2."""
 
+# Comment-only live-fire payload for the ordered Community CI introduced in
+# PR #1262. This does not change GPT-2 support or runtime behavior.
+
 from tensorrt_model_connect.model_support import family_support
 
 
