@@ -1,0 +1,18 @@
+{
+  "name": "xcit-tiny-12-p16-224-fb-in1k",
+  "hf_id": "timm/xcit_tiny_12_p16_224.fb_in1k",
+  "hf_revision": "060449891838eaf301bdb3673e3daaf58e0370de",
+  "bundle": "xcit-tiny-12-p16-224-fb-in1k.bundle",
+  "family": "timm_xcit",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "xcit-tiny-12-p16-224-fb-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

@@ -73,6 +73,12 @@ excluded_profiles:
       three published MobileViT v1 checkpoints, but the release-performance
       workload and receipt were collected only for mobilevit_s, which is the
       width the release entry names.
+  - model: xcit-nano-12-p16-224-fb-in1k
+    reason: >-
+      Functional and timm reference-parity qualification is present for the
+      nano width, which is the only one whose class-attention norm covers a
+      single token, but the release-performance workload and receipt were
+      collected only for xcit_tiny_12_p16_224.
 
 entries:
   - id: detr.detect
@@ -1271,6 +1277,19 @@ entries:
       adapter: ultralytics-detection
       mode: torch-eager
       reference_backend: ultralytics
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_xcit.classify
+    family: timm_xcit
+    operation: classify
+    model: xcit-tiny-12-p16-224-fb-in1k
+    workload:
+      testcase: xcit-tiny-12-p16-224-fb-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_repvgg.classify
