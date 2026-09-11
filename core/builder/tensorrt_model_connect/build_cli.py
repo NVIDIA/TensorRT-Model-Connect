@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Sequence
 
 from .build import BuildRequest, _load_family, build
 from .model_support import load_model_metadata, resolve_family
+
+
+_OPTION = re.compile(r"([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*)=(.*)\Z", re.DOTALL)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,6 +39,14 @@ def _parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--fp32-layer", type=int, action="append", default=[])
     build_parser.add_argument("--dynamic-kv-cache", action="store_true")
     build_parser.add_argument("--verbose", action="store_true")
+    build_parser.add_argument(
+        "--set",
+        dest="family_options",
+        action="append",
+        default=[],
+        metavar="FAMILY.KEY=VALUE",
+        help="Set one family-owned scalar build option",
+    )
     prepare_parser = commands.add_parser(
         "prepare-structure",
         help="Prepare one structure request without rebuilding its model bundle",
@@ -45,6 +57,33 @@ def _parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--revision", help="Hugging Face model revision")
     prepare_parser.add_argument("--cache-dir", type=Path)
     return parser
+
+
+def _parse_family_options(
+    values: Sequence[str], family: str
+) -> tuple[tuple[str, str | int | float | bool | None], ...]:
+    result: list[tuple[str, str | int | float | bool | None]] = []
+    names: set[str] = set()
+    for value in values:
+        match = _OPTION.fullmatch(value)
+        if match is None:
+            raise ValueError("--set must use FAMILY.KEY=VALUE")
+        namespace, name, raw = match.groups()
+        if namespace != family:
+            raise ValueError(
+                f"--set namespace {namespace!r} does not match resolved family {family!r}"
+            )
+        if name in names:
+            raise ValueError(f"duplicate --set option: {family}.{name}")
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = raw
+        if not isinstance(parsed, (str, int, float, bool, type(None))):
+            raise ValueError("--set values must be JSON scalars")
+        result.append((name, parsed))
+        names.add(name)
+    return tuple(result)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -93,6 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             fp32_layers=tuple(args.fp32_layer),
             dynamic_kv_cache=args.dynamic_kv_cache,
             verbose=args.verbose,
+            family_options=_parse_family_options(args.family_options, family),
         )
     )
     return 0

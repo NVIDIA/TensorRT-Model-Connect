@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 import pytest
 import numpy as np
@@ -23,6 +24,37 @@ TASKS = frozenset({"image_generation"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
+
+
+def _dynamic_library_name(stem: str, platform: str | None = None) -> str:
+    target = sys.platform if platform is None else platform
+    if target == "win32":
+        return f"{stem}.dll"
+    if target == "darwin":
+        return f"lib{stem}.dylib"
+    return f"lib{stem}.so"
+
+
+def _loader_path_variable(platform: str | None = None) -> str:
+    target = sys.platform if platform is None else platform
+    if target == "win32":
+        return "PATH"
+    if target == "darwin":
+        return "DYLD_LIBRARY_PATH"
+    return "LD_LIBRARY_PATH"
+
+
+@pytest.mark.parametrize(
+    ("platform", "library", "loader_path"),
+    (
+        ("win32", "trtmc_backend_trt_rtx.dll", "PATH"),
+        ("darwin", "libtrtmc_backend_trt_rtx.dylib", "DYLD_LIBRARY_PATH"),
+        ("linux", "libtrtmc_backend_trt_rtx.so", "LD_LIBRARY_PATH"),
+    ),
+)
+def test_runtime_library_conventions(platform: str, library: str, loader_path: str) -> None:
+    assert _dynamic_library_name("trtmc_backend_trt_rtx", platform) == library
+    assert _loader_path_variable(platform) == loader_path
 
 
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:
@@ -108,7 +140,6 @@ def _model_dir(manifest: dict) -> Path:
             repo_id=manifest["hf_id"],
             revision=manifest.get("hf_revision"),
             local_files_only=True,
-            allow_patterns=["model_index.json"],
         )
     except Exception as error:
         raise AssertionError(
@@ -120,8 +151,9 @@ def _model_dir(manifest: dict) -> Path:
 def _runtime(manifest: dict) -> tuple[Path, Path]:
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
-    assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
-    assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
+    for stem in ("trtmc_core", "trtmc_backend_trt_rtx", f"trtmc_model_{FAMILY}"):
+        library = runtime_root / _dynamic_library_name(stem)
+        assert library.is_file(), f"selected {FAMILY} E2E runtime is missing {library.name}"
     import torch
 
     required_gpus = int(manifest["tensor_parallel_size"])
@@ -140,6 +172,7 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
             family=FAMILY,
             task=manifest["task"],
             precision=manifest["precision"],
+            backend="trt_rtx",
             max_sequence_length=manifest.get("max_sequence_length"),
             image_height=manifest.get("image_height"),
             image_width=manifest.get("image_width"),
@@ -161,6 +194,7 @@ def _run_json(
     command: str,
     *arguments: str,
 ) -> dict:
+    loader_path_variable = _loader_path_variable()
     invocation = [
         str(binary),
         command,
@@ -170,6 +204,9 @@ def _run_json(
         *arguments,
     ]
     if int(manifest["tensor_parallel_size"]) > 1:
+        assert loader_path_variable == "LD_LIBRARY_PATH", (
+            "selected multi-GPU E2E requires a POSIX mpirun environment"
+        )
         mpirun = shutil.which("mpirun")
         assert mpirun, "selected multi-GPU E2E requires mpirun"
         invocation = [
@@ -182,8 +219,8 @@ def _run_json(
             *invocation,
         ]
     env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = ":".join(
-        (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
+    env[loader_path_variable] = os.pathsep.join(
+        (value for value in (str(runtime_root), env.get(loader_path_variable, "")) if value)
     )
     completed = subprocess.run(
         invocation,
@@ -300,6 +337,8 @@ def _native(
         "--seed",
         str(int(case["seed"])),
     ]
+    if is_video:
+        arguments.extend(("--num-frames", str(frames)))
     if case.get("negative_prompt"):
         arguments.extend(("--negative-prompt", str(case["negative_prompt"])))
     for key, option in (("guidance_scale", "--guidance-scale"), ("cfg_scale", "--cfg-scale")):
@@ -309,6 +348,66 @@ def _native(
     payload["artifact"] = str(output)
     record_native_preview(output)
     return payload
+
+
+def test_e2e_uses_rtx_staged_build_and_requested_frame_count(monkeypatch, tmp_path: Path) -> None:
+    manifest = {
+        "task": "image_generation",
+        "precision": "bf16",
+        "tensor_parallel_size": 1,
+        "image_height": 768,
+        "image_width": 1344,
+        "video_num_frames": 124,
+    }
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a short test prompt\n", encoding="utf-8")
+    case = {
+        "prompt_file": str(prompt_file),
+        "num_inference_steps": 50,
+        "seed": 0,
+    }
+    observed: dict[str, object] = {}
+
+    def capture_build(request: BuildRequest) -> None:
+        observed["request"] = request
+
+    def capture_run(
+        _binary: Path,
+        _runtime_root: Path,
+        _bundle: Path,
+        _manifest: dict,
+        _case: dict,
+        command: str,
+        *arguments: str,
+    ) -> dict:
+        observed["command"] = command
+        observed["arguments"] = arguments
+        return {"frames": 124}
+
+    monkeypatch.setitem(globals(), "build", capture_build)
+    monkeypatch.setitem(globals(), "_run_json", capture_run)
+    bundle = tmp_path / "minimax-h3.bundle"
+    _build(tmp_path / "checkpoint", bundle, manifest)
+    result = _native(
+        tmp_path / "trtmc",
+        tmp_path / "runtime",
+        bundle,
+        tmp_path / "checkpoint",
+        manifest,
+        case,
+        tmp_path,
+    )
+
+    request = observed["request"]
+    assert isinstance(request, BuildRequest)
+    assert request.backend == "trt_rtx"
+    assert request.output_path == bundle
+    assert observed["command"] == "generate-video"
+    arguments = observed["arguments"]
+    assert isinstance(arguments, tuple)
+    options = dict(zip(arguments[::2], arguments[1::2], strict=True))
+    assert options["--num-frames"] == "124"
+    assert result["artifact"] == str(tmp_path / "native-frames")
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):

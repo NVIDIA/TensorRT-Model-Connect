@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import struct
 from pathlib import Path
 
@@ -66,9 +67,7 @@ def test_writer_rejects_duplicate_and_empty_section_names(tmp_path: Path) -> Non
     ("field", "value"),
     [("family", "../family"), ("task", ""), ("backend", "")],
 )
-def test_writer_rejects_unsafe_header_ids(
-    tmp_path: Path, field: str, value: str
-) -> None:
+def test_writer_rejects_unsafe_header_ids(tmp_path: Path, field: str, value: str) -> None:
     header = {"family": "family", "task": "text_generation", "backend": "trt"}
     header[field] = value
     writer = BundleWriter(tmp_path / "model.bundle")
@@ -111,9 +110,7 @@ def test_abort_discards_staging_and_preserves_destination(tmp_path: Path) -> Non
         writer.finish()
 
 
-def test_failed_atomic_replace_preserves_destination(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_failed_atomic_replace_preserves_destination(monkeypatch, tmp_path: Path) -> None:
     destination = tmp_path / "model.bundle"
     destination.write_bytes(b"previous")
     writer = BundleWriter(destination)
@@ -131,3 +128,124 @@ def test_failed_atomic_replace_preserves_destination(
     assert not list(tmp_path.glob(".model.bundle.*.tmp"))
 
     writer.abort()
+
+
+def test_borrowed_file_mixes_with_streamed_sections_without_staging_copy(tmp_path: Path) -> None:
+    source = tmp_path / "existing.plan"
+    source.write_bytes(b"engine-bytes")
+    before = source.stat()
+    destination = tmp_path / "model.bundle"
+    writer = BundleWriter(destination)
+    writer.set_header(family="family", task="text_generation", backend="trt")
+    writer.add_file("engine.plan", source)
+    assert list(tmp_path.iterdir()) == [source]
+    writer.add_json("config.json", {"size": 7})
+    with writer.open_section("tokenizer.model") as section:
+        section.write(b"tokens")
+    writer.finish()
+
+    header, payload = _read_bundle(destination)
+    assert header["sections"] == {
+        "engine.plan": {"offset": 0, "length": 12},
+        "config.json": {"offset": 12, "length": 10},
+        "tokenizer.model": {"offset": 22, "length": 6},
+    }
+    assert payload == b'engine-bytes{"size":7}tokens'
+    assert source.read_bytes() == b"engine-bytes"
+    assert source.stat().st_mtime_ns == before.st_mtime_ns
+    assert set(tmp_path.iterdir()) == {source, destination}
+    with pytest.raises(RuntimeError, match="already finished"):
+        writer.add_file("other", source)
+
+
+def test_borrowed_files_reuse_section_guards_and_require_external_files(tmp_path: Path) -> None:
+    source = tmp_path / "existing.plan"
+    source.write_bytes(b"plan")
+    writer = BundleWriter(tmp_path / "model.bundle")
+    writer.add_file("borrowed", source)
+    with pytest.raises(ValueError, match="duplicate"):
+        writer.add_bytes("borrowed", b"other")
+    writer.add_bytes("staged", b"bytes")
+    with pytest.raises(ValueError, match="duplicate"):
+        writer.add_file("staged", source)
+    with pytest.raises(ValueError, match="section name"):
+        writer.add_file("", source)
+    for missing in (tmp_path, tmp_path / "missing.plan"):
+        with pytest.raises(FileNotFoundError, match="source is not a file"):
+            writer.add_file("invalid", missing)
+    with writer.open_section("owned") as section:
+        section.write(b"owned")
+        owned_path = Path(section.name)
+    with pytest.raises(ValueError, match="writer-owned paths"):
+        writer.add_file("invalid", owned_path)
+    writer.abort()
+    assert source.read_bytes() == b"plan"
+    with pytest.raises(RuntimeError, match="aborted"):
+        writer.add_file("other", source)
+
+
+def test_borrowing_destination_is_rejected_without_modifying_it(tmp_path: Path) -> None:
+    destination = tmp_path / "model.bundle"
+    destination.write_bytes(b"previous")
+    writer = BundleWriter(destination)
+    with pytest.raises(ValueError, match="writer-owned paths"):
+        writer.add_file("previous", destination)
+    writer.abort()
+    assert destination.read_bytes() == b"previous"
+
+
+@pytest.mark.parametrize("failure", ("abort", "copy", "replace"))
+def test_borrowed_source_and_old_destination_survive_abort_or_finish_failure(
+    tmp_path: Path, monkeypatch, failure: str
+) -> None:
+    source, destination = tmp_path / "existing.plan", tmp_path / "model.bundle"
+    source.write_bytes(b"plan")
+    destination.write_bytes(b"previous")
+    writer = BundleWriter(destination)
+    writer.set_header(family="family", task="text_generation", backend="trt")
+    writer.add_file("engine.plan", source)
+    writer.add_bytes("metadata", b"metadata")
+
+    def fail(*_args, **_kwargs):
+        raise OSError("publication failed")
+
+    if failure != "abort":
+        monkeypatch.setattr(
+            shutil if failure == "copy" else os,
+            "copyfileobj" if failure == "copy" else "replace",
+            fail,
+        )
+        with pytest.raises(OSError, match="publication failed"):
+            writer.finish()
+        assert not list(tmp_path.glob(".model.bundle.*.tmp"))
+    writer.abort()
+    assert source.read_bytes() == b"plan"
+    assert destination.read_bytes() == b"previous"
+    assert set(tmp_path.iterdir()) == {source, destination}
+
+
+@pytest.mark.parametrize("change", ("size", "mtime", "replacement"))
+def test_changed_borrowed_source_fails_before_publishing(tmp_path: Path, change: str) -> None:
+    source, destination = tmp_path / "existing.plan", tmp_path / "model.bundle"
+    source.write_bytes(b"original")
+    destination.write_bytes(b"previous")
+    writer = BundleWriter(destination)
+    writer.set_header(family="family", task="text_generation", backend="trt")
+    writer.add_file("engine.plan", source)
+    before = source.stat()
+    if change == "size":
+        source.write_bytes(b"longer source content")
+    elif change == "mtime":
+        source.write_bytes(b"modified")
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+    else:
+        replacement = tmp_path / "replacement.plan"
+        replacement.write_bytes(b"modified")
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(replacement, source)
+    with pytest.raises(RuntimeError, match="borrowed bundle section source changed"):
+        writer.finish()
+    writer.abort()
+    assert source.is_file()
+    assert destination.read_bytes() == b"previous"
+    assert set(tmp_path.iterdir()) == {source, destination}

@@ -40,6 +40,7 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
     assert request.context_parallel_size == 3
     assert request.backend == "trt"
     assert request.dynamic_kv_cache is False
+    assert request.family_options == ()
 
 
 @pytest.mark.parametrize(
@@ -57,6 +58,10 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
         ("dynamic_kv_cache", 1),
         ("graph_transform", object()),
         ("backend", "unknown"),
+        ("family_options", [("option", True)]),
+        ("family_options", (("bad-name", True),)),
+        ("family_options", (("option", []),)),
+        ("family_options", (("option", True), ("option", False))),
     ],
 )
 def test_build_request_rejects_invalid_direct_inputs(
@@ -233,6 +238,22 @@ def test_build_runs_graph_transform_before_family_engine_serialization(
     assert events[1] == ("serialize", events[0][1])
     assert events[2] == "finish"
     assert fake_trt.Builder is FakeTrtBuilder
+
+
+def test_nonempty_family_options_require_family_validation(monkeypatch, tmp_path: Path) -> None:
+    request = replace(_request(tmp_path), family_options=(("example_option", True),))
+    family = SimpleNamespace(build=lambda _request, _writer: pytest.fail("unexpected build"))
+    monkeypatch.setattr(build_core, "_load_family", lambda _family: family)
+    with pytest.raises(ValueError, match="does not accept family_options"):
+        build_core.build(request)
+
+    def reject_options(options):
+        assert options == {"example_option": True}
+        raise ValueError("unsupported example option")
+
+    family.validate_build_options = reject_options
+    with pytest.raises(ValueError, match="unsupported example option"):
+        build_core.build(request)
 
 
 def test_build_aborts_and_preserves_family_error(monkeypatch, tmp_path: Path) -> None:

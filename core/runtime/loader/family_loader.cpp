@@ -6,10 +6,10 @@
 #include "trtmc/runtime/family_loader.h"
 
 #include "runtime/bundle/bundle_format.h"
+#include "runtime/platform/dynamic_library.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
-#include <dlfcn.h>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -62,12 +62,11 @@ fs::path explicit_runtime_root(const std::string& runtime_root) {
 class SharedLibrary {
   public:
     explicit SharedLibrary(const fs::path& path) : path_(path.string()) {
-        dlerror();
-        handle_ = dlopen(path_.c_str(), RTLD_NOW | RTLD_LOCAL);
+        std::string error;
+        handle_ =
+            internal::open_dynamic_library(path, internal::DynamicLibraryVisibility::local, &error);
         if (handle_ == nullptr) {
-            const char* error = dlerror();
-            throw std::runtime_error("Unable to load '" + path_ +
-                                     "': " + (error != nullptr ? error : "unknown dlopen error"));
+            throw std::runtime_error("Unable to load '" + path_ + "': " + error);
         }
     }
 
@@ -76,29 +75,29 @@ class SharedLibrary {
 
     ~SharedLibrary() {
         if (handle_ != nullptr)
-            dlclose(handle_);
+            (void)internal::close_dynamic_library(handle_);
     }
 
     void* require_symbol(const char* name) const {
-        dlerror();
-        void* symbol = dlsym(handle_, name);
-        const char* error = dlerror();
-        if (error != nullptr || symbol == nullptr) {
+        std::string error;
+        void* symbol = internal::dynamic_library_symbol(handle_, name, &error);
+        if (symbol == nullptr) {
             throw std::runtime_error("Library '" + path_ + "' is missing required symbol '" + name +
-                                     "'");
+                                     "': " + error);
         }
         return symbol;
     }
 
   private:
     std::string path_;
-    void* handle_{nullptr};
+    internal::DynamicLibraryHandle handle_{nullptr};
 };
 
 class BackendLibrary {
   public:
     BackendLibrary(const fs::path& runtime_root, const std::string& backend_id)
-        : library_(runtime_root / ("libtrtmc_backend_" + backend_id + ".so")) {
+        : library_(runtime_root /
+                   internal::dynamic_library_filename("trtmc_backend_" + backend_id)) {
         const auto create =
             reinterpret_cast<CreateBackendFn>(library_.require_symbol("trtmc_create_backend"));
         destroy_ =
@@ -136,7 +135,7 @@ class BackendLibrary {
 class FamilyLibrary {
   public:
     FamilyLibrary(const fs::path& runtime_root, const std::string& family_id)
-        : library_(runtime_root / ("libtrtmc_model_" + family_id + ".so")),
+        : library_(runtime_root / internal::dynamic_library_filename("trtmc_model_" + family_id)),
           create_(reinterpret_cast<CreateFamilyFn>(library_.require_symbol(kCreateFamilySymbol))) {}
 
     FamilyLibrary(const FamilyLibrary&) = delete;
@@ -173,6 +172,25 @@ class RuntimeOptionsBackend final : public IBackend {
                                 const ModuleCreateOptions& options) override {
         return backend_.create_dual_profile_modules(plan_data, plan_size,
                                                     with_runtime_options(options));
+    }
+
+    std::unique_ptr<ITrtModule>
+    create_module_from_file(const char* plan_path, std::uint64_t plan_offset,
+                            std::uint64_t plan_size, const ModuleCreateOptions& options,
+                            const std::vector<ModuleExternalBinding>& bindings,
+                            std::int64_t weight_streaming_budget_bytes, bool retain_engine,
+                            bool serial_execution_context) override {
+        return backend_.create_module_from_file(
+            plan_path, plan_offset, plan_size, with_runtime_options(options), bindings,
+            weight_streaming_budget_bytes, retain_engine, serial_execution_context);
+    }
+
+    std::uint64_t acquire_runtime_cache_lease(const char* path) override {
+        return backend_.acquire_runtime_cache_lease(path);
+    }
+
+    void release_runtime_cache_lease(std::uint64_t lease) override {
+        backend_.release_runtime_cache_lease(lease);
     }
 
     const char* name() const override { return backend_.name(); }
@@ -228,7 +246,8 @@ RuntimeLibraryCache& runtime_library_cache() {
 }
 
 IBackend& cached_backend(const fs::path& runtime_root, const std::string& backend_id) {
-    const std::string path = (runtime_root / ("libtrtmc_backend_" + backend_id + ".so")).string();
+    const std::string path =
+        (runtime_root / internal::dynamic_library_filename("trtmc_backend_" + backend_id)).string();
     auto& cache = runtime_library_cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
     const auto found = cache.backends.find(path);
@@ -258,7 +277,8 @@ IBackend& cached_configured_backend(IBackend& backend, const std::string& runtim
 }
 
 FamilyLibrary& cached_family(const fs::path& runtime_root, const std::string& family_id) {
-    const std::string path = (runtime_root / ("libtrtmc_model_" + family_id + ".so")).string();
+    const std::string path =
+        (runtime_root / internal::dynamic_library_filename("trtmc_model_" + family_id)).string();
     auto& cache = runtime_library_cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
     const auto found = cache.families.find(path);
@@ -301,7 +321,8 @@ std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::stri
     FamilyLibrary& family = cached_family(root, info.family);
     IBackend& configured_backend =
         cached_configured_backend(backend, runtime_cache_path, cuda_graphs);
-    FamilyContext context{reader, configured_backend, kv_cache_size_bytes};
+    FamilyContext context{reader, configured_backend, kv_cache_size_bytes, runtime_cache_path,
+                          cuda_graphs};
     std::unique_ptr<ITask> task(family.create(context));
     if (task == nullptr)
         throw std::runtime_error("trtmc_create_family returned nullptr");

@@ -10,6 +10,8 @@ graph uses fused ``IAttention`` and contains no plugin or distributed layer.
 from __future__ import annotations
 
 from collections import Counter
+from contextvars import ContextVar
+from functools import lru_cache, wraps
 import math
 
 import ml_dtypes
@@ -18,18 +20,55 @@ import numpy as np
 import tensorrt as trt
 
 from .config import resolve_workspace_bytes
+from .quantized_checkpoint import ConvRotInt8Weight
 
 
 # TensorRT's explicit BF16 ``Weights`` constructor stores a pointer rather
 # than owning its input.  Retain every backing array until the associated
 # network has finished building, including temporary packed QKV buffers.
 _WEIGHT_BUFFER_KEEPALIVE: dict[int, list[np.ndarray]] = {}
+_ACTIVE_BUILD_NETWORKS: ContextVar[set[int] | None] = ContextVar(
+    "minimax_h3_active_build_networks", default=None
+)
 
 
-def configure_builder(config) -> None:
-    """Retain enough engine metadata to audit native TensorRT lowering."""
+def cleanup_failed_build(function):
+    """Release retained arrays and consumed weights after graph-build failures."""
+
+    @wraps(function)
+    def wrapped(weights, *args, **kwargs):
+        network_ids: set[int] = set()
+        token = _ACTIVE_BUILD_NETWORKS.set(network_ids)
+        try:
+            return function(weights, *args, **kwargs)
+        except BaseException:
+            for network_id in network_ids:
+                _WEIGHT_BUFFER_KEEPALIVE.pop(network_id, None)
+            if kwargs.get("consume_weights", False):
+                weights.clear()
+            raise
+        finally:
+            _ACTIVE_BUILD_NETWORKS.reset(token)
+
+    return wrapped
+
+
+def configure_builder(config, *, weight_streaming: bool = False) -> None:
+    """Retain graph metadata and enable RTX weight streaming when requested."""
 
     config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    if not isinstance(weight_streaming, bool):
+        raise ValueError("MiniMax-H3 weight_streaming must be a boolean")
+    if not weight_streaming:
+        return
+    flag = getattr(trt.BuilderFlag, "WEIGHT_STREAMING", None)
+    if flag is None:
+        raise RuntimeError(
+            "Selected TensorRT-RTX bindings do not expose BuilderFlag.WEIGHT_STREAMING"
+        )
+    config.set_flag(flag)
+    if not config.get_flag(flag):
+        raise RuntimeError("TensorRT-RTX did not enable MiniMax-H3 weight streaming")
 
 
 def configure_workspace(config, workspace_bytes: int | None, *, default_bytes: int) -> int:
@@ -47,8 +86,13 @@ def configure_workspace(config, workspace_bytes: int | None, *, default_bytes: i
     return applied
 
 
-def validate_native_network(network, *, expected_attentions: int, label: str) -> dict[str, int]:
-    """Fail closed if a native H3 graph gains plugins or collectives."""
+def validate_native_network(
+    network,
+    *,
+    expected_attentions: int,
+    label: str,
+) -> dict[str, int]:
+    """Fail closed on any layer outside the selected native H3 contract."""
 
     counts = Counter(network.get_layer(index).type for index in range(network.num_layers))
     expected = {
@@ -79,7 +123,11 @@ def validate_native_network(network, *, expected_attentions: int, label: str) ->
 
 def _add_constant(network, array: np.ndarray):
     array = np.ascontiguousarray(array)
-    _WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).append(array)
+    network_id = id(network)
+    _WEIGHT_BUFFER_KEEPALIVE.setdefault(network_id, []).append(array)
+    active_networks = _ACTIVE_BUILD_NETWORKS.get()
+    if active_networks is not None:
+        active_networks.add(network_id)
     if array.dtype == np.dtype(ml_dtypes.bfloat16):
         weights = trt.Weights(trt.bfloat16, array.ctypes.data, array.size)
     else:
@@ -113,6 +161,247 @@ def cast(network, tensor, dtype):
     return network.add_cast(tensor, dtype).get_output(0)
 
 
+def _name_convrot_layer(network, layer, role: str) -> None:
+    """Assign a stable, network-unique diagnostic name to a ConvRot layer."""
+
+    layer.name = f"minimax_h3.convrot.{role}.{network.num_layers - 1}"
+
+
+@lru_cache(maxsize=None)
+def _regular_hadamard(group_size: int) -> np.ndarray:
+    """Return Comfy's normalized regular Hadamard matrix in checkpoint dtype.
+
+    Comfy ConvRot starts from its symmetric 4x4 basis and takes Kronecker
+    powers.  H3 currently uses groups of 64 and 256.  Keeping the coefficients
+    in BF16 exactly matches the activation dtype used by the published
+    checkpoint and avoids introducing a second activation quantizer.
+    """
+
+    if not isinstance(group_size, int) or isinstance(group_size, bool) or group_size < 4:
+        raise ValueError("MiniMax-H3 ConvRot group_size must be a power of four")
+    basis = np.asarray(
+        (
+            (1.0, 1.0, 1.0, -1.0),
+            (1.0, 1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0, 1.0),
+        ),
+        dtype=np.float32,
+    )
+    matrix = basis
+    while matrix.shape[0] < group_size:
+        matrix = np.kron(matrix, basis)
+    if matrix.shape != (group_size, group_size):
+        raise ValueError("MiniMax-H3 ConvRot group_size must be a power of four")
+    return np.ascontiguousarray(
+        matrix / math.sqrt(float(group_size)), dtype=ml_dtypes.bfloat16
+    )
+
+
+def _convrot_activation(network, tensor, *, in_features: int, group_size: int):
+    """Apply the checkpoint's grouped right-Hadamard rotation with native TRT."""
+
+    if in_features % group_size:
+        raise ValueError(
+            "MiniMax-H3 ConvRot input width must be divisible by group_size: "
+            f"width={in_features}, group_size={group_size}"
+        )
+    if len(tuple(tensor.shape)) != 2:
+        raise ValueError("MiniMax-H3 ConvRot linears require rank-2 activations")
+    static_width = int(tensor.shape[1])
+    if static_width >= 0 and static_width != in_features:
+        raise ValueError(
+            "MiniMax-H3 ConvRot activation/weight width mismatch: "
+            f"activation={static_width}, weight={in_features}"
+        )
+
+    value = cast(network, tensor, trt.bfloat16)
+    grouped = network.add_shuffle(value)
+    # Collapse rows and groups into one GEMM M dimension.  This is materially
+    # faster than issuing one tiny batched GEMM per sequence row while keeping
+    # the exact same contiguous group boundaries.
+    grouped.reshape_dims = (-1, group_size)
+    hadamard = weight_constant(network, _regular_hadamard(group_size))
+    rotation = network.add_matrix_multiply(
+        grouped.get_output(0),
+        trt.MatrixOperation.NONE,
+        hadamard,
+        trt.MatrixOperation.NONE,
+    )
+    if rotation is None:
+        raise RuntimeError("TensorRT rejected the MiniMax-H3 ConvRot activation rotation")
+    _name_convrot_layer(network, rotation, f"group_{group_size}")
+    rotation.metadata = (
+        "trtmc.quantization=int8_tensorwise_convrot;"
+        f"activation=bf16;group_size={group_size}"
+    )
+    restored = network.add_shuffle(rotation.get_output(0))
+    restored.reshape_dims = (-1, in_features)
+    return restored.get_output(0)
+
+
+def _convrot_int8_linear(network, tensor, weight: ConvRotInt8Weight, bias=None):
+    """Build Comfy-compatible dynamic-rowwise ConvRot W8A8 with native TRT.
+
+    TensorRT's ordinary Quantize layer requires a build-time-constant scale.
+    To retain the published checkpoint's exact dynamic semantics without a
+    plugin, express the BF16 rowwise quantizer as native math, then place unit
+    Q/DQ markers around the resulting INT8 tensors.  TensorRT recognizes those
+    markers and lowers the MatrixMultiply to an INT8 GEMM; the dynamic row and
+    per-output weight scales are applied explicitly in FP32 before BF16 output.
+    """
+
+    qweight = np.asarray(weight.qweight)
+    scale = np.asarray(weight.scale)
+    if qweight.dtype != np.int8 or qweight.ndim != 2:
+        raise ValueError("MiniMax-H3 ConvRot qweight must be rank-2 INT8")
+    if scale.dtype != np.float32 or scale.shape not in {
+        (qweight.shape[0],),
+        (qweight.shape[0], 1),
+    }:
+        raise ValueError(
+            "MiniMax-H3 ConvRot scale must be FP32 [out] or [out,1]: "
+            f"weight={qweight.shape}, scale={scale.shape}"
+        )
+
+    rotated = _convrot_activation(
+        network,
+        tensor,
+        in_features=int(qweight.shape[1]),
+        group_size=int(weight.group_size),
+    )
+
+    # Match comfy-kitchen >= 0.2.15 exactly: absmax is computed at the source
+    # BF16 dtype, scale storage is FP32, scale math and division return to BF16,
+    # and ROUND is round-to-nearest-even before the signed INT8 clamp.
+    absolute = network.add_unary(rotated, trt.UnaryOperation.ABS)
+    if absolute is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot activation abs")
+    _name_convrot_layer(network, absolute, "activation_abs_bf16")
+    row_max = network.add_reduce(
+        absolute.get_output(0),
+        trt.ReduceOperation.MAX,
+        1 << 1,
+        True,
+    )
+    if row_max is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot rowwise maximum")
+    _name_convrot_layer(network, row_max, "activation_row_max_bf16")
+    row_max_f32 = cast(network, row_max.get_output(0), trt.float32)
+    divisor = constant(network, np.full((1, 1), 127.0, dtype=np.float32))
+    row_scale = network.add_elementwise(
+        row_max_f32,
+        divisor,
+        trt.ElementWiseOperation.DIV,
+    )
+    if row_scale is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot row scale")
+    _name_convrot_layer(network, row_scale, "activation_scale_f32")
+    minimum_scale = constant(network, np.full((1, 1), 1.0e-30, dtype=np.float32))
+    clamped_scale = network.add_elementwise(
+        row_scale.get_output(0),
+        minimum_scale,
+        trt.ElementWiseOperation.MAX,
+    )
+    if clamped_scale is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot row scale clamp")
+    _name_convrot_layer(network, clamped_scale, "activation_scale_clamped_f32")
+    row_scale_f32 = clamped_scale.get_output(0)
+    row_scale_bf16 = cast(network, row_scale_f32, trt.bfloat16)
+    divided = network.add_elementwise(
+        rotated,
+        row_scale_bf16,
+        trt.ElementWiseOperation.DIV,
+    )
+    if divided is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot BF16 quantization division")
+    _name_convrot_layer(network, divided, "activation_divide_bf16")
+    rounded = network.add_unary(divided.get_output(0), trt.UnaryOperation.ROUND)
+    if rounded is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot activation rounding")
+    _name_convrot_layer(network, rounded, "activation_round_bf16")
+    minimum_code = weight_constant(
+        network,
+        np.full((1, 1), -128.0, dtype=ml_dtypes.bfloat16),
+    )
+    maximum_code = weight_constant(
+        network,
+        np.full((1, 1), 127.0, dtype=ml_dtypes.bfloat16),
+    )
+    clipped_minimum = network.add_elementwise(
+        rounded.get_output(0),
+        minimum_code,
+        trt.ElementWiseOperation.MAX,
+    )
+    if clipped_minimum is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot activation lower clamp")
+    clipped = network.add_elementwise(
+        clipped_minimum.get_output(0),
+        maximum_code,
+        trt.ElementWiseOperation.MIN,
+    )
+    if clipped is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot activation upper clamp")
+    activation_int8 = cast(network, clipped.get_output(0), trt.int8)
+
+    quantized = weight_constant(network, qweight)
+    unit_scale = constant(network, np.asarray(1.0, dtype=np.float32))
+    activation_dequantize = network.add_dequantize(
+        activation_int8,
+        unit_scale,
+        trt.float32,
+    )
+    weight_dequantize = network.add_dequantize(
+        quantized,
+        unit_scale,
+        trt.float32,
+    )
+    if activation_dequantize is None or weight_dequantize is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot unit INT8 Q/DQ markers")
+    _name_convrot_layer(network, activation_dequantize, "activation_unit_dequantize")
+    _name_convrot_layer(network, weight_dequantize, "weight_unit_dequantize")
+    matmul = network.add_matrix_multiply(
+        activation_dequantize.get_output(0),
+        trt.MatrixOperation.NONE,
+        weight_dequantize.get_output(0),
+        trt.MatrixOperation.TRANSPOSE,
+    )
+    if matmul is None:
+        raise RuntimeError("TensorRT rejected the MiniMax-H3 ConvRot INT8 linear")
+    _name_convrot_layer(network, matmul, "dynamic_rowwise_int8_gemm")
+    matmul.metadata = (
+        "trtmc.quantization=int8_tensorwise_convrot;"
+        "activation=dynamic_int8_rowwise;weight=int8;accumulator=fp32"
+    )
+    accumulator = cast(network, matmul.get_output(0), trt.float32)
+    weight_scale = weight_constant(network, scale.reshape(1, -1))
+    output_scale = network.add_elementwise(
+        row_scale_f32,
+        weight_scale,
+        trt.ElementWiseOperation.PROD,
+    )
+    if output_scale is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot combined output scale")
+    _name_convrot_layer(network, output_scale, "combined_scale_f32")
+    scaled = network.add_elementwise(
+        accumulator,
+        output_scale.get_output(0),
+        trt.ElementWiseOperation.PROD,
+    )
+    if scaled is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 ConvRot output scaling")
+    _name_convrot_layer(network, scaled, "output_scale_f32")
+    output = scaled.get_output(0)
+    if bias is not None:
+        shape = (1,) * (len(tuple(output.shape)) - 1) + (-1,)
+        bias_tensor = weight_constant(network, np.asarray(bias).reshape(shape))
+        bias_tensor = cast(network, bias_tensor, trt.float32)
+        output = network.add_elementwise(
+            output, bias_tensor, trt.ElementWiseOperation.SUM
+        ).get_output(0)
+    return cast(network, output, trt.bfloat16)
+
+
 def linear(
     network,
     tensor,
@@ -123,6 +412,11 @@ def linear(
     compute_dtype=None,
 ):
     """PyTorch ``[out, in]`` linear expressed as native TensorRT GEMM."""
+
+    if isinstance(weight, ConvRotInt8Weight):
+        if compute_dtype not in (None, trt.bfloat16) or not bf16:
+            raise ValueError("MiniMax-H3 ConvRot linears require BF16 activation compute")
+        return _convrot_int8_linear(network, tensor, weight, bias)
 
     tensor_rank = len(tuple(tensor.shape))
     rhs_value = np.asarray(weight)
@@ -218,26 +512,50 @@ def dynamic_slice(network, tensor, starts: tuple[int, ...], sizes: tuple[int | N
 
     if len(starts) != len(sizes):
         raise ValueError("MiniMax-H3 dynamic slice rank mismatch")
-    runtime_sizes = [
-        _shape_dim(network, tensor, axis) if size is None else size
-        for axis, size in enumerate(sizes)
-    ]
+    runtime_sizes = []
+    for axis, size in enumerate(sizes):
+        if size is not None:
+            runtime_sizes.append(size)
+            continue
+        static_size = int(tensor.shape[axis])
+        runtime_sizes.append(
+            static_size if static_size >= 0 else _shape_dim(network, tensor, axis)
+        )
+    if all(isinstance(size, (int, np.integer)) for size in runtime_sizes):
+        return network.add_slice(
+            tensor,
+            starts,
+            tuple(int(size) for size in runtime_sizes),
+            (1,) * len(sizes),
+        ).get_output(0)
     initial_sizes = tuple(1 if size is None else size for size in sizes)
     layer = network.add_slice(tensor, starts, initial_sizes, (1,) * len(sizes))
     layer.set_input(2, _shape_vector(network, runtime_sizes))
     return layer.get_output(0)
 
 
-def slice_rows_from_end(network, tensor, *, offset: int, rows: int):
-    """Take fixed rows from a dynamic 2-D tensor, measured from its end."""
+def slice_rows_like_from_end(network, tensor, reference, *, trailing_reference=None):
+    """Take runtime-sized rows from ``tensor`` using modality input shapes.
+
+    ``reference`` supplies the number of rows to return.  When a trailing
+    modality is supplied, its runtime row count is included in the offset
+    measured from the packed sequence end.  Only shape tensors participate in
+    this operation, so the reference contents are never copied or consumed.
+    """
 
     total_rows = _shape_dim(network, tensor, 0)
-    offset_tensor = constant(network, np.asarray([offset], dtype=np.int64), dtype=np.int64)
+    rows = _shape_dim(network, reference, 0)
+    offset = rows
+    if trailing_reference is not None:
+        trailing_rows = _shape_dim(network, trailing_reference, 0)
+        offset = network.add_elementwise(
+            offset, trailing_rows, trt.ElementWiseOperation.SUM
+        ).get_output(0)
     start_row = network.add_elementwise(
-        total_rows, offset_tensor, trt.ElementWiseOperation.SUB
+        total_rows, offset, trt.ElementWiseOperation.SUB
     ).get_output(0)
     width = int(tensor.shape[1])
-    layer = network.add_slice(tensor, (0, 0), (rows, width), (1, 1))
+    layer = network.add_slice(tensor, (0, 0), (1, width), (1, 1))
     layer.set_input(1, _shape_vector(network, (start_row, 0)))
     layer.set_input(2, _shape_vector(network, (rows, width)))
     return layer.get_output(0)
@@ -283,20 +601,50 @@ def swiglu(network, tensor, weight_in, weight_out, ffn_dim: int):
     return linear(network, hidden, weight_out)
 
 
-def fused_qkv(network, tensor, weights: dict, prefix: str):
+def fused_qkv(
+    network,
+    tensor,
+    weights: dict,
+    prefix: str,
+    *,
+    consume_weights: bool = False,
+):
     """Pack Q/K/V into one TensorRT GEMM, matching Sol-Engine's lossless path."""
 
-    packed_weight = np.concatenate(
-        [weights[f"{prefix}.to_{name}.weight"] for name in ("q", "k", "v")], axis=0
-    )
+    keys = tuple(f"{prefix}.to_{name}.weight" for name in ("q", "k", "v"))
+    sources = tuple(weights[key] for key in keys)
+    if all(isinstance(source, ConvRotInt8Weight) for source in sources):
+        parents = tuple(source.packed_parent for source in sources)
+        if parents[0] is None or not all(parent is parents[0] for parent in parents):
+            raise ValueError(
+                "MiniMax-H3 quantized Q/K/V must share one packed parent"
+            )
+        packed_weight = parents[0]
+        if not packed_weight.is_full_fused_qkv:
+            raise ValueError("MiniMax-H3 quantized QKV parent is not marked as full fused QKV")
+        expected_width = int(packed_weight.qweight.shape[0]) // 3
+        expected_slices = tuple(
+            (index * expected_width, (index + 1) * expected_width) for index in range(3)
+        )
+        if tuple(source.row_slice for source in sources) != expected_slices:
+            raise ValueError("MiniMax-H3 quantized Q/K/V row slices are not q-k-v ordered")
+    elif any(isinstance(source, ConvRotInt8Weight) for source in sources):
+        raise ValueError("MiniMax-H3 fused QKV cannot mix quantized and BF16 weights")
+    else:
+        packed_weight = np.concatenate(sources, axis=0)
     packed = linear(network, tensor, packed_weight)
+    if consume_weights:
+        # The packed array is retained by the network. Its three sources are
+        # no longer referenced and can be released before serialization.
+        for key in keys:
+            weights.pop(key)
     width = int(packed.shape[1]) // 3
     return tuple(
         dynamic_slice(network, packed, (0, index * width), (None, width)) for index in range(3)
     )
 
 
-def rows_to_heads(network, tensor, rows: int, heads: int, head_dim: int):
+def rows_to_heads(network, tensor, heads: int, head_dim: int):
     reshape = network.add_shuffle(tensor)
     reshape.reshape_dims = (-1, heads, head_dim)
     reshape.second_transpose = trt.Permutation([1, 0, 2])
@@ -305,7 +653,7 @@ def rows_to_heads(network, tensor, rows: int, heads: int, head_dim: int):
     return batch.get_output(0)
 
 
-def heads_to_rows(network, tensor, rows: int, width: int):
+def heads_to_rows(network, tensor, width: int):
     reshape = network.add_shuffle(tensor)
     reshape.first_transpose = trt.Permutation([0, 2, 1, 3])
     reshape.reshape_dims = (-1, width)
@@ -318,7 +666,6 @@ def partial_rope(
     cos_half,
     sin_half,
     *,
-    rows: int,
     heads: int,
     head_dim: int,
     rotary_dim: int,
@@ -326,7 +673,7 @@ def partial_rope(
 ):
     """Apply H3's 96-channel rotate-half MM-RoPE with native layers."""
 
-    value = rows_to_heads(network, tensor, rows, heads, head_dim)
+    value = rows_to_heads(network, tensor, heads, head_dim)
     if interleaved:
         raise ValueError("MiniMax-H3 uses rotate-half, non-interleaved RoPE")
     rotary = dynamic_slice(network, value, (0, 0, 0, 0), (1, heads, None, rotary_dim))
@@ -357,21 +704,17 @@ def partial_rope(
     rotated = network.add_elementwise(left, right, trt.ElementWiseOperation.SUM).get_output(0)
     result = network.add_concatenation((rotated, passthrough))
     result.axis = 3
-    return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
+    return heads_to_rows(network, result.get_output(0), heads * head_dim)
 
 
-def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, name: str):
+def native_attention(network, q, k, v, *, heads: int, head_dim: int, name: str):
     """Full-sequence single-device fused TensorRT attention."""
 
-    q = rows_to_heads(network, q, rows, heads, head_dim)
-    k = rows_to_heads(network, k, rows, heads, head_dim)
-    v = rows_to_heads(network, v, rows, heads, head_dim)
-    # TensorRT's fused FP16 attention has three additional mantissa bits over
-    # BF16. Keep the surrounding block in checkpoint-native BF16 while
-    # reducing recurrent numerical drift across 49 denoising evaluations.
-    q = cast(network, q, trt.float16)
-    k = cast(network, k, trt.float16)
-    v = cast(network, v, trt.float16)
+    q = rows_to_heads(network, q, heads, head_dim)
+    k = rows_to_heads(network, k, heads, head_dim)
+    v = rows_to_heads(network, v, heads, head_dim)
+    # Preserve BF16's exponent range. H3 residuals can exceed FP16's finite
+    # limit before a later block normalizes them.
     scale = constant(
         network,
         np.full((1, 1, 1, 1), 1.0 / math.sqrt(head_dim), dtype=np.float32),
@@ -385,5 +728,4 @@ def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, 
     layer.metadata = f"trtmc.native_op=IAttention;source={name}"
     layer.get_output(0).name = f"{name}.output"
     layer.decomposable = False
-    context = cast(network, layer.get_output(0), trt.bfloat16)
-    return heads_to_rows(network, context, rows, heads * head_dim)
+    return heads_to_rows(network, layer.get_output(0), heads * head_dim)

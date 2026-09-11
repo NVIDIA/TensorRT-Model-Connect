@@ -14,6 +14,7 @@
 static_assert(std::is_abstract_v<trtmc::ITextGeneration>);
 static_assert(std::is_abstract_v<trtmc::IVisionLanguageGeneration>);
 static_assert(std::is_abstract_v<trtmc::IImageGeneration>);
+static_assert(std::is_abstract_v<trtmc::IVideoGeneration>);
 static_assert(std::is_abstract_v<trtmc::IImageEditing>);
 static_assert(std::is_abstract_v<trtmc::IImageBatchGeneration>);
 static_assert(std::is_abstract_v<trtmc::IWorldModelGeneration>);
@@ -70,6 +71,39 @@ void test_robot_observation() {
         throw std::runtime_error("RobotObservation did not preserve its input spans");
 }
 
+void test_structured_video_generation_contract() {
+    trtmc::AudioResult stereo;
+    stereo.samples = {0.25F, -0.25F, 0.5F, -0.5F};
+    stereo.num_samples = static_cast<std::int32_t>(stereo.samples.size());
+    stereo.sample_rate = 32000;
+    stereo.channels = 2;
+
+    trtmc::VideoGenerationRequest request;
+    request.prompt = "ordered references";
+    request.mode = trtmc::VideoGenerationMode::kReferenceToVideoAudio;
+    request.config.video_num_frames = 124;
+
+    trtmc::VideoReferenceInput image;
+    image.kind = trtmc::VideoReferenceKind::kImage;
+    trtmc::VideoReferenceInput audio;
+    audio.kind = trtmc::VideoReferenceKind::kAudio;
+    audio.audio = stereo;
+    trtmc::VideoReferenceInput video;
+    video.kind = trtmc::VideoReferenceKind::kVideo;
+    video.video.soundtrack = stereo;
+    request.references = {image, audio, video};
+
+    if (stereo.channels != 2 || stereo.num_samples != 4 ||
+        request.mode != trtmc::VideoGenerationMode::kReferenceToVideoAudio ||
+        request.config.video_num_frames != 124 || request.references.size() != 3 ||
+        request.references[0].kind != trtmc::VideoReferenceKind::kImage ||
+        request.references[1].kind != trtmc::VideoReferenceKind::kAudio ||
+        request.references[2].kind != trtmc::VideoReferenceKind::kVideo ||
+        request.references[2].video.soundtrack.channels != 2) {
+        throw std::runtime_error("structured video request did not preserve mode or media order");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -87,6 +121,7 @@ int main() {
         return 1;
 
     test_robot_observation();
+    test_structured_video_generation_contract();
 
     std::unique_ptr<trtmc::ITask> task = std::make_unique<TextAndEmbedding>();
     if (std::string(task->task()) != trtmc::ITextGeneration::kTask)
