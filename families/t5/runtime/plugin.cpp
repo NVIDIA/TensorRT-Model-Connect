@@ -187,17 +187,7 @@ class T5Pipeline final : public ITextGeneration {
         // Allocate cross-attention device buffers (one per decoder layer)
         cross_kv_bytes_ = static_cast<size_t>(max_enc_seq_len_) *
                           static_cast<size_t>(hidden_size_) * sizeof(float);
-        cross_k_ptrs_.resize(static_cast<size_t>(num_decoder_layers_));
-        cross_v_ptrs_.resize(static_cast<size_t>(num_decoder_layers_));
-        for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-            const size_t layer = static_cast<size_t>(i);
-            if (cross_k_ptrs_[layer].allocate(cross_kv_bytes_) != cudaSuccess)
-                throw std::runtime_error(
-                    "T5Pipeline: unable to allocate cross-attention key buffer");
-            if (cross_v_ptrs_[layer].allocate(cross_kv_bytes_) != cudaSuccess)
-                throw std::runtime_error(
-                    "T5Pipeline: unable to allocate cross-attention value buffer");
-        }
+        t5::allocate_cross_kv(cross_k_ptrs_, cross_v_ptrs_, num_decoder_layers_, cross_kv_bytes_);
     }
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg) override {
@@ -290,9 +280,7 @@ class T5Pipeline final : public ITextGeneration {
         for (int32_t i = 0; i < actual_enc_len_; ++i)
             enc_mask_host[static_cast<size_t>(i)] = 0.0f;
         size_t mask_bytes = static_cast<size_t>(max_enc_seq_len_) * sizeof(float);
-        if (enc_mask_device_.get() == nullptr &&
-            enc_mask_device_.allocate(mask_bytes) != cudaSuccess)
-            throw std::runtime_error("T5Pipeline: unable to allocate encoder mask buffer");
+        t5::ensure_encoder_mask(enc_mask_device_, mask_bytes);
         cudaMemcpyAsync(enc_mask_device_.get(), enc_mask_host.data(), mask_bytes,
                         cudaMemcpyHostToDevice, stream_);
         cudaStreamSynchronize(stream_);
