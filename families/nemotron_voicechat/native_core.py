@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import tensorrt as trt
@@ -59,6 +60,61 @@ from .checkpoint_mapper import (
 )
 from . import graph_ops
 from . import graph_blocks
+
+if TYPE_CHECKING:
+    from .quantization import VoiceChatQuantContext
+
+
+def _add_static_projection(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    lhs_width: int,
+    rhs_width: int,
+    rhs_weights: np.ndarray,
+    weight_name: str,
+    *,
+    dtype: np.dtype,
+    quant_ctx: VoiceChatQuantContext | None,
+) -> trt.ITensor:
+    if quant_ctx is not None:
+        return quant_ctx.maybe_quantized_matmul(
+            network,
+            lhs,
+            lhs_width,
+            rhs_width,
+            rhs_weights,
+            weight_name,
+            dtype=dtype,
+        )
+    return graph_ops.add_matmul_rhs_constant(
+        network, lhs, lhs_width, rhs_width, rhs_weights, dtype=dtype
+    )
+
+
+def _add_fp16_projection(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    lhs_width: int,
+    rhs_width: int,
+    rhs_weights: np.ndarray,
+) -> trt.ITensor:
+    """Store and execute one projection in FP16, preserving an FP32 ABI."""
+    lhs_fp16 = (
+        lhs
+        if lhs.dtype == trt.float16
+        else network.add_cast(lhs, trt.float16).get_output(0)
+    )
+    projected = graph_ops.add_matmul_rhs_constant(
+        network,
+        lhs_fp16,
+        lhs_width,
+        rhs_width,
+        rhs_weights,
+        dtype=np.float16,
+    )
+    if projected.dtype == trt.float32:
+        return projected
+    return network.add_cast(projected, trt.float32).get_output(0)
 
 
 def _disable_tf32(builder_config) -> None:
@@ -654,6 +710,7 @@ class VoiceChatThinkerBuilder:
         max_cache_length: int,
         *,
         verbose: bool = False,
+        quant_ctx: VoiceChatQuantContext | None = None,
     ) -> bytes:
         """Build hybrid TRT engine with heterogeneous layer stack."""
         hidden = config.hidden_size
@@ -730,7 +787,17 @@ class VoiceChatThinkerBuilder:
             cache_v_inputs.append(cv)
 
         # --- Shared constants ---
-        embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"])
+        # Keep the public/runtime contract FP32, but store the large tokenizer
+        # table as FP16 whenever the experimental compressed thinker is in use.
+        # Casting each gathered row preserves the 2x table saving; casting the
+        # whole constant before Gather lets TensorRT expand it back to FP32.
+        compressed_embedding = quant_ctx is not None
+        embedding_table = graph_ops.add_constant(
+            network,
+            (vocab, hidden),
+            weights["embedding"],
+            dtype=np.float16 if compressed_embedding else np.float32,
+        )
         eps_tensor = graph_ops.add_constant(
             network,
             (1, 1),
@@ -738,9 +805,15 @@ class VoiceChatThinkerBuilder:
         )
 
         # --- AddFusion(text, prompt-or-audio timeline, function) ---
-        text_embed = network.add_gather(embedding_table, text_token_id, 0).get_output(0)
-        timeline_embed = network.add_gather(embedding_table, timeline_token_id, 0).get_output(0)
-        function_embed = network.add_gather(embedding_table, function_token_id, 0).get_output(0)
+        def embedding_lookup(token_id: trt.ITensor) -> trt.ITensor:
+            gathered = network.add_gather(embedding_table, token_id, 0).get_output(0)
+            if compressed_embedding:
+                return network.add_cast(gathered, trt.float32).get_output(0)
+            return gathered
+
+        text_embed = embedding_lookup(text_token_id)
+        timeline_embed = embedding_lookup(timeline_token_id)
+        function_embed = embedding_lookup(function_token_id)
         one = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
         inverse_audio = network.add_elementwise(
             one, use_audio_embed, trt.ElementWiseOperation.SUB
@@ -775,152 +848,185 @@ class VoiceChatThinkerBuilder:
             text_audio, function_channel, trt.ElementWiseOperation.SUM
         ).get_output(0)
 
-        # --- Layer stack ---
-        present_conv_outputs = []
-        present_ssm_outputs = []
-        present_k_outputs = []
-        present_v_outputs = []
-        mamba_counter = 0
-        attn_counter = 0
+        from .quantization import build_serialized_network, int8_weight_build_scope
 
-        for layer_idx in range(num_layers):
-            prefix = f"layer.{layer_idx}"
-            lt = layer_types[layer_idx]
-            layer_hidden = hidden_state
-            layer_eps = eps_tensor
+        with int8_weight_build_scope(network):
+            # --- Layer stack ---
+            present_conv_outputs = []
+            present_ssm_outputs = []
+            present_k_outputs = []
+            present_v_outputs = []
+            mamba_counter = 0
+            attn_counter = 0
 
-            if lt == "mamba2":
-                conv_state = conv_state_inputs[mamba_counter]
-                ssm_state = ssm_state_inputs[mamba_counter]
-                result = _add_mamba2_layer(
-                    network=network,
-                    hidden=layer_hidden,
-                    conv_state_in=conv_state,
-                    ssm_state_in=ssm_state,
-                    eps_tensor=layer_eps,
-                    weights=weights,
-                    prefix=prefix,
-                    hidden_size=hidden,
-                    d_inner=d_inner,
-                    d_state=d_state,
-                    d_conv=d_conv,
-                    conv_dim=conv_dim,
-                    mamba_num_heads=mamba_num_heads,
-                    mamba_head_dim=mamba_head_dim,
-                    n_groups=n_groups,
+            for layer_idx in range(num_layers):
+                prefix = f"layer.{layer_idx}"
+                lt = layer_types[layer_idx]
+                layer_hidden = hidden_state
+                layer_eps = eps_tensor
+
+                if lt == "mamba2":
+                    conv_state = conv_state_inputs[mamba_counter]
+                    ssm_state = ssm_state_inputs[mamba_counter]
+                    result = _add_mamba2_layer(
+                        network=network,
+                        hidden=layer_hidden,
+                        conv_state_in=conv_state,
+                        ssm_state_in=ssm_state,
+                        eps_tensor=layer_eps,
+                        weights=weights,
+                        prefix=prefix,
+                        hidden_size=hidden,
+                        d_inner=d_inner,
+                        d_state=d_state,
+                        d_conv=d_conv,
+                        conv_dim=conv_dim,
+                        mamba_num_heads=mamba_num_heads,
+                        mamba_head_dim=mamba_head_dim,
+                        n_groups=n_groups,
+                        quant_ctx=quant_ctx,
+                    )
+                    hidden_state = result["hidden"]
+                    present_conv_outputs.append(result["present_conv"])
+                    present_ssm_outputs.append(result["present_ssm"])
+                    mamba_counter += 1
+
+                elif lt == "mlp":
+                    result = _add_mlp_layer(
+                        network=network,
+                        hidden=layer_hidden,
+                        eps_tensor=layer_eps,
+                        weights=weights,
+                        prefix=prefix,
+                        hidden_size=hidden,
+                        mlp_size=mlp_size,
+                        quant_ctx=quant_ctx,
+                    )
+                    hidden_state = result["hidden"]
+
+                elif lt == "attention":
+                    cache_k = cache_k_inputs[attn_counter]
+                    cache_v = cache_v_inputs[attn_counter]
+                    result = graph_blocks.add_attention_block(
+                        network,
+                        layer_hidden,
+                        cache_k,
+                        cache_v,
+                        attention_mask,
+                        weights=weights,
+                        prefix=prefix,
+                        hidden_size=hidden,
+                        attention_size=attention_size,
+                        kv_attention_size=kv_attention_size,
+                        num_heads=num_heads,
+                        num_kv_heads=num_kv_heads,
+                        head_dim=head_dim,
+                        max_cache_length=max_cache_length,
+                        eps_tensor=layer_eps,
+                        quant_ctx=quant_ctx,
+                    )
+                    # add_attention_block does NOT apply residual
+                    residual = network.add_elementwise(
+                        layer_hidden, result["attn_out"], trt.ElementWiseOperation.SUM
+                    )
+                    hidden_state = residual.get_output(0)
+                    present_k_outputs.append(result["present_k"])
+                    present_v_outputs.append(result["present_v"])
+                    attn_counter += 1
+
+            # --- Final norm ---
+            final_norm = weights.get("final_norm")
+            if final_norm is not None and len(final_norm) > 0:
+                hidden_state = graph_ops.add_rms_norm(
+                    network, hidden_state, hidden, final_norm, eps_tensor
                 )
-                hidden_state = result["hidden"]
-                present_conv_outputs.append(result["present_conv"])
-                present_ssm_outputs.append(result["present_ssm"])
-                mamba_counter += 1
 
-            elif lt == "mlp":
-                result = _add_mlp_layer(
-                    network=network,
-                    hidden=layer_hidden,
-                    eps_tensor=layer_eps,
-                    weights=weights,
-                    prefix=prefix,
-                    hidden_size=hidden,
-                    mlp_size=mlp_size,
-                )
-                hidden_state = result["hidden"]
-
-            elif lt == "attention":
-                cache_k = cache_k_inputs[attn_counter]
-                cache_v = cache_v_inputs[attn_counter]
-                result = graph_blocks.add_attention_block(
+            # --- LM head ---
+            # Keep the extremely wide language head in FP16 for compressed builds.
+            # This explicit sibling-head precision boundary retains half-sized
+            # storage and leaves all internal projections and the function head on
+            # the packed INT8 path.
+            if quant_ctx is None:
+                logits = _add_static_projection(
                     network,
-                    layer_hidden,
-                    cache_k,
-                    cache_v,
-                    attention_mask,
-                    weights=weights,
-                    prefix=prefix,
-                    hidden_size=hidden,
-                    attention_size=attention_size,
-                    kv_attention_size=kv_attention_size,
-                    num_heads=num_heads,
-                    num_kv_heads=num_kv_heads,
-                    head_dim=head_dim,
-                    max_cache_length=max_cache_length,
-                    eps_tensor=layer_eps,
+                    hidden_state,
+                    hidden,
+                    vocab,
+                    weights["w_lm_head"],
+                    "w_lm_head",
+                    dtype=np.float32,
+                    quant_ctx=None,
                 )
-                # add_attention_block does NOT apply residual
-                residual = network.add_elementwise(
-                    layer_hidden, result["attn_out"], trt.ElementWiseOperation.SUM
+            else:
+                logits = _add_fp16_projection(
+                    network,
+                    hidden_state,
+                    hidden,
+                    vocab,
+                    weights["w_lm_head"],
                 )
-                hidden_state = residual.get_output(0)
-                present_k_outputs.append(result["present_k"])
-                present_v_outputs.append(result["present_v"])
-                attn_counter += 1
-
-        # --- Final norm ---
-        final_norm = weights.get("final_norm")
-        if final_norm is not None and len(final_norm) > 0:
-            hidden_state = graph_ops.add_rms_norm(
-                network, hidden_state, hidden, final_norm, eps_tensor
+            logits = graph_ops.add_bias_sum(
+                network, logits, vocab, np.zeros(vocab, dtype=np.float32)
             )
+            logits.name = "logits"
+            network.mark_output(logits)
 
-        # --- LM head ---
-        logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_lm_head"]
-        )
-        logits = graph_ops.add_bias_sum(network, logits, vocab, np.zeros(vocab, dtype=np.float32))
-        logits.name = "logits"
-        network.mark_output(logits)
-
-        function_logits = graph_ops.add_matmul_rhs_constant(
-            network,
-            hidden_state,
-            hidden,
-            vocab,
-            weights["w_function_head"],
-        )
-        function_logits = graph_ops.add_bias_sum(
-            network,
-            function_logits,
-            vocab,
-            np.zeros(vocab, dtype=np.float32),
-        )
-        function_logits.name = "function_logits"
-        network.mark_output(function_logits)
-
-        # --- Present state outputs ---
-        for mi in range(num_mamba):
-            pc = present_conv_outputs[mi]
-            ps = present_ssm_outputs[mi]
-            pc.name = graph_ops.layer_tensor_name("present_conv", mi)
-            ps.name = graph_ops.layer_tensor_name("present_ssm", mi)
-            network.mark_output(pc)
-            network.mark_output(ps)
-
-        for ai in range(num_attn):
-            pk = present_k_outputs[ai]
-            pv = present_v_outputs[ai]
-            pk.name = graph_ops.layer_tensor_name("present_k", ai)
-            pv.name = graph_ops.layer_tensor_name("present_v", ai)
-            network.mark_output(pk)
-            network.mark_output(pv)
-
-        # --- Build ---
-        if verbose:
-            print(
-                f"[trtmc build] Building NemotronH hybrid TRT engine "
-                f"({num_layers} layers: {num_mamba} mamba2 + "
-                f"{sum(1 for t in layer_types if t == 'mlp')} mlp + "
-                f"{num_attn} attention, "
-                f"hidden={hidden}, d_inner={d_inner}, "
-                f"d_state={d_state}, nheads={mamba_num_heads}, "
-                f"cache={max_cache_length}) ...",
-                file=sys.stderr,
+            function_logits = _add_static_projection(
+                network,
+                hidden_state,
+                hidden,
+                vocab,
+                weights["w_function_head"],
+                "w_function_head",
+                dtype=np.float32,
+                quant_ctx=quant_ctx,
             )
+            function_logits = graph_ops.add_bias_sum(
+                network,
+                function_logits,
+                vocab,
+                np.zeros(vocab, dtype=np.float32),
+            )
+            function_logits.name = "function_logits"
+            network.mark_output(function_logits)
 
-        plan = builder.build_serialized_network(network, trt_config)
-        if plan is None:
-            raise RuntimeError("TensorRT engine build failed")
+            # --- Present state outputs ---
+            for mi in range(num_mamba):
+                pc = present_conv_outputs[mi]
+                ps = present_ssm_outputs[mi]
+                pc.name = graph_ops.layer_tensor_name("present_conv", mi)
+                ps.name = graph_ops.layer_tensor_name("present_ssm", mi)
+                network.mark_output(pc)
+                network.mark_output(ps)
 
-        return bytes(plan)
+            for ai in range(num_attn):
+                pk = present_k_outputs[ai]
+                pv = present_v_outputs[ai]
+                pk.name = graph_ops.layer_tensor_name("present_k", ai)
+                pv.name = graph_ops.layer_tensor_name("present_v", ai)
+                network.mark_output(pk)
+                network.mark_output(pv)
+
+            # --- Build ---
+            if verbose:
+                print(
+                    f"[trtmc build] Building NemotronH hybrid TRT engine "
+                    f"({num_layers} layers: {num_mamba} mamba2 + "
+                    f"{sum(1 for t in layer_types if t == 'mlp')} mlp + "
+                    f"{num_attn} attention, "
+                    f"hidden={hidden}, d_inner={d_inner}, "
+                    f"d_state={d_state}, nheads={mamba_num_heads}, "
+                    f"cache={max_cache_length}) ...",
+                    file=sys.stderr,
+                )
+
+            # Family-owned INT8 constants use pointer-backed TensorRT weights;
+            # retain their NumPy storage until serialization finishes.
+            plan = build_serialized_network(builder, network, trt_config)
+            if plan is None:
+                raise RuntimeError("TensorRT engine build failed")
+
+            return bytes(plan)
 
 
 def _add_mamba2_layer(
@@ -941,6 +1047,7 @@ def _add_mamba2_layer(
     mamba_head_dim: int,
     n_groups: int,
     dtype: np.dtype = np.float32,
+    quant_ctx: VoiceChatQuantContext | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one Mamba-2 SSD layer (single-step decode).
 
@@ -960,8 +1067,15 @@ def _add_mamba2_layer(
 
     # ===== 2. Input projection =====
     proj_dim = d_inner + conv_dim + mamba_num_heads
-    projected = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, proj_dim, weights[f"{prefix}.mamba_in_proj"], dtype=dtype
+    projected = _add_static_projection(
+        network,
+        normed,
+        hidden_size,
+        proj_dim,
+        weights[f"{prefix}.mamba_in_proj"],
+        f"{prefix}.mamba_in_proj",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )  # [1, proj_dim]
 
     # Split: gate [d_inner], hidden_B_C [conv_dim], dt [nheads]
@@ -1196,13 +1310,15 @@ def _add_mamba2_layer(
     gated_tensor = gated.get_output(0)
 
     # ===== 8. Output projection + residual =====
-    out = graph_ops.add_matmul_rhs_constant(
+    out = _add_static_projection(
         network,
         gated_tensor,
         d_inner,
         hidden_size,
         weights[f"{prefix}.mamba_out_proj"],
+        f"{prefix}.mamba_out_proj",
         dtype=dtype,
+        quant_ctx=quant_ctx,
     )
 
     residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
@@ -1224,18 +1340,33 @@ def _add_mlp_layer(
     hidden_size: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
+    quant_ctx: VoiceChatQuantContext | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add MLP layer: RMSNorm -> up -> relu2 -> down -> residual."""
     normed = graph_ops.add_rms_norm(
         network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
     )
 
-    up = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, mlp_size, weights[f"{prefix}.w_up"], dtype=dtype
+    up = _add_static_projection(
+        network,
+        normed,
+        hidden_size,
+        mlp_size,
+        weights[f"{prefix}.w_up"],
+        f"{prefix}.w_up",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
     activated = graph_ops.add_activation(network, up, "relu2")
-    down = graph_ops.add_matmul_rhs_constant(
-        network, activated, mlp_size, hidden_size, weights[f"{prefix}.w_down"], dtype=dtype
+    down = _add_static_projection(
+        network,
+        activated,
+        mlp_size,
+        hidden_size,
+        weights[f"{prefix}.w_down"],
+        f"{prefix}.w_down",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
 
     residual = network.add_elementwise(hidden, down, trt.ElementWiseOperation.SUM)
@@ -1249,6 +1380,7 @@ def build_thinker_engine(
     max_cache_length: int,
     *,
     verbose: bool = False,
+    quant_ctx: VoiceChatQuantContext | None = None,
 ) -> bytes:
     """Build the strongly typed VoiceChat AddFusion + Nemotron-H engine."""
     return VoiceChatThinkerBuilder().build_engine(
@@ -1256,4 +1388,5 @@ def build_thinker_engine(
         weights,
         max_cache_length,
         verbose=verbose,
+        quant_ctx=quant_ctx,
     )

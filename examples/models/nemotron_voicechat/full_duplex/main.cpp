@@ -11,6 +11,7 @@
 #include <alsa/asoundlib.h>
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -20,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -32,12 +34,20 @@ using trtmc::SpeechSessionEvent;
 using trtmc::SpeechSessionEventKind;
 using trtmc::examples::voicechat::float_to_pcm16;
 using trtmc::examples::voicechat::pcm16_to_float;
+using trtmc::examples::voicechat::playback_gain_from_db;
+using trtmc::examples::voicechat::PlaybackLevelMeter;
+using trtmc::examples::voicechat::PlaybackLevelSummary;
 using trtmc::examples::voicechat::PlaybackQueue;
+using trtmc::examples::voicechat::PlaybackQueueItem;
 using trtmc::examples::voicechat::PlaybackQueueItemKind;
 
 constexpr int kCaptureChunkMs = 20;
 constexpr int kCaptureWaitMs = 50;
-constexpr int kPlaybackQueueSeconds = 4;
+// VoiceChat may generate up to 256 80-ms frames (20.48 seconds) faster than
+// ALSA consumes them in real time. Keep the event loop non-blocking so it can
+// process barge-in/flush events, while retaining a small fixed memory bound.
+constexpr int kPlaybackQueueSeconds = 24;
+constexpr int kPlaybackPrebufferMs = 160;
 constexpr int kEventWaitMs = 50;
 
 volatile std::sig_atomic_t g_signal_requested = 0;
@@ -56,6 +66,7 @@ struct Options {
     int output_rate{48000};
     int latency_ms{80};
     int seed{0};
+    float playback_gain_db{0.0F};
     bool help{false};
     bool list_devices{false};
 };
@@ -76,6 +87,7 @@ void print_usage(std::ostream& output, const char* program) {
            << "  --input-rate HZ         Capture/session rate (default: 16000)\n"
            << "  --output-rate HZ        Session/playback rate (default: 48000)\n"
            << "  --latency-ms MS         ALSA target latency (default: 80)\n"
+           << "  --playback-gain-db DB   Digital output gain, -24 to 24 (default: 0)\n"
            << "  --seed N                Deterministic speech seed (default: 0)\n"
            << "  --system-prompt TEXT    Optional system prompt\n"
            << "  --list-devices          List ALSA PCM names and exit\n"
@@ -94,6 +106,19 @@ int parse_integer(const std::string& value, const char* option, int minimum, int
     if (consumed != value.size() || parsed < minimum || parsed > maximum)
         throw CliError(std::string(option) + " is outside its supported range");
     return static_cast<int>(parsed);
+}
+
+float parse_float(const std::string& value, const char* option, float minimum, float maximum) {
+    std::size_t consumed = 0;
+    float parsed = 0.0F;
+    try {
+        parsed = std::stof(value, &consumed);
+    } catch (const std::exception&) {
+        throw CliError(std::string(option) + " requires a number");
+    }
+    if (consumed != value.size() || !std::isfinite(parsed) || parsed < minimum || parsed > maximum)
+        throw CliError(std::string(option) + " is outside its supported range");
+    return parsed;
 }
 
 std::string take_option_value(int& index, int argc, char** argv, const char* option) {
@@ -129,6 +154,12 @@ bool parse_value_option(const std::string& argument, int& index, int argc, char*
     if (argument == "--latency-ms") {
         options.latency_ms = parse_integer(take_option_value(index, argc, argv, "--latency-ms"),
                                            "--latency-ms", 10, 1000);
+        return true;
+    }
+    if (argument == "--playback-gain-db") {
+        options.playback_gain_db =
+            parse_float(take_option_value(index, argc, argv, "--playback-gain-db"),
+                        "--playback-gain-db", -24.0F, 24.0F);
         return true;
     }
     if (argument == "--seed") {
@@ -198,14 +229,14 @@ Options parse_options(int argc, char** argv) {
 class AlsaPcm {
   public:
     AlsaPcm(const std::string& device, snd_pcm_stream_t stream, unsigned int sample_rate,
-            unsigned int latency_ms)
+            unsigned int channels, unsigned int latency_ms)
         : stream_(stream) {
         const int open_mode = stream == SND_PCM_STREAM_CAPTURE ? SND_PCM_NONBLOCK : 0;
         int status = snd_pcm_open(&handle_, device.c_str(), stream, open_mode);
         if (status < 0)
             throw_alsa_error("cannot open ALSA device '" + device + "'", status);
         status = snd_pcm_set_params(handle_, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
-                                    1, sample_rate, 1, latency_ms * 1000U);
+                                    channels, sample_rate, 1, latency_ms * 1000U);
         if (status < 0) {
             snd_pcm_close(handle_);
             handle_ = nullptr;
@@ -223,6 +254,15 @@ class AlsaPcm {
 
     std::size_t read_frames(std::int16_t* samples, std::size_t capacity) {
         while (true) {
+            // A nonblocking read smaller than ALSA's automatic start threshold
+            // can return EAGAIN forever while the PCM remains PREPARED. Start
+            // just before reading (rather than before the large model load),
+            // and do it again after snd_pcm_recover() prepares an XRUN stream.
+            if (snd_pcm_state(handle_) == SND_PCM_STATE_PREPARED) {
+                const int start_status = snd_pcm_start(handle_);
+                if (start_status < 0)
+                    throw_alsa_error("cannot start ALSA capture", start_status);
+            }
             const auto result = snd_pcm_readi(handle_, samples, capacity);
             if (result >= 0)
                 return static_cast<std::size_t>(result);
@@ -277,10 +317,18 @@ class AlsaPcm {
         const int recovered = snd_pcm_recover(handle_, error, 1);
         if (recovered < 0)
             throw_alsa_error(operation, recovered);
+        if (error == -EPIPE) {
+            ++xrun_recoveries_;
+            std::cerr << '['
+                      << (stream_ == SND_PCM_STREAM_PLAYBACK ? "playback underrun"
+                                                             : "capture overrun")
+                      << " recovered: count=" << xrun_recoveries_ << "]\n";
+        }
     }
 
     snd_pcm_t* handle_{nullptr};
     snd_pcm_stream_t stream_;
+    std::uint64_t xrun_recoveries_{0};
 };
 
 class RunState {
@@ -358,25 +406,78 @@ void capture_loop(AlsaPcm& capture, trtmc::ISpeechSession& session, int sample_r
 void playback_loop(AlsaPcm& playback, PlaybackQueue& queue, int sample_rate,
                    RunState& state) noexcept {
     try {
-        const auto write_chunk =
+        const auto period_frames =
             static_cast<std::size_t>(std::max(1, sample_rate * kCaptureChunkMs / 1000));
+        std::vector<std::int16_t> mono(period_frames, 0);
+        std::vector<std::int16_t> stereo(period_frames * 2U, 0);
+        std::optional<PlaybackQueueItem> current;
+        std::size_t current_offset = 0;
         while (true) {
-            auto item = queue.wait_pop();
-            if (item.kind == PlaybackQueueItemKind::kStopped) {
-                playback.discard_noexcept();
-                return;
-            }
-            if (item.kind == PlaybackQueueItemKind::kFlush) {
-                playback.flush_playback();
-                continue;
+            std::fill(mono.begin(), mono.end(), 0);
+            std::size_t filled = 0;
+            std::uint64_t period_generation = 0;
+            bool restart_period = false;
+
+            while (filled < period_frames) {
+                if (current && !queue.generation_is_current(current->generation)) {
+                    current.reset();
+                    current_offset = 0;
+                }
+                if (!current) {
+                    auto item = queue.try_pop();
+                    if (!item) {
+                        if (const auto notice = queue.take_rebuffer_notice()) {
+                            const auto target_ms = notice->target_samples * 1000U /
+                                                   static_cast<std::size_t>(sample_rate);
+                            std::cerr << "[playback queue underflow: epoch=" << notice->epoch
+                                      << " count=" << notice->underflow_count
+                                      << " rebuffer_ms=" << target_ms << "]\n";
+                        }
+                        break;
+                    }
+                    if (item->kind == PlaybackQueueItemKind::kStopped) {
+                        playback.discard_noexcept();
+                        return;
+                    }
+                    if (item->kind == PlaybackQueueItemKind::kFlush) {
+                        playback.flush_playback();
+                        current_offset = 0;
+                        restart_period = true;
+                        break;
+                    }
+                    current = std::move(*item);
+                    current_offset = 0;
+                }
+
+                const auto available = current->samples.size() - current_offset;
+                const auto count = std::min(period_frames - filled, available);
+                std::copy_n(current->samples.data() + current_offset, count, mono.data() + filled);
+                period_generation = current->generation;
+                filled += count;
+                current_offset += count;
+                if (current_offset == current->samples.size()) {
+                    current.reset();
+                    current_offset = 0;
+                }
             }
 
-            std::size_t offset = 0;
-            while (offset < item.samples.size() && !state.stopping() &&
-                   queue.generation_is_current(item.generation)) {
-                const auto count = std::min(write_chunk, item.samples.size() - offset);
-                const auto written = playback.write_frames(item.samples.data() + offset, count);
-                offset += written;
+            if (restart_period)
+                continue;
+            if (period_generation != 0 && !queue.generation_is_current(period_generation))
+                continue;
+
+            // Keep the ALSA PCM and plughw resampler continuously RUNNING. A
+            // fixed-size silent period during producer gaps prevents the XRUN
+            // and resampler restart that previously occurred after every
+            // 80-ms VoiceChat event.
+            for (std::size_t frame = 0; frame < period_frames; ++frame) {
+                stereo[frame * 2U] = mono[frame];
+                stereo[frame * 2U + 1U] = mono[frame];
+            }
+            std::size_t written = 0;
+            while (written < period_frames) {
+                written +=
+                    playback.write_frames(stereo.data() + written * 2U, period_frames - written);
             }
         }
     } catch (...) {
@@ -438,17 +539,17 @@ class TranscriptPrinter {
         if (!event.is_final || event.text.empty())
             return;
         finish_agent_line();
-        std::cout << "user> " << event.text << '\n';
+        std::cout << "user> " << event.text << '\n' << std::flush;
     }
 
     void status(const std::string& text) {
         finish_agent_line();
-        std::cout << '[' << text << "]\n";
+        std::cout << '[' << text << "]\n" << std::flush;
     }
 
     void finish_agent_line() {
         if (agent_line_open_)
-            std::cout << '\n';
+            std::cout << '\n' << std::flush;
         agent_line_open_ = false;
         saw_agent_delta_ = false;
     }
@@ -460,22 +561,25 @@ class TranscriptPrinter {
 };
 
 void enqueue_agent_audio(const SpeechSessionEvent& event, int expected_sample_rate,
-                         PlaybackQueue& queue) {
+                         float playback_gain, PlaybackQueue& queue,
+                         PlaybackLevelMeter& level_meter) {
     if (event.sample_rate != expected_sample_rate)
         throw std::runtime_error("speech session changed its output sample rate");
+    level_meter.observe(event.epoch, event.audio_samples, playback_gain);
     std::vector<std::int16_t> pcm;
     pcm.reserve(event.audio_samples.size());
     std::transform(event.audio_samples.begin(), event.audio_samples.end(), std::back_inserter(pcm),
-                   float_to_pcm16);
-    if (!queue.try_push(std::move(pcm)))
-        throw std::runtime_error("playback queue exceeded its four-second bound");
+                   [playback_gain](float sample) { return float_to_pcm16(sample, playback_gain); });
+    if (!queue.try_push(std::move(pcm), event.epoch))
+        throw std::runtime_error("playback queue exceeded its bounded capacity");
 }
 
-bool consume_payload_event(const SpeechSessionEvent& event, int output_rate, PlaybackQueue& queue,
+bool consume_payload_event(const SpeechSessionEvent& event, int output_rate, float playback_gain,
+                           PlaybackQueue& queue, PlaybackLevelMeter& level_meter,
                            TranscriptPrinter& printer) {
     switch (event.kind) {
     case SpeechSessionEventKind::kAgentAudio:
-        enqueue_agent_audio(event, output_rate, queue);
+        enqueue_agent_audio(event, output_rate, playback_gain, queue, level_meter);
         return true;
     case SpeechSessionEventKind::kAgentText:
         printer.agent_text(event);
@@ -488,29 +592,52 @@ bool consume_payload_event(const SpeechSessionEvent& event, int output_rate, Pla
     }
 }
 
+void print_level_summary(const PlaybackLevelSummary& summary) {
+    const double clipped_percent = summary.samples == 0
+                                       ? 0.0
+                                       : 100.0 * static_cast<double>(summary.clipped_samples) /
+                                             static_cast<double>(summary.samples);
+    std::cerr << "[playback levels: epoch=" << summary.epoch
+              << " pre_gain_peak=" << summary.pre_gain_peak
+              << " pre_gain_rms=" << summary.pre_gain_rms << " clipped=" << summary.clipped_samples
+              << '/' << summary.samples << " (" << clipped_percent << "%)]\n";
+}
+
 void consume_lifecycle_event(const SpeechSessionEvent& event, PlaybackQueue& queue,
-                             TranscriptPrinter& printer, RunState& state) {
+                             PlaybackLevelMeter& level_meter, TranscriptPrinter& printer,
+                             RunState& state) {
     switch (event.kind) {
     case SpeechSessionEventKind::kYielded:
         (void)queue.request_flush();
+        level_meter.reset();
         printer.status(event.text.empty() ? "yielded" : "yielded: " + event.text);
         break;
     case SpeechSessionEventKind::kCancelled:
         (void)queue.request_flush();
+        level_meter.reset();
         printer.status("cancelled");
         state.request_stop();
         break;
     case SpeechSessionEventKind::kReset:
         (void)queue.request_flush();
+        level_meter.reset();
         printer.status("reset");
+        break;
+    case SpeechSessionEventKind::kContextRolled:
+        printer.status(event.text.empty() ? "context rolled" : "context rolled: " + event.text);
         break;
     case SpeechSessionEventKind::kError:
         (void)queue.request_flush();
+        level_meter.reset();
         throw std::runtime_error(event.text.empty() ? "speech session failed" : event.text);
     case SpeechSessionEventKind::kInputFinished:
         state.request_stop();
         break;
     case SpeechSessionEventKind::kTurnFinished:
+        if (!queue.finish_turn(event.epoch))
+            throw std::runtime_error("playback queue stopped before the agent turn finished");
+        if (const auto summary = level_meter.finish(event.epoch))
+            print_level_summary(*summary);
         printer.finish_agent_line();
         break;
     default:
@@ -518,19 +645,20 @@ void consume_lifecycle_event(const SpeechSessionEvent& event, PlaybackQueue& que
     }
 }
 
-void consume_event(const SpeechSessionEvent& event, int output_rate, PlaybackQueue& queue,
+void consume_event(const SpeechSessionEvent& event, int output_rate, float playback_gain,
+                   PlaybackQueue& queue, PlaybackLevelMeter& level_meter,
                    TranscriptPrinter& printer, RunState& state) {
-    if (!consume_payload_event(event, output_rate, queue, printer))
-        consume_lifecycle_event(event, queue, printer, state);
+    if (!consume_payload_event(event, output_rate, playback_gain, queue, level_meter, printer))
+        consume_lifecycle_event(event, queue, level_meter, printer, state);
 }
 
 int run(const Options& options) {
     // Fail on an unavailable host audio device before loading the large model.
     AlsaPcm capture(options.capture_device, SND_PCM_STREAM_CAPTURE,
-                    static_cast<unsigned int>(options.input_rate),
+                    static_cast<unsigned int>(options.input_rate), 1U,
                     static_cast<unsigned int>(options.latency_ms));
     AlsaPcm playback(options.playback_device, SND_PCM_STREAM_PLAYBACK,
-                     static_cast<unsigned int>(options.output_rate),
+                     static_cast<unsigned int>(options.output_rate), 2U,
                      static_cast<unsigned int>(options.latency_ms));
 
     auto task = trtmc::load_task(options.bundle_path, options.runtime_root);
@@ -554,7 +682,11 @@ int run(const Options& options) {
 
     const auto playback_capacity = static_cast<std::size_t>(actual_config.output_sample_rate) *
                                    static_cast<std::size_t>(kPlaybackQueueSeconds);
-    PlaybackQueue playback_queue(playback_capacity);
+    const auto playback_prebuffer =
+        static_cast<std::size_t>(actual_config.output_sample_rate) * kPlaybackPrebufferMs / 1000U;
+    PlaybackQueue playback_queue(playback_capacity, playback_prebuffer);
+    const float playback_gain = playback_gain_from_db(options.playback_gain_db);
+    PlaybackLevelMeter level_meter;
     RunState state;
     TranscriptPrinter printer;
 
@@ -563,12 +695,13 @@ int run(const Options& options) {
                                          actual_config.input_sample_rate, state);
 
     std::cout << "Listening on '" << options.capture_device << "'; playing on '"
-              << options.playback_device << "'. Press Ctrl-C to stop.\n";
+              << options.playback_device << "' at " << options.playback_gain_db
+              << " dB digital gain. Press Ctrl-C to stop.\n";
     try {
         while (!state.stopping() && g_signal_requested == 0) {
             for (const auto& event : session->wait_events(kEventWaitMs))
-                consume_event(event, actual_config.output_sample_rate, playback_queue, printer,
-                              state);
+                consume_event(event, actual_config.output_sample_rate, playback_gain,
+                              playback_queue, level_meter, printer, state);
         }
     } catch (...) {
         state.fail(std::current_exception());

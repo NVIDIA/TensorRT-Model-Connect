@@ -6,6 +6,7 @@ add_library(trtmc_model_nemotron_voicechat SHARED
   resampler.cpp
   audio_helpers.cpp
   codec_reconstruction.cpp
+  conversation_memory.cpp
   function_channel.cpp
   pipeline.cpp
   plugin.cpp
@@ -68,6 +69,7 @@ if(TRTMC_BUILD_TESTS)
 
   foreach(test_name IN ITEMS
       test_nemotron_voicechat_codec_reconstruction
+      test_nemotron_voicechat_conversation_memory
       test_nemotron_voicechat_function_channel
       test_nemotron_voicechat_session_state
       test_nemotron_voicechat_streaming_mel_policy)
