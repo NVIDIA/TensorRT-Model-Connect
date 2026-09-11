@@ -7,13 +7,13 @@ run-name: >-
   ${{ github.event_name == 'workflow_dispatch' && format('Manual PR #{0} · community CI', inputs.pr_number) || format('PR #{0} · community CI · head {1} · base {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.event.pull_request.base.sha) }}
 
 # Community CI is one ordered pull-request pipeline: the public CPU gate runs
-# first, and the external GPU stage can reserve a Brev instance only after
-# Community CPU / Required succeeds. pull_request_target is required because
-# fork pull_request runs cannot receive the Brev credential. Keep the trust
-# boundary job-local: CPU jobs execute the exact PR merge with read-only
-# permissions and no secrets, while secret-bearing GPU orchestration runs on
-# fresh hosted runners, consumes no CPU artifact or cache, and executes PR code
-# only on the isolated Brev instance.
+# first, followed by trusted GPU authorization and impact classification.
+# External GPU execution is temporarily disabled below, so no Brev instance is
+# reserved and GPU validation is not a merge gate. Keep the dormant execution
+# path and its trust boundary intact for a reviewed re-enable: CPU jobs execute
+# the exact PR merge with read-only permissions and no secrets, while
+# secret-bearing GPU orchestration executes PR code only on an isolated Brev
+# instance.
 on:
   pull_request_target:
     branches: [main]
@@ -26,6 +26,12 @@ on:
         type: string
 
 permissions: {}
+
+# Temporary rollout policy. Change this only through review after Community
+# GPU runtime and cost have been qualified. A quoted string avoids YAML boolean
+# coercion when it crosses the GitHub output boundary.
+env:
+  COMMUNITY_GPU_EXECUTION_ENABLED: "false"
 
 concurrency:
   group: community-ci-${{ github.event.pull_request.number || inputs.pr_number }}
@@ -177,7 +183,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
 
@@ -290,6 +296,7 @@ jobs:
       families: ${{ steps.impact.outputs.families }}
       added_families: ${{ steps.impact.outputs.added_families }}
       scope: ${{ steps.impact.outputs.scope }}
+      gpu_enabled: ${{ steps.impact.outputs.gpu_enabled }}
       run_gpu: ${{ steps.impact.outputs.run_gpu }}
 
     steps:
@@ -319,6 +326,7 @@ jobs:
         env:
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          GPU_EXECUTION_ENABLED: ${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}
         run: |
           set -euo pipefail
           python3 -m tools.test_impact --base "$BASE_SHA" --head "$HEAD_SHA" \
@@ -334,6 +342,7 @@ jobs:
           summary = json.loads(
               (Path(os.environ["RUNNER_TEMP"]) / "trtmc-gpu-impact.json").read_text()
           )
+          gpu_enabled = os.environ["GPU_EXECUTION_ENABLED"] == "true"
           added_families = set()
           if summary["scope"] == "all":
               trusted_families = set(summary["families"])
@@ -365,19 +374,26 @@ jobs:
                   file=output,
               )
               print("scope=" + summary["scope"], file=output)
+              print("gpu_enabled=" + str(gpu_enabled).lower(), file=output)
               print(
                   "run_gpu="
-                  + ("true" if summary["scope"] in {"all", "families"} else "false"),
+                  + (
+                      "true"
+                      if gpu_enabled and summary["scope"] in {"all", "families"}
+                      else "false"
+                  ),
                   file=output,
               )
           PY
 
-      # Both values cross from diff metadata into the secret-bearing job.
+      # Selection and policy values cross into the secret-bearing job.
       - name: Validate the GPU selection
         env:
           FAMILIES: ${{ steps.impact.outputs.families }}
           ADDED_FAMILIES: ${{ steps.impact.outputs.added_families }}
           SCOPE: ${{ steps.impact.outputs.scope }}
+          GPU_ENABLED: ${{ steps.impact.outputs.gpu_enabled }}
+          RUN_GPU: ${{ steps.impact.outputs.run_gpu }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -389,8 +405,17 @@ jobs:
           families = json.loads(os.environ["FAMILIES"])
           added_families = json.loads(os.environ["ADDED_FAMILIES"])
           scope = os.environ["SCOPE"]
+          gpu_enabled = os.environ["GPU_ENABLED"]
+          run_gpu = os.environ["RUN_GPU"]
           if scope not in {"all", "families", "docs", "none"}:
               raise SystemExit(f"invalid impact scope: {scope!r}")
+          if gpu_enabled not in {"true", "false"}:
+              raise SystemExit(f"invalid GPU execution policy: {gpu_enabled!r}")
+          if run_gpu not in {"true", "false"}:
+              raise SystemExit(f"invalid GPU run decision: {run_gpu!r}")
+          expected_run_gpu = gpu_enabled == "true" and scope in {"all", "families"}
+          if (run_gpu == "true") != expected_run_gpu:
+              raise SystemExit("GPU run decision does not match policy and impact")
           if not isinstance(families, list) or not all(
               isinstance(name, str) and pattern.fullmatch(name) for name in families
           ):
@@ -412,6 +437,23 @@ jobs:
           if scope in {"docs", "none"} and families:
               raise SystemExit(f"{scope} scope must not select families")
           PY
+
+      - name: Report the GPU execution policy
+        env:
+          GPU_ENABLED: ${{ steps.impact.outputs.gpu_enabled }}
+          RUN_GPU: ${{ steps.impact.outputs.run_gpu }}
+          SCOPE: ${{ steps.impact.outputs.scope }}
+          FAMILIES: ${{ steps.impact.outputs.families }}
+        run: |
+          set -euo pipefail
+          if [ "$GPU_ENABLED" = "false" ]; then
+            message="Community GPU execution is temporarily disabled and is not a merge gate."
+            echo "::notice::$message"
+            printf '## Community GPU\n\n%s\n\nImpact scope: `%s`; selected families: `%s`.\n' \
+              "$message" "$SCOPE" "$FAMILIES" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Community GPU execution enabled; run decision: $RUN_GPU"
 
   announce:
     name: Community GPU / Publish pending result
@@ -589,9 +631,12 @@ jobs:
         run: brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
 
   publish:
-    name: Community GPU / Required
+    name: Community GPU / Result
     needs: [authorize, gpu-authorize, announce, provision-and-test, cleanup]
-    if: ${{ always() && needs.authorize.result == 'success' && needs.gpu-authorize.result == 'success' }}
+    if: >-
+      ${{ always() && needs.authorize.result == 'success' &&
+      needs.gpu-authorize.result == 'success' &&
+      needs.gpu-authorize.outputs.gpu_enabled == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

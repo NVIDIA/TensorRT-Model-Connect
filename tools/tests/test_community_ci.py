@@ -58,7 +58,7 @@ def test_contributor_guide_matches_the_live_ci_flow() -> None:
         "git commit --signoff",
         "git push --set-upstream origin",
         "Community CPU / Required",
-        "Community GPU / Required",
+        "Community GPU",
         "run-internal-ci",
         "TRTMC Internal CI / Automated premerge gate",
     ]
@@ -74,8 +74,10 @@ def test_contributor_guide_matches_the_live_ci_flow() -> None:
         "runners, secrets, or",
         "GPUs",
         "Only after `Community CPU / Required` passes",
-        "external GPU instance",
-        "pull-request code executes only on the isolated GPU instance",
+        "execution is temporarily disabled by repository policy",
+        "Community GPU is not a merge",
+        "pull-request code executes only on the",
+        "isolated GPU instance",
         "pull-request checks",
         "public Actions logs",
         "py -3 -m pip",
@@ -193,7 +195,7 @@ def test_public_source_quality_enforces_legal_compliance(
             assert change in output
 
 
-def test_public_workflow_is_one_exact_merge_cpu_then_gpu_gate() -> None:
+def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None:
     path = REPO_ROOT / ".github" / "workflows" / "community-ci.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
     source = path.read_text(encoding="utf-8")
@@ -203,6 +205,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_gate() -> None:
     assert "PR #{0} · community CI · head {1} · base {2}" in workflow["run-name"]
     assert "github.sha" not in workflow["run-name"]
     assert workflow["permissions"] == {}
+    assert workflow["env"] == {"COMMUNITY_GPU_EXECUTION_ENABLED": "false"}
     assert "pull_request_target:" in source
     assert "branches: [main]" in source
     assert "types: [opened, synchronize, reopened, ready_for_review]" in source
@@ -221,11 +224,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_gate() -> None:
     assert "check-runs" not in source
     assert "issues/comments" not in source
     workflows = REPO_ROOT / ".github" / "workflows"
-    compatibility_cpu = (workflows / "community-cpu.yml").read_text(encoding="utf-8")
-    assert "Temporary rollout compatibility gate" in compatibility_cpu
-    assert "Remove this file only after Community CI has run successfully from main" in (
-        compatibility_cpu
-    )
+    assert not (workflows / "community-cpu.yml").exists()
     assert not (workflows / "community-gpu-ci.yml").exists()
 
     jobs = workflow["jobs"]
@@ -275,7 +274,15 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_gate() -> None:
     assert gpu_authorize["outputs"]["added_families"] == (
         "${{ steps.impact.outputs.added_families }}"
     )
+    assert gpu_authorize["outputs"]["gpu_enabled"] == ("${{ steps.impact.outputs.gpu_enabled }}")
     assert gpu_authorize["outputs"]["run_gpu"] == "${{ steps.impact.outputs.run_gpu }}"
+    gpu_authorize_steps = {step["name"]: step for step in gpu_authorize["steps"]}
+    impact_step = gpu_authorize_steps["Resolve the changed model families"]
+    assert impact_step["env"]["GPU_EXECUTION_ENABLED"] == (
+        "${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}"
+    )
+    policy_step = gpu_authorize_steps["Report the GPU execution policy"]
+    assert "temporarily disabled and is not a merge gate" in policy_step["run"]
     assert jobs["announce"]["needs"] == "gpu-authorize"
     assert jobs["announce"]["if"] == "${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}"
     assert jobs["provision-and-test"]["needs"] == ["gpu-authorize", "announce"]
@@ -294,6 +301,8 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_gate() -> None:
         "provision-and-test",
         "cleanup",
     ]
+    assert jobs["publish"]["name"] == "Community GPU / Result"
+    assert "needs.gpu-authorize.outputs.gpu_enabled == 'true'" in jobs["publish"]["if"]
     assert jobs["cleanup"]["needs"] == ["gpu-authorize", "provision-and-test"]
     assert jobs["cleanup"]["environment"] == {
         "name": "gpu-ci-dispatch",
@@ -315,7 +324,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_gate() -> None:
         encoding="utf-8"
     )
     assert "community-ci.yml/runs?event=pull_request_target&head_sha=$head_sha" in (internal_bridge)
-    assert "community-cpu.yml/runs?event=pull_request&head_sha=$head_sha" in internal_bridge
+    assert "community-cpu.yml" not in internal_bridge
     assert "/actions/runs/$community_ci_run/jobs?filter=latest&per_page=100" in internal_bridge
     assert 'name == "Community CPU / Required" and .conclusion == "success"' in internal_bridge
     assert ".display_title == $title" in internal_bridge
@@ -334,7 +343,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_gate() -> None:
     assert all("if" not in step for step in docs_steps.values())
     assert docs_steps["Set up Node"] == {
         "name": "Set up Node",
-        "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
         "with": {"node-version": "20"},
     }
     assert docs_steps["Install website dependencies"] == {
@@ -407,17 +416,15 @@ def test_public_required_job_fails_closed(
 
 
 @pytest.mark.parametrize(
-    ("legacy_run_id", "combined_cpu_job_id", "combined_title_matches", "expected_returncode"),
+    ("combined_cpu_job_id", "combined_title_matches", "expected_returncode"),
     [
-        ("11", "", False, 0),
-        ("", "33", True, 0),
-        ("", "", True, 1),
-        ("", "33", False, 1),
+        ("33", True, 0),
+        ("", True, 1),
+        ("33", False, 1),
     ],
 )
-def test_internal_label_bridge_accepts_exact_cpu_gate_during_and_after_rollout(
+def test_internal_label_bridge_accepts_only_the_exact_combined_cpu_gate(
     tmp_path: Path,
-    legacy_run_id: str,
     combined_cpu_job_id: str,
     combined_title_matches: bool,
     expected_returncode: int,
@@ -436,16 +443,6 @@ case "$arguments" in
   *collaborators/tester/permission*) printf '%s\n' maintain ;;
   *pulls/17*)
     printf '{"state":"open","base":{"repo":{"full_name":"example/repo"},"ref":"main","sha":"%s"},"head":{"sha":"%s"}}\n' "$BASE_SHA" "$HEAD_SHA"
-    ;;
-  *community-cpu.yml*)
-    if [ -n "$LEGACY_RUN_ID" ]; then
-      printf '{"workflow_runs":[{"id":%s,"conclusion":"success","display_title":"PR #17 · public CPU · merge %s","updated_at":"2026-01-01T00:00:00Z"}]}\n' "$LEGACY_RUN_ID" "$MERGE_SHA"
-    else
-      printf '{"workflow_runs":[]}\n'
-    fi
-    ;;
-  *git/commits/*)
-    printf '{"parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$BASE_SHA" "$HEAD_SHA"
     ;;
   *community-ci.yml*)
     printf '{"workflow_runs":[{"id":22,"display_title":"%s","updated_at":"2026-01-01T00:00:00Z"}]}\n' "$RUN_TITLE"
@@ -478,10 +475,8 @@ esac
             "GITHUB_OUTPUT": str(github_output),
             "HEAD_SHA": head_sha,
             "BASE_SHA": base_sha,
-            "LEGACY_RUN_ID": legacy_run_id,
             "COMBINED_CPU_JOB_ID": combined_cpu_job_id,
             "RUN_TITLE": run_title,
-            "MERGE_SHA": "c" * 40,
         },
         capture_output=True,
         text=True,
@@ -785,6 +780,7 @@ def test_gpu_impact_executes_only_trusted_base_code(
                 "PYTHONPATH": "",
                 "BASE_SHA": base,
                 "HEAD_SHA": revision,
+                "GPU_EXECUTION_ENABLED": "false",
                 "RUNNER_TEMP": str(tmp_path),
                 "GITHUB_OUTPUT": str(output),
             },
@@ -806,7 +802,8 @@ def test_gpu_impact_executes_only_trusted_base_code(
         assert json.loads(values["families"]) == summary["families"]
         assert json.loads(values["added_families"]) == expected_added_families
         assert values["scope"] == summary["scope"]
-        assert values["run_gpu"] == ("true" if summary["scope"] in {"all", "families"} else "false")
+        assert values["gpu_enabled"] == "false"
+        assert values["run_gpu"] == "false"
 
 
 @pytest.mark.parametrize("create_exitcode", [0, 1])
