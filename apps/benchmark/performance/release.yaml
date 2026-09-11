@@ -43,6 +43,12 @@ excluded_profiles:
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
       into the release performance runner.
+  - model: yolov5n
+    reason: >-
+      Functional and reference-parity qualification is present, but the release
+      performance baseline runs Ultralytics, which cannot load a legacy YOLOv5
+      archive: those archives pickle classes from the standalone yolov5
+      repository, which is not a dependency here.
   - model: dpn92-mx-in1k
     reason: >-
       Functional and timm reference-parity qualification is present for every
