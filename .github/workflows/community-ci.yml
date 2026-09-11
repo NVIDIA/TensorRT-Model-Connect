@@ -8,12 +8,12 @@ run-name: >-
 
 # Community CI is one ordered pull-request pipeline: the public CPU gate runs
 # first, followed by trusted GPU authorization and impact classification.
-# External GPU execution is temporarily disabled below, so no Brev instance is
-# reserved and GPU validation is not a merge gate. Keep the dormant execution
-# path and its trust boundary intact for a reviewed re-enable: CPU jobs execute
-# the exact PR merge with read-only permissions and no secrets, while
-# secret-bearing GPU orchestration executes PR code only on an isolated Brev
-# instance.
+# Automatic GPU execution is disabled below, so pull-request events reserve no
+# Brev instance and GPU validation is not a merge gate. A maintain/admin manual
+# dispatch may explicitly opt into the experimental smoke path after CPU. CPU
+# jobs execute the exact PR merge with read-only permissions and no secrets,
+# while secret-bearing GPU orchestration executes PR code only on an isolated
+# Brev instance.
 on:
   pull_request_target:
     branches: [main]
@@ -24,12 +24,17 @@ on:
         description: Open pull request number to test
         required: true
         type: string
+      run_gpu_smoke:
+        description: Run the experimental, non-gating Community GPU smoke test
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
-# Temporary rollout policy. Change this only through review after Community
-# GPU runtime and cost have been qualified. A quoted string avoids YAML boolean
-# coercion when it crosses the GitHub output boundary.
+# Temporary automatic rollout policy. Change this only through review after
+# Community GPU runtime and cost have been qualified. A quoted string avoids
+# YAML boolean coercion when it crosses the GitHub output boundary.
 env:
   COMMUNITY_GPU_EXECUTION_ENABLED: "false"
 
@@ -292,6 +297,7 @@ jobs:
     outputs:
       pr_number: ${{ needs.authorize.outputs.pr_number }}
       head_sha: ${{ needs.authorize.outputs.head_sha }}
+      base_sha: ${{ needs.authorize.outputs.base_sha }}
       merge_sha: ${{ needs.authorize.outputs.merge_sha }}
       families: ${{ steps.impact.outputs.families }}
       added_families: ${{ steps.impact.outputs.added_families }}
@@ -327,6 +333,8 @@ jobs:
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
           GPU_EXECUTION_ENABLED: ${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}
+          MANUAL_GPU_EXECUTION_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.run_gpu_smoke || false }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           python3 -m tools.test_impact --base "$BASE_SHA" --head "$HEAD_SHA" \
@@ -342,7 +350,12 @@ jobs:
           summary = json.loads(
               (Path(os.environ["RUNNER_TEMP"]) / "trtmc-gpu-impact.json").read_text()
           )
-          gpu_enabled = os.environ["GPU_EXECUTION_ENABLED"] == "true"
+          gpu_enabled = os.environ["GPU_EXECUTION_ENABLED"].lower() == "true"
+          manual_gpu_enabled = (
+              os.environ["EVENT_NAME"] == "workflow_dispatch"
+              and os.environ["MANUAL_GPU_EXECUTION_ENABLED"].lower() == "true"
+          )
+          gpu_enabled = gpu_enabled or manual_gpu_enabled
           added_families = set()
           if summary["scope"] == "all":
               trusted_families = set(summary["families"])
@@ -447,13 +460,16 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$GPU_ENABLED" = "false" ]; then
-            message="Community GPU execution is temporarily disabled and is not a merge gate."
+            message="Automatic Community GPU execution is disabled and is not a merge gate."
             echo "::notice::$message"
             printf '## Community GPU\n\n%s\n\nImpact scope: `%s`; selected families: `%s`.\n' \
               "$message" "$SCOPE" "$FAMILIES" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          echo "Community GPU execution enabled; run decision: $RUN_GPU"
+          message="Experimental Community GPU smoke was manually enabled; it is not a merge gate."
+          echo "::notice::$message"
+          printf '## Community GPU\n\n%s\n\nRun decision: `%s`.\n' \
+            "$message" "$RUN_GPU" >> "$GITHUB_STEP_SUMMARY"
 
   announce:
     name: Community GPU / Publish pending result
@@ -495,11 +511,18 @@ jobs:
     concurrency:
       group: trtmc-community-gpu
       cancel-in-progress: false
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
 
     steps:
+      - name: Check out trusted GPU orchestration
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.gpu-authorize.outputs.base_sha }}
+          persist-credentials: false
+
       - name: Install the Brev CLI
         env:
           BREV_VERSION: 0.6.335
@@ -553,8 +576,17 @@ jobs:
           # checkpoint revisions and uses E2ERunner's explicit premerge case
           # selection plus JUnit validation, which rejects skips and omissions.
           echo "Changed families: $FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
-          brev exec "$INSTANCE_NAME" "sudo docker run --rm --gpus all --shm-size 16g -v /tmp/model_connect:/src -w /src -e TRTMC_GPU_SCOPE='$SCOPE' -e TRTMC_GPU_FAMILIES='$FAMILIES' -e TRTMC_GPU_ADDED_FAMILIES='$ADDED_FAMILIES' -e CMAKE_CUDA_ARCHITECTURES=89 trtmc-quickstart-gpu python3.12 -m tools.community_gpu_ci" \
-            | tee /tmp/gpu-ci-output.log
+          python3 -m tools.brev_exec \
+            --instance "$INSTANCE_NAME" \
+            --log /tmp/gpu-ci-output.log \
+            --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -- sudo docker run --rm --gpus all --shm-size 16g \
+            -v /tmp/model_connect:/src -w /src \
+            -e "TRTMC_GPU_SCOPE=$SCOPE" \
+            -e "TRTMC_GPU_FAMILIES=$FAMILIES" \
+            -e "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            -e CMAKE_CUDA_ARCHITECTURES=89 \
+            trtmc-quickstart-gpu python3.12 -m tools.community_gpu_ci
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
@@ -673,3 +705,4 @@ jobs:
             -f context="TRTMC Community GPU CI / Smoke test" \
             -f description="$description" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          test "$state" = success

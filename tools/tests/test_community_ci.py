@@ -74,7 +74,8 @@ def test_contributor_guide_matches_the_live_ci_flow() -> None:
         "runners, secrets, or",
         "GPUs",
         "Only after `Community CPU / Required` passes",
-        "execution is temporarily disabled by repository policy",
+        "Community GPU execution is disabled by repository policy",
+        "experimental, non-gating Community GPU smoke test",
         "Community GPU is not a merge",
         "pull-request code executes only on the",
         "isolated GPU instance",
@@ -210,6 +211,13 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     assert "branches: [main]" in source
     assert "types: [opened, synchronize, reopened, ready_for_review]" in source
     assert "workflow_dispatch:" in source
+    dispatch_inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    assert dispatch_inputs["run_gpu_smoke"] == {
+        "description": "Run the experimental, non-gating Community GPU smoke test",
+        "required": False,
+        "default": False,
+        "type": "boolean",
+    }
     assert "\n  pull_request:\n" not in source
     assert "workflow_run:" not in source
     assert "issue_comment:" not in source
@@ -270,6 +278,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
         "needs.required.result == 'success' }}"
     )
     assert gpu_authorize["permissions"] == {"contents": "read"}
+    assert gpu_authorize["outputs"]["base_sha"] == ("${{ needs.authorize.outputs.base_sha }}")
     assert gpu_authorize["outputs"]["merge_sha"] == ("${{ needs.authorize.outputs.merge_sha }}")
     assert gpu_authorize["outputs"]["added_families"] == (
         "${{ steps.impact.outputs.added_families }}"
@@ -281,8 +290,16 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     assert impact_step["env"]["GPU_EXECUTION_ENABLED"] == (
         "${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}"
     )
+    assert impact_step["env"]["MANUAL_GPU_EXECUTION_ENABLED"] == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.run_gpu_smoke || false }}"
+    )
+    assert impact_step["env"]["EVENT_NAME"] == "${{ github.event_name }}"
     policy_step = gpu_authorize_steps["Report the GPU execution policy"]
-    assert "temporarily disabled and is not a merge gate" in policy_step["run"]
+    assert (
+        "Automatic Community GPU execution is disabled and is not a merge gate"
+        in (policy_step["run"])
+    )
+    assert "Experimental Community GPU smoke was manually enabled" in policy_step["run"]
     assert jobs["announce"]["needs"] == "gpu-authorize"
     assert jobs["announce"]["if"] == "${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}"
     assert jobs["provision-and-test"]["needs"] == ["gpu-authorize", "announce"]
@@ -290,6 +307,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
         "name": "gpu-ci-dispatch",
         "deployment": False,
     }
+    assert jobs["provision-and-test"]["permissions"] == {"contents": "read"}
     assert jobs["provision-and-test"]["concurrency"] == {
         "group": "trtmc-community-gpu",
         "cancel-in-progress": False,
@@ -311,14 +329,26 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     gpu_test = {step["name"]: step for step in jobs["provision-and-test"]["steps"]}[
         "Build the GPU image, check out the exact PR merge, and run the smoke test"
     ]
+    trusted_checkout = {step["name"]: step for step in jobs["provision-and-test"]["steps"]}[
+        "Check out trusted GPU orchestration"
+    ]
+    assert trusted_checkout["with"] == {
+        "ref": "${{ needs.gpu-authorize.outputs.base_sha }}",
+        "persist-credentials": False,
+    }
     assert gpu_test["env"]["MERGE_SHA"] == "${{ needs.gpu-authorize.outputs.merge_sha }}"
     assert "refs/pull/$PR_NUMBER/merge" in gpu_test["run"]
     assert r"\$(git rev-parse FETCH_HEAD)" in gpu_test["run"]
     assert '= $MERGE_SHA && git checkout --detach $MERGE_SHA"' in gpu_test["run"]
     assert "python3.12 -m tools.community_gpu_ci" in gpu_test["run"]
+    assert "python3 -m tools.brev_exec" in gpu_test["run"]
     assert "tests/e2e/models" not in gpu_test["run"]
     assert "py-only" not in gpu_test["run"]
     assert "python3.12 -m pytest" not in gpu_test["run"]
+    terminal = {step["name"]: step for step in jobs["publish"]["steps"]}[
+        "Publish the terminal status"
+    ]
+    assert terminal["run"].rstrip().endswith('test "$state" = success')
 
     internal_bridge = (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
         encoding="utf-8"
@@ -644,7 +674,9 @@ def test_gpu_published_status_requires_job_and_test_success(
         text=True,
         check=False,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == (0 if expected_state == "success" else 1), (
+        result.stdout + result.stderr
+    )
     assert f"state={expected_state}" in output.read_text(encoding="utf-8").splitlines()
 
 
@@ -781,6 +813,8 @@ def test_gpu_impact_executes_only_trusted_base_code(
                 "BASE_SHA": base,
                 "HEAD_SHA": revision,
                 "GPU_EXECUTION_ENABLED": "false",
+                "MANUAL_GPU_EXECUTION_ENABLED": "false",
+                "EVENT_NAME": "pull_request_target",
                 "RUNNER_TEMP": str(tmp_path),
                 "GITHUB_OUTPUT": str(output),
             },
@@ -804,6 +838,33 @@ def test_gpu_impact_executes_only_trusted_base_code(
         assert values["scope"] == summary["scope"]
         assert values["gpu_enabled"] == "false"
         assert values["run_gpu"] == "false"
+
+    output.write_text("", encoding="utf-8")
+    manual = subprocess.run(
+        ["bash", "-c", script],
+        cwd=repository,
+        env={
+            **os.environ,
+            "PYTHONPATH": "",
+            "BASE_SHA": base,
+            "HEAD_SHA": head,
+            "GPU_EXECUTION_ENABLED": "false",
+            "MANUAL_GPU_EXECUTION_ENABLED": "true",
+            "EVENT_NAME": "workflow_dispatch",
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert manual.returncode == 0, manual.stdout + manual.stderr
+    manual_summary = json.loads(manual.stdout)
+    manual_values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert manual_values["gpu_enabled"] == "true"
+    assert manual_values["run_gpu"] == (
+        "true" if manual_summary["scope"] in {"all", "families"} else "false"
+    )
 
 
 @pytest.mark.parametrize("create_exitcode", [0, 1])

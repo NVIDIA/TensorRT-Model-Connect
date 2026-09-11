@@ -316,6 +316,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     }
     expected_tools = {
         "tools/__init__.py",
+        "tools/brev_exec.py",
         "tools/check_cyclomatic_complexity.py",
         "tools/community_ci.py",
         "tools/community_gpu_ci.py",

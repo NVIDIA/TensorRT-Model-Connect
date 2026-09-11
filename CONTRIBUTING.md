@@ -215,10 +215,13 @@ The CPU jobs run on fresh GitHub-hosted `ubuntu-24.04` runners with
 read-only repository permission and no access to private runners, secrets, or
 GPUs.
 Only after `Community CPU / Required` passes does the workflow authorize and
-classify Community GPU impact with trusted base-branch code. Community GPU
-execution is temporarily disabled by repository policy, so the provision,
+classify Community GPU impact with trusted base-branch code. Automatic
+Community GPU execution is disabled by repository policy, so the provision,
 test, cleanup, and result jobs are skipped and Community GPU is not a merge
-gate. When execution is re-enabled through review, the Brev credential remains
+gate. A maintainer with `maintain` or `admin` permission may dispatch the
+workflow with **Run the experimental, non-gating Community GPU smoke test**
+enabled after the CPU stage has passed. This manual result is diagnostic and
+does not replace the required Internal CI status. The Brev credential remains
 in the hosted orchestration job; pull-request code executes only on the
 isolated GPU instance and cannot read that credential.
 
