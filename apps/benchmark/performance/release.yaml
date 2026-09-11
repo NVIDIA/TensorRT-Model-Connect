@@ -75,6 +75,19 @@ excluded_profiles:
       width the release entry names.
 
 entries:
+  - id: detr.detect
+    family: detr
+    operation: detect
+    model: detr-resnet-50
+    workload:
+      testcase: detr-resnet-50
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: albert.encode
     family: albert
     operation: encode
