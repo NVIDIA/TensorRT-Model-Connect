@@ -73,6 +73,11 @@ excluded_profiles:
       three published MobileViT v1 checkpoints, but the release-performance
       workload and receipt were collected only for mobilevit_s, which is the
       width the release entry names.
+  - model: minicpm5-2b
+    reason: >-
+      Functional and HF reference-parity e2e qualification is present, but
+      this change does not add a matching release-performance workload or
+      receipt.
 
 entries:
   - id: albert.encode

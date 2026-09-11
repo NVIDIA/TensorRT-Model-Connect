@@ -32,7 +32,7 @@ struct RuntimeConfig {
     std::int32_t head_dim;
     std::int32_t vocab_size;
     std::int32_t bos_token_id;
-    std::int32_t eos_token_id;
+    std::vector<std::int32_t> eos_token_ids;
     std::int32_t pad_token_id;
     std::int32_t max_cache_length;
     std::string precision;
@@ -84,13 +84,16 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::int32_t>(json, "head_dim"),
         require_value<std::int32_t>(json, "vocab_size"),
         require_value<std::int32_t>(json, "bos_token_id"),
-        require_value<std::int32_t>(json, "eos_token_id"),
+        require_value<std::vector<std::int32_t>>(json, "eos_token_id"),
         require_value<std::int32_t>(json, "pad_token_id"),
         require_value<std::int32_t>(json, "max_cache_length"),
         require_value<std::string>(json, "precision"),
         require_value<std::string>(json, "decoder_engine_layout"),
         dynamic_kv_cache,
     };
+    if (config.eos_token_ids.empty()) {
+        throw std::runtime_error("llama runtime.json has an empty 'eos_token_id' list");
+    }
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 || config.vocab_size <= 0 ||
         config.max_cache_length <= 0 ||
@@ -225,7 +228,7 @@ ITask* create(const FamilyContext& context) {
     LlamaTextGenConfig text_config;
     text_config.vocab_size = config.vocab_size;
     text_config.id_bos = config.bos_token_id;
-    text_config.id_eos = config.eos_token_id;
+    text_config.id_eos_ids = config.eos_token_ids;
     text_config.chat_template_format =
         llama_detect_chat_template_format(chat_template(context.reader));
     text_config.prefill_max_length = prefill_token_limit(*modules.prefill);

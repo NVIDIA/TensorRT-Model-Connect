@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from .build_routing import native_kv_architecture_capability, native_kv_build_capability
 from .checkpoint_mapper import WeightDict, load_standard_weights
-from .config import ModelConfig
+from .config import ModelConfig, _as_id_list
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 from .native_kv_contract import validate_native_kv_weights
 from .standard_decoder_builder import build_standard_decoder_engine
@@ -98,7 +98,7 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
         "num_key_value_heads": config.num_key_value_heads,
         "head_dim": config.head_dim,
         "bos_token_id": config.bos_token_id,
-        "eos_token_id": config.eos_token_id,
+        "eos_token_id": list(config.eos_token_ids) or [-1],
         "pad_token_id": config.pad_token_id,
     }
     runtime.update(config.raw.get("_native_kv_cache_metadata", {}))
@@ -108,7 +108,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
         if not isinstance(generation, dict):
             raise ValueError("generation_config.json must contain one JSON object")
         if "eos_token_id" in generation:
-            runtime["eos_token_id"] = generation["eos_token_id"]
+            eos_ids = _as_id_list(generation["eos_token_id"])
+            runtime["eos_token_id"] = list(eos_ids) if eos_ids else [-1]
     runtime.update(updates)
     return runtime
 

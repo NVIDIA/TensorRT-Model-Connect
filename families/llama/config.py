@@ -10,6 +10,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def _as_id_list(value: object) -> tuple[int, ...]:
+    """Normalize an HF eos_token_id-shaped value (missing, a single id, or
+    a list of ids — e.g. Llama 3.1+, MiniCPM5) into a tuple of ints.
+
+    Checking for None (rather than falsiness) matters here: a legitimate
+    id of 0 must survive, unlike a missing value.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple)):
+        return tuple(int(v) for v in value)
+    return (int(value),)
+
+
 @dataclass
 class ModelConfig:
     """Parsed model architecture from HF config.json."""
@@ -26,6 +40,7 @@ class ModelConfig:
     rope_theta: float = 10000.0
     bos_token_id: int = -1
     eos_token_id: int = -1
+    eos_token_ids: tuple[int, ...] = ()
     pad_token_id: int = -1
     tie_word_embeddings: bool = False
     max_position_embeddings: int = 8192
@@ -173,6 +188,8 @@ class ModelConfig:
         if not architectures and architecture:
             architectures = [architecture]
 
+        eos_token_ids = _as_id_list(d.get("eos_token_id"))
+
         return ModelConfig(
             model_type=d.get("model_type", "") or architecture,
             architectures=architectures,
@@ -185,7 +202,8 @@ class ModelConfig:
             rms_norm_eps=eps,
             rope_theta=rope_theta,
             bos_token_id=d.get("bos_token_id", -1) or -1,
-            eos_token_id=d.get("eos_token_id", -1) or -1,
+            eos_token_id=eos_token_ids[0] if eos_token_ids else -1,
+            eos_token_ids=eos_token_ids,
             pad_token_id=d.get("pad_token_id", -1) or -1,
             tie_word_embeddings=d.get("tie_word_embeddings", False),
             max_position_embeddings=d.get("max_position_embeddings",
