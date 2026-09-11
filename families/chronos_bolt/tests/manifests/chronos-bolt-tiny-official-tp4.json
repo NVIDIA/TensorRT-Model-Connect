@@ -1,6 +1,7 @@
 {
   "name": "chronos-bolt-tiny-official-tp4",
   "hf_id": "amazon/chronos-bolt-tiny",
+  "hf_revision": "a0e552de83495b5c28c14c71c374f3e33280b340",
   "bundle": "chronos-bolt-tiny-official-tp4.bundle",
   "family": "chronos_bolt",
   "task": "time_series_forecast",

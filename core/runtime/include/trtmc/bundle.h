@@ -54,4 +54,8 @@ class BundleReader {
 // Read metadata without loading the engine.
 BundleInfo InspectBundle(const std::string& bundle_path);
 
+// Read the core-owned provenance trailer without interpreting family sections.
+// Returns an empty string for bundles created before provenance was added.
+std::string InspectBundleProvenance(const std::string& bundle_path);
+
 } // namespace trtmc

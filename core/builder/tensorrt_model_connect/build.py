@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +20,33 @@ from .graph_transform import GraphTransform, graph_transform
 
 
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
+_EXACT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
+_PROVIDER_VERSION_REVISION = re.compile(
+    r"[a-z][a-z0-9_.-]*:version:(?P<version>[A-Za-z0-9][A-Za-z0-9_.-]*)\Z"
+)
+_MUTABLE_REVISION_ALIASES = frozenset(
+    {"dev", "head", "latest", "main", "master", "nightly", "release", "stable"}
+)
+
+
+def _is_exact_artifact_revision(value: str) -> bool:
+    if _EXACT_REVISION.fullmatch(value):
+        return True
+    match = _PROVIDER_VERSION_REVISION.fullmatch(value)
+    return bool(
+        match and match.group("version").lower() not in _MUTABLE_REVISION_ALIASES
+    )
+
+
+def validate_checkpoint_revision(value: object) -> str:
+    """Return one resolved checkpoint identity or reject mutable labels."""
+
+    if not isinstance(value, str) or not _is_exact_artifact_revision(value):
+        raise ValueError(
+            "checkpoint revision must be an exact Git SHA or resolved provider version "
+            "ID formatted as '<provider>:version:<id>'"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -30,6 +59,9 @@ class BuildRequest:
     task: str
     precision: str
     backend: str = "trt"
+    checkpoint_id: str = ""
+    checkpoint_revision: str = ""
+    source_revision: str = ""
     max_sequence_length: int | None = None
     image_height: int | None = None
     image_width: int | None = None
@@ -42,10 +74,15 @@ class BuildRequest:
     dynamic_kv_cache: bool = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
+    graph_transform_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.precision:
             raise ValueError("precision must be non-empty")
+        if self.checkpoint_revision:
+            validate_checkpoint_revision(self.checkpoint_revision)
+        if self.source_revision and _EXACT_REVISION.fullmatch(self.source_revision) is None:
+            raise ValueError("source_revision must be an exact 40-character Git SHA")
         _validate_id("family", self.family)
         _validate_id("task", self.task)
         if self.backend not in {"trt", "trt_rtx"}:
@@ -70,6 +107,16 @@ class BuildRequest:
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
             raise ValueError("graph_transform must be callable when provided")
+        if (self.graph_transform is not None) != bool(self.graph_transform_id.strip()):
+            raise ValueError("graph_transform and graph_transform_id must be provided together")
+        if (
+            self.graph_transform_id
+            and not _is_exact_artifact_revision(self.graph_transform_id)
+        ):
+            raise ValueError(
+                "graph_transform_id must be an exact Git SHA or resolved provider version "
+                "ID formatted as '<provider>:version:<id>'"
+            )
 
 
 def _validate_id(field: str, value: object) -> str:
@@ -138,9 +185,98 @@ def build(request: BuildRequest) -> None:
     family_module = _load_family(family)
     writer = BundleWriter(request.output_path)
     try:
+        provenance = _build_provenance(request)
+        writer.set_provenance(provenance)
         with graph_transform(request.graph_transform):
             family_module.build(request, writer)
         writer.finish()
     except BaseException:
         writer.abort()
         raise
+
+
+def resolve_source_revision(explicit: str = "") -> str:
+    """Return the exact source revision that produced a bundle."""
+
+    candidates = (
+        ("source_revision", explicit),
+        ("TRTMC_ENGINE_BUILD_REVISION", os.environ.get("TRTMC_ENGINE_BUILD_REVISION", "")),
+        ("GITHUB_SHA", os.environ.get("GITHUB_SHA", "")),
+    )
+    for field, candidate in candidates:
+        revision = candidate.strip().lower()
+        if not revision:
+            continue
+        if _EXACT_REVISION.fullmatch(revision) is None:
+            raise ValueError(f"{field} must be an exact 40-character Git SHA")
+        return revision
+
+    repository = str(Path(__file__).resolve().parent)
+    try:
+        completed = subprocess.run(
+            ["git", "-C", repository, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        completed = None
+    revision = completed.stdout.strip().lower() if completed and completed.returncode == 0 else ""
+    if _EXACT_REVISION.fullmatch(revision):
+        try:
+            status = subprocess.run(
+                ["git", "-C", repository, "status", "--porcelain", "--untracked-files=normal"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            status = None
+        if status and status.returncode == 0:
+            if status.stdout:
+                raise ValueError(
+                    "source checkout is dirty; commit the changes or set "
+                    "TRTMC_ENGINE_BUILD_REVISION from a controlled build"
+                )
+            return revision
+    raise ValueError(
+        "source revision is unavailable; set TRTMC_ENGINE_BUILD_REVISION to the exact Git SHA"
+    )
+
+
+def _build_provenance(request: BuildRequest) -> dict[str, object]:
+    options: dict[str, object] = {
+        "family": request.family,
+        "task": request.task,
+        "backend": request.backend,
+        "precision": request.precision,
+        "max_batch_size": request.max_batch_size,
+        "tensor_parallel_size": request.tensor_parallel_size,
+        "context_parallel_size": request.context_parallel_size,
+        "dynamic_kv_cache": request.dynamic_kv_cache,
+    }
+    if request.max_sequence_length is not None:
+        options["max_sequence_length"] = request.max_sequence_length
+    if request.image_height is not None:
+        options["image_height"] = request.image_height
+    if request.image_width is not None:
+        options["image_width"] = request.image_width
+    if request.video_num_frames is not None:
+        options["video_num_frames"] = request.video_num_frames
+    if request.quantization is not None:
+        options["quantization"] = request.quantization
+    if request.fp32_layers:
+        options["fp32_layers"] = list(request.fp32_layers)
+    if request.graph_transform_id:
+        options["graph_transform_id"] = request.graph_transform_id
+    return {
+        "format": 1,
+        "checkpoint": {
+            "id": request.checkpoint_id or str(request.model_dir.resolve()),
+            "revision": request.checkpoint_revision or "unknown",
+        },
+        "build": {"source_revision": resolve_source_revision(request.source_revision)},
+        "request": options,
+    }

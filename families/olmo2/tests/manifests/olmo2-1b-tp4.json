@@ -1,6 +1,7 @@
 {
   "name": "olmo2-1b-tp4",
   "hf_id": "allenai/OLMo-2-0425-1B",
+  "hf_revision": "a1847dff35000b4271fa70afc5db10fd29fedbdf",
   "bundle": "olmo2-1b-tp4.bundle",
   "family": "olmo2",
   "task": "text_generation",

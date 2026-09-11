@@ -1,6 +1,7 @@
 {
   "name": "qwen-image-edit-2511",
   "hf_id": "Qwen/Qwen-Image-Edit-2511",
+  "hf_revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
   "bundle": "qwen-image-edit-2511.bundle",
   "family": "qwen_image",
   "task": "image_edit",

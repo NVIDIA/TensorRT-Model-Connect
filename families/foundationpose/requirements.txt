@@ -2,5 +2,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
 numpy==1.26.4
-onnx
+onnx==1.21.0
 onnxruntime==1.29.0

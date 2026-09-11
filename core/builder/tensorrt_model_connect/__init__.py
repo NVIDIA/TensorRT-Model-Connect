@@ -3,8 +3,13 @@
 
 """TensorRT Model Connect build API."""
 
-from .build import BuildRequest, build
-from .bundle_writer import BundleWriter
+from .build import (
+    BuildRequest,
+    build,
+    resolve_source_revision,
+    validate_checkpoint_revision,
+)
+from .bundle_writer import BundleWriter, read_bundle_provenance
 from .graph_transform import GraphTransform
 
 __all__ = [
@@ -12,4 +17,7 @@ __all__ = [
     "BundleWriter",
     "GraphTransform",
     "build",
+    "read_bundle_provenance",
+    "resolve_source_revision",
+    "validate_checkpoint_revision",
 ]

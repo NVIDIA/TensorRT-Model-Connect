@@ -1,6 +1,7 @@
 {
   "name": "mobilenetv3-large-100-ra-in1k",
   "hf_id": "timm/mobilenetv3_large_100.ra_in1k",
+  "hf_revision": "96f46a1c52932f27492dff66c72378eb99b443a7",
   "bundle": "mobilenetv3-large-100-ra-in1k.bundle",
   "family": "timm_mobilenetv3",
   "task": "classification",

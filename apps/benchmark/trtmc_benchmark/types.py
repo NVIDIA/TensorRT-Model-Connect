@@ -53,6 +53,8 @@ class ModelDescriptor:
     name: str
     hf_id: str
     hf_revision: str
+    checkpoint_id: str
+    checkpoint_revision: str
     bundle_name: str
     family: str
     task: str
@@ -65,6 +67,8 @@ class ModelDescriptor:
         value = {
             "name": self.name,
             "hf_id": self.hf_id,
+            "checkpoint_id": self.checkpoint_id,
+            "checkpoint_revision": self.checkpoint_revision,
             "bundle_name": self.bundle_name,
             "family": self.family,
             "task": self.task,

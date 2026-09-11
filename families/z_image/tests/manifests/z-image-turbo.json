@@ -1,6 +1,7 @@
 {
   "name": "z-image-turbo",
   "hf_id": "Tongyi-MAI/Z-Image-Turbo",
+  "hf_revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
   "bundle": "z-image-turbo.bundle",
   "family": "z_image",
   "task": "image_generation",

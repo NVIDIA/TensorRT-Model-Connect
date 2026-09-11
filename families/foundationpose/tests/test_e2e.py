@@ -131,6 +131,8 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
         BuildRequest(
             model_dir=model_dir,
             output_path=bundle,
+            checkpoint_id=manifest["checkpoint_id"],
+            checkpoint_revision=manifest["checkpoint_revision"],
             family=FAMILY,
             task=manifest["task"],
             precision=manifest["precision"],

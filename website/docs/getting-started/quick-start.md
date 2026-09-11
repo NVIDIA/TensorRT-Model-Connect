@@ -30,8 +30,10 @@ Build a bundle directly from a Hugging Face model ID:
 
 ```bash
 python -m tensorrt_model_connect build openai-community/gpt2 \
+  --revision 607a30d783dfa663caf39e06633721c8d4cfcd7e \
   --precision fp16 \
   --output gpt2.bundle
+trtmc inspect gpt2.bundle
 ```
 
 The CLI downloads the snapshot, reads `config.json` or `model_index.json`, and
@@ -39,7 +41,12 @@ asks every dependency-free family `support.py`. Exactly one family must claim
 the checkpoint. That family supplies the default task; pass `--task` only when
 selecting another task supported by the same family. The build then imports
 only the selected `families.gpt2.model` and calls `build(request, writer)` once.
-A prepared local snapshot can be passed in place of the model ID.
+A prepared local snapshot can be passed in place of the model ID. Pass its
+canonical model name with `--checkpoint-id` and its exact commit with
+`--revision`; both are required so the resulting provenance is equivalent to a
+direct download. Non-Hugging-Face stores may use a resolved provider
+version-object ID such as `ngc:version:1.0.1_onnx`; mutable aliases such as
+`latest` are rejected.
 
 For a wheel install, resolve its native runtime directory directly from the
 installed package:

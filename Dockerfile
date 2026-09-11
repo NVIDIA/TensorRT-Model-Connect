@@ -39,7 +39,7 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 COPY requirements/base.txt /tmp/trtmc-base-requirements.txt
 RUN python3.12 -m venv "$VIRTUAL_ENV" \
-    && pip install --upgrade pip \
+    && pip install --upgrade "pip==26.2.1" \
     && pip install \
       "torch==2.12.0+cu130" \
       "torchvision==0.27.0+cu130" \
@@ -53,29 +53,30 @@ RUN python3.12 -m venv "$VIRTUAL_ENV" \
       "huggingface_hub==1.21.0" \
       "jsonschema==4.26.0" \
       "lizard==1.21.2" \
-      "ml_dtypes>=0.4" \
-      "numpy>=1.24,<2.5" \
-      "onnx>=1.16" \
-      "Pillow" \
-      "protobuf" \
+      "ml_dtypes==0.5.4" \
+      "numpy==1.26.4" \
+      "onnx==1.21.0" \
+      "packaging==26.2" \
+      "Pillow==12.2.0" \
+      "protobuf==7.35.0" \
       "pybind11==2.13.6" \
       "pybind11-stubgen==2.4.2" \
-      "pytest<9" \
-      "PyYAML>=6.0" \
+      "pytest==8.4.2" \
+      "PyYAML==6.0.3" \
       "ruff==0.16.4" \
-      "safetensors>=0.4" \
+      "safetensors==0.8.0" \
       "scikit-build-core==0.8.2" \
-      "sentencepiece>=0.1.99" \
-      "setuptools>=80,<82" \
+      "sentencepiece==0.2.2" \
+      "setuptools==81.0.0" \
       "tensorrt==11.1.0.106" \
-      "tokenizers" \
+      "tokenizers==0.22.2" \
       "transformers==5.2.0" \
     && pip install --force-reinstall \
       "torch==2.12.0+cu130" \
       "torchvision==0.27.0+cu130" \
       "torchaudio==2.11.0+cu130" \
       --index-url https://download.pytorch.org/whl/cu130 \
-    && pip install "setuptools>=80,<82"
+    && pip install "setuptools==81.0.0"
 
 ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
 ENV NCCL_LIB_DIR=/opt/venv/lib/python3.12/site-packages/nvidia/nccl/lib

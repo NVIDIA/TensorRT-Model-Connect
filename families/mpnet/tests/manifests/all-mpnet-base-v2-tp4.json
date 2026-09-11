@@ -1,6 +1,7 @@
 {
   "name": "all-mpnet-base-v2-tp4",
   "hf_id": "sentence-transformers/all-mpnet-base-v2",
+  "hf_revision": "e8c3b32edf5434bc2275fc9bab85f82640a19130",
   "bundle": "all-mpnet-base-v2-tp4.bundle",
   "family": "mpnet",
   "task": "encoding",

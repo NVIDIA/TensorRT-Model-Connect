@@ -21,6 +21,7 @@ from trtmc_benchmark.metrics import reduce_metrics
 from trtmc_benchmark.report import generate_collection_report
 from trtmc_benchmark.service import BenchmarkService
 from trtmc_benchmark.types import BenchmarkError
+from tensorrt_model_connect import BundleWriter
 from trtmc_benchmark.worker import find_worker
 
 
@@ -37,6 +38,18 @@ def test_catalog_reads_family_owned_manifests_without_a_registry() -> None:
     distilgpt2 = next(entry for entry in entries if entry.name == "distilgpt2")
     assert distilgpt2.operation == "generate"
     assert distilgpt2.status == "ready"
+
+
+def test_catalog_rejects_a_mutable_checkpoint_revision(tmp_path: Path) -> None:
+    manifest = json.loads(
+        (REPO / "families/gpt2/tests/manifests/distilgpt2.json").read_text()
+    )
+    manifest["hf_revision"] = "main"
+    manifest_path = tmp_path / "model.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(BenchmarkError, match="mutable checkpoint_revision"):
+        ManifestCatalog(tmp_path).resolve(str(manifest_path))
 
 
 def test_case_resolves_current_task_and_manifest_fields(tmp_path: Path) -> None:
@@ -87,6 +100,21 @@ def test_build_command_is_the_current_closed_build_request(tmp_path: Path) -> No
     assert "source-revision" not in joined
 
 
+def test_build_command_preserves_canonical_checkpoint_identity(tmp_path: Path) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "model.bundle")
+
+    command = _build_command(
+        model,
+        tmp_path / "resolved-checkpoint",
+        tmp_path / "model.bundle",
+        (case,),
+    )
+
+    assert command[command.index("--checkpoint-id") + 1] == model.hf_id
+    assert command[command.index("--revision") + 1] == model.hf_revision
+
+
 def test_build_command_passes_manifest_backend_and_dynamic_kv_cache(tmp_path: Path) -> None:
     manifest = json.loads(
         (REPO / "families/llama/tests/manifests/minitron-4b-width-l0.json").read_text()
@@ -130,8 +158,8 @@ def test_bundle_builder_keeps_explicit_model_dir_cli_behavior(
 ) -> None:
     model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
     case = resolve_case(model, tmp_path / "model.bundle")
-    checkpoint = tmp_path / "checkpoint"
-    checkpoint.mkdir()
+    checkpoint = tmp_path / "models--distilbert--distilgpt2" / "snapshots" / model.hf_revision
+    checkpoint.mkdir(parents=True)
     calls = []
 
     def resolve_model(value: str, revision: str | None) -> Path:
@@ -146,11 +174,132 @@ def test_bundle_builder_keeps_explicit_model_dir_cli_behavior(
     assert plan.model_dir == checkpoint.resolve()
 
 
+def test_bundle_builder_rejects_an_unverified_explicit_hugging_face_directory(
+    tmp_path: Path,
+) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "model.bundle")
+    checkpoint = tmp_path / "arbitrary-checkpoint"
+    checkpoint.mkdir()
+
+    with pytest.raises(BenchmarkError, match="exact Hugging Face snapshot"):
+        BundleBuilder(
+            tmp_path / "cache", model_dirs={model.name: checkpoint}
+        )._plan(model, (case,))
+
+
 def test_bundle_builder_has_no_second_model_resolver() -> None:
     source = (REPO / "apps/benchmark/trtmc_benchmark/builder.py").read_text()
     assert "snapshot_download" not in source
     assert "_MODEL_DIR" not in source
     assert "repository / model.hf_id" not in source
+
+
+def test_bundle_cache_rejects_mismatched_provenance_when_build_is_disabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_revision = "a" * 40
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", source_revision)
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    builder = BundleBuilder(tmp_path / "cache")
+    bundle = builder.provisional_path(model)
+    bundle.parent.mkdir(parents=True)
+    writer = BundleWriter(bundle)
+    writer.set_header(family=model.family, task=model.task, backend="trt")
+    writer.set_provenance(
+        {
+            "format": 1,
+            "checkpoint": {"id": model.hf_id, "revision": "c" * 40},
+            "build": {"source_revision": source_revision},
+            "request": {},
+        },
+    )
+    writer.finish()
+    case = resolve_case(model, bundle)
+
+    with pytest.raises(BenchmarkError, match="bundle provenance does not match"):
+        builder.prepare(
+            (case,),
+            allow_build=False,
+            rebuild=False,
+            dry_run=False,
+        )
+
+
+def test_bundle_cache_rejects_a_different_build_request(tmp_path: Path, monkeypatch) -> None:
+    source_revision = "a" * 40
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", source_revision)
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    builder = BundleBuilder(tmp_path / "cache")
+    bundle = builder.provisional_path(model)
+    bundle.parent.mkdir(parents=True)
+    writer = BundleWriter(bundle)
+    writer.set_header(family=model.family, task=model.task, backend="trt")
+    writer.set_provenance(
+        {
+            "format": 1,
+            "checkpoint": {"id": model.hf_id, "revision": model.hf_revision},
+            "build": {"source_revision": source_revision},
+            "request": {
+                "family": "gpt2",
+                "task": "text_generation",
+                "backend": "trt",
+                "precision": "fp32",
+                "max_sequence_length": 256,
+                "max_batch_size": 1,
+                "tensor_parallel_size": 1,
+                "context_parallel_size": 1,
+                "dynamic_kv_cache": False,
+            },
+        },
+    )
+    writer.finish()
+    case = resolve_case(model, bundle)
+
+    with pytest.raises(BenchmarkError, match="bundle provenance does not match"):
+        builder.prepare((case,), allow_build=False, rebuild=False, dry_run=False)
+
+
+def test_bundle_cache_reuses_an_exact_build_identity(tmp_path: Path, monkeypatch) -> None:
+    source_revision = "a" * 40
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", source_revision)
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    builder = BundleBuilder(tmp_path / "cache")
+    bundle = builder.provisional_path(model)
+    bundle.parent.mkdir(parents=True)
+    writer = BundleWriter(bundle)
+    writer.set_header(family=model.family, task=model.task, backend="trt")
+    writer.set_provenance(
+        {
+            "format": 1,
+            "checkpoint": {"id": model.hf_id, "revision": model.hf_revision},
+            "build": {"source_revision": source_revision},
+            "request": {
+                "family": "gpt2",
+                "task": "text_generation",
+                "backend": "trt",
+                "precision": "fp16",
+                "max_sequence_length": 256,
+                "max_batch_size": 1,
+                "tensor_parallel_size": 1,
+                "context_parallel_size": 1,
+                "dynamic_kv_cache": False,
+            },
+        },
+    )
+    writer.finish()
+    case = resolve_case(model, bundle)
+
+    resolved, records = builder.prepare(
+        (case,), allow_build=False, rebuild=False, dry_run=False
+    )
+
+    assert resolved[0].bundle_path == bundle
+    assert records[0].status == "reused"
+
+    bundle.write_bytes(bundle.read_bytes().replace(b'"sections"', b'"sectionz"', 1))
+    with pytest.raises(BenchmarkError, match="bundle provenance does not match"):
+        builder.prepare((case,), allow_build=False, rebuild=False, dry_run=False)
 
 
 def _worker(tmp_path: Path) -> Path:
@@ -248,9 +397,34 @@ def test_collection_rejects_duplicate_run_id_without_content_fingerprints(
         generate_collection_report((tmp_path,), tmp_path / "report")
 
 
-def test_cli_dry_run_uses_explicit_bundle_without_runtime(tmp_path: Path, capsys) -> None:
+def test_cli_dry_run_uses_explicit_bundle_without_runtime(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    source_revision = "a" * 40
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", source_revision)
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
     bundle = tmp_path / "model.bundle"
-    bundle.write_bytes(b"bundle")
+    writer = BundleWriter(bundle)
+    writer.set_header(family=model.family, task=model.task, backend="trt")
+    writer.set_provenance(
+        {
+            "format": 1,
+            "checkpoint": {"id": model.hf_id, "revision": model.hf_revision},
+            "build": {"source_revision": source_revision},
+            "request": {
+                "family": "gpt2",
+                "task": "text_generation",
+                "backend": "trt",
+                "precision": "fp16",
+                "max_sequence_length": 256,
+                "max_batch_size": 1,
+                "tensor_parallel_size": 1,
+                "context_parallel_size": 1,
+                "dynamic_kv_cache": False,
+            },
+        },
+    )
+    writer.finish()
     assert (
         main(
             [

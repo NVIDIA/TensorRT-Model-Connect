@@ -1,6 +1,7 @@
 {
   "name": "bark-small-fp32-l0",
   "hf_id": "suno/bark-small",
+  "hf_revision": "1dbd7a128513b8ae4a4e2130fed57b7ac9da5bcd",
   "hf_dependencies": [
     {
       "repo_id": "openai/whisper-large-v3-turbo"

@@ -2,5 +2,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Thin source-build delta over the pinned base image.
-build>=1.2
+build==1.5.0
 conan-py-build==0.4.3

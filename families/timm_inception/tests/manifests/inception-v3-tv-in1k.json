@@ -1,6 +1,7 @@
 {
   "name": "inception-v3-tv-in1k",
   "hf_id": "timm/inception_v3.tv_in1k",
+  "hf_revision": "393d84cc85c467d8fbc0dc81a65c04e87a32572c",
   "bundle": "inception-v3-tv-in1k.bundle",
   "family": "timm_inception",
   "task": "classification",

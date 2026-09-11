@@ -1,6 +1,7 @@
 {
   "name": "timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4",
   "hf_id": "timm/vit_base_patch16_224.augreg_in21k_ft_in1k",
+  "hf_revision": "2ec9fb3d7bb664aac471ac44582c94d18de33780",
   "bundle": "timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4.bundle",
   "family": "timm_vit",
   "task": "classification",

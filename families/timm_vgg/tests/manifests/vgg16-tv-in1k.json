@@ -1,6 +1,7 @@
 {
   "name": "vgg16-tv-in1k",
   "hf_id": "timm/vgg16.tv_in1k",
+  "hf_revision": "b8d8aa2dd860af9233c8c67385a8097fd6c35d3f",
   "bundle": "vgg16-tv-in1k.bundle",
   "family": "timm_vgg",
   "task": "classification",

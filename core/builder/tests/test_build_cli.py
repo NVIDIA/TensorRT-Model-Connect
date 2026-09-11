@@ -13,8 +13,23 @@ import pytest
 from tensorrt_model_connect import build_cli
 
 
+def _stub_family_resolution(monkeypatch) -> None:
+    support = SimpleNamespace(
+        tasks=("example_task",),
+        default_task="example_task",
+        default_precision="fp32",
+    )
+    monkeypatch.setattr(build_cli, "load_model_metadata", lambda _model_dir: object())
+    monkeypatch.setattr(
+        build_cli,
+        "resolve_family",
+        lambda _metadata: ("example", support),
+    )
+
+
 def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) -> None:
     captured = []
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "a" * 40)
     monkeypatch.setattr(build_cli, "build", captured.append)
     model = tmp_path / "model"
     model.mkdir()
@@ -26,6 +41,10 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
             [
                 "build",
                 str(model),
+                "--checkpoint-id",
+                "example/model",
+                "--revision",
+                "b" * 40,
                 "--output",
                 str(output),
                 "--task",
@@ -82,12 +101,27 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
 
 def test_build_command_uses_the_family_owned_default_task(monkeypatch, tmp_path: Path) -> None:
     captured = []
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "a" * 40)
     monkeypatch.setattr(build_cli, "build", captured.append)
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")
 
-    assert build_cli.main(["build", str(model), "--output", str(tmp_path / "out.bundle")]) == 0
+    assert (
+        build_cli.main(
+            [
+                "build",
+                str(model),
+                "--checkpoint-id",
+                "example/model",
+                "--revision",
+                "b" * 40,
+                "--output",
+                str(tmp_path / "out.bundle"),
+            ]
+        )
+        == 0
+    )
 
     assert captured[0].family == "gpt2"
     assert captured[0].task == "text_generation"
@@ -111,17 +145,174 @@ def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_pat
     assert calls == [{"repo_id": "openai-community/gpt2", "revision": "revision-1"}]
 
 
+def test_build_command_preserves_resolved_checkpoint_and_source_revisions(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkpoint_revision = "b" * 40
+    source_revision = "a" * 40
+    snapshot = tmp_path / "models--example-org--example-model" / "snapshots" / checkpoint_revision
+    snapshot.mkdir(parents=True)
+    (snapshot / "metadata.json").write_text("{}", encoding="utf-8")
+    captured = []
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=lambda **_kwargs: str(snapshot)),
+    )
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", source_revision)
+    monkeypatch.setattr(build_cli, "build", captured.append)
+    _stub_family_resolution(monkeypatch)
+
+    assert (
+        build_cli.main(
+            [
+                "build",
+                "example-org/example-model",
+                "--revision",
+                "main",
+                "--output",
+                str(tmp_path / "out.bundle"),
+            ]
+        )
+        == 0
+    )
+    request = captured[0]
+    assert request.model_dir == snapshot
+    assert request.checkpoint_id == "example-org/example-model"
+    assert request.checkpoint_revision == checkpoint_revision
+    assert request.source_revision == source_revision
+
+
+def test_local_snapshot_can_preserve_a_canonical_checkpoint_id(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkpoint_revision = "b" * 40
+    source_revision = "a" * 40
+    snapshot = tmp_path / "downloaded-checkpoint"
+    snapshot.mkdir()
+    (snapshot / "metadata.json").write_text("{}", encoding="utf-8")
+    captured = []
+
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", source_revision)
+    monkeypatch.setattr(build_cli, "build", captured.append)
+    _stub_family_resolution(monkeypatch)
+
+    assert (
+        build_cli.main(
+            [
+                "build",
+                str(snapshot),
+                "--checkpoint-id",
+                "example-org/example-model",
+                "--revision",
+                checkpoint_revision,
+                "--output",
+                str(tmp_path / "out.bundle"),
+            ]
+        )
+        == 0
+    )
+    request = captured[0]
+    assert request.model_dir == snapshot
+    assert request.checkpoint_id == "example-org/example-model"
+    assert request.checkpoint_revision == checkpoint_revision
+
+
+def test_build_command_forwards_resolved_source_revision(
+    monkeypatch, tmp_path: Path
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "metadata.json").write_text("{}", encoding="utf-8")
+    captured = []
+    monkeypatch.setattr(build_cli, "resolve_source_revision", lambda: "a" * 40)
+    monkeypatch.setattr(build_cli, "build", captured.append)
+    _stub_family_resolution(monkeypatch)
+
+    assert (
+        build_cli.main(
+            [
+                "build",
+                str(model),
+                "--checkpoint-id",
+                "example/model",
+                "--revision",
+                "b" * 40,
+                "-o",
+                str(tmp_path / "out.bundle"),
+            ]
+        )
+        == 0
+    )
+
+    assert captured[0].source_revision == "a" * 40
+
+
+def test_local_checkpoint_rejects_a_non_exact_requested_revision(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="resolved provider version"):
+        build_cli._checkpoint_revision(
+            tmp_path / "local-checkpoint",
+            requested="main",
+        )
+
+
+@pytest.mark.parametrize("revision", ["hf:main", "ngc:version:latest"])
+def test_local_checkpoint_rejects_a_mutable_namespaced_revision(
+    tmp_path: Path, revision: str
+) -> None:
+    with pytest.raises(ValueError, match="resolved provider version"):
+        build_cli._checkpoint_revision(
+            tmp_path / "local-checkpoint",
+            requested=revision,
+        )
+
+
+def test_local_checkpoint_accepts_a_resolved_provider_version(tmp_path: Path) -> None:
+    assert (
+        build_cli._checkpoint_revision(
+            tmp_path / "local-checkpoint",
+            requested="ngc:version:1.0.1_onnx",
+        )
+        == "ngc:version:1.0.1_onnx"
+    )
+
+
+def test_local_checkpoint_requires_canonical_id_and_revision(tmp_path: Path) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+
+    with pytest.raises(ValueError, match="--checkpoint-id"):
+        build_cli.main(["build", str(model), "-o", str(tmp_path / "out.bundle")])
+    with pytest.raises(ValueError, match="checkpoint revision is required"):
+        build_cli.main(
+            [
+                "build",
+                str(model),
+                "--checkpoint-id",
+                "example/model",
+                "-o",
+                str(tmp_path / "out.bundle"),
+            ]
+        )
+
+
 def test_build_command_rejects_a_task_the_family_does_not_own(monkeypatch, tmp_path: Path) -> None:
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")
     monkeypatch.setattr(build_cli, "build", lambda request: None)
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "a" * 40)
 
     with pytest.raises(ValueError, match="does not support task 'embedding'"):
         build_cli.main(
             [
                 "build",
                 str(model),
+                "--checkpoint-id",
+                "example/model",
+                "--revision",
+                "b" * 40,
                 "--output",
                 str(tmp_path / "out.bundle"),
                 "--task",

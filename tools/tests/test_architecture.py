@@ -7,7 +7,10 @@ import ast
 import importlib.util
 import json
 import re
+import tomllib
 from pathlib import Path
+
+from packaging.requirements import Requirement
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -546,9 +549,13 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
     # The core consumes these before dispatch. Every other field belongs to the
     # selected family's build function, including explicit unsupported checks.
     family_owned_fields = request_fields - {
+        "checkpoint_id",
+        "checkpoint_revision",
         "family",
         "output_path",
         "graph_transform",
+        "graph_transform_id",
+        "source_revision",
     }
 
     violations: list[str] = []
@@ -750,14 +757,34 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
             if line.strip() and not line.lstrip().startswith("#")
         ]
 
-    assert dependency_lines(REPO / "requirements/base.txt") == [
-        "build>=1.2",
+    exact_requirement = re.compile(
+        r"[A-Za-z0-9_.-]+(?:\[[A-Za-z0-9_.,-]+\])?==[^,;*\s]+(?:\s*;\s*.+)?\Z"
+    )
+    base_requirements = dependency_lines(REPO / "requirements/base.txt")
+    assert base_requirements == [
+        "build==1.5.0",
         "conan-py-build==0.4.3",
     ]
+    assert all(exact_requirement.fullmatch(line) for line in base_requirements)
 
     pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    project_metadata = tomllib.loads(pyproject)
     assert 'requires-python = ">=3.12"' in pyproject
     assert "tomli" not in pyproject
+    locked_metadata_dependencies = [
+        *project_metadata["build-system"]["requires"],
+        *(
+            requirement
+            for requirements_group in project_metadata["project"]["optional-dependencies"].values()
+            for requirement in requirements_group
+        ),
+    ]
+    assert all(exact_requirement.fullmatch(line) for line in locked_metadata_dependencies)
+    project_dependencies = {
+        Requirement(line).name.lower().replace("-", "_"): Requirement(line)
+        for line in project_metadata["project"]["dependencies"]
+    }
+    assert all(requirement.specifier for requirement in project_dependencies.values())
     optional = pyproject.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
     assert set(re.findall(r"^([a-z][a-z0-9_-]*)\s*=", optional, re.MULTILINE)) == {
         "cutedsl",
@@ -771,6 +798,23 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
         assert lines, f"empty family dependency declaration: {path.relative_to(REPO)}"
         for line in lines:
             normalized = line.lower()
+            assert exact_requirement.fullmatch(line), (
+                f"family dependency must use one exact version: {path.relative_to(REPO)}:{line}"
+            )
+            family_requirement = Requirement(line)
+            shared_requirement = project_dependencies.get(
+                family_requirement.name.lower().replace("-", "_")
+            )
+            if shared_requirement is not None:
+                family_version = next(
+                    specifier.version
+                    for specifier in family_requirement.specifier
+                    if specifier.operator == "=="
+                )
+                assert shared_requirement.specifier.contains(family_version), (
+                    f"family dependency conflicts with project compatibility contract: "
+                    f"{path.relative_to(REPO)}:{line} vs {shared_requirement}"
+                )
             assert not normalized.startswith(("-r", "--requirement", "-c", "--constraint"))
             assert not normalized.startswith(("-e", "--editable", "./", "../", "/", "file:"))
             assert " @ file:" not in normalized
@@ -789,6 +833,23 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
     dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
     assert "COPY requirements/base.txt" in dockerfile
     assert "families/" not in dockerfile
+    for requirement in (
+        "pip==26.2.1",
+        "ml_dtypes==0.5.4",
+        "numpy==1.26.4",
+        "onnx==1.21.0",
+        "packaging==26.2",
+        "Pillow==12.2.0",
+        "protobuf==7.35.0",
+        "pytest==8.4.2",
+        "PyYAML==6.0.3",
+        "safetensors==0.8.0",
+        "sentencepiece==0.2.2",
+        "setuptools==81.0.0",
+        "tokenizers==0.22.2",
+    ):
+        assert f'"{requirement}"' in dockerfile
+    assert "pip install --upgrade pip" not in dockerfile
 
     package_validation = (REPO / "tools/ci/package.py").read_text(encoding="utf-8")
     assert 'import_module(f"families.{family}.model")' not in package_validation
@@ -805,6 +866,20 @@ def test_family_reference_consumers_declare_their_source() -> None:
         if consumers and not (family / "tests/reference-source.json").is_file():
             missing.append(family.name)
     assert missing == []
+
+
+def test_remote_checkpoint_manifests_pin_exact_revisions() -> None:
+    violations: list[str] = []
+    exact_revision = re.compile(r"[0-9a-f]{40}\Z")
+    for family in family_dirs():
+        for path in (family / "tests/manifests").glob("*.json"):
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            if not manifest.get("hf_id"):
+                continue
+            revision = manifest.get("hf_revision")
+            if not isinstance(revision, str) or exact_revision.fullmatch(revision) is None:
+                violations.append(str(path.relative_to(REPO)))
+    assert violations == []
 
 
 def test_ci_base_image_is_pinned_by_its_from_reference() -> None:

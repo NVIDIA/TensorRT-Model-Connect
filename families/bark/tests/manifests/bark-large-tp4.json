@@ -1,6 +1,7 @@
 {
   "name": "bark-large-tp4",
   "hf_id": "suno/bark",
+  "hf_revision": "70a8a7d34168586dc5d028fa9666aceade177992",
   "hf_dependencies": [
     {
       "repo_id": "openai/whisper-large-v3-turbo"

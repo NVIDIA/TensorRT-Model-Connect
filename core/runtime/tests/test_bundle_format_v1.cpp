@@ -33,7 +33,7 @@ std::filesystem::path temp_dir() {
 }
 
 void write_bundle(const std::filesystem::path& path, const std::string& header,
-                  const std::string& payload = {}) {
+                  const std::string& payload = {}, const std::string& provenance = {}) {
     std::ofstream output(path, std::ios::binary);
     output.write(reinterpret_cast<const char*>(trtmc::kBundleMagic), 8);
     const std::uint64_t length = header.size();
@@ -41,6 +41,13 @@ void write_bundle(const std::filesystem::path& path, const std::string& header,
         output.put(static_cast<char>((length >> shift) & 0xffU));
     output.write(header.data(), static_cast<std::streamsize>(header.size()));
     output.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    if (!provenance.empty()) {
+        output.write(provenance.data(), static_cast<std::streamsize>(provenance.size()));
+        const std::uint64_t provenance_length = provenance.size();
+        for (int shift = 0; shift < 64; shift += 8)
+            output.put(static_cast<char>((provenance_length >> shift) & 0xffU));
+        output.write(reinterpret_cast<const char*>(trtmc::kBundleProvenanceMagic), 8);
+    }
 }
 
 bool read_throws(const std::filesystem::path& path) {
@@ -70,6 +77,28 @@ int main() {
     check(valid_reader.info().sections.size() == 1, "one section descriptor");
     check(valid_reader.info().sections.front().length == 4, "section length parsed");
     check(valid_reader.read_section("engine.plan").size() == 4, "section payload read");
+    check(trtmc::InspectBundleProvenance(valid.string()).empty(),
+          "legacy bundle has no provenance");
+
+    const auto provenance_bundle = directory / "provenance.bundle";
+    const std::string provenance =
+        R"({"format":1,"checkpoint":{"id":"example/model","revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"build":{"source_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"request":{}})";
+    write_bundle(
+        provenance_bundle,
+        R"({"format":1,"family":"fake","task":"time_series_forecast","backend":"fake","sections":{"engine.plan":{"offset":0,"length":4}}})",
+        "PLAN", provenance);
+    const trtmc::BundleReader provenance_reader(provenance_bundle.string());
+    check(provenance_reader.read_section("engine.plan").size() == 4,
+          "provenance is outside family section payload");
+    check(trtmc::InspectBundleProvenance(provenance_bundle.string()) == provenance,
+          "core provenance trailer parsed");
+
+    const auto overlapping_provenance = directory / "overlapping-provenance.bundle";
+    write_bundle(
+        overlapping_provenance,
+        R"({"format":1,"family":"fake","task":"time_series_forecast","backend":"fake","sections":{"engine.plan":{"offset":0,"length":5}}})",
+        "PLAN", provenance);
+    check(read_throws(overlapping_provenance), "family section cannot overlap provenance");
 
     const auto original_directory = std::filesystem::current_path();
     std::filesystem::current_path(directory);

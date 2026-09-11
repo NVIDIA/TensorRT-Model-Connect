@@ -29,6 +29,7 @@
 
 ```bash
 python -m tensorrt_model_connect build Qwen/Qwen3-0.6B \
+  --revision c1899de289a04d12100db370d81485cdf75e47ca \
   --max-sequence-length 16384 \
   --output qwen3-0.6b.bundle
 trtmc run ./qwen3-0.6b.bundle \

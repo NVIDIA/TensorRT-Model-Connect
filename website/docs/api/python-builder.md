@@ -9,11 +9,14 @@ optional build-time graph transform.
 
 ```python
 from pathlib import Path
-from tensorrt_model_connect import BuildRequest, build
+from tensorrt_model_connect import BuildRequest, build, resolve_source_revision
 
 build(BuildRequest(
     model_dir=Path("/models/gpt2"),
     output_path=Path("gpt2.bundle"),
+    checkpoint_id="openai-community/gpt2",
+    checkpoint_revision="607a30d783dfa663caf39e06633721c8d4cfcd7e",
+    source_revision=resolve_source_revision(),
     family="gpt2",
     task="text_generation",
     precision="fp16",
@@ -28,6 +31,15 @@ resolved API directly.
 `model_dir` is already local at this boundary. The selected family alone
 decides whether that directory is a Hugging Face snapshot or a prepared
 checkpoint; `BuildRequest` does not perform another discovery pass.
+Callers of this low-level API must pass the canonical checkpoint ID and an
+immutable checkpoint revision. Hugging Face inputs use an exact commit SHA;
+other stores use the provider's resolved version-object ID, explicitly tagged
+as such, for example `ngc:version:1.0.1_onnx`. Branches, channels, and aliases
+such as `main` or `latest` are rejected.
+`resolve_source_revision()` accepts an explicit SHA,
+`TRTMC_ENGINE_BUILD_REVISION`, `GITHUB_SHA`, or a Git checkout and fails when
+none yields an exact source commit. Automatic checkout resolution also rejects
+a dirty worktree.
 
 ## Optional graph transform
 
@@ -47,10 +59,14 @@ def replace_subgraph(network, engine_index):
 build(BuildRequest(
     model_dir=Path("/models/gpt2"),
     output_path=Path("gpt2.bundle"),
+    checkpoint_id="openai-community/gpt2",
+    checkpoint_revision="607a30d783dfa663caf39e06633721c8d4cfcd7e",
+    source_revision=resolve_source_revision(),
     family="gpt2",
     task="text_generation",
     precision="fp16",
     graph_transform=replace_subgraph,
+    graph_transform_id="94f6e5764b3ae57f775c759ca16e617adcdd28ee",
 ))
 ```
 
@@ -59,6 +75,9 @@ subgraph TensorRT can express. It must reconnect the replacement in place and
 raise on an invalid graph; a failure stops serialization and aborts bundle
 publication. Normal builds do not install the hook. There is no graph IR,
 registry, fingerprint, hash, fallback, or runtime Python path.
+`graph_transform_id` is a required stable identity for the callback and is part
+of provenance, so two transform implementations cannot silently share a cache
+identity.
 
 `tensor_parallel_size` and `context_parallel_size` are direct request fields,
 not an options bag. Every family must either implement the requested value or

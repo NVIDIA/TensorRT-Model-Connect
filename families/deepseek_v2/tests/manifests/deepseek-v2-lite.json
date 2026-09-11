@@ -1,6 +1,7 @@
 {
   "name": "deepseek-v2-lite",
   "hf_id": "deepseek-ai/DeepSeek-V2-Lite",
+  "hf_revision": "604d5664dddd88a0433dbae533b7fe9472482de0",
   "bundle": "deepseek-v2-lite.bundle",
   "family": "deepseek_v2",
   "task": "text_generation",

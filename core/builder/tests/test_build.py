@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tensorrt_model_connect import BuildRequest
+from tensorrt_model_connect import BuildRequest, read_bundle_provenance
 
 
 build_core = importlib.import_module("tensorrt_model_connect.build")
@@ -21,6 +21,9 @@ def _request(tmp_path: Path, *, family: str = "example") -> BuildRequest:
     return BuildRequest(
         model_dir=tmp_path / "model",
         output_path=tmp_path / "model.bundle",
+        checkpoint_id="example/model",
+        checkpoint_revision="b" * 40,
+        source_revision="a" * 40,
         precision="fp16",
         family=family,
         task="text_generation",
@@ -42,6 +45,14 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
     assert request.dynamic_kv_cache is False
 
 
+def test_build_request_accepts_a_resolved_provider_version(tmp_path: Path) -> None:
+    request = replace(
+        _request(tmp_path), checkpoint_revision="ngc:version:1.0.1_onnx"
+    )
+
+    assert request.checkpoint_revision == "ngc:version:1.0.1_onnx"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -57,6 +68,10 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
         ("dynamic_kv_cache", 1),
         ("graph_transform", object()),
         ("backend", "unknown"),
+        ("checkpoint_revision", "main"),
+        ("checkpoint_revision", "hf:main"),
+        ("checkpoint_revision", "ngc:version:latest"),
+        ("source_revision", "dirty"),
     ],
 )
 def test_build_request_rejects_invalid_direct_inputs(
@@ -72,6 +87,47 @@ def test_build_request_rejects_invalid_direct_inputs(
     }
     with pytest.raises(ValueError):
         BuildRequest(**kwargs)  # type: ignore[arg-type]
+
+
+def test_graph_transform_requires_a_stable_identity(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="provided together"):
+        replace(_request(tmp_path), graph_transform=lambda _network, _index: None)
+    with pytest.raises(ValueError, match="provided together"):
+        replace(_request(tmp_path), graph_transform_id="example:transform-v1")
+    with pytest.raises(ValueError, match="resolved provider version"):
+        replace(
+            _request(tmp_path),
+            graph_transform=lambda _network, _index: None,
+            graph_transform_id="mutable",
+        )
+
+
+def test_source_revision_rejects_a_dirty_checkout(monkeypatch) -> None:
+    monkeypatch.delenv("TRTMC_ENGINE_BUILD_REVISION", raising=False)
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+
+    def run(arguments, **_kwargs):
+        if arguments[-2:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout="a" * 40 + "\n")
+        return SimpleNamespace(returncode=0, stdout=" M core/builder/build.py\n")
+
+    monkeypatch.setattr(build_core.subprocess, "run", run)
+
+    with pytest.raises(ValueError, match="checkout is dirty"):
+        build_core.resolve_source_revision()
+
+
+def test_source_revision_accepts_a_clean_checkout(monkeypatch) -> None:
+    monkeypatch.delenv("TRTMC_ENGINE_BUILD_REVISION", raising=False)
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+
+    def run(arguments, **_kwargs):
+        stdout = "a" * 40 + "\n" if arguments[-2:] == ["rev-parse", "HEAD"] else ""
+        return SimpleNamespace(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(build_core.subprocess, "run", run)
+
+    assert build_core.resolve_source_revision() == "a" * 40
 
 
 def test_resolver_returns_only_the_explicit_family(tmp_path: Path) -> None:
@@ -167,6 +223,9 @@ def test_build_finishes_after_family_returns(monkeypatch, tmp_path: Path) -> Non
         def finish(self) -> None:
             events.append("finish")
 
+        def set_provenance(self, value: object) -> None:
+            events.append(("provenance", value))
+
         def abort(self) -> None:
             events.append("abort")
 
@@ -181,8 +240,104 @@ def test_build_finishes_after_family_returns(monkeypatch, tmp_path: Path) -> Non
 
     assert build_core.build(request) is None
     assert events[0] == ("writer", request.output_path)
-    assert events[1][0:2] == ("build", request)
-    assert events[2:] == ["finish"]
+    assert events[1][0] == "provenance"
+    assert events[2][0:2] == ("build", request)
+    assert events[3:] == ["finish"]
+
+
+def test_build_embeds_checkpoint_and_source_provenance(monkeypatch, tmp_path: Path) -> None:
+    checkpoint_revision = "b" * 40
+    source_revision = "a" * 40
+    request = BuildRequest(
+        model_dir=tmp_path / "model",
+        output_path=tmp_path / "model.bundle",
+        checkpoint_id="example-org/example-model",
+        checkpoint_revision=checkpoint_revision,
+        source_revision=source_revision,
+        precision="fp16",
+        family="example",
+        task="example_task",
+        max_sequence_length=128,
+    )
+
+    def family_build(seen_request: BuildRequest, writer) -> None:
+        writer.set_header(
+            family=seen_request.family,
+            task=seen_request.task,
+            backend=seen_request.backend,
+        )
+        writer.add_bytes("engine.plan", b"plan")
+
+    monkeypatch.setattr(
+        build_core,
+        "_load_family",
+        lambda _family: SimpleNamespace(build=family_build),
+    )
+
+    build_core.build(request)
+
+    provenance = read_bundle_provenance(request.output_path)
+    assert provenance == {
+        "format": 1,
+        "checkpoint": {
+            "id": "example-org/example-model",
+            "revision": checkpoint_revision,
+        },
+        "build": {"source_revision": source_revision},
+        "request": {
+            "family": "example",
+            "task": "example_task",
+            "backend": "trt",
+            "precision": "fp16",
+            "max_sequence_length": 128,
+            "max_batch_size": 1,
+            "tensor_parallel_size": 1,
+            "context_parallel_size": 1,
+            "dynamic_kv_cache": False,
+        },
+    }
+
+
+def test_build_freezes_source_revision_before_family_build(
+    monkeypatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    source_revision = "a" * 40
+    request = BuildRequest(
+        model_dir=tmp_path / "model",
+        output_path=tmp_path / "model.bundle",
+        checkpoint_id="example-org/example-model",
+        checkpoint_revision="b" * 40,
+        source_revision=source_revision,
+        precision="fp16",
+        family="example",
+        task="example_task",
+    )
+
+    def resolve_source_revision(explicit: str = "") -> str:
+        assert explicit == source_revision
+        events.append("resolve_source_revision")
+        return source_revision
+
+    def family_build(seen_request: BuildRequest, writer) -> None:
+        events.append("family_build")
+        writer.set_header(
+            family=seen_request.family,
+            task=seen_request.task,
+            backend=seen_request.backend,
+        )
+        writer.add_bytes("engine.plan", b"plan")
+
+    monkeypatch.setattr(build_core, "resolve_source_revision", resolve_source_revision)
+    monkeypatch.setattr(
+        build_core,
+        "_load_family",
+        lambda _family: SimpleNamespace(build=family_build),
+    )
+
+    build_core.build(request)
+
+    assert events == ["resolve_source_revision", "family_build"]
 
 
 def test_build_runs_graph_transform_before_family_engine_serialization(
@@ -208,6 +363,9 @@ def test_build_runs_graph_transform_before_family_engine_serialization(
         def finish(self) -> None:
             events.append("finish")
 
+        def set_provenance(self, _value: object) -> None:
+            pass
+
         def abort(self) -> None:
             events.append("abort")
 
@@ -219,7 +377,11 @@ def test_build_runs_graph_transform_before_family_engine_serialization(
         setattr(network, "replaced", True)
         events.append(("transform", network, engine_index))
 
-    request = replace(_request(tmp_path), graph_transform=transform)
+    request = replace(
+        _request(tmp_path),
+        graph_transform=transform,
+        graph_transform_id="c" * 40,
+    )
     monkeypatch.setattr(build_core, "BundleWriter", FakeWriter)
     monkeypatch.setattr(
         build_core, "_load_family", lambda family: SimpleNamespace(build=family_build)
@@ -245,6 +407,9 @@ def test_build_aborts_and_preserves_family_error(monkeypatch, tmp_path: Path) ->
 
         def finish(self) -> None:
             events.append("finish")
+
+        def set_provenance(self, _value: object) -> None:
+            pass
 
         def abort(self) -> None:
             events.append("abort")
@@ -273,6 +438,9 @@ def test_build_aborts_if_finish_fails(monkeypatch, tmp_path: Path) -> None:
         def finish(self) -> None:
             events.append("finish")
             raise OSError("publish failed")
+
+        def set_provenance(self, _value: object) -> None:
+            pass
 
         def abort(self) -> None:
             events.append("abort")

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-Pillow
-accelerate
+Pillow==12.2.0
+accelerate==1.14.0
 diffusers==0.40.0
 transformers==5.15.0

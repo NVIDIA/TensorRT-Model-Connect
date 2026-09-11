@@ -11,6 +11,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from tensorrt_model_connect import validate_checkpoint_revision
+
 from .task_adapters import default_operation, resolve_task_case, supported_tasks
 from .types import BenchmarkError, MeasurementSpec, ModelDescriptor, ResolvedCase
 
@@ -166,10 +168,30 @@ class ManifestCatalog:
         settings.setdefault("max_batch_size", 1)
         settings.setdefault("tensor_parallel_size", 1)
         settings.setdefault("context_parallel_size", 1)
+        hf_id = _optional_string(raw.get("hf_id", ""), "hf_id", path)
+        hf_revision = _optional_string(raw.get("hf_revision", ""), "hf_revision", path)
+        checkpoint_id = _optional_string(
+            raw.get("checkpoint_id", hf_id), "checkpoint_id", path
+        )
+        checkpoint_revision = _optional_string(
+            raw.get("checkpoint_revision", hf_revision), "checkpoint_revision", path
+        )
+        if not checkpoint_id or not checkpoint_revision:
+            raise BenchmarkError(
+                f"model manifest must declare an immutable checkpoint identity: {path}"
+            )
+        try:
+            validate_checkpoint_revision(checkpoint_revision)
+        except ValueError as error:
+            raise BenchmarkError(
+                f"model manifest has a mutable checkpoint_revision in {path}: {error}"
+            ) from error
         return ModelDescriptor(
             name=_string(raw["name"], "name", path),
-            hf_id=_optional_string(raw.get("hf_id", ""), "hf_id", path),
-            hf_revision=_optional_string(raw.get("hf_revision", ""), "hf_revision", path),
+            hf_id=hf_id,
+            hf_revision=hf_revision,
+            checkpoint_id=checkpoint_id,
+            checkpoint_revision=checkpoint_revision,
             bundle_name=_string(raw["bundle"], "bundle", path),
             family=_string(raw["family"], "family", path),
             task=_string(raw["task"], "task", path),

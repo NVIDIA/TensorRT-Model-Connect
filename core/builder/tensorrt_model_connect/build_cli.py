@@ -7,11 +7,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Sequence
 
-from .build import BuildRequest, _load_family, build
+from .build import (
+    BuildRequest,
+    _load_family,
+    build,
+    resolve_source_revision,
+    validate_checkpoint_revision,
+)
 from .model_support import load_model_metadata, resolve_family
+
+
+_EXACT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -21,6 +31,10 @@ def _parser() -> argparse.ArgumentParser:
     build_parser.add_argument("model", help="Hugging Face model ID or local snapshot")
     build_parser.add_argument("-o", "--output", type=Path, required=True)
     build_parser.add_argument("--task", help="Override the family-owned default task")
+    build_parser.add_argument(
+        "--checkpoint-id",
+        help="Canonical checkpoint ID when MODEL is an already-resolved local snapshot",
+    )
     build_parser.add_argument("--revision", help="Hugging Face model revision")
     build_parser.add_argument("--precision", choices=("fp16", "bf16", "fp32"))
     build_parser.add_argument("--backend", choices=("trt", "trt_rtx"), default="trt")
@@ -49,7 +63,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    source_is_local = Path(args.model).is_dir()
+    if args.command == "build" and source_is_local and not args.checkpoint_id:
+        raise ValueError("--checkpoint-id is required when MODEL is a local directory")
     model_dir = _resolve_model(args.model, args.revision)
+    if args.command == "build":
+        checkpoint_revision = _checkpoint_revision(model_dir, requested=args.revision)
     family, support = resolve_family(load_model_metadata(model_dir))
     if args.command == "prepare-structure":
         if "structure_prediction" not in support.tasks:
@@ -78,6 +97,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         BuildRequest(
             model_dir=model_dir,
             output_path=args.output,
+            checkpoint_id=args.checkpoint_id or args.model,
+            checkpoint_revision=checkpoint_revision,
+            source_revision=_source_revision(),
             precision=args.precision or support.default_precision,
             backend=args.backend,
             family=family,
@@ -108,3 +130,17 @@ def _resolve_model(model: str, revision: str | None) -> Path:
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(repo_id=model, revision=revision))
+
+
+def _checkpoint_revision(model_dir: Path, *, requested: str | None) -> str:
+    resolved = model_dir.name.lower() if model_dir.parent.name == "snapshots" else ""
+    if _EXACT_REVISION.fullmatch(resolved):
+        return resolved
+    requested = (requested or "").strip()
+    if requested:
+        return validate_checkpoint_revision(requested)
+    raise ValueError("checkpoint revision is required and must identify immutable content")
+
+
+def _source_revision() -> str:
+    return resolve_source_revision()

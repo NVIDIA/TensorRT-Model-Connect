@@ -1,6 +1,7 @@
 {
   "name": "falcon-rw-1b-tp4",
   "hf_id": "tiiuae/falcon-rw-1b",
+  "hf_revision": "e4b9872bb803165eb22f0a867d4e6a64d34fce19",
   "bundle": "falcon-rw-1b-tp4.bundle",
   "family": "falcon",
   "task": "text_generation",

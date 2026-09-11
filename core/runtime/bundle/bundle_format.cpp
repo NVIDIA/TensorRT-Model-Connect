@@ -23,6 +23,13 @@ namespace {
 using BundleSectionLocation = std::pair<std::uint64_t, std::uint64_t>;
 using BundleSectionEntry = std::pair<std::string, BundleSectionLocation>;
 using BundleSectionTable = std::vector<BundleSectionEntry>;
+constexpr std::uint64_t kProvenanceFooterSize = 16;
+constexpr std::uint64_t kMaxJsonSize = 100 * 1024 * 1024;
+
+struct ProvenanceTrailer {
+    std::uint64_t payload_end{0};
+    std::string json;
+};
 
 uint64_t read_u64_le(std::ifstream& in) {
     unsigned char bytes[8];
@@ -35,6 +42,42 @@ uint64_t read_u64_le(std::ifstream& in) {
         value = (value << 8) | bytes[i];
     }
     return value;
+}
+
+ProvenanceTrailer read_provenance_trailer(std::ifstream& in, std::uint64_t file_size,
+                                          std::uint64_t minimum_start, const std::string& path) {
+    ProvenanceTrailer result{file_size, {}};
+    if (file_size < minimum_start + kProvenanceFooterSize)
+        return result;
+
+    in.clear();
+    in.seekg(static_cast<std::streamoff>(file_size - sizeof(kBundleProvenanceMagic)));
+    unsigned char magic[sizeof(kBundleProvenanceMagic)];
+    in.read(reinterpret_cast<char*>(magic), sizeof(magic));
+    if (!in || std::memcmp(magic, kBundleProvenanceMagic, sizeof(magic)) != 0) {
+        in.clear();
+        return result;
+    }
+
+    in.seekg(static_cast<std::streamoff>(file_size - kProvenanceFooterSize));
+    const std::uint64_t length = read_u64_le(in);
+    if (length > kMaxJsonSize || length > file_size - minimum_start - kProvenanceFooterSize)
+        throw std::runtime_error("Invalid bundle provenance trailer in: " + path);
+    const std::uint64_t start = file_size - kProvenanceFooterSize - length;
+    in.seekg(static_cast<std::streamoff>(start));
+    result.json.assign(static_cast<std::size_t>(length), '\0');
+    in.read(result.json.data(), static_cast<std::streamsize>(length));
+    if (!in)
+        throw std::runtime_error("Failed to read bundle provenance trailer from: " + path);
+    try {
+        const nlohmann::json provenance = nlohmann::json::parse(result.json);
+        if (!provenance.is_object())
+            throw std::runtime_error("Bundle provenance must be a JSON object: " + path);
+    } catch (const nlohmann::json::exception& error) {
+        throw std::runtime_error("Invalid bundle provenance JSON: " + std::string(error.what()));
+    }
+    result.payload_end = start;
+    return result;
 }
 
 void require_exact_keys(const nlohmann::json& object,
@@ -159,7 +202,7 @@ BundleReader::BundleReader(std::string bundle_path) {
     }
 
     const uint64_t header_length = read_u64_le(in);
-    if (header_length > 100 * 1024 * 1024) {
+    if (header_length > kMaxJsonSize) {
         throw std::runtime_error("Bundle header too large: " + path_);
     }
 
@@ -178,6 +221,7 @@ BundleReader::BundleReader(std::string bundle_path) {
         throw std::runtime_error("Failed to determine bundle size: " + path_);
     file_size_ = static_cast<std::uint64_t>(file_end);
     data_offset_ = kBundleHeaderOffset + header_length;
+    file_size_ = read_provenance_trailer(in, file_size_, data_offset_, path_).payload_end;
     for (const auto& section : info_.sections)
         (void)checked_section_file_offset(section, data_offset_, file_size_, path_);
 }
@@ -217,6 +261,20 @@ std::vector<char> BundleReader::read_section(std::string_view name) const {
 
 BundleInfo InspectBundle(const std::string& bundle_path) {
     return BundleReader(bundle_path).info();
+}
+
+std::string InspectBundleProvenance(const std::string& bundle_path) {
+    const BundleReader reader(bundle_path);
+    std::ifstream in(reader.path(), std::ios::binary);
+    if (!in)
+        throw std::runtime_error("Failed to open bundle file: " + reader.path());
+    in.seekg(0, std::ios::end);
+    const auto file_end = in.tellg();
+    if (file_end < 0)
+        throw std::runtime_error("Failed to determine bundle size: " + reader.path());
+    return read_provenance_trailer(in, static_cast<std::uint64_t>(file_end), kBundleHeaderOffset,
+                                   reader.path())
+        .json;
 }
 
 } // namespace trtmc

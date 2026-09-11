@@ -2,4 +2,4 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Used by the Transformers reference loader.
-accelerate>=1.0
+accelerate==1.14.0

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from tensorrt_model_connect import read_bundle_provenance, resolve_source_revision
 from tensorrt_model_connect.build_cli import _resolve_model
 
 from .types import BenchmarkError, ModelDescriptor, ResolvedCase
@@ -119,7 +120,12 @@ class BundleBuilder:
         model = cases[0].model
         managed = _is_relative_to(requested, self.cache_root)
         if requested.is_file() and not rebuild:
-            return requested, BundlePreparation(model.name, "reused", requested)
+            if _bundle_matches_model(requested, model, cases):
+                return requested, BundlePreparation(model.name, "reused", requested)
+            if not allow_build:
+                raise BenchmarkError(
+                    f"bundle provenance does not match {model.name}: {requested}"
+                )
         if requested.is_file() and not managed:
             raise BenchmarkError(
                 f"--rebuild cannot overwrite explicit bundle {requested}; "
@@ -151,6 +157,16 @@ class BundleBuilder:
             raise BenchmarkError(f"model directory does not exist: {explicit}")
         if explicit is None and not model.hf_id:
             raise BenchmarkError(f"{model.name} has no hf_id; pass --model-dir")
+        if explicit is not None and model.hf_id:
+            resolved_explicit = explicit.resolve()
+            if (
+                resolved_explicit.parent.name != "snapshots"
+                or resolved_explicit.name.lower() != model.hf_revision.lower()
+            ):
+                raise BenchmarkError(
+                    f"explicit model directory for {model.name} must be the exact Hugging Face "
+                    f"snapshot ending in /snapshots/{model.hf_revision}"
+                )
         try:
             model_dir = _resolve_model(
                 str(explicit) if explicit is not None else model.hf_id,
@@ -238,7 +254,7 @@ def _build_command(
     bundle: Path,
     cases: Sequence[ResolvedCase],
 ) -> tuple[str, ...]:
-    settings = model.build_settings
+    settings = _build_request_options(model, cases)
     command = [
         sys.executable,
         "-m",
@@ -252,6 +268,8 @@ def _build_command(
         "--precision",
         model.precision,
     ]
+    command.extend(("--checkpoint-id", model.checkpoint_id))
+    command.extend(("--revision", model.checkpoint_revision))
     flags = (
         ("max_sequence_length", "--max-sequence-length"),
         ("image_height", "--image-height"),
@@ -272,24 +290,30 @@ def _build_command(
     if settings.get("dynamic_kv_cache", False):
         command.append("--dynamic-kv-cache")
 
+    return tuple(command)
+
+
+def _build_request_options(
+    model: ModelDescriptor, cases: Sequence[ResolvedCase]
+) -> dict[str, object]:
+    settings: dict[str, object] = dict(model.build_settings)
+    settings.setdefault("backend", "trt")
+    settings.setdefault("max_batch_size", 1)
+    settings.setdefault("tensor_parallel_size", 1)
+    settings.setdefault("context_parallel_size", 1)
+    settings.setdefault("dynamic_kv_cache", False)
+
     image_cases = [case for case in cases if case.operation == "generate_image"]
     if image_cases:
         heights = [int(case.request.get("height", 0)) for case in image_cases]
         widths = [int(case.request.get("width", 0)) for case in image_cases]
         batches = [int(case.request.get("batch_size", 1)) for case in image_cases]
-        _replace_value(command, "--image-height", max(heights, default=0))
-        _replace_value(command, "--image-width", max(widths, default=0))
-        _replace_value(command, "--max-batch-size", max(batches, default=1))
-    return tuple(command)
-
-
-def _replace_value(command: list[str], flag: str, value: int) -> None:
-    if value <= 0:
-        return
-    if flag in command:
-        command[command.index(flag) + 1] = str(value)
-    else:
-        command.extend((flag, str(value)))
+        if max(heights, default=0) > 0:
+            settings["image_height"] = max(heights)
+        if max(widths, default=0) > 0:
+            settings["image_width"] = max(widths)
+        settings["max_batch_size"] = max(batches, default=1)
+    return settings
 
 
 def _write(path: Path, value: str) -> None:
@@ -308,3 +332,34 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _bundle_matches_model(
+    bundle: Path, model: ModelDescriptor, cases: Sequence[ResolvedCase]
+) -> bool:
+    try:
+        source_revision = resolve_source_revision()
+    except ValueError:
+        return False
+    try:
+        provenance = read_bundle_provenance(bundle)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(provenance, dict) or provenance.get("format") != 1:
+        return False
+    expected_request = {
+        "family": model.family,
+        "task": model.task,
+        "precision": model.precision,
+        **_build_request_options(model, cases),
+    }
+    if not expected_request.get("fp32_layers"):
+        expected_request.pop("fp32_layers", None)
+    elif isinstance(expected_request["fp32_layers"], tuple):
+        expected_request["fp32_layers"] = list(expected_request["fp32_layers"])
+    return provenance.get("checkpoint") == {
+        "id": model.checkpoint_id,
+        "revision": model.checkpoint_revision,
+    } and provenance.get("build") == {
+        "source_revision": source_revision
+    } and provenance.get("request") == expected_request

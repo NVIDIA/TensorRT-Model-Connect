@@ -1,6 +1,7 @@
 {
   "name": "modernbert-base",
   "hf_id": "answerdotai/ModernBERT-base",
+  "hf_revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
   "bundle": "modernbert-base.bundle",
   "family": "modernbert",
   "task": "encoding",
