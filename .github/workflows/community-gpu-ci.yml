@@ -263,7 +263,13 @@ jobs:
         run: |
           set -euo pipefail
           brev exec "$INSTANCE_NAME" "git clone --no-checkout https://github.com/$GITHUB_REPOSITORY.git /tmp/model_connect && cd /tmp/model_connect && git fetch --depth 1 origin $HEAD_SHA && git checkout $HEAD_SHA"
-          brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements"
+          # sudo: a freshly created instance's SSH session does not
+          # reliably have its docker-group membership propagated yet
+          # (confirmed live: "permission denied ... docker.sock" on the
+          # very first docker command right after instance creation).
+          # sudo sidesteps the group-membership timing entirely rather
+          # than depending on it.
+          brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements"
 
           # Selective by design: 87 model families exist, and running the
           # full tests/e2e/models suite on GPU for every push is not
@@ -297,7 +303,7 @@ jobs:
             exit 0
           fi
 
-          brev exec "$INSTANCE_NAME" "docker run --rm --gpus all -v /tmp/model_connect:/src -w /src trtmc-quickstart-gpu bash -c 'python3.12 -m pip install --no-deps -e . -C py-only=true && python3.12 -m pytest $test_paths -v'" \
+          brev exec "$INSTANCE_NAME" "sudo docker run --rm --gpus all -v /tmp/model_connect:/src -w /src trtmc-quickstart-gpu bash -c 'python3.12 -m pip install --no-deps -e . -C py-only=true && python3.12 -m pytest $test_paths -v'" \
             | tee /tmp/gpu-ci-output.log
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
