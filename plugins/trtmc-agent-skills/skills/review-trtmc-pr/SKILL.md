@@ -295,7 +295,7 @@ claiming execution.
 
 Interpret CI carefully:
 
-- Public Community CPU and protected premerge are different evidence tiers.
+- Public Community CI and protected premerge are different evidence tiers.
 - A bridge dispatch is not a protected test pass.
 - Only a passing `TRTMC Internal CI / Automated premerge gate` on the current
   head proves protected premerge for that head.

@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Temporary rollout compatibility gate. The default-branch Internal CI bridge
+# still resolves this workflow by filename while Community CI is introduced.
+# Remove this file only after Community CI has run successfully from main and
+# the updated bridge can authorize against its Community CPU / Required job.
 name: Community CPU
 
 run-name: >-

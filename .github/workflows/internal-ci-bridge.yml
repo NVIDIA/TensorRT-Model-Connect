@@ -99,12 +99,74 @@ jobs:
             exit 1
           fi
 
-          community_cpu_run="$(
+          # Keep the label path CPU-gated. During rollout, accept the legacy
+          # workflow so this PR can satisfy the bridge already on main. After
+          # Community CI is live on main, accept its exact successful CPU
+          # aggregate without waiting for the later GPU stage to finish.
+          community_cpu_runs="$(
             gh api --method GET \
               "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
-              --jq '.workflow_runs | map(select(.conclusion == "success")) | sort_by(.updated_at) | last | .id // empty'
+              2>/dev/null || true
           )"
+          community_cpu_run=""
+          if [ -n "$community_cpu_runs" ]; then
+            community_cpu_title_prefix="PR #$PR_NUMBER · public CPU · merge "
+            community_cpu_record="$(
+              jq -r --arg prefix "$community_cpu_title_prefix" \
+                '.workflow_runs
+                 | map(select(.conclusion == "success" and (.display_title | startswith($prefix))))
+                 | sort_by(.updated_at) | last
+                 | if . then [.id, .display_title] | @tsv else empty end' \
+                <<<"$community_cpu_runs"
+            )"
+            if [ -n "$community_cpu_record" ]; then
+              IFS=$'\t' read -r candidate_run candidate_title <<<"$community_cpu_record"
+              candidate_merge="${candidate_title#"$community_cpu_title_prefix"}"
+              if [[ "$candidate_run" =~ ^[1-9][0-9]*$ ]] \
+                && [[ "$candidate_merge" =~ ^[0-9a-f]{40}$ ]]; then
+                merge="$(
+                  gh api --method GET \
+                    "/repos/$GITHUB_REPOSITORY/git/commits/$candidate_merge"
+                )"
+                merge_parent_count="$(jq -er '.parents | length' <<<"$merge")"
+                merge_base="$(jq -er '.parents[0].sha' <<<"$merge")"
+                merge_head="$(jq -er '.parents[1].sha' <<<"$merge")"
+                if [ "$merge_parent_count" = "2" ] \
+                  && [ "$merge_base" = "$base_sha" ] \
+                  && [ "$merge_head" = "$head_sha" ]; then
+                  community_cpu_run="$candidate_run"
+                fi
+              fi
+            fi
+          fi
+          community_cpu_job=""
           if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then
+            community_ci_runs="$(
+              gh api --method GET \
+                "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request_target&head_sha=$head_sha&per_page=100" \
+                2>/dev/null || true
+            )"
+            community_ci_title="PR #$PR_NUMBER · community CI · head $head_sha · base $base_sha"
+            community_ci_run=""
+            if [ -n "$community_ci_runs" ]; then
+              community_ci_run="$(
+                jq -r --arg title "$community_ci_title" \
+                  '.workflow_runs
+                   | map(select(.display_title == $title))
+                   | sort_by(.updated_at) | last | .id // empty' \
+                  <<<"$community_ci_runs"
+              )"
+            fi
+            if [[ "$community_ci_run" =~ ^[1-9][0-9]*$ ]]; then
+              community_cpu_job="$(
+                gh api --method GET \
+                  "/repos/$GITHUB_REPOSITORY/actions/runs/$community_ci_run/jobs?filter=latest&per_page=100" \
+                  --jq '.jobs | map(select(.name == "Community CPU / Required" and .conclusion == "success")) | last | .id // empty'
+              )"
+            fi
+          fi
+          if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]] \
+            && ! [[ "$community_cpu_job" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::Community CPU / Required must pass on the current PR head before internal CI can run."
             exit 1
           fi

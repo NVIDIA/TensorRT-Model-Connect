@@ -196,12 +196,13 @@ request in draft, record the question, and ask a maintainer. Rerun the affected
 validation and self-review after material changes. Self-review does not replace
 public CI, protected CI, or maintainer review.
 
-### 9. Run contributor-visible public CPU validation
+### 9. Run contributor-visible Community CI
 
-Opening a pull request or pushing a new commit automatically starts Community
-CPU against GitHub's exact pull-request merge revision. Separate jobs run
-source quality, ownership and impact analysis, and the selected source-only C++
-and Python units. No comment or maintainer action is required.
+Opening a pull request or pushing a new commit automatically starts one ordered
+Community CI workflow. Its first stage validates GitHub's exact pull-request
+merge revision. Separate CPU jobs run source quality, ownership and impact
+analysis, documentation, and the selected source-only C++ and Python units. No
+comment or maintainer action is required.
 
 Source quality first checks required SPDX headers on all tracked source files
 and rejects changes to `LICENSE` or `NOTICE` relative to the tested merge's base.
@@ -210,15 +211,24 @@ To run the full source-quality gate locally, use
 `python3 -m tools.community_ci source-quality --base upstream/main` after fetching
 the target branch and installing `requirements/community-ci.txt`.
 
-All public jobs run on GitHub-hosted `ubuntu-24.04` runners. Test jobs have
+The CPU jobs run on fresh GitHub-hosted `ubuntu-24.04` runners with
 read-only repository permission and no access to private runners, secrets, or
-GPUs. GitHub publishes native pull-request checks and public Actions logs,
-including the complete output for every failed command.
+GPUs.
+Only after `Community CPU / Required` passes does the workflow classify GPU
+impact with trusted base-branch code and, when needed, reserve an isolated
+external GPU instance. The Brev credential remains in the hosted orchestration
+job; pull-request code executes only on the isolated GPU instance and cannot
+read that credential. GPU reservations are serialized across the repository;
+GitHub may cancel an older queued GPU job when newer work enters the shared
+queue, in which case rerun Community CI for the affected head.
 
-Wait for `Community CPU / Required` to pass on the current merge revision. A
-new commit automatically validates the new merge revision and cancels an older
-in-progress run for the same pull request. If `main` advances and GitHub asks
-for an update, rebase or update the branch so the new exact merge is validated.
+GitHub publishes native pull-request checks and public Actions logs, including
+the complete output for every failed command. Wait for the complete `Community
+CI` workflow, including `Community GPU / Required` when GPU-impacting tests are
+selected, to pass on the current pull-request head. A new commit automatically
+validates a fresh merge revision and cancels an older in-progress run for the
+same pull request. If `main` advances and GitHub asks for an update, rebase or
+update the branch so the new exact merge is validated.
 
 ### 10. Ask a maintainer to trigger protected CI
 
@@ -231,12 +241,14 @@ comment:
 @yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
 ```
 
-The maintainer verifies the pull-request head and a successful Community CPU
-run for that head, then applies the one-shot `run-internal-ci` label. Only
+The maintainer verifies the pull-request head and a successful `Community CPU /
+Required` result for that head, then applies the one-shot `run-internal-ci`
+label. Only
 collaborators with repository `maintain` or `admin` permission can authorize
 that trigger.
-The trusted bridge consumes the label, rechecks `Community CPU / Required`,
-captures the current PR head SHA, and dispatches protected premerge validation.
+The trusted bridge consumes the label, rechecks that CPU aggregate in Community
+CI, captures the current PR head SHA, and dispatches protected premerge
+validation without waiting for the later GPU stage.
 If authorization rejects the request, ask the maintainer to remove and re-add
 the retained label after satisfying the reported prerequisite. Adding an
 already-present label does not create a new trigger event.
@@ -245,7 +257,7 @@ Wait for `TRTMC Internal CI / Automated premerge gate` to pass on the exact
 pull-request head SHA. This is an automated test result, not a request for an
 individual maintainer review.
 If you push another commit, the previous result no longer validates the current
-head; finish the update, wait for automatic Community CPU validation, and
+head; finish the update, wait for the automatic Community CPU stage, and
 mention `@yifeif-nv` once to request a new protected run. Private runner details,
 logs, artifacts, and URLs are not part of the public contribution interface.
 
