@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Exercises the ownership the Marian pipeline uses for its cross-attention K/V
-// buffers, against CPU CUDA stubs so each allocation can be failed in turn
-// without a GPU. MarianPipeline itself needs live TensorRT modules to build, so
-// this drives the same allocation loop over the same owning type.
+// Drives the Marian pipeline's own allocation paths - allocate_cross_kv, which
+// the constructor runs, and ensure_encoder_mask, which setup_cross_attention
+// runs - against CPU CUDA stubs so each allocation can be failed in turn
+// without a GPU. MarianPipeline itself needs live TensorRT modules to build.
 
 #include "families/marian/runtime/device_buffer.h"
 
@@ -30,23 +30,6 @@ void check(bool condition, const char* what) {
     if (!condition) {
         std::fprintf(stderr, "FAIL: %s\n", what);
         ++g_failures;
-    }
-}
-
-// The allocation loop from MarianPipeline's constructor, over the same type.
-void allocate_cross_kv(std::vector<trtmc::marian::DeviceBuffer>& keys,
-                       std::vector<trtmc::marian::DeviceBuffer>& values, int32_t layers,
-                       std::size_t bytes) {
-    keys.resize(static_cast<std::size_t>(layers));
-    values.resize(static_cast<std::size_t>(layers));
-    for (int32_t i = 0; i < layers; ++i) {
-        const std::size_t layer = static_cast<std::size_t>(i);
-        if (keys[layer].allocate(bytes) != cudaSuccess)
-            throw std::runtime_error(
-                "MarianPipeline: unable to allocate cross-attention key buffer");
-        if (values[layer].allocate(bytes) != cudaSuccess)
-            throw std::runtime_error(
-                "MarianPipeline: unable to allocate cross-attention value buffer");
     }
 }
 
@@ -90,7 +73,7 @@ int main() {
         try {
             std::vector<trtmc::marian::DeviceBuffer> keys;
             std::vector<trtmc::marian::DeviceBuffer> values;
-            allocate_cross_kv(keys, values, layers, bytes);
+            trtmc::marian::allocate_cross_kv(keys, values, layers, bytes);
         } catch (const std::runtime_error& error) {
             threw = true;
             // Allocations alternate key, value, so an odd failure point is a
@@ -114,11 +97,41 @@ int main() {
     {
         std::vector<trtmc::marian::DeviceBuffer> keys;
         std::vector<trtmc::marian::DeviceBuffer> values;
-        allocate_cross_kv(keys, values, layers, bytes);
+        trtmc::marian::allocate_cross_kv(keys, values, layers, bytes);
         check(g_outstanding.size() == static_cast<std::size_t>(2 * layers),
               "every layer should hold a key and a value buffer");
     }
     check(g_outstanding.empty(), "leaving scope should release every buffer");
+
+    // The encoder mask is allocated lazily by setup_cross_attention. A failure
+    // must throw and hold nothing; a success must allocate exactly once, and a
+    // repeat call must reuse it rather than allocate again.
+    {
+        trtmc::marian::DeviceBuffer mask;
+        g_fail_on_allocation = 1;
+        g_allocation_count = 0;
+        bool mask_threw = false;
+        try {
+            trtmc::marian::ensure_encoder_mask(mask, bytes);
+        } catch (const std::runtime_error& error) {
+            mask_threw = true;
+            check(std::string(error.what()) ==
+                      "MarianPipeline: unable to allocate encoder mask buffer",
+                  "the encoder mask error should name the encoder mask");
+        }
+        check(mask_threw, "a failed encoder mask allocation should throw");
+        check(mask.get() == nullptr && g_outstanding.empty(),
+              "a failed encoder mask allocation must hold nothing");
+
+        g_fail_on_allocation = 0;
+        g_allocation_count = 0;
+        trtmc::marian::ensure_encoder_mask(mask, bytes);
+        check(mask.get() != nullptr && g_outstanding.size() == 1,
+              "the encoder mask should allocate once");
+        trtmc::marian::ensure_encoder_mask(mask, bytes);
+        check(g_allocation_count == 1, "a second call must reuse the mask, not reallocate");
+    }
+    check(g_outstanding.empty(), "leaving scope should release the encoder mask");
 
     if (g_failures != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);

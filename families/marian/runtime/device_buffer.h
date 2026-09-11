@@ -6,7 +6,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
+#include <stdexcept>
+#include <vector>
 
 namespace trtmc {
 namespace marian {
@@ -46,6 +49,28 @@ class DeviceBuffer {
   private:
     void* ptr_{nullptr};
 };
+
+// The pipeline's own allocation paths, kept here so the test can drive the
+// same code the constructor and setup_cross_attention run.
+inline void allocate_cross_kv(std::vector<DeviceBuffer>& keys, std::vector<DeviceBuffer>& values,
+                              int32_t layers, std::size_t bytes) {
+    keys.resize(static_cast<std::size_t>(layers));
+    values.resize(static_cast<std::size_t>(layers));
+    for (int32_t i = 0; i < layers; ++i) {
+        const std::size_t layer = static_cast<std::size_t>(i);
+        if (keys[layer].allocate(bytes) != cudaSuccess)
+            throw std::runtime_error(
+                "MarianPipeline: unable to allocate cross-attention key buffer");
+        if (values[layer].allocate(bytes) != cudaSuccess)
+            throw std::runtime_error(
+                "MarianPipeline: unable to allocate cross-attention value buffer");
+    }
+}
+
+inline void ensure_encoder_mask(DeviceBuffer& mask, std::size_t bytes) {
+    if (mask.get() == nullptr && mask.allocate(bytes) != cudaSuccess)
+        throw std::runtime_error("MarianPipeline: unable to allocate encoder mask buffer");
+}
 
 } // namespace marian
 } // namespace trtmc
