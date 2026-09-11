@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -122,6 +123,56 @@ class FakeStreamingAudio final : public trtmc::IAudioGeneration,
         const float samples[] = {0.25F, -0.5F, 0.75F};
         callback(samples, 3, 24000);
         return 3;
+    }
+};
+
+class FakeMultichannelAudio final : public trtmc::IAudioGeneration,
+                                    public trtmc::IStreamingAudioGeneration,
+                                    public trtmc::IMultichannelStreamingAudioGeneration {
+  public:
+    std::string fault;
+    trtmc::AudioGenerationConfig seen;
+    std::int32_t seen_chunk_frames{0};
+
+    trtmc::AudioResult generate_audio(const std::string&,
+                                      const trtmc::AudioGenerationConfig&) override {
+        throw std::logic_error("synchronous audio path was selected");
+    }
+    std::int32_t generate_audio_streaming(const std::string&, const trtmc::AudioGenerationConfig&,
+                                          trtmc::AudioChunkCallback, std::int32_t) override {
+        throw std::logic_error("mono capability was selected instead of multichannel");
+    }
+    std::int64_t generate_audio_streaming(const std::string&,
+                                          const trtmc::AudioGenerationConfig& config,
+                                          trtmc::MultichannelAudioChunkCallback callback,
+                                          std::int32_t chunk_frames) override {
+        seen = config;
+        seen_chunk_frames = chunk_frames;
+        if (fault == "empty")
+            return 0;
+        float first[] = {0.25F, -0.5F, 0.75F, -1.0F};
+        trtmc::AudioChunkView chunk{first, 4, 48000, 2};
+        if (fault == "null")
+            chunk.samples = nullptr;
+        if (fault == "partial frame")
+            chunk.num_samples = 3;
+        if (fault == "empty chunk")
+            chunk.num_samples = 0;
+        if (fault == "negative count")
+            chunk.num_samples = -2;
+        if (fault == "invalid rate")
+            chunk.sample_rate = 0;
+        if (fault == "invalid channels")
+            chunk.num_channels = 0;
+        if (fault == "nonfinite")
+            first[0] = std::numeric_limits<float>::infinity();
+        callback(chunk);
+        if (fault == "producer error")
+            throw std::runtime_error("synthetic producer failure");
+        const float last[] = {0.125F, -0.25F};
+        callback(
+            {last, 2, fault == "rate change" ? 24000 : 48000, fault == "channel change" ? 1 : 2});
+        return fault == "wrong total" ? 3 : 6;
     }
 };
 
@@ -585,6 +636,48 @@ int main() {
           "streaming audio options reach the Task API");
     check(audio_output.str().find("\"format\":\"float32le\"") != std::string::npos,
           "streaming audio output format is explicit");
+    std::filesystem::remove(audio_path);
+
+    check(audio_output.str().find("\"num_channels\":1") != std::string::npos,
+          "legacy streaming reports one channel");
+    FakeMultichannelAudio stereo_audio;
+    audio_output.str("");
+    audio_output.clear();
+    check(trtmc::cli::dispatch(audio_command, stereo_audio, audio_output) == 0,
+          "multichannel capability takes precedence over mono");
+    check(stereo_audio.seen.max_new_tokens == 9 && stereo_audio.seen.seed == 17 &&
+              stereo_audio.seen_chunk_frames == 4,
+          "multichannel options reach the Task API");
+    check(audio_output.str().find("\"num_channels\":2") != std::string::npos &&
+              audio_output.str().find("\"sample_rate\":48000") != std::string::npos &&
+              audio_output.str().find("\"num_samples\":6") != std::string::npos,
+          "streaming metadata describes interleaved stereo");
+    std::vector<float> streamed_samples(6);
+    {
+        std::ifstream input(audio_path, std::ios::binary);
+        input.read(reinterpret_cast<char*>(streamed_samples.data()), 6 * sizeof(float));
+        check(static_cast<bool>(input) && input.peek() == std::char_traits<char>::eof(),
+              "stream contains exactly the delivered samples");
+    }
+    check(streamed_samples == std::vector<float>({0.25F, -0.5F, 0.75F, -1.0F, 0.125F, -0.25F}),
+          "chunk concatenation preserves left and right sample order");
+
+    for (const std::string fault :
+         {"empty", "null", "partial frame", "empty chunk", "negative count", "invalid rate",
+          "invalid channels", "nonfinite", "producer error", "rate change", "channel change",
+          "wrong total"}) {
+        stereo_audio.fault = fault;
+        audio_output.str("");
+        audio_output.clear();
+        bool rejected = false;
+        try {
+            trtmc::cli::dispatch(audio_command, stereo_audio, audio_output);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        check(rejected, ("reject streaming fault: " + fault).c_str());
+        check(audio_output.str().empty(), "failed stream does not report successful output");
+    }
     std::filesystem::remove(audio_path);
 
     const std::filesystem::path transcription_path = "/tmp/trtmc-cli-transcription-stream.wav";
