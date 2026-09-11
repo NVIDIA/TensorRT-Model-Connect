@@ -287,3 +287,59 @@ def test_build_aborts_if_finish_fails(monkeypatch, tmp_path: Path) -> None:
     with pytest.raises(OSError, match="publish failed"):
         build_core.build(_request(tmp_path))
     assert events == ["finish", "abort"]
+
+
+@pytest.mark.parametrize("value", ["", "/one", "/one:/two", ":/one::/two:"])
+def test_cmake_prefixes_preserve_standard_search_order(monkeypatch, value):
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", value)
+    monkeypatch.setattr(build_core.sys, "prefix", "/python")
+    expected = [Path(item) for item in value.split(build_core.os.pathsep) if item]
+    assert build_core.cmake_prefixes() == [*expected, Path("/python")]
+
+
+def test_cmake_prefixes_without_environment_use_python_prefix(monkeypatch):
+    monkeypatch.delenv("CMAKE_PREFIX_PATH", raising=False)
+    monkeypatch.setattr(build_core.sys, "prefix", "/python")
+    assert build_core.cmake_prefixes() == [Path("/python")]
+
+
+@pytest.fixture
+def native_platform_bindings(monkeypatch):
+    from unittest.mock import Mock
+
+    runtime = SimpleNamespace(
+        cudaGetDevice=Mock(return_value=(0, 3)),
+        cudaGetDeviceProperties=Mock(return_value=(0, SimpleNamespace(major=8, minor=6))),
+        cudaRuntimeGetVersion=Mock(return_value=(0, 13030)),
+    )
+    monkeypatch.setitem(sys.modules, "tensorrt", SimpleNamespace(__version__="11.1.0.106"))
+    monkeypatch.setitem(sys.modules, "cuda.bindings", SimpleNamespace(runtime=runtime))
+    monkeypatch.setattr(build_core.sys, "platform", "linux")
+    monkeypatch.setattr(build_core.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(build_core.platform, "freedesktop_os_release", lambda: {"VERSION_ID": "24.04"})
+    monkeypatch.setattr(build_core.platform, "release", lambda: "fallback-release")
+    return runtime
+
+
+def test_native_platform_uses_executing_cuda_device_and_full_sdk(native_platform_bindings):
+    assert build_core.detect_local_platform() == {
+        "os": "linux", "os_version": "24.04", "arch": "x86_64", "sm": 86,
+        "cuda_version": "13.3", "tensorrt_version": "11.1.0.106",
+    }
+    native_platform_bindings.cudaGetDevice.assert_called_once_with()
+    native_platform_bindings.cudaGetDeviceProperties.assert_called_once_with(3)
+    native_platform_bindings.cudaRuntimeGetVersion.assert_called_once_with()
+
+
+@pytest.mark.parametrize("failing", ["cudaGetDevice", "cudaGetDeviceProperties", "cudaRuntimeGetVersion"])
+def test_native_platform_propagates_cuda_discovery_failure(native_platform_bindings, failing):
+    getattr(native_platform_bindings, failing).return_value = (35,)
+    with pytest.raises(RuntimeError, match="CUDA device discovery failed: 35"):
+        build_core.detect_local_platform()
+
+
+def test_native_platform_retains_nonlinux_identity(native_platform_bindings, monkeypatch):
+    monkeypatch.setattr(build_core.sys, "platform", "win32")
+    result = build_core.detect_local_platform()
+    assert result["os"] == "win32"
+    assert result["os_version"] == "fallback-release"

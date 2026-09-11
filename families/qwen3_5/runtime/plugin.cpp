@@ -9,6 +9,9 @@
 #include "families/qwen3_5/runtime/plugin_helpers.h"
 #include "families/qwen3_5/runtime/recurrent_state.h"
 #include "trtmc/runtime/family_factory.h"
+#ifdef TRTMC_HAS_EDGE_LLM
+#include "families/qwen3_5/runtime/edge_llm/adapter.h"
+#endif
 
 #include <algorithm>
 #include <cstdint>
@@ -119,6 +122,14 @@ std::string chat_template(const BundleReader& bundle) {
 } // namespace
 
 ITask* create(const FamilyContext& context) {
+    if (context.reader.find_section("edge_llm.json")) {
+#ifdef TRTMC_HAS_EDGE_LLM
+        return edge_llm::create(context.reader);
+#else
+        throw std::runtime_error("Qwen3.5 Edge bundle requires a runtime configured with "
+                                 "-DTRTMC_ENABLE_EDGELLM=ON; rebuild and install Model Connect");
+#endif
+    }
     const RuntimeConfig config = parse_runtime_config(context.reader);
     auto decoder = load_engine(context.backend, require_section(context.reader, "engine.plan"),
                                "qwen3_5 decoder");

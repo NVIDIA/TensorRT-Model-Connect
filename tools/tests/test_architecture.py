@@ -7,6 +7,9 @@ import ast
 import importlib.util
 import json
 import re
+from textwrap import dedent
+
+import pytest
 from pathlib import Path
 
 
@@ -352,7 +355,16 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_pr_metadata.py",
         "tools/tests/test_public_source_hygiene.py",
     }
-    expected_cmake = {"cmake/trtmcConfig.cmake.in"}
+    expected_cmake = {
+        "cmake/trtmcConfig.cmake.in",
+        "cmake/EdgeLLM.cmake",
+        "cmake/edgellm/CheckNative.cmake",
+        "cmake/edgellm/EdgeLLMConfig.cmake.in",
+        "cmake/edgellm/Install.cmake.in",
+        "cmake/edgellm/Prepare.cmake.in",
+        "cmake/edgellm/README.md",
+        "cmake/edgellm/tests/package_contract.cmake",
+    }
     expected_third_party = {
         "third_party/stb/stb_image.h",
         "third_party/stb/stb_image_resize2.h",
@@ -533,6 +545,361 @@ def test_builders_publish_the_explicit_task_without_guessing() -> None:
     assert violations == []
 
 
+def _handled_build_request_fields(family: Path) -> set[str]:
+    """Return fields read along explicit, owning-family build request calls.
+
+    Args:
+        family: Family directory containing model.py and any delegated helpers.
+
+    Returns:
+        Fields accessed on the original request, including called native callbacks.
+        Imports and renamed parameters are supported; dynamic lookup, reassigned
+        values and nested definitions receive no credit. This is a conservative
+        syntactic call graph, not proof of execution through every runtime branch.
+
+    Raises:
+        OSError, SyntaxError: A visited family module cannot be read or parsed.
+    """
+    prefix = f"families.{family.name}"
+    request_value = "<build-request>"
+    modules: dict[str, tuple[dict[str, ast.FunctionDef | ast.AsyncFunctionDef], dict[str, str]]] = {}
+
+    def imported_names(node: ast.AST, package: str) -> dict[str, str]:
+        """Resolve explicit imports in package to bound names; other nodes return empty."""
+        if isinstance(node, ast.Import):
+            return {
+                alias.asname or alias.name.split(".")[0]: _canonical_family_module(
+                    alias.name if alias.asname else alias.name.split(".")[0]
+                )
+                for alias in node.names
+            }
+        if not isinstance(node, ast.ImportFrom):
+            return {}
+        base = node.module or ""
+        if node.level:
+            try:
+                base = importlib.util.resolve_name("." * node.level + base, package)
+            except (ImportError, ValueError):
+                return {}
+        return {
+            alias.asname or alias.name: f"{_canonical_family_module(base)}.{alias.name}"
+            for alias in node.names if alias.name != "*"
+        }
+
+    def module_symbols(module: str):
+        """Cache functions/imports for module, returning empty for non-family code."""
+        if module not in modules:
+            modules[module] = ({}, {})
+            if not module.startswith(prefix + "."):
+                return modules[module]
+            path = family.joinpath(*module.removeprefix(prefix + ".").split(".")).with_suffix(".py")
+            if not path.is_file():
+                return modules[module]
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            functions, names = modules[module]
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    functions[node.name] = node
+                    names[node.name] = f"{module}.{node.name}"
+                elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.ClassDef)):
+                    overwritten = (
+                        {node.name} if isinstance(node, ast.ClassDef) else
+                        {item.id for item in ast.walk(node)
+                         if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)}
+                    )
+                    for bound_name in overwritten:
+                        names.pop(bound_name, None)
+                        functions.pop(bound_name, None)
+                imported = imported_names(node, module.rpartition(".")[0])
+                for bound_name in imported:
+                    functions.pop(bound_name, None)
+                names.update(imported)
+        return modules[module]
+
+    pending = [(f"{prefix}.model.build", (("request", request_value),))]
+    visited = set()
+    handled: set[str] = set()
+    while pending:
+        state = pending.pop()
+        if state in visited:
+            continue
+        visited.add(state)
+        target, bindings = state
+        module, _, name = target.rpartition(".")
+        functions, globals_ = module_symbols(module)
+        function = functions.get(name)
+        if function is None:
+            continue
+        names = dict(globals_)
+        for argument in [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]:
+            names.pop(argument.arg, None)
+        names.update(bindings)
+
+        def value(node: ast.AST) -> str | None:
+            """Resolve an expression through current request, function or import bindings."""
+            parts = _attribute_path(node)
+            if not parts or parts[0] not in names:
+                return None
+            return ".".join((names[parts[0]], *parts[1:]))
+
+        def scan(node: ast.AST) -> None:
+            """Visit executable syntax in order, queuing calls and killing overwritten names."""
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.pop(node.name, None)
+                return
+            if isinstance(node, ast.Lambda):
+                return
+            if isinstance(node, ast.Attribute) and value(node.value) == request_value:
+                if isinstance(node.ctx, ast.Load):
+                    handled.add(node.attr)
+            if isinstance(node, ast.Call) and (callee := value(node.func)):
+                called_module, _, called_name = callee.rpartition(".")
+                called = module_symbols(called_module)[0].get(called_name)
+                if called is not None:
+                    arguments = [*called.args.posonlyargs, *called.args.args]
+                    supplied = {arg.arg: value(expr) for arg, expr in zip(arguments, node.args)}
+                    keyword_names = {
+                        arg.arg for arg in [*called.args.args, *called.args.kwonlyargs]
+                    }
+                    supplied.update({
+                        kw.arg: value(kw.value) for kw in node.keywords if kw.arg in keyword_names
+                    })
+                    # Only request identity and known callbacks flow onward;
+                    # attributes are not requests and cannot grow recursive states.
+                    bound = {}
+                    for key, item in supplied.items():
+                        if item is None:
+                            continue
+                        owner, _, symbol = item.rpartition(".")
+                        if item == request_value or symbol in module_symbols(owner)[0]:
+                            bound[key] = item
+                    if request_value in bound.values():
+                        pending.append((callee, tuple(sorted(bound.items()))))
+            names.update(imported_names(node, module.rpartition(".")[0]))
+            # Evaluate assignment RHS before invalidating request identity. No
+            # credit is given to a new object merely because it is named request.
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                if node.value is not None:
+                    scan(node.value)
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target_node in targets:
+                    scan(target_node)
+                return
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                names.pop(node.id, None)
+            for child in ast.iter_child_nodes(node):
+                scan(child)
+
+        for statement in function.body:
+            scan(statement)
+    return handled
+
+
+@pytest.mark.parametrize(
+    ("model", "helper", "expected"),
+    [
+        ("def build(request, writer): return request.precision", "", {"precision"}),
+        ("async def build(request, writer): return request.precision", "", {"precision"}),
+        (
+            """
+            def native(original, writer): return original.precision
+            def build(request, writer):
+                from .helper import dispatch as route
+                route(request, writer, native)
+            """,
+            """
+            def dispatch(incoming, writer, fallback):
+                incoming.task
+                fallback(original=incoming, writer=writer)
+            """,
+            {"precision", "task"},
+        ),
+        (
+            """
+            from . import helper as adapter
+            def build(request, writer): adapter.check(request)
+            """,
+            "def check(config): return config.precision",
+            {"precision"},
+        ),
+        (
+            """
+            from tensorrt_model_connect.families.owned.helper import check as validate
+            def build(request, writer): validate(config=request)
+            """,
+            "def check(*, config): return config.precision",
+            {"precision"},
+        ),
+        (
+            """
+            from .helper import check
+            def build(request, writer): check(request)
+            """,
+            """
+            def check(config):
+                config.precision
+                check(config)
+            """,
+            {"precision"},
+        ),
+        (
+            """
+            def unused(request): return request.precision
+            def build(request, writer): return request.task
+            """,
+            "",
+            {"task"},
+        ),
+        (
+            """
+            def build(request, writer):
+                def unused(request): return request.precision
+                return request.task
+            """,
+            "",
+            {"task"},
+        ),
+        (
+            """
+            from .helper import check
+            def build(request, writer): check(writer)
+            """,
+            "def check(request): return request.precision",
+            set(),
+        ),
+        (
+            """
+            from families.other.helper import check
+            def build(request, writer): check(request)
+            """,
+            "def check(request): return request.precision",
+            set(),
+        ),
+        (
+            """
+            from tensorrt_model_connect.build import check
+            def build(request, writer): check(request)
+            """,
+            "def check(request): return request.precision",
+            set(),
+        ),
+        (
+            """
+            def native(request, writer): return request.precision
+            def build(request, writer):
+                from .helper import dispatch
+                dispatch(request, writer, native)
+            """,
+            "def dispatch(request, writer, native): return request.task",
+            {"task"},
+        ),
+        (
+            """
+            def build(request, writer):
+                request.task
+                request = writer
+                return request.precision
+            """,
+            "",
+            {"task"},
+        ),
+        (
+            """
+            from .helper import check
+            def build(request, writer): check(request)
+            """,
+            """
+            def check(original):
+                request = object()
+                return request.precision
+            """,
+            set(),
+        ),
+    ],
+    ids=[
+        "direct", "async-direct", "native-callback-and-renamed-parameters", "module-alias",
+        "absolute-import-and-keyword", "recursive-helper", "dead-helper",
+        "nested-dead-helper", "call-without-request", "other-family", "shared-helper",
+        "unused-callback", "reassigned-request", "unrelated-request-object",
+    ],
+)
+def test_build_request_field_reachability(tmp_path, model, helper, expected) -> None:
+    """Credit only fields reached with the original request inside its owning family."""
+    family = tmp_path / "owned"
+    family.mkdir()
+    (family / "model.py").write_text(dedent(model), encoding="utf-8")
+    (family / "helper.py").write_text(dedent(helper), encoding="utf-8")
+    handled = _handled_build_request_fields(family)
+    assert handled == expected
+
+
+@pytest.mark.parametrize("shadow", [
+    "def check(request): pass", "class check: pass", "check = object()",
+    "from tensorrt_model_connect.build import check",
+])
+@pytest.mark.parametrize("scope", ["local", "module", "imported-module"])
+def test_build_request_fields_ignore_shadowed_helpers(tmp_path, shadow, scope) -> None:
+    """Overwriting a callable must not credit the former callable or nested dead body."""
+    family = tmp_path / "owned"
+    family.mkdir()
+    definition = "def check(request): return request.precision\n"
+    if scope == "imported-module":
+        model = "from .helper import check\ndef build(request, writer): check(request)\n"
+        helper = definition + shadow + "\n"
+    elif scope == "module":
+        model = definition + shadow + "\ndef build(request, writer): check(request)\n"
+        helper = ""
+    else:
+        model = definition + "def build(request, writer):\n    " + shadow + "\n    check(request)\n"
+        helper = ""
+    (family / "model.py").write_text(model, encoding="utf-8")
+    (family / "helper.py").write_text(helper, encoding="utf-8")
+    assert _handled_build_request_fields(family) == set()
+
+
+def test_build_request_fields_ignore_undeclared_keyword(tmp_path) -> None:
+    """An undeclared keyword cannot bind a global request-looking object in the callee."""
+    family = tmp_path / "owned"
+    family.mkdir()
+    (family / "model.py").write_text(dedent("""
+        request = object()
+        def check(writer): return request.precision
+        def build(request, writer): check(request=request)
+    """), encoding="utf-8")
+    assert _handled_build_request_fields(family) == set()
+
+
+def test_build_request_field_recursion_has_finite_bindings(tmp_path) -> None:
+    """Recursive attribute chains cannot generate unbounded symbolic call states."""
+    family = tmp_path / "owned"
+    family.mkdir()
+    (family / "model.py").write_text(dedent("""
+        def recurse(original, item):
+            original.precision
+            recurse(original, item.next)
+        def build(request, writer): recurse(request, request)
+    """), encoding="utf-8")
+    assert _handled_build_request_fields(family) == {"precision", "next"}
+
+
+def test_build_request_contract_rejects_missing_delegated_field(tmp_path, monkeypatch) -> None:
+    """The mandatory-field gate still rejects missing handling, even with a dead helper."""
+    family = tmp_path / "owned"
+    family.mkdir()
+    (family / "model.py").write_text(dedent("""
+        def unused(request): return request.task
+        def native(original): return original.precision
+        def build(request, writer): native(request)
+    """), encoding="utf-8")
+    api = tmp_path / "core/builder/tensorrt_model_connect/build.py"
+    api.parent.mkdir(parents=True)
+    api.write_text("class BuildRequest:\n    precision: str\n    task: str\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO", tmp_path)
+    monkeypatch.setitem(globals(), "family_dirs", lambda: [family])
+    with pytest.raises(AssertionError, match="owned:task"):
+        test_every_builder_handles_every_family_owned_request_field()
+
+
 def test_every_builder_handles_every_family_owned_request_field() -> None:
     build_api = REPO / "core/builder/tensorrt_model_connect/build.py"
     build_api_tree = ast.parse(build_api.read_text(encoding="utf-8"), filename=str(build_api))
@@ -556,20 +923,7 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
 
     violations: list[str] = []
     for family in family_dirs():
-        model = family / "model.py"
-        tree = ast.parse(model.read_text(encoding="utf-8"), filename=str(model))
-        build = next(
-            node
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "build"
-        )
-        handled = {
-            node.attr
-            for node in ast.walk(build)
-            if isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "request"
-        }
+        handled = _handled_build_request_fields(family)
         for field in sorted(family_owned_fields - handled):
             violations.append(f"{family.name}:{field}")
     assert violations == []
