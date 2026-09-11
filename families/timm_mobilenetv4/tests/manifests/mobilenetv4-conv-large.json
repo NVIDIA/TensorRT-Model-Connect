@@ -1,0 +1,17 @@
+{
+  "name": "mobilenetv4-conv-large",
+  "hf_id": "timm/mobilenetv4_conv_large.e500_r256_in1k",
+  "bundle": "mobilenetv4-conv-large.bundle",
+  "family": "timm_mobilenetv4",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "mobilenetv4-conv-large",
+      "premerge": false,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

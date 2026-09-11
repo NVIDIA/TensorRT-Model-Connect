@@ -49,6 +49,15 @@ excluded_profiles:
       performance baseline runs Ultralytics, which cannot load a legacy YOLOv5
       archive: those archives pickle classes from the standalone yolov5
       repository, which is not a dependency here.
+  - model: mobilenetv4-conv-small
+    reason: &mobilenetv4_performance_exclusion >-
+      Functional and timm reference-parity qualification is present for every
+      claimed MobileNetV4 width, but the release-performance workload and
+      receipt were collected only for the 050 width.
+  - model: mobilenetv4-conv-medium
+    reason: *mobilenetv4_performance_exclusion
+  - model: mobilenetv4-conv-large
+    reason: *mobilenetv4_performance_exclusion
   - model: dpn92-mx-in1k
     reason: >-
       Functional and timm reference-parity qualification is present for every
@@ -1369,6 +1378,19 @@ entries:
     model: efficientnet-b0-ra-in1k
     workload:
       testcase: efficientnet-b0-ra-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_mobilenetv4.classify
+    family: timm_mobilenetv4
+    operation: classify
+    model: mobilenetv4-conv-small-050
+    workload:
+      testcase: mobilenetv4-conv-small-050
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
