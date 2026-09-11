@@ -43,6 +43,11 @@ excluded_profiles:
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
       into the release performance runner.
+  - model: ornith-1-5-9b
+    reason: >-
+      Functional and Hugging Face reference-parity qualification are present,
+      but no matching release-performance workload or receipt has been
+      collected.
   - model: dpn92-mx-in1k
     reason: >-
       Functional and timm reference-parity qualification is present for every
@@ -51,7 +56,7 @@ excluded_profiles:
   - model: res2net50d-in1k
     reason: &res2net_performance_exclusion >-
       Functional and timm reference-parity qualification is present for every
-      published Res2Net checkpoint, but the release-performance workload and
+      published Res2Net checkpoint, but the release-pwherformance workload and
       receipt were collected only for res2net50_26w_4s.
   - model: res2next50-in1k
     reason: *res2net_performance_exclusion
