@@ -607,7 +607,10 @@ bool required_lifecycle_contract(bool baseline, bool irregular, bool barge_in, b
            response_cancel_recovery && response_truncate_recovery;
 }
 
+void check_barge_yield_wait();
+
 int run_host_self_check() {
+    check_barge_yield_wait();
     const auto make_event = [](EventKind kind, std::uint64_t epoch, std::uint64_t sequence,
                                const char* text = nullptr, bool is_final = false) {
         trtmc::SpeechSessionEvent event;
@@ -820,6 +823,69 @@ void wait_until(trtmc::ISpeechSession& session, Capture& capture,
             static_cast<int32_t>(std::max<std::int64_t>(1, std::min<std::int64_t>(500, remaining)));
         capture.absorb(session.wait_events(wait_ms));
     }
+}
+
+void wait_for_barge_yield(trtmc::ISpeechSession& session, Capture& capture, int32_t timeout_ms) {
+    wait_until(
+        session, capture,
+        [&] { return capture.count_with_text(EventKind::kYielded, "barge-in") != 0; }, timeout_ms,
+        "recognized speech barge-in yield");
+}
+
+void check_barge_yield_wait() {
+    class DeferredSession final : public trtmc::ISpeechSession {
+      public:
+        explicit DeferredSession(bool emit_yield) : emit_yield_(emit_yield) {}
+        void append_audio(const float*, std::int32_t) override {
+            throw std::logic_error("the wait must not submit more input");
+        }
+        void finish_input() override {
+            throw std::logic_error("the wait must preserve the live session");
+        }
+        std::vector<trtmc::SpeechSessionEvent> take_events() override { return {}; }
+        std::vector<trtmc::SpeechSessionEvent> wait_events(std::int32_t timeout_ms) override {
+            if (timeout_ms <= 0)
+                throw std::logic_error("event waits must remain bounded");
+            ++wait_calls;
+            if (!emit_yield_ || wait_calls != 2)
+                return {};
+            trtmc::SpeechSessionEvent event;
+            event.kind = EventKind::kYielded;
+            event.epoch = 3;
+            event.text = "barge-in";
+            return {event};
+        }
+        void cancel() override { throw std::logic_error("the wait must not cancel"); }
+        void reset() override { throw std::logic_error("the wait must not reset"); }
+        trtmc::SpeechSessionConfig config() const override { return {}; }
+        int wait_calls{0};
+
+      private:
+        bool emit_yield_;
+    };
+
+    DeferredSession delayed(true);
+    Capture capture;
+    capture.absorb(delayed.take_events());
+    wait_for_barge_yield(delayed, capture, 1000);
+    if (delayed.wait_calls != 2 || capture.count_with_text(EventKind::kYielded, "barge-in") != 1)
+        throw std::runtime_error("an asynchronously delivered barge-in yield was not retained");
+
+    DeferredSession absent(false);
+    Capture missing;
+    trtmc::SpeechSessionEvent unrelated;
+    unrelated.kind = EventKind::kYielded;
+    unrelated.text = "max-response-frames";
+    missing.absorb({unrelated});
+    bool timed_out = false;
+    try {
+        wait_for_barge_yield(absent, missing, 1);
+    } catch (const std::runtime_error& error) {
+        timed_out =
+            std::string(error.what()) == "timed out waiting for recognized speech barge-in yield";
+    }
+    if (!timed_out || missing.count_with_text(EventKind::kYielded, "barge-in") != 0)
+        throw std::runtime_error("a missing barge-in yield did not fail closed");
 }
 
 bool wait_until_bounded(trtmc::ISpeechSession& session, Capture& capture,
@@ -1264,9 +1330,13 @@ int main(int argc, char** argv) {
                 offset += kInputFrameSamples;
                 pace_and_drain(*session, barge_after);
             }
-            if (barge_after.count(EventKind::kYielded) == 0) {
+            // append_audio only queues input. Observe the result of already
+            // submitted speech before judging the asynchronous barge-in event.
+            try {
+                wait_for_barge_yield(*session, barge_after, kConcurrencyDeadlineMs);
+            } catch (const std::runtime_error&) {
                 dump_event_trace("recognized_barge_attempt", barge_after);
-                throw std::runtime_error("recognized speech did not trigger barge-in yield");
+                throw;
             }
             yielded_epoch = last_epoch(barge_after, EventKind::kYielded);
             interrupted_audio_before_yield =

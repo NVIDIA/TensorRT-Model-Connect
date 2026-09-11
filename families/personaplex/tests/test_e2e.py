@@ -4,6 +4,8 @@
 """Direct build, native-runtime, and official-reference E2E for personaplex."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
 import json
 import os
 import re
@@ -224,6 +226,8 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     payloads = []
     for line in completed.stdout.splitlines():
         if tp_size > 1:
@@ -284,11 +288,12 @@ def _thresholds(case_name: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
 
 
-def _asset(raw: str) -> Path:
+def _asset(raw: str, *, report_role: str = "inputs") -> Path:
     path = Path(raw)
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence(report_role, {str(raw): path})
     return path
 
 
@@ -341,6 +346,7 @@ def _native(
             frames.append([int(token) for token in match.group(1).split()])
     assert frames, "PersonaPlex native runtime emitted no output speech tokens"
     payload["speech_tokens"] = np.asarray(frames, dtype=np.int32)
+    record_evidence("native_artifacts", {"files": sorted(output.glob("*")) if output.is_dir() else [output]})
     return payload
 
 
@@ -348,7 +354,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     manifest["task"]
     backend = case.get("reference_backend")
     if backend == "golden_snapshot":
-        reference_tokens = _asset(case["speech_reference_tokens"])
+        reference_tokens = _asset(case["speech_reference_tokens"], report_role="reference_assets")
         return {"speech_tokens": np.load(reference_tokens, allow_pickle=False)}
     assert backend == "personaplex_official", f"unsupported PersonaPlex reference: {backend!r}"
     return generate_official_reference(
@@ -466,10 +472,21 @@ def test_reference_dispatch_is_live_only_for_the_full_case(monkeypatch, tmp_path
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
-    actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
-    expected = _official_reference(model_dir, manifest, case, tmp_path)
-    _assert_parity(actual, expected, manifest, case, _thresholds(case_name))
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
+    record_evidence("native", actual)
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, manifest, case, tmp_path)
+    from families.personaplex.tests.reporting import record_audio_views
+
+    record_audio_views(actual, expected, tmp_path / "report-views")
+    record_evidence("reference", expected)
+    with evidence_stage("compare"):
+        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))

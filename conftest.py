@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import sys
 
+pytest_plugins = ("tools.e2e_evidence",)
+
 
 if os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") != "1":
     repository = Path(__file__).resolve().parent

@@ -167,6 +167,11 @@ class Boltz2Plugin:
         except UnicodeDecodeError as error:
             raise ValueError("Boltz-2 request YAML must be UTF-8") from error
         request = parse_request_yaml(request_text)
+        if len(request.sequences) != 1 or len(request.sequences[0].chain_ids) != 1:
+            raise ValueError(
+                "Boltz-2 bundle construction requires the pinned monomer package; "
+                "prepare compatible protein-complex requests after the bundle is built"
+            )
         if request.sequences[0].msa_path != MSA:
             raise ValueError(f"Boltz-2 request must reference the packaged {MSA} file")
         msa_rows = validate_a3m(

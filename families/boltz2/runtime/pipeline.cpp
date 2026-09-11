@@ -539,20 +539,165 @@ std::vector<float> confidenceFrameMask(const std::vector<float>& coordinates, co
 }
 
 float maximumTmScore(const std::vector<float>& expected, const std::vector<float>& frame_mask,
-                     const float* token_mask, int token_count) {
+                     const float* token_mask, const std::vector<float>& pair_mask,
+                     int token_count) {
     float maximum = 0.0F;
     for (int row = 0; row < token_count; ++row) {
         float numerator = 0.0F;
         float denominator = 0.0F;
         for (int column = 0; column < token_count; ++column) {
-            const float mask =
-                frame_mask[static_cast<std::size_t>(row)] * token_mask[column] * token_mask[row];
+            const float selection =
+                pair_mask.empty() ? 1.0F
+                                  : pair_mask[static_cast<std::size_t>(row * token_count + column)];
+            const float mask = frame_mask[static_cast<std::size_t>(row)] * token_mask[column] *
+                               token_mask[row] * selection;
             numerator += expected[static_cast<std::size_t>(row * token_count + column)] * mask;
             denominator += mask;
         }
         maximum = std::max(maximum, numerator / (denominator + 1.0e-5F));
     }
     return maximum;
+}
+
+std::vector<float> differentChainMask(const int32_t* asym_id, int token_count) {
+    std::vector<float> result(static_cast<std::size_t>(token_count * token_count));
+    for (int row = 0; row < token_count; ++row)
+        for (int column = 0; column < token_count; ++column)
+            result[static_cast<std::size_t>(row * token_count + column)] =
+                static_cast<float>(asym_id[row] != asym_id[column]);
+    return result;
+}
+
+std::vector<float> proteinInterfaceMask(const int32_t* asym_id, const int32_t* mol_type,
+                                        int token_count) {
+    constexpr int32_t kProtein = 0;
+    auto result = differentChainMask(asym_id, token_count);
+    for (int row = 0; row < token_count; ++row)
+        for (int column = 0; column < token_count; ++column)
+            result[static_cast<std::size_t>(row * token_count + column)] *=
+                static_cast<float>(mol_type[row] == kProtein && mol_type[column] == kProtein);
+    return result;
+}
+
+bool isLigandProteinPair(int32_t first, int32_t second) {
+    constexpr int32_t kProtein = 0;
+    constexpr int32_t kNonPolymer = 3;
+    return (first == kNonPolymer && second == kProtein) ||
+           (first == kProtein && second == kNonPolymer);
+}
+
+std::vector<float> ligandInterfaceMask(const int32_t* asym_id, const int32_t* mol_type,
+                                       int token_count) {
+    auto result = differentChainMask(asym_id, token_count);
+    for (int row = 0; row < token_count; ++row)
+        for (int column = 0; column < token_count; ++column)
+            result[static_cast<std::size_t>(row * token_count + column)] *=
+                static_cast<float>(isLigandProteinPair(mol_type[row], mol_type[column]));
+    return result;
+}
+
+std::vector<float> chainPairMask(const int32_t* asym_id, int token_count, int32_t first,
+                                 int32_t second) {
+    std::vector<float> result(static_cast<std::size_t>(token_count * token_count));
+    for (int row = 0; row < token_count; ++row)
+        for (int column = 0; column < token_count; ++column)
+            result[static_cast<std::size_t>(row * token_count + column)] =
+                static_cast<float>(asym_id[column] == first && asym_id[row] == second);
+    return result;
+}
+
+std::vector<int32_t> activeChainIds(const int32_t* asym_id, int active_token_count) {
+    std::vector<int32_t> result(asym_id, asym_id + active_token_count);
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
+float interfacePlddt(const std::vector<float>& plddt, const std::vector<float>& distances,
+                     const float* token_mask, const int32_t* asym_id, const int32_t* mol_type,
+                     int token_count) {
+    constexpr int32_t kNonPolymer = 3;
+    float weighted_sum = 0.0F;
+    float weight_sum = 0.0F;
+    for (int row = 0; row < token_count; ++row) {
+        if (token_mask[row] == 0.0F)
+            continue;
+        bool interface = false;
+        for (int column = 0; column < token_count; ++column) {
+            interface = interface ||
+                        (token_mask[column] != 0.0F && asym_id[row] != asym_id[column] &&
+                         distances[static_cast<std::size_t>(row * token_count + column)] < 8.0F);
+        }
+        const float weight = mol_type[row] == kNonPolymer ? 20.0F : (interface ? 10.0F : 1.0F);
+        weighted_sum += plddt[static_cast<std::size_t>(row)] * weight;
+        weight_sum += weight;
+    }
+    return weighted_sum / weight_sum;
+}
+
+struct ConfidenceOutputs {
+    std::vector<uint16_t> plddt_logits;
+    std::vector<uint16_t> pae_logits;
+    std::vector<float> representative_distances;
+};
+
+ConfidenceOutputs readConfidenceOutputs(ITrtModule& module, int token_count) {
+    const std::size_t tokens = static_cast<std::size_t>(token_count);
+    ConfidenceOutputs result{
+        std::vector<uint16_t>(tokens * 50U),
+        std::vector<uint16_t>(tokens * tokens * 64U),
+        std::vector<float>(tokens * tokens),
+    };
+    if (cudaMemcpy(result.plddt_logits.data(), module.device_ptr("plddt_logits"),
+                   result.plddt_logits.size() * sizeof(uint16_t),
+                   cudaMemcpyDeviceToHost) != cudaSuccess ||
+        cudaMemcpy(result.pae_logits.data(), module.device_ptr("pae_logits"),
+                   result.pae_logits.size() * sizeof(uint16_t),
+                   cudaMemcpyDeviceToHost) != cudaSuccess ||
+        cudaMemcpy(result.representative_distances.data(),
+                   module.device_ptr("representative_distance"),
+                   result.representative_distances.size() * sizeof(float),
+                   cudaMemcpyDeviceToHost) != cudaSuccess) {
+        throw std::runtime_error("Boltz-2 failed to read confidence outputs");
+    }
+    return result;
+}
+
+struct TmConfidence {
+    float ptm{0.0F};
+    float iptm{0.0F};
+    float ligand_iptm{0.0F};
+    float protein_iptm{0.0F};
+    std::vector<int32_t> chain_ids;
+    std::vector<std::vector<float>> chain_pairs;
+};
+
+TmConfidence aggregateTmConfidence(const std::vector<float>& expected,
+                                   const std::vector<float>& frame_mask, const float* token_mask,
+                                   const int32_t* asym_id, const int32_t* mol_type, int token_count,
+                                   int active_token_count) {
+    TmConfidence result;
+    result.ptm = maximumTmScore(expected, frame_mask, token_mask, {}, token_count);
+    result.iptm = maximumTmScore(expected, frame_mask, token_mask,
+                                 differentChainMask(asym_id, token_count), token_count);
+    result.ligand_iptm =
+        maximumTmScore(expected, frame_mask, token_mask,
+                       ligandInterfaceMask(asym_id, mol_type, token_count), token_count);
+    result.protein_iptm =
+        maximumTmScore(expected, frame_mask, token_mask,
+                       proteinInterfaceMask(asym_id, mol_type, token_count), token_count);
+    result.chain_ids = activeChainIds(asym_id, active_token_count);
+    result.chain_pairs.assign(result.chain_ids.size(), std::vector<float>(result.chain_ids.size()));
+    for (std::size_t first = 0; first < result.chain_ids.size(); ++first) {
+        for (std::size_t second = 0; second < result.chain_ids.size(); ++second) {
+            result.chain_pairs[first][second] =
+                maximumTmScore(expected, frame_mask, token_mask,
+                               chainPairMask(asym_id, token_count, result.chain_ids[first],
+                                             result.chain_ids[second]),
+                               token_count);
+        }
+    }
+    return result;
 }
 
 struct AtomRow {
@@ -987,23 +1132,16 @@ StructureConfidence Boltz2Pipeline::runConfidence(const std::vector<float>& coor
     engines_.confidence->forward_device_async({});
     engines_.confidence->sync();
 
-    const std::size_t plddt_elements = static_cast<std::size_t>(token_count_) * 50U;
-    const std::size_t pae_elements =
-        static_cast<std::size_t>(token_count_) * static_cast<std::size_t>(token_count_) * 64U;
-    std::vector<uint16_t> plddt_logits(plddt_elements);
-    std::vector<uint16_t> pae_logits(pae_elements);
-    if (cudaMemcpy(plddt_logits.data(), engines_.confidence->device_ptr("plddt_logits"),
-                   plddt_logits.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost) != cudaSuccess ||
-        cudaMemcpy(pae_logits.data(), engines_.confidence->device_ptr("pae_logits"),
-                   pae_logits.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
-        throw std::runtime_error("Boltz-2 failed to read confidence logits");
-    }
+    const auto outputs = readConfidenceOutputs(*engines_.confidence, token_count_);
     StructureConfidence result;
-    result.plddt =
-        softmaxExpectedBfloat16(plddt_logits, static_cast<std::size_t>(token_count_), 50, 1.0F);
+    result.plddt = softmaxExpectedBfloat16(outputs.plddt_logits,
+                                           static_cast<std::size_t>(token_count_), 50, 1.0F);
     const auto* token_mask = reinterpret_cast<const float*>(feature("token_pad_mask").data.data());
     result.complex_plddt = maskedMean(result.plddt, token_mask, token_count_);
-    result.complex_iplddt = result.complex_plddt;
+    const auto* asym_id = reinterpret_cast<const int32_t*>(feature("asym_id").data.data());
+    const auto* mol_type = reinterpret_cast<const int32_t*>(feature("mol_type").data.data());
+    result.complex_iplddt = interfacePlddt(result.plddt, outputs.representative_distances,
+                                           token_mask, asym_id, mol_type, token_count_);
 
     const auto* frames = reinterpret_cast<const int32_t*>(feature("frames_idx").data.data());
     const auto frame_mask =
@@ -1013,9 +1151,17 @@ StructureConfidence Boltz2Pipeline::runConfidence(const std::vector<float>& coor
         valid_tokens += token_mask[token];
     const float d0 = 1.24F * std::cbrt(std::max(valid_tokens, 19.0F) - 15.0F) - 1.8F;
     const auto tm_expected = softmaxExpectedTmBfloat16(
-        pae_logits, static_cast<std::size_t>(token_count_) * token_count_, 64, d0);
-    result.ptm = maximumTmScore(tm_expected, frame_mask, token_mask, token_count_);
-    result.confidence_score = (4.0F * result.complex_plddt + result.ptm) / 5.0F;
+        outputs.pae_logits, static_cast<std::size_t>(token_count_) * token_count_, 64, d0);
+    const auto tm = aggregateTmConfidence(tm_expected, frame_mask, token_mask, asym_id, mol_type,
+                                          token_count_, active_token_count_);
+    result.ptm = tm.ptm;
+    result.iptm = tm.iptm;
+    result.ligand_iptm = tm.ligand_iptm;
+    result.protein_iptm = tm.protein_iptm;
+    confidence_chain_ids_ = tm.chain_ids;
+    confidence_chain_pairs_ = tm.chain_pairs;
+    const float ranking_tm = result.iptm > 1.0e-8F ? result.iptm : result.ptm;
+    result.confidence_score = (4.0F * result.complex_plddt + ranking_tm) / 5.0F;
     result.plddt.resize(static_cast<std::size_t>(active_token_count_));
     return result;
 }
@@ -1034,6 +1180,17 @@ std::string Boltz2Pipeline::writeStructure(const std::vector<float>& coordinates
 
 std::string Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
                                            const StructureConfidence& confidence) const {
+    nlohmann::json chains_ptm = nlohmann::json::object();
+    nlohmann::json pair_chains_iptm = nlohmann::json::object();
+    for (std::size_t first = 0; first < confidence_chain_ids_.size(); ++first) {
+        const std::string first_id = std::to_string(confidence_chain_ids_[first]);
+        chains_ptm[first_id] = confidence_chain_pairs_[first][first];
+        pair_chains_iptm[first_id] = nlohmann::json::object();
+        for (std::size_t second = 0; second < confidence_chain_ids_.size(); ++second) {
+            pair_chains_iptm[first_id][std::to_string(confidence_chain_ids_[second])] =
+                confidence_chain_pairs_[first][second];
+        }
+    }
     const nlohmann::json metadata{
         {"schema_version", 1},
         {"family", "boltz2"},
@@ -1055,7 +1212,9 @@ std::string Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
         {"ligand_iptm", confidence.ligand_iptm},
         {"protein_iptm", confidence.protein_iptm},
         {"plddt", confidence.plddt},
+        {"chains_ptm", std::move(chains_ptm)},
         {"chain_pair_confidence", nlohmann::json::array()},
+        {"pair_chains_iptm", std::move(pair_chains_iptm)},
     };
     return metadata.dump(2) + "\n";
 }

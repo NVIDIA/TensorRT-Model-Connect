@@ -80,6 +80,7 @@ def validate_request(
     if not request.sequences:
         raise ValueError("Boltz-2 requires at least one polymer sequence")
     seen_chain_ids: set[str] = set()
+    entity_msas: dict[tuple[PolymerKind, str], PurePosixPath] = {}
     for item in request.sequences:
         if item.kind is not PolymerKind.PROTEIN:
             raise ValueError("only protein polymers are supported by this Boltz-2 profile")
@@ -108,9 +109,10 @@ def validate_request(
             raise ValueError(
                 "Boltz-2 A3M paths must be relative and remain inside the request root"
             )
-    if len(request.sequences) != 1 or len(request.sequences[0].chain_ids) != 1:
-        raise ValueError("the qualified Boltz-2 profile accepts exactly one protein chain")
-
+        entity = (item.kind, item.sequence)
+        previous_msa = entity_msas.setdefault(entity, item.msa_path)
+        if previous_msa != item.msa_path:
+            raise ValueError("proteins with the same sequence must share one Boltz-2 MSA")
     if not profile.min_tokens <= request.token_count <= profile.max_tokens:
         raise ValueError(
             "Boltz-2 token count is outside the qualified BF16 profile: "
@@ -167,15 +169,23 @@ def parse_request_yaml(text: str) -> Boltz2Request:
                 "unsupported Boltz-2 protein fields: "
                 + ", ".join(sorted(unknown_protein))
             )
-        chain_id = protein.get("id")
+        raw_chain_ids = protein.get("id")
         sequence = protein.get("sequence")
         msa = protein.get("msa")
-        if not all(isinstance(value, str) for value in (chain_id, sequence, msa)):
-            raise ValueError("Boltz-2 protein id, sequence, and msa must be strings")
+        if isinstance(raw_chain_ids, str):
+            chain_ids = (raw_chain_ids,)
+        elif isinstance(raw_chain_ids, list) and all(
+            isinstance(chain_id, str) for chain_id in raw_chain_ids
+        ):
+            chain_ids = tuple(raw_chain_ids)
+        else:
+            raise ValueError("Boltz-2 protein id must be a string or list of strings")
+        if not isinstance(sequence, str) or not isinstance(msa, str):
+            raise ValueError("Boltz-2 protein sequence and msa must be strings")
         sequences.append(
             SequenceInput(
                 kind=PolymerKind.PROTEIN,
-                chain_ids=(chain_id,),
+                chain_ids=chain_ids,
                 sequence=sequence,
                 msa_path=PurePosixPath(msa),
             )

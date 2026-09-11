@@ -76,6 +76,8 @@ class Boltz2Pipeline final : public IStructurePrediction {
     int atom_count_{0};
     int active_token_count_{0};
     int active_atom_count_{0};
+    std::vector<int32_t> confidence_chain_ids_;
+    std::vector<std::vector<float>> confidence_chain_pairs_;
     cudaStream_t stream_{nullptr};
     std::unordered_map<std::string, DeviceTensor> device_features_;
     DeviceTensor zero_s_;

@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 
 FAMILY = "openfold3"
@@ -189,6 +190,7 @@ def _run_native(
         timeout=timeout,
         env=environment,
     )
+    record_evidence("native", {"structure": structure, "confidence": metadata})
     return structure.read_text(encoding="utf-8"), json.loads(metadata.read_text(encoding="utf-8"))
 
 
@@ -217,53 +219,71 @@ def _qualification_binary() -> Path:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "thresholds",
+        {"repeatability": "exact", "expected_token_count": case["expected_token_count"], "expected_atom_count": case["expected_atom_count"], "plddt_range": [0.0, 100.0], "pae_range": [0.0, 32.0], "pde_range": [0.0, 32.0], "ptm_range": [0.0, 1.0]},
+    )
+    record_evidence("reference", {"mode": "contract_only", "oracle": "recorded reproducibility and confidence checks"})
     source = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(source), "external_files": manifest["external_files"]})
     package = _prepared_package(source, tmp_path / "package")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
-    qualification = _qualification_binary()
+    with evidence_stage("build"):
+        qualification = _qualification_binary()
     bundle = tmp_path / manifest["bundle"]
-    build(
-        BuildRequest(
-            model_dir=package,
-            output_path=bundle,
-            family=FAMILY,
-            task=manifest["task"],
-            precision=manifest["precision"],
-            max_sequence_length=int(manifest["max_sequence_length"]),
-            tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+    with evidence_stage("build"):
+        build(
+            BuildRequest(
+                model_dir=package,
+                output_path=bundle,
+                family=FAMILY,
+                task=manifest["task"],
+                precision=manifest["precision"],
+                max_sequence_length=int(manifest["max_sequence_length"]),
+                tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+            )
         )
-    )
     request = package / "query.json"
-    receipts = [
-        _run_native(
-            qualification,
-            runtime_root,
-            bundle,
-            request,
-            tmp_path,
-            index,
-            int(case["runtime_timeout_s"]),
-        )
-        for index in range(2)
-    ]
-    assert receipts[0] == receipts[1]
-    cif, confidence = receipts[0]
-    coordinates = _atom_coordinates(cif)
-    plddt = confidence["plddt"]
-    pae = confidence["pae"]
-    pde = confidence["pde"]
-    assert confidence["precision"] == f"{manifest['precision']}-mixed"
-    assert confidence["token_count"] == case["expected_token_count"]
-    assert confidence["atom_count"] == case["expected_atom_count"]
-    assert len(coordinates) == 3 * case["expected_atom_count"]
-    assert len(plddt) == case["expected_atom_count"]
-    assert len(pae) == len(pde) == case["expected_token_count"] ** 2
-    assert all(math.isfinite(float(value)) for value in coordinates + plddt + pae + pde)
-    assert all(0.0 <= float(value) <= 100.0 for value in plddt)
-    assert all(0.0 <= float(value) <= 32.0 for value in (*pae, *pde))
-    assert 0.0 <= float(confidence["average_plddt"]) <= 100.0
-    assert 0.0 <= float(confidence["gpde"]) <= 32.0
-    assert 0.0 <= float(confidence["ptm"]) <= 1.0
-    assert confidence["sample_rank"] == 0
-    assert confidence["sample_ranking_score"] is None
-    assert confidence["sample_ranking_score_applicable"] is False
+    record_evidence(
+        "inputs",
+        {"query": request, "features": package / "openfold3_features.npz", "structure_metadata": package / "openfold3_structure.json"},
+    )
+    with evidence_stage("native"):
+        receipts = [
+            _run_native(
+                qualification,
+                runtime_root,
+                bundle,
+                request,
+                tmp_path,
+                index,
+                int(case["runtime_timeout_s"]),
+            )
+            for index in range(2)
+        ]
+    with evidence_stage("compare"):
+        assert receipts[0] == receipts[1]
+    with evidence_stage("native"):
+        cif, confidence = receipts[0]
+        record_evidence("native", confidence)
+        coordinates = _atom_coordinates(cif)
+        plddt = confidence["plddt"]
+        pae = confidence["pae"]
+        pde = confidence["pde"]
+    with evidence_stage("compare"):
+        assert confidence["precision"] == f"{manifest['precision']}-mixed"
+        assert confidence["token_count"] == case["expected_token_count"]
+        assert confidence["atom_count"] == case["expected_atom_count"]
+        assert len(coordinates) == 3 * case["expected_atom_count"]
+        assert len(plddt) == case["expected_atom_count"]
+        assert len(pae) == len(pde) == case["expected_token_count"] ** 2
+        assert all(math.isfinite(float(value)) for value in coordinates + plddt + pae + pde)
+        assert all(0.0 <= float(value) <= 100.0 for value in plddt)
+        assert all(0.0 <= float(value) <= 32.0 for value in (*pae, *pde))
+        assert 0.0 <= float(confidence["average_plddt"]) <= 100.0
+        assert 0.0 <= float(confidence["gpde"]) <= 32.0
+        assert 0.0 <= float(confidence["ptm"]) <= 1.0
+        assert confidence["sample_rank"] == 0
+        assert confidence["sample_ranking_score"] is None
+        assert confidence["sample_ranking_score_applicable"] is False

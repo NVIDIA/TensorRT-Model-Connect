@@ -4,6 +4,8 @@
 """Direct build, native-runtime, and official-reference E2E for chronos_bolt."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
 import json
 import os
 import shutil
@@ -186,6 +188,8 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -228,7 +232,9 @@ def _native(
     input_path = tmp_path / "values.f32"
     mask_path = tmp_path / "mask.f32"
     values.tofile(input_path)
+    record_evidence("inputs", {"raw_file": input_path})
     mask.tofile(mask_path)
+    record_evidence("inputs", {"raw_file": mask_path})
     payload = _run_json(
         binary,
         runtime_root,
@@ -304,10 +310,13 @@ def test_forecast_contract_requires_multiple_quantiles() -> None:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     from families.chronos_bolt.tests.etth1 import CASE as ETTH1_CASE
 
     if case_name == ETTH1_CASE:
@@ -317,12 +326,24 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             window_root = tmp_path / f"etth1-{index:02}"
             window_root.mkdir()
             window_case = {**case, "inputs": inputs}
-            actual = _native(
-                binary, runtime_root, bundle, model_dir, manifest, window_case, window_root
-            )
-            expected = _official_reference(model_dir, manifest, window_case, window_root)
-            _assert_parity(actual, expected, manifest, window_case, GATES)
+            record_evidence("inputs", {"window_index": index, "case": window_case})
+            with evidence_stage("native"):
+                actual = _native(
+                    binary, runtime_root, bundle, model_dir, manifest, window_case, window_root
+                )
+            record_evidence("native", actual)
+            with evidence_stage("reference"):
+                expected = _official_reference(model_dir, manifest, window_case, window_root)
+            record_evidence("reference", expected)
+            with evidence_stage("compare"):
+                record_evidence("thresholds", GATES)
+                _assert_parity(actual, expected, manifest, window_case, GATES)
         return
-    actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
-    expected = _official_reference(model_dir, manifest, case, tmp_path)
-    _assert_parity(actual, expected, manifest, case, _thresholds(case_name))
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
+    record_evidence("native", actual)
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, manifest, case, tmp_path)
+    record_evidence("reference", expected)
+    with evidence_stage("compare"):
+        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))

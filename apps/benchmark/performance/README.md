@@ -29,6 +29,14 @@ trtmc-bench run apps/benchmark/example.yaml -o results/example
 Missing bundles are built through the public build command and cached. Pass
 `--no-build` when every selected bundle must already exist.
 
+Managed cache reuse requires a matching benchmark receipt for the resolved
+immutable Hugging Face snapshot, manifest, build arguments, builder sources,
+and build environment. Changed or missing identities rebuild the bundle;
+`--no-build` reports an error instead. Arbitrary local checkpoint directories
+are mutable and are rebuilt rather than assumed unchanged. An explicitly
+supplied bundle outside the managed cache remains the caller's provenance
+responsibility. `--rebuild` forces a fresh managed build.
+
 ## Timing contract
 
 Candidate measurements use one scope: public_task_call_wall.
@@ -118,9 +126,15 @@ The entry, model, and model-selection options select work. resume continues
 incomplete rows, and report regenerates JSON and HTML from stored measurements.
 
 Reference runners are separate processes so their dependencies never enter the
-candidate worker or core runtime. Optional Hugging Face revisions are model
-inputs only; the benchmark does not calculate or validate repository, request,
-bundle, source, or report fingerprints.
+candidate worker or core runtime. The benchmark-owned cache receipt protects
+managed build reuse without changing the public bundle format. It does not
+certify externally supplied bundle bytes.
+
+HTML reports include p50, p95, task rates, measurement boundaries, reproduction
+commands, and recorded evidence. Historical v1 results can be rendered without
+relabelling their original timing scope; they cannot be resumed as v2 runs.
+Historical latency deltas appear only when the recorded comparison identities
+match. A performance result does not establish model correctness.
 
 External reference checkouts must provide their official runtime dependencies.
 In particular, PersonaPlex requires the real `sphn` package and Lance requires

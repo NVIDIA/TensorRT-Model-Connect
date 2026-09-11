@@ -4,6 +4,11 @@
 """Direct build, native-runtime, and official-reference E2E for sana_wm."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
+from families.sana_wm.tests.reporting import (
+    native_snapshot, record_native_preview, record_report_views, reference_snapshot,
+)
 import json
 import os
 import shutil
@@ -209,6 +214,10 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence(
+        "native_process",
+        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -228,16 +237,19 @@ def _thresholds(case_name: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
 
 
-def _asset(raw: str) -> Path:
+def _asset(
+    raw: str, *, report_key: str | None = None, report_role: str = "inputs"
+) -> Path:
     path = Path(raw)
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence(report_role, {report_key or str(raw): path})
     return path
 
 
 def _case_text(case: dict) -> str:
-    path = _asset(case["prompt_file"])
+    path = _asset(case["prompt_file"], report_key="prompt_file")
     if path.suffix == ".json":
         value = str(json.loads(path.read_text(encoding="utf-8"))["prompt"])
     else:
@@ -260,11 +272,12 @@ def _native(
     intrinsics = np.asarray(case["camera_intrinsics"], dtype=np.float32)
     intrinsics_path = tmp_path / "intrinsics.f32"
     intrinsics.tofile(intrinsics_path)
+    record_evidence("inputs", {"raw_file": intrinsics_path})
     arguments = [
         "--prompt",
         _case_text(case),
         "--image",
-        str(_asset(case["test_image"])),
+        str(_asset(case["test_image"], report_key="image")),
         "--output",
         str(output),
         "--intrinsics",
@@ -287,6 +300,7 @@ def _native(
             arguments.extend((option, str(float(case[key]))))
     payload = _run_json(binary, runtime_root, bundle, manifest, case, "generate-world", *arguments)
     payload["artifact"] = str(output)
+    record_native_preview(output)
     return payload
 
 
@@ -331,11 +345,17 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         sys.executable,
         str(entrypoint),
         "--image",
-        str(_asset(case["test_image"])),
+        str(_asset(case["test_image"], report_key="image")),
         "--prompt",
-        str(_asset(case["prompt_file"])),
+        str(_asset(case["prompt_file"], report_key="prompt_file")),
         "--intrinsics",
-        str(_asset(case["camera_intrinsics_file"])),
+        str(
+            _asset(
+                case["camera_intrinsics_file"],
+                report_key="camera_intrinsics_file",
+                report_role="reference_inputs",
+            )
+        ),
         "--action",
         str(case["action"]),
         "--translation_speed",
@@ -370,7 +390,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         "--name",
         "reference",
     ]
-    subprocess.run(
+    completed = subprocess.run(
         command,
         check=True,
         capture_output=True,
@@ -378,6 +398,10 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         cwd=source_root,
         env=environment,
         timeout=int(case.get("runtime_timeout_s", 7200)),
+    )
+    record_evidence(
+        "reference_process",
+        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
     )
     frame_paths = _decode_reference_video(
         video_dir / "reference_generated.mp4", tmp_path / "reference-frames"
@@ -509,10 +533,19 @@ def test_semantic_artifacts_are_paired(monkeypatch, tmp_path: Path) -> None:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(_prepared_model_dir(model_dir, manifest, tmp_path), bundle, manifest)
-    actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
-    expected = _official_reference(model_dir, manifest, case, tmp_path)
-    _assert_contract(actual, expected, manifest, case, _thresholds(case_name))
+    with evidence_stage("build"):
+        _build(_prepared_model_dir(model_dir, manifest, tmp_path), bundle, manifest)
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
+    record_evidence("native", native_snapshot(actual))
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, manifest, case, tmp_path)
+    record_report_views(actual, expected, tmp_path / "paired-report-views")
+    record_evidence("reference", reference_snapshot(expected))
+    with evidence_stage("compare"):
+        _assert_contract(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))

@@ -111,7 +111,7 @@ def serialize_prepared_request(
     return header + b"".join(sections)
 
 
-def _request_inputs(request_path: Path) -> tuple[bytes, int, Path, bytes]:
+def _request_inputs(request_path: Path) -> tuple[bytes, int, tuple[tuple[Path, bytes], ...]]:
     request_bytes = request_path.read_bytes()
     try:
         request_text = request_bytes.decode("utf-8")
@@ -119,23 +119,26 @@ def _request_inputs(request_path: Path) -> tuple[bytes, int, Path, bytes]:
         raise ValueError("Boltz-2 request YAML must be UTF-8") from error
     request = parse_request_yaml(request_text)
     request_root = request_path.parent.resolve(strict=True)
-    msa_path = (request_root / request.sequences[0].msa_path).resolve(strict=True)
-    try:
-        msa_path.relative_to(request_root)
-    except ValueError as error:
-        raise ValueError("Boltz-2 A3M path must remain inside the request root") from error
-    if not msa_path.is_file():
-        raise ValueError(f"Boltz-2 A3M path is not a file: {msa_path}")
-    msa_bytes = msa_path.read_bytes()
-    try:
-        msa_text = msa_bytes.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ValueError("Boltz-2 A3M must be UTF-8") from error
-    validate_a3m(msa_text, expected_query=request.sequences[0].sequence)
-    return request_bytes, request.token_count, msa_path, msa_bytes
+    msa_inputs: list[tuple[Path, bytes]] = []
+    for sequence in request.sequences:
+        msa_path = (request_root / sequence.msa_path).resolve(strict=True)
+        try:
+            msa_path.relative_to(request_root)
+        except ValueError as error:
+            raise ValueError("Boltz-2 A3M path must remain inside the request root") from error
+        if not msa_path.is_file():
+            raise ValueError(f"Boltz-2 A3M path is not a file: {msa_path}")
+        msa_bytes = msa_path.read_bytes()
+        try:
+            msa_text = msa_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("Boltz-2 A3M must be UTF-8") from error
+        validate_a3m(msa_text, expected_query=sequence.sequence)
+        msa_inputs.append((msa_path, msa_bytes))
+    return request_bytes, request.token_count, tuple(msa_inputs)
 
 
-def _cache_key(request: bytes, msa: bytes) -> str:
+def _cache_key(request: bytes, msa_inputs: tuple[tuple[Path, bytes], ...]) -> str:
     profile = INITIAL_BF16_PROFILE
     identity = json.dumps(
         {
@@ -148,7 +151,8 @@ def _cache_key(request: bytes, msa: bytes) -> str:
         },
         sort_keys=True,
     ).encode("utf-8")
-    return content_cache_key("boltz2-prepared-request-v2", identity, request, msa)
+    msa_payloads = tuple(payload for _, payload in msa_inputs)
+    return content_cache_key("boltz2-prepared-request-v2", identity, request, *msa_payloads)
 
 
 def _write_atomic(path: Path, payload: bytes) -> None:
@@ -171,9 +175,14 @@ def _write_atomic(path: Path, payload: bytes) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _stage_request(path: Path, request: bytes, msa_path: Path) -> None:
+def _stage_request(
+    path: Path, request: bytes, msa_inputs: tuple[tuple[Path, bytes], ...]
+) -> None:
     document = yaml.safe_load(request.decode("utf-8"))
-    document["sequences"][0]["protein"]["msa"] = str(msa_path)
+    if len(document["sequences"]) != len(msa_inputs):
+        raise ValueError("Boltz-2 request and MSA inputs are inconsistent")
+    for entry, (msa_path, _) in zip(document["sequences"], msa_inputs, strict=True):
+        entry["protein"]["msa"] = str(msa_path)
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
 
@@ -194,8 +203,8 @@ def prepare_structure_request(
     validate_artifact(root / MOLS_ARCHIVE, PINNED_BOLTZ2.molecular_archive)
     request_path = Path(request_path).resolve(strict=True)
     output_path = Path(output_path)
-    request_bytes, request_token_count, msa_path, msa_bytes = _request_inputs(request_path)
-    key = _cache_key(request_bytes, msa_bytes)
+    request_bytes, request_token_count, msa_inputs = _request_inputs(request_path)
+    key = _cache_key(request_bytes, msa_inputs)
     cache_root = (
         Path(cache_dir)
         if cache_dir is not None
@@ -224,7 +233,7 @@ def prepare_structure_request(
         work.mkdir(parents=True, exist_ok=True)
         if staged_request.is_symlink():
             raise ValueError(f"Boltz-2 staged request must not be a symlink: {staged_request}")
-        _stage_request(staged_request, request_bytes, msa_path)
+        _stage_request(staged_request, request_bytes, msa_inputs)
         process_inputs(
             data=[staged_request],
             out_dir=work,

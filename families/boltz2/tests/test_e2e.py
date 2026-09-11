@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 
 FAMILY = "boltz2"
@@ -21,6 +22,118 @@ TASK = "structure_prediction"
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
+
+
+def _record_request_evidence(request: Path, prepared: Path | None = None) -> None:
+    if not evidence_enabled():
+        return
+    try:
+        from families.boltz2.contracts import parse_request_yaml
+
+        record_evidence("inputs", {"request_file": request, "prepared_request": prepared})
+        if request.stat().st_size > 65536:
+            record_evidence("input_preview", {"omitted": "request exceeds the text preview bound"})
+            return
+        parsed = parse_request_yaml(request.read_text(encoding="utf-8"))
+        record_evidence(
+            "inputs",
+            {
+                "text": "\n\n".join(
+                    "Protein " + ", ".join(sequence.chain_ids) + "\n" + sequence.sequence
+                    for sequence in parsed.sequences
+                ),
+                "sequences": [
+                    {
+                        "chain_ids": list(sequence.chain_ids),
+                        "sequence": sequence.sequence,
+                        "msa": request.parent / sequence.msa_path,
+                    }
+                    for sequence in parsed.sequences
+                ],
+            },
+        )
+    except Exception as error:
+        record_evidence("input_preview", {"error": f"{type(error).__name__}: {error}"})
+
+
+def _record_native_evidence(structure: Path, metadata: Path) -> None:
+    if not evidence_enabled():
+        return
+    try:
+        record_evidence("native_artifacts", {"structure": structure, "metadata": metadata})
+        if metadata.stat().st_size <= 8 * 1024 * 1024:
+            record_evidence("native", json.loads(metadata.read_text(encoding="utf-8")))
+        else:
+            record_evidence("native", {"metadata": metadata, "omitted": "metadata exceeds the JSON preview bound"})
+    except Exception as error:
+        record_evidence("native_preview", {"error": f"{type(error).__name__}: {error}"})
+
+
+def _record_reference_comparison(structure: Path, reference: Path, accuracy: Path) -> None:
+    if not evidence_enabled():
+        return
+    try:
+        record_evidence("comparison_artifacts", {"accuracy": accuracy})
+        if accuracy.stat().st_size > 8 * 1024 * 1024:
+            record_evidence("comparison_preview", {"omitted": "accuracy exceeds the JSON preview bound"})
+            return
+        metrics = json.loads(accuracy.read_text(encoding="utf-8"))
+        record_evidence("metrics", metrics)
+        qualification = metrics["qualification"]
+        thresholds, outcomes = qualification["thresholds"], qualification["checks"]
+        checks = [
+            {
+                "name": name,
+                "label": label,
+                "scope": "contract",
+                "actual": metrics[name],
+                "operator": "==",
+                "expected": expected,
+                "passed": outcomes[name],
+            }
+            for name, label, expected in (
+                ("all_outputs_finite", "Finite outputs", True),
+                ("atom_count", "Atom count", thresholds["atom_count"]),
+                ("token_count", "Token count", thresholds["token_count"]),
+            )
+        ]
+        checks.extend(
+            {
+                "name": name,
+                "label": label,
+                "scope": "independent_reference",
+                "actual": metrics[name],
+                "operator": operator,
+                "expected": thresholds[threshold],
+                "passed": outcomes[name],
+            }
+            for name, label, operator, threshold in (
+                ("lddt", "lDDT", ">=", "lddt_min"),
+                ("kabsch_rmsd_angstrom", "Aligned RMSD (Å)", "<=", "kabsch_rmsd_angstrom_max"),
+                ("plddt_mean_abs", "Mean pLDDT difference", "<=", "plddt_mean_abs_max"),
+                ("confidence_score_abs", "Confidence score difference", "<=", "confidence_score_abs_max"),
+                ("complex_plddt_abs", "Complex pLDDT difference", "<=", "complex_plddt_abs_max"),
+                ("complex_iplddt_abs", "Complex interface pLDDT difference", "<=", "complex_iplddt_abs_max"),
+                ("ptm_abs", "pTM difference", "<=", "ptm_abs_max"),
+                ("iptm_abs", "ipTM difference", "<=", "iptm_abs_max"),
+                ("protein_iptm_abs", "Protein ipTM difference", "<=", "protein_iptm_abs_max"),
+                ("chains_ptm_max_abs", "Largest per-chain pTM difference", "<=", "chains_ptm_max_abs_max"),
+                ("pair_chains_iptm_max_abs", "Largest chain-pair ipTM difference", "<=", "pair_chains_iptm_max_abs_max"),
+            )
+        )
+        record_evidence(
+            "reference_comparison",
+            {
+                "label": structure.stem,
+                "scope": "independent_reference",
+                "enforced": True,
+                "native": structure,
+                "reference": reference,
+                "checks": checks,
+            },
+        )
+    except Exception as error:
+        record_evidence("comparison_preview", {"error": f"{type(error).__name__}: {error}"})
 
 
 def _cases() -> dict[str, tuple[dict, dict]]:
@@ -34,6 +147,27 @@ def _cases() -> dict[str, tuple[dict, dict]]:
 
 
 CASES = _cases()
+
+
+def test_multichain_protein_request_contract() -> None:
+    from families.boltz2.contracts import parse_request_yaml
+
+    request = parse_request_yaml(
+        """version: 1
+sequences:
+  - protein:
+      id: [A, B]
+      sequence: ACDE
+      msa: shared.a3m
+  - protein:
+      id: C
+      sequence: FGHIK
+      msa: chain-c.a3m
+"""
+    )
+    assert request.token_count == 13
+    assert request.sequences[0].chain_ids == ("A", "B")
+    assert request.sequences[1].chain_ids == ("C",)
 
 
 def pytest_generate_tests(metafunc) -> None:
@@ -149,52 +283,62 @@ def _assert_live_reference_parity(
     atom_count: int,
     token_count: int,
 ) -> None:
-    import torch
+    with evidence_stage("reference"):
+        import torch
 
-    from families.boltz2.reference import (
-        compare_native,
-        load_reference_model,
-        predict_reference,
-        save_reference_output,
-    )
-    from families.boltz2.request_preparation import load_profile_features
+        from families.boltz2.reference import (
+            compare_native,
+            load_reference_model,
+            predict_reference,
+            save_reference_output,
+        )
+        from families.boltz2.request_preparation import load_profile_features
 
-    batch = load_profile_features(processed_dir, model_dir / "mols")
-    model = load_reference_model(model_dir / "boltz2_conf.ckpt")
-    prediction = predict_reference(model, batch)
-    reference = output_dir / "eager-reference.npz"
-    save_reference_output(reference, prediction)
-    del prediction, model, batch
-    torch.cuda.empty_cache()
-    compare_native(
-        reference,
-        structure,
-        metadata,
-        output_dir / "accuracy.json",
-        expected_atom_count=atom_count,
-        expected_token_count=token_count,
-    )
+        batch = load_profile_features(processed_dir, model_dir / "mols")
+        model = load_reference_model(model_dir / "boltz2_conf.ckpt")
+        prediction = predict_reference(model, batch)
+        reference = output_dir / "eager-reference.npz"
+        save_reference_output(reference, prediction)
+        record_evidence("reference", {"artifact": reference, "kind": "seeded eager model output"})
+        del prediction, model, batch
+        torch.cuda.empty_cache()
+    with evidence_stage("compare"):
+        try:
+            compare_native(
+                reference,
+                structure,
+                metadata,
+                output_dir / "accuracy.json",
+                expected_atom_count=atom_count,
+                expected_token_count=token_count,
+            )
+        finally:
+            _record_reference_comparison(structure, reference, output_dir / "accuracy.json")
 
 
 def test_model_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    _record_request_evidence(TEST_ROOT / case["request"])
     model_dir = _model_dir(manifest, tmp_path)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest["hf_id"], "hf_revision": manifest["hf_revision"]})
     binary = _required_environment("TRTMC_BINARY")
     runtime_root = _required_environment("TRTMC_RUNTIME_ROOT")
     assert manifest["hf_id"] and manifest["hf_revision"]
 
     bundle = tmp_path / manifest["bundle"]
-    build(
-        BuildRequest(
-            model_dir=model_dir,
-            output_path=bundle,
-            family=FAMILY,
-            task=manifest["task"],
-            precision=manifest["precision"],
-            max_sequence_length=manifest["max_sequence_length"],
-            tensor_parallel_size=manifest["tensor_parallel_size"],
+    with evidence_stage("build"):
+        build(
+            BuildRequest(
+                model_dir=model_dir,
+                output_path=bundle,
+                family=FAMILY,
+                task=manifest["task"],
+                precision=manifest["precision"],
+                max_sequence_length=manifest["max_sequence_length"],
+                tensor_parallel_size=manifest["tensor_parallel_size"],
+            )
         )
-    )
     structure = tmp_path / "prediction.cif"
     metadata = tmp_path / "prediction.json"
     request = TEST_ROOT / case["request"]
@@ -202,36 +346,41 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
     environment["LD_LIBRARY_PATH"] = ":".join(
         value for value in (str(runtime_root), environment.get("LD_LIBRARY_PATH")) if value
     )
-    completed = subprocess.run(
-        [
-            str(binary),
-            "predict-structure",
-            str(bundle),
-            "--runtime-root",
-            str(runtime_root),
-            "--input",
-            str(request),
-            "--output",
-            str(structure),
-            "--output-json",
-            str(metadata),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-        timeout=1800,
-    )
-    _last_json(completed.stdout)
-    details = json.loads(metadata.read_text(encoding="utf-8"))
+    with evidence_stage("native"):
+        completed = subprocess.run(
+            [
+                str(binary),
+                "predict-structure",
+                str(bundle),
+                "--runtime-root",
+                str(runtime_root),
+                "--input",
+                str(request),
+                "--output",
+                str(structure),
+                "--output-json",
+                str(metadata),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=1800,
+        )
+        record_evidence("native_process", {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr})
+        record_evidence("native_summary", _last_json(completed.stdout))
+        details = json.loads(metadata.read_text(encoding="utf-8"))
+        record_evidence("native", {**details, "structure": structure, "metadata": metadata})
     thresholds = json.loads(
         (THRESHOLD_ROOT / f"{case_name}.json").read_text(encoding="utf-8")
     )["threshold_overrides"]
+    record_evidence("thresholds", thresholds)
     atom_count = sum(line.startswith("ATOM ") for line in structure.read_text().splitlines())
     token_count = len(details["plddt"])
-    assert atom_count == thresholds["atom_count"]
-    assert token_count == thresholds["token_count"]
-    assert structure.read_text(encoding="utf-8").startswith("data_boltz2\n#\nloop_\n")
+    with evidence_stage("compare"):
+        assert atom_count == thresholds["atom_count"]
+        assert token_count == thresholds["token_count"]
+        assert structure.read_text(encoding="utf-8").startswith("data_boltz2\n#\nloop_\n")
     _assert_live_reference_parity(
         model_dir,
         model_dir / "processed",
@@ -252,65 +401,93 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
         bundle_stat.st_mtime_ns,
         bundle_stat.st_ctime_ns,
     )
+    from families.boltz2.contracts import parse_request_yaml
+
     variant_request = TEST_ROOT / "data/protein_monomer_variant/protein_monomer_variant.yaml"
-    prepared = tmp_path / "protein_monomer_variant.b2rq"
+    variant = parse_request_yaml(variant_request.read_text(encoding="utf-8"))
+    complex_sequence = variant.sequences[0].sequence[:50]
+    complex_root = tmp_path / "protein-complex"
+    complex_root.mkdir()
+    complex_a3m = complex_root / "protein_complex.a3m"
+    complex_a3m.write_text(f">query\n{complex_sequence}\n", encoding="utf-8")
+    complex_request = complex_root / "protein_complex.yaml"
+    complex_request.write_text(
+        "version: 1\n"
+        "sequences:\n"
+        "  - protein:\n"
+        "      id: [A, B]\n"
+        f"      sequence: {complex_sequence}\n"
+        f"      msa: {complex_a3m.name}\n",
+        encoding="utf-8",
+    )
+    prepared = tmp_path / "protein_complex.b2rq"
     request_cache = tmp_path / "request-cache"
     preparation = prepare_structure_request(
         model_dir,
-        variant_request,
+        complex_request,
         prepared,
         cache_dir=request_cache,
     )
-    variant_structure = tmp_path / "variant.cif"
-    variant_metadata = tmp_path / "variant.json"
-    completed = subprocess.run(
-        [
-            str(binary),
-            "predict-structure",
-            str(bundle),
-            "--runtime-root",
-            str(runtime_root),
-            "--input",
-            str(prepared),
-            "--output",
-            str(variant_structure),
-            "--output-json",
-            str(variant_metadata),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-        timeout=1800,
-    )
-    _last_json(completed.stdout)
+    record_evidence("request_preparation", preparation)
+    _record_request_evidence(complex_request, prepared)
+    complex_structure = tmp_path / "complex.cif"
+    complex_metadata = tmp_path / "complex.json"
+    with evidence_stage("native"):
+        completed = subprocess.run(
+            [
+                str(binary),
+                "predict-structure",
+                str(bundle),
+                "--runtime-root",
+                str(runtime_root),
+                "--input",
+                str(prepared),
+                "--output",
+                str(complex_structure),
+                "--output-json",
+                str(complex_metadata),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=1800,
+        )
+        record_evidence("native_process", {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr})
+        record_evidence("native_summary", _last_json(completed.stdout))
+    _record_native_evidence(complex_structure, complex_metadata)
     bundle_stat = bundle.stat()
-    assert (
-        bundle_stat.st_dev,
-        bundle_stat.st_ino,
-        bundle_stat.st_size,
-        bundle_stat.st_mtime_ns,
-        bundle_stat.st_ctime_ns,
-    ) == bundle_identity
-    assert json.loads(variant_metadata.read_text(encoding="utf-8"))["profile"] == (
-        "tokens_117_atoms_928"
-    )
+    with evidence_stage("compare"):
+        assert (
+            bundle_stat.st_dev,
+            bundle_stat.st_ino,
+            bundle_stat.st_size,
+            bundle_stat.st_mtime_ns,
+            bundle_stat.st_ctime_ns,
+        ) == bundle_identity
+        complex_details = json.loads(complex_metadata.read_text(encoding="utf-8"))
+        assert complex_details["profile"] == "tokens_117_atoms_928"
+        assert complex_details["active_token_count"] == 100
+        assert complex_details["active_atom_count"] == 794
+        assert complex_details["chain_pair_confidence"] == []
     _assert_live_reference_parity(
         model_dir,
         request_cache
         / str(preparation["cache_key"])[:2]
         / str(preparation["cache_key"])
         / "work/processed",
-        variant_structure,
-        variant_metadata,
-        tmp_path / "variant-reference",
-        atom_count=thresholds["atom_count"],
-        token_count=thresholds["token_count"],
+        complex_structure,
+        complex_metadata,
+        tmp_path / "complex-reference",
+        atom_count=794,
+        token_count=100,
     )
     cached = prepare_structure_request(
         model_dir,
-        variant_request,
-        tmp_path / "protein_monomer_variant-cached.b2rq",
+        complex_request,
+        tmp_path / "protein_complex-cached.b2rq",
         cache_dir=request_cache,
     )
-    assert cached["cache_hit"] is True
+    record_evidence("request_preparation", cached)
+    with evidence_stage("compare"):
+        assert cached["cache_hit"] is True

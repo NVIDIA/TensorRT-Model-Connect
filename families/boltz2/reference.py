@@ -25,7 +25,12 @@ NATIVE_QUALIFICATION_THRESHOLDS = {
     "plddt_mean_abs_max": 0.10,
     "confidence_score_abs_max": 0.10,
     "complex_plddt_abs_max": 0.10,
+    "complex_iplddt_abs_max": 0.10,
     "ptm_abs_max": 0.10,
+    "iptm_abs_max": 0.10,
+    "protein_iptm_abs_max": 0.10,
+    "chains_ptm_max_abs_max": 0.10,
+    "pair_chains_iptm_max_abs_max": 0.10,
 }
 
 
@@ -98,7 +103,23 @@ def _as_numpy(value: Any) -> np.ndarray:
     return value.detach().float().cpu().numpy()
 
 
+def _pair_chain_arrays(prediction: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    pairs = prediction["pair_chains_iptm"]
+    chain_ids = sorted(int(chain_id) for chain_id in pairs)
+    if any(set(int(value) for value in pairs[chain_id]) != set(chain_ids) for chain_id in pairs):
+        raise ValueError("reference pair-chain ipTM map is not square")
+    values = np.empty((len(chain_ids), len(chain_ids)), dtype=np.float32)
+    for first_index, first in enumerate(chain_ids):
+        for second_index, second in enumerate(chain_ids):
+            score = _as_numpy(pairs[first][second]).reshape(-1)
+            if score.size != 1:
+                raise ValueError("reference pair-chain ipTM score is not scalar")
+            values[first_index, second_index] = score[0]
+    return np.asarray(chain_ids, dtype=np.int32), values
+
+
 def save_reference_output(path: Path, prediction: dict[str, Any]) -> None:
+    pair_chain_ids, pair_chains_iptm = _pair_chain_arrays(prediction)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         path,
@@ -108,7 +129,12 @@ def save_reference_output(path: Path, prediction: dict[str, Any]) -> None:
         plddt=_as_numpy(prediction["plddt"]),
         confidence_score=_as_numpy(prediction["confidence_score"]),
         complex_plddt=_as_numpy(prediction["complex_plddt"]),
+        complex_iplddt=_as_numpy(prediction["complex_iplddt"]),
         ptm=_as_numpy(prediction["ptm"]),
+        iptm=_as_numpy(prediction["iptm"]),
+        protein_iptm=_as_numpy(prediction["protein_iptm"]),
+        pair_chain_ids=pair_chain_ids,
+        pair_chains_iptm=pair_chains_iptm,
     )
 
 
@@ -120,6 +146,17 @@ def _masked_coords(data: np.lib.npyio.NpzFile) -> np.ndarray:
     result = coords[mask]
     if result.size == 0 or not np.isfinite(result).all():
         raise ValueError("coordinates are empty or non-finite")
+    return result
+
+
+def _masked_tokens(data: np.lib.npyio.NpzFile, name: str) -> np.ndarray:
+    values = np.asarray(data[name], dtype=np.float64).reshape(-1)
+    mask = np.asarray(data["token_mask"], dtype=bool).reshape(-1)
+    if values.shape != mask.shape:
+        raise ValueError(f"{name} and token-mask shapes do not match")
+    result = values[mask]
+    if result.size == 0 or not np.isfinite(result).all():
+        raise ValueError(f"active {name} values are empty or non-finite")
     return result
 
 
@@ -193,7 +230,24 @@ def _qualification(
             float(metrics["complex_plddt_abs"])
             <= thresholds["complex_plddt_abs_max"]
         ),
+        "complex_iplddt_abs": (
+            float(metrics["complex_iplddt_abs"])
+            <= thresholds["complex_iplddt_abs_max"]
+        ),
         "ptm_abs": float(metrics["ptm_abs"]) <= thresholds["ptm_abs_max"],
+        "iptm_abs": float(metrics["iptm_abs"]) <= thresholds["iptm_abs_max"],
+        "protein_iptm_abs": (
+            float(metrics["protein_iptm_abs"])
+            <= thresholds["protein_iptm_abs_max"]
+        ),
+        "chains_ptm_max_abs": (
+            float(metrics["chains_ptm_max_abs"])
+            <= thresholds["chains_ptm_max_abs_max"]
+        ),
+        "pair_chains_iptm_max_abs": (
+            float(metrics["pair_chains_iptm_max_abs"])
+            <= thresholds["pair_chains_iptm_max_abs_max"]
+        ),
     }
     return {"thresholds": thresholds, "checks": checks, "passed": all(checks.values())}
 
@@ -214,10 +268,21 @@ def compare_native(
         raise ValueError("native qualification expected counts must be positive")
     with np.load(reference_npz) as reference:
         reference_coords = _masked_coords(reference)
-        reference_plddt = np.asarray(reference["plddt"], dtype=np.float64).reshape(-1)
+        reference_plddt = _masked_tokens(reference, "plddt")
         reference_confidence = float(np.asarray(reference["confidence_score"]).reshape(-1)[0])
         reference_complex_plddt = float(np.asarray(reference["complex_plddt"]).reshape(-1)[0])
+        reference_complex_iplddt = float(
+            np.asarray(reference["complex_iplddt"]).reshape(-1)[0]
+        )
         reference_ptm = float(np.asarray(reference["ptm"]).reshape(-1)[0])
+        reference_iptm = float(np.asarray(reference["iptm"]).reshape(-1)[0])
+        reference_protein_iptm = float(
+            np.asarray(reference["protein_iptm"]).reshape(-1)[0]
+        )
+        reference_chain_ids = np.asarray(reference["pair_chain_ids"], dtype=np.int32)
+        reference_pair_chains_iptm = np.asarray(
+            reference["pair_chains_iptm"], dtype=np.float64
+        )
     candidate_coords = _native_mmcif_coords(candidate_mmcif)
     metadata = json.loads(candidate_metadata.read_text(encoding="utf-8"))
     candidate_plddt = np.asarray(metadata.get("plddt", []), dtype=np.float64)
@@ -225,6 +290,29 @@ def compare_native(
         raise ValueError("reference and native coordinate shapes do not match")
     if reference_plddt.shape != candidate_plddt.shape:
         raise ValueError("reference and native pLDDT shapes do not match")
+    if reference_pair_chains_iptm.shape != (reference_chain_ids.size,) * 2:
+        raise ValueError("reference pair-chain ipTM shape does not match its chain IDs")
+    chain_keys = {str(int(chain_id)) for chain_id in reference_chain_ids}
+    candidate_chains = metadata.get("chains_ptm")
+    candidate_pairs = metadata.get("pair_chains_iptm")
+    if not isinstance(candidate_chains, dict) or set(candidate_chains) != chain_keys:
+        raise ValueError("native per-chain pTM keys do not match the reference")
+    if not isinstance(candidate_pairs, dict) or set(candidate_pairs) != chain_keys:
+        raise ValueError("native pair-chain ipTM keys do not match the reference")
+    if metadata.get("chain_pair_confidence") != []:
+        raise ValueError("native legacy chain-pair confidence field changed shape")
+    candidate_pair_chains_iptm = np.empty_like(reference_pair_chains_iptm)
+    candidate_chains_ptm = np.empty(reference_chain_ids.size, dtype=np.float64)
+    for first_index, first in enumerate(reference_chain_ids):
+        first_key = str(int(first))
+        row = candidate_pairs[first_key]
+        if not isinstance(row, dict) or set(row) != chain_keys:
+            raise ValueError("native pair-chain ipTM map is not square")
+        candidate_chains_ptm[first_index] = float(candidate_chains[first_key])
+        for second_index, second in enumerate(reference_chain_ids):
+            candidate_pair_chains_iptm[first_index, second_index] = float(
+                row[str(int(second))]
+            )
     result = {
         "schema_version": 1,
         "atom_count": int(candidate_coords.shape[0]),
@@ -234,6 +322,9 @@ def compare_native(
             and np.isfinite(candidate_coords).all()
             and np.isfinite(reference_plddt).all()
             and np.isfinite(candidate_plddt).all()
+            and np.isfinite(reference_pair_chains_iptm).all()
+            and np.isfinite(candidate_pair_chains_iptm).all()
+            and np.isfinite(candidate_chains_ptm).all()
         ),
         "lddt": _lddt(reference_coords, candidate_coords),
         "kabsch_rmsd_angstrom": _kabsch_rmsd(reference_coords, candidate_coords),
@@ -245,7 +336,20 @@ def compare_native(
         "complex_plddt_abs": abs(
             reference_complex_plddt - float(metadata["complex_plddt"])
         ),
+        "complex_iplddt_abs": abs(
+            reference_complex_iplddt - float(metadata["complex_iplddt"])
+        ),
         "ptm_abs": abs(reference_ptm - float(metadata["ptm"])),
+        "iptm_abs": abs(reference_iptm - float(metadata["iptm"])),
+        "protein_iptm_abs": abs(
+            reference_protein_iptm - float(metadata["protein_iptm"])
+        ),
+        "chains_ptm_max_abs": float(
+            np.max(np.abs(np.diag(reference_pair_chains_iptm) - candidate_chains_ptm))
+        ),
+        "pair_chains_iptm_max_abs": float(
+            np.max(np.abs(reference_pair_chains_iptm - candidate_pair_chains_iptm))
+        ),
     }
     numeric = (
         value

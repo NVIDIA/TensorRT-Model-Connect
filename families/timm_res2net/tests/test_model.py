@@ -110,6 +110,93 @@ def test_support_claims_only_its_own_identity() -> None:
     assert describe(_metadata("seresnet50")) is None
 
 
+@pytest.mark.parametrize("missing_library", ["backend", "model", None])
+def test_e2e_runtime_library_checks_record_setup_before_build(
+    tmp_path: Path, monkeypatch, missing_library: str | None
+) -> None:
+    from contextlib import contextmanager
+
+    from families.timm_res2net.tests import test_e2e
+    from tools import e2e_evidence
+
+    binary = tmp_path / "trtmc"
+    binary.touch()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    libraries = {
+        "backend": runtime_root / "libtrtmc_backend_trt.so",
+        "model": runtime_root / "libtrtmc_model_timm_res2net.so",
+    }
+    for role, path in libraries.items():
+        if role != missing_library:
+            path.touch()
+    monkeypatch.setenv("TRTMC_BINARY", str(binary))
+    monkeypatch.setenv("TRTMC_RUNTIME_ROOT", str(runtime_root))
+    recorder = e2e_evidence.Evidence(
+        tmp_path / "evidence", family="timm_res2net", case="runtime-library-control",
+        source_revision="a" * 40, roots=(tmp_path,),
+    )
+    events = []
+    original_is_file = Path.is_file
+
+    def is_file(path):
+        if path in libraries.values():
+            events.append(path.name)
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+
+    def model_dir(manifest):
+        events.append("model_dir")
+        return tmp_path
+
+    build_stop = RuntimeError("CPU control reached the original build boundary")
+
+    def build(request):
+        events.append("build")
+        assert request.model_dir == tmp_path
+        raise build_stop
+
+    monkeypatch.setattr(test_e2e, "_model_dir", model_dir)
+    monkeypatch.setattr(test_e2e, "build", build)
+    setup_errors = []
+
+    @contextmanager
+    def observed_stage(name):
+        with e2e_evidence.evidence_stage(name):
+            try:
+                yield
+            except AssertionError as error:
+                if name == "setup":
+                    setup_errors.append(error)
+                raise
+
+    monkeypatch.setattr(test_e2e, "evidence_stage", observed_stage)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        if missing_library:
+            with pytest.raises(AssertionError) as caught:
+                test_e2e.test_official_checkpoint_e2e("res2net50-26w-4s-in1k", tmp_path)
+            assert len(setup_errors) == 1 and setup_errors[0] is caught.value
+            assert recorder.data["failure_stage"] == "setup"
+            assert [(row["stage"], row["status"]) for row in recorder.data["timing"]] == [
+                ("setup", "failed")
+            ]
+            assert events == [libraries["backend"].name] + (
+                [libraries["model"].name] if missing_library == "model" else []
+            )
+        else:
+            with pytest.raises(RuntimeError) as caught:
+                test_e2e.test_official_checkpoint_e2e("res2net50-26w-4s-in1k", tmp_path)
+            assert caught.value is build_stop
+            assert events == [libraries["backend"].name, libraries["model"].name, "model_dir", "build"]
+            assert [(row["stage"], row["status"]) for row in recorder.data["timing"]] == [
+                ("setup", "passed"), ("build", "failed")
+            ]
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+
+
 def test_layout_reads_the_scale_from_the_convolution_chain(tmp_path: Path) -> None:
     """The last chunk skips the chain, so scale is one more than the rungs."""
     for scale in (2, 4, 8):
@@ -206,13 +293,14 @@ class _RecordingConfig:
         self.cleared.append(flag)
 
 
-def test_fp32_builds_switch_off_the_reduced_precision_path() -> None:
+def test_fp32_builds_switch_off_the_reduced_precision_path(monkeypatch) -> None:
     """An fp32 build must not silently run convolutions in TF32.
 
     TF32 keeps ten mantissa bits. On res2net50_26w_8s that is enough to change
     the predicted class against timm, so fp32 has to mean fp32.
     """
-    import tensorrt as trt
+    trt = SimpleNamespace(BuilderFlag=SimpleNamespace(TF32=object()))
+    monkeypatch.setattr(model, "trt", trt)
 
     config = _RecordingConfig()
     model._configure_precision(config, "fp32")
