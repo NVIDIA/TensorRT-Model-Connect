@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 import json
 import os
 import subprocess
@@ -257,6 +257,44 @@ def _assert_parity(actual, expected, thresholds: dict) -> None:
     assert int(actual["top_class"]) == int(expected["second_class"])
 
 
+def _record_exact_class_match(actual, expected, tmp_path: Path) -> None:
+    """Observe the original successful early return without adding another gate."""
+    if not evidence_enabled():
+        return
+    try:
+        native_class = int(actual["top_class"])
+        reference_class = int(expected["top_class"])
+        if native_class != reference_class:
+            return
+        native = tmp_path / "classification-native.json"
+        reference = tmp_path / "classification-reference.json"
+        native.write_text(json.dumps({"top_class": native_class}) + "\n", encoding="utf-8")
+        reference.write_text(json.dumps({"top_class": reference_class}) + "\n", encoding="utf-8")
+        record_evidence(
+            "reference_comparison",
+            {
+                "label": "Exact top class match",
+                "scope": "independent_reference",
+                "enforced": True,
+                "native": native,
+                "reference": reference,
+                "checks": [
+                    {
+                        "name": "top_class",
+                        "label": "Predicted class ID",
+                        "scope": "independent_reference",
+                        "actual": native_class,
+                        "operator": "==",
+                        "expected": reference_class,
+                        "passed": native_class == reference_class,
+                    }
+                ],
+            },
+        )
+    except Exception as error:
+        record_evidence("comparison_preview", {"error": f"{type(error).__name__}: {error}"})
+
+
 def test_top1_margin_contract_accepts_only_the_reference_runner_up() -> None:
     thresholds = {"top1_margin_atol": 0.12}
     _assert_parity(
@@ -289,3 +327,142 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("reference", expected)
     with evidence_stage("compare"):
         _assert_parity(actual, expected, record_evidence("thresholds", _thresholds(case_name)))
+    _record_exact_class_match(actual, expected, tmp_path)
+
+
+@pytest.fixture
+def classification_reporting_run(tmp_path: Path, monkeypatch):
+    from tools import e2e_evidence
+
+    recorder = e2e_evidence.Evidence(
+        tmp_path / "evidence", family=FAMILY, case="classification-report-control",
+        source_revision="a" * 40, roots=(tmp_path,),
+    )
+    original_parity = _assert_parity
+    original_write = Path.write_text
+    events = []
+    errors = []
+
+    def run(actual, expected, thresholds, *, fail_file=None, capture=True):
+        monkeypatch.setitem(globals(), "_model_dir", lambda manifest: tmp_path)
+        monkeypatch.setitem(globals(), "_runtime", lambda: (tmp_path / "trtmc", tmp_path))
+        monkeypatch.setitem(globals(), "_build", lambda *args: events.append("build"))
+        monkeypatch.setitem(globals(), "_native", lambda *args: actual)
+        monkeypatch.setitem(globals(), "_official_reference", lambda *args: expected)
+        monkeypatch.setitem(globals(), "_thresholds", lambda name: thresholds)
+
+        def parity(*args):
+            events.append("parity")
+            try:
+                result = original_parity(*args)
+            except AssertionError as error:
+                errors.append(error)
+                raise
+            events.append("parity-passed")
+            return result
+
+        def write(path, *args, **kwargs):
+            if path.name in {"classification-native.json", "classification-reference.json"}:
+                events.append(path.name)
+                if path.name == fail_file:
+                    raise OSError("report file unavailable")
+            return original_write(path, *args, **kwargs)
+
+        monkeypatch.setitem(globals(), "_assert_parity", parity)
+        monkeypatch.setattr(Path, "write_text", write)
+        token = e2e_evidence._ACTIVE.set(recorder if capture else None)
+        caught = None
+        try:
+            test_official_checkpoint_e2e("efficientnet-b0-ra-in1k", tmp_path)
+        except AssertionError as error:
+            caught = error
+        finally:
+            e2e_evidence._ACTIVE.reset(token)
+        if capture:
+            recorder.finish("failed" if caught else "passed", failure=str(caught or ""))
+        return recorder, events, errors, caught
+
+    return run
+
+
+@pytest.mark.parametrize("native_class,reference_class", [(0, 0), (656, 656), ("0", np.int64(0))])
+def test_classification_reporting_exact_match_has_real_distinct_artifacts(
+    classification_reporting_run, native_class, reference_class
+):
+    import copy
+    from tools.e2e_report import _assessment, render_case
+
+    actual = {"top_class": native_class, "extra": [1, 2]}
+    expected = {"top_class": reference_class, "second_class": 817, "top1_margin": 0.1}
+    original = copy.deepcopy((actual, expected))
+    recorder, events, errors, caught = classification_reporting_run(actual, expected, {"top1_margin_atol": 0.12})
+    assert caught is None and errors == [] and (actual, expected) == original
+    assert events == ["build", "parity", "parity-passed", "classification-native.json", "classification-reference.json"]
+    comparison = recorder.data["reference_comparison"]
+    native, reference = comparison["native"], comparison["reference"]
+    assert native["artifact"] != reference["artifact"]
+    assert native["size_bytes"] > 0 and reference["size_bytes"] > 0
+    files = [recorder.directory / value["artifact"] for value in (native, reference)]
+    assert files[0].read_bytes() == files[1].read_bytes()
+    assert all(json.loads(path.read_text()) == {"top_class": int(reference_class)} for path in files)
+    assert comparison["scope"] == "independent_reference" and comparison["enforced"] is True
+    assert comparison["checks"] == [{"name": "top_class", "label": "Predicted class ID", "scope": "independent_reference", "actual": int(native_class), "operator": "==", "expected": int(reference_class), "passed": True}]
+    assert recorder.data["checks"] == []
+    assert _assessment(recorder.data)["kind"] == "reference"
+    assert "Exact top class match" in render_case(recorder.data, recorder.directory)
+
+
+@pytest.mark.parametrize(
+    "native_class,margin,limit,accepted",
+    [(817, 0.1, 0.12, True), (817, 0.12, 0.12, True), (817, 0.2, 0.12, False),
+     (99, 0.1, 0.12, False), (817, 0.1, None, False)],
+)
+def test_classification_reporting_keeps_original_runner_up_route(
+    classification_reporting_run, native_class, margin, limit, accepted
+):
+    import copy
+    from tools.e2e_report import _assessment
+
+    actual = {"top_class": native_class}
+    expected = {"top_class": 656, "second_class": 817, "top1_margin": margin}
+    original = copy.deepcopy((actual, expected))
+    thresholds = {} if limit is None else {"top1_margin_atol": limit}
+    recorder, events, errors, caught = classification_reporting_run(actual, expected, thresholds)
+    assert (actual, expected) == original
+    assert "reference_comparison" not in recorder.data
+    assert not list(recorder.directory.parent.glob("classification-*.json"))
+    if accepted:
+        assert caught is None and errors == []
+        assert events == ["build", "parity", "parity-passed"]
+        assert len(recorder.data["checks"]) == 3
+        assert "runner-up" in _assessment(recorder.data)["summary"]
+    else:
+        assert errors == [caught] and isinstance(caught, AssertionError)
+        assert events == ["build", "parity"]
+        assert recorder.data["failure_stage"] == "compare"
+        assert _assessment(recorder.data)["kind"] == "failed"
+
+
+@pytest.mark.parametrize("fail_file", ["classification-native.json", "classification-reference.json"])
+def test_classification_reporting_io_failure_keeps_original_success(
+    classification_reporting_run, fail_file
+):
+    from tools.e2e_report import _assessment
+
+    recorder, events, errors, caught = classification_reporting_run(
+        {"top_class": 0}, {"top_class": 0}, {}, fail_file=fail_file,
+    )
+    assert caught is None and errors == [] and "parity-passed" in events
+    assert recorder.data["status"] == "passed"
+    assert "reference_comparison" not in recorder.data
+    assert "OSError: report file unavailable" in recorder.data["comparison_preview"]["error"]
+    assert _assessment(recorder.data)["kind"] == "unverified"
+
+
+def test_classification_reporting_disabled_does_not_write_files(classification_reporting_run):
+    recorder, events, errors, caught = classification_reporting_run(
+        {"top_class": 0}, {"top_class": 0}, {}, capture=False,
+    )
+    assert caught is None and errors == []
+    assert events == ["build", "parity", "parity-passed"]
+    assert not list(recorder.directory.parent.glob("classification-*.json"))
