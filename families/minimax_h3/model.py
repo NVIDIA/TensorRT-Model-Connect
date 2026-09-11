@@ -5,37 +5,61 @@
 
 from __future__ import annotations
 
-import gc
+from fractions import Fraction
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-from .checkpoint import (
-    load_selected_component_state_dict,
-    numpy_state,
-    validate_component_key_partition,
-)
 from .config import (
-    SOL_ENGINE_1344X768_124F,
-    default_workspace_limit_bytes,
+    CANVAS_MAX_ASPECT_RATIO,
+    CANVAS_MAX_PIXELS,
+    CANVAS_MIN_ASPECT_RATIO,
+    CANVAS_MULTIPLE,
+    CANVAS_SHORT_EDGE,
+    NATIVE_EXPLICIT_CANVAS_SIZES,
+    SOL_ENGINE_1344X768_124_TO_345F,
+    VIDEO_NUM_FRAMES_MAX,
+    VIDEO_NUM_FRAMES_MIN,
+    VIDEO_NUM_FRAMES_OPT,
 )
+from .runtime_config_schema import normalize_build_options as validate_build_options
+from .delivery import SR_SOURCE_SHAPE
 
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
-def _fixed_profile(raw: dict):
+def _effective_build_config(raw: dict) -> dict:
+    family_options = raw.get("_family_build_options", {})
+    options = family_options.get("minimax_h3", {}) if isinstance(family_options, dict) else {}
+    if not isinstance(options, dict):
+        raise ValueError("minimax_h3 build options must be an object")
+    return {**raw, **validate_build_options(options)}
+
+
+def _public_dynamic_profile(raw: dict):
+    profile = SOL_ENGINE_1344X768_124_TO_345F
     expected = {
-        "text_rows": SOL_ENGINE_1344X768_124F.text_rows,
-        "text_rows_min": SOL_ENGINE_1344X768_124F.min_text_rows,
-        "text_rows_opt": SOL_ENGINE_1344X768_124F.opt_text_rows,
-        "text_rows_max": SOL_ENGINE_1344X768_124F.text_rows,
-        "audio_rows": SOL_ENGINE_1344X768_124F.audio_rows,
-        "video_rows": SOL_ENGINE_1344X768_124F.video_rows,
-        "padded_sequence_length": SOL_ENGINE_1344X768_124F.padded_sequence_length,
+        "text_rows": profile.text_rows,
+        "text_rows_min": profile.min_text_rows,
+        "text_rows_opt": profile.opt_text_rows,
+        "text_rows_max": profile.text_rows,
+        "audio_rows": profile.opt_audio_rows,
+        "audio_rows_min": profile.min_audio_rows,
+        "audio_rows_opt": profile.opt_audio_rows,
+        "audio_rows_max": profile.audio_rows,
+        "video_rows": profile.opt_video_rows,
+        "video_rows_min": profile.min_video_rows,
+        "video_rows_opt": profile.opt_video_rows,
+        "video_rows_max": profile.video_rows,
+        "packed_sequence_length_min": profile.min_sequence_length,
+        "packed_sequence_length_opt": profile.opt_sequence_length,
+        "packed_sequence_length_max": profile.sequence_length,
+        "padded_sequence_length": profile.padded_sequence_length,
     }
     mismatches = {
         name: (raw[name], value)
@@ -44,28 +68,141 @@ def _fixed_profile(raw: dict):
     }
     if mismatches:
         raise ValueError(f"Unsupported MiniMax-H3 packed-row profile: {mismatches}")
-    explicit_flag = raw.get("first_block_cache")
-    mode = raw.get(
-        "denoiser_cache_mode",
-        "first_block" if explicit_flag is True else "monolithic",
-    )
-    if mode not in ("monolithic", "first_block"):
-        raise ValueError(f"Unsupported MiniMax-H3 denoiser_cache_mode: {mode!r}")
-    if explicit_flag is not None and not isinstance(explicit_flag, bool):
-        raise ValueError("MiniMax-H3 first_block_cache must be a boolean")
-    mode_flag = mode == "first_block"
-    if explicit_flag is not None and explicit_flag != mode_flag:
-        raise ValueError("MiniMax-H3 cache mode and first_block_cache flag disagree")
-    if not mode_flag:
-        return SOL_ENGINE_1344X768_124F
-    return replace(SOL_ENGINE_1344X768_124F, first_block_cache=True)
+    explicit_flag = raw.get("first_block_cache", True)
+    if explicit_flag is not True:
+        raise ValueError("MiniMax-H3 only supports the dense FirstBlockCache build")
+    mode = raw.get("denoiser_cache_mode", "first_block")
+    if mode != "first_block":
+        raise ValueError("MiniMax-H3 only supports denoiser_cache_mode='first_block'")
+    return replace(profile, first_block_cache=True)
 
 
-class _MiniMaxH3Model:
-    def load_weights(self, model_dir: str, config) -> dict:
+def _default_num_frames(raw: dict) -> int:
+    value = raw.get("video_num_frames", raw.get("num_frames", VIDEO_NUM_FRAMES_OPT))
+    if isinstance(value, bool):
+        raise ValueError("MiniMax-H3 video_num_frames must be a valid 5--15 second geometry")
+    try:
+        frames = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "MiniMax-H3 video_num_frames must be a valid 5--15 second geometry"
+        ) from error
+    if not VIDEO_NUM_FRAMES_MIN <= frames <= VIDEO_NUM_FRAMES_MAX or frames % 17 != 5:
+        raise ValueError("MiniMax-H3 video_num_frames must be a valid 5--15 second geometry")
+    return frames
+
+
+def _resolve_canvas_size(aspect_width: float, aspect_height: float) -> tuple[int, int]:
+    """Mirror the public H3 resolver with Python ties-to-even 32 rounding."""
+
+    if not math.isfinite(aspect_width) or not math.isfinite(aspect_height):
+        raise ValueError("MiniMax-H3 canvas aspect must be finite and positive")
+    if aspect_width <= 0.0 or aspect_height <= 0.0:
+        raise ValueError("MiniMax-H3 canvas aspect must be finite and positive")
+    ratio = aspect_width / aspect_height
+    if not CANVAS_MIN_ASPECT_RATIO <= ratio <= CANVAS_MAX_ASPECT_RATIO:
+        raise ValueError("MiniMax-H3 canvas aspect must be within 1:4 through 4:1")
+    if ratio >= 1.0:
+        height = float(CANVAS_SHORT_EDGE)
+        width = height * ratio
+    else:
+        width = float(CANVAS_SHORT_EDGE)
+        height = width / ratio
+    pixels = width * height
+    if pixels > CANVAS_MAX_PIXELS:
+        scale = math.sqrt(CANVAS_MAX_PIXELS / pixels)
+        width *= scale
+        height *= scale
+    resolved_width = int(round(width / CANVAS_MULTIPLE)) * CANVAS_MULTIPLE
+    resolved_height = int(round(height / CANVAS_MULTIPLE)) * CANVAS_MULTIPLE
+    return resolved_height, resolved_width
+
+
+def _reachable_canvas_sizes() -> tuple[tuple[int, int], ...]:
+    """Enumerate the exact finite image of the continuous 32-rounded resolver."""
+
+    landscape = {
+        (CANVAS_SHORT_EDGE, width)
+        for width in range(
+            CANVAS_SHORT_EDGE,
+            int(CANVAS_SHORT_EDGE * 1.75) + CANVAS_MULTIPLE,
+            CANVAS_MULTIPLE,
+        )
+    }
+    half = CANVAS_MULTIPLE // 2
+    maximum_dimension = CANVAS_SHORT_EDGE * int(CANVAS_MAX_ASPECT_RATIO)
+    for height in range(CANVAS_MULTIPLE, CANVAS_SHORT_EDGE + 1, CANVAS_MULTIPLE):
+        for width in range(CANVAS_SHORT_EDGE, maximum_dimension + 1, CANVAS_MULTIPLE):
+            # In the area-limited landscape branch raw dimensions satisfy
+            # h*w=max_pixels and r=w/h. Intersect the two nearest-multiple
+            # rounding cells with the resolver's exact r interval.
+            lower = max(
+                Fraction(7, 4),
+                Fraction(CANVAS_MAX_PIXELS, (height + half) ** 2),
+                Fraction((width - half) ** 2, CANVAS_MAX_PIXELS),
+            )
+            upper = min(
+                Fraction(4, 1),
+                Fraction(CANVAS_MAX_PIXELS, (height - half) ** 2),
+                Fraction((width + half) ** 2, CANVAS_MAX_PIXELS),
+            )
+            if lower >= upper:
+                continue
+            sample = float((lower + upper) / 2)
+            if _resolve_canvas_size(sample, 1.0) == (height, width):
+                landscape.add((height, width))
+    reachable = landscape | {(width, height) for height, width in landscape}
+    return tuple(sorted(reachable))
+
+
+def _default_canvas_size(raw: dict) -> tuple[int, int]:
+    sr = raw.get("super_resolution", False)
+    default_height, default_width = SR_SOURCE_SHAPE if sr else (768, 1344)
+    height_value = raw.get("video_height", raw.get("height", default_height))
+    width_value = raw.get("video_width", raw.get("width", default_width))
+    if isinstance(height_value, bool) or isinstance(width_value, bool):
+        raise ValueError("MiniMax-H3 video dimensions must match the public canvas resolver")
+    try:
+        height = int(height_value)
+        width = int(width_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "MiniMax-H3 video dimensions must match the public canvas resolver"
+        ) from error
+    if sr and (height, width) != SR_SOURCE_SHAPE:
+        raise ValueError("MiniMax-H3 super_resolution=true requires height=480 and width=864")
+    if (
+        height <= 0
+        or width <= 0
+        or (
+            (height, width) not in NATIVE_EXPLICIT_CANVAS_SIZES
+            and (height, width) != _resolve_canvas_size(width, height)
+        )
+    ):
+        raise ValueError("MiniMax-H3 video dimensions must match the public canvas resolver")
+    return height, width
+
+
+def _first_block_cache_threshold(raw: dict, *, default: float = 0.08) -> float:
+    value = raw.get("first_block_cache_threshold", default)
+    if isinstance(value, bool):
+        raise ValueError("MiniMax-H3 first_block_cache_threshold must be finite and positive")
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "MiniMax-H3 first_block_cache_threshold must be finite and positive"
+        ) from error
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("MiniMax-H3 first_block_cache_threshold must be finite and positive")
+    return threshold
+
+
+class MiniMaxH3Plugin:
+    def load_weights(self, model_dir: str, config, **_kwargs) -> dict:
         del config
         root = Path(model_dir)
-        required_dirs = ("transformer", "text_encoder", "vae", "audio_vae", "tokenizer")
+        required_dirs = ("transformer", "vae", "audio_vae", "tokenizer")
         missing = [str(root / name) for name in required_dirs if not (root / name).is_dir()]
         if missing:
             raise FileNotFoundError(
@@ -86,241 +223,131 @@ class _MiniMaxH3Model:
         }
         if mismatches:
             raise ValueError(f"Unsupported MiniMax-H3 transformer architecture: {mismatches}")
-        return {
-            "_model_dir": str(root),
-            "_transformer_dir": str(root / "transformer"),
-            "_text_encoder_dir": str(root / "text_encoder"),
-            "_vae_dir": str(root / "vae"),
-            "_audio_vae_dir": str(root / "audio_vae"),
-            "_tokenizer_dir": str(root / "tokenizer"),
-        }
+        return {"_model_dir": str(root)}
 
-    def build_components(
+    def build_staged_bundle(
         self,
         model_dir: str,
+        writer: "BundleWriter",
         config,
         weights: dict,
         *,
-        precision: str = "bf16",
+        plans_dir: str | Path,
+        precision: str,
         verbose: bool = False,
-    ) -> dict:
-        del model_dir
+        parallel_config=None,
+        max_batch_size: int = 1,
+    ) -> None:
+        """Build a staged RTX bundle without retaining serialized plans in RAM."""
+
         if precision.lower() != "bf16":
-            raise ValueError("MiniMax-H3 native builds require BF16 checkpoint weights")
-        raw = getattr(config, "raw", {})
-        profile = _fixed_profile(raw)
-        profile.validate()
-        workspace_limits = default_workspace_limit_bytes(
-            first_block_cache=profile.first_block_cache
-        )
-        from .adaln_builder import build_adaln_precompute_engine
-        from .adaln_builder import checkpoint_keys as adaln_checkpoint_keys
-        from .dit_builder import (
-            build_dit_engine,
-            build_dit_finish_engine,
-            build_dit_head_engine,
-            build_dit_tail_engine,
-            checkpoint_keys as dit_checkpoint_keys,
-            finish_checkpoint_keys,
-            head_checkpoint_keys,
-            tail_checkpoint_keys,
-        )
-        from .text_encoder_builder import (
-            build_text_encoder_engine,
-            checkpoint_keys as text_encoder_checkpoint_keys,
-        )
+            raise ValueError("MiniMax-H3 TensorRT-RTX staged builds require BF16")
+        if max_batch_size != 1:
+            raise ValueError("MiniMax-H3 TensorRT-RTX staged builds require max_batch_size=1")
+        mode = str(getattr(parallel_config, "mode", "single"))
+        if mode != "single":
+            raise ValueError("MiniMax-H3 TensorRT-RTX staged builds require one GPU")
 
-        if profile.first_block_cache:
-            denoiser_specs = (
-                (
-                    "denoiser_head",
-                    "denoiser_head.plan",
-                    build_dit_head_engine,
-                    head_checkpoint_keys(profile),
-                ),
-                (
-                    "denoiser_tail",
-                    "denoiser_tail.plan",
-                    build_dit_tail_engine,
-                    tail_checkpoint_keys(profile),
-                ),
-                (
-                    "denoiser_finish",
-                    "denoiser_finish.plan",
-                    build_dit_finish_engine,
-                    finish_checkpoint_keys(profile),
-                ),
-            )
-            checkpoint_groups = (
-                adaln_checkpoint_keys(profile),
-                *(spec[3] for spec in denoiser_specs),
-            )
-        else:
-            denoiser_specs = (
-                (
-                    "denoiser",
-                    "denoiser.plan",
-                    build_dit_engine,
-                    dit_checkpoint_keys(profile),
-                ),
-            )
-            checkpoint_groups = (
-                adaln_checkpoint_keys(profile),
-                dit_checkpoint_keys(profile),
-            )
-        validate_component_key_partition(weights["_transformer_dir"], checkpoint_groups)
+        raw = _effective_build_config(getattr(config, "raw", {}))
+        if raw.get("_fp32_layers"):
+            raise ValueError("MiniMax-H3 TensorRT-RTX staged builds do not support FP32 layers")
+        from .delivery import resolve_quantized_sources, resolve_super_resolution_sources
 
-        text_state = load_selected_component_state_dict(
-            weights["_text_encoder_dir"], text_encoder_checkpoint_keys()
-        )
-        text_weights = numpy_state(text_state)
-        del text_state
-        text_encoder_plan = build_text_encoder_engine(
-            text_weights,
-            sequence_length=profile.text_rows,
-            verbose=verbose,
-            consume_weights=True,
-            workspace_bytes=workspace_limits["text_encoder.plan"],
-        )
-        del text_weights
-        gc.collect()
-
-        adaln_state = load_selected_component_state_dict(
-            weights["_transformer_dir"], adaln_checkpoint_keys(profile)
-        )
-        adaln_weights = numpy_state(adaln_state)
-        del adaln_state
-        adaln_plan = build_adaln_precompute_engine(
-            adaln_weights,
-            profile,
-            verbose=verbose,
-            consume_weights=True,
-            workspace_bytes=workspace_limits["adaln_precompute.plan"],
-        )
-        del adaln_weights
-        gc.collect()
-
-        denoiser_components = {}
-        for component_name, filename, denoiser_builder, selected_keys in denoiser_specs:
-            dit_state = load_selected_component_state_dict(
-                weights["_transformer_dir"], selected_keys
-            )
-            dit_weights = numpy_state(dit_state)
-            del dit_state
-            denoiser_plan = denoiser_builder(
-                dit_weights,
-                profile,
-                verbose=verbose,
-                consume_weights=True,
-                workspace_bytes=workspace_limits[filename],
-            )
-            del dit_weights
-            gc.collect()
-            denoiser_components[component_name] = denoiser_plan
-
-        from .vae_builder import (
-            build_vae_tile_decoder_engine,
-            checkpoint_keys as vae_checkpoint_keys,
-        )
-
-        vae_state = load_selected_component_state_dict(weights["_vae_dir"], vae_checkpoint_keys())
-        vae_weights = numpy_state(vae_state)
-        del vae_state
-        vae_decoder_plan = build_vae_tile_decoder_engine(
-            vae_weights,
-            verbose=verbose,
-            consume_weights=True,
-            workspace_bytes=workspace_limits["vae_tile_decoder.plan"],
-        )
-        tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
-
-        return {
-            "text_encoder": text_encoder_plan,
-            "adaln_precompute": adaln_plan,
-            **denoiser_components,
-            "vae_decoder": vae_decoder_plan,
-            "profile": profile,
-            # Text/VAE paths remain explicit so follow-on native component
-            # builders cannot silently substitute a different checkpoint.
-            "vae_dir": weights["_vae_dir"],
-            "audio_vae_dir": weights["_audio_vae_dir"],
-            "tokenizer_dir": weights["_tokenizer_dir"],
-            "tokenizer_json": tokenizer_json,
+        root = Path(weights.get("_model_dir", model_dir))
+        staged_raw = dict(raw)
+        staged_raw.setdefault("first_block_cache", True)
+        staged_raw.setdefault("denoiser_cache_mode", "first_block")
+        _public_dynamic_profile(staged_raw)
+        expected_request = {
+            "num_inference_steps": 50,
+            "seed": 0,
         }
+        mismatches = {
+            name: (raw[name], value)
+            for name, value in expected_request.items()
+            if name in raw and int(raw[name]) != value
+        }
+        if mismatches:
+            raise ValueError(f"Unsupported MiniMax-H3 staged profile: {mismatches}")
+        _default_canvas_size(raw)
+        _default_num_frames(raw)
+
+        from .staged_build import build_staged_bundle
+
+        # All public builds use the same quantized checkpoints for all three
+        # workflows. Only the explicit SR flag changes the delivery mode.
+        staged_options = {"verbose": verbose, **resolve_quantized_sources(root, raw)}
+        super_resolution_model, super_resolution_weak_model = resolve_super_resolution_sources(raw)
+        staged_options["runtime_defaults"] = {
+            "height": _default_canvas_size(raw)[0],
+            "width": _default_canvas_size(raw)[1],
+            "num_frames": _default_num_frames(raw),
+            "first_block_cache_threshold": _first_block_cache_threshold(raw),
+        }
+        staged_options["runtime_defaults"].update(
+            ref2va_first_block_cache=raw.get("ref2va_first_block_cache", True),
+            ref2va_first_block_cache_threshold=raw.get("ref2va_first_block_cache_threshold", 0.08),
+        )
+        if super_resolution_model is not None:
+            staged_options["super_resolution_model"] = super_resolution_model
+        if super_resolution_weak_model is not None:
+            staged_options["super_resolution_weak_model"] = super_resolution_weak_model
+        build_staged_bundle(root, writer, plans_dir=plans_dir, **staged_options)
+
+
+plugin = MiniMaxH3Plugin()
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one MiniMax-H3 image-generation bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("minimax_h3 does not support dynamic_kv_cache")
-
-    if request.max_sequence_length is not None:
-        raise NotImplementedError("minimax_h3 does not support max_sequence_length")
-
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
+    """Build the unified T2VA/FL2VA/Ref2VA bundle through TensorRT-RTX."""
 
     if request.task != "image_generation":
         raise ValueError("minimax_h3 supports only task=image_generation")
+    if request.backend != "trt_rtx":
+        raise ValueError("MiniMax-H3 requires backend=trt_rtx")
     if request.precision != "bf16":
         raise ValueError("MiniMax-H3 requires precision=bf16")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("MiniMax-H3 requires tensor_parallel_size=1")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("minimax_h3 does not support dynamic_kv_cache")
+    if request.max_sequence_length is not None:
+        raise NotImplementedError("minimax_h3 does not support max_sequence_length")
+    if request.tensor_parallel_size != 1 or request.context_parallel_size != 1:
+        raise ValueError("MiniMax-H3 requires single-device parallel settings")
     if request.max_batch_size != 1:
-        raise NotImplementedError("MiniMax-H3 requires max_batch_size=1")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("MiniMax-H3 does not support quantization")
+        raise ValueError("MiniMax-H3 requires max_batch_size=1")
     if request.fp32_layers:
         raise NotImplementedError("MiniMax-H3 does not support fp32_layers")
-    if int(request.image_height or 768) != 768 or int(request.image_width or 1344) != 1344:
-        raise ValueError("MiniMax-H3 requires image_height=768 and image_width=1344")
-    if int(request.video_num_frames or 124) != 124:
-        raise ValueError("MiniMax-H3 requires video_num_frames=124")
 
-    config = SimpleNamespace(raw={})
-    model_dir = Path(request.model_dir)
-    model = _MiniMaxH3Model()
-    weights = model.load_weights(str(model_dir), config)
-    components = model.build_components(
-        str(model_dir),
-        config,
-        weights,
-        precision=request.precision,
-        verbose=request.verbose,
-    )
-    profile = components["profile"]
-    if profile.first_block_cache:
-        raise RuntimeError("MiniMax-H3 minimal build uses the monolithic denoiser profile")
+    family_options = validate_build_options(dict(getattr(request, "family_options", ())))
+    if request.quantization not in {None, "int8_tensorwise_convrot"}:
+        raise ValueError("MiniMax-H3 delivery requires Comfy INT8 denoisers and the NVFP4 text checkpoint")
+    if (request.image_height is None) != (request.image_width is None):
+        raise ValueError("MiniMax-H3 requires both image height and width, or neither")
+    sr = family_options.get("super_resolution", False)
+    default_height, default_width = SR_SOURCE_SHAPE if sr else (768, 1344)
+
+    raw = {
+        "_family_build_options": {"minimax_h3": family_options},
+        "height": int(request.image_height or default_height),
+        "width": int(request.image_width or default_width),
+        "video_num_frames": int(request.video_num_frames or VIDEO_NUM_FRAMES_OPT),
+        "num_inference_steps": 50,
+        "seed": 0,
+    }
+    config = SimpleNamespace(raw=raw)
+    _default_canvas_size(_effective_build_config(raw))
+    _default_num_frames(raw)
+    weights = plugin.load_weights(str(request.model_dir), config)
 
     writer.set_header(family="minimax_h3", task=request.task, backend=request.backend)
-    writer.add_bytes("text_encoder.plan", components["text_encoder"])
-    writer.add_bytes("adaln.plan", components["adaln_precompute"])
-    writer.add_bytes("denoiser.plan", components["denoiser"])
-    writer.add_bytes("vae.plan", components["vae_decoder"])
-    writer.add_bytes("tokenizer.json", components["tokenizer_json"])
-    writer.add_json(
-        "runtime.json",
-        {
-            "height": 768,
-            "width": 1344,
-            "num_frames": 124,
-            "fps": 24,
-            "num_inference_steps": 50,
-            "seed": 0,
-            "first_block_cache": False,
-            "denoiser_cache_mode": "monolithic",
-            "first_block_cache_threshold": 0.025,
-            "text_rows": profile.text_rows,
-            "text_rows_min": profile.min_text_rows,
-            "text_rows_opt": profile.opt_text_rows,
-            "text_rows_max": profile.text_rows,
-            "audio_rows": profile.audio_rows,
-            "video_rows": profile.video_rows,
-            "padded_sequence_length": profile.padded_sequence_length,
-            "max_timestep_count": profile.max_timestep_count,
-            "context_parallel_size": profile.context_parallel_size,
-            "vae_tile_batch": 28,
-            "vae_tile_size": 256,
-            "vae_tile_overlap": 64,
-        },
+    plans_dir = request.output_path.with_name(f"{request.output_path.name}.plans")
+    plugin.build_staged_bundle(
+        str(request.model_dir),
+        writer,
+        config,
+        weights,
+        plans_dir=plans_dir,
+        precision=request.precision,
+        verbose=request.verbose,
+        max_batch_size=request.max_batch_size,
     )

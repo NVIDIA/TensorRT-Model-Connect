@@ -13,12 +13,14 @@ from __future__ import annotations
 import gc
 import math
 import sys
+from pathlib import Path
 
 import numpy as np
 
 import tensorrt as trt
 
 from . import graph_ops as op
+from . import trt_compat
 from .config import TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES
 
 
@@ -55,7 +57,7 @@ def checkpoint_keys() -> tuple[str, ...]:
     return tuple(names)
 
 
-def _per_head_norm(network, tensor, weight, rows: int, heads: int):
+def _per_head_norm(network, tensor, weight, heads: int):
     reshape = network.add_shuffle(tensor)
     reshape.reshape_dims = (-1, heads, HEAD_DIM)
     normalized = op.rms_norm(network, reshape.get_output(0), weight, HEAD_DIM, NORM_EPS)
@@ -93,6 +95,7 @@ def _linear(network, hidden, weights, name: str):
     return op.linear(network, hidden, weights[f"{name}.weight"])
 
 
+@op.cleanup_failed_build
 def build_text_encoder_engine(
     weights: dict[str, np.ndarray],
     *,
@@ -100,13 +103,15 @@ def build_text_encoder_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
-    op.configure_builder(config)
+    op.configure_builder(config, weight_streaming=weight_streaming)
     op.configure_workspace(
         config,
         workspace_bytes,
@@ -137,18 +142,15 @@ def build_text_encoder_engine(
         q = _linear(network, normalized, weights, f"{prefix}.self_attn.q_proj")
         k = _linear(network, normalized, weights, f"{prefix}.self_attn.k_proj")
         v = _linear(network, normalized, weights, f"{prefix}.self_attn.v_proj")
-        q = _per_head_norm(
-            network, q, weights[f"{prefix}.self_attn.q_norm.weight"], sequence_length, NUM_HEADS
-        )
+        q = _per_head_norm(network, q, weights[f"{prefix}.self_attn.q_norm.weight"], NUM_HEADS)
         k = _per_head_norm(
-            network, k, weights[f"{prefix}.self_attn.k_norm.weight"], sequence_length, NUM_KV_HEADS
+            network, k, weights[f"{prefix}.self_attn.k_norm.weight"], NUM_KV_HEADS
         )
         q = op.partial_rope(
             network,
             q,
             cos,
             sin,
-            rows=sequence_length,
             heads=NUM_HEADS,
             head_dim=HEAD_DIM,
             rotary_dim=HEAD_DIM,
@@ -158,14 +160,13 @@ def build_text_encoder_engine(
             k,
             cos,
             sin,
-            rows=sequence_length,
             heads=NUM_KV_HEADS,
             head_dim=HEAD_DIM,
             rotary_dim=HEAD_DIM,
         )
-        q4 = op.rows_to_heads(network, q, sequence_length, NUM_HEADS, HEAD_DIM)
-        k4 = op.rows_to_heads(network, k, sequence_length, NUM_KV_HEADS, HEAD_DIM)
-        v4 = op.rows_to_heads(network, v, sequence_length, NUM_KV_HEADS, HEAD_DIM)
+        q4 = op.rows_to_heads(network, q, NUM_HEADS, HEAD_DIM)
+        k4 = op.rows_to_heads(network, k, NUM_KV_HEADS, HEAD_DIM)
+        v4 = op.rows_to_heads(network, v, NUM_KV_HEADS, HEAD_DIM)
         k4 = _repeat_kv(network, k4)
         v4 = _repeat_kv(network, v4)
         scale = op.constant(
@@ -181,9 +182,7 @@ def build_text_encoder_engine(
         attention.metadata = f"trtmc.native_op=IAttention;source={attention.name}"
         attention.get_output(0).name = f"{attention.name}.output"
         attention.decomposable = False
-        update = op.heads_to_rows(
-            network, attention.get_output(0), sequence_length, NUM_HEADS * HEAD_DIM
-        )
+        update = op.heads_to_rows(network, attention.get_output(0), NUM_HEADS * HEAD_DIM)
         update = _linear(network, update, weights, f"{prefix}.self_attn.o_proj")
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -210,14 +209,21 @@ def build_text_encoder_engine(
         f"sequence=1..{sequence_length} (opt={opt_sequence_length})",
         file=sys.stderr,
     )
+    plan = None
+    record = None
     try:
-        plan = builder.build_serialized_network(network, config)
+        if output_path is None:
+            plan = builder.build_serialized_network(network, config)
+        else:
+            record = trt_compat.build_serialized_network_to_file(
+                builder, network, config, output_path
+            )
     finally:
         op.release_weight_buffers(network)
         if consume_weights:
             weights.clear()
-    if plan is None:
+    if output_path is None and plan is None:
         raise RuntimeError("TensorRT failed to build MiniMax-H3 text encoder")
     del network, config, builder
     gc.collect()
-    return bytes(plan)
+    return record if record is not None else bytes(plan)

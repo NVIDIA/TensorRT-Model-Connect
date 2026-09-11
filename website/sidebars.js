@@ -46,6 +46,7 @@ module.exports = {
       label: 'Models & Recipes',
       link: {type: 'doc', id: 'models-recipes/overview'},
       items: [
+        'models-recipes/minimax-h3',
         {
           type: 'category',
           label: 'Model Recipes',

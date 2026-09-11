@@ -11,6 +11,10 @@
 #include <nlohmann/json.hpp>
 #include <string>
 
+#if defined(_WIN32)
+#include <process.h>
+#endif
+
 namespace {
 
 using Json = nlohmann::json;
@@ -39,12 +43,14 @@ void write_bundle(const std::filesystem::path& path) {
         throw std::runtime_error("failed to write fake bundle");
 }
 
+#if !defined(_WIN32)
 std::string shell_quote(const std::string& value) {
     std::string result{"'"};
     for (const char character : value)
         result += character == '\'' ? "'\\''" : std::string(1, character);
     return result + "'";
 }
+#endif
 
 } // namespace
 
@@ -81,10 +87,19 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("failed to write worker request");
         }
 
+#if defined(_WIN32)
+        const std::string worker_argument = '"' + std::string(argv[1]) + '"';
+        const std::string request_argument = '"' + request_path.string() + '"';
+        const std::string output_argument = '"' + output_path.string() + '"';
+        check(_spawnl(_P_WAIT, argv[1], worker_argument.c_str(), "--request",
+                      request_argument.c_str(), "--output", output_argument.c_str(), nullptr) == 0,
+              "worker process completed");
+#else
         const std::string command = shell_quote(argv[1]) + " --request " +
                                     shell_quote(request_path.string()) + " --output " +
                                     shell_quote(output_path.string());
         check(std::system(command.c_str()) == 0, "worker process completed");
+#endif
 
         std::ifstream output_file(output_path);
         Json result;

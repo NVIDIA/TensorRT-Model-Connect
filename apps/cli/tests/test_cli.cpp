@@ -5,7 +5,9 @@
 
 #include "cli/cli.h"
 #include "cli/io.h"
+#include "cli/windows_media.h"
 
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +22,31 @@
 namespace {
 
 int failures = 0;
+
+class TestTempDirectory {
+  public:
+    TestTempDirectory() {
+        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+        path_ =
+            std::filesystem::temp_directory_path() / ("trtmc-cli-test-" + std::to_string(nonce));
+        std::filesystem::create_directory(path_);
+    }
+
+    ~TestTempDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+    std::filesystem::path file(const char* name) const { return path_ / name; }
+
+  private:
+    std::filesystem::path path_;
+};
+
+const TestTempDirectory& test_temp_directory() {
+    static const TestTempDirectory directory;
+    return directory;
+}
 
 void check(bool condition, const char* name) {
     if (!condition) {
@@ -89,7 +116,7 @@ class BareTextTask final : public trtmc::ITask {
     const char* task() const noexcept override { return trtmc::ITextGeneration::kTask; }
 };
 
-class EmptyImageWorker final : public trtmc::IImageGeneration {
+class EmptyImageWorker final : public trtmc::IImageGeneration, public trtmc::IVideoGeneration {
   public:
     trtmc::ImageGenerationConfig seen;
 
@@ -99,6 +126,18 @@ class EmptyImageWorker final : public trtmc::IImageGeneration {
         trtmc::ImageResult result;
         result.num_frames = 0;
         return result;
+    }
+
+    trtmc::VideoResult generate_video(const std::string&,
+                                      const trtmc::ImageGenerationConfig& config) override {
+        seen = config;
+        trtmc::VideoResult result;
+        result.frames.num_frames = 0;
+        return result;
+    }
+
+    trtmc::VideoResult generate_video(const trtmc::VideoGenerationRequest& request) override {
+        return generate_video(request.prompt, request.config);
     }
 };
 
@@ -388,9 +427,25 @@ int main() {
           "image replay latents option is retained");
     const auto video_generation =
         parse({"trtmc", "generate-video", "model.bundle", "--runtime-root", "lib", "--prompt",
-               "cat", "--output", "cat.mp4", "--initial-latents-raw", "initial.f32"});
-    check(video_generation.options.at("--initial-latents-raw") == "initial.f32",
-          "video replay latents option is retained");
+               "cat", "--output", "cat.mp4", "--initial-latents-raw", "initial.f32", "--num-frames",
+               "124", "--first-frame", "first.png", "--last-frame", "last.png"});
+    check(video_generation.options.at("--initial-latents-raw") == "initial.f32" &&
+              video_generation.options.at("--num-frames") == "124" &&
+              video_generation.options.at("--first-frame") == "first.png" &&
+              video_generation.options.at("--last-frame") == "last.png",
+          "structured first/last-frame video options are retained");
+    const auto reference_generation =
+        parse({"trtmc", "generate-video", "model.bundle", "--runtime-root", "lib", "--prompt",
+               "cat", "--output", "cat.mp4", "--reference-video", "clip.mp4", "--reference-image",
+               "still.png", "--reference-audio", "sound.wav"});
+    check(reference_generation.video_references.size() == 3 &&
+              reference_generation.video_references[0].kind == trtmc::VideoReferenceKind::kVideo &&
+              reference_generation.video_references[0].path == "clip.mp4" &&
+              reference_generation.video_references[1].kind == trtmc::VideoReferenceKind::kImage &&
+              reference_generation.video_references[1].path == "still.png" &&
+              reference_generation.video_references[2].kind == trtmc::VideoReferenceKind::kAudio &&
+              reference_generation.video_references[2].path == "sound.wav",
+          "mixed video references preserve CLI order and media kind");
     const auto batch =
         parse({"trtmc", "generate-image-batch", "model.bundle", "--runtime-root", "lib",
                "--prompts", "prompts.txt", "--seeds", "1,2", "--output", "images"});
@@ -441,9 +496,10 @@ int main() {
     run_command.options.emplace("--threshold", "0.75");
     run_command.options.emplace("--use-chat-template", "true");
     run_command.options.emplace("--enable-thinking", "false");
-    run_command.options.emplace("--lora-adapter", "/tmp/adapter");
+    const auto adapter_path = test_temp_directory().file("adapter").string();
+    run_command.options.emplace("--lora-adapter", adapter_path);
     run_command.options.emplace("--lora-adapter-id", "demo");
-    const std::filesystem::path replay_values_path = "/tmp/trtmc-cli-replay-values.f32";
+    const auto replay_values_path = test_temp_directory().file("replay-values.f32");
     const float replay_values[] = {0.25F, -0.5F};
     {
         std::ofstream replay_file(replay_values_path, std::ios::binary);
@@ -478,7 +534,7 @@ int main() {
               text.seen.condition_mask == text.seen.initial_latents &&
               text.seen.sampling_steps == text.seen.initial_latents &&
               text.seen.sde_noises == text.seen.initial_latents &&
-              text.loaded_adapter_id == "demo" && text.loaded_adapter_path == "/tmp/adapter",
+              text.loaded_adapter_id == "demo" && text.loaded_adapter_path == adapter_path,
           "text sampling options reach the Task API");
     auto invalid_block = run_command;
     invalid_block.options["--block-length"] = "invalid";
@@ -500,7 +556,7 @@ int main() {
               text.seen.text_generation_mode == "auto" && text.seen.block_length == 0 &&
               text.seen.confidence_threshold == -1.0F && text.seen.temperature == 1.0F,
           "text diffusion options preserve Task API defaults");
-    const std::filesystem::path unsupported_image_path = "/tmp/trtmc-cli-unsupported.ppm";
+    const auto unsupported_image_path = test_temp_directory().file("unsupported.ppm");
     {
         std::ofstream image_file(unsupported_image_path, std::ios::binary);
         image_file << "P6\n1 1\n255\n";
@@ -520,7 +576,7 @@ int main() {
     edit_command.name = "generate-image";
     edit_command.options.emplace("--prompt", "make it night");
     edit_command.options.emplace("--image", unsupported_image_path.string());
-    edit_command.options.emplace("--output", "/tmp/trtmc-cli-unused.png");
+    edit_command.options.emplace("--output", test_temp_directory().file("unused.png").string());
     EmptyImageWorker image_only;
     check(dispatch_throws(edit_command, image_only),
           "image-generation task rejects an edit image instead of dropping it");
@@ -568,7 +624,7 @@ int main() {
     trtmc::cli::Command audio_command;
     audio_command.kind = trtmc::cli::CommandKind::kGenerateAudio;
     audio_command.name = "generate-audio";
-    const std::filesystem::path audio_path = "/tmp/trtmc-cli-stream-test.raw";
+    const auto audio_path = test_temp_directory().file("stream-test.raw");
     audio_command.options.emplace("--prompt", "hello");
     audio_command.options.emplace("--output", audio_path.string());
     audio_command.options.emplace("--max-new-tokens", "9");
@@ -587,7 +643,7 @@ int main() {
           "streaming audio output format is explicit");
     std::filesystem::remove(audio_path);
 
-    const std::filesystem::path transcription_path = "/tmp/trtmc-cli-transcription-stream.wav";
+    const auto transcription_path = test_temp_directory().file("transcription-stream.wav");
     trtmc::AudioResult transcription_audio;
     transcription_audio.samples = {0.25F, -0.5F, 0.75F};
     transcription_audio.num_samples = 3;
@@ -722,7 +778,7 @@ int main() {
               usage.str().find("--cuda-graphs") != std::string::npos,
           "help lists direct Task and backend options");
 
-    const std::filesystem::path video_path = "/tmp/trtmc-cli-video-frame.ppm";
+    const auto video_path = test_temp_directory().file("video-frame.ppm");
     {
         std::ofstream image_file(video_path, std::ios::binary);
         image_file << "P6\n1 1\n255\n";
@@ -738,8 +794,8 @@ int main() {
     check(video_task.prompt.empty(), "missing video prompt reaches the family as empty");
     std::filesystem::remove(video_path);
 
-    const std::filesystem::path forecast_values_path = "/tmp/trtmc-cli-forecast-values.f32";
-    const std::filesystem::path forecast_mask_path = "/tmp/trtmc-cli-forecast-mask.f32";
+    const auto forecast_values_path = test_temp_directory().file("forecast-values.f32");
+    const auto forecast_mask_path = test_temp_directory().file("forecast-mask.f32");
     const float forecast_values[] = {1.0F, 2.0F};
     const float forecast_mask[] = {1.0F, 1.0F};
     {
@@ -762,9 +818,9 @@ int main() {
     std::filesystem::remove(forecast_values_path);
     std::filesystem::remove(forecast_mask_path);
 
-    const std::filesystem::path control_image_path = "/tmp/trtmc-cli-control.ppm";
-    const std::filesystem::path control_state_path = "/tmp/trtmc-cli-control-state.f32";
-    const std::filesystem::path control_output_path = "/tmp/trtmc-cli-control-actions.f32";
+    const auto control_image_path = test_temp_directory().file("control.ppm");
+    const auto control_state_path = test_temp_directory().file("control-state.f32");
+    const auto control_output_path = test_temp_directory().file("control-actions.f32");
     {
         std::ofstream image_file(control_image_path, std::ios::binary);
         image_file << "P6\n1 1\n255\n";
@@ -801,7 +857,16 @@ int main() {
             return true;
         }
     };
-    const std::filesystem::path wav_path = "/tmp/trtmc-cli-io.wav";
+    const auto wav_path = test_temp_directory().file("io.wav");
+    trtmc::ReferenceMediaDecodePolicy canvas_policy{15, 24, 240, 1, 1, 32, 0.25, 4.0};
+    check(trtmc::cli::detail::reference_video_decode_size(canvas_policy, 1, 1) ==
+              std::make_pair(32U, 32U),
+          "canvas axes clamp to one alignment unit on every platform");
+    canvas_policy.canvas_short_edge = 80;
+    canvas_policy.canvas_max_pixels = 80 * 80;
+    check(trtmc::cli::detail::reference_video_decode_size(canvas_policy, 1, 1) ==
+              std::make_pair(64U, 64U),
+          "canvas rounding uses ties-to-even on every platform");
     trtmc::AudioResult wav;
     wav.samples = {-1.0F, 0.25F, 1.0F};
     wav.num_samples = 3;
@@ -816,7 +881,7 @@ int main() {
     check(throws_runtime([&] { trtmc::cli::io::write_wav({}, wav_path.string()); }),
           "empty WAV is rejected");
 
-    const std::filesystem::path png_path = "/tmp/trtmc-cli-io.png";
+    const auto png_path = test_temp_directory().file("io.png");
     const std::vector<float> rgb{-0.5F, 0.5F, 1.5F};
     trtmc::cli::io::save_png(png_path.string(), rgb, 1, 1);
     const auto loaded_image = trtmc::cli::io::read_image(png_path.string());

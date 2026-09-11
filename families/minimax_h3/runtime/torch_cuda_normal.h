@@ -37,18 +37,22 @@ uint64_t torch_cuda_normal_consumed_offset(std::size_t count);
 void scheduler_step_cuda_async(float* sample, const float* velocity, std::size_t count,
                                float timestep, float sigma, float sigma_next, cudaStream_t stream);
 
-// Extract one fixed-profile VAE tile batch directly from the denoiser's patched
+// Extract one dynamic-canvas VAE tile batch directly from the denoiser's patched
 // video rows. The kernel also applies the checkpoint latent mean/std transform,
 // so no full latent unpatch is materialized on either host or device.
 void extract_vae_tiles_cuda_async(const float* video_rows, float* latent_tiles, int32_t clip_index,
+                                  int32_t clip_count, int32_t output_height, int32_t output_width,
+                                  int32_t tile_rows, int32_t tile_columns,
                                   VaeLatentNormalization normalization, cudaStream_t stream);
 
-// Spatially stitch one fixed-profile VAE output, assemble its 17 temporal
-// frames (plus the final 5-frame tail for clip six), apply pixel normalization,
+// Spatially stitch one dynamic-canvas VAE output, assemble its 17 temporal
+// frames (plus the final 5-frame tail), apply pixel normalization,
 // clamp, and write frame-major RGB. `overlap` stores the previous clip's raw
 // five-frame spatial overlap and is updated after it has been consumed.
 void assemble_vae_clip_cuda_async(const float* decoded_tiles, float* overlap,
-                                  float* frame_major_rgb, int32_t clip_index,
-                                  VaePixelNormalization normalization, cudaStream_t stream);
+                                  float* frame_major_rgb, int32_t clip_index, int32_t clip_count,
+                                  int32_t output_height, int32_t output_width, int32_t tile_rows,
+                                  int32_t tile_columns, VaePixelNormalization normalization,
+                                  cudaStream_t stream);
 
 } // namespace trtmc::minimax_h3
