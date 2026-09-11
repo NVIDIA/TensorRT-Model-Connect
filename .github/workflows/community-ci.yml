@@ -563,6 +563,7 @@ jobs:
           FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
           ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
           SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin refs/pull/$PR_NUMBER/merge && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
@@ -575,6 +576,12 @@ jobs:
           # selected family DSOs, and configured CTest tree. It then stages
           # checkpoint revisions and uses E2ERunner's explicit premerge case
           # selection plus JUnit validation, which rejects skips and omissions.
+          # HF_TOKEN: some premerge checkpoints (e.g. sam3) are gated and
+          # fail to download without authorization. huggingface_hub reads
+          # HF_TOKEN from the environment automatically (verified directly
+          # against huggingface_hub.get_token()); no code change is needed
+          # in tools.community_gpu_ci to consume it. GitHub Actions masks
+          # the secret value everywhere it appears, including here.
           echo "Changed families: $FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
           python3 -m tools.brev_exec \
             --instance "$INSTANCE_NAME" \
@@ -585,6 +592,7 @@ jobs:
             -e "TRTMC_GPU_SCOPE=$SCOPE" \
             -e "TRTMC_GPU_FAMILIES=$FAMILIES" \
             -e "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            -e "HF_TOKEN=$HF_TOKEN" \
             -e CMAKE_CUDA_ARCHITECTURES=89 \
             trtmc-quickstart-gpu python3.12 -m tools.community_gpu_ci
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
