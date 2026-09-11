@@ -22,7 +22,7 @@ from tools.ci.process import CiError
 
 
 FAMILY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
-SHARED_SMOKE_FAMILIES = ("bert", "gpt2", "qwen3_8", "timm_vit", "whisper")
+SHARED_SMOKE_FAMILIES = ("bert", "gpt2", "qwen", "timm_vit", "whisper")
 
 
 @dataclass(frozen=True)
