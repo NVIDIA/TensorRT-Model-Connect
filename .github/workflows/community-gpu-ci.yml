@@ -154,14 +154,19 @@ jobs:
         run: |
           set -euo pipefail
           git checkout --quiet "$HEAD_SHA"
-          python3 -m tools.community_ci impact --base "$BASE_SHA" | tee /tmp/impact.json
-          # tools.community_ci already writes the "families" output; scope
-          # ("changed" vs "all", e.g. a shared/root file was touched) is not
-          # exposed as an action output, so read it from the same JSON here.
-          python3 -c "
-          import json
-          with open('/tmp/impact.json') as f:
-              summary = json.load(f)
+          IMPACT_OUTPUT="$(python3 -m tools.community_ci impact --base "$BASE_SHA")"
+          echo "$IMPACT_OUTPUT"
+          # tools.community_ci already writes the "families" output itself.
+          # scope (one of "all", "families", "docs", "none"; "all" means a
+          # shared/root file was touched) is not exposed as an action
+          # output, so read it here. The tool's own stdout is NOT pure
+          # JSON: it prints a human-readable "Community CPU base: ..."
+          # line before the JSON object, so extract from the first '{'
+          # rather than parsing the whole captured output directly.
+          IMPACT_OUTPUT="$IMPACT_OUTPUT" python3 -c "
+          import json, os
+          text = os.environ['IMPACT_OUTPUT']
+          summary = json.loads(text[text.index('{'):])
           print(f\"scope={summary['scope']}\")
           " >> "$GITHUB_OUTPUT"
 
