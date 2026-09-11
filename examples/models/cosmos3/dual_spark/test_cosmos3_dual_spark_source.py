@@ -35,9 +35,7 @@ EXPECTED_SCENES = (
 
 def _clean_environment() -> dict[str, str]:
     environment = {
-        name: value
-        for name, value in os.environ.items()
-        if not name.startswith("COSMOS3_")
+        name: value for name, value in os.environ.items() if not name.startswith("COSMOS3_")
     }
     environment["PATH"] = ""
     return environment
@@ -97,6 +95,11 @@ def _generation_command(argv: Sequence[str]) -> list[str]:
     return list(argv[argv.index("generate-video") :])
 
 
+def _contains_subsequence(argv: Sequence[str], expected: Sequence[str]) -> bool:
+    width = len(expected)
+    return any(list(argv[index : index + width]) == list(expected) for index in range(len(argv)))
+
+
 def test_showcase_prompt_is_built_in_and_compact_in_dry_run(
     tmp_path: Path,
 ) -> None:
@@ -117,9 +120,9 @@ def test_showcase_prompt_is_built_in_and_compact_in_dry_run(
     assert "\n" not in compact_prompt
     assert ": " not in compact_prompt
     assert _option_value(command, "--prompt") == compact_prompt
-    assert _option_value(
-        command, "--negative-prompt"
-    ) == run_dual_spark._negative_prompt_text(scene)
+    assert _option_value(command, "--negative-prompt") == run_dual_spark._negative_prompt_text(
+        scene
+    )
 
 
 @pytest.mark.parametrize("scene_id,seed,filename", EXPECTED_SCENES)
@@ -157,9 +160,7 @@ def test_launcher_selects_one_native_720p_cp2_scene(
 
     bundle = plan["prepare"]["bundle_build_argv"]
     assert plan["prepare"]["image"] == "trtmc-cosmos3-dual-spark:local"
-    assert plan["prepare"]["image_source"] == (
-        "prebuilt locally from this example's Dockerfile"
-    )
+    assert plan["prepare"]["image_source"] == ("prebuilt locally from this example's Dockerfile")
     assert "image_build_argv" not in plan["prepare"]
     assert _option_value(bundle, "--context-parallel-size") == "2"
     assert "--family" not in bundle
@@ -167,6 +168,43 @@ def test_launcher_selects_one_native_720p_cp2_scene(
     assert _option_value(bundle, "--image-height") == "720"
     assert _option_value(bundle, "--image-width") == "1280"
     assert Path(plan["prepare"]["bundle"]).name == "cosmos3-nano-cp2-1280x720.bundle"
+    assert plan["prepare"]["image_sync"] == (
+        "docker image save on primary -> strict SSH -> docker image load"
+    )
+
+    assert scene["rendezvous"] == {
+        "bytes": 128,
+        "transport": "MPI_Bcast",
+        "root": 0,
+        "file_transfer": False,
+    }
+    assert scene["mpi"]["processes"] == 2
+    assert scene["mpi"]["mapping"] == "one MPI worker per Spark"
+    mpi_argv = scene["mpi"]["argv"]
+    assert mpi_argv[:5] == [
+        "mpirun",
+        "--host",
+        "localhost:1,peer.example:1",
+        "-np",
+        "2",
+    ]
+    assert _contains_subsequence(mpi_argv, ["--map-by", "ppr:1:node"])
+    assert _contains_subsequence(mpi_argv, ["--rank-by", "slot"])
+    assert _contains_subsequence(mpi_argv, ["--mca", "oob_tcp_if_include", "enp1s0f0np0"])
+    assert _contains_subsequence(mpi_argv, ["--mca", "btl_tcp_if_include", "enp1s0f0np0"])
+    assert _contains_subsequence(mpi_argv, ["--mca", "btl", "self,tcp"])
+    assert _contains_subsequence(mpi_argv, ["--bind-to", "none"])
+    rsh_agent = _option_value(mpi_argv, "plm_rsh_agent")
+    assert "BatchMode=yes" in rsh_agent
+    assert "StrictHostKeyChecking=yes" in rsh_agent
+    assert "-l tester" in rsh_agent
+    assert mpi_argv[-5:] == [
+        "python3",
+        "-c",
+        run_dual_spark.MPI_WORKER_BOOTSTRAP,
+        "<embedded-mpi-worker-source>",
+        "<embedded-scene-config>",
+    ]
 
     assert [(rank["host"], rank["rank"]) for rank in scene["ranks"]] == [
         ("primary", 0),
@@ -178,6 +216,13 @@ def test_launcher_selects_one_native_720p_cp2_scene(
         assert environment["OMPI_COMM_WORLD_RANK"] == str(rank_number)
         assert environment["OMPI_COMM_WORLD_LOCAL_RANK"] == "0"
         assert environment["CUDA_VISIBLE_DEVICES"] == "0"
+        assert "TRTMC_NCCL_RENDEZVOUS" not in environment
+        if rank_number == 0:
+            assert environment["TRTMC_NCCL_UNIQUE_ID_STDOUT"] == "1"
+            assert "TRTMC_NCCL_UNIQUE_ID_HEX" not in environment
+        else:
+            assert environment["TRTMC_NCCL_UNIQUE_ID_HEX"] == (run_dual_spark.NCCL_ID_ENV_TOKEN)
+            assert "TRTMC_NCCL_UNIQUE_ID_STDOUT" not in environment
         command = _generation_command(rank["docker_argv"])
         assert _option_value(command, "--runtime-root") == "/opt/trtmc/lib"
         assert _option_value(command, "--height") == "720"
@@ -216,6 +261,70 @@ def test_launcher_uses_strict_ssh_roce_and_declares_run_telemetry(
     }
 
 
+def test_mpi_worker_broadcasts_the_live_nccl_id_and_owns_container_lifecycle() -> None:
+    source = run_dual_spark.MPI_WORKER_SOURCE
+
+    assert "MPI.COMM_TYPE_SHARED" in source
+    assert "comm.Bcast([unique_id, MPI.BYTE], root=0)" in source
+    assert '["docker", "logs", container]' in source
+    assert '["docker", "wait", container]' in source
+    assert "comm.allgather(exit_code)" in source
+    assert "TRTMC_NCCL_RENDEZVOUS" not in source
+
+
+def test_command_logging_is_quiet_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages: list[str] = []
+    monkeypatch.delenv("COSMOS3_LOG_COMMANDS", raising=False)
+    monkeypatch.setattr(run_dual_spark, "_log", messages.append)
+
+    completed = run_dual_spark._run([sys.executable, "-c", "print('quiet')"])
+
+    assert completed.stdout.strip() == "quiet"
+    assert messages == []
+
+    monkeypatch.setenv("COSMOS3_LOG_COMMANDS", "1")
+    run_dual_spark._run([sys.executable, "-c", "print('must not be logged')"])
+
+    assert messages == [f"$ {sys.executable} -c '<inline-code>'"]
+    assert "must not be logged" not in messages[0]
+    assert "WyJ" not in messages[0]
+
+    settings = run_dual_spark.Settings(
+        action="run",
+        scene=EXPECTED_SCENES[0][0],
+        peer_host="peer.example",
+        peer_user="tester",
+        ssh_key=None,
+        known_hosts=None,
+        work_root=Path("/tmp/cosmos3-contract"),
+        remote_root="/var/tmp/cosmos3-contract",
+        image="cosmos3-contract:latest",
+        run_id="contract-run",
+        ib_hca="rocep1s0f0:1",
+        net_iface="enp1s0f0np0",
+        gid_index=3,
+        runtime_timeout=60,
+        build_timeout=60,
+        dry_run=False,
+    )
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(run_dual_spark, "_run", fake_run)
+    messages.clear()
+    run_dual_spark._remote_run(settings, ["python3", "-c", "sensitive remote source"])
+
+    assert messages == ["peer peer.example: $ python3 -c '<inline-code>'"]
+    assert "sensitive remote source" not in messages[0]
+    assert "WyJ" not in messages[0]
+    assert calls[0][1]["log_command"] is False
+
+
 def test_launcher_parses_one_matching_cosmos3_performance_record(
     tmp_path: Path,
 ) -> None:
@@ -243,6 +352,35 @@ def test_launcher_parses_one_matching_cosmos3_performance_record(
     assert performance["rank0_wall_seconds"] == pytest.approx(85.25)
     assert performance["cp_size"] == 2
     assert performance["seed"] == scene.seed
+
+
+def test_stop_mpi_noexcept_swallows_timeout_after_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str | tuple[str, float]] = []
+    messages: list[str] = []
+
+    class StuckProcess:
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        def wait(self, timeout: float) -> int:
+            events.append(("wait", timeout))
+            raise subprocess.TimeoutExpired(cmd="mpirun", timeout=timeout)
+
+    monkeypatch.setattr(run_dual_spark, "_log", messages.append)
+
+    run_dual_spark._stop_mpi_noexcept(StuckProcess())  # type: ignore[arg-type]
+
+    assert events == ["terminate", ("wait", 15), "kill", ("wait", 15)]
+    assert len(messages) == 1
+    assert "could not stop mpirun cleanly" in messages[0]
 
 
 def test_launcher_tolerates_cgroup_teardown_after_confirmed_container_exit(
@@ -279,6 +417,7 @@ def test_launcher_tolerates_cgroup_teardown_after_confirmed_container_exit(
         )
     )
     observed_queries: list[tuple[str, bool]] = []
+    messages: list[str] = []
 
     def container_state(
         _settings: run_dual_spark.Settings,
@@ -299,6 +438,7 @@ def test_launcher_tolerates_cgroup_teardown_after_confirmed_container_exit(
         raise run_dual_spark.DualSparkError("cgroup counters disappeared")
 
     monkeypatch.setattr(run_dual_spark, "_sample_memory_tracker", missing_cgroup)
+    monkeypatch.setattr(run_dual_spark, "_log", messages.append)
 
     states = run_dual_spark._wait_for_containers(
         settings,
@@ -308,6 +448,53 @@ def test_launcher_tolerates_cgroup_teardown_after_confirmed_container_exit(
 
     assert states == {"rank1": {"Running": False, "ExitCode": 0}}
     assert observed_queries == [(tracker.container, True), (tracker.container, True)]
+    assert messages == []
+
+
+def test_launcher_rejects_missing_memory_counters_while_rank_is_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = run_dual_spark.Settings(
+        action="run",
+        scene=EXPECTED_SCENES[1][0],
+        peer_host="peer.example",
+        peer_user="tester",
+        ssh_key=None,
+        known_hosts=None,
+        work_root=Path("/tmp/cosmos3-contract"),
+        remote_root="/var/tmp/cosmos3-contract",
+        image="cosmos3-contract:latest",
+        run_id="contract-run",
+        ib_hca="rocep1s0f0:1",
+        net_iface="enp1s0f0np0",
+        gid_index=3,
+        runtime_timeout=60,
+        build_timeout=60,
+        dry_run=False,
+    )
+    tracker = run_dual_spark.MemoryTracker(
+        container="rank1",
+        remote=True,
+        cgroup_path="/sys/fs/cgroup/missing",
+        samples=1,
+    )
+    monkeypatch.setattr(
+        run_dual_spark,
+        "_container_state",
+        lambda *_args, **_kwargs: {"Running": True, "ExitCode": 0},
+    )
+
+    def missing_cgroup(*_args: Any, **_kwargs: Any) -> None:
+        raise run_dual_spark.DualSparkError("cgroup counters disappeared")
+
+    monkeypatch.setattr(run_dual_spark, "_sample_memory_tracker", missing_cgroup)
+
+    with pytest.raises(run_dual_spark.DualSparkError, match="cgroup counters disappeared"):
+        run_dual_spark._wait_for_containers(
+            settings,
+            ((tracker.container, tracker.remote),),
+            {tracker.container: tracker},
+        )
 
 
 def test_launcher_stops_sampling_a_finished_container(
@@ -387,10 +574,7 @@ def test_launcher_stops_sampling_a_finished_container(
         "rank1": {"Running": False, "ExitCode": 0},
     }
     assert sampled == [rank0.container, rank1.container, rank0.container]
-    assert messages == [
-        "WARNING: final cgroup memory sample was unavailable "
-        "for rank1: cgroup counters disappeared"
-    ]
+    assert messages == []
 
 
 def test_launcher_removes_rank1_verified_empty_frames(
@@ -436,12 +620,20 @@ def test_launcher_removes_rank1_verified_empty_frames(
     assert observed == [
         (
             [
+                "test",
+                "-e",
+                "/var/tmp/cosmos3-contract/runs/run/scene/rank1/frames",
+            ],
+            False,
+        ),
+        (
+            [
                 "rmdir",
                 "--",
                 "/var/tmp/cosmos3-contract/runs/run/scene/rank1/frames",
             ],
             False,
-        )
+        ),
     ]
 
 
@@ -546,9 +738,7 @@ def test_readme_leads_with_the_cli_and_one_time_image_build() -> None:
 
 def test_dockerfile_ships_a_pinned_isolated_cosmos3_environment() -> None:
     dockerfile = (EXAMPLE_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    dockerignore = (EXAMPLE_ROOT / "Dockerfile.dockerignore").read_text(
-        encoding="utf-8"
-    )
+    dockerignore = (EXAMPLE_ROOT / "Dockerfile.dockerignore").read_text(encoding="utf-8")
 
     assert "nvcr.io/nvidia/tensorrt:26.07-py3@sha256:" in dockerfile
     assert "ARG TRTMC_CUDA_ARCHITECTURES=121-real" in dockerfile
@@ -564,6 +754,7 @@ def test_dockerfile_ships_a_pinned_isolated_cosmos3_environment() -> None:
     assert "!families/__init__.py" in dockerignore
     assert "!families/cosmos3/**" in dockerignore
     assert "!core/**" in dockerignore
+    assert "!apps/cli/**" in dockerignore
     assert "website/**" in dockerignore
     assert "nemotron_voicechat" not in dockerignore
 

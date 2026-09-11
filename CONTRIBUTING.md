@@ -203,6 +203,13 @@ CPU against GitHub's exact pull-request merge revision. Separate jobs run
 source quality, ownership and impact analysis, and the selected source-only C++
 and Python units. No comment or maintainer action is required.
 
+Source quality first checks required SPDX headers on all tracked source files
+and rejects changes to `LICENSE` or `NOTICE` relative to the tested merge's base.
+To check headers locally before pushing, run `python3 tools/legal_headers.py --check`.
+To run the full source-quality gate locally, use
+`python3 -m tools.community_ci source-quality --base upstream/main` after fetching
+the target branch and installing `requirements/community-ci.txt`.
+
 All public jobs run on GitHub-hosted `ubuntu-24.04` runners. Test jobs have
 read-only repository permission and no access to private runners, secrets, or
 GPUs. GitHub publishes native pull-request checks and public Actions logs,

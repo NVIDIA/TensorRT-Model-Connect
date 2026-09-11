@@ -184,6 +184,7 @@ def _native_text(binary: Path, runtime_root: Path, bundle: Path, case: dict) -> 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict) -> str:
     import torch
+    from torch.nn.attention import SDPBackend, sdpa_kernel
     from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
 
     processor = Qwen3OmniMoeProcessor.from_pretrained(
@@ -221,7 +222,9 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict) -> str:
         return_tensors="pt",
         padding=True,
     ).to(model.device)
-    with torch.inference_mode():
+    # Keep the correctness oracle independent of fused SDPA backend selection.
+    # The math backend retains FP32 attention intermediates for BF16 inputs.
+    with torch.inference_mode(), sdpa_kernel(SDPBackend.MATH):
         text_ids = model.generate(
             **inputs,
             thinker_max_new_tokens=int(case["max_new_tokens"]),

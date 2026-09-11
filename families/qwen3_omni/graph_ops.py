@@ -13,6 +13,16 @@ import numpy as np
 import tensorrt as trt
 
 
+class _BFloat16Weights(trt.Weights):
+    """Keep the NumPy storage alive for TensorRT's typed pointer constructor."""
+
+    def __init__(self, values: np.ndarray) -> None:
+        super().__init__(trt.bfloat16, values.ctypes.data, values.size)
+        # add_constant keeps this Weights object alive with the network. The
+        # pointer constructor itself does not retain the underlying array.
+        self._values = values
+
+
 def _cast_back_to_trt_dtype(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -29,13 +39,12 @@ def layer_tensor_name(stem: str, layer: int) -> str:
 
 
 def _constant_carrier(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
-    """Return a TensorRT-supported array with the requested storage rounding."""
+    """Return contiguous values with the requested storage rounding."""
     values_array = np.asarray(values)
     target_dtype = np.dtype(dtype)
     bf16_dtype = np.dtype(ml_dtypes.bfloat16)
     if target_dtype == bf16_dtype or values_array.dtype == bf16_dtype:
-        rounded = np.asarray(values_array, dtype=bf16_dtype)
-        return np.ascontiguousarray(rounded, dtype=np.float32)
+        return np.ascontiguousarray(values_array, dtype=bf16_dtype)
     return np.ascontiguousarray(values_array, dtype=target_dtype)
 
 
@@ -45,18 +54,21 @@ def add_constant(
     values: np.ndarray,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Add a constant using a TensorRT-supported carrier dtype.
+    """Add a constant without expanding BF16 checkpoint storage to FP32.
 
-    NumPy BF16 uses the extension dtype ``V16``, which ``trt.Weights`` cannot
-    consume. BF16 inputs or targets are therefore rounded exactly once to
-    BF16 and promoted losslessly to an FP32 carrier. The caller must cast the
-    returned TensorRT tensor to ``trt.bfloat16`` at its strongly typed graph
-    boundary.
+    NumPy's extension BF16 dtype is not accepted by TensorRT's NumPy weights
+    constructor. Use its explicit dtype and pointer overload while retaining
+    the array for the network lifetime. BF16 inputs and targets keep the same
+    BF16 rounding as the former FP32 carrier followed by a BF16 cast.
     """
     constant_values = _constant_carrier(values, dtype)
     if constant_values.size != int(np.prod(shape, dtype=np.int64)):
         raise ValueError("Qwen3-Omni constant values do not match the declared shape")
-    weights = trt.Weights(constant_values)
+    weights = (
+        _BFloat16Weights(constant_values)
+        if constant_values.dtype == np.dtype(ml_dtypes.bfloat16)
+        else trt.Weights(constant_values)
+    )
     layer = network.add_constant(shape, weights)
     if layer is None:
         raise RuntimeError("TensorRT rejected a Qwen3-Omni constant")

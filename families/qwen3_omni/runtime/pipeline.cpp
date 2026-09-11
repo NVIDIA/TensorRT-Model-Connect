@@ -157,22 +157,36 @@ Qwen3OmniTextPipeline::run_token_prefill(const std::vector<std::int32_t>& token_
         token_ids.size() > static_cast<std::size_t>(thinker_state_->max_length())) {
         throw std::runtime_error("Qwen3-Omni Thinker prompt exceeds its prefill profile");
     }
+    // Execute long prompts in the engine's optimized token batch while keeping
+    // its original profile and full KV capacity.
+    const auto optimal_shape = thinker_prefill_->input_profile_shape(
+        "token_id", thinker_prefill_->profile_idx(), ProfileShapeSelector::kOpt);
+    if (optimal_shape.size() != 1 || optimal_shape.front() <= 0)
+        throw std::runtime_error("Qwen3-Omni Thinker has an invalid prefill token profile");
+    const auto chunk_size = static_cast<std::size_t>(optimal_shape.front());
     thinker_state_->reset();
     thinker_state_->bind_to(*thinker_decode_);
     thinker_state_->bind_cache_inputs(*thinker_prefill_);
-    const auto sequence = static_cast<std::int32_t>(token_ids.size());
-    TensorMap inputs;
-    inputs["token_id"] =
-        Tensor{const_cast<std::int32_t*>(token_ids.data()), {sequence}, DType::kInt32};
-    thinker_state_->prepare_step(inputs, sequence);
-    const TensorMap outputs = thinker_prefill_->forward(inputs);
-    std::vector<const void*> keys;
-    std::vector<const void*> values;
-    collect_prefill_kv(*thinker_prefill_, outputs, thinker_state_->num_layers(), sequence, keys,
-                       values);
-    thinker_state_->write_prefill_kv(keys, values, sequence);
+    std::vector<float> logits;
+    for (std::size_t offset = 0; offset < token_ids.size();) {
+        const auto sequence =
+            static_cast<std::int32_t>(std::min(chunk_size, token_ids.size() - offset));
+        TensorMap inputs;
+        inputs["token_id"] =
+            Tensor{const_cast<std::int32_t*>(token_ids.data() + offset), {sequence}, DType::kInt32};
+        thinker_state_->prepare_step(inputs, sequence);
+        const TensorMap outputs = thinker_prefill_->forward(inputs);
+        std::vector<const void*> keys;
+        std::vector<const void*> values;
+        collect_prefill_kv(*thinker_prefill_, outputs, thinker_state_->num_layers(), sequence, keys,
+                           values);
+        thinker_state_->write_prefill_kv(keys, values, sequence);
+        offset += static_cast<std::size_t>(sequence);
+        if (offset == token_ids.size())
+            logits = copy_logits(outputs, config_.thinker_vocab_size);
+    }
     thinker_state_->bind_to(*thinker_decode_);
-    return copy_logits(outputs, config_.thinker_vocab_size);
+    return logits;
 }
 
 std::vector<float> Qwen3OmniTextPipeline::run_token_step(std::int32_t token_id) {

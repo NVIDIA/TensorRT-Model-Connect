@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
-from tools import community_ci
+from tools import community_ci, legal_headers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -123,6 +124,66 @@ def test_impact_publishes_only_the_public_cpu_scope(
     assert github_output.read_text(encoding="utf-8") == 'families=["qwen"]\n'
     summary = github_summary.read_text(encoding="utf-8")
     assert "families/qwen/model.py" in summary
+
+
+@pytest.mark.parametrize("change", ["valid", "missing-header", "LICENSE", "NOTICE"])
+def test_public_source_quality_enforces_legal_compliance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    change: str,
+) -> None:
+    header = legal_headers.HASH_STYLE.render(b"\n").decode() + "\n\n"
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    shutil.copyfile(REPO_ROOT / "tools/legal_headers.py", tools_dir / "legal_headers.py")
+    (tools_dir / "legal_header_exceptions.toml").write_text(
+        header + "schema_version = 1\n", encoding="utf-8"
+    )
+    for name in ("LICENSE", "NOTICE"):
+        (tmp_path / name).write_text("Original legal document.\n", encoding="utf-8")
+
+    def git(*arguments: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", *arguments],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "--quiet")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "Base fixture")
+    base = git("rev-parse", "HEAD")
+    source = tmp_path / "families/example/support.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        ("" if change == "missing-header" else header) + '"""Example family support."""\n',
+        encoding="utf-8",
+    )
+    if change in ("LICENSE", "NOTICE"):
+        (tmp_path / change).write_text("Changed legal document.\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "Contribution fixture")
+
+    # Keep the real public entrypoint, header audit, and Git comparison; unrelated
+    # architecture and formatter checks need the full project and toolchain.
+    for name in ("family_coverage", "complexity", "lint_changed_files", "architecture_contracts"):
+        monkeypatch.setattr(community_ci.SourceQualityChecks, name, lambda _self: None)
+    runner = community_ci.CommunityCI(tmp_path, dict(os.environ))
+    if change == "valid":
+        runner.source_quality(base)
+        assert "findings=0" in capfd.readouterr().out
+    else:
+        with pytest.raises(community_ci.CiError):
+            runner.source_quality(base)
+        captured = capfd.readouterr()
+        output = captured.out + captured.err
+        if change == "missing-header":
+            assert "[missing] families/example/support.py: missing required hash SPDX header" in output
+        else:
+            assert change in output
 
 
 def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
