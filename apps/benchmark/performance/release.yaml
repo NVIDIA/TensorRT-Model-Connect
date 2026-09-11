@@ -1260,6 +1260,19 @@ entries:
       reference_backend: ultralytics
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: yolo11.detect
+    family: yolo11
+    operation: detect
+    model: yolo11n
+    workload:
+      testcase: yolo11n
+    baseline:
+      runner: task-reference
+      adapter: ultralytics-detection
+      mode: torch-eager
+      reference_backend: ultralytics
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_repvgg.classify
     family: timm_repvgg
     operation: classify
