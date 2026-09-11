@@ -232,6 +232,7 @@ class _ZImageModel:
                 max_batch_size=te_mbs,
                 opt_batch_size=te_opt,
             )
+        del te_weights
 
         # 2. Z-Image DiT denoiser
         print("[z-image] Loading Z-Image DiT weights ...", file=sys.stderr)
@@ -293,6 +294,10 @@ class _ZImageModel:
                     opt_batch_size=dit_opt,
                 )
 
+        # Retain only the serialized data needed by the runtime before loading VAE weights.
+        preprocessor_weights = _serialize_preprocessor_weights(dit_weights)
+        del dit_weights
+
         # 3. VAE decoder
         print("[z-image] Building VAE decoder engine ...", file=sys.stderr)
         vae_plan = build_vae_2d_decoder_engine(
@@ -307,9 +312,6 @@ class _ZImageModel:
             build_timing=build_timing,
             timing_component="vae_decoder",
         )
-
-        # 4. Serialize preprocessor weights for C++ runtime
-        preprocessor_weights = _serialize_preprocessor_weights(dit_weights)
 
         out = {
             "text_encoders": [("qwen3", te_plan)],

@@ -9,6 +9,7 @@ from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from . import test_e2e as e2e
 
@@ -31,12 +32,6 @@ class _Weight:
 
     def data_ptr(self) -> int:
         return self.pointer
-
-
-class _Image:
-    def convert(self, mode: str) -> np.ndarray:
-        assert mode == "RGB"
-        return np.zeros((2, 2, 3), dtype=np.uint8)
 
 
 def _framework(monkeypatch) -> tuple[dict, object]:
@@ -84,7 +79,10 @@ def _framework(monkeypatch) -> tuple[dict, object]:
 
         def __call__(self, **kwargs):
             calls["kwargs"] = kwargs
-            return SimpleNamespace(frames=[[_Image()]])
+            pixels = np.array([[[17, 128, 255], [0, 64, 192]]], dtype=np.uint8)
+            if kwargs.get("output_type", "np") == "pil":
+                return SimpleNamespace(frames=[[Image.fromarray(pixels)]])
+            return SimpleNamespace(frames=np.asarray([[pixels]], dtype=np.float32) / 255.0)
 
     diffusers = ModuleType("diffusers")
     diffusers.WanPipeline = Pipeline
@@ -135,7 +133,7 @@ def test_reference_is_fp32_tied_and_consumes_the_same_latents(monkeypatch, tmp_p
     calls, fp32 = _framework(monkeypatch)
     _, manifest, case = e2e.CASES["wan21-t2v-1.3b-l0"]
     latents = e2e._initial_latents(manifest, case)
-    e2e._official_reference(Path("model"), manifest, case, tmp_path, latents)
+    result = e2e._official_reference(Path("model"), manifest, case, tmp_path, latents)
 
     assert calls["load"] == {
         "torch_dtype": fp32,
@@ -151,6 +149,11 @@ def test_reference_is_fp32_tied_and_consumes_the_same_latents(monkeypatch, tmp_p
     np.testing.assert_array_equal(tensor.values, latents)
     assert tensor.device == "cuda"
     assert tensor.dtype is fp32
+    assert calls["kwargs"]["output_type"] == "pil"
+    np.testing.assert_array_equal(
+        result["images"],
+        np.array([[[[17, 128, 255], [0, 64, 192]]]], dtype=np.float32) / 255.0,
+    )
 
 
 def test_reference_rejects_an_untied_text_encoder() -> None:
@@ -158,6 +161,61 @@ def test_reference_rejects_an_untied_text_encoder() -> None:
         shared=SimpleNamespace(weight=_Weight(1)),
         encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=_Weight(2))),
         tie_weights=lambda: None,
+    )
+    with pytest.raises(RuntimeError, match=r"tie_weights\(\) did not bind embeddings"):
+        e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+
+
+def test_reference_restores_shared_inputs_without_changing_output_tying() -> None:
+    shared = SimpleNamespace(weight=_Weight(1))
+    encoder = SimpleNamespace(embed_tokens=SimpleNamespace(weight=_Weight(2)))
+    configuration = SimpleNamespace(tie_word_embeddings=False)
+    calls = []
+
+    def set_input_embeddings(value):
+        calls.append(value)
+        encoder.embed_tokens = value
+
+    text_encoder = SimpleNamespace(
+        shared=shared,
+        encoder=encoder,
+        config=configuration,
+        tie_weights=lambda: None,
+        set_input_embeddings=set_input_embeddings,
+    )
+    e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+    assert calls == [shared]
+    assert encoder.embed_tokens is shared
+    assert configuration.tie_word_embeddings is False
+
+
+def test_reference_rejects_missing_or_mismatched_embeddings() -> None:
+    shared = SimpleNamespace(weight=_Weight(1))
+    with pytest.raises(RuntimeError, match="no shared embedding binding"):
+        e2e._tie_wan_text_encoder(
+            SimpleNamespace(text_encoder=SimpleNamespace(shared=shared, tie_weights=lambda: None))
+        )
+
+    mismatched = _Weight(2)
+    mismatched.shape = (9, 4)
+    calls = []
+    text_encoder = SimpleNamespace(
+        shared=shared,
+        encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=mismatched)),
+        tie_weights=lambda: None,
+        set_input_embeddings=calls.append,
+    )
+    with pytest.raises(RuntimeError, match="embedding shapes do not match"):
+        e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))
+    assert calls == []
+
+
+def test_reference_rejects_an_ineffective_input_setter() -> None:
+    text_encoder = SimpleNamespace(
+        shared=SimpleNamespace(weight=_Weight(1)),
+        encoder=SimpleNamespace(embed_tokens=SimpleNamespace(weight=_Weight(2))),
+        tie_weights=lambda: None,
+        set_input_embeddings=lambda value: None,
     )
     with pytest.raises(RuntimeError, match=r"tie_weights\(\) did not bind embeddings"):
         e2e._tie_wan_text_encoder(SimpleNamespace(text_encoder=text_encoder))

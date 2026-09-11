@@ -1,0 +1,18 @@
+{
+  "name": "dm-nfnet-f0-dm-in1k",
+  "hf_id": "timm/dm_nfnet_f0.dm_in1k",
+  "hf_revision": "ca8e830961c2ebceffff7affff34acfe7a1da673",
+  "bundle": "dm-nfnet-f0-dm-in1k.bundle",
+  "family": "timm_nfnet",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "dm-nfnet-f0-dm-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

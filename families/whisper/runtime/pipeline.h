@@ -8,6 +8,7 @@
 // WhisperPipeline: encoder-decoder speech-to-text pipeline.
 // Uses ITrtModule(encoder) + ITrtModule(decoder) + WhisperInferenceState.
 
+#include "families/whisper/runtime/device_buffer.h"
 #include "families/whisper/runtime/inference_state.h"
 #include "families/whisper/runtime/kv_cache.h"
 #include "families/whisper/runtime/tokenizer.h"
@@ -74,8 +75,8 @@ class WhisperPipeline final : public ITranscription {
     std::string model_id_;
 
     std::vector<std::vector<uint8_t>> cross_k_host_;
-    std::vector<void*> cross_k_ptrs_;
-    std::vector<void*> cross_v_ptrs_;
+    std::vector<whisper::DeviceBuffer> cross_k_ptrs_;
+    std::vector<whisper::DeviceBuffer> cross_v_ptrs_;
     std::size_t cross_kv_bytes_{0};
 };
 

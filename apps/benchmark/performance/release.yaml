@@ -34,6 +34,11 @@ excluded_profiles:
     reason: >-
       Pinned BF16 build and Hugging Face parity qualification are present, but
       no matching release-performance workload or receipt has been collected.
+  - model: k2-horizon-7b-uno
+    reason: >-
+      Pinned BF16 build and exact linear Psi-Spec parity qualification are
+      present, but the algorithmic committed-token receipt is not a matched
+      wall-clock release-performance workload.
   - model: minimax-h3-768p
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
@@ -43,8 +48,51 @@ excluded_profiles:
       Functional and Hugging Face reference-parity qualification are present,
       but no matching release-performance workload or receipt has been
       collected.
+  - model: dpn92-mx-in1k
+    reason: >-
+      Functional and timm reference-parity qualification is present for every
+      published DPN width, but the release-performance workload and receipt
+      were collected only for dpn68b.
+  - model: res2net50d-in1k
+    reason: &res2net_performance_exclusion >-
+      Functional and timm reference-parity qualification is present for every
+      published Res2Net checkpoint, but the release-pwherformance workload and
+      receipt were collected only for res2net50_26w_4s.
+  - model: res2next50-in1k
+    reason: *res2net_performance_exclusion
+  - model: yolov10s
+    reason: &yolov10_performance_exclusion >-
+      Functional and reference-parity qualification against ultralytics is
+      present for every published YOLOv10 width, but the release-performance
+      workload and receipt were collected only for yolov10n.
+  - model: yolov10x
+    reason: *yolov10_performance_exclusion
+  - model: dm-nfnet-f3-dm-in1k
+    reason: >-
+      Functional and timm reference-parity qualification is present for every
+      published dm_nfnet checkpoint, but the release-performance workload and
+      receipt were collected only for dm_nfnet_f0.
+  - model: mobilevit-xxs-cvnets-in1k
+    reason: >-
+      Functional and timm reference-parity qualification is present for all
+      three published MobileViT v1 checkpoints, but the release-performance
+      workload and receipt were collected only for mobilevit_s, which is the
+      width the release entry names.
 
 entries:
+  - id: detr.detect
+    family: detr
+    operation: detect
+    model: detr-resnet-50
+    workload:
+      testcase: detr-resnet-50
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: albert.encode
     family: albert
     operation: encode
@@ -976,6 +1024,227 @@ entries:
     model: resnet50-a1-in1k
     workload:
       testcase: resnet50-a1-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_xception.classify
+    family: timm_xception
+    operation: classify
+    model: xception41-tf-in1k
+    workload:
+      testcase: xception41-tf-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_regnet.classify
+    family: timm_regnet
+    operation: classify
+    model: regnety-040-ra3-in1k
+    workload:
+      testcase: regnety-040-ra3-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_seresnet.classify
+    family: timm_seresnet
+    operation: classify
+    model: seresnet50-a1-in1k
+    workload:
+      testcase: seresnet50-a1-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_senet.classify
+    family: timm_senet
+    operation: classify
+    model: senet154-gluon-in1k
+    workload:
+      testcase: senet154-gluon-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_ghostnet.classify
+    family: timm_ghostnet
+    operation: classify
+    model: ghostnet-100-in1k
+    workload:
+      testcase: ghostnet-100-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_convnext.classify
+    family: timm_convnext
+    operation: classify
+    model: convnext-tiny-in12k-ft-in1k
+    workload:
+      testcase: convnext-tiny-in12k-ft-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_inception_v4.classify
+    family: timm_inception_v4
+    operation: classify
+    model: inception-v4-tf-in1k
+    workload:
+      testcase: inception-v4-tf-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_inception_resnet.classify
+    family: timm_inception_resnet
+    operation: classify
+    model: inception-resnet-v2-tf-in1k
+    workload:
+      testcase: inception-resnet-v2-tf-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_hrnet.classify
+    family: timm_hrnet
+    operation: classify
+    model: hrnet-w18-ms-aug-in1k
+    workload:
+      testcase: hrnet-w18-ms-aug-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_resnest.classify
+    family: timm_resnest
+    operation: classify
+    model: resnest50d-in1k
+    workload:
+      testcase: resnest50d-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_swin.classify
+    family: timm_swin
+    operation: classify
+    model: swin-tiny-patch4-window7-224-ms-in1k
+    workload:
+      testcase: swin-tiny-patch4-window7-224-ms-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_crossvit.classify
+    family: timm_crossvit
+    operation: classify
+    model: crossvit-9-240-in1k
+    workload:
+      testcase: crossvit-9-240-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_dpn.classify
+    family: timm_dpn
+    operation: classify
+    model: dpn68b-ra-in1k
+    workload:
+      testcase: dpn68b-ra-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_res2net.classify
+    family: timm_res2net
+    operation: classify
+    model: res2net50-26w-4s-in1k
+    workload:
+      testcase: res2net50-26w-4s-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: yolov10.detect
+    family: yolov10
+    operation: detect
+    model: yolov10n
+    workload:
+      testcase: yolov10n
+    baseline:
+      runner: task-reference
+      adapter: ultralytics-detection
+      mode: torch-eager
+      reference_backend: ultralytics
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_nfnet.classify
+    family: timm_nfnet
+    operation: classify
+    model: dm-nfnet-f0-dm-in1k
+    workload:
+      testcase: dm-nfnet-f0-dm-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_mobilevit.classify
+    family: timm_mobilevit
+    operation: classify
+    model: mobilevit-s-cvnets-in1k
+    workload:
+      testcase: mobilevit-s-cvnets-in1k
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision

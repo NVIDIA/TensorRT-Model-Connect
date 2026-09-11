@@ -8,7 +8,7 @@ PyYAML==6.0.3
 einops==0.8.2
 ftfy
 huggingface-hub==1.26.0
-imageio[pyav]
+imageio[ffmpeg,pyav]
 flash-linear-attention>=0.4.2
 mmcv==1.7.2
 omegaconf

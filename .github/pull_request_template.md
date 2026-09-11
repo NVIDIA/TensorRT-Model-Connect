@@ -64,6 +64,15 @@ why. Use "None: <reason>" only when the recorded evidence covers every relevant
 path.
 -->
 
+## Contributor Self-Review
+
+<!--
+Confirm that you reviewed your change before marking the pull request ready.
+`$review-trtmc-pr`, another review tool, or a manual review are all accepted.
+-->
+
+- [ ] I have completed a self-review of this change.
+
 ## Notes For Future Readers
 
 <!--

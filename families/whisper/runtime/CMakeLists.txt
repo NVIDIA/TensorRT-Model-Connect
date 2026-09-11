@@ -39,3 +39,22 @@ set_target_properties(trtmc_model_whisper PROPERTIES
 install(TARGETS trtmc_model_whisper
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  # CPU CUDA stubs live in the test, so allocation failures can be injected
+  # without a GPU or cudart.
+  add_executable(test_whisper_cross_kv_alloc
+    ${PROJECT_SOURCE_DIR}/families/whisper/tests/cpp/test_whisper_cross_kv_alloc.cpp
+  )
+  target_include_directories(test_whisper_cross_kv_alloc PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_whisper_cross_kv_alloc SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_compile_options(test_whisper_cross_kv_alloc PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME whisper_cross_kv_alloc COMMAND test_whisper_cross_kv_alloc)
+endif()

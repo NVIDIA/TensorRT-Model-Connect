@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -55,6 +56,10 @@ Repository head `def456`; Qwen revision `abc123`; CPU-only Ubuntu 24.04.
 
 GPU execution was not run because runtime math is unchanged.
 
+## Contributor Self-Review
+
+- [x] I have completed a self-review of this change.
+
 ## Notes For Future Readers
 
 Family-owned support resolution replaces the previous selector. Existing
@@ -70,6 +75,12 @@ ownership check before the model-owned regression.
 The change is isolated to model selection.
 
 """
+
+
+def _without_self_review(body: str) -> str:
+    start = body.index("## Contributor Self-Review")
+    end = body.index("## Notes For Future Readers")
+    return body[:start] + body[end:]
 
 
 def test_complete_pull_request_body_passes() -> None:
@@ -95,6 +106,41 @@ def test_validation_requires_commands_results_environment_revisions_and_gaps() -
         "Required subsection is empty: Validation / Hardware, Environment, and Revisions"
         in pr_metadata.validate_body(body)
     )
+
+
+def test_self_review_requires_confirmation_checkbox() -> None:
+    body = _complete_body().replace(
+        "- [x] I have completed a self-review of this change.",
+        "- [ ] I have completed a self-review of this change.",
+    )
+
+    assert "Complete the Contributor Self-Review checkbox" in pr_metadata.validate_body(body)
+
+
+def test_ready_event_accepts_self_review_confirmation(tmp_path: Path) -> None:
+    event_path = tmp_path / "event.json"
+    event = {
+        "pull_request": {
+            "body": _complete_body(),
+            "draft": False,
+        }
+    }
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+
+    assert pr_metadata.main(["validate", "--event", str(event_path)]) == 0
+
+
+def test_draft_event_allows_self_review_to_remain_pending(tmp_path: Path) -> None:
+    event_path = tmp_path / "event.json"
+    event = {
+        "pull_request": {
+            "body": _without_self_review(_complete_body()),
+            "draft": True,
+        }
+    }
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+
+    assert pr_metadata.main(["validate", "--event", str(event_path)]) == 0
 
 
 def test_change_category_and_risk_choices_are_enforced() -> None:
@@ -164,6 +210,7 @@ def test_template_and_validator_share_the_same_contract() -> None:
         assert f"## {title}" in template
     for title in pr_metadata.VALIDATION_SUBSECTIONS:
         assert f"### {title}" in template
+    assert f"- [ ] {pr_metadata.SELF_REVIEW_CONFIRMATION}" in template
     for option in (*pr_metadata.CHANGE_CATEGORIES, *pr_metadata.RISK_LEVELS):
         assert f"- [ ] {option}" in template
 

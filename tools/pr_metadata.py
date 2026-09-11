@@ -19,6 +19,7 @@ REQUIRED_SECTIONS = (
     "Exit Criteria",
     "Implementation",
     "Validation",
+    "Contributor Self-Review",
     "Notes For Future Readers",
 )
 VALIDATION_SUBSECTIONS = (
@@ -26,6 +27,7 @@ VALIDATION_SUBSECTIONS = (
     "Hardware, Environment, and Revisions",
     "Not Run / Remaining Gaps",
 )
+SELF_REVIEW_CONFIRMATION = "I have completed a self-review of this change."
 CHANGE_CATEGORIES = (
     "Model or runtime behavior",
     "Public API",
@@ -71,15 +73,22 @@ def checked_options(body: str, options: Sequence[str]) -> list[str]:
     return [option for option in options if option in checked]
 
 
-def validate_body(body: str) -> list[str]:
+def validate_body(
+    body: str,
+    *,
+    require_self_review: bool = True,
+) -> list[str]:
     errors: list[str] = []
     visible_body = _HTML_COMMENT_RE.sub("", body)
     sections = _heading_blocks(visible_body, 2)
-    for title in REQUIRED_SECTIONS:
+    required_sections = tuple(
+        title for title in REQUIRED_SECTIONS if require_self_review or title != "Contributor Self-Review"
+    )
+    for title in required_sections:
         content = sections.get(title.casefold())
         if content is None:
             errors.append(f"Missing required section: {title}")
-        elif title != "Validation" and not _meaningful(content):
+        elif title not in ("Validation", "Contributor Self-Review") and not _meaningful(content):
             errors.append(f"Required section is empty: {title}")
 
     nested_requirements = {
@@ -107,6 +116,12 @@ def validate_body(body: str) -> list[str]:
     selected_risks = checked_options(risk_level, RISK_LEVELS)
     if len(selected_risks) != 1:
         errors.append("Select exactly one Risk level option")
+    if require_self_review:
+        self_review = sections.get("contributor self-review", "")
+        if SELF_REVIEW_CONFIRMATION not in checked_options(
+            self_review, (SELF_REVIEW_CONFIRMATION,)
+        ):
+            errors.append("Complete the Contributor Self-Review checkbox")
     return errors
 
 
@@ -124,8 +139,21 @@ def _pull_request_body(event: Mapping[str, object]) -> str:
     return body if isinstance(body, str) else ""
 
 
+def _pull_request_is_draft(event: Mapping[str, object]) -> bool:
+    pull_request = event["pull_request"]
+    assert isinstance(pull_request, Mapping)
+    draft = pull_request.get("draft")
+    if not isinstance(draft, bool):
+        raise MetadataError("GitHub event does not contain pull_request draft state")
+    return draft
+
+
 def _validate(event_path: Path) -> None:
-    errors = validate_body(_pull_request_body(_load_event(event_path)))
+    event = _load_event(event_path)
+    errors = validate_body(
+        _pull_request_body(event),
+        require_self_review=not _pull_request_is_draft(event),
+    )
     if errors:
         for error in errors:
             print(f"::error title=PR metadata::{error}")

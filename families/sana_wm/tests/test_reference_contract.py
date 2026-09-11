@@ -20,7 +20,7 @@ def test_official_source_dependencies_are_family_owned() -> None:
     }
     assert {
         "flash-linear-attention>=0.4.2",
-        "imageio[pyav]",
+        "imageio[ffmpeg,pyav]",
         "mmcv==1.7.2",
         "pyrallis",
         "pytz",
@@ -93,6 +93,13 @@ def test_raw_snapshot_calls_declared_official_entrypoint(monkeypatch, tmp_path: 
     assert not (model_dir / "model_index.json").exists()
     monkeypatch.setenv("TRTMC_REFERENCE_SOURCE_DIR", str(source))
     captured = {}
+    observations = {}
+
+    def record(name, value):
+        observations[name] = value
+        return value
+
+    monkeypatch.setattr(e2e, "record_evidence", record)
 
     def run(command, **kwargs):
         captured["command"] = command
@@ -100,13 +107,15 @@ def test_raw_snapshot_calls_declared_official_entrypoint(monkeypatch, tmp_path: 
         output = Path(command[command.index("--output_dir") + 1])
         output.mkdir()
         (output / "reference_generated.mp4").write_bytes(b"video")
-        return e2e.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return e2e.subprocess.CompletedProcess(
+            command, 0, stdout="reference progress\n", stderr="reference diagnostic\n"
+        )
 
     def decode(video_path: Path, frames_dir: Path):
         captured["video_path"] = video_path
         frames_dir.mkdir()
         paths = []
-        for index in range(3):
+        for index in range(2):
             path = frames_dir / f"frame_{index:04d}.png"
             path.write_bytes(b"png")
             paths.append(path)
@@ -148,7 +157,12 @@ def test_raw_snapshot_calls_declared_official_entrypoint(monkeypatch, tmp_path: 
     assert captured["kwargs"]["env"]["TRANSFORMERS_OFFLINE"] == "1"
     assert captured["kwargs"]["env"]["PYTHONPATH"] == str(source)
     assert captured["video_path"] == tmp_path / "reference-video/reference_generated.mp4"
-    assert len(result["frame_paths"]) == 3
+    assert len(result["frame_paths"]) == 2
+    assert observations["reference_process"] == {
+        "argv": command,
+        "stdout": "reference progress\n",
+        "stderr": "reference diagnostic\n",
+    }
 
 
 def test_official_reference_dependency_failure_is_not_hidden(monkeypatch, tmp_path: Path) -> None:
@@ -193,3 +207,46 @@ def test_frame_stats_load_each_candidate_once(monkeypatch) -> None:
     assert loaded == actual_paths
     assert mean == pytest.approx(0.4)
     assert std == pytest.approx(np.std([0.2, 0.4, 0.6]))
+
+
+@pytest.mark.parametrize(
+    ("frame_indices", "passes"),
+    [
+        (list(range(319)), False),
+        (list(range(320)), True),
+        (list(range(321)), False),
+        ([*range(319), 320], False),
+    ],
+    ids=["short", "complete", "extra", "gap"],
+)
+def test_official_refiner_requires_every_output_frame(
+    frame_indices, passes, monkeypatch, tmp_path: Path
+) -> None:
+    _, manifest, case = e2e.CASES["sana-wm-bidirectional"]
+    source = tmp_path / "source"
+    entrypoint = source / "inference_video_scripts/wm/inference_sana_wm.py"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text("# declared official source\n", encoding="utf-8")
+    model_dir = tmp_path / "checkpoint"
+    (model_dir / "dit").mkdir(parents=True)
+    (model_dir / "refiner/text_encoder").mkdir(parents=True)
+    (model_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
+    (model_dir / "dit/sana_wm_1600m_720p.safetensors").write_bytes(b"weights")
+    monkeypatch.setenv("TRTMC_REFERENCE_SOURCE_DIR", str(source))
+    monkeypatch.setattr(
+        e2e.subprocess,
+        "run",
+        lambda command, **kwargs: e2e.subprocess.CompletedProcess(
+            command, 0, stdout="reference completed", stderr=""
+        ),
+    )
+    frames = [tmp_path / f"frame_{index:04d}.png" for index in frame_indices]
+    monkeypatch.setattr(e2e, "_decode_reference_video", lambda *_: frames)
+
+    if passes:
+        assert e2e._official_reference(model_dir, manifest, case, tmp_path) == {
+            "frame_paths": frames
+        }
+    else:
+        with pytest.raises(AssertionError):
+            e2e._official_reference(model_dir, manifest, case, tmp_path)

@@ -45,6 +45,7 @@ SHARED_FILES = {
     "Dockerfile.community-cpu",
     "Dockerfile.dev.aarch64",
     "Dockerfile.dev.x86",
+    "Dockerfile.dev.x86-gpu",
     ".dockerignore",
     "conanfile.py",
     "conftest.py",

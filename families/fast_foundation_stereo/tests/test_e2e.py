@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence
+from families.fast_foundation_stereo.tests.reporting import record_report_views
+
 import json
 import os
 import shutil
@@ -227,6 +230,8 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -252,6 +257,7 @@ def _asset(raw: str) -> Path:
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence("inputs", {str(raw): path})
     return path
 
 
@@ -358,17 +364,27 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest, tmp_path)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
-    actual = _native(binary, runtime_root, bundle, manifest, case)
-    expected = _run_official_reference(_load_official_reference(model_dir), case)
-    _assert_parity(actual, expected, manifest, case, _thresholds(case_name))
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, manifest, case)
+    record_evidence("native", actual)
+    with evidence_stage("reference"):
+        expected = _run_official_reference(_load_official_reference(model_dir), case)
+    record_evidence("reference", expected)
+    record_report_views(actual, expected, tmp_path / "stereo-views")
+    with evidence_stage("compare"):
+        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
 
 
 def test_middlebury_q_task_accuracy_e2e(case_name: str, request, tmp_path: Path) -> None:
-    assert case_name == MIDDLEBURY_CASE
+    with evidence_stage("compare"):
+        assert case_name == MIDDLEBURY_CASE
     if not _middlebury_selected(request.config):
         pytest.skip("Middlebury-Q E2E requires an explicit matching E2E selector")
     configured = os.environ.get(MIDDLEBURY_DATASET_ENV)
@@ -386,25 +402,40 @@ def test_middlebury_q_task_accuracy_e2e(case_name: str, request, tmp_path: Path)
         configured = str(output / "dataset.json")
     dataset_path = _required_path(configured, MIDDLEBURY_DATASET_ENV)
     dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    record_evidence("inputs", {"dataset": dataset, "dataset_file": dataset_path})
     requests = dataset.get("requests")
-    assert isinstance(requests, list) and len(requests) == 15
+    with evidence_stage("compare"):
+        assert isinstance(requests, list) and len(requests) == 15
     scenes = [str(item["inputs"]["scene"]) for item in requests]
-    assert len(set(scenes)) == 15
+    with evidence_stage("compare"):
+        assert len(set(scenes)) == 15
 
     _, manifest, _ = CASES["fast-foundation-stereo"]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES["fast-foundation-stereo"][-1]})
     model_dir = _model_dir(manifest, tmp_path)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     reference = _load_official_reference(model_dir)
-    thresholds = _thresholds(case_name)
+    thresholds = record_evidence("thresholds", _thresholds(case_name))
+    record_evidence("thresholds", thresholds)
     statistics = []
     for item in requests:
         case = {"name": str(item["sample_id"]), "inputs": dict(item["inputs"])}
-        actual = _native(binary, runtime_root, bundle, manifest, case)
-        expected = _run_official_reference(reference, case)
-        _assert_parity(actual, expected, manifest, case, thresholds)
+        record_evidence("inputs", {"case": case})
+        with evidence_stage("native"):
+            actual = _native(binary, runtime_root, bundle, manifest, case)
+        record_evidence("native", actual)
+        with evidence_stage("reference"):
+            expected = _run_official_reference(reference, case)
+        record_evidence("reference", expected)
+        record_report_views(actual, expected, tmp_path / "stereo-views" / case["name"])
+        with evidence_stage("compare"):
+            _assert_parity(actual, expected, manifest, case, thresholds)
         truth, valid = ground_truth(case["inputs"])
+        record_evidence("ground_truth", {"ground_truth": truth, "valid_mask": valid})
         statistics.append(scene_statistics(_disparity(actual), _disparity(expected), truth, valid))
 
     aggregate = aggregate_task_accuracy(
@@ -414,5 +445,8 @@ def test_middlebury_q_task_accuracy_e2e(case_name: str, request, tmp_path: Path)
             thresholds["candidate_nonocc_bp2_max_reference_plus_fraction"]
         ),
     )
-    assert aggregate["candidate_nonocc_epe_passed"] is True
-    assert aggregate["candidate_nonocc_bp2_passed"] is True
+    record_evidence("metrics", aggregate)
+    with evidence_stage("compare"):
+        assert aggregate["candidate_nonocc_epe_passed"] is True
+    with evidence_stage("compare"):
+        assert aggregate["candidate_nonocc_bp2_passed"] is True

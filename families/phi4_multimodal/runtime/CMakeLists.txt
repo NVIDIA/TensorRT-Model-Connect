@@ -44,3 +44,26 @@ set_target_properties(trtmc_model_phi4_multimodal PROPERTIES
 install(TARGETS trtmc_model_phi4_multimodal
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_phi4_multimodal_runtime_config_contract
+    ${PROJECT_SOURCE_DIR}/families/phi4_multimodal/tests/cpp/test_phi4_multimodal_runtime_config_contract.cpp
+    image_preprocessor.cpp
+  )
+  target_include_directories(test_phi4_multimodal_runtime_config_contract PRIVATE
+    ${PROJECT_SOURCE_DIR}
+  )
+  target_include_directories(test_phi4_multimodal_runtime_config_contract SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_link_libraries(test_phi4_multimodal_runtime_config_contract PRIVATE
+    nlohmann_json::nlohmann_json
+  )
+  target_compile_options(test_phi4_multimodal_runtime_config_contract PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME test_phi4_multimodal_runtime_config_contract
+    COMMAND test_phi4_multimodal_runtime_config_contract
+  )
+  set_tests_properties(test_phi4_multimodal_runtime_config_contract PROPERTIES LABELS cpu)
+endif()

@@ -55,6 +55,7 @@ class FamilySupport:
 
     tasks: tuple[str, ...]
     default_task: str
+    default_precision: str = "fp32"
 
     def __post_init__(self) -> None:
         if not self.tasks or len(set(self.tasks)) != len(self.tasks):
@@ -63,6 +64,8 @@ class FamilySupport:
             raise ValueError("family support tasks must be lowercase identifiers")
         if self.default_task not in self.tasks:
             raise ValueError("default_task must be one of the supported tasks")
+        if self.default_precision not in {"fp16", "bf16", "fp32"}:
+            raise ValueError("default_precision must be fp16, bf16, or fp32")
 
 
 DescribeSupport = Callable[[ModelMetadata], FamilySupport | None]
@@ -80,20 +83,21 @@ def family_support(
     required_files: tuple[str, ...] = (),
     tasks: tuple[str, ...],
     default_task: str,
+    default_precision: str = "fp32",
 ) -> DescribeSupport:
     """Create one exact, family-owned support function."""
 
     model_type_keys = frozenset(key for value in model_types if (key := _key(value)))
-    architecture_keys = frozenset(
-        key for value in architectures if (key := _key(value))
-    )
-    pipeline_keys = frozenset(
-        key for value in pipeline_classes if (key := _key(value))
-    )
+    architecture_keys = frozenset(key for value in architectures if (key := _key(value)))
+    pipeline_keys = frozenset(key for value in pipeline_classes if (key := _key(value)))
     file_keys = frozenset(value for value in required_files if value)
     if not model_type_keys and not architecture_keys and not pipeline_keys and not file_keys:
         raise ValueError("family support must declare at least one model identity")
-    support = FamilySupport(tasks=tasks, default_task=default_task)
+    support = FamilySupport(
+        tasks=tasks,
+        default_task=default_task,
+        default_precision=default_precision,
+    )
 
     def describe(metadata: ModelMetadata) -> FamilySupport | None:
         if _key(metadata.model_type) in model_type_keys:
@@ -128,11 +132,7 @@ def load_model_metadata(model_dir: str | Path) -> ModelMetadata:
     config = _read_object(root / "config.json")
     model_index = _read_object(root / "model_index.json")
     files = tuple(
-        sorted(
-            path.relative_to(root).as_posix()
-            for path in root.rglob("*")
-            if path.is_file()
-        )
+        sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
     )
     if not files:
         raise ValueError(f"model snapshot is empty: {root}")

@@ -1,0 +1,18 @@
+{
+  "name": "convnext-tiny-in12k-ft-in1k",
+  "hf_id": "timm/convnext_tiny.in12k_ft_in1k",
+  "hf_revision": "aa096f03029c7f0ec052013f64c819b34f8ad790",
+  "bundle": "convnext-tiny-in12k-ft-in1k.bundle",
+  "family": "timm_convnext",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "convnext-tiny-in12k-ft-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

@@ -26,6 +26,19 @@ from trtmc_devtoolkit import (  # noqa: E402
 )
 
 
+@pytest.mark.parametrize("name", ("docker_build.py", "local_build.py"))
+def test_build_examples_expose_help_without_preparing_an_environment(name: str) -> None:
+    result = subprocess.run(
+        [sys.executable, str(REPO / "apps" / "devtoolkit" / "examples" / name), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "TRTMC CLI and TensorRT backend" in result.stdout
+
+
 class RecordingRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], Path, dict[str, str] | None]] = []
@@ -687,6 +700,31 @@ def test_local_uses_only_the_explicit_existing_interpreter(tmp_path: Path) -> No
     assert result.command("python", "-V") == ("python", "-V")
 
 
+def test_prepared_environment_bridges_to_capability_execution_targets(tmp_path: Path) -> None:
+    repository = tmp_path.resolve()
+    local = PreparedEnvironment(kind="local", repository=repository, python="/venv/bin/python")
+    docker = PreparedEnvironment(
+        kind="docker",
+        repository=repository,
+        python="python3",
+        container="trtmc-dev",
+        container_id="sha256:container",
+    )
+
+    local_target = local.execution_target(gpu="2")
+    docker_target = docker.execution_target(state="/workspace/.devtoolkit")
+
+    assert local_target.provider == "local"
+    assert local_target.options == {"python": "/venv/bin/python", "gpu": "2"}
+    assert docker_target.provider == "docker"
+    assert docker_target.options == {
+        "python": "python3",
+        "workspace": str(repository),
+        "state": "/workspace/.devtoolkit",
+        "container": "sha256:container",
+    }
+
+
 @pytest.mark.parametrize("family", ("missing", "../alpha", "Alpha"))
 def test_unknown_or_invalid_family_fails_closed(tmp_path: Path, family: str) -> None:
     toolkit = DevToolkit.from_checkout(_checkout(tmp_path), runner=RecordingRunner())
@@ -710,7 +748,7 @@ def test_invalid_docker_inputs_fail_before_commands(tmp_path: Path) -> None:
     assert runner.calls == []
 
 
-def test_devtoolkit_has_no_legacy_registry_or_cohort_modules() -> None:
+def test_devtoolkit_has_no_legacy_location_or_cohort_modules() -> None:
     root = REPO / "apps/devtoolkit"
     legacy = REPO / "scripts/devToolkit"
     assert not legacy.exists() or not [path for path in legacy.rglob("*") if path.is_file()]
@@ -718,16 +756,11 @@ def test_devtoolkit_has_no_legacy_registry_or_cohort_modules() -> None:
     assert not [
         name
         for name in (
-            "builtin_providers.py",
             "builtin_registry.py",
             "cohorts.py",
             "planner.py",
-            "providers.py",
-            "receipt.py",
-            "spi.py",
             "target_contracts.py",
             "target_service.py",
-            "toolchain.py",
         )
         if (root / "trtmc_devtoolkit" / name).exists()
     ]

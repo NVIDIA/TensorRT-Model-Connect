@@ -1,0 +1,18 @@
+{
+  "name": "boltz2-protein-monomer",
+  "hf_id": "boltz-community/boltz-2",
+  "hf_revision": "6fdef46d763fee7fbb83ca5501ccceff43b85607",
+  "bundle": "boltz2-protein-monomer.bundle",
+  "family": "boltz2",
+  "task": "structure_prediction",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 117,
+  "testcases": [
+    {
+      "name": "boltz2-protein-monomer",
+      "premerge": true,
+      "request": "data/protein_monomer.yaml"
+    }
+  ]
+}

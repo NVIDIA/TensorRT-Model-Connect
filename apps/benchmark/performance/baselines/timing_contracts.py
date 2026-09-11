@@ -11,6 +11,7 @@ from typing import Any
 MODEL_CALL_FAMILIES = {
     "bark",
     "chronos_bolt",
+    "detr",
     "dinov3",
     "eagle_vlm",
     "elf_flow",

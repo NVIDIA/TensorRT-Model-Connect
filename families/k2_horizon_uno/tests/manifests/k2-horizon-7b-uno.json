@@ -1,0 +1,70 @@
+{
+  "name": "k2-horizon-7b-uno",
+  "hf_id": "IFM/K2-Horizon-7B-Uno",
+  "hf_revision": "ec92bbd768f4a404319625204544782e3377bcd7",
+  "hf_dependencies": [
+    {
+      "repo_id": "IFM/K2-Horizon-7B",
+      "revision": "586b03f0fd1fbbf2f13eeafc33749e95ae34dd10"
+    }
+  ],
+  "bundle": "k2-horizon-7b-uno.bundle",
+  "family": "k2_horizon_uno",
+  "task": "text_generation",
+  "precision": "bf16",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1,
+  "base_reference_trust_remote_code": true,
+  "testcases": [
+    {
+      "name": "k2-horizon-7b-uno-linear-psi-spec-l0",
+      "premerge": true,
+      "prompt": "Reply with the word OK.",
+      "max_new_tokens": 26,
+      "temperature": 0.0,
+      "top_k": 1,
+      "generation_mode": "linear_spec_lora",
+      "block_length": 8,
+      "use_chat_template": true,
+      "enable_thinking": true,
+      "expected_prompt_token_ids": [
+        0, 250018, 2672, 200, 42035, 458, 293, 5512, 19677, 15, 250019, 250018,
+        142036, 200, 250029, 200
+      ],
+      "expected_continuation_token_ids": [
+        864, 3318, 4943, 27, 322, 42035, 458, 293, 5512, 19677, 2818, 2953, 627,
+        1767, 9359, 458, 322, 8228, 2338, 2515, 4791, 3343, 15, 250030, 8228, 250019
+      ],
+      "expected_continuation_text": "The user says: \"Reply with the word OK.\" So we should respond with \"OK\". No extra text.</ifm|think>OK",
+      "expected_decode_mode": "linear_spec_lora",
+      "expected_forwards": 18,
+      "expected_committed_tokens": 26,
+      "expected_lookaheads": 1
+    },
+    {
+      "name": "k2-horizon-7b-uno-ar-control",
+      "premerge": false,
+      "prompt": "Reply with the word OK.",
+      "max_new_tokens": 26,
+      "temperature": 0.0,
+      "top_k": 1,
+      "generation_mode": "ar",
+      "block_length": 1,
+      "use_chat_template": true,
+      "enable_thinking": true,
+      "expected_prompt_token_ids": [
+        0, 250018, 2672, 200, 42035, 458, 293, 5512, 19677, 15, 250019, 250018,
+        142036, 200, 250029, 200
+      ],
+      "expected_continuation_token_ids": [
+        864, 3318, 4943, 27, 322, 42035, 458, 293, 5512, 19677, 2818, 2953, 627,
+        1767, 9359, 458, 322, 8228, 2338, 2515, 4791, 3343, 15, 250030, 8228, 250019
+      ],
+      "expected_continuation_text": "The user says: \"Reply with the word OK.\" So we should respond with \"OK\". No extra text.</ifm|think>OK",
+      "expected_decode_mode": "ar",
+      "expected_forwards": 25,
+      "expected_committed_tokens": 26,
+      "expected_lookaheads": 0
+    }
+  ]
+}

@@ -73,4 +73,27 @@ if(TRTMC_BUILD_TESTS)
     LABELS gpu
     SKIP_RETURN_CODE 77
   )
+
+  add_executable(test_lance_runtime_config_contract
+    ${PROJECT_SOURCE_DIR}/families/lance/tests/cpp/test_lance_runtime_config_contract.cpp
+    ${PROJECT_SOURCE_DIR}/families/lance/runtime/image_preprocessor.cpp
+  )
+  target_include_directories(test_lance_runtime_config_contract PRIVATE
+    ${PROJECT_SOURCE_DIR}
+  )
+  target_include_directories(test_lance_runtime_config_contract SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_link_libraries(test_lance_runtime_config_contract PRIVATE
+    nlohmann_json::nlohmann_json
+  )
+  target_compile_options(test_lance_runtime_config_contract PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME test_lance_runtime_config_contract
+    COMMAND test_lance_runtime_config_contract
+  )
+  set_tests_properties(test_lance_runtime_config_contract PROPERTIES
+    LABELS cpu
+  )
 endif()

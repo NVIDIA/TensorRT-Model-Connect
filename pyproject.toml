@@ -69,6 +69,7 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
+enable_assertion_pass_hook = true
 testpaths = [
     "families",
     "core/builder/tests",

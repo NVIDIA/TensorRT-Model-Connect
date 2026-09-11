@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence
+
 import json
 import os
 import subprocess
@@ -175,11 +177,14 @@ def _native_text(binary: Path, runtime_root: Path, bundle: Path, case: dict) -> 
         env=environment,
         timeout=int(case["runtime_timeout_s"]),
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     return json.loads(completed.stdout)
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict) -> str:
     import torch
+    from torch.nn.attention import SDPBackend, sdpa_kernel
     from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
 
     processor = Qwen3OmniMoeProcessor.from_pretrained(
@@ -217,7 +222,9 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict) -> str:
         return_tensors="pt",
         padding=True,
     ).to(model.device)
-    with torch.inference_mode():
+    # Keep the correctness oracle independent of fused SDPA backend selection.
+    # The math backend retains FP32 attention intermediates for BF16 inputs.
+    with torch.inference_mode(), sdpa_kernel(SDPBackend.MATH):
         text_ids = model.generate(
             **inputs,
             thinker_max_new_tokens=int(case["max_new_tokens"]),
@@ -232,12 +239,23 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict) -> str:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
+    record_evidence("thresholds", {"reference_equals_expected": True, "native_equals_reference": True})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime_paths()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
-    native_text = _native_text(binary, runtime_root, bundle, case)
-    reference_text = _official_reference(model_dir, manifest, case)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        native_text = _native_text(binary, runtime_root, bundle, case)
+    record_evidence("native", native_text)
+    with evidence_stage("reference"):
+        reference_text = _official_reference(model_dir, manifest, case)
+    record_evidence("reference", {"text": reference_text})
     expected_text = str(case["expected_continuation_text"]).strip()
-    assert reference_text == expected_text
-    assert native_text["text"] == reference_text
+    record_evidence("inputs", {"expected_text": expected_text})
+    with evidence_stage("compare"):
+        assert reference_text == expected_text
+    with evidence_stage("compare"):
+        assert native_text["text"] == reference_text

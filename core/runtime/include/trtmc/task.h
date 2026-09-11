@@ -147,6 +147,43 @@ struct StereoDisparityResult {
     std::int32_t width{0};
 };
 
+enum class StructureFormat {
+    kMmcif,
+    kPdb,
+};
+
+struct StructurePredictionConfig {
+    std::int32_t recycling_steps{3};
+    std::int32_t sampling_steps{200};
+    std::int32_t diffusion_samples{1};
+    std::int32_t seed{42};
+    StructureFormat output_format{StructureFormat::kMmcif};
+};
+
+struct StructurePredictionRequest {
+    std::string document;
+    std::string source_path;
+    StructurePredictionConfig config;
+};
+
+struct StructureConfidence {
+    float confidence_score{0.0F};
+    float ptm{0.0F};
+    float iptm{0.0F};
+    float ligand_iptm{0.0F};
+    float protein_iptm{0.0F};
+    float complex_plddt{0.0F};
+    float complex_iplddt{0.0F};
+    std::vector<float> plddt;
+};
+
+struct StructurePredictionResult {
+    std::string structure;
+    StructureFormat format{StructureFormat::kMmcif};
+    StructureConfidence confidence;
+    std::string metadata_json;
+};
+
 struct GeometryResult {
     std::vector<float> points;
     std::vector<float> depth;
@@ -169,6 +206,26 @@ struct ClassificationResult {
     std::vector<float> logits;
     std::int32_t top_class{-1};
     float top_score{0.0F};
+};
+
+struct DetectionBox {
+    // Corner form in input-image pixels, not the letterboxed network input: a
+    // family undoes its own padding and scaling before returning.
+    float x_min{0.0F};
+    float y_min{0.0F};
+    float x_max{0.0F};
+    float y_max{0.0F};
+    float score{0.0F};
+    std::int32_t class_id{-1};
+};
+
+struct ObjectDetectionResult {
+    // Ordered by descending score. A family returns only the boxes it keeps,
+    // so a detector that suppresses duplicates and one that never produces
+    // them present the same result.
+    std::vector<DetectionBox> boxes;
+    std::int32_t image_height{0};
+    std::int32_t image_width{0};
 };
 
 enum class PoseCropStage {
@@ -646,6 +703,14 @@ class IImageClassification : public virtual ITask {
                                           std::int32_t width) = 0;
 };
 
+class IObjectDetection : public virtual ITask {
+  public:
+    static constexpr const char* kTask = "object_detection";
+    const char* task() const noexcept override { return kTask; }
+    virtual ObjectDetectionResult detect(const float* pixels, std::int32_t height,
+                                         std::int32_t width) = 0;
+};
+
 class IPoseHypothesisRefinement : public virtual ITask {
   public:
     static constexpr const char* kTask = "pose_hypothesis_refinement";
@@ -660,6 +725,14 @@ class IImageFeatureExtractor : public virtual ITask {
     const char* task() const noexcept override { return kTask; }
     virtual ImageFeaturesResult extract_image_features(const float* pixels, std::int32_t height,
                                                        std::int32_t width) = 0;
+};
+
+class IStructurePrediction : public virtual ITask {
+  public:
+    static constexpr const char* kTask = "structure_prediction";
+    const char* task() const noexcept override { return kTask; }
+    virtual StructurePredictionResult
+    predict_structure(const StructurePredictionRequest& request) = 0;
 };
 
 class IVideoSegmentation : public virtual ITask {

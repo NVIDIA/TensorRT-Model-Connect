@@ -1,0 +1,18 @@
+{
+  "name": "mobilevit-xxs-cvnets-in1k",
+  "hf_id": "timm/mobilevit_xxs.cvnets_in1k",
+  "hf_revision": "2c62d71504c6fbba9bb322f728586c4a235e5fa4",
+  "bundle": "mobilevit-xxs-cvnets-in1k.bundle",
+  "family": "timm_mobilevit",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "mobilevit-xxs-cvnets-in1k",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

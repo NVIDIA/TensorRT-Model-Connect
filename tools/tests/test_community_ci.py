@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the contributor-visible Community CPU entrypoint."""
+"""Tests for the contributor-visible Community CI entrypoint."""
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
-from tools import community_ci
+from tools import community_ci, legal_headers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +58,7 @@ def test_contributor_guide_matches_the_live_ci_flow() -> None:
         "git commit --signoff",
         "git push --set-upstream origin",
         "Community CPU / Required",
+        "Community GPU / Required",
         "run-internal-ci",
         "TRTMC Internal CI / Automated premerge gate",
     ]
@@ -70,6 +73,9 @@ def test_contributor_guide_matches_the_live_ci_flow() -> None:
         "no access to private",
         "runners, secrets, or",
         "GPUs",
+        "Only after `Community CPU / Required` passes",
+        "external GPU instance",
+        "pull-request code executes only on the isolated GPU instance",
         "pull-request checks",
         "public Actions logs",
         "py -3 -m pip",
@@ -125,48 +131,126 @@ def test_impact_publishes_only_the_public_cpu_scope(
     assert "families/qwen/model.py" in summary
 
 
-def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
-    path = REPO_ROOT / ".github" / "workflows" / "community-cpu.yml"
+@pytest.mark.parametrize("change", ["valid", "missing-header", "LICENSE", "NOTICE"])
+def test_public_source_quality_enforces_legal_compliance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    change: str,
+) -> None:
+    header = legal_headers.HASH_STYLE.render(b"\n").decode() + "\n\n"
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    shutil.copyfile(REPO_ROOT / "tools/legal_headers.py", tools_dir / "legal_headers.py")
+    (tools_dir / "legal_header_exceptions.toml").write_text(
+        header + "schema_version = 1\n", encoding="utf-8"
+    )
+    for name in ("LICENSE", "NOTICE"):
+        (tmp_path / name).write_text("Original legal document.\n", encoding="utf-8")
+
+    def git(*arguments: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", *arguments],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "--quiet")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "Base fixture")
+    base = git("rev-parse", "HEAD")
+    source = tmp_path / "families/example/support.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        ("" if change == "missing-header" else header) + '"""Example family support."""\n',
+        encoding="utf-8",
+    )
+    if change in ("LICENSE", "NOTICE"):
+        (tmp_path / change).write_text("Changed legal document.\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "Contribution fixture")
+
+    # Keep the real public entrypoint, header audit, and Git comparison; unrelated
+    # architecture and formatter checks need the full project and toolchain.
+    for name in ("family_coverage", "complexity", "lint_changed_files", "architecture_contracts"):
+        monkeypatch.setattr(community_ci.SourceQualityChecks, name, lambda _self: None)
+    runner = community_ci.CommunityCI(tmp_path, dict(os.environ))
+    if change == "valid":
+        runner.source_quality(base)
+        assert "findings=0" in capfd.readouterr().out
+    else:
+        with pytest.raises(community_ci.CiError):
+            runner.source_quality(base)
+        captured = capfd.readouterr()
+        output = captured.out + captured.err
+        if change == "missing-header":
+            assert (
+                "[missing] families/example/support.py: missing required hash SPDX header" in output
+            )
+        else:
+            assert change in output
+
+
+def test_public_workflow_is_one_exact_merge_cpu_then_gpu_gate() -> None:
+    path = REPO_ROOT / ".github" / "workflows" / "community-ci.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
     source = path.read_text(encoding="utf-8")
 
-    assert workflow["run-name"] == (
-        "PR #${{ github.event.pull_request.number }} · public CPU · merge ${{ github.sha }}"
-    )
+    assert workflow["name"] == "Community CI"
+    assert "Manual PR #{0} · community CI" in workflow["run-name"]
+    assert "PR #{0} · community CI · head {1} · base {2}" in workflow["run-name"]
+    assert "github.sha" not in workflow["run-name"]
     assert workflow["permissions"] == {}
-    assert "pull_request:" in source
+    assert "pull_request_target:" in source
     assert "branches: [main]" in source
     assert "types: [opened, synchronize, reopened, ready_for_review]" in source
+    assert "workflow_dispatch:" in source
+    assert "\n  pull_request:\n" not in source
+    assert "workflow_run:" not in source
     assert "issue_comment:" not in source
-    assert "pull_request_target" not in source
-    assert "workflow_dispatch:" not in source
     assert "/run-ci" not in source
     assert "checks: write" not in source
     assert "pull-requests: write" not in source
-    assert "secrets." not in source
     assert "self-hosted" not in source
-    assert "github.event.pull_request.base.sha" not in source
-    assert source.count("CI_BASE_REF: ${{ github.sha }}^1") == 2
-    assert "ref: ${{ github.sha }}" in source
+    assert source.count("secrets.BREV_API_KEY") == 2
+    assert source.count("CI_BASE_REF: ${{ needs.authorize.outputs.merge_sha }}^1") == 2
     assert "persist-credentials: false" in source
     assert "cancel-in-progress: true" in source
-    assert "--gpus" not in source
     assert "check-runs" not in source
     assert "issues/comments" not in source
+    workflows = REPO_ROOT / ".github" / "workflows"
+    compatibility_cpu = (workflows / "community-cpu.yml").read_text(encoding="utf-8")
+    assert "Temporary rollout compatibility gate" in compatibility_cpu
+    assert "Remove this file only after Community CI has run successfully from main" in (
+        compatibility_cpu
+    )
+    assert not (workflows / "community-gpu-ci.yml").exists()
 
     jobs = workflow["jobs"]
-    assert [job["name"] for job in jobs.values()] == [
-        "Community CPU / Source quality",
-        "Community CPU / Docs",
-        "Community CPU / Ownership and impact",
-        "Community CPU / Unit / C++ and Python",
-        "Community CPU / Required",
-    ]
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
+    assert jobs["authorize"]["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+    }
+    assert set(jobs["authorize"]["outputs"]) == {
+        "pr_number",
+        "head_sha",
+        "base_sha",
+        "merge_sha",
+    }
     for job_name in ("source-quality", "docs", "ownership-impact", "unit"):
         assert jobs[job_name]["permissions"] == {"contents": "read"}
+        assert jobs[job_name]["needs"] == "authorize"
+        checkout = jobs[job_name]["steps"][0]
+        assert checkout["name"] == "Check out the exact PR merge"
+        assert checkout["with"] == {
+            "ref": "${{ needs.authorize.outputs.merge_sha }}",
+            "fetch-depth": 0,
+            "persist-credentials": False,
+        }
     assert "if" not in jobs["unit"]
-    assert "needs" not in jobs["unit"]
     unit_steps = {step["name"]: step for step in jobs["unit"]["steps"]}
     assert unit_steps["Run hardened source-only units"]["run"] == (
         "python3 -m tools.community_ci unit"
@@ -180,9 +264,65 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     assert jobs["required"]["permissions"] == {}
     assert jobs["required"]["if"] == "${{ !cancelled() }}"
 
+    gpu_authorize = jobs["gpu-authorize"]
+    assert gpu_authorize["needs"] == ["authorize", "required"]
+    assert gpu_authorize["if"] == (
+        "${{ always() && needs.authorize.result == 'success' && "
+        "needs.required.result == 'success' }}"
+    )
+    assert gpu_authorize["permissions"] == {"contents": "read"}
+    assert gpu_authorize["outputs"]["merge_sha"] == ("${{ needs.authorize.outputs.merge_sha }}")
+    assert gpu_authorize["outputs"]["added_families"] == (
+        "${{ steps.impact.outputs.added_families }}"
+    )
+    assert gpu_authorize["outputs"]["run_gpu"] == "${{ steps.impact.outputs.run_gpu }}"
+    assert jobs["announce"]["needs"] == "gpu-authorize"
+    assert jobs["announce"]["if"] == "${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}"
+    assert jobs["provision-and-test"]["needs"] == ["gpu-authorize", "announce"]
+    assert jobs["provision-and-test"]["environment"] == {
+        "name": "gpu-ci-dispatch",
+        "deployment": False,
+    }
+    assert jobs["provision-and-test"]["concurrency"] == {
+        "group": "trtmc-community-gpu",
+        "cancel-in-progress": False,
+    }
+    assert jobs["publish"]["needs"] == [
+        "authorize",
+        "gpu-authorize",
+        "announce",
+        "provision-and-test",
+        "cleanup",
+    ]
+    assert jobs["cleanup"]["needs"] == ["gpu-authorize", "provision-and-test"]
+    assert jobs["cleanup"]["environment"] == {
+        "name": "gpu-ci-dispatch",
+        "deployment": False,
+    }
+    gpu_test = {step["name"]: step for step in jobs["provision-and-test"]["steps"]}[
+        "Build the GPU image, check out the exact PR merge, and run the smoke test"
+    ]
+    assert gpu_test["env"]["MERGE_SHA"] == "${{ needs.gpu-authorize.outputs.merge_sha }}"
+    assert "refs/pull/$PR_NUMBER/merge" in gpu_test["run"]
+    assert r"\$(git rev-parse FETCH_HEAD)" in gpu_test["run"]
+    assert '= $MERGE_SHA && git checkout --detach $MERGE_SHA"' in gpu_test["run"]
+    assert "python3.12 -m tools.community_gpu_ci" in gpu_test["run"]
+    assert "tests/e2e/models" not in gpu_test["run"]
+    assert "py-only" not in gpu_test["run"]
+    assert "python3.12 -m pytest" not in gpu_test["run"]
+
+    internal_bridge = (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "community-ci.yml/runs?event=pull_request_target&head_sha=$head_sha" in (internal_bridge)
+    assert "community-cpu.yml/runs?event=pull_request&head_sha=$head_sha" in internal_bridge
+    assert "/actions/runs/$community_ci_run/jobs?filter=latest&per_page=100" in internal_bridge
+    assert 'name == "Community CPU / Required" and .conclusion == "success"' in internal_bridge
+    assert ".display_title == $title" in internal_bridge
+    assert "· base $base_sha" in internal_bridge
+
     docs = jobs["docs"]
     assert "if" not in docs
-    assert "needs" not in docs
     docs_steps = {step["name"]: step for step in docs["steps"]}
     assert list(docs_steps) == [
         "Check out the exact PR merge",
@@ -192,11 +332,6 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
         "Build production documentation",
     ]
     assert all("if" not in step for step in docs_steps.values())
-    assert docs_steps["Check out the exact PR merge"]["with"] == {
-        "ref": "${{ github.sha }}",
-        "fetch-depth": 0,
-        "persist-credentials": False,
-    }
     assert docs_steps["Set up Node"] == {
         "name": "Set up Node",
         "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
@@ -252,7 +387,7 @@ def test_public_required_job_fails_closed(
             "bash",
             "-c",
             _workflow_step_script(
-                "community-cpu.yml",
+                "community-ci.yml",
                 "required",
                 "Require every public CPU stage",
             ),
@@ -271,6 +406,97 @@ def test_public_required_job_fails_closed(
     assert f"Unit / C++ and Python: {unit}" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("legacy_run_id", "combined_cpu_job_id", "combined_title_matches", "expected_returncode"),
+    [
+        ("11", "", False, 0),
+        ("", "33", True, 0),
+        ("", "", True, 1),
+        ("", "33", False, 1),
+    ],
+)
+def test_internal_label_bridge_accepts_exact_cpu_gate_during_and_after_rollout(
+    tmp_path: Path,
+    legacy_run_id: str,
+    combined_cpu_job_id: str,
+    combined_title_matches: bool,
+    expected_returncode: int,
+) -> None:
+    head_sha = "a" * 40
+    base_sha = "b" * 40
+    expected_title = f"PR #17 · community CI · head {head_sha} · base {base_sha}"
+    run_title = expected_title if combined_title_matches else "PR #17 · stale Community CI"
+    github_output = tmp_path / "github-output"
+    gh = tmp_path / "gh"
+    gh.write_text(
+        """#!/bin/bash
+set -euo pipefail
+arguments="$*"
+case "$arguments" in
+  *collaborators/tester/permission*) printf '%s\n' maintain ;;
+  *pulls/17*)
+    printf '{"state":"open","base":{"repo":{"full_name":"example/repo"},"ref":"main","sha":"%s"},"head":{"sha":"%s"}}\n' "$BASE_SHA" "$HEAD_SHA"
+    ;;
+  *community-cpu.yml*)
+    if [ -n "$LEGACY_RUN_ID" ]; then
+      printf '{"workflow_runs":[{"id":%s,"conclusion":"success","display_title":"PR #17 · public CPU · merge %s","updated_at":"2026-01-01T00:00:00Z"}]}\n' "$LEGACY_RUN_ID" "$MERGE_SHA"
+    else
+      printf '{"workflow_runs":[]}\n'
+    fi
+    ;;
+  *git/commits/*)
+    printf '{"parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$BASE_SHA" "$HEAD_SHA"
+    ;;
+  *community-ci.yml*)
+    printf '{"workflow_runs":[{"id":22,"display_title":"%s","updated_at":"2026-01-01T00:00:00Z"}]}\n' "$RUN_TITLE"
+    ;;
+  *actions/runs/22/jobs*) printf '%s\n' "$COMBINED_CPU_JOB_ID" ;;
+  *) printf 'unexpected gh call: %s\n' "$arguments" >&2; exit 99 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "internal-ci-bridge.yml",
+                "authorize",
+                "Capture the exact pull-request snapshot",
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "ACTOR": "tester",
+            "PR_NUMBER": "17",
+            "EVENT_NAME": "pull_request_target",
+            "EVENT_HEAD_SHA": head_sha,
+            "GITHUB_REPOSITORY": "example/repo",
+            "GITHUB_OUTPUT": str(github_output),
+            "HEAD_SHA": head_sha,
+            "BASE_SHA": base_sha,
+            "LEGACY_RUN_ID": legacy_run_id,
+            "COMBINED_CPU_JOB_ID": combined_cpu_job_id,
+            "RUN_TITLE": run_title,
+            "MERGE_SHA": "c" * 40,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == expected_returncode, result.stdout + result.stderr
+    if expected_returncode == 0:
+        assert github_output.read_text(encoding="utf-8") == (
+            f"pr_number=17\nhead_sha={head_sha}\nbase_sha={base_sha}\n"
+        )
+    else:
+        assert "Community CPU / Required must pass" in result.stdout + result.stderr
+
+
 def test_cpu_image_installs_the_same_pinned_community_requirements() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile.community-cpu").read_text(encoding="utf-8")
     dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
@@ -282,6 +508,7 @@ def test_cpu_image_installs_the_same_pinned_community_requirements() -> None:
     assert '"libnvinfer-safe-headers-dev=${TENSORRT_APT_VERSION}"' in dockerfile
     assert "libcurand-dev-13-3" in dockerfile
     assert "cuda-nvrtc-dev-13-3" in dockerfile
+    assert "      jq \\\n" in dockerfile
     assert "2.12.0+cu130" in dockerfile
     assert "torch.version.cuda == '13.0'" in dockerfile
     assert "ENV TORCH_CUDA_ARCH_LIST=10.0" in dockerfile
@@ -300,6 +527,14 @@ def test_cpu_image_installs_the_same_pinned_community_requirements() -> None:
     assert "!requirements/community-ci.txt" not in dockerignore
 
 
+def test_gpu_image_verifies_the_native_byok_dependency() -> None:
+    """The GPU image fails during construction if the native TVM-FFI input is absent."""
+    dockerfile = (REPO_ROOT / "Dockerfile.dev.x86-gpu").read_text(encoding="utf-8")
+
+    assert "import onnx, tensorrt, torch, tvm_ffi" in dockerfile
+    assert "metadata.version('apache-tvm-ffi') == '0.1.12'" in dockerfile
+
+
 def test_cpu_image_builds_from_the_minimal_requirements_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -316,3 +551,320 @@ def test_cpu_image_builds_from_the_minimal_requirements_context(
 
     assert calls[0][:3] == ["docker", "build", "--file"]
     assert calls[0][-1] == "requirements"
+
+
+@pytest.mark.parametrize(
+    ("job_status", "test_outcome", "test_conclusion", "expected"),
+    [
+        ("success", "success", "success", "success"),
+        ("failure", "skipped", "", "failure"),
+        ("failure", "failure", "", "failure"),
+        ("failure", "success", "success", "failure"),
+        ("success", "skipped", "", "failure"),
+        ("success", "success", "", "failure"),
+        ("success", "failure", "success", "failure"),
+        ("cancelled", "cancelled", "", "cancelled"),
+        ("cancelled", "success", "success", "cancelled"),
+        ("", "", "", "failure"),
+    ],
+)
+def test_gpu_step_conclusion_requires_completed_success(
+    tmp_path: Path,
+    job_status: str,
+    test_outcome: str,
+    test_conclusion: str,
+    expected: str,
+) -> None:
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "provision-and-test", "Record the step conclusion"
+            ),
+        ],
+        env={
+            **os.environ,
+            "JOB_STATUS": job_status,
+            "TEST_OUTCOME": test_outcome,
+            "TEST_CONCLUSION": test_conclusion,
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.read_text(encoding="utf-8") == f"conclusion={expected}\n"
+
+
+@pytest.mark.parametrize(
+    ("run_gpu", "job_result", "conclusion", "cleanup_result", "expected_state"),
+    [
+        ("false", "skipped", "", "skipped", "success"),
+        ("false", "success", "success", "success", "failure"),
+        ("true", "success", "success", "success", "success"),
+        ("true", "success", "success", "failure", "failure"),
+        ("true", "failure", "success", "success", "failure"),
+        ("true", "cancelled", "success", "success", "failure"),
+        ("true", "skipped", "", "skipped", "failure"),
+        ("true", "success", "failure", "success", "failure"),
+        ("true", "success", "cancelled", "success", "failure"),
+        ("true", "success", "", "success", "failure"),
+    ],
+)
+def test_gpu_published_status_requires_job_and_test_success(
+    tmp_path: Path,
+    run_gpu: str,
+    job_result: str,
+    conclusion: str,
+    cleanup_result: str,
+    expected_state: str,
+) -> None:
+    output = tmp_path / "status-args"
+    gh = tmp_path / "gh"
+    gh.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$STATUS_ARGS"\n', encoding="utf-8")
+    gh.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script("community-ci.yml", "publish", "Publish the terminal status"),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "STATUS_ARGS": str(output),
+            "RUN_GPU": run_gpu,
+            "JOB_RESULT": job_result,
+            "CONCLUSION": conclusion,
+            "CLEANUP_RESULT": cleanup_result,
+            "GITHUB_REPOSITORY": "example/model-connect",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "123",
+            "HEAD_SHA": "a" * 40,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"state={expected_state}" in output.read_text(encoding="utf-8").splitlines()
+
+
+def test_gpu_status_and_cleanup_fail_closed() -> None:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/community-ci.yml").read_text(encoding="utf-8")
+    )
+    job = workflow["jobs"]["provision-and-test"]
+    steps = {step["name"]: step for step in job["steps"]}
+    assert steps["Reserve a GPU instance"]["id"] == "reserve"
+    test_step = steps["Build the GPU image, check out the exact PR merge, and run the smoke test"]
+    assert "sudo docker build -f Dockerfile.dev.x86-gpu" in test_step["run"]
+    assert "sudo docker run --rm --gpus all" in test_step["run"]
+    result = steps["Record the step conclusion"]
+    assert result["id"] == "result"
+    assert result["if"] == "always()"
+    assert result["env"] == {
+        "JOB_STATUS": "${{ job.status }}",
+        "TEST_OUTCOME": "${{ steps.test.outcome }}",
+        "TEST_CONCLUSION": "${{ steps.test.outputs.conclusion }}",
+    }
+    assert "${{" not in result["run"]
+    cleanup = steps["Always tear down the GPU instance"]
+    assert cleanup["if"] == "${{ always() && steps.reserve.outputs.instance_name != '' }}"
+    assert cleanup["env"] == {"INSTANCE_NAME": "${{ steps.reserve.outputs.instance_name }}"}
+    assert cleanup["run"] == 'brev delete "$INSTANCE_NAME" || true'
+    assert job["outputs"] == {"conclusion": "${{ steps.result.outputs.conclusion }}"}
+    cleanup_job = workflow["jobs"]["cleanup"]
+    assert "always()" in cleanup_job["if"]
+    assert "needs.gpu-authorize.outputs.run_gpu == 'true'" in cleanup_job["if"]
+    cleanup_steps = {step["name"]: step for step in cleanup_job["steps"]}
+    assert cleanup_steps["Delete the deterministic GPU instance"]["run"] == (
+        'brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true'
+    )
+    publish = workflow["jobs"]["publish"]["steps"][0]
+    assert publish["env"]["RUN_GPU"] == "${{ needs.gpu-authorize.outputs.run_gpu }}"
+    assert publish["env"]["JOB_RESULT"] == "${{ needs.provision-and-test.result }}"
+    assert publish["env"]["CLEANUP_RESULT"] == "${{ needs.cleanup.result }}"
+
+    for install_step in (
+        steps["Install the Brev CLI"],
+        cleanup_steps["Install the pinned Brev CLI"],
+    ):
+        assert install_step["env"] == {
+            "BREV_VERSION": "0.6.335",
+            "BREV_ARCHIVE_SHA256": (
+                "89d778e6f1e5e52495f3e0f10393f1666a1b16d180001b13faec6f906955e6f8"
+            ),
+        }
+        assert "raw.githubusercontent.com" not in install_step["run"]
+        assert "sha256sum --check --strict" in install_step["run"]
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "expected_scope", "expected_families", "expected_added_families"),
+    [
+        ("families/bert/model.py", "families", ["bert"], []),
+        ("families/new_family/model.py", "all", ["bert", "gpt2"], ["new_family"]),
+        ("README.md", "docs", [], []),
+    ],
+)
+def test_gpu_impact_executes_only_trusted_base_code(
+    tmp_path: Path,
+    changed_path: str,
+    expected_scope: str,
+    expected_families: list[str],
+    expected_added_families: list[str],
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for family in ("bert", "gpt2"):
+        root = repository / "families" / family
+        root.mkdir(parents=True)
+        (root / "model.py").write_text("# trusted base\n", encoding="utf-8")
+    tools = repository / "tools"
+    tools.mkdir()
+    (tools / "__init__.py").write_text("", encoding="utf-8")
+    (tools / "test_impact.py").write_text(
+        (REPO_ROOT / "tools/test_impact.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (repository / "README.md").write_text("Trusted documentation\n", encoding="utf-8")
+
+    def git(*arguments: str) -> str:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=repository,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_NAME": "CI Test",
+                "GIT_AUTHOR_EMAIL": "test@example.invalid",
+                "GIT_COMMITTER_NAME": "CI Test",
+                "GIT_COMMITTER_EMAIL": "test@example.invalid",
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    git("init")
+    git("add", ".")
+    git("-c", "core.hooksPath=/dev/null", "commit", "-m", "trusted fixture")
+    base = git("rev-parse", "HEAD")
+    changed = repository / changed_path
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("# pull-request content\n", encoding="utf-8")
+    git("add", changed_path)
+    git("-c", "core.hooksPath=/dev/null", "commit", "-m", "untrusted fixture")
+    head = git("rev-parse", "HEAD")
+
+    sentinel = tmp_path / "untrusted-code-executed"
+    (tools / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n"
+        "raise RuntimeError('untrusted')\n",
+        encoding="utf-8",
+    )
+    git("add", "tools/__init__.py")
+    git("-c", "core.hooksPath=/dev/null", "commit", "-m", "poison fixture")
+    poisoned_head = git("rev-parse", "HEAD")
+    git("checkout", "--detach", base)
+
+    output = tmp_path / "output"
+    script = _workflow_step_script(
+        "community-ci.yml", "gpu-authorize", "Resolve the changed model families"
+    )
+    for revision in (head, poisoned_head):
+        output.write_text("", encoding="utf-8")
+        result = subprocess.run(
+            ["bash", "-c", script],
+            cwd=repository,
+            env={
+                **os.environ,
+                "PYTHONPATH": "",
+                "BASE_SHA": base,
+                "HEAD_SHA": revision,
+                "RUNNER_TEMP": str(tmp_path),
+                "GITHUB_OUTPUT": str(output),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not sentinel.exists()
+        assert git("rev-parse", "HEAD") == base
+        summary = json.loads(result.stdout)
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        if revision == poisoned_head:
+            assert summary["scope"] == "all"
+            assert summary["families"] == ["bert", "gpt2"]
+        else:
+            assert summary["scope"] == expected_scope
+            assert summary["families"] == expected_families
+        assert json.loads(values["families"]) == summary["families"]
+        assert json.loads(values["added_families"]) == expected_added_families
+        assert values["scope"] == summary["scope"]
+        assert values["run_gpu"] == ("true" if summary["scope"] in {"all", "families"} else "false")
+
+
+@pytest.mark.parametrize("create_exitcode", [0, 1])
+def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
+    tmp_path: Path,
+    create_exitcode: int,
+) -> None:
+    output = tmp_path / "output"
+    calls = tmp_path / "brev-calls"
+    brev = tmp_path / "brev"
+    brev.write_text(
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> "$BREV_CALLS"\n'
+        'if [ "$1" = "create" ]; then exit "$CREATE_EXITCODE"; fi\n',
+        encoding="utf-8",
+    )
+    brev.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "BREV_CALLS": str(calls),
+        "CREATE_EXITCODE": str(create_exitcode),
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "GITHUB_OUTPUT": str(output),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "provision-and-test", "Reserve a GPU instance"
+            ),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == create_exitcode, result.stdout + result.stderr
+    instance_name = "trtmc-gpu-ci-123-2"
+    assert output.read_text(encoding="utf-8") == f"instance_name={instance_name}\n"
+    cleanup = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml",
+                "provision-and-test",
+                "Always tear down the GPU instance",
+            ),
+        ],
+        env={**environment, "INSTANCE_NAME": instance_name},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        f"create {instance_name} -g L40 --timeout 600",
+        f"delete {instance_name}",
+    ]

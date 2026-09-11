@@ -76,7 +76,11 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"embed", {CommandKind::kEmbed, {"--text"}}},
         {"rerank", {CommandKind::kRerank, {"--query", "--document"}}},
         {"classify", {CommandKind::kClassify, {"--image"}}},
+        {"detect", {CommandKind::kDetect, {"--image"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
+        {"predict-structure",
+         {CommandKind::kPredictStructure,
+          {"--input", "--output", "--output-json", "--num-steps", "--seed"}}},
         {"disparity", {CommandKind::kDisparity, {"--left", "--right"}}},
         {"geometry", {CommandKind::kGeometry, {"--image", "--output"}}},
         {"segment", {CommandKind::kSegment, {"--image"}}},
@@ -769,6 +773,30 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
                             {"top_score", result.top_score}});
         return EXIT_SUCCESS;
     }
+    case CommandKind::kDetect: {
+        const io::LoadedImage image = read_image(require_option(command, "--image"));
+        const auto result = require_interface<IObjectDetection>(task).detect(
+            image.pixels.data(), image.height, image.width);
+        std::vector<float> boxes;
+        std::vector<float> scores;
+        std::vector<std::int32_t> classes;
+        boxes.reserve(result.boxes.size() * 4);
+        scores.reserve(result.boxes.size());
+        classes.reserve(result.boxes.size());
+        for (const auto& box : result.boxes) {
+            boxes.insert(boxes.end(), {box.x_min, box.y_min, box.x_max, box.y_max});
+            scores.push_back(box.score);
+            classes.push_back(box.class_id);
+        }
+        require_finite(boxes, "detection boxes");
+        require_finite(scores, "detection scores");
+        write_json(output, {{"boxes", boxes},
+                            {"scores", scores},
+                            {"classes", classes},
+                            {"image_height", result.image_height},
+                            {"image_width", result.image_width}});
+        return EXIT_SUCCESS;
+    }
     case CommandKind::kExtractFeatures: {
         const io::LoadedImage image = read_image(require_option(command, "--image"));
         const auto result = require_interface<IImageFeatureExtractor>(task).extract_image_features(
@@ -779,6 +807,49 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
                             {"last_hidden_state_shape", result.last_hidden_state_shape},
                             {"pooler_output", result.pooler_output},
                             {"pooler_output_shape", result.pooler_output_shape}});
+        return EXIT_SUCCESS;
+    }
+    case CommandKind::kPredictStructure: {
+        const std::string input_path = require_option(command, "--input");
+        std::ifstream input(input_path, std::ios::binary);
+        if (!input)
+            throw std::runtime_error("unable to open structure request: " + input_path);
+        StructurePredictionRequest request;
+        request.document.assign(std::istreambuf_iterator<char>(input),
+                                std::istreambuf_iterator<char>());
+        if (request.document.empty())
+            throw std::invalid_argument("structure request must not be empty");
+        request.source_path = input_path;
+        request.config.sampling_steps =
+            int_option(command, "--num-steps", request.config.sampling_steps, 1);
+        request.config.seed = int_option(command, "--seed", request.config.seed);
+
+        auto& predictor = require_interface<IStructurePrediction>(task);
+        const auto result = predictor.predict_structure(request);
+
+        const fs::path structure_path = require_option(command, "--output");
+        if (!structure_path.parent_path().empty())
+            fs::create_directories(structure_path.parent_path());
+        std::ofstream structure(structure_path, std::ios::binary);
+        structure.write(result.structure.data(),
+                        static_cast<std::streamsize>(result.structure.size()));
+        if (!structure)
+            throw std::runtime_error("failed to write structure output: " +
+                                     structure_path.string());
+        const fs::path metadata_path = has_option(command, "--output-json")
+                                           ? command.options.at("--output-json")
+                                           : structure_path.string() + ".metadata.json";
+        std::ofstream metadata(metadata_path, std::ios::binary);
+        metadata.write(result.metadata_json.data(),
+                       static_cast<std::streamsize>(result.metadata_json.size()));
+        if (!metadata)
+            throw std::runtime_error("failed to write structure metadata: " +
+                                     metadata_path.string());
+        write_json(output, {{"structure_path", structure_path.string()},
+                            {"metadata_path", metadata_path.string()},
+                            {"confidence_score", result.confidence.confidence_score},
+                            {"complex_plddt", result.confidence.complex_plddt},
+                            {"ptm", result.confidence.ptm}});
         return EXIT_SUCCESS;
     }
     case CommandKind::kDisparity: {
@@ -1208,7 +1279,8 @@ void print_usage(std::ostream& output) {
               "  trtmc inspect BUNDLE\n"
               "  trtmc COMMAND BUNDLE --runtime-root DIR [OPTIONS]\n\n"
               "Execution commands:\n"
-              "  run, encode, embed, rerank, classify, extract-features, disparity, geometry,\n"
+              "  run, encode, embed, rerank, classify, detect, extract-features,\n"
+              "  predict-structure, disparity, geometry,\n"
               "  segment,\n"
               "  segment-prompted, video-segment, generate-audio, transcribe,\n"
               "  transcribe-batch, transcribe-streaming, speak, speech-session, generate-image,\n"

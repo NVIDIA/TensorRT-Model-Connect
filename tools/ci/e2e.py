@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import tempfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -18,13 +20,56 @@ from .context import CiContext
 from .process import CiError
 
 
-def _require_passing_junit(path: Path, label: str, *, allow_empty: bool = False) -> int:
+_E2E_CASE_NAME = re.compile(r"^test_.*e2e\[(?P<case>.+)\]$")
+_JUNIT_OPTIONS = ("--junitxml", "--junit-xml")
+
+
+def _pytest_addopts_junit(repository: Path, value: str) -> Path | None:
+    """Preserve the caller-owned JUnit destination without honoring other addopts."""
+    try:
+        options = shlex.split(value)
+    except ValueError as error:
+        raise CiError(f"PYTEST_ADDOPTS is invalid: {error}") from error
+
+    destinations = []
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option in _JUNIT_OPTIONS:
+            index += 1
+            if index == len(options) or options[index].startswith("-"):
+                raise CiError(f"PYTEST_ADDOPTS {option} requires a path")
+            destinations.append(options[index])
+        else:
+            for name in _JUNIT_OPTIONS:
+                prefix = f"{name}="
+                if option.startswith(prefix):
+                    destination = option.removeprefix(prefix)
+                    if not destination:
+                        raise CiError(f"PYTEST_ADDOPTS {name} requires a path")
+                    destinations.append(destination)
+                    break
+        index += 1
+
+    if not destinations:
+        return None
+    if len(destinations) != 1:
+        raise CiError("PYTEST_ADDOPTS must specify at most one JUnit destination")
+    path = Path(destinations[0])
+    return path if path.is_absolute() else repository / path
+
+
+def _read_junit(path: Path, label: str) -> list[ET.Element]:
     if not path.is_file():
         raise CiError(f"{label} report is missing")
     try:
-        testcases = ET.parse(path).getroot().findall(".//testcase")
+        return ET.parse(path).getroot().findall(".//testcase")
     except (OSError, ET.ParseError) as error:
         raise CiError(f"{label} report is invalid: {error}") from error
+
+
+def _require_passing_junit(path: Path, label: str, *, allow_empty: bool = False) -> int:
+    testcases = _read_junit(path, label)
     if not testcases and not allow_empty:
         raise CiError(f"{label} report has no test cases")
     for element, outcome in (
@@ -33,13 +78,84 @@ def _require_passing_junit(path: Path, label: str, *, allow_empty: bool = False)
         ("failure", "failures"),
     ):
         affected = [
-            test.get("name", "<unnamed>")
-            for test in testcases
-            if test.find(element) is not None
+            test.get("name", "<unnamed>") for test in testcases if test.find(element) is not None
         ]
         if affected:
             raise CiError(f"{label} {outcome}: " + ", ".join(affected))
     return len(testcases)
+
+
+def _require_e2e_junit(
+    path: Path,
+    family: str,
+    requested: tuple[str, ...],
+) -> None:
+    testcases = _read_junit(path, f"{family} E2E")
+    results: dict[str, list[ET.Element]] = {}
+    for testcase in testcases:
+        match = _E2E_CASE_NAME.fullmatch(testcase.get("name", ""))
+        if match:
+            results.setdefault(match.group("case"), []).append(testcase)
+
+    requested_counts = Counter(requested)
+    selected_results = [result for name in requested_counts for result in results.get(name, ())]
+    skipped = [result for result in selected_results if result.find("skipped") is not None]
+    failed = [
+        result
+        for result in selected_results
+        if result.find("failure") is not None or result.find("error") is not None
+    ]
+    passed = [
+        result
+        for result in selected_results
+        if result.find("skipped") is None
+        and result.find("failure") is None
+        and result.find("error") is None
+    ]
+    print(
+        f"{family} E2E results: requested={len(requested)} "
+        f"executed={len(passed) + len(failed)} passed={len(passed)} "
+        f"failed={len(failed)} skipped={len(skipped)}"
+    )
+
+    problems = []
+    duplicate_requests = sorted(name for name, count in requested_counts.items() if count != 1)
+    if duplicate_requests:
+        problems.append("duplicate requested E2E testcase: " + ", ".join(duplicate_requests))
+    missing = sorted(name for name in requested_counts if not results.get(name))
+    if missing:
+        problems.append("missing requested E2E testcase: " + ", ".join(missing))
+    duplicate_results = sorted(name for name in requested_counts if len(results.get(name, ())) > 1)
+    if duplicate_results:
+        problems.append("duplicate E2E testcase result: " + ", ".join(duplicate_results))
+    skipped_names = sorted(
+        name
+        for name in requested_counts
+        if any(result.find("skipped") is not None for result in results.get(name, ()))
+    )
+    if skipped_names:
+        problems.append("requested E2E testcase skipped: " + ", ".join(skipped_names))
+    failed_names = sorted(
+        name
+        for name in requested_counts
+        if any(
+            result.find("failure") is not None or result.find("error") is not None
+            for result in results.get(name, ())
+        )
+    )
+    if failed_names:
+        problems.append("requested E2E testcase failed: " + ", ".join(failed_names))
+
+    unexpected_executions = sorted(
+        name
+        for name, testcase_results in results.items()
+        if name not in requested_counts
+        and any(result.find("skipped") is None for result in testcase_results)
+    )
+    if unexpected_executions:
+        problems.append("unrequested E2E testcase executed: " + ", ".join(unexpected_executions))
+    if problems:
+        raise CiError(f"{family} E2E result validation failed: " + "; ".join(problems))
 
 
 class E2ERunner:
@@ -125,8 +241,7 @@ class E2ERunner:
                     print("No CPU family Python tests selected")
                 elif completed.returncode:
                     raise CiError(
-                        "family Python unit tests failed with exit code "
-                        f"{completed.returncode}"
+                        f"family Python unit tests failed with exit code {completed.returncode}"
                     )
             hardware_tests = [
                 str(path.relative_to(self.context.repository))
@@ -158,7 +273,18 @@ class E2ERunner:
                     limit=self.context.env.get("TRTMC_E2E_TIMEOUT", "12h"),
                 )
                 _require_passing_junit(hardware_junit, "family hardware tests")
+            requested_testcases = testcases or self._family_testcases(family)
             test = f"families/{family}/tests/test_e2e.py"
+            # Protected runners historically own the evidence path through
+            # PYTEST_ADDOPTS. Keep that path contract, but do not allow unrelated
+            # addopts to alter selection or execution.
+            e2e_junit = (
+                _pytest_addopts_junit(
+                    self.context.repository,
+                    self.context.env.get("PYTEST_ADDOPTS", ""),
+                )
+                or native_build / f"trtmc-{family}-e2e-junit.xml"
+            )
             with self._isolated_runtime_root(runtime_root, family) as isolated:
                 command = [
                     "python",
@@ -170,16 +296,50 @@ class E2ERunner:
                     command.extend(("--e2e-testcase", ",".join(sorted(set(testcases)))))
                 else:
                     command.extend(("--e2e-model", family))
-                command.extend(("-q", "-x", "-p", "no:cacheprovider"))
-                self.context.run(
+                command.extend(
+                    (
+                        "-q",
+                        "-x",
+                        "-p",
+                        "no:cacheprovider",
+                        "--junitxml",
+                        e2e_junit,
+                    )
+                )
+                completed = self.context.run(
                     command,
                     updates={
                         "TRTMC_BINARY": str(binary),
                         "TRTMC_RUNTIME_ROOT": str(isolated),
                         "PYTHONDONTWRITEBYTECODE": "1",
                     },
+                    unset=("PYTEST_ADDOPTS",),
+                    check=False,
                     limit=self.context.env.get("TRTMC_E2E_TIMEOUT", "12h"),
                 )
+            _require_e2e_junit(
+                e2e_junit,
+                family,
+                tuple(requested_testcases),
+            )
+            if completed.returncode:
+                raise CiError(f"{family} E2E pytest failed with exit code {completed.returncode}")
+
+    def _family_testcases(self, family: str) -> tuple[str, ...]:
+        manifests = self.context.repository / "families" / family / "tests/manifests"
+        names = []
+        for path in sorted(manifests.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                names.extend(str(case["name"]) for case in payload["testcases"])
+            except (KeyError, OSError, TypeError, json.JSONDecodeError) as error:
+                raise CiError(f"invalid E2E manifest {path}: {error}") from error
+        if not names:
+            raise CiError(f"{family} has no declared E2E testcases")
+        duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
+        if duplicates:
+            raise CiError(f"{family} has duplicate E2E testcases: " + ", ".join(duplicates))
+        return tuple(sorted(names))
 
     @contextmanager
     def _isolated_runtime_root(self, runtime_root: Path, family: str):

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare only the checkout that owns this toolkit."""
+"""Compose checkout preparation with evidence-producing environment capabilities."""
 
 from __future__ import annotations
 
@@ -11,6 +11,14 @@ import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from .building import BuildRecipe, BuildResult, Builder
+from .commands import (
+    ArtifactInput,
+    CommandArgument,
+    CommandExecutor,
+    CommandResult,
+    CommandSpec,
+)
 from .docker_target import (
     DockerLifecycle,
     DockerMount,
@@ -18,16 +26,33 @@ from .docker_target import (
     DockerTargetRequest,
 )
 from .models import DevToolkitError, PreparedEnvironment
-from .runner import CommandRunner
+from .providers import FrozenProviderRegistry, ProviderRegistry
+from .provisioning import EnvironmentProvisioner, ProvisionedEnvironment, ProvisionPolicy
+from .qualifications import QualificationRegistry, QualificationSource
+from .resolution import EnvironmentLock, EnvironmentRequest, EnvironmentResolver
+from .runner import CommandRunner, Runner
 
 
 _FAMILY = re.compile(r"[a-z][a-z0-9_]*\Z")
 
 
 class DevToolkit:
-    def __init__(self, repository: Path, runner: CommandRunner | None = None):
+    """Prepare a checkout or compose its resolved environment capabilities."""
+
+    def __init__(
+        self,
+        repository: Path,
+        runner: Runner | None = None,
+        *,
+        state_root: Path | None = None,
+        providers: FrozenProviderRegistry | None = None,
+        qualifications: Sequence[QualificationSource] = (),
+    ):
         self.repository = repository.resolve()
         self.runner = runner or CommandRunner()
+        self._capability_state_root = (state_root or self.repository / ".devtoolkit").resolve()
+        self._providers = providers or ProviderRegistry.with_builtins().freeze()
+        self._qualifications = QualificationRegistry(tuple(qualifications))
         if not (self.repository / "pyproject.toml").is_file():
             raise DevToolkitError(f"not a TensorRT-Model-Connect checkout: {self.repository}")
         if not (self.repository / "families").is_dir():
@@ -38,9 +63,103 @@ class DevToolkit:
         cls,
         repository: Path | None = None,
         *,
-        runner: CommandRunner | None = None,
+        state_root: Path | None = None,
+        runner: Runner | None = None,
+        providers: FrozenProviderRegistry | None = None,
+        qualifications: Sequence[QualificationSource] = (),
     ) -> "DevToolkit":
-        return cls(repository or Path.cwd(), runner=runner)
+        return cls(
+            repository or Path.cwd(),
+            runner=runner,
+            state_root=state_root,
+            providers=providers,
+            qualifications=qualifications,
+        )
+
+    def resolve(self, request: EnvironmentRequest) -> EnvironmentLock:
+        """Resolve environment intent without mutating the target or state root."""
+        return EnvironmentResolver(
+            self.repository,
+            self._providers,
+            self.runner,
+            self._qualifications,
+        ).resolve(request)
+
+    def provision(
+        self,
+        lock: EnvironmentLock,
+        *,
+        policy: ProvisionPolicy = ProvisionPolicy.ADOPT_OR_CREATE,
+    ) -> ProvisionedEnvironment:
+        """Idempotently satisfy a lock, attest it, and write a receipt."""
+        return EnvironmentProvisioner(
+            self.repository,
+            self._capability_state_root,
+            self._providers,
+            self.runner,
+        ).provision(lock, policy=policy)
+
+    def run(
+        self,
+        environment: ProvisionedEnvironment,
+        command: CommandSpec,
+        *,
+        check: bool = True,
+        capture_output: bool = False,
+    ) -> CommandResult:
+        """Run one opaque command through the selected execution context."""
+        return CommandExecutor(self.repository, self._providers, self.runner).run(
+            environment,
+            command,
+            check=check,
+            capture_output=capture_output,
+        )
+
+    def build(
+        self,
+        environment: ProvisionedEnvironment,
+        recipe: BuildRecipe,
+    ) -> BuildResult:
+        """Execute a caller-selected source build recipe inside an environment."""
+        return Builder(self.repository, self._providers, self.runner).build(
+            environment,
+            recipe,
+        )
+
+    def run_trtmc(
+        self,
+        environment: ProvisionedEnvironment,
+        arguments: Sequence[CommandArgument],
+        *,
+        build: BuildResult | None = None,
+        artifact: str = "trtmc",
+        check: bool = True,
+        capture_output: bool = False,
+    ) -> CommandResult:
+        """Run arbitrary TRTMC CLI arguments without interpreting family semantics."""
+        executable: CommandArgument = "trtmc"
+        provenance: dict[str, str] = {}
+        artifacts: tuple[ArtifactInput, ...] = ()
+        if build is not None:
+            if build.environment_id != environment.environment_id:
+                raise DevToolkitError("Build result belongs to a different environment")
+            selected = build.artifact(artifact)
+            executable = selected.path
+            provenance = {
+                "build_id": build.build_id,
+                f"artifact:{selected.name}": selected.sha256,
+            }
+            artifacts = (ArtifactInput(selected.name, selected.path, selected.sha256),)
+        return self.run(
+            environment,
+            CommandSpec(
+                (executable, *arguments),
+                provenance=provenance,
+                artifacts=artifacts,
+            ),
+            check=check,
+            capture_output=capture_output,
+        )
 
     def prepare_docker(
         self,

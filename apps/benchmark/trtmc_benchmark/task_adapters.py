@@ -43,6 +43,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "prompted_segmentation": ("segment_prompted", 10, 100),
     "text_prompted_segmentation": ("segment_prompted", 10, 100),
     "classification": ("classify", 50, 500),
+    "object_detection": ("detect", 50, 500),
     "image_features": ("extract_features", 50, 500),
     "stereo_disparity": ("disparity", 3, 100),
     "time_series_forecast": ("solve", 50, 500),
@@ -131,6 +132,7 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         "prompted_segmentation",
         "text_prompted_segmentation",
         "classification",
+        "object_detection",
         "image_features",
     }:
         request: dict[str, Any] = {"image_path": _image_path(case, root), "batch_size": 1}

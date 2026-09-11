@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+interface:
+  display_name: "Review TRTMC PR"
+  short_description: "Review TRTMC branches and PRs for compliance"
+  default_prompt: "Use $review-trtmc-pr to self-review this branch or review this PR against the current TRTMC architecture and repository rules."
