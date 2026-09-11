@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Exercises the ownership the M2M-100 pipeline uses for its cross-attention K/V
-// buffers, against CPU CUDA stubs so each allocation can be failed in turn
-// without a GPU. M2M100Pipeline itself needs live TensorRT modules to build, so
-// this drives the same allocation loop over the same owning type.
+// Drives the M2M-100 pipeline's own allocation path - allocate_cross_kv, which
+// the constructor runs - against CPU CUDA stubs so each allocation can be
+// failed in turn without a GPU. M2M100Pipeline itself needs live TensorRT
+// modules to build.
 
 #include "families/m2m_100/runtime/device_buffer.h"
 
@@ -30,23 +30,6 @@ void check(bool condition, const char* what) {
     if (!condition) {
         std::fprintf(stderr, "FAIL: %s\n", what);
         ++g_failures;
-    }
-}
-
-// The allocation loop from M2M100Pipeline's constructor, over the same type.
-void allocate_cross_kv(std::vector<trtmc::m2m_100::DeviceBuffer>& keys,
-                       std::vector<trtmc::m2m_100::DeviceBuffer>& values, int32_t layers,
-                       std::size_t bytes) {
-    keys.resize(static_cast<std::size_t>(layers));
-    values.resize(static_cast<std::size_t>(layers));
-    for (int32_t i = 0; i < layers; ++i) {
-        const std::size_t layer = static_cast<std::size_t>(i);
-        if (keys[layer].allocate(bytes) != cudaSuccess)
-            throw std::runtime_error(
-                "M2M100Pipeline: unable to allocate cross-attention key buffer");
-        if (values[layer].allocate(bytes) != cudaSuccess)
-            throw std::runtime_error(
-                "M2M100Pipeline: unable to allocate cross-attention value buffer");
     }
 }
 
@@ -90,7 +73,7 @@ int main() {
         try {
             std::vector<trtmc::m2m_100::DeviceBuffer> keys;
             std::vector<trtmc::m2m_100::DeviceBuffer> values;
-            allocate_cross_kv(keys, values, layers, bytes);
+            trtmc::m2m_100::allocate_cross_kv(keys, values, layers, bytes);
         } catch (const std::runtime_error& error) {
             threw = true;
             // Allocations alternate key, value, so an odd failure point is a
@@ -114,7 +97,7 @@ int main() {
     {
         std::vector<trtmc::m2m_100::DeviceBuffer> keys;
         std::vector<trtmc::m2m_100::DeviceBuffer> values;
-        allocate_cross_kv(keys, values, layers, bytes);
+        trtmc::m2m_100::allocate_cross_kv(keys, values, layers, bytes);
         check(g_outstanding.size() == static_cast<std::size_t>(2 * layers),
               "every layer should hold a key and a value buffer");
     }

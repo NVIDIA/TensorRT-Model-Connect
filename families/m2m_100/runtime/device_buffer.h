@@ -6,7 +6,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
+#include <stdexcept>
+#include <vector>
 
 namespace trtmc {
 namespace m2m_100 {
@@ -46,6 +49,23 @@ class DeviceBuffer {
   private:
     void* ptr_{nullptr};
 };
+
+// The pipeline's own allocation loop, kept here so the test can drive the
+// same code the constructor runs.
+inline void allocate_cross_kv(std::vector<DeviceBuffer>& keys, std::vector<DeviceBuffer>& values,
+                              int32_t layers, std::size_t bytes) {
+    keys.resize(static_cast<std::size_t>(layers));
+    values.resize(static_cast<std::size_t>(layers));
+    for (int32_t i = 0; i < layers; ++i) {
+        const std::size_t layer = static_cast<std::size_t>(i);
+        if (keys[layer].allocate(bytes) != cudaSuccess)
+            throw std::runtime_error(
+                "M2M100Pipeline: unable to allocate cross-attention key buffer");
+        if (values[layer].allocate(bytes) != cudaSuccess)
+            throw std::runtime_error(
+                "M2M100Pipeline: unable to allocate cross-attention value buffer");
+    }
+}
 
 } // namespace m2m_100
 } // namespace trtmc

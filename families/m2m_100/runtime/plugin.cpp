@@ -167,17 +167,8 @@ class M2M100Pipeline final : public ITextGeneration {
 
         cross_kv_bytes_ = static_cast<std::size_t>(max_source_length_) *
                           static_cast<std::size_t>(hidden_size_) * sizeof(float);
-        cross_k_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_));
-        cross_v_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_));
-        for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-            const std::size_t layer = static_cast<std::size_t>(i);
-            if (cross_k_ptrs_[layer].allocate(cross_kv_bytes_) != cudaSuccess)
-                throw std::runtime_error(
-                    "M2M100Pipeline: unable to allocate cross-attention key buffer");
-            if (cross_v_ptrs_[layer].allocate(cross_kv_bytes_) != cudaSuccess)
-                throw std::runtime_error(
-                    "M2M100Pipeline: unable to allocate cross-attention value buffer");
-        }
+        m2m_100::allocate_cross_kv(cross_k_ptrs_, cross_v_ptrs_, num_decoder_layers_,
+                                   cross_kv_bytes_);
     }
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg) override {
