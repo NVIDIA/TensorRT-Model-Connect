@@ -68,6 +68,83 @@ manifest. Their input and output support must match the chosen contract; the
 text-only reference loaders reject token IDs instead of replacing them with
 empty text. This selection path requires a family migrated to the Task SDK.
 
+The `head_scores` operation uses `head-scores-shape` for performance comparison:
+both outputs must contain every finite score and agree on tensor shape, score
+kind, pooling and normalization. It does not compare score accuracy or turn
+logits into embeddings. Numerical acceptance remains in the owning family's
+correctness tests; a matching reference implementation is still required.
+
+The `geometry`, `predict_structure` and `refine_pose` operations similarly use
+`metric-geometry-shape`, `molecular-structure-shape` and `pose-refinement-shape`.
+These contracts check complete output fields and artifact lengths, semantic
+layouts, confidence presence and pose callback metadata. Their receipts mark
+`numerical_parity_checked: false`: predicted values and opaque serialization
+lengths need not be identical across implementations. Existing family numerical
+thresholds remain authoritative.
+
+`offline_speech_dialogue` uses `offline-speech-shape`: the complete candidate
+event PCM and reference Float32 WAV must agree on input/output counts and audio
+formats. Text is retained per epoch, with final text replacing partial updates
+instead of duplicating them. The comparison records both texts but does not
+judge text or audio accuracy; `text_parity_checked` and
+`numerical_parity_checked` are false. It cannot qualify live or tool dialogue.
+
+### Family-owned performance declarations
+
+The canonical release suite also reads optional
+`families/<family>/tests/performance.yaml` files using the same
+`trtmc.perf-suite/v2` format. Each file may name only that family's manifests and
+testcases. Entry IDs must be globally unique; family files cannot replace central
+entries or add exclusions. A standalone user suite does not implicitly include
+other suites. Check, prepare, run and resume use the same composition.
+
+Use an existing reference adapter when it implements the actual workload.
+Otherwise declare a Python script relative to the owning family directory:
+
+```yaml
+schema_version: trtmc.perf-suite/v2
+name: example-performance
+defaults:
+  measurement: {warmup: 3, iterations: 10}
+entries:
+  - id: example.head_scores
+    family: example
+    model: example-model
+    operation: head_scores
+    workload: {testcase: example-head-scores}
+    baseline:
+      runner: task-reference
+      script: tests/performance_reference.py
+      mode: pytorch-eager
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+      asset_loading_included: false
+```
+
+This is an illustrative declaration, not an existing qualified model. `script`
+and `adapter` are mutually exclusive. The script must be an existing `.py` file
+inside its family, without symlinks or parent-directory traversal. It runs through
+the existing subprocess mechanism; the core does not import or execute it.
+
+The script receives the existing model/revision, family, operation, manifest,
+request JSON, selected Task, adapter-options JSON, precision, mode, padding,
+warmup, iterations, case name, output path and timing-contract JSON arguments.
+When no mode is declared, a custom script uses the neutral label `reference`,
+not an implied `torch.compile` claim. Supplied token IDs stay in request JSON;
+the script must execute the requested operand and Task, not decode/re-tokenize or
+substitute a different operation. Preparation needed by the candidate must happen
+explicitly before the candidate runs; a reference is not a preparation hook.
+
+Return `trtmc.perf-baseline/v1` JSON with `status: completed`, matching model,
+family, operation, case name, selected Task, precision and mode. Include exact
+warmup/iteration counts in `measurement`; include the three declared timing
+fields both at top level and in `measurement_policy`. Return one actual finite,
+positive `samples_ms` value per measured invocation, its median in
+`metrics.latency_ms.p50`, and the complete `output_summary` required by the output
+contract. Loading happens once before warmup; input preparation and output
+materialization follow the declared clock. Metadata validation does not prove
+model accuracy or make an unexecuted reference qualified.
+
 ## DataFrame forecast formatting
 
 Install `pandas` separately (`pip install pandas`) when using the optional table
@@ -185,8 +262,9 @@ python3 tools/perf_matrix.py report artifacts/perf/<run-directory>
 
 ## Configuration
 
-release.yaml owns only model, testcase, operation, measurement, reference, and
-comparison semantics. Machine paths live in one environment YAML.
+The release suite and optional family-owned suites declare model, testcase,
+operation, measurement, reference and comparison semantics. Machine paths live
+in the existing environment YAML.
 
 A release entry has one explicit testcase:
 
@@ -203,8 +281,8 @@ A release entry has one explicit testcase:
 ~~~
 
 The catalog reads families/*/tests/manifests/*.json directly. It has no second
-registry and no family-specific benchmark plugin. A task that the worker does
-not implement is reported as unsupported.
+model registry; optional performance declarations reuse those exact manifests.
+A task that the worker does not implement is reported as unsupported.
 
 The entry, model, and model-selection options select work. resume continues
 incomplete rows, and report regenerates JSON and HTML from stored measurements.

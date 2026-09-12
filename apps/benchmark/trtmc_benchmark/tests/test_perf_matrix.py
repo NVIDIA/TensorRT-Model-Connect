@@ -387,6 +387,40 @@ def test_regression_values_reference_retains_single_target_axis():
         task_reference._regression_values_summary(_SummaryTensor([[float("inf")]]))
 
 
+def test_head_score_performance_contract_preserves_shape_and_representation():
+    entry = SimpleNamespace(
+        spec={"id": "scores", "operation": "head_scores", "baseline": {}},
+        model=SimpleNamespace(task="text_to_head_scores"),
+        case=SimpleNamespace(selected_task=None),
+    )
+    assert perf._contract_name(entry) == "head-scores-shape"
+    value = {"shape": [1, 2, 2], "values": [-1.0, 2.0, 3.0, -4.0],
+             "score_kind": "logit", "pooling": "none", "normalization": "none"}
+    summary = {"output_summary": value}
+    assert perf._output_contract(entry, summary, summary)[0]
+    for changed in ({"shape": [1, 4]}, {"score_kind": "unbounded"},
+                    {"pooling": "first"}, {"normalization": "l2"}):
+        assert not perf._output_contract(entry, summary, {"output_summary": {**value, **changed}})[0]
+    # This is a performance shape/representation contract, not an accuracy threshold.
+    assert perf._output_contract(entry, summary, {"output_summary": {**value, "values": [4.0] * 4}})[0]
+
+
+@pytest.mark.parametrize("changed", [
+    {"shape": []}, {"shape": [0, 4]}, {"shape": [True, 4]}, {"shape": [1.0, 4]},
+    {"shape": [2, 3]}, {"values": None}, {"values": [1, 2, 3]},
+    {"values": [True, 2, 3, 4]}, {"values": [float("nan"), 2, 3, 4]},
+    {"values": [float("inf"), 2, 3, 4]}, {"score_kind": "embedding"},
+    {"score_kind": []}, {"score_kind": None},
+    {"pooling": ""}, {"normalization": None},
+])
+def test_head_score_performance_contract_rejects_incomplete_outputs(changed):
+    entry = SimpleNamespace(spec={"baseline": {"output_contract": "head-scores-shape"}})
+    value = {"shape": [2, 2], "values": [1, 2, 3, 4], "score_kind": "logit",
+             "pooling": "none", "normalization": "none", **changed}
+    summary = {"output_summary": value}
+    assert not perf._output_contract(entry, summary, summary)[0]
+
+
 def test_regression_distribution_keeps_parameter_names_and_target_axis():
     values = (_SummaryTensor([[1.0, 2.0]]), _SummaryTensor([[0.5, 0.7]]))
     summary = task_reference._regression_summary(values, "normal", ["loc", "scale"])
@@ -639,6 +673,26 @@ def test_voicechat_reference_does_not_relabel_live_dialogue_as_offline(tmp_path,
     with pytest.raises(ValueError, match="live or tool"):
         task_reference._load_voicechat(arguments, request, options)
     assert state["events"] == []
+
+
+def test_voicechat_reference_uses_explicit_offline_task_without_changing_primary(tmp_path, monkeypatch):
+    arguments, request, options, state, _upstream, _tensor = _voicechat_reference_fixture(
+        tmp_path, monkeypatch
+    )
+    arguments.manifest.write_text('{"task":"duplex_speech_dialogue"}', encoding="utf-8")
+    original = arguments.manifest.read_bytes()
+    arguments.selected_task = "offline_speech_dialogue"
+    session = task_reference._load_voicechat(arguments, request, options)
+    output = session.invoke()
+    assert state["kwargs"] and isinstance(output["text"], str)
+    assert output["audio_samples"] == output["num_samples"]
+    assert arguments.manifest.read_bytes() == original
+    for task in ("duplex_speech_dialogue", "tool_speech_dialogue", "unknown_task", ""):
+        arguments.selected_task = task
+        before = list(state["events"])
+        with pytest.raises(ValueError):
+            task_reference._load_voicechat(arguments, request, options)
+        assert state["events"] == before
 
 
 def test_voicechat_empty_prompt_matches_native_default_selection(tmp_path, monkeypatch):
