@@ -327,12 +327,26 @@ class WordPieceTokenizer final : public ITokenizer {
             return make_special_frame({});
         }
 
-        std::string normalized = bert_normalize(text, mNormConfig);
-        auto words = bert_pre_tokenize(normalized);
-
         std::vector<int32_t> ids;
-        for (const auto& word : words) {
-            tokenize_word(word, ids);
+        size_t start = 0;
+        while (start < text.size()) {
+            size_t next = std::string::npos;
+            int32_t special_id = -1;
+            size_t special_size = 0;
+            for (int32_t id : mRawSpecialIds) {
+                const auto& token = mIdToToken[id];
+                const auto pos = text.find(token, start);
+                if (pos < next || (pos == next && token.size() > special_size)) {
+                    next = pos;
+                    special_id = id;
+                    special_size = token.size();
+                }
+            }
+            encode_text(text.substr(start, next == std::string::npos ? next : next - start), ids);
+            if (next == std::string::npos)
+                break;
+            ids.push_back(special_id);
+            start = next + special_size;
         }
 
         if (mAddSpecialTokens) {
@@ -378,6 +392,12 @@ class WordPieceTokenizer final : public ITokenizer {
     WordPieceTokenizer() = default;
 
     // ─── Greedy longest-match WordPiece encoding ───
+
+    void encode_text(const std::string& text, std::vector<int32_t>& ids) const {
+        auto words = bert_pre_tokenize(bert_normalize(text, mNormConfig));
+        for (const auto& word : words)
+            tokenize_word(word, ids);
+    }
 
     void tokenize_word(const std::string& word, std::vector<int32_t>& ids) const {
         if (word.empty())
@@ -559,6 +579,10 @@ class WordPieceTokenizer final : public ITokenizer {
 
             if (tok.value("special", false)) {
                 mSpecialIds.insert(id);
+                // BERT's raw special tokens must bypass lowercasing and punctuation splitting.
+                if (id >= 0 && !content.empty() && !tok.value("normalized", false) &&
+                    !tok.value("single_word", false))
+                    mRawSpecialIds.push_back(id);
             }
         }
     }
@@ -634,6 +658,7 @@ class WordPieceTokenizer final : public ITokenizer {
     std::vector<std::string> mIdToToken;
     std::unordered_map<std::string, int32_t> mTokenToId;
     std::unordered_set<int32_t> mSpecialIds;
+    std::vector<int32_t> mRawSpecialIds;
     std::unordered_set<int32_t> mDecodeSkipIds; // tokens to filter during decode
 
     std::string mUnkToken = "[UNK]";
