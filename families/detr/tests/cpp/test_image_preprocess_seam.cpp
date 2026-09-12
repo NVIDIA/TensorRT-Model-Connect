@@ -48,6 +48,44 @@ void test_detr_resize_caps_longest_edge() {
     check(shape.width == 1333, "detr landscape resize width");
 }
 
+void test_detr_resize_rounds_half_ties_to_even() {
+    const trtmc::DetrPreprocessConfig config;
+    const auto landscape = trtmc::compute_detr_resize_shape(600, 1200, config);
+    check(landscape.height == 666 && landscape.width == 1333,
+          "detr landscape half tie rounds down to even");
+    const auto portrait = trtmc::compute_detr_resize_shape(1200, 600, config);
+    check(portrait.height == 1333 && portrait.width == 666,
+          "detr portrait half tie rounds down to even");
+    const auto odd_landscape = trtmc::compute_detr_resize_shape(1335, 2666, config);
+    check(odd_landscape.height == 668 && odd_landscape.width == 1333,
+          "detr landscape half tie rounds up to even");
+    const auto odd_portrait = trtmc::compute_detr_resize_shape(2666, 1335, config);
+    check(odd_portrait.height == 1333 && odd_portrait.width == 668,
+          "detr portrait half tie rounds up to even");
+}
+
+void test_detr_resize_rounds_non_ties_to_nearest() {
+    const trtmc::DetrPreprocessConfig config;
+    const auto below = trtmc::compute_detr_resize_shape(599, 1200, config);
+    check(below.height == 665 && below.width == 1333, "detr resize below half tie");
+    const auto above = trtmc::compute_detr_resize_shape(601, 1200, config);
+    check(above.height == 668 && above.width == 1333, "detr resize above half tie");
+}
+
+void test_detr_preprocess_fits_half_tie_engine_dimensions() {
+    const std::vector<float> pixels(3U * 600U * 1200U, 0.75F);
+    trtmc::DetrPreprocessConfig config;
+    config.input_image_h = 666;
+    config.input_image_w = 1333;
+    const auto landscape = trtmc::preprocess_detr_image(pixels.data(), 600, 1200, config);
+    check(landscape.size() == 3U * 666U * 1333U, "detr landscape fits reference dimensions");
+
+    config.input_image_h = 1333;
+    config.input_image_w = 666;
+    const auto portrait = trtmc::preprocess_detr_image(pixels.data(), 1200, 600, config);
+    check(portrait.size() == 3U * 1333U * 666U, "detr portrait fits reference dimensions");
+}
+
 void test_detr_preprocess_applies_normalization() {
     const std::vector<float> pixels(3U * 2U * 2U, 0.75F);
     trtmc::DetrPreprocessConfig config;
@@ -119,6 +157,9 @@ void test_detr_preprocess_rejects_invalid_config() {
 int main() {
     test_detr_resize_preserves_short_edge_for_square_image();
     test_detr_resize_caps_longest_edge();
+    test_detr_resize_rounds_half_ties_to_even();
+    test_detr_resize_rounds_non_ties_to_nearest();
+    test_detr_preprocess_fits_half_tie_engine_dimensions();
     test_detr_preprocess_applies_normalization();
     test_detr_preprocess_rejects_invalid_config();
     test_detr_preprocess_rejects_resize_larger_than_engine_input();
