@@ -49,43 +49,56 @@ class VideoFixture final : public IModel,
   public:
     explicit VideoFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "none")
             return {};
         if (mode_.rfind("batch", 0) == 0)
-            return {{IBatchTextToVideo::kTask, 1, 0},
-                    {IBatchInitialImageTextToVideo::kTask, 1, 0},
-                    {IBatchVideoTextToFutureVideo::kTask, 1, 0},
-                    {IBatchImageActionToFutureVideo::kTask, 1, 0},
-                    {IBatchVideoToActionSequence::kTask, 1, 0},
-                    {IBatchImageToActionAndVideo::kTask, 1, 0},
-                    {IBatchTextToAudioVideo::kTask, 1, 0},
-                    {IBatchInitialImageTextToAudioVideo::kTask, 1, 0}};
+            return {bind<IBatchTextToVideo>(*this, fields_for(IBatchTextToVideo::kTask)),
+                    bind<IBatchInitialImageTextToVideo>(
+                        *this, fields_for(IBatchInitialImageTextToVideo::kTask)),
+                    bind<IBatchVideoTextToFutureVideo>(
+                        *this, fields_for(IBatchVideoTextToFutureVideo::kTask)),
+                    bind<IBatchImageActionToFutureVideo>(
+                        *this, fields_for(IBatchImageActionToFutureVideo::kTask)),
+                    bind<IBatchVideoToActionSequence>(
+                        *this, fields_for(IBatchVideoToActionSequence::kTask)),
+                    bind<IBatchImageToActionAndVideo>(
+                        *this, fields_for(IBatchImageToActionAndVideo::kTask)),
+                    bind<IBatchTextToAudioVideo>(*this, fields_for(IBatchTextToAudioVideo::kTask)),
+                    bind<IBatchInitialImageTextToAudioVideo>(
+                        *this, fields_for(IBatchInitialImageTextToAudioVideo::kTask))};
         return {
-            {ITextToVideo::kTask, 1, 0},
-            {IInitialImageTextToVideo::kTask, 1, 0},
-            {IBoundaryFramesTextToVideo::kTask, 1, 0},
-            {ITimedFramesTextToVideo::kTask, 1, 0},
-            {IVideoTextToVideoEdit::kTask, 1, 0},
-            {IMaskedVideoTextToVideo::kTask, 1, 0},
-            {IMaskedVideoReferenceImagesTextToVideo::kTask, 1, 0},
-            {IImageTextActionToVideo::kTask, 1, 0},
-            {IImageTextCameraTrajectoryToVideo::kTask, 1, 0},
-            {IVideoTextToFutureVideo::kTask, 1, 0},
-            {IImageActionToFutureVideo::kTask, 1, 0},
-            {IVideoActionToFutureVideo::kTask, 1, 0},
-            {IVideoToActionSequence::kTask, 1, 0},
-            {IImageToActionAndVideo::kTask, 1, 0},
-            {IVideoToActionAndVideo::kTask, 1, 0},
-            {ITextToAudioVideo::kTask, 1, 0},
-            {IInitialImageTextToAudioVideo::kTask, 1, 0},
-            {ILastImageTextToAudioVideo::kTask, 1, 0},
-            {IBoundaryFramesTextToAudioVideo::kTask, 1, 0},
-            {IReferencesTextToAudioVideo::kTask, 1, 0},
+            bind<ITextToVideo>(*this, fields_for(ITextToVideo::kTask)),
+            bind<IInitialImageTextToVideo>(*this, fields_for(IInitialImageTextToVideo::kTask)),
+            bind<IBoundaryFramesTextToVideo>(*this, fields_for(IBoundaryFramesTextToVideo::kTask)),
+            bind<ITimedFramesTextToVideo>(*this, fields_for(ITimedFramesTextToVideo::kTask)),
+            bind<IVideoTextToVideoEdit>(*this, fields_for(IVideoTextToVideoEdit::kTask)),
+            bind<IMaskedVideoTextToVideo>(*this, fields_for(IMaskedVideoTextToVideo::kTask)),
+            bind<IMaskedVideoReferenceImagesTextToVideo>(
+                *this, fields_for(IMaskedVideoReferenceImagesTextToVideo::kTask)),
+            bind<IImageTextActionToVideo>(*this, fields_for(IImageTextActionToVideo::kTask)),
+            bind<IImageTextCameraTrajectoryToVideo>(
+                *this, fields_for(IImageTextCameraTrajectoryToVideo::kTask)),
+            bind<IVideoTextToFutureVideo>(*this, fields_for(IVideoTextToFutureVideo::kTask)),
+            bind<IImageActionToFutureVideo>(*this, fields_for(IImageActionToFutureVideo::kTask)),
+            bind<IVideoActionToFutureVideo>(*this, fields_for(IVideoActionToFutureVideo::kTask)),
+            bind<IVideoToActionSequence>(*this, fields_for(IVideoToActionSequence::kTask)),
+            bind<IImageToActionAndVideo>(*this, fields_for(IImageToActionAndVideo::kTask)),
+            bind<IVideoToActionAndVideo>(*this, fields_for(IVideoToActionAndVideo::kTask)),
+            bind<ITextToAudioVideo>(*this, fields_for(ITextToAudioVideo::kTask)),
+            bind<IInitialImageTextToAudioVideo>(*this,
+                                                fields_for(IInitialImageTextToAudioVideo::kTask)),
+            bind<ILastImageTextToAudioVideo>(*this, fields_for(ILastImageTextToAudioVideo::kTask)),
+            bind<IBoundaryFramesTextToAudioVideo>(
+                *this, fields_for(IBoundaryFramesTextToAudioVideo::kTask)),
+            bind<IReferencesTextToAudioVideo>(*this,
+                                              fields_for(IReferencesTextToAudioVideo::kTask)),
         };
     }
-    std::vector<ConfigField> config_fields(std::string_view) const override {
-        return {{"gain", ConfigKind::F64, ConfigValue{1.0}, "Synthetic video intensity gain."}};
+    trtmc::Span<const ConfigField> fields_for(std::string_view) const {
+        static const ConfigField declared[] = {
+            {"gain", ConfigKind::F64, ConfigValue{1.0}, "Synthetic video intensity gain."}};
+        return declared;
     }
 
     VideoResult run(const TextToVideoRequest& input, ConfigView config) override {
@@ -418,7 +431,7 @@ class VideoFixture final : public IModel,
         return result;
     }
     double gain(ConfigView config) const {
-        const auto field = config_fields({}).front();
+        const auto field = fields_for({})[0];
         double value = std::get<double>(*field.default_value);
         bool seen = false;
         for (const auto& entry : config) {

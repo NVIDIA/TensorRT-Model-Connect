@@ -74,6 +74,15 @@ int main(int argc, char** argv) {
               "device descriptors are exposed without dereferencing them");
         check(session.supports_device_masks() && borrowed.view().frame_count == 5,
               "metadata reads do not invalidate device views");
+        rejects([&] { (void)session.segment(clip, {{"unexpected", 1}}); }, TRTMC_INVALID_CONFIG,
+                "host segmentation rejects undeclared config before changing session state");
+        check(borrowed.view().frame_count == 5,
+              "host config preflight failure preserves the prior device view");
+        rejects([&] { (void)device.segment_device(clip, {{"unexpected", false}}); },
+                TRTMC_INVALID_CONFIG,
+                "device segmentation rejects undeclared config before changing session state");
+        check(borrowed.view().frame_count == 5,
+              "device config preflight failure preserves the prior device view");
         auto invalid = clip;
         invalid.frames.pop_back();
         rejects([&] { (void)session.segment(invalid); }, TRTMC_INVALID_ARGUMENT,

@@ -116,6 +116,7 @@ struct ConfigFieldSnapshot {
     std::string name;
     std::string description;
     std::uint32_t kind;
+    internal::ConfigKind internal_kind;
     std::optional<OwnedConfigValue> value;
     std::vector<trtmc_string_view> strings;
     trtmc_config_field_v1 view{};
@@ -123,7 +124,7 @@ struct ConfigFieldSnapshot {
     explicit ConfigFieldSnapshot(const internal::ConfigField& field)
         : name(owned_string(string_view(borrowed_string(field.name)))),
           description(owned_string(string_view(borrowed_string(field.description)))),
-          kind(wire_kind(field.kind)) {
+          kind(wire_kind(field.kind)), internal_kind(field.kind) {
         if (field.default_value) {
             if (internal::config_kind(*field.default_value) != field.kind)
                 throw ApiFailure{TRTMC_INTERNAL_ERROR, "family config default has the wrong type"};
@@ -259,7 +260,9 @@ std::string default_runtime_root() {
 
 struct TaskSnapshot {
     const TaskBinding* binding;
+    void* implementation;
     std::vector<ConfigFieldSnapshot> config_fields;
+    std::vector<internal::ConfigField> validation_fields;
 };
 
 struct ModelState {
@@ -364,31 +367,83 @@ ITask& require_family(const std::shared_ptr<ModelState>& state, std::string_view
     return *state->family;
 }
 
-void snapshot_tasks(ModelState& state, const internal::IModel& metadata) {
-    const auto declarations = metadata.task_info();
-    for (const auto bindings :
-         {text_continuation_bindings(), text_task_bindings(), image_task_bindings(),
-          stream_task_bindings(), features_task_bindings(), audio_task_bindings(),
-          numeric_task_bindings(), video_task_bindings(), perception_task_bindings(),
-          language_task_bindings(), tracking_task_bindings(), speech_task_bindings(),
-          action_task_bindings(), recurrent_task_bindings()}) {
-        for (const auto& binding : bindings) {
-            const bool declared = std::any_of(
-                declarations.begin(), declarations.end(), [&](const internal::TaskInfo& task) {
-                    return task.id == binding.id && task.major == binding.major &&
-                           task.minor == binding.minor;
-                });
-            if (!declared || !binding.implemented(*state.family))
-                continue;
-            TaskSnapshot snapshot{&binding, {}};
-            for (const auto& field : metadata.config_fields(binding.id))
-                snapshot.config_fields.emplace_back(field);
-            state.tasks.push_back(std::move(snapshot));
+void* task_implementation(const std::shared_ptr<ModelState>& state, internal::TaskKey key) {
+    return require_task(state, key.id, key.major, key.minor).implementation;
+}
+
+void validate_task_config(const std::shared_ptr<ModelState>& state, internal::TaskKey key,
+                          internal::ConfigView supplied) {
+    const auto& fields = require_task(state, key.id, key.major, key.minor).validation_fields;
+    internal::validate_config({fields.data(), fields.size()}, supplied);
+}
+
+void validate_batch_configs(const std::shared_ptr<ModelState>& state, internal::TaskKey key,
+                            const std::vector<ConvertedConfig>& supplied) {
+    for (std::size_t index = 0; index < supplied.size(); ++index) {
+        try {
+            validate_task_config(state, key, supplied[index].view());
+        } catch (const internal::ConfigError& error) {
+            throw OwnedApiFailure{TRTMC_INVALID_CONFIG,
+                                  "batch item[" + std::to_string(index) + "]: " + error.what()};
         }
     }
+}
+
+void snapshot_tasks(ModelState& state, internal::IModel& metadata) {
+    const auto declarations = metadata.task_bindings();
+    const auto groups = {
+        text_continuation_bindings(), text_task_bindings(),      image_task_bindings(),
+        stream_task_bindings(),       features_task_bindings(),  audio_task_bindings(),
+        numeric_task_bindings(),      video_task_bindings(),     perception_task_bindings(),
+        language_task_bindings(),     tracking_task_bindings(),  speech_task_bindings(),
+        action_task_bindings(),       recurrent_task_bindings(), structure_task_bindings()};
+    state.tasks.reserve(declarations.size());
+    for (const auto& declaration : declarations) {
+        const auto key = declaration.key;
+        for (const auto& prior : state.tasks) {
+            if (prior.binding->id == key.id && prior.binding->major == key.major &&
+                prior.binding->minor == key.minor)
+                throw ApiFailure{TRTMC_INTERNAL_ERROR, "family declared a duplicate Task"};
+        }
+        const TaskBinding* contract = nullptr;
+        bool known_id = false;
+        for (const auto group : groups) {
+            for (const auto& binding : group) {
+                if (binding.id != key.id)
+                    continue;
+                known_id = true;
+                if (binding.major == key.major && binding.minor == key.minor)
+                    contract = &binding;
+            }
+        }
+        if (contract == nullptr)
+            throw ApiFailure{known_id ? TRTMC_VERSION_MISMATCH : TRTMC_UNSUPPORTED,
+                             "family declared an unavailable Task contract"};
+        if (declaration.implementation == nullptr)
+            throw ApiFailure{TRTMC_INTERNAL_ERROR, "family declared a null Task implementation"};
+        TaskSnapshot snapshot{contract, declaration.implementation, {}, {}};
+        for (const auto& field :
+             checked_span(declaration.fields.data(), declaration.fields.size())) {
+            if (field.name.empty())
+                throw ApiFailure{TRTMC_INTERNAL_ERROR, "family declared an empty config name"};
+            for (const auto& prior : snapshot.config_fields) {
+                if (prior.name == field.name)
+                    throw ApiFailure{TRTMC_INTERNAL_ERROR,
+                                     "family declared a duplicate config name"};
+            }
+            snapshot.config_fields.emplace_back(field);
+        }
+        state.tasks.push_back(std::move(snapshot));
+    }
     for (auto& task : state.tasks) {
-        for (auto& field : task.config_fields)
+        task.validation_fields.reserve(task.config_fields.size());
+        for (auto& field : task.config_fields) {
             field.bind_view();
+            // Only names and kinds are needed for validation. These views
+            // borrow the same immutable model-owned snapshot exposed to C.
+            task.validation_fields.push_back(
+                {field.name, field.internal_kind, std::nullopt, field.description});
+        }
     }
 }
 
@@ -443,7 +498,7 @@ trtmc_status TRTMC_CALL model_load(trtmc_string_view bundle_path,
         state->info = reader.info();
         state->family =
             trtmc::load_task(reader, runtime_root, kv_bytes, runtime_cache, cuda_graphs);
-        const auto* metadata = dynamic_cast<const internal::IModel*>(state->family.get());
+        auto* metadata = dynamic_cast<internal::IModel*>(state->family.get());
         if (metadata == nullptr)
             throw ApiFailure{TRTMC_UNSUPPORTED,
                              "family has not implemented the Task SDK model interface"};

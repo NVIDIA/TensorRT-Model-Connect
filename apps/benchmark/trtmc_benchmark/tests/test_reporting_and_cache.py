@@ -37,6 +37,10 @@ def _cache_fixture(tmp_path: Path, monkeypatch):
     calls = []
 
     def build(command, **_):
+        if "inspect" in command:
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"family": "example", "task": "text_generation"}), ""
+            )
         calls.append(command)
         Path(command[command.index("-o") + 1]).write_bytes(b"built bundle")
         return subprocess.CompletedProcess(command, 0, "built", "")
@@ -128,6 +132,101 @@ def test_explicit_mutable_checkpoint_is_rebuilt_even_if_unchanged(tmp_path, monk
     builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
     assert len(calls) == 2
     assert not case.bundle_path.with_suffix(".bundle.benchmark.json").exists()
+
+
+@pytest.mark.parametrize("actual", [
+    {"family": "other", "task": "text_generation"},
+    {"family": "example", "task": "text_continuation"},
+])
+def test_receipt_does_not_replace_bundle_identity_check(tmp_path, monkeypatch, actual):
+    builder, case, _, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
+    original = case.bundle_path.read_bytes()
+    monkeypatch.setattr(
+        builder_module.subprocess, "run",
+        lambda command, **_: subprocess.CompletedProcess(command, 0, json.dumps(actual), ""),
+    )
+    with pytest.raises(BenchmarkError, match="bundle identity mismatch"):
+        builder.prepare([case], allow_build=False, rebuild=False, dry_run=False)
+    assert case.bundle_path.read_bytes() == original
+    assert len(calls) == 1
+
+
+def test_explicit_bundle_inside_cache_cannot_be_rebuilt(tmp_path, monkeypatch):
+    builder, case, _, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
+    case = case.with_values(bundle_is_explicit=True)
+    with pytest.raises(BenchmarkError, match="cannot overwrite explicit bundle"):
+        builder.prepare([case], allow_build=True, rebuild=True, dry_run=False)
+    assert case.bundle_path.read_bytes() == b"built bundle"
+    assert len(calls) == 1
+
+
+def test_explicit_bundle_is_protected_across_manifest_groups(tmp_path, monkeypatch):
+    builder, case, _, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    case.bundle_path.parent.mkdir(parents=True)
+    case.bundle_path.write_bytes(b"user bundle")
+    explicit = replace(
+        case, model=replace(case.model, manifest_path=tmp_path / "other-manifest.json"),
+        bundle_is_explicit=True,
+    )
+    with pytest.raises(BenchmarkError, match="cannot overwrite explicit bundle"):
+        builder.prepare([case, explicit], allow_build=True, rebuild=True, dry_run=False)
+    assert case.bundle_path.read_bytes() == b"user bundle"
+    assert calls == []
+
+
+def test_wrong_new_bundle_does_not_replace_cache_or_publish_receipt(tmp_path, monkeypatch):
+    builder, case, _, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    case.bundle_path.parent.mkdir(parents=True)
+    case.bundle_path.write_bytes(b"previous bundle")
+    build = builder_module.subprocess.run
+
+    def wrong_identity(command, **options):
+        if "inspect" in command:
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"family": "wrong", "task": case.model.task}), ""
+            )
+        return build(command, **options)
+
+    monkeypatch.setattr(builder_module.subprocess, "run", wrong_identity)
+    with pytest.raises(BenchmarkError, match="bundle identity mismatch"):
+        builder.prepare([case], allow_build=True, rebuild=True, dry_run=False)
+    assert case.bundle_path.read_bytes() == b"previous bundle"
+    assert not case.bundle_path.with_suffix(".bundle.benchmark.json").exists()
+    assert not list(case.bundle_path.parent.glob(".trtmc-bench-*.bundle"))
+    assert len(calls) == 1
+
+
+def test_dry_run_does_not_claim_bundle_identity_was_verified(tmp_path, monkeypatch):
+    builder, case, _, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    case.bundle_path.parent.mkdir(parents=True)
+    case.bundle_path.write_bytes(b"uninspected")
+    case = case.with_values(bundle_is_explicit=True)
+
+    def unexpected_inspection(*_, **__):
+        pytest.fail("dry run must not require the native runtime")
+
+    monkeypatch.setattr(builder_module.subprocess, "run", unexpected_inspection)
+    _, records = builder.prepare([case], allow_build=False, rebuild=False, dry_run=True)
+    assert records[0].status == "would_reuse"
+    assert calls == []
+
+
+@pytest.mark.parametrize("stdout", ["not json", "{}", "[]", "null"])
+def test_invalid_inspection_cannot_validate_an_explicit_bundle(tmp_path, monkeypatch, stdout):
+    builder, case, _, _, _ = _cache_fixture(tmp_path, monkeypatch)
+    case.bundle_path.parent.mkdir(parents=True)
+    case.bundle_path.write_bytes(b"uninspected")
+    monkeypatch.setattr(
+        builder_module.subprocess, "run",
+        lambda command, **_: subprocess.CompletedProcess(command, 0, stdout, ""),
+    )
+    with pytest.raises(BenchmarkError, match="invalid bundle inspection result"):
+        builder.prepare(
+            [case.with_values(bundle_is_explicit=True)],
+            allow_build=False, rebuild=False, dry_run=False,
+        )
 
 
 def _run(root, run_id, schema="v2", scope="public_task_call_wall", p50=10.0):

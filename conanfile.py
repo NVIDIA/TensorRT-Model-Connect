@@ -52,12 +52,12 @@ class TensorRTModelConnectConan(ConanFile):
 
     def layout(self) -> None:
         cmake_layout(self)
+        # CMakeToolchain derives install directories from the package layout.
+        self.cpp.package.libdirs = ["bin"]
 
     def generate(self) -> None:
         toolchain = CMakeToolchain(self)
         toolchain.cache_variables["TRTMC_BUILD_TESTS"] = False
-        # The wheel keeps its native runtime and SDK library in the same directory.
-        toolchain.cache_variables["CMAKE_INSTALL_LIBDIR"] = "bin"
         for name in (
             "TRT_ROOT",
             "CMAKE_CUDA_ARCHITECTURES",

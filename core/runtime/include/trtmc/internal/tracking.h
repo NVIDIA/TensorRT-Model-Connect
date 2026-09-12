@@ -60,6 +60,7 @@ class IDetectedClipSession {
 };
 class IFramesToDetectedMaskTracks {
   public:
+    using TaskInterface = IFramesToDetectedMaskTracks;
     static constexpr std::string_view kTask = "frames_to_detected_mask_tracks";
     virtual ~IFramesToDetectedMaskTracks() = default;
     virtual std::unique_ptr<IDetectedClipSession> create_detected_session(ConfigView) = 0;
@@ -72,6 +73,7 @@ class ITextClipSession {
 };
 class IFramesTextToMaskTracks {
   public:
+    using TaskInterface = IFramesTextToMaskTracks;
     static constexpr std::string_view kTask = "frames_text_to_mask_tracks";
     virtual ~IFramesTextToMaskTracks() = default;
     virtual std::unique_ptr<ITextClipSession> create_text_clip_session(ConfigView) = 0;
@@ -86,6 +88,7 @@ class ITextPromptFrameSession {
 };
 class IPromptFrameTextToMaskTracks {
   public:
+    using TaskInterface = IPromptFrameTextToMaskTracks;
     static constexpr std::string_view kTask = "prompt_frame_text_to_mask_tracks";
     virtual ~IPromptFrameTextToMaskTracks() = default;
     virtual std::unique_ptr<ITextPromptFrameSession>
@@ -121,6 +124,7 @@ class IImageMaskContext {
 };
 class IInteractiveImageMasks {
   public:
+    using TaskInterface = IInteractiveImageMasks;
     static constexpr std::string_view kTask = "interactive_image_masks";
     virtual ~IInteractiveImageMasks() = default;
     // The family owns any retained image/features before this call returns.
@@ -208,6 +212,7 @@ struct MaskTrackSessionStart {
 #define TRTMC_TRACK_FACTORY(Name, Id, Method, Input)                                               \
     class I##Name {                                                                                \
       public:                                                                                      \
+        using TaskInterface = I##Name;                                                             \
         static constexpr std::string_view kTask = Id;                                              \
         virtual ~I##Name() = default;                                                              \
         virtual MaskTrackSessionStart Method(VideoView, const Input&, ConfigView) = 0;             \
@@ -235,6 +240,7 @@ class ICropPoseSession {
 };
 class ICropPoseTracking {
   public:
+    using TaskInterface = ICropPoseTracking;
     static constexpr std::string_view kTask = "crop_pose_tracking";
     virtual ~ICropPoseTracking() = default;
     virtual std::unique_ptr<ICropPoseSession> create_crop_pose_session(ConfigView) = 0;
@@ -252,6 +258,7 @@ class IRgbdPoseSession {
 };
 class IRgbdInitializedPoseToTrackedPose {
   public:
+    using TaskInterface = IRgbdInitializedPoseToTrackedPose;
     static constexpr std::string_view kTask = "rgbd_initialized_pose_to_tracked_pose";
     virtual ~IRgbdInitializedPoseToTrackedPose() = default;
     // Family retains mesh/appearance before return and owns centered-frame conversions.

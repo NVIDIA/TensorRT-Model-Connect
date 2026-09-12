@@ -72,6 +72,7 @@ struct BatchTextToImageRequest {
 
 class ITextToImage {
   public:
+    using TaskInterface = ITextToImage;
     static constexpr std::string_view kTask = "text_to_image";
     virtual ~ITextToImage() = default;
     virtual ImageResult run(const TextToImageRequest&, ConfigView) = 0;
@@ -79,6 +80,7 @@ class ITextToImage {
 
 class IImagesTextToImageEdit {
   public:
+    using TaskInterface = IImagesTextToImageEdit;
     static constexpr std::string_view kTask = "images_text_to_image_edit";
     virtual ~IImagesTextToImageEdit() = default;
     virtual ImageResult run(const ImagesTextToImageEditRequest&, ConfigView) = 0;
@@ -86,6 +88,7 @@ class IImagesTextToImageEdit {
 
 class IMaskedImageTextToImage {
   public:
+    using TaskInterface = IMaskedImageTextToImage;
     static constexpr std::string_view kTask = "masked_image_text_to_image";
     virtual ~IMaskedImageTextToImage() = default;
     virtual ImageResult run(const MaskedImageTextToImageRequest&, ConfigView) = 0;
@@ -93,6 +96,7 @@ class IMaskedImageTextToImage {
 
 class IBatchTextToImage {
   public:
+    using TaskInterface = IBatchTextToImage;
     static constexpr std::string_view kTask = "batch_text_to_image";
     virtual ~IBatchTextToImage() = default;
     // One native batch invocation, preserving item order. Config preflight for

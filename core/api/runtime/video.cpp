@@ -485,8 +485,11 @@ trtmc_status TRTMC_CALL run(trtmc_model* model, const Request* input,
         VideoInputs storage;
         const auto request = storage.convert(*input);
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<Interface>(model, Interface::kTask);
+        validate_task_config(model_owner(model), internal::contract_key<Interface>(),
+                             options.view());
         auto result = family.run(request, options.view());
         validate_result(request, result);
         *out = make_result<Storage>(std::move(result));
@@ -675,10 +678,12 @@ trtmc_status TRTMC_CALL run_batch(trtmc_model* model, const Wire* input, trtmc_r
         items.reserve(supplied.size());
         for (size_t i = 0; i < supplied.size(); ++i) {
             configs.emplace_back(&supplied[i].config);
+
             items.push_back({conversions[i].convert(supplied[i].input), configs.back().view()});
         }
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<Interface>(model, Interface::kTask);
+        validate_batch_configs(model_owner(model), internal::contract_key<Interface>(), configs);
         auto results = family.run_batch({{items.data(), items.size()}});
         output_check(results.size() == items.size(), "family changed video batch item count");
         std::vector<std::unique_ptr<Storage>> storage;
@@ -747,70 +752,44 @@ const trtmc_batch_initial_image_text_to_audio_video_api_v1
 
 const TaskBinding bindings[] = {
     {internal::IBatchInitialImageTextToVideo::kTask, 1, 0,
-     &batch_initial_image_text_to_video_api.header,
-     implements<internal::IBatchInitialImageTextToVideo>},
+     &batch_initial_image_text_to_video_api.header},
     {internal::IBatchVideoTextToFutureVideo::kTask, 1, 0,
-     &batch_video_text_to_future_video_api.header,
-     implements<internal::IBatchVideoTextToFutureVideo>},
+     &batch_video_text_to_future_video_api.header},
     {internal::IBatchImageActionToFutureVideo::kTask, 1, 0,
-     &batch_image_action_to_future_video_api.header,
-     implements<internal::IBatchImageActionToFutureVideo>},
-    {internal::IBatchVideoToActionSequence::kTask, 1, 0, &batch_video_to_action_sequence_api.header,
-     implements<internal::IBatchVideoToActionSequence>},
+     &batch_image_action_to_future_video_api.header},
+    {internal::IBatchVideoToActionSequence::kTask, 1, 0,
+     &batch_video_to_action_sequence_api.header},
     {internal::IBatchImageToActionAndVideo::kTask, 1, 0,
-     &batch_image_to_action_and_video_api.header,
-     implements<internal::IBatchImageToActionAndVideo>},
-    {internal::IBatchTextToAudioVideo::kTask, 1, 0, &batch_text_to_audio_video_api.header,
-     implements<internal::IBatchTextToAudioVideo>},
+     &batch_image_to_action_and_video_api.header},
+    {internal::IBatchTextToAudioVideo::kTask, 1, 0, &batch_text_to_audio_video_api.header},
     {internal::IBatchInitialImageTextToAudioVideo::kTask, 1, 0,
-     &batch_initial_image_text_to_audio_video_api.header,
-     implements<internal::IBatchInitialImageTextToAudioVideo>},
-    {internal::IBatchTextToVideo::kTask, 1, 0, &batch_text_to_video_api.header,
-     implements<internal::IBatchTextToVideo>},
-    {internal::ITextToVideo::kTask, 1, 0, &text_to_video_api.header,
-     implements<internal::ITextToVideo>},
-    {internal::IInitialImageTextToVideo::kTask, 1, 0, &initial_image_text_to_video_api.header,
-     implements<internal::IInitialImageTextToVideo>},
-    {internal::IBoundaryFramesTextToVideo::kTask, 1, 0, &boundary_frames_text_to_video_api.header,
-     implements<internal::IBoundaryFramesTextToVideo>},
-    {internal::ITimedFramesTextToVideo::kTask, 1, 0, &timed_frames_text_to_video_api.header,
-     implements<internal::ITimedFramesTextToVideo>},
-    {internal::IVideoTextToVideoEdit::kTask, 1, 0, &video_text_to_video_edit_api.header,
-     implements<internal::IVideoTextToVideoEdit>},
-    {internal::IMaskedVideoTextToVideo::kTask, 1, 0, &masked_video_text_to_video_api.header,
-     implements<internal::IMaskedVideoTextToVideo>},
+     &batch_initial_image_text_to_audio_video_api.header},
+    {internal::IBatchTextToVideo::kTask, 1, 0, &batch_text_to_video_api.header},
+    {internal::ITextToVideo::kTask, 1, 0, &text_to_video_api.header},
+    {internal::IInitialImageTextToVideo::kTask, 1, 0, &initial_image_text_to_video_api.header},
+    {internal::IBoundaryFramesTextToVideo::kTask, 1, 0, &boundary_frames_text_to_video_api.header},
+    {internal::ITimedFramesTextToVideo::kTask, 1, 0, &timed_frames_text_to_video_api.header},
+    {internal::IVideoTextToVideoEdit::kTask, 1, 0, &video_text_to_video_edit_api.header},
+    {internal::IMaskedVideoTextToVideo::kTask, 1, 0, &masked_video_text_to_video_api.header},
     {internal::IMaskedVideoReferenceImagesTextToVideo::kTask, 1, 0,
-     &masked_video_reference_images_text_to_video_api.header,
-     implements<internal::IMaskedVideoReferenceImagesTextToVideo>},
-    {internal::IImageTextActionToVideo::kTask, 1, 0, &image_text_action_to_video_api.header,
-     implements<internal::IImageTextActionToVideo>},
+     &masked_video_reference_images_text_to_video_api.header},
+    {internal::IImageTextActionToVideo::kTask, 1, 0, &image_text_action_to_video_api.header},
     {internal::IImageTextCameraTrajectoryToVideo::kTask, 1, 0,
-     &image_text_camera_trajectory_to_video_api.header,
-     implements<internal::IImageTextCameraTrajectoryToVideo>},
-    {internal::IVideoTextToFutureVideo::kTask, 1, 0, &video_text_to_future_video_api.header,
-     implements<internal::IVideoTextToFutureVideo>},
-    {internal::IImageActionToFutureVideo::kTask, 1, 0, &image_action_to_future_video_api.header,
-     implements<internal::IImageActionToFutureVideo>},
-    {internal::IVideoActionToFutureVideo::kTask, 1, 0, &video_action_to_future_video_api.header,
-     implements<internal::IVideoActionToFutureVideo>},
-    {internal::IVideoToActionSequence::kTask, 1, 0, &video_to_action_sequence_api.header,
-     implements<internal::IVideoToActionSequence>},
-    {internal::IImageToActionAndVideo::kTask, 1, 0, &image_to_action_and_video_api.header,
-     implements<internal::IImageToActionAndVideo>},
-    {internal::IVideoToActionAndVideo::kTask, 1, 0, &video_to_action_and_video_api.header,
-     implements<internal::IVideoToActionAndVideo>},
-    {internal::ITextToAudioVideo::kTask, 1, 0, &text_to_audio_video_api.header,
-     implements<internal::ITextToAudioVideo>},
+     &image_text_camera_trajectory_to_video_api.header},
+    {internal::IVideoTextToFutureVideo::kTask, 1, 0, &video_text_to_future_video_api.header},
+    {internal::IImageActionToFutureVideo::kTask, 1, 0, &image_action_to_future_video_api.header},
+    {internal::IVideoActionToFutureVideo::kTask, 1, 0, &video_action_to_future_video_api.header},
+    {internal::IVideoToActionSequence::kTask, 1, 0, &video_to_action_sequence_api.header},
+    {internal::IImageToActionAndVideo::kTask, 1, 0, &image_to_action_and_video_api.header},
+    {internal::IVideoToActionAndVideo::kTask, 1, 0, &video_to_action_and_video_api.header},
+    {internal::ITextToAudioVideo::kTask, 1, 0, &text_to_audio_video_api.header},
     {internal::IInitialImageTextToAudioVideo::kTask, 1, 0,
-     &initial_image_text_to_audio_video_api.header,
-     implements<internal::IInitialImageTextToAudioVideo>},
-    {internal::ILastImageTextToAudioVideo::kTask, 1, 0, &last_image_text_to_audio_video_api.header,
-     implements<internal::ILastImageTextToAudioVideo>},
+     &initial_image_text_to_audio_video_api.header},
+    {internal::ILastImageTextToAudioVideo::kTask, 1, 0, &last_image_text_to_audio_video_api.header},
     {internal::IBoundaryFramesTextToAudioVideo::kTask, 1, 0,
-     &boundary_frames_text_to_audio_video_api.header,
-     implements<internal::IBoundaryFramesTextToAudioVideo>},
-    {internal::IReferencesTextToAudioVideo::kTask, 1, 0, &references_text_to_audio_video_api.header,
-     implements<internal::IReferencesTextToAudioVideo>},
+     &boundary_frames_text_to_audio_video_api.header},
+    {internal::IReferencesTextToAudioVideo::kTask, 1, 0,
+     &references_text_to_audio_video_api.header},
 };
 
 } // namespace

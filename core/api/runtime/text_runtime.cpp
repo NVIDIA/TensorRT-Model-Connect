@@ -94,6 +94,9 @@ trtmc_status TRTMC_CALL text_run(trtmc_model* model,
             model, internal::ITextContinuation::kTask);
         const internal::TextContinuationRequest input{text_source(request->prefix)};
         const ConvertedConfig converted(config);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ITextContinuation>(),
+                             converted.view());
         *out = make_result<TextResultStorage>(task.run(input, converted.view()));
     });
 }
@@ -101,8 +104,7 @@ trtmc_status TRTMC_CALL text_run(trtmc_model* model,
 const trtmc_text_continuation_api_v1 text_api = {
     {1, 0, sizeof(trtmc_text_continuation_api_v1)}, text_run, text_result_view};
 
-const TaskBinding bindings[] = {{internal::ITextContinuation::kTask, 1, 0, &text_api.header,
-                                 implements<internal::ITextContinuation>}};
+const TaskBinding bindings[] = {{internal::ITextContinuation::kTask, 1, 0, &text_api.header}};
 
 static_assert(offsetof(trtmc_text_continuation_api_v1, header) == 0);
 

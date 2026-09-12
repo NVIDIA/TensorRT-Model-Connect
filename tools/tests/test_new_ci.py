@@ -512,6 +512,10 @@ def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
     assert "CMakeDeps" not in conanfile
     assert "libtrtmc_model_sana_wm" not in conanfile
     assert '"--print-needed"' in conanfile
+    # Conan's output_dirs block overrides a cache-only CMAKE_INSTALL_LIBDIR.
+    # The SDK library must share the wheel's bin directory with its runtime.
+    assert 'self.cpp.package.libdirs = ["bin"]' in conanfile
+    assert 'cache_variables["CMAKE_INSTALL_LIBDIR"]' not in conanfile
     dockerfile = (repository / "Dockerfile").read_text()
     assert "openmpi-bin" in dockerfile
     assert "nvidia/nccl/lib" in dockerfile

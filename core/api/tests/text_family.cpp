@@ -49,28 +49,33 @@ class TextFixture final : public IModel,
           default_target_(mode_ == "translation_explicit" ? std::nullopt
                                                           : std::optional<std::string>{"en"}) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "translation_only" || mode_ == "translation_explicit")
-            return {{ITextTranslation::kTask, 1, 0}};
+            return {bind<ITextTranslation>(*this, fields_for(ITextTranslation::kTask))};
         if (mode_ == "broken_batch")
-            return {{IBatchTextContinuation::kTask, 1, 0}};
-        return {{ITextContinuation::kTask, 1, 0},
-                {IConditionalTextGeneration::kTask, 1, 0},
-                {ICorruptedTextReconstruction::kTask, 1, 0},
-                {IUnconditionalTextGeneration::kTask, 1, 0},
-                {ITextTranslation::kTask, 1, 0},
-                {ITextSummarization::kTask, 1, 0},
-                {ITextPrefixSuffixInfilling::kTask, 1, 0},
-                {IContextQuestionAnswering::kTask, 1, 0},
-                {IBatchTextContinuation::kTask, 1, 0}};
+            return {bind<IBatchTextContinuation>(*this, fields_for(IBatchTextContinuation::kTask))};
+        return {
+            bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask)),
+            bind<IConditionalTextGeneration>(*this, fields_for(IConditionalTextGeneration::kTask)),
+            bind<ICorruptedTextReconstruction>(*this,
+                                               fields_for(ICorruptedTextReconstruction::kTask)),
+            bind<IUnconditionalTextGeneration>(*this,
+                                               fields_for(IUnconditionalTextGeneration::kTask)),
+            bind<ITextTranslation>(*this, fields_for(ITextTranslation::kTask)),
+            bind<ITextSummarization>(*this, fields_for(ITextSummarization::kTask)),
+            bind<ITextPrefixSuffixInfilling>(*this, fields_for(ITextPrefixSuffixInfilling::kTask)),
+            bind<IContextQuestionAnswering>(*this, fields_for(IContextQuestionAnswering::kTask)),
+            bind<IBatchTextContinuation>(*this, fields_for(IBatchTextContinuation::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view id) const override {
-        const auto supported = task_info();
-        if (std::none_of(supported.begin(), supported.end(),
-                         [&](const TaskInfo& info) { return info.id == id; }))
+    trtmc::Span<const ConfigField> fields_for(std::string_view id) const {
+        if (((mode_ == "translation_only" || mode_ == "translation_explicit") &&
+             id != ITextTranslation::kTask) ||
+            (mode_ == "broken_batch" && id != IBatchTextContinuation::kTask))
             throw UnsupportedTask("Task is not enabled in this fixture bundle");
-        return {{"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}},
-                 "Fixture output suffix"}};
+        static const ConfigField declared[] = {{"suffix", ConfigKind::String,
+                                                ConfigValue{std::string_view{"!"}},
+                                                "Fixture output suffix"}};
+        return declared;
     }
 
     TextResult run(const TextContinuationRequest& input, ConfigView config) override {
@@ -137,7 +142,7 @@ class TextFixture final : public IModel,
 
   private:
     std::string parse(ConfigView config, std::string_view task) const {
-        const auto fields = config_fields(task);
+        const auto fields = fields_for(task);
         std::string suffix(std::get<std::string_view>(*fields[0].default_value));
         bool seen = false;
         for (const auto& entry : config) {

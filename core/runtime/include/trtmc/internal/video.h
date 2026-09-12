@@ -199,6 +199,7 @@ struct ReferencesTextToAudioVideoRequest {
 
 class ITextToVideo {
   public:
+    using TaskInterface = ITextToVideo;
     static constexpr std::string_view kTask = "text_to_video";
     virtual ~ITextToVideo() = default;
     virtual VideoResult run(const TextToVideoRequest&, ConfigView) = 0;
@@ -206,6 +207,7 @@ class ITextToVideo {
 
 class IInitialImageTextToVideo {
   public:
+    using TaskInterface = IInitialImageTextToVideo;
     static constexpr std::string_view kTask = "initial_image_text_to_video";
     virtual ~IInitialImageTextToVideo() = default;
     virtual VideoResult run(const InitialImageTextToVideoRequest&, ConfigView) = 0;
@@ -213,6 +215,7 @@ class IInitialImageTextToVideo {
 
 class IBoundaryFramesTextToVideo {
   public:
+    using TaskInterface = IBoundaryFramesTextToVideo;
     static constexpr std::string_view kTask = "boundary_frames_text_to_video";
     virtual ~IBoundaryFramesTextToVideo() = default;
     virtual VideoResult run(const BoundaryFramesTextToVideoRequest&, ConfigView) = 0;
@@ -220,6 +223,7 @@ class IBoundaryFramesTextToVideo {
 
 class ITimedFramesTextToVideo {
   public:
+    using TaskInterface = ITimedFramesTextToVideo;
     static constexpr std::string_view kTask = "timed_frames_text_to_video";
     virtual ~ITimedFramesTextToVideo() = default;
     virtual VideoResult run(const TimedFramesTextToVideoRequest&, ConfigView) = 0;
@@ -227,6 +231,7 @@ class ITimedFramesTextToVideo {
 
 class IVideoTextToVideoEdit {
   public:
+    using TaskInterface = IVideoTextToVideoEdit;
     static constexpr std::string_view kTask = "video_text_to_video_edit";
     virtual ~IVideoTextToVideoEdit() = default;
     virtual VideoResult run(const VideoTextToVideoEditRequest&, ConfigView) = 0;
@@ -234,6 +239,7 @@ class IVideoTextToVideoEdit {
 
 class IMaskedVideoTextToVideo {
   public:
+    using TaskInterface = IMaskedVideoTextToVideo;
     static constexpr std::string_view kTask = "masked_video_text_to_video";
     virtual ~IMaskedVideoTextToVideo() = default;
     virtual VideoResult run(const MaskedVideoTextToVideoRequest&, ConfigView) = 0;
@@ -241,6 +247,7 @@ class IMaskedVideoTextToVideo {
 
 class IMaskedVideoReferenceImagesTextToVideo {
   public:
+    using TaskInterface = IMaskedVideoReferenceImagesTextToVideo;
     static constexpr std::string_view kTask = "masked_video_reference_images_text_to_video";
     virtual ~IMaskedVideoReferenceImagesTextToVideo() = default;
     virtual VideoResult run(const MaskedVideoReferenceImagesTextToVideoRequest&, ConfigView) = 0;
@@ -248,6 +255,7 @@ class IMaskedVideoReferenceImagesTextToVideo {
 
 class IImageTextActionToVideo {
   public:
+    using TaskInterface = IImageTextActionToVideo;
     static constexpr std::string_view kTask = "image_text_action_to_video";
     virtual ~IImageTextActionToVideo() = default;
     virtual VideoResult run(const ImageTextActionToVideoRequest&, ConfigView) = 0;
@@ -255,6 +263,7 @@ class IImageTextActionToVideo {
 
 class IImageTextCameraTrajectoryToVideo {
   public:
+    using TaskInterface = IImageTextCameraTrajectoryToVideo;
     static constexpr std::string_view kTask = "image_text_camera_trajectory_to_video";
     virtual ~IImageTextCameraTrajectoryToVideo() = default;
     virtual VideoResult run(const ImageTextCameraTrajectoryToVideoRequest&, ConfigView) = 0;
@@ -262,6 +271,7 @@ class IImageTextCameraTrajectoryToVideo {
 
 class IVideoTextToFutureVideo {
   public:
+    using TaskInterface = IVideoTextToFutureVideo;
     static constexpr std::string_view kTask = "video_text_to_future_video";
     virtual ~IVideoTextToFutureVideo() = default;
     virtual VideoResult run(const VideoTextToFutureVideoRequest&, ConfigView) = 0;
@@ -269,6 +279,7 @@ class IVideoTextToFutureVideo {
 
 class IImageActionToFutureVideo {
   public:
+    using TaskInterface = IImageActionToFutureVideo;
     static constexpr std::string_view kTask = "image_action_to_future_video";
     virtual ~IImageActionToFutureVideo() = default;
     virtual VideoResult run(const ImageActionToFutureVideoRequest&, ConfigView) = 0;
@@ -276,6 +287,7 @@ class IImageActionToFutureVideo {
 
 class IVideoActionToFutureVideo {
   public:
+    using TaskInterface = IVideoActionToFutureVideo;
     static constexpr std::string_view kTask = "video_action_to_future_video";
     virtual ~IVideoActionToFutureVideo() = default;
     virtual VideoResult run(const VideoActionToFutureVideoRequest&, ConfigView) = 0;
@@ -283,6 +295,7 @@ class IVideoActionToFutureVideo {
 
 class IVideoToActionSequence {
   public:
+    using TaskInterface = IVideoToActionSequence;
     static constexpr std::string_view kTask = "video_to_action_sequence";
     virtual ~IVideoToActionSequence() = default;
     virtual ActionSequenceResult run(const VideoToActionSequenceRequest&, ConfigView) = 0;
@@ -290,6 +303,7 @@ class IVideoToActionSequence {
 
 class IImageToActionAndVideo {
   public:
+    using TaskInterface = IImageToActionAndVideo;
     static constexpr std::string_view kTask = "image_to_action_and_video";
     virtual ~IImageToActionAndVideo() = default;
     virtual ActionVideoResult run(const ImageToActionAndVideoRequest&, ConfigView) = 0;
@@ -297,6 +311,7 @@ class IImageToActionAndVideo {
 
 class IVideoToActionAndVideo {
   public:
+    using TaskInterface = IVideoToActionAndVideo;
     static constexpr std::string_view kTask = "video_to_action_and_video";
     virtual ~IVideoToActionAndVideo() = default;
     virtual ActionVideoResult run(const VideoToActionAndVideoRequest&, ConfigView) = 0;
@@ -304,6 +319,7 @@ class IVideoToActionAndVideo {
 
 class ITextToAudioVideo {
   public:
+    using TaskInterface = ITextToAudioVideo;
     static constexpr std::string_view kTask = "text_to_audio_video";
     virtual ~ITextToAudioVideo() = default;
     virtual AudioVideoResult run(const TextToAudioVideoRequest&, ConfigView) = 0;
@@ -311,6 +327,7 @@ class ITextToAudioVideo {
 
 class IInitialImageTextToAudioVideo {
   public:
+    using TaskInterface = IInitialImageTextToAudioVideo;
     static constexpr std::string_view kTask = "initial_image_text_to_audio_video";
     virtual ~IInitialImageTextToAudioVideo() = default;
     virtual AudioVideoResult run(const InitialImageTextToAudioVideoRequest&, ConfigView) = 0;
@@ -318,6 +335,7 @@ class IInitialImageTextToAudioVideo {
 
 class ILastImageTextToAudioVideo {
   public:
+    using TaskInterface = ILastImageTextToAudioVideo;
     static constexpr std::string_view kTask = "last_image_text_to_audio_video";
     virtual ~ILastImageTextToAudioVideo() = default;
     virtual AudioVideoResult run(const LastImageTextToAudioVideoRequest&, ConfigView) = 0;
@@ -325,6 +343,7 @@ class ILastImageTextToAudioVideo {
 
 class IBoundaryFramesTextToAudioVideo {
   public:
+    using TaskInterface = IBoundaryFramesTextToAudioVideo;
     static constexpr std::string_view kTask = "boundary_frames_text_to_audio_video";
     virtual ~IBoundaryFramesTextToAudioVideo() = default;
     virtual AudioVideoResult run(const BoundaryFramesTextToAudioVideoRequest&, ConfigView) = 0;
@@ -332,6 +351,7 @@ class IBoundaryFramesTextToAudioVideo {
 
 class IReferencesTextToAudioVideo {
   public:
+    using TaskInterface = IReferencesTextToAudioVideo;
     static constexpr std::string_view kTask = "references_text_to_audio_video";
     virtual ~IReferencesTextToAudioVideo() = default;
     virtual AudioVideoResult run(const ReferencesTextToAudioVideoRequest&, ConfigView) = 0;
@@ -350,6 +370,7 @@ struct BatchTextToVideoRequest {
 };
 class IBatchTextToVideo {
   public:
+    using TaskInterface = IBatchTextToVideo;
     static constexpr std::string_view kTask = "batch_text_to_video";
     using Request = BatchTextToVideoRequest;
     virtual ~IBatchTextToVideo() = default;
@@ -366,6 +387,7 @@ struct BatchInitialImageTextToVideoRequest {
 };
 class IBatchInitialImageTextToVideo {
   public:
+    using TaskInterface = IBatchInitialImageTextToVideo;
     static constexpr std::string_view kTask = "batch_initial_image_text_to_video";
     using Request = BatchInitialImageTextToVideoRequest;
     virtual ~IBatchInitialImageTextToVideo() = default;
@@ -382,6 +404,7 @@ struct BatchVideoTextToFutureVideoRequest {
 };
 class IBatchVideoTextToFutureVideo {
   public:
+    using TaskInterface = IBatchVideoTextToFutureVideo;
     static constexpr std::string_view kTask = "batch_video_text_to_future_video";
     using Request = BatchVideoTextToFutureVideoRequest;
     virtual ~IBatchVideoTextToFutureVideo() = default;
@@ -398,6 +421,7 @@ struct BatchImageActionToFutureVideoRequest {
 };
 class IBatchImageActionToFutureVideo {
   public:
+    using TaskInterface = IBatchImageActionToFutureVideo;
     static constexpr std::string_view kTask = "batch_image_action_to_future_video";
     using Request = BatchImageActionToFutureVideoRequest;
     virtual ~IBatchImageActionToFutureVideo() = default;
@@ -414,6 +438,7 @@ struct BatchVideoToActionSequenceRequest {
 };
 class IBatchVideoToActionSequence {
   public:
+    using TaskInterface = IBatchVideoToActionSequence;
     static constexpr std::string_view kTask = "batch_video_to_action_sequence";
     using Request = BatchVideoToActionSequenceRequest;
     virtual ~IBatchVideoToActionSequence() = default;
@@ -430,6 +455,7 @@ struct BatchImageToActionAndVideoRequest {
 };
 class IBatchImageToActionAndVideo {
   public:
+    using TaskInterface = IBatchImageToActionAndVideo;
     static constexpr std::string_view kTask = "batch_image_to_action_and_video";
     using Request = BatchImageToActionAndVideoRequest;
     virtual ~IBatchImageToActionAndVideo() = default;
@@ -446,6 +472,7 @@ struct BatchTextToAudioVideoRequest {
 };
 class IBatchTextToAudioVideo {
   public:
+    using TaskInterface = IBatchTextToAudioVideo;
     static constexpr std::string_view kTask = "batch_text_to_audio_video";
     using Request = BatchTextToAudioVideoRequest;
     virtual ~IBatchTextToAudioVideo() = default;
@@ -462,6 +489,7 @@ struct BatchInitialImageTextToAudioVideoRequest {
 };
 class IBatchInitialImageTextToAudioVideo {
   public:
+    using TaskInterface = IBatchInitialImageTextToAudioVideo;
     static constexpr std::string_view kTask = "batch_initial_image_text_to_audio_video";
     using Request = BatchInitialImageTextToAudioVideoRequest;
     virtual ~IBatchInitialImageTextToAudioVideo() = default;

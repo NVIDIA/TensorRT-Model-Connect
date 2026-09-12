@@ -150,6 +150,195 @@ int main(int argc, char** argv) {
         request["request"]["target_language"] = "";
         run(false);
 
+        const auto mono_wav = root / "benchmark_audio_mono.wav";
+        const float mono_samples[] = {0.125F, -0.25F, 0.5F, -0.75F};
+        trtmc::cli::io::write_wav_interleaved({mono_samples, 4}, 16000, 1, mono_wav.string());
+        for (const auto* task : {"batch_speech_transcription", "batch_speech_translation",
+                                 "mixed_batch_speech_to_text"}) {
+            bundle(model, task);
+            Json items = Json::array({{{"audio_path", wav.string()}, {"config", {{"suffix", ""}}}},
+                                      {{"audio_path", mono_wav.string()},
+                                       {"source_language", "fr"},
+                                       {"config", {{"suffix", "?"}}}}});
+            const bool mixed = std::string(task) == "mixed_batch_speech_to_text";
+            const bool translation = std::string(task) == "batch_speech_translation";
+            if (translation || mixed)
+                items[1]["target_language"] = "de";
+            if (mixed) {
+                items[0]["kind"] = "transcription";
+                items[1]["kind"] = "translation";
+            }
+            for (const bool include_assets : {false, true}) {
+                request["request"] = {{"items", items}};
+                request["measurement"]["asset_loading_included"] = include_assets;
+                result = run();
+                const auto& summary = result.at("output_summary");
+                const auto& first = summary.at("items").at(0);
+                const auto& second = summary.at("items").at(1);
+                check(summary.at("transcribed_items") == 2 &&
+                          std::abs(summary.at("input_audio_seconds").get<double>() -
+                                   (3.0 / 8000 + 4.0 / 16000)) < 1e-12 &&
+                          first.at("input_channels") == 2 &&
+                          first.at("input_sample_rate") == 8000 &&
+                          second.at("input_channels") == 1 &&
+                          second.at("input_sample_rate") == 16000 &&
+                          first.at("input_frames") == 3 && second.at("input_frames") == 4,
+                      "native speech batch preserves unequal item rates/channels and sums real "
+                      "duration");
+                check(first.at("token_ids") ==
+                              (mixed ? Json::array({3, 0, 0, 0, 0, 0}) : Json::array({3, 0, 0})) &&
+                          second.at("token_ids") ==
+                              (mixed ? Json::array({3, 1, 0, 0, 0, 0}) : Json::array({3, 1, 0})),
+                      "one native batch call per warmup/iteration; no scalar or alternate-batch "
+                      "calls");
+                check(first.at("text") == (mixed         ? "mixed_asr:auto"
+                                           : translation ? "batch_translate:auto->en"
+                                                         : "batch_asr:auto") &&
+                          second.at("text") == (mixed         ? "mixed_translate:fr->de?"
+                                                : translation ? "batch_translate:fr->de?"
+                                                              : "batch_asr:fr?"),
+                      "per-item language presence, variant and Config survive batch transport");
+                check(first.at("segments").at(0).at("end_seconds") == 3.0 / 8000 &&
+                          second.at("segments").at(0).at("end_seconds") == 4.0 / 16000 &&
+                          result.at("asset_loading_included") == include_assets,
+                      "batch transcript segments and asset timing policy remain explicit");
+            }
+            request["request"] = {{"items", items}, {"config", {{"suffix", "global"}}}};
+            run(false);
+            request["request"] = {{"items", items}};
+            request["request"]["items"][1]["config"] = {{"suffix", 3}};
+            run(false);
+            request["request"] = {{"items", items}};
+            request["request"]["items"][1]["source_language"] = nullptr;
+            run(false);
+            request["request"] = {{"items", items}};
+            if (mixed)
+                request["request"]["items"][1]["kind"] = "guess";
+            else
+                request["request"]["items"][1]["kind"] = "transcription";
+            run(false);
+        }
+        std::filesystem::remove(mono_wav);
+
+        const auto original_audio = trtmc::cli::io::read_wav_interleaved(wav.string());
+        Json waveform = Json::array();
+        for (const float sample : original_audio.samples)
+            waveform.push_back(sample);
+        request["operation"] = "speech_dialogue";
+        for (const auto* task : {"duplex_speech_dialogue", "offline_speech_dialogue"}) {
+            bundle(model, task, "speech_fixture");
+            request["request"] = {
+                {"audio_path", wav.string()}, {"chunk_frames", 1}, {"system_prompt", ""}};
+            for (const bool include_assets : {false, true}) {
+                request["measurement"]["asset_loading_included"] = include_assets;
+                result = run();
+                for (const auto& observation : result.at("observations")) {
+                    const auto& events = observation.at("events");
+                    check(observation.at("lifecycle_scope") ==
+                                  "fresh_create_append_finish_drain_close" &&
+                              observation.at("input_chunks") == 3 &&
+                              observation.at("append_attempts") == 3 &&
+                              observation.at("system_prompt") == "" &&
+                              events.at(0).at("sequence") == 0 && events.at(0).at("epoch") == 1 &&
+                              events.at(0).at("kind") == "user_speech_started",
+                          "every dialogue iteration starts a fresh session and preserves explicit "
+                          "empty prompt/chunking");
+                    bool audio_seen = false, finished = false, reply_seen = false;
+                    for (const auto& event : events) {
+                        if (event.at("kind") == "agent_audio") {
+                            audio_seen =
+                                event.at("audio") == waveform && event.at("channels") == 2 &&
+                                event.at("sample_rate") == 24000 &&
+                                event.at("media_start_sample") == 0 &&
+                                event.at("media_end_sample") == 3 && event.at("frame_index") == 3;
+                        }
+                        if (event.at("kind") == "input_finished")
+                            finished = event.at("is_final").get<bool>();
+                        if (event.at("kind") == "agent_text")
+                            reply_seen |=
+                                event.at("text") == (std::string(task) == "offline_speech_dialogue"
+                                                         ? "offline reply"
+                                                         : "live reply");
+                    }
+                    check(audio_seen && finished && reply_seen &&
+                              observation.at("read_states").back() == 2 &&
+                              std::abs(observation.at("output_audio_seconds").get<double>() -
+                                       3.0 / 24000) < 1e-12 &&
+                              observation.at("input_sample_rate") == 8000 &&
+                              !observation.contains("output_tokens"),
+                          "dialogue retains typed PCM/event timeline, drains normal epoch end, and "
+                          "does not guess text tokens");
+                }
+            }
+        }
+        bundle(model, "tool_speech_dialogue", "speech_fixture");
+        const std::string preset_error("preset\0error", 12);
+        const Json tool_input{
+            {"audio_path", wav.string()},
+            {"chunk_frames", 1},
+            {"tools",
+             Json::array(
+                 {{{"name", "lookup"}, {"description", "Lookup"}, {"parameters_schema_json", "{}"}},
+                  {{"name", "other"},
+                   {"description", "Other"},
+                   {"parameters_schema_json", "{}"}}})},
+            {"tool_replies",
+             Json::array(
+                 {{{"name", "lookup"}, {"content_text", preset_error}, {"is_error", true}},
+                  {{"name", "other"}, {"content_text", "preset-ok"}, {"is_error", false}}})},
+            {"acknowledgements",
+             Json::array({{{"tool_name", "lookup"}, {"messages", {"first ack", "chosen ack"}}}})},
+            {"default_acknowledgements", {"first default", "chosen default"}}};
+        request["request"] = tool_input;
+        result = run();
+        for (const auto& observation : result.at("observations")) {
+            bool acknowledged = false, default_acknowledged = false, error_reply = false,
+                 ok_reply = false;
+            std::size_t calls = 0;
+            for (const auto& event : observation.at("events")) {
+                if (event.contains("tool_call")) {
+                    ++calls;
+                    check(event.at("tool_call").at("state") == "unknown" &&
+                              event.at("tool_call").at("arguments_json") == "{}" &&
+                              event.at("epoch") == 2,
+                          "tool-call arguments, state and fresh epoch are preserved without "
+                          "reinterpretation");
+                }
+                acknowledged |= event.at("text") == "chosen ack";
+                default_acknowledged |= event.at("text") == "chosen default";
+                error_reply |= event.at("kind") == "error" && event.at("text") == preset_error;
+                ok_reply |= event.at("kind") == "agent_text" && event.at("text") == "preset-ok";
+            }
+            check(calls == 2 && observation.at("submitted_tool_replies") == 2 && acknowledged &&
+                      default_acknowledged && error_reply && ok_reply &&
+                      observation.at("system_prompt") == "fixture prompt",
+                  "tool dialogue submits only ordered preset replies, preserves acknowledgements, "
+                  "and treats error replies as recoverable events");
+        }
+        request["request"]["tool_replies"][0]["name"] = "wrong";
+        run(false);
+        request["request"] = tool_input;
+        request["request"]["tool_replies"].erase(1);
+        run(false);
+        request["request"] = tool_input;
+        request["request"].erase("tool_replies");
+        run(false);
+        request["request"] = tool_input;
+        request["request"]["default_acknowledgements"] = Json::array();
+        run(false);
+        bundle(model, "duplex_speech_dialogue", "speech_fixture");
+        request["request"] = {{"audio_path", wav.string()}, {"chunk_frames", 0}};
+        run(false);
+        const auto oversized_wav = root / "benchmark_dialogue_oversized.wav";
+        std::vector<float> oversized(20, 0);
+        trtmc::cli::io::write_wav_interleaved({oversized.data(), oversized.size()}, 8000, 2,
+                                              oversized_wav.string());
+        request["request"] = {{"audio_path", oversized_wav.string()}, {"timeout_ms", 5}};
+        check(
+            run(false).at("error").get<std::string>().find("timed out") != std::string::npos,
+            "unaccepted audio is not dropped or completed; bounded backpressure fails explicitly");
+        std::filesystem::remove(oversized_wav);
+
         request["operation"] = "generate_audio";
         request["request"] = {{"prompt", "Hello"}};
         for (const auto* task : {"text_to_audio", "text_to_speech"}) {

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -81,6 +82,132 @@ def test_semantic_text_benchmark_keeps_family_config_and_presence(tmp_path: Path
     assert special.request["confidence_threshold"] == "0.8"
 
 
+def test_translation_uses_typed_language_inputs_and_family_defaults(tmp_path: Path) -> None:
+    absent = resolve_task_case("text_translation", {"inputs": {"source_text": "Bonjour"}}, tmp_path)
+    assert absent.operation == "translate"
+    assert absent.request == {"source_text": "Bonjour"}
+    explicit = resolve_task_case("text_translation", {
+        "prompt": "", "source_language": "fr", "inputs": {"target_language": "en"},
+        "max_new_tokens": 0, "config": {"suffix": "", "normalize": False},
+    }, tmp_path)
+    assert explicit.request == {
+        "source_text": "", "source_language": "fr", "target_language": "en",
+        "max_new_tokens": 0, "config": {"suffix": "", "normalize": False},
+    }
+    assert all(source == "family manifest" for source in explicit.sources.values())
+
+
+@pytest.mark.parametrize("value", [None, "", False, 3])
+def test_translation_keeps_invalid_present_languages_for_native_rejection(tmp_path: Path, value) -> None:
+    request = resolve_task_case("text_translation", {
+        "prompt": "Bonjour", "target_language": value,
+    }, tmp_path).request
+    assert "target_language" in request and request["target_language"] is value
+    assert "source_language" not in request
+
+
+def test_translation_rejects_duplicate_languages_and_wrong_operation(tmp_path: Path) -> None:
+    with pytest.raises(BenchmarkError, match="duplicate input/control for target_language"):
+        resolve_task_case("text_translation", {
+            "prompt": "Bonjour", "target_language": "en", "inputs": {"target_language": "de"},
+        }, tmp_path)
+    with pytest.raises(BenchmarkError, match="cannot run operation 'generate'"):
+        resolve_task_case("text_translation", {"prompt": "Bonjour"}, tmp_path, operation="generate")
+
+
+def test_translation_metrics_keep_token_rates_and_stage_timings() -> None:
+    metrics = reduce_metrics("translate", [
+        {"runtime_e2e_wall_ms": 20.0, "output_tokens": 4, "prefill_ms": 2.0, "decode_ms": 3.0},
+    ])
+    assert metrics["output_tokens_per_s"] == 200.0
+    assert metrics["reported_stages_ms"]["prefill_ms"]["p50"] == 2.0
+    assert metrics["reported_stages_ms"]["decode_ms"]["p50"] == 3.0
+
+
+def test_unconditional_generation_has_no_fabricated_prompt(tmp_path: Path) -> None:
+    default = resolve_task_case("unconditional_text_generation", {}, tmp_path)
+    assert default.operation == "generate" and default.request == {}
+    explicit = resolve_task_case("unconditional_text_generation", {
+        "max_new_tokens": 0, "config": {"suffix": ""},
+    }, tmp_path)
+    assert explicit.request == {"max_new_tokens": 0, "config": {"suffix": ""}}
+    with pytest.raises(BenchmarkError, match="has no prompt"):
+        resolve_task_case("unconditional_text_generation", {"prompt": ""}, tmp_path)
+
+
+@pytest.fixture
+def latent_assets(tmp_path: Path) -> Path:
+    for name in ("condition", "mask", "initial", "noise", "steps", "branch", "trunk"):
+        (tmp_path / f"{name}.f32").write_bytes(b"\0" * 16)
+    return tmp_path
+
+
+def test_latent_text_requests_preserve_raw_operands_and_optional_prompt(latent_assets: Path) -> None:
+    conditioned = resolve_task_case("latent_conditioned_text_generation", {"inputs": {
+        "condition_latents_raw": "condition.f32", "condition_mask_path": "mask.f32",
+    }}, latent_assets)
+    assert conditioned.operation == "generate"
+    assert conditioned.request == {
+        "condition_latents_path": str(latent_assets / "condition.f32"),
+        "condition_mask_path": str(latent_assets / "mask.f32"),
+    }
+    replay = resolve_task_case("latent_replay_to_text", {
+        "prompt": "", "inputs": {"sde_noise_raw": "noise.f32", "sampling_steps_raw": "steps.f32"},
+        "config": {"sampling_steps": [0.0, 0.5, 1.0]},
+    }, latent_assets)
+    assert replay.request == {
+        "sde_noises_path": str(latent_assets / "noise.f32"),
+        "sampling_steps_path": str(latent_assets / "steps.f32"), "prompt": "",
+        "config": {"sampling_steps": [0.0, 0.5, 1.0]},
+    }  # A duplicate schedule remains explicit for native rejection.
+
+
+def test_latent_replay_rejects_missing_or_wrong_kind_of_operands(latent_assets: Path) -> None:
+    with pytest.raises(BenchmarkError, match="requires initial latents or SDE noise"):
+        resolve_task_case("latent_replay_to_text", {"prompt": "text"}, latent_assets)
+    with pytest.raises(BenchmarkError, match="requires condition latents and mask"):
+        resolve_task_case("latent_conditioned_text_generation", {
+            "condition_latents_path": "condition.f32",
+        }, latent_assets)
+    with pytest.raises(BenchmarkError, match="require the conditioned latent Task"):
+        resolve_task_case("latent_replay_to_text", {
+            "condition_latents_path": "condition.f32", "initial_latents_path": "initial.f32",
+        }, latent_assets)
+
+
+@pytest.mark.parametrize("task,operation,count_field,metric", [
+    ("latent_denoising_step", "denoise", "latent_elements", "latent_elements_per_s"),
+    ("latent_to_token_logits", "decode_logits", "logit_elements", "logit_elements_per_s"),
+])
+def test_latent_steps_preserve_logical_or_native_packed_inputs_without_token_inference(
+    latent_assets: Path, task: str, operation: str, count_field: str, metric: str
+) -> None:
+    logical = resolve_task_case(task, {"inputs": {
+        "latents_path": "condition.f32", "shape": [2, 2], "timestep": 0.0,
+        "self_condition_path": "initial.f32",
+    }}, latent_assets)
+    assert logical.operation == operation
+    assert logical.request == {
+        "latents_path": str(latent_assets / "condition.f32"), "shape": [2, 2], "timestep": 0.0,
+        "self_condition_path": str(latent_assets / "initial.f32"),
+    }
+    packed = resolve_task_case(task, {
+        "inputs": {"branch": "branch.f32", "trunk": "trunk.f32"},
+        "config": {"self_cond_cfg_scale": 0.0},
+    }, latent_assets)
+    assert packed.request == {
+        "branch_path": str(latent_assets / "branch.f32"),
+        "trunk_path": str(latent_assets / "trunk.f32"), "config": {"self_cond_cfg_scale": 0.0},
+    }
+    metrics = reduce_metrics(operation, [{"runtime_e2e_wall_ms": 20.0, count_field: 6}])
+    assert metrics[metric] == 300.0 and metrics["request_throughput_per_s"] == 50.0
+    assert "output_tokens_per_s" not in metrics
+    with pytest.raises(BenchmarkError, match="cannot be combined"):
+        resolve_task_case(task, {"inputs": {
+            "branch": "branch.f32", "trunk": "trunk.f32", "self_condition_path": "initial.f32",
+        }}, latent_assets)
+
+
 @pytest.mark.parametrize("task", [
     "series_to_point_forecast", "series_to_quantile_forecast", "series_to_point_and_quantile_forecast",
 ])
@@ -154,6 +281,255 @@ def sdk_assets(tmp_path: Path) -> Path:
     for name in ("state.f32", "latents.f32"):
         (tmp_path / name).write_bytes(b"\0" * 16)
     return tmp_path
+
+
+def test_metric_geometry_has_an_image_input_and_preserves_optional_config(sdk_assets: Path) -> None:
+    default = resolve_task_case("image_to_metric_geometry", {"image": "image.ppm"}, sdk_assets)
+    assert default.operation == "geometry"
+    assert default.request == {"image_path": str(sdk_assets / "image.ppm")}
+    explicit = resolve_task_case("image_to_metric_geometry", {
+        "inputs": {"image_path": "image.ppm", "fov_x": 0.0}, "config": {"resolution_level": 0},
+    }, sdk_assets)
+    assert explicit.request == {
+        "image_path": str(sdk_assets / "image.ppm"), "fov_x": 0.0, "config": {"resolution_level": 0},
+    }
+
+
+def test_image_only_detection_has_no_text_or_postprocessing_defaults(sdk_assets: Path) -> None:
+    result = resolve_task_case("image_to_boxes", {"image": "image.ppm", "config": {"score": 0.0}}, sdk_assets)
+    assert result.operation == "detect"
+    assert result.request == {"image_path": str(sdk_assets / "image.ppm"), "config": {"score": 0.0}}
+    with pytest.raises(BenchmarkError, match="has no prompt"):
+        resolve_task_case("image_to_boxes", {"image": "image.ppm", "prompt": ""}, sdk_assets)
+    metrics = reduce_metrics("detect", [{"runtime_e2e_wall_ms": 20.0, "detected_images": 1, "detections": 0}])
+    assert metrics["images_per_s"] == 50.0 and metrics["detections_per_s"] == 0.0
+
+
+def test_structure_input_keeps_document_bytes_and_source_path_opaque(tmp_path: Path) -> None:
+    document = tmp_path / "prepared.bytes"
+    document.write_bytes(b"B2RQ\0\x7f")
+    source_path = "relative/source\0name.yaml"
+    result = resolve_task_case("molecular_document_to_structure", {
+        "inputs": {"input_path": document.name, "input_encoding": "b2rq", "source_path": source_path},
+        "config": {"seed": 0, "include_confidence": False, "sampling_steps": 1},
+    }, tmp_path)
+    assert result.operation == "predict_structure"
+    assert result.request == {
+        "document_path": str(document), "input_encoding": "b2rq", "source_path": source_path,
+        "config": {"seed": 0, "include_confidence": False, "sampling_steps": 1},
+    }
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "model.bundle").with_values(
+        request=result.request, runtime_root=tmp_path,
+    )
+    assert case.worker_request()["request"]["source_path"] == source_path
+    assert document.read_bytes() == b"B2RQ\0\x7f"
+
+
+@pytest.mark.parametrize("extension,encoding", [("yaml", "yaml"), ("yml", "yaml"), ("json", "json"), ("b2rq", "b2rq")])
+def test_structure_encoding_defaults_follow_the_cli_without_config_defaults(tmp_path: Path, extension: str, encoding: str) -> None:
+    document = tmp_path / f"input.{extension}"
+    document.write_bytes(b"opaque")
+    result = resolve_task_case("molecular_document_to_structure", {"document_path": document.name}, tmp_path)
+    assert result.request == {"document_path": str(document), "input_encoding": encoding, "source_path": str(document)}
+    assert result.sources["input_encoding"] == result.sources["source_path"] == "task default"
+    assert "seed" not in result.request and "sampling_steps" not in result.request
+    explicit = resolve_task_case("molecular_document_to_structure", {
+        "document_path": document.name, "input_encoding": "", "source_path": "", "num_steps": 0,
+        "config": {"sampling_steps": 1},
+    }, tmp_path)
+    assert explicit.request["input_encoding"] == explicit.request["source_path"] == ""
+    assert explicit.request["sampling_steps"] == 0
+    assert explicit.request["config"] == {"sampling_steps": 1}
+
+
+def test_unknown_structure_extension_requires_explicit_encoding(tmp_path: Path) -> None:
+    (tmp_path / "request.bytes").write_bytes(b"opaque")
+    with pytest.raises(BenchmarkError, match="specify input_encoding"):
+        resolve_task_case("molecular_document_to_structure", {"document_path": "request.bytes"}, tmp_path)
+    metrics = reduce_metrics("predict_structure", [{"runtime_e2e_wall_ms": 50.0, "structures": 1}])
+    assert metrics["structures_per_s"] == 20.0
+    assert "output_tokens_per_s" not in metrics
+
+
+def test_regression_distribution_preserves_masked_history_and_target_semantics(tmp_path: Path) -> None:
+    supplied = {"inputs": {"past_values": [1.0, None, 3.0, 4.0], "shape": [2, 2],
+                            "observed_mask": [1, 0, 1, 1]},
+                "config": {"distribution": "student_t"}}
+    resolved = resolve_task_case("series_to_regression_distribution", supplied, tmp_path)
+    assert resolved.operation == "regress"
+    assert resolved.request == {
+        "past_values": [1.0, None, 3.0, 4.0], "shape": [2, 2], "observed_mask": [1, 0, 1, 1],
+        "config": {"distribution": "student_t"},
+    }
+    assert "frequency" not in resolved.request
+    supplied["inputs"]["past_values"][0] = 9.0
+    assert resolved.request["past_values"][0] == 1.0
+    metrics = reduce_metrics("regress", [
+        {"runtime_e2e_wall_ms": 20.0, "regression_targets": 2, "parameter_elements": 6},
+    ])
+    assert metrics["targets_per_s"] == 100.0
+    assert metrics["parameter_elements_per_s"] == 300.0
+    assert "forecast_elements_per_s" not in metrics
+
+
+@pytest.mark.parametrize("task", [
+    "batch_speech_transcription", "batch_speech_translation", "mixed_batch_speech_to_text",
+])
+def test_native_speech_batch_preserves_each_item_and_has_no_global_defaults(tmp_path: Path, task: str) -> None:
+    (tmp_path / "a.wav").write_bytes(b"fixture")
+    (tmp_path / "b.wav").write_bytes(b"fixture")
+    items = [{"audio": "a.wav", "config": {"suffix": ""}},
+             {"audio_path": "b.wav", "source_language": "fr", "config": {"suffix": "?"}}]
+    if task == "batch_speech_translation":
+        items[1]["target_language"] = "de"
+    if task == "mixed_batch_speech_to_text":
+        items[0]["kind"] = "transcription"
+        items[1].update(kind="translation", target_language="de")
+    resolved = resolve_task_case(task, {"inputs": {"items": items}}, tmp_path)
+    assert resolved.operation == "transcribe"
+    assert set(resolved.request) == {"items"}
+    assert [item["audio_path"] for item in resolved.request["items"]] == [
+        str(tmp_path / "a.wav"), str(tmp_path / "b.wav"),
+    ]
+    assert "source_language" not in resolved.request["items"][0]
+    assert "target_language" not in resolved.request["items"][0]
+    assert resolved.request["items"][1]["source_language"] == "fr"
+    items[0]["config"]["suffix"] = "changed"
+    assert resolved.request["items"][0]["config"] == {"suffix": ""}
+    with pytest.raises(BenchmarkError, match="belongs to each"):
+        resolve_task_case(task, {"inputs": {"items": items}, "config": {}}, tmp_path)
+    with pytest.raises(BenchmarkError, match="belongs to each"):
+        resolve_task_case(task, {"inputs": {"items": items}, "source_language": "en"}, tmp_path)
+
+
+@pytest.mark.parametrize("items", [None, [], [None], "audio.wav"])
+def test_native_speech_batch_requires_a_nonempty_array_of_items(tmp_path: Path, items) -> None:
+    with pytest.raises(BenchmarkError, match="batch speech"):
+        resolve_task_case("batch_speech_transcription", {"inputs": {"items": items}}, tmp_path)
+
+
+def test_action_queue_preserves_order_and_separates_create_from_step_config(sdk_assets: Path) -> None:
+    observations = [
+        {"image": "image.ppm", "state": "state.f32", "config": {}},
+        {"image_path": "second.ppm", "state_path": "state.f32", "config": {"tag": "step"}},
+    ]
+    resolved = resolve_task_case("image_state_action_queue", {
+        "inputs": {"observations": observations}, "config": {"tag": "session"},
+    }, sdk_assets)
+    assert resolved.operation == "control_queue"
+    assert resolved.request["config"] == {"tag": "session"}
+    assert [step["image_path"] for step in resolved.request["observations"]] == [
+        str(sdk_assets / "image.ppm"), str(sdk_assets / "second.ppm"),
+    ]
+    assert [step["config"] for step in resolved.request["observations"]] == [{}, {"tag": "step"}]
+    observations[1]["config"]["tag"] = "changed"
+    assert resolved.request["observations"][1]["config"] == {"tag": "step"}
+    with pytest.raises(BenchmarkError, match="nonempty observations"):
+        resolve_task_case("image_state_action_queue", {"observations": []}, sdk_assets)
+    with pytest.raises(BenchmarkError, match="state_path"):
+        resolve_task_case("image_state_action_queue", {"observations": [{"image": "image.ppm"}]}, sdk_assets)
+
+
+@pytest.mark.parametrize("task", ["duplex_speech_dialogue", "offline_speech_dialogue"])
+def test_speech_dialogue_has_explicit_audio_and_keeps_prompt_presence(tmp_path: Path, task: str) -> None:
+    (tmp_path / "input.wav").write_bytes(b"fixture")
+    default = resolve_task_case(task, {"audio": "input.wav"}, tmp_path)
+    assert default.operation == "speech_dialogue"
+    assert default.request == {"audio_path": str(tmp_path / "input.wav")}
+    explicit = resolve_task_case(task, {
+        "inputs": {"audio_path": "input.wav", "system_prompt": "", "chunk_frames": 1, "timeout_ms": 0},
+        "config": {"bool": False},
+    }, tmp_path)
+    assert explicit.request == {"audio_path": str(tmp_path / "input.wav"), "system_prompt": "",
+                                "chunk_frames": 1, "timeout_ms": 0, "config": {"bool": False}}
+    with pytest.raises(BenchmarkError, match="require tool_speech_dialogue"):
+        resolve_task_case(task, {"audio": "input.wav", "tool_replies": []}, tmp_path)
+
+
+def test_tool_speech_dialogue_keeps_preset_replies_and_acknowledgement_lists(tmp_path: Path) -> None:
+    (tmp_path / "input.wav").write_bytes(b"fixture")
+    tools = [{"name": "lookup", "description": "", "parameters_schema_json": '{ "type": "object" }'}]
+    replies = [{"name": "lookup", "content_text": "preset\0error", "is_error": True}]
+    resolved = resolve_task_case("tool_speech_dialogue", {
+        "audio": "input.wav", "tools": tools, "tool_replies": replies,
+        "acknowledgements": [{"tool_name": "lookup", "messages": ["first", "second"]}],
+        "default_acknowledgements": [],
+    }, tmp_path)
+    assert resolved.request["tools"] == tools and resolved.request["tool_replies"] == replies
+    assert resolved.request["acknowledgements"][0]["messages"] == ["first", "second"]
+    assert resolved.request["default_acknowledgements"] == []
+    replies[0]["content_text"] = "changed"
+    assert resolved.request["tool_replies"][0]["content_text"] == "preset\0error"
+    with pytest.raises(BenchmarkError, match="explicit tool_replies"):
+        resolve_task_case("tool_speech_dialogue", {"audio": "input.wav", "tools": tools}, tmp_path)
+    with pytest.raises(BenchmarkError, match="audio_path"):
+        resolve_task_case("tool_speech_dialogue", {"tools": tools, "tool_replies": replies}, tmp_path)
+
+
+def test_session_metrics_use_complete_lifecycle_duration_without_text_token_guesses() -> None:
+    control = reduce_metrics("control_queue", [{"runtime_e2e_wall_ms": 10.0, "action_steps": 3}])
+    assert control["action_steps_per_s"] == 300.0
+    speech = reduce_metrics("speech_dialogue", [
+        {"runtime_e2e_wall_ms": 50.0, "input_audio_seconds": 0.1, "output_audio_seconds": 0.04},
+    ])
+    assert speech["input_audio_seconds_per_s"] == 2.0
+    assert speech["audio_seconds_per_s"] == 0.04 / 0.05
+    assert "output_tokens_per_s" not in speech
+
+
+@pytest.mark.parametrize("task", ["frames_to_detected_mask_tracks", "frames_text_to_mask_tracks", "prompt_frame_text_to_mask_tracks"])
+def test_tracking_inputs_preserve_clip_order_and_distinct_prompt_roles(sdk_assets: Path, task: str) -> None:
+    case = {"frame_paths": ["second.ppm", "image.ppm"], "timestamps_seconds": [0.0, 0.75]}
+    if task != "frames_to_detected_mask_tracks":
+        case["prompt"] = "bird"
+    result = resolve_task_case(task, case, sdk_assets)
+    assert result.operation == "track_masks"
+    assert result.request["frame_paths"] == [str(sdk_assets / "second.ppm"), str(sdk_assets / "image.ppm")]
+    assert result.request["timestamps_seconds"] == [0.0, 0.75]
+    assert ("prompt" in result.request) == (task != "frames_to_detected_mask_tracks")
+    if task == "frames_to_detected_mask_tracks":
+        case["device_masks"] = True
+        assert resolve_task_case(task, case, sdk_assets).request["device_masks"] is True
+        case["prompt"] = ""
+        with pytest.raises(BenchmarkError, match="no text prompt"):
+            resolve_task_case(task, case, sdk_assets)
+    elif task == "prompt_frame_text_to_mask_tracks":
+        case["segment_config"] = {}
+        with pytest.raises(BenchmarkError, match="creation only"):
+            resolve_task_case(task, case, sdk_assets)
+
+
+def test_pose_replay_requires_explicit_crop_query_and_input_geometry(latent_assets: Path) -> None:
+    batch = {"stage": "refinement", "iteration": 0, "shape": [2, 1, 1, 6],
+             "query_poses_path": "condition.f32", "rendered_path": "initial.f32", "observed_path": "mask.f32"}
+    initial = {"candidate_poses_path": "condition.f32", "hypothesis_count": 2, "mesh_diameter_meters": 0.0,
+               "crop_batches": [batch], "config": {"refinement_iterations": 1}}
+    result = resolve_task_case("pose_hypotheses_crops_to_refined_poses", initial, latent_assets)
+    assert result.operation == "refine_pose"
+    assert result.request["mesh_diameter_meters"] == 0.0  # Native contract rejects it; no guessed diameter.
+    assert result.request["crop_batches"][0]["query_poses_path"] == str(latent_assets / "condition.f32")
+    assert result.request["crop_batches"][0]["shape"] == [2, 1, 1, 6]
+    tracked = resolve_task_case("crop_pose_tracking", {
+        "initialization": initial, "updates": [{"crop_batches": [batch], "config": {}}], "config": {},
+    }, latent_assets)
+    assert tracked.operation == "track_pose"
+    assert tracked.request["updates"][0]["config"] == {}
+    assert tracked.request["initialization"]["config"] == {"refinement_iterations": 1}
+    del batch["query_poses_path"]
+    with pytest.raises(BenchmarkError, match="query_poses_path"):
+        resolve_task_case("pose_hypotheses_crops_to_refined_poses", initial, latent_assets)
+
+
+def test_tracking_and_pose_rates_count_actual_output_units() -> None:
+    masks = reduce_metrics("track_masks", [{"runtime_e2e_wall_ms": 100.0, "tracked_frames": 5, "mask_elements": 30}])
+    assert masks["frames_per_s"] == 50.0 and masks["mask_elements_per_s"] == 300.0
+    pose = reduce_metrics("refine_pose", [{"runtime_e2e_wall_ms": 100.0, "refined_hypotheses": 2,
+                                           "refinement_ms": 2.0, "scoring_ms": 1.0}])
+    assert pose["hypotheses_per_s"] == 20.0
+    assert pose["reported_stages_ms"]["scoring_ms"]["p50"] == 1.0
+    tracking = reduce_metrics("track_pose", [{"runtime_e2e_wall_ms": 100.0, "pose_updates": 2}])
+    assert tracking["pose_updates_per_s"] == 20.0
 
 
 @pytest.mark.parametrize("task,operation,case,expected", [
@@ -607,6 +983,47 @@ def test_cli_dry_run_uses_explicit_bundle_without_runtime(tmp_path: Path, capsys
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["operation"] == "generate"
+    assert payload[0]["bundle_is_explicit"] is True
+
+
+@pytest.mark.parametrize("task", ["text_generation", "text_continuation"])
+def test_prepare_only_checks_explicit_bundle_identity_without_loading_a_model(
+    tmp_path: Path, monkeypatch, capsys, task: str
+) -> None:
+    bundle = tmp_path / "model.bundle"
+    bundle.write_bytes(b"user bundle")
+    commands = []
+
+    def inspect(command, **options):
+        commands.append(command)
+        assert options["timeout"] == 30
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps({"family": "gpt2", "task": task}), ""
+        )
+
+    monkeypatch.setattr(benchmark_builder.subprocess, "run", inspect)
+    arguments = [
+        "run", "--model", "distilgpt2", "--manifest-root", str(REPO / "families"),
+        "--bundle", str(bundle), "--prepare-only", "--no-build",
+    ]
+    if task == "text_generation":
+        assert main(arguments) == 0
+        assert json.loads(capsys.readouterr().out)["bundles"][0]["status"] == "reused"
+    else:
+        with pytest.raises(SystemExit) as error:
+            main(arguments)
+        assert error.value.code == 2
+        assert "bundle identity mismatch" in capsys.readouterr().err
+    assert commands == [[sys.executable, "-m", "tensorrt_model_connect", "inspect", str(bundle)]]
+    assert bundle.read_bytes() == b"user bundle"
+
+
+def test_worker_request_carries_the_manifest_bundle_identity(tmp_path: Path) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "model.bundle").with_values(runtime_root=tmp_path)
+    request = case.worker_request()
+    assert request["expected_family"] == model.family
+    assert request["expected_task"] == model.task
 
 
 def test_native_examples_depend_only_on_public_headers() -> None:

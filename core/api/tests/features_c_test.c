@@ -211,6 +211,38 @@ static void class_identity_contracts(const trtmc_core_api_v1* core, const char* 
     }
 }
 
+static void unknown_embedding_space_contract(const trtmc_core_api_v1* core, const char* root,
+                                             const trtmc_load_options_v1* options) {
+    char path[4096];
+    trtmc_model* model = NULL;
+    trtmc_result* result = NULL;
+    trtmc_error* error = NULL;
+    const trtmc_api_header* header = NULL;
+    if (snprintf(path, sizeof(path), "%s/features_c_unknown_space.bundle", root) >=
+            (int)sizeof(path) ||
+        !write_bundle(path, "unknown_embedding_space") ||
+        core->model_load(str(path), options, &model, &error) != TRTMC_OK ||
+        core->model_get_task_api(model, str(TRTMC_TASK_TEXT_TO_EMBEDDING), 1, 0, &header, &error) !=
+            TRTMC_OK) {
+        check(0, "load C unknown-space embedding fixture");
+        consume_error(core, &error);
+        core->model_release(model);
+        return;
+    }
+    const trtmc_text_to_embedding_api_v1* task = (const trtmc_text_to_embedding_api_v1*)header;
+    const trtmc_text_to_embedding_request_v1 input = {str("local"), TRTMC_EMBEDDING_DEFAULT};
+    check(task->run(model, &input, NULL, &result, &error) == TRTMC_OK && result,
+          "C computes an embedding without a known checkpoint-space identifier");
+    core->model_release(model);
+    trtmc_semantic_embedding_view_v1 view = {0};
+    check(task->result_view(result, &view, &error) == TRTMC_OK && view.count == 2 &&
+              view.values[0] == 4 && view.embedding_space.size == 0 && view.pooling.size == 4 &&
+              view.normalization.size == 4,
+          "C preserves values and explicit unknown identity after model release");
+    core->result_release(result);
+    consume_error(core, &error);
+}
+
 int main(int argc, char** argv) {
     if (argc != 2)
         return 2;
@@ -229,6 +261,7 @@ int main(int argc, char** argv) {
     options.struct_size = sizeof(options);
     options.runtime_root = str(argv[1]);
     class_identity_contracts(core, argv[1], &options);
+    unknown_embedding_space_contract(core, argv[1], &options);
     trtmc_model *model = NULL, *disabled = NULL;
     if (core->model_load(str(path), &options, &model, &error) != TRTMC_OK)
         return 2;

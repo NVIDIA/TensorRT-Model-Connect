@@ -45,52 +45,62 @@ class FeaturesFixture final : public IModel,
   public:
     explicit FeaturesFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "none")
             return {};
         return {
-            {IBatchImageToTokenFeatures::kTask, 1, 0},
-            {IBatchImageToSpatialFeatures::kTask, 1, 0},
-            {IBatchImageToPooledFeatures::kTask, 1, 0},
-            {IBatchTextToEmbedding::kTask, 1, 0},
-            {IBatchTextToTokenFeatures::kTask, 1, 0},
-            {IBatchImageToTokenAndPooledFeatures::kTask, 1, 0},
-            {IBatchImageToClassScores::kTask, 1, 0},
-            {ITextToTokenFeatures::kTask, 1, 0},
-            {ITextPairToTokenFeatures::kTask, 1, 0},
-            {ITextToPooledFeatures::kTask, 1, 0},
-            {ITextToEmbedding::kTask, 1, 0},
-            {ITitleBodyToEmbedding::kTask, 1, 0},
-            {IMaskedTextToTokenScores::kTask, 1, 0},
-            {ITextPairToPretrainingRelationScores::kTask, 1, 0},
-            {ITextToReplacedTokenScores::kTask, 1, 0},
-            {ITextPredictionPositionsToTokenScores::kTask, 1, 0},
-            {IImageToTokenFeatures::kTask, 1, 0},
-            {IImageToTokenAndPooledFeatures::kTask, 1, 0},
-            {IImageToSpatialFeatures::kTask, 1, 0},
-            {IImageToPooledFeatures::kTask, 1, 0},
-            {IImageToEmbedding::kTask, 1, 0},
-            {IImageTextToEmbedding::kTask, 1, 0},
-            {ITextPairToRelevance::kTask, 1, 0},
-            {ITextImageToRelevance::kTask, 1, 0},
-            {ITextImageTextToRelevance::kTask, 1, 0},
-            {IImageToClassScores::kTask, 1, 0},
-            {ITextQueryDocumentsToRelevance::kTask, 1, 0},
+            bind<IBatchImageToTokenFeatures>(*this, fields_for(IBatchImageToTokenFeatures::kTask)),
+            bind<IBatchImageToSpatialFeatures>(*this,
+                                               fields_for(IBatchImageToSpatialFeatures::kTask)),
+            bind<IBatchImageToPooledFeatures>(*this,
+                                              fields_for(IBatchImageToPooledFeatures::kTask)),
+            bind<IBatchTextToEmbedding>(*this, fields_for(IBatchTextToEmbedding::kTask)),
+            bind<IBatchTextToTokenFeatures>(*this, fields_for(IBatchTextToTokenFeatures::kTask)),
+            bind<IBatchImageToTokenAndPooledFeatures>(
+                *this, fields_for(IBatchImageToTokenAndPooledFeatures::kTask)),
+            bind<IBatchImageToClassScores>(*this, fields_for(IBatchImageToClassScores::kTask)),
+            bind<ITextToTokenFeatures>(*this, fields_for(ITextToTokenFeatures::kTask)),
+            bind<ITextPairToTokenFeatures>(*this, fields_for(ITextPairToTokenFeatures::kTask)),
+            bind<ITextToPooledFeatures>(*this, fields_for(ITextToPooledFeatures::kTask)),
+            bind<ITextToEmbedding>(*this, fields_for(ITextToEmbedding::kTask)),
+            bind<ITitleBodyToEmbedding>(*this, fields_for(ITitleBodyToEmbedding::kTask)),
+            bind<IMaskedTextToTokenScores>(*this, fields_for(IMaskedTextToTokenScores::kTask)),
+            bind<ITextPairToPretrainingRelationScores>(
+                *this, fields_for(ITextPairToPretrainingRelationScores::kTask)),
+            bind<ITextToReplacedTokenScores>(*this, fields_for(ITextToReplacedTokenScores::kTask)),
+            bind<ITextPredictionPositionsToTokenScores>(
+                *this, fields_for(ITextPredictionPositionsToTokenScores::kTask)),
+            bind<IImageToTokenFeatures>(*this, fields_for(IImageToTokenFeatures::kTask)),
+            bind<IImageToTokenAndPooledFeatures>(*this,
+                                                 fields_for(IImageToTokenAndPooledFeatures::kTask)),
+            bind<IImageToSpatialFeatures>(*this, fields_for(IImageToSpatialFeatures::kTask)),
+            bind<IImageToPooledFeatures>(*this, fields_for(IImageToPooledFeatures::kTask)),
+            bind<IImageToEmbedding>(*this, fields_for(IImageToEmbedding::kTask)),
+            bind<IImageTextToEmbedding>(*this, fields_for(IImageTextToEmbedding::kTask)),
+            bind<ITextPairToRelevance>(*this, fields_for(ITextPairToRelevance::kTask)),
+            bind<ITextImageToRelevance>(*this, fields_for(ITextImageToRelevance::kTask)),
+            bind<ITextImageTextToRelevance>(*this, fields_for(ITextImageTextToRelevance::kTask)),
+            bind<IImageToClassScores>(*this, fields_for(IImageToClassScores::kTask)),
+            bind<ITextQueryDocumentsToRelevance>(*this,
+                                                 fields_for(ITextQueryDocumentsToRelevance::kTask)),
         };
     }
-    std::vector<ConfigField> config_fields(std::string_view task_id) const override {
-        if (task_id.find("batch_") == 0) {
-            std::vector<ConfigField> fields{
-                {"scale", ConfigKind::F64, ConfigValue{1.0}, "Synthetic batch scale."},
-                {"annotate", ConfigKind::Bool, ConfigValue{true}, "Add a synthetic probe offset."}};
-            if (task_id == IBatchImageToClassScores::kTask ||
-                task_id == IBatchTextToEmbedding::kTask)
-                fields.push_back({"tag", ConfigKind::String,
-                                  ConfigValue{std::string_view{"default"}},
-                                  "Synthetic metadata tag."});
-            return fields;
-        }
-        return {{"scale", ConfigKind::F64, ConfigValue{1.0}, "Synthetic fixture scale."}};
+    trtmc::Span<const ConfigField> fields_for(std::string_view task_id) const {
+        static const ConfigField single[] = {
+            {"scale", ConfigKind::F64, ConfigValue{1.0}, "Synthetic fixture scale."}};
+        static const ConfigField batch[] = {
+            {"scale", ConfigKind::F64, ConfigValue{1.0}, "Synthetic batch scale."},
+            {"annotate", ConfigKind::Bool, ConfigValue{true}, "Add a synthetic probe offset."}};
+        static const ConfigField tagged_batch[] = {
+            {"scale", ConfigKind::F64, ConfigValue{1.0}, "Synthetic batch scale."},
+            {"annotate", ConfigKind::Bool, ConfigValue{true}, "Add a synthetic probe offset."},
+            {"tag", ConfigKind::String, ConfigValue{std::string_view{"default"}},
+             "Synthetic metadata tag."}};
+        if (task_id == IBatchImageToClassScores::kTask || task_id == IBatchTextToEmbedding::kTask)
+            return tagged_batch;
+        if (task_id.find("batch_") == 0)
+            return batch;
+        return single;
     }
 
     TokenFeaturesResult run(const TextToTokenFeaturesRequest& request, ConfigView config) override {
@@ -335,7 +345,8 @@ class FeaturesFixture final : public IModel,
                 {{static_cast<float>(25 * options[i].scale),
                   probe(static_cast<float>(request.items[i].input.text.size()), options[i]),
                   static_cast<float>(request.items[i].input.role), invocation},
-                 "fixture." + options[i].tag + ".embedding",
+                 mode_ == "unknown_embedding_space" ? ""
+                                                    : "fixture." + options[i].tag + ".embedding",
                  "mean",
                  "none"});
         return out;
@@ -499,8 +510,11 @@ class FeaturesFixture final : public IModel,
         return {{{float(marker * factor), float(text_size(source))}, 1, 2},
                 {{token_id, 0, 0, false, 0, 0}}};
     }
-    static SemanticEmbeddingResult embedding(float first, float second) {
-        return {{first, second}, "fixture.embedding", "mean", "none"};
+    SemanticEmbeddingResult embedding(float first, float second) const {
+        return {{first, second},
+                mode_ == "unknown_embedding_space" ? "" : "fixture.embedding",
+                "mean",
+                "none"};
     }
     static float pixel(const ImageView& image) {
         if (image.format == ImageFormat::Float32)
@@ -514,8 +528,7 @@ class FeaturesFixture final : public IModel,
 class MissingFixture final : public IModel {
   public:
     const char* task() const noexcept override { return "missing"; }
-    std::vector<TaskInfo> task_info() const override { return {{ITextToEmbedding::kTask, 1, 0}}; }
-    std::vector<ConfigField> config_fields(std::string_view) const override { return {}; }
+    std::vector<TaskInstance> task_bindings() override { return {}; }
 };
 
 } // namespace

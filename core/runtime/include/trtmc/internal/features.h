@@ -39,7 +39,9 @@ struct PooledFeaturesResult {
 };
 struct SemanticEmbeddingResult {
     std::vector<float> values;
-    std::string embedding_space; // Identifies the trained space, not a content hash.
+    // Identifies the checkpoint space when known, not a content hash. Empty
+    // means unknown; it never establishes compatibility with another model.
+    std::string embedding_space;
     std::string pooling;
     std::string normalization;
 };
@@ -102,6 +104,7 @@ struct TextQueryDocumentsToRelevanceRequest {
 
 class ITextQueryDocumentsToRelevance {
   public:
+    using TaskInterface = ITextQueryDocumentsToRelevance;
     static constexpr std::string_view kTask = "text_query_documents_to_relevance";
     virtual ~ITextQueryDocumentsToRelevance() = default;
     // One family-owned list-scoring operation with a shared query. Native
@@ -195,6 +198,7 @@ struct ImageToClassScoresRequest {
 // Each request type is distinct so one family can implement multiple run overloads.
 class ITextToTokenFeatures {
   public:
+    using TaskInterface = ITextToTokenFeatures;
     static constexpr std::string_view kTask = "text_to_token_features";
     virtual ~ITextToTokenFeatures() = default;
     virtual TokenFeaturesResult run(const TextToTokenFeaturesRequest&, ConfigView) = 0;
@@ -202,6 +206,7 @@ class ITextToTokenFeatures {
 
 class ITextPairToTokenFeatures {
   public:
+    using TaskInterface = ITextPairToTokenFeatures;
     static constexpr std::string_view kTask = "text_pair_to_token_features";
     virtual ~ITextPairToTokenFeatures() = default;
     virtual TokenFeaturesResult run(const TextPairToTokenFeaturesRequest&, ConfigView) = 0;
@@ -209,6 +214,7 @@ class ITextPairToTokenFeatures {
 
 class ITextToPooledFeatures {
   public:
+    using TaskInterface = ITextToPooledFeatures;
     static constexpr std::string_view kTask = "text_to_pooled_features";
     virtual ~ITextToPooledFeatures() = default;
     virtual PooledFeaturesResult run(const TextToPooledFeaturesRequest&, ConfigView) = 0;
@@ -216,6 +222,7 @@ class ITextToPooledFeatures {
 
 class ITextToEmbedding {
   public:
+    using TaskInterface = ITextToEmbedding;
     static constexpr std::string_view kTask = "text_to_embedding";
     virtual ~ITextToEmbedding() = default;
     virtual SemanticEmbeddingResult run(const TextToEmbeddingRequest&, ConfigView) = 0;
@@ -223,6 +230,7 @@ class ITextToEmbedding {
 
 class ITitleBodyToEmbedding {
   public:
+    using TaskInterface = ITitleBodyToEmbedding;
     static constexpr std::string_view kTask = "title_body_to_embedding";
     virtual ~ITitleBodyToEmbedding() = default;
     virtual SemanticEmbeddingResult run(const TitleBodyToEmbeddingRequest&, ConfigView) = 0;
@@ -230,6 +238,7 @@ class ITitleBodyToEmbedding {
 
 class IMaskedTextToTokenScores {
   public:
+    using TaskInterface = IMaskedTextToTokenScores;
     static constexpr std::string_view kTask = "masked_text_to_token_scores";
     virtual ~IMaskedTextToTokenScores() = default;
     virtual VocabularyScoresResult run(const MaskedTextToTokenScoresRequest&, ConfigView) = 0;
@@ -237,6 +246,7 @@ class IMaskedTextToTokenScores {
 
 class ITextPairToPretrainingRelationScores {
   public:
+    using TaskInterface = ITextPairToPretrainingRelationScores;
     static constexpr std::string_view kTask = "text_pair_to_pretraining_relation_scores";
     virtual ~ITextPairToPretrainingRelationScores() = default;
     virtual LabelScoresResult run(const TextPairToPretrainingRelationScoresRequest&,
@@ -245,6 +255,7 @@ class ITextPairToPretrainingRelationScores {
 
 class ITextToReplacedTokenScores {
   public:
+    using TaskInterface = ITextToReplacedTokenScores;
     static constexpr std::string_view kTask = "text_to_replaced_token_scores";
     virtual ~ITextToReplacedTokenScores() = default;
     virtual ReplacedTokenScoresResult run(const TextToReplacedTokenScoresRequest&, ConfigView) = 0;
@@ -252,6 +263,7 @@ class ITextToReplacedTokenScores {
 
 class ITextPredictionPositionsToTokenScores {
   public:
+    using TaskInterface = ITextPredictionPositionsToTokenScores;
     static constexpr std::string_view kTask = "text_prediction_positions_to_token_scores";
     virtual ~ITextPredictionPositionsToTokenScores() = default;
     virtual VocabularyScoresResult run(const TextPredictionPositionsToTokenScoresRequest&,
@@ -260,6 +272,7 @@ class ITextPredictionPositionsToTokenScores {
 
 class IImageToTokenFeatures {
   public:
+    using TaskInterface = IImageToTokenFeatures;
     static constexpr std::string_view kTask = "image_to_token_features";
     virtual ~IImageToTokenFeatures() = default;
     virtual ImageTokenFeaturesResult run(const ImageToTokenFeaturesRequest&, ConfigView) = 0;
@@ -267,6 +280,7 @@ class IImageToTokenFeatures {
 
 class IImageToSpatialFeatures {
   public:
+    using TaskInterface = IImageToSpatialFeatures;
     static constexpr std::string_view kTask = "image_to_spatial_features";
     virtual ~IImageToSpatialFeatures() = default;
     virtual SpatialFeaturesResult run(const ImageToSpatialFeaturesRequest&, ConfigView) = 0;
@@ -274,6 +288,7 @@ class IImageToSpatialFeatures {
 
 class IImageToPooledFeatures {
   public:
+    using TaskInterface = IImageToPooledFeatures;
     static constexpr std::string_view kTask = "image_to_pooled_features";
     virtual ~IImageToPooledFeatures() = default;
     virtual PooledFeaturesResult run(const ImageToPooledFeaturesRequest&, ConfigView) = 0;
@@ -281,6 +296,7 @@ class IImageToPooledFeatures {
 
 class IImageToEmbedding {
   public:
+    using TaskInterface = IImageToEmbedding;
     static constexpr std::string_view kTask = "image_to_embedding";
     virtual ~IImageToEmbedding() = default;
     virtual SemanticEmbeddingResult run(const ImageToEmbeddingRequest&, ConfigView) = 0;
@@ -288,6 +304,7 @@ class IImageToEmbedding {
 
 class IImageTextToEmbedding {
   public:
+    using TaskInterface = IImageTextToEmbedding;
     static constexpr std::string_view kTask = "image_text_to_embedding";
     virtual ~IImageTextToEmbedding() = default;
     virtual SemanticEmbeddingResult run(const ImageTextToEmbeddingRequest&, ConfigView) = 0;
@@ -295,6 +312,7 @@ class IImageTextToEmbedding {
 
 class ITextPairToRelevance {
   public:
+    using TaskInterface = ITextPairToRelevance;
     static constexpr std::string_view kTask = "text_pair_to_relevance";
     virtual ~ITextPairToRelevance() = default;
     virtual RelevanceResult run(const TextPairToRelevanceRequest&, ConfigView) = 0;
@@ -302,6 +320,7 @@ class ITextPairToRelevance {
 
 class ITextImageToRelevance {
   public:
+    using TaskInterface = ITextImageToRelevance;
     static constexpr std::string_view kTask = "text_image_to_relevance";
     virtual ~ITextImageToRelevance() = default;
     virtual RelevanceResult run(const TextImageToRelevanceRequest&, ConfigView) = 0;
@@ -309,6 +328,7 @@ class ITextImageToRelevance {
 
 class ITextImageTextToRelevance {
   public:
+    using TaskInterface = ITextImageTextToRelevance;
     static constexpr std::string_view kTask = "text_image_text_to_relevance";
     virtual ~ITextImageTextToRelevance() = default;
     virtual RelevanceResult run(const TextImageTextToRelevanceRequest&, ConfigView) = 0;
@@ -316,6 +336,7 @@ class ITextImageTextToRelevance {
 
 class IImageToTokenAndPooledFeatures {
   public:
+    using TaskInterface = IImageToTokenAndPooledFeatures;
     static constexpr std::string_view kTask = "image_to_token_and_pooled_features";
     virtual ~IImageToTokenAndPooledFeatures() = default;
     // One family-owned extraction returns both views of the same evaluation.
@@ -326,6 +347,7 @@ class IImageToTokenAndPooledFeatures {
 
 class IImageToClassScores {
   public:
+    using TaskInterface = IImageToClassScores;
     static constexpr std::string_view kTask = "image_to_class_scores";
     virtual ~IImageToClassScores() = default;
     // Nonempty scores in vocabulary-ordinal order. Supply either a nonempty
@@ -349,6 +371,7 @@ struct BatchImageToClassScoresRequest {
 };
 class IBatchImageToClassScores {
   public:
+    using TaskInterface = IBatchImageToClassScores;
     static constexpr std::string_view kTask = "batch_image_to_class_scores";
     using Request = BatchImageToClassScoresRequest;
     virtual ~IBatchImageToClassScores() = default;
@@ -366,6 +389,7 @@ struct BatchImageToTokenFeaturesRequest {
 };
 class IBatchImageToTokenFeatures {
   public:
+    using TaskInterface = IBatchImageToTokenFeatures;
     static constexpr std::string_view kTask = "batch_image_to_token_features";
     using Request = BatchImageToTokenFeaturesRequest;
     virtual ~IBatchImageToTokenFeatures() = default;
@@ -382,6 +406,7 @@ struct BatchImageToSpatialFeaturesRequest {
 };
 class IBatchImageToSpatialFeatures {
   public:
+    using TaskInterface = IBatchImageToSpatialFeatures;
     static constexpr std::string_view kTask = "batch_image_to_spatial_features";
     using Request = BatchImageToSpatialFeaturesRequest;
     virtual ~IBatchImageToSpatialFeatures() = default;
@@ -398,6 +423,7 @@ struct BatchImageToPooledFeaturesRequest {
 };
 class IBatchImageToPooledFeatures {
   public:
+    using TaskInterface = IBatchImageToPooledFeatures;
     static constexpr std::string_view kTask = "batch_image_to_pooled_features";
     using Request = BatchImageToPooledFeaturesRequest;
     virtual ~IBatchImageToPooledFeatures() = default;
@@ -414,6 +440,7 @@ struct BatchTextToEmbeddingRequest {
 };
 class IBatchTextToEmbedding {
   public:
+    using TaskInterface = IBatchTextToEmbedding;
     static constexpr std::string_view kTask = "batch_text_to_embedding";
     using Request = BatchTextToEmbeddingRequest;
     virtual ~IBatchTextToEmbedding() = default;
@@ -429,6 +456,7 @@ struct BatchTextToTokenFeaturesRequest {
 };
 class IBatchTextToTokenFeatures {
   public:
+    using TaskInterface = IBatchTextToTokenFeatures;
     static constexpr std::string_view kTask = "batch_text_to_token_features";
     using Request = BatchTextToTokenFeaturesRequest;
     virtual ~IBatchTextToTokenFeatures() = default;
@@ -444,6 +472,7 @@ struct BatchImageToTokenAndPooledFeaturesRequest {
 };
 class IBatchImageToTokenAndPooledFeatures {
   public:
+    using TaskInterface = IBatchImageToTokenAndPooledFeatures;
     static constexpr std::string_view kTask = "batch_image_to_token_and_pooled_features";
     using Request = BatchImageToTokenAndPooledFeaturesRequest;
     virtual ~IBatchImageToTokenAndPooledFeatures() = default;

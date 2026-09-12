@@ -596,21 +596,32 @@ class Family final : public IModel,
             throw std::logic_error("persistent streaming example loaded its model more than once");
     }
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "example_streaming_unsupported")
-            return {{ITextContinuation::kTask, 1, 0}};
-        return {{ITextContinuation::kTask, 1, 0},      {IStreamingSpeechTranscription::kTask, 1, 0},
-                {IStreamingTextToSpeech::kTask, 1, 0}, {IDuplexSpeechDialogue::kTask, 1, 0},
-                {IOfflineSpeechDialogue::kTask, 1, 0}, {IToolSpeechDialogue::kTask, 1, 0}};
+            return {bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask))};
+        return {bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask)),
+                bind<IStreamingSpeechTranscription>(
+                    *this, fields_for(IStreamingSpeechTranscription::kTask)),
+                bind<IStreamingTextToSpeech>(*this, fields_for(IStreamingTextToSpeech::kTask)),
+                bind<IDuplexSpeechDialogue>(*this, fields_for(IDuplexSpeechDialogue::kTask)),
+                bind<IOfflineSpeechDialogue>(*this, fields_for(IOfflineSpeechDialogue::kTask)),
+                bind<IToolSpeechDialogue>(*this, fields_for(IToolSpeechDialogue::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view task) const override {
-        if (mode_.find("example_voicechat") == 0 && task == IDuplexSpeechDialogue::kTask)
-            return example_voice_fields();
-        if (mode_.find("example_streaming") == 0 && task == IStreamingTextToSpeech::kTask)
-            return {
+    trtmc::Span<const ConfigField> fields_for(std::string_view task) const {
+        if (mode_.find("example_voicechat") == 0 && task == IDuplexSpeechDialogue::kTask) {
+            static const auto declared = example_voice_fields();
+            return {declared.data(), declared.size()};
+        }
+        if (mode_.find("example_streaming") == 0 && task == IStreamingTextToSpeech::kTask) {
+            static const ConfigField declared[] = {
                 {"max_new_tokens", ConfigKind::I64, ConfigValue{std::int64_t{750}}, "Token limit."},
                 {"chunk_frames", ConfigKind::I64, ConfigValue{std::int64_t{16}}, "Chunk frames."}};
-        return task == ITextContinuation::kTask ? std::vector<ConfigField>{} : fields();
+            return declared;
+        }
+        if (task == ITextContinuation::kTask)
+            return {};
+        static const auto declared = fields();
+        return {declared.data(), declared.size()};
     }
     TextResult run(const TextContinuationRequest&, ConfigView) override { return {"sync", {7}}; }
     std::unique_ptr<ISpeechTranscriptionStream>

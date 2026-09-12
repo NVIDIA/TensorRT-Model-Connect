@@ -41,11 +41,13 @@ class DatasetFixture final : public IModel,
     explicit DatasetFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
     std::int32_t default_max_new_tokens() const override { return 5; }
-    std::vector<TaskInfo> task_info() const override { return {{ITextContinuation::kTask, 1, 0}}; }
-    std::vector<ConfigField> config_fields(std::string_view id) const override {
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask))};
+    }
+    trtmc::Span<const ConfigField> fields_for(std::string_view id) const {
         if (id != ITextContinuation::kTask)
             throw UnsupportedTask("fixture only supports continuation");
-        return {
+        static const ConfigField declared[] = {
             {"max_new_tokens", ConfigKind::I64, ConfigValue{std::int64_t{5}}, "Token limit"},
             {"temperature", ConfigKind::F64, ConfigValue{0.75}, "Temperature"},
             {"top_k", ConfigKind::I64, ConfigValue{std::int64_t{7}}, "Top k"},
@@ -63,9 +65,10 @@ class DatasetFixture final : public IModel,
             {"labels", ConfigKind::StringList, ConfigValue{trtmc::Span<const std::string_view>{}},
              "Labels"},
         };
+        return declared;
     }
     TextResult run(const TextContinuationRequest& input, ConfigView config) override {
-        const auto fields = config_fields(ITextContinuation::kTask);
+        const auto fields = fields_for(ITextContinuation::kTask);
         Json values = Json::object();
         for (const auto& field : fields)
             values[std::string(field.name)] = json_value(*field.default_value);

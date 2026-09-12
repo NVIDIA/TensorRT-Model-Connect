@@ -29,6 +29,7 @@ float float_option(const Command&, const std::string&, float);
 io::LoadedImage read_image(const std::string&);
 std::vector<std::string> image_paths(const Command&);
 std::vector<float> read_float32_file(const std::string&);
+std::string read_structure_document(const std::string&);
 std::vector<std::string> read_lines(const std::string&);
 std::vector<std::uint32_t> parse_seeds(const std::string&);
 void require_finite(const std::vector<float>&, const std::string&);
@@ -76,5 +77,7 @@ std::string_view perception_task_for_command(const Command&, const Model&);
 bool dispatch_sdk_perception(const Command&, const Model&, std::string_view, std::ostream&);
 std::string_view language_task_for_command(const Command&, const Model&);
 bool dispatch_sdk_language(const Command&, const Model&, std::string_view, std::ostream&);
+std::string_view structure_task_for_command(const Command&);
+bool dispatch_sdk_structure(const Command&, const Model&, std::string_view, std::ostream&);
 
 } // namespace trtmc::cli

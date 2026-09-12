@@ -96,11 +96,23 @@ failure can prevent error-detail allocation. C++ wrappers turn failures into
 ## Config and ownership
 
 `text.config_fields()` returns the family-declared fields for that loaded Task.
-The caller may pass an owned `trtmc::Config`; the C entry point transports typed
-key/value views without imposing sampling defaults. The family supplies defaults,
-validates names, types, ranges and combinations, then executes. Unknown or
-duplicate keys fail. Missing is different from explicit zero, false or empty.
+The caller may pass an owned `trtmc::Config`; the Core Runtime's C entry point
+transports typed key/value views without imposing sampling defaults. It checks
+names, duplicates and types against the family-declared field table before
+execution. The Family Runtime supplies defaults and validates ranges and
+combinations. Missing is different from explicit zero, false or empty.
 There is no model-global configuration merger or silently ignored option.
+
+An embedding result may have an empty `embedding_space` when a local checkpoint
+has no known space identifier. Its vectors, pooling and normalization are still
+available; two empty identifiers do not imply cross-model compatibility. Families
+must not fabricate identifiers or require a hash just to compute an embedding.
+
+Family Runtime returns `IModel::task_bindings()` records built with
+`bind<SharedTaskInterface>(*this, fields)`. Core Runtime retains the correctly
+adjusted interface address and immutable metadata snapshot, rather than testing
+each Task with repeated RTTI casts. This does not change the release-coupled
+internal C++ boundary or expose a public C++ vtable.
 
 | Object | Lifetime |
 | --- | --- |

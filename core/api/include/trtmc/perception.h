@@ -146,6 +146,21 @@ typedef struct {
     uint32_t parse_complete;
 } trtmc_grounded_points_view_v1;
 
+/* Fixed-label detection, not text grounding. Coordinates are continuous XYXY
+ * in original-image pixels. Each box retains its numeric class ID and score;
+ * the family owns filtering and suppression. No label lookup is implied. */
+typedef struct {
+    trtmc_pixel_box_v1 box;
+    float score;
+    int32_t class_id;
+} trtmc_detected_box_v1;
+/* Borrowed through result lifetime. Empty detections retain image dimensions. */
+typedef struct {
+    const trtmc_detected_box_v1* boxes;
+    uint64_t count;
+    uint32_t image_height, image_width;
+} trtmc_detected_boxes_view_v1;
+
 typedef struct {
     const float* values;
     uint64_t value_count, count;
@@ -230,6 +245,7 @@ typedef struct {
 #define TRTMC_TASK_IMAGE_BOX_EXEMPLARS_TO_INSTANCE_MASKS "image_box_exemplars_to_instance_masks"
 #define TRTMC_TASK_STEREO_IMAGES_TO_DISPARITY "stereo_images_to_disparity"
 #define TRTMC_TASK_IMAGE_TO_METRIC_GEOMETRY "image_to_metric_geometry"
+#define TRTMC_TASK_IMAGE_TO_BOXES "image_to_boxes"
 #define TRTMC_TASK_IMAGE_TEXT_TO_BOXES "image_text_to_boxes"
 #define TRTMC_TASK_IMAGE_TEXT_TO_POINTS "image_text_to_points"
 #define TRTMC_TASK_POSE_HYPOTHESES_CROPS_TO_REFINED_POSES "pose_hypotheses_crops_to_refined_poses"
@@ -260,6 +276,8 @@ TRTMC_PERCEPTION_API(trtmc_stereo_images_to_disparity_api_v1, trtmc_stereo_image
                      trtmc_disparity_view_v1)
 TRTMC_PERCEPTION_API(trtmc_image_to_metric_geometry_api_v1, trtmc_perception_image_request_v1,
                      trtmc_metric_geometry_view_v1)
+TRTMC_PERCEPTION_API(trtmc_image_to_boxes_api_v1, trtmc_perception_image_request_v1,
+                     trtmc_detected_boxes_view_v1)
 TRTMC_PERCEPTION_API(trtmc_image_text_to_boxes_api_v1, trtmc_image_query_request_v1,
                      trtmc_grounded_boxes_view_v1)
 TRTMC_PERCEPTION_API(trtmc_image_text_to_points_api_v1, trtmc_image_query_request_v1,

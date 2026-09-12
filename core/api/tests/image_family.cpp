@@ -22,25 +22,26 @@ class ImageFixture final : public IModel,
   public:
     explicit ImageFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "single_only")
-            return {{ITextToImage::kTask, 1, 0}};
-        return {{ITextToImage::kTask, 1, 0},
-                {IImagesTextToImageEdit::kTask, 1, 0},
-                {IMaskedImageTextToImage::kTask, 1, 0},
-                {IBatchTextToImage::kTask, 1, 0}};
+            return {bind<ITextToImage>(*this, fields_for(ITextToImage::kTask))};
+        return {bind<ITextToImage>(*this, fields_for(ITextToImage::kTask)),
+                bind<IImagesTextToImageEdit>(*this, fields_for(IImagesTextToImageEdit::kTask)),
+                bind<IMaskedImageTextToImage>(*this, fields_for(IMaskedImageTextToImage::kTask)),
+                bind<IBatchTextToImage>(*this, fields_for(IBatchTextToImage::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view task_id) const override {
-        const auto supported = task_info();
-        if (std::none_of(supported.begin(), supported.end(),
-                         [&](const TaskInfo& task) { return task.id == task_id; }))
+    trtmc::Span<const ConfigField> fields_for(std::string_view task_id) const {
+        if (mode_ == "single_only" && task_id != ITextToImage::kTask)
             throw UnsupportedTask("image fixture task is disabled in this bundle");
-        std::vector<ConfigField> fields{
+        static const ConfigField single[] = {
             {"level", ConfigKind::F64, ConfigValue{0.25}, "Generated red-channel intensity"}};
+        static const ConfigField batch[] = {
+            {"level", ConfigKind::F64, ConfigValue{0.25}, "Generated red-channel intensity"},
+            {"seed", ConfigKind::I64, std::nullopt,
+             "Optional seed marker; absence retains the batch marker"}};
         if (task_id == IBatchTextToImage::kTask)
-            fields.push_back({"seed", ConfigKind::I64, std::nullopt,
-                              "Optional seed marker; absence retains the batch marker"});
-        return fields;
+            return batch;
+        return single;
     }
     ImageResult run(const TextToImageRequest& input, ConfigView config) override {
         const auto level = parse(ITextToImage::kTask, config);
@@ -127,7 +128,7 @@ class ImageFixture final : public IModel,
         return result;
     }
     float parse(std::string_view task_id, ConfigView config) const {
-        const auto field = config_fields(task_id).at(0);
+        const auto field = fields_for(task_id)[0];
         double level = config_value_as<double>(*field.default_value);
         bool seen = false;
         bool seed_seen = false;

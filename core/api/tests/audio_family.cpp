@@ -53,58 +53,84 @@ class AudioFixture final : public IModel,
   public:
     explicit AudioFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "asr_only")
-            return {{ISpeechTranscription::kTask, 1, 0}};
+            return {bind<ISpeechTranscription>(*this, fields_for(ISpeechTranscription::kTask))};
         if (mode_ == "history_single_only")
-            return {{ITextAudioTokenHistoryToAudio::kTask, 1, 0}};
+            return {bind<ITextAudioTokenHistoryToAudio>(
+                *this, fields_for(ITextAudioTokenHistoryToAudio::kTask))};
         if (mode_ == "audio_single_only")
-            return {{ITextToAudio::kTask, 1, 0}, {ITextToSpeech::kTask, 1, 0}};
+            return {bind<ITextToAudio>(*this, fields_for(ITextToAudio::kTask)),
+                    bind<ITextToSpeech>(*this, fields_for(ITextToSpeech::kTask))};
         if (mode_ == "batch_audio_only")
-            return {{IBatchTextToAudio::kTask, 1, 0}};
+            return {bind<IBatchTextToAudio>(*this, fields_for(IBatchTextToAudio::kTask))};
         if (mode_ == "batch_speech_only")
-            return {{IBatchTextToSpeech::kTask, 1, 0}};
-        return {{ITextToAudio::kTask, 1, 0},
-                {ITextAudioTokenHistoryToAudio::kTask, 1, 0},
-                {IBatchTextAudioTokenHistoryToAudio::kTask, 1, 0},
-                {ITextToSpeech::kTask, 1, 0},
-                {ISpeechTranscription::kTask, 1, 0},
-                {ISpeechTranslation::kTask, 1, 0},
-                {IAudioLanguageIdentification::kTask, 1, 0},
-                {ISpeechToSpeechResponse::kTask, 1, 0},
-                {IBatchSpeechTranscription::kTask, 1, 0},
-                {IBatchSpeechTranslation::kTask, 1, 0},
-                {IMixedBatchSpeechToText::kTask, 1, 0},
-                {IBatchTextToAudio::kTask, 1, 0},
-                {IBatchTextToSpeech::kTask, 1, 0}};
+            return {bind<IBatchTextToSpeech>(*this, fields_for(IBatchTextToSpeech::kTask))};
+        return {
+            bind<ITextToAudio>(*this, fields_for(ITextToAudio::kTask)),
+            bind<ITextAudioTokenHistoryToAudio>(*this,
+                                                fields_for(ITextAudioTokenHistoryToAudio::kTask)),
+            bind<IBatchTextAudioTokenHistoryToAudio>(
+                *this, fields_for(IBatchTextAudioTokenHistoryToAudio::kTask)),
+            bind<ITextToSpeech>(*this, fields_for(ITextToSpeech::kTask)),
+            bind<ISpeechTranscription>(*this, fields_for(ISpeechTranscription::kTask)),
+            bind<ISpeechTranslation>(*this, fields_for(ISpeechTranslation::kTask)),
+            bind<IAudioLanguageIdentification>(*this,
+                                               fields_for(IAudioLanguageIdentification::kTask)),
+            bind<ISpeechToSpeechResponse>(*this, fields_for(ISpeechToSpeechResponse::kTask)),
+            bind<IBatchSpeechTranscription>(*this, fields_for(IBatchSpeechTranscription::kTask)),
+            bind<IBatchSpeechTranslation>(*this, fields_for(IBatchSpeechTranslation::kTask)),
+            bind<IMixedBatchSpeechToText>(*this, fields_for(IMixedBatchSpeechToText::kTask)),
+            bind<IBatchTextToAudio>(*this, fields_for(IBatchTextToAudio::kTask)),
+            bind<IBatchTextToSpeech>(*this, fields_for(IBatchTextToSpeech::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view task) const override {
-        const auto tasks = task_info();
-        if (std::none_of(tasks.begin(), tasks.end(),
-                         [&](const TaskInfo& info) { return info.id == task; }))
+    trtmc::Span<const ConfigField> fields_for(std::string_view task) const {
+        if ((mode_ == "asr_only" && task != ISpeechTranscription::kTask) ||
+            (mode_ == "history_single_only" && task != ITextAudioTokenHistoryToAudio::kTask) ||
+            (mode_ == "audio_single_only" && task != ITextToAudio::kTask &&
+             task != ITextToSpeech::kTask) ||
+            (mode_ == "batch_audio_only" && task != IBatchTextToAudio::kTask) ||
+            (mode_ == "batch_speech_only" && task != IBatchTextToSpeech::kTask))
             throw UnsupportedTask("audio fixture Task is disabled");
         if (task == IAudioLanguageIdentification::kTask)
             return {};
         if (task == ITextAudioTokenHistoryToAudio::kTask ||
-            task == IBatchTextAudioTokenHistoryToAudio::kTask)
-            return {{"gain", ConfigKind::F64, ConfigValue{1.0}, "Output gain"},
-                    {"normalize", ConfigKind::Bool, ConfigValue{true}, "Boolean marker"}};
-        if (task == ITextToAudio::kTask || task == IBatchTextToAudio::kTask)
-            return {{"gain", ConfigKind::F64, ConfigValue{1.0}, "Output gain"},
-                    {"preset", ConfigKind::String, ConfigValue{std::string_view{}}, "Preset"}};
-        if (task == ITextToSpeech::kTask || task == IBatchTextToSpeech::kTask)
-            return {{"gain", ConfigKind::F64, ConfigValue{1.0}, "Output gain"},
-                    {"speaker", ConfigKind::I64, ConfigValue{std::int64_t{0}}, "Speaker index"},
-                    {"normalize", ConfigKind::Bool, ConfigValue{true}, "Text normalization"}};
-        if (task == ISpeechToSpeechResponse::kTask)
-            return {{"gain", ConfigKind::F64, ConfigValue{1.0}, "Response gain"}};
-        if (task == ISpeechTranscription::kTask || task == ISpeechTranslation::kTask)
-            return {{"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}},
-                     "Transcript suffix"},
-                    {"max_output_tokens", ConfigKind::I64, ConfigValue{std::int64_t{224}},
-                     "Output token limit"}};
-        return {{"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}},
-                 "Transcript suffix"}};
+            task == IBatchTextAudioTokenHistoryToAudio::kTask) {
+            static const ConfigField declared[] = {
+                {"gain", ConfigKind::F64, ConfigValue{1.0}, "Output gain"},
+                {"normalize", ConfigKind::Bool, ConfigValue{true}, "Boolean marker"}};
+            return declared;
+        }
+        if (task == ITextToAudio::kTask || task == IBatchTextToAudio::kTask) {
+            static const ConfigField declared[] = {
+                {"gain", ConfigKind::F64, ConfigValue{1.0}, "Output gain"},
+                {"preset", ConfigKind::String, ConfigValue{std::string_view{}}, "Preset"}};
+            return declared;
+        }
+        if (task == ITextToSpeech::kTask || task == IBatchTextToSpeech::kTask) {
+            static const ConfigField declared[] = {
+                {"gain", ConfigKind::F64, ConfigValue{1.0}, "Output gain"},
+                {"speaker", ConfigKind::I64, ConfigValue{std::int64_t{0}}, "Speaker index"},
+                {"normalize", ConfigKind::Bool, ConfigValue{true}, "Text normalization"}};
+            return declared;
+        }
+        if (task == ISpeechToSpeechResponse::kTask) {
+            static const ConfigField declared[] = {
+                {"gain", ConfigKind::F64, ConfigValue{1.0}, "Response gain"}};
+            return declared;
+        }
+        if (task == ISpeechTranscription::kTask || task == ISpeechTranslation::kTask) {
+            static const ConfigField declared[] = {
+                {"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}},
+                 "Transcript suffix"},
+                {"max_output_tokens", ConfigKind::I64, ConfigValue{std::int64_t{224}},
+                 "Output token limit"}};
+            return declared;
+        }
+        static const ConfigField declared[] = {{"suffix", ConfigKind::String,
+                                                ConfigValue{std::string_view{"!"}},
+                                                "Transcript suffix"}};
+        return declared;
     }
 
     AudioResult run(const TextToAudioRequest& input, ConfigView config) override {
@@ -416,7 +442,7 @@ class AudioFixture final : public IModel,
         return {std::move(samples), 24000, mode_ == "bad_audio" ? 0U : 2U, 1, 2};
     }
     Options parse(ConfigView config, std::string_view task) const {
-        const auto fields = config_fields(task);
+        const auto fields = fields_for(task);
         Options options;
         const auto assign = [&](std::string_view name, const ConfigValue& value) {
             if (name == "gain")
@@ -462,11 +488,7 @@ class AudioFixture final : public IModel,
 class DeclaredHistoryOnly final : public IModel {
   public:
     const char* task() const noexcept override { return "history_declared_only"; }
-    std::vector<TaskInfo> task_info() const override {
-        return {{ITextAudioTokenHistoryToAudio::kTask, 1, 0},
-                {IBatchTextAudioTokenHistoryToAudio::kTask, 1, 0}};
-    }
-    std::vector<ConfigField> config_fields(std::string_view) const override { return {}; }
+    std::vector<TaskInstance> task_bindings() override { return {}; }
 };
 } // namespace
 

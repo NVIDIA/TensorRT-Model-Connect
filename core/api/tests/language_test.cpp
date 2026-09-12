@@ -451,7 +451,7 @@ void exercise(const trtmc::Model& model, const std::filesystem::path& root) {
             "single-only model cannot receive a shared scalar-loop batch fallback");
     auto missing = load(root, "missing");
     check(missing.tasks().empty() && !missing.supports<ImagesTextToText>(),
-          "declaration without implemented interface is not advertised");
+          "a loaded variant without an implementation binding advertises no task");
 }
 } // namespace
 

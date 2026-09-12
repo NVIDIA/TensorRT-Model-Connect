@@ -17,6 +17,8 @@ struct NativeState {
     std::mutex operation;
     std::uint64_t generation{0};
     bool closed{false};
+    std::shared_ptr<ModelState> owner;
+    internal::TaskKey task_key{};
     std::unique_ptr<ModelSession> model;
     std::unique_ptr<Session> implementation;
     // Destruction order releases native GPU resources before ModelSession.
@@ -223,6 +225,9 @@ trtmc_status TRTMC_CALL create_detected(trtmc_model* model, const trtmc_config_v
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<internal::IFramesToDetectedMaskTracks>(
                 model, internal::IFramesToDetectedMaskTracks::kTask);
+            state->owner = model_owner(model);
+            state->task_key = internal::contract_key<internal::IFramesToDetectedMaskTracks>();
+            validate_task_config(state->owner, state->task_key, options.view());
             state->model = std::make_unique<ModelSession>(model);
             state->implementation = family.create_detected_session(options.view());
         }
@@ -243,6 +248,7 @@ trtmc_status TRTMC_CALL segment_detected(trtmc_detected_mask_session* session,
         std::vector<internal::ImageView> images;
         const auto input = video_input(*clip, images);
         const ConvertedConfig options(config);
+        validate_task_config(session->state->owner, session->state->task_key, options.view());
         ++session->state->generation;
         auto result = session->state->implementation->segment(input, options.view());
         complete_clip(result, input);
@@ -258,12 +264,13 @@ trtmc_status TRTMC_CALL segment_device(trtmc_detected_mask_session* session,
     return guarded(error, [&] {
         require(session && clip && out, "session, clip and output are required");
         auto lock = operation(*session->state);
-        auto* device = session->state->implementation->device_masks();
-        if (!device)
-            throw ApiFailure{TRTMC_UNSUPPORTED, "device masks are unavailable"};
         std::vector<internal::ImageView> images;
         const auto input = video_input(*clip, images);
         const ConvertedConfig options(config);
+        validate_task_config(session->state->owner, session->state->task_key, options.view());
+        auto* device = session->state->implementation->device_masks();
+        if (!device)
+            throw ApiFailure{TRTMC_UNSUPPORTED, "device masks are unavailable"};
         ++session->state->generation;
         auto result = device->segment_device(input, options.view());
         complete_clip(result, input);
@@ -314,6 +321,7 @@ void TRTMC_CALL release_native(Handle* session) noexcept {
         ++session->state->generation;
         session->state->implementation.reset();
         session->state->model.reset();
+        session->state->owner.reset();
     }
     delete session;
 }
@@ -338,6 +346,9 @@ trtmc_status TRTMC_CALL create_text_clip(trtmc_model* model, const trtmc_config_
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<internal::IFramesTextToMaskTracks>(
                 model, internal::IFramesTextToMaskTracks::kTask);
+            state->owner = model_owner(model);
+            state->task_key = internal::contract_key<internal::IFramesTextToMaskTracks>();
+            validate_task_config(state->owner, state->task_key, options.view());
             state->model = std::make_unique<ModelSession>(model);
             state->implementation = family.create_text_clip_session(options.view());
         }
@@ -358,6 +369,7 @@ trtmc_status TRTMC_CALL segment_text_clip(trtmc_text_mask_clip_session* session,
         const auto input = video_input(*clip, frames);
         const auto prompt = string_view(text);
         const ConvertedConfig options(config);
+        validate_task_config(session->state->owner, session->state->task_key, options.view());
         auto result = session->state->implementation->segment(input, prompt, options.view());
         complete_clip(result, input);
         *out = make_result<TrackStorage>(std::move(result));
@@ -378,6 +390,9 @@ trtmc_status TRTMC_CALL create_prompt_frame(trtmc_model* model, trtmc_string_vie
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<internal::IPromptFrameTextToMaskTracks>(
                 model, internal::IPromptFrameTextToMaskTracks::kTask);
+            state->owner = model_owner(model);
+            state->task_key = internal::contract_key<internal::IPromptFrameTextToMaskTracks>();
+            validate_task_config(state->owner, state->task_key, options.view());
             state->model = std::make_unique<ModelSession>(model);
             state->implementation = family.create_prompt_frame_session(prompt, options.view());
         }
@@ -457,6 +472,9 @@ trtmc_status TRTMC_CALL create_image_context(trtmc_model* model, const trtmc_ima
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<internal::IInteractiveImageMasks>(
                 model, internal::IInteractiveImageMasks::kTask);
+            state->owner = model_owner(model);
+            state->task_key = internal::contract_key<internal::IInteractiveImageMasks>();
+            validate_task_config(state->owner, state->task_key, options.view());
             state->model = std::make_unique<ModelSession>(model);
             state->implementation = family.create_image_context(input, options.view());
         }
@@ -473,6 +491,7 @@ trtmc_status image_edit(trtmc_image_mask_context* context, const trtmc_config_vi
         require(context && out, "image context and result output are required");
         auto lock = operation(*context->state);
         const ConvertedConfig options(config);
+        validate_task_config(context->state->owner, context->state->task_key, options.view());
         *out = make_masks_result(invoke(*context->state->implementation, options.view()));
     });
 }
@@ -641,6 +660,9 @@ trtmc_status create_interactive(trtmc_model* model, const trtmc_video_view_v1* c
         {
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<Interface>(model, Interface::kTask);
+            state->owner = model_owner(model);
+            state->task_key = internal::contract_key<Interface>();
+            validate_task_config(state->owner, state->task_key, options.view());
             state->model = std::make_unique<ModelSession>(model);
             start = invoke(family, input, supplied.input, options.view());
         }
@@ -687,9 +709,10 @@ trtmc_status track_edit(trtmc_mask_track_session* session, const Input* supplied
     return guarded(error, [&] {
         require(session && supplied && out, "session, typed prompt and result output are required");
         auto lock = interactive_operation(*session->state);
-        auto& editor = require_editor(getter(*session->state->implementation));
         const auto input = tracking_prompt(*supplied, session->state->geometry);
         const ConvertedConfig options(config);
+        validate_task_config(session->state->owner, session->state->task_key, options.view());
+        auto& editor = require_editor(getter(*session->state->implementation));
         internal::TrackClipResult result;
         result.frames.push_back(invoke(editor, input.input, options.view()));
         valid_track_frame(result.frames.front(), session->state->geometry);
@@ -889,6 +912,9 @@ trtmc_status TRTMC_CALL create_crop_pose(trtmc_model* model, const trtmc_config_
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<internal::ICropPoseTracking>(
                 model, internal::ICropPoseTracking::kTask);
+            state->owner = model_owner(model);
+            state->task_key = internal::contract_key<internal::ICropPoseTracking>();
+            validate_task_config(state->owner, state->task_key, options.view());
             state->model = std::make_unique<ModelSession>(model);
             state->implementation = family.create_crop_pose_session(options.view());
         }
@@ -907,6 +933,7 @@ trtmc_status TRTMC_CALL initialize_crop_pose(trtmc_crop_pose_session* session,
         auto lock = operation(*session->state);
         const auto input = pose_refinement_input(*request);
         const ConvertedConfig options(config);
+        validate_task_config(session->state->owner, session->state->task_key, options.view());
         *out = make_refined_poses_result(
             session->state->implementation->initialize(input, options.view()));
     });
@@ -922,6 +949,7 @@ trtmc_status TRTMC_CALL track_crop_pose(trtmc_crop_pose_session* session, void* 
                 "pose session, per-call callback and result output are required");
         auto lock = operation(*session->state);
         const ConvertedConfig options(config);
+        validate_task_config(session->state->owner, session->state->task_key, options.view());
         const internal::PoseCropProvider provider =
             [context, callback](const internal::PoseCropRequest& query) {
                 return pose_crops_input(context, callback, query);
@@ -963,6 +991,9 @@ trtmc_status TRTMC_CALL create_rgbd_pose(trtmc_model* model, const trtmc_triangl
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<internal::IRgbdInitializedPoseToTrackedPose>(
                 model, internal::IRgbdInitializedPoseToTrackedPose::kTask);
+            state->owner = model_owner(model);
+            state->task_key = internal::contract_key<internal::IRgbdInitializedPoseToTrackedPose>();
+            validate_task_config(state->owner, state->task_key, options.view());
             state->model = std::make_unique<ModelSession>(model);
             state->implementation =
                 family.create_rgbd_pose_session(mesh_input, initial, options.view());
@@ -988,6 +1019,7 @@ trtmc_status TRTMC_CALL track_rgbd_pose(trtmc_rgbd_pose_session* session,
         const internal::RgbdObservation input{rgb, depth,
                                               pixel_intrinsics_input(request->pixel_intrinsics)};
         const ConvertedConfig options(config);
+        validate_task_config(session->state->owner, session->state->task_key, options.view());
         *out =
             make_object_pose_result(session->state->implementation->track(input, options.view()));
     });
@@ -1018,29 +1050,18 @@ const trtmc_rgbd_initialized_pose_to_tracked_pose_api_v1 rgbd_pose_api{
 } // namespace
 Span<const TaskBinding> tracking_task_bindings() noexcept {
     static const TaskBinding bindings[] = {
-        {internal::IFramesToDetectedMaskTracks::kTask, 1, 0, &detected_api.header,
-         implements<internal::IFramesToDetectedMaskTracks>},
-        {internal::IFramesTextToMaskTracks::kTask, 1, 0, &text_clip_api.header,
-         implements<internal::IFramesTextToMaskTracks>},
-        {internal::IPromptFrameTextToMaskTracks::kTask, 1, 0, &prompt_frame_api.header,
-         implements<internal::IPromptFrameTextToMaskTracks>},
-        {internal::IInteractiveImageMasks::kTask, 1, 0, &image_context_api.header,
-         implements<internal::IInteractiveImageMasks>},
-        {internal::IFramesPointsToMaskTracks::kTask, 1, 0, &points_tracks_api.header,
-         implements<internal::IFramesPointsToMaskTracks>},
-        {internal::IFramesBoxToMaskTracks::kTask, 1, 0, &box_tracks_api.header,
-         implements<internal::IFramesBoxToMaskTracks>},
-        {internal::IFramesMaskToMaskTracks::kTask, 1, 0, &mask_tracks_api.header,
-         implements<internal::IFramesMaskToMaskTracks>},
+        {internal::IFramesToDetectedMaskTracks::kTask, 1, 0, &detected_api.header},
+        {internal::IFramesTextToMaskTracks::kTask, 1, 0, &text_clip_api.header},
+        {internal::IPromptFrameTextToMaskTracks::kTask, 1, 0, &prompt_frame_api.header},
+        {internal::IInteractiveImageMasks::kTask, 1, 0, &image_context_api.header},
+        {internal::IFramesPointsToMaskTracks::kTask, 1, 0, &points_tracks_api.header},
+        {internal::IFramesBoxToMaskTracks::kTask, 1, 0, &box_tracks_api.header},
+        {internal::IFramesMaskToMaskTracks::kTask, 1, 0, &mask_tracks_api.header},
         {internal::IInteractiveFramesTextToMaskTracks::kTask, 1, 0,
-         &interactive_text_tracks_api.header,
-         implements<internal::IInteractiveFramesTextToMaskTracks>},
-        {internal::IFramesBoxExemplarToMaskTracks::kTask, 1, 0, &exemplar_tracks_api.header,
-         implements<internal::IFramesBoxExemplarToMaskTracks>},
-        {internal::ICropPoseTracking::kTask, 1, 0, &crop_pose_api.header,
-         implements<internal::ICropPoseTracking>},
-        {internal::IRgbdInitializedPoseToTrackedPose::kTask, 1, 0, &rgbd_pose_api.header,
-         implements<internal::IRgbdInitializedPoseToTrackedPose>}};
+         &interactive_text_tracks_api.header},
+        {internal::IFramesBoxExemplarToMaskTracks::kTask, 1, 0, &exemplar_tracks_api.header},
+        {internal::ICropPoseTracking::kTask, 1, 0, &crop_pose_api.header},
+        {internal::IRgbdInitializedPoseToTrackedPose::kTask, 1, 0, &rgbd_pose_api.header}};
     return bindings;
 }
 } // namespace trtmc::api

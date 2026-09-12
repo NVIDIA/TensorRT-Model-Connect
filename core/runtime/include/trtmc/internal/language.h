@@ -142,6 +142,7 @@ struct EncoderDecoderStatesResult {
 
 class IImagesTextToText {
   public:
+    using TaskInterface = IImagesTextToText;
     static constexpr std::string_view kTask = "images_text_to_text";
     virtual ~IImagesTextToText() = default;
     virtual TextResult run(const ImagesTextToTextRequest&, ConfigView) = 0;
@@ -149,6 +150,7 @@ class IImagesTextToText {
 
 class IVideoTextToText {
   public:
+    using TaskInterface = IVideoTextToText;
     static constexpr std::string_view kTask = "video_text_to_text";
     virtual ~IVideoTextToText() = default;
     virtual TextResult run(const VideoTextToTextRequest&, ConfigView) = 0;
@@ -156,6 +158,7 @@ class IVideoTextToText {
 
 class IImageVideoTextToText {
   public:
+    using TaskInterface = IImageVideoTextToText;
     static constexpr std::string_view kTask = "image_video_text_to_text";
     virtual ~IImageVideoTextToText() = default;
     virtual TextResult run(const ImageVideoTextToTextRequest&, ConfigView) = 0;
@@ -163,6 +166,7 @@ class IImageVideoTextToText {
 
 class IAudioTextToText {
   public:
+    using TaskInterface = IAudioTextToText;
     static constexpr std::string_view kTask = "audio_text_to_text";
     virtual ~IAudioTextToText() = default;
     virtual TextResult run(const AudioTextToTextRequest&, ConfigView) = 0;
@@ -170,6 +174,7 @@ class IAudioTextToText {
 
 class IImageAudioToText {
   public:
+    using TaskInterface = IImageAudioToText;
     static constexpr std::string_view kTask = "image_audio_to_text";
     virtual ~IImageAudioToText() = default;
     virtual TextResult run(const ImageAudioToTextRequest&, ConfigView) = 0;
@@ -177,6 +182,7 @@ class IImageAudioToText {
 
 class IAudioVideoTextToText {
   public:
+    using TaskInterface = IAudioVideoTextToText;
     static constexpr std::string_view kTask = "audio_video_text_to_text";
     virtual ~IAudioVideoTextToText() = default;
     virtual TextResult run(const AudioVideoTextToTextRequest&, ConfigView) = 0;
@@ -184,6 +190,7 @@ class IAudioVideoTextToText {
 
 class IImageAudioTextToText {
   public:
+    using TaskInterface = IImageAudioTextToText;
     static constexpr std::string_view kTask = "image_audio_text_to_text";
     virtual ~IImageAudioTextToText() = default;
     virtual TextResult run(const ImageAudioTextToTextRequest&, ConfigView) = 0;
@@ -191,6 +198,7 @@ class IImageAudioTextToText {
 
 class IImageAudioTextToTextSpeechResponse {
   public:
+    using TaskInterface = IImageAudioTextToTextSpeechResponse;
     static constexpr std::string_view kTask = "image_audio_text_to_text_speech_response";
     virtual ~IImageAudioTextToTextSpeechResponse() = default;
     virtual TextSpeechResult run(const ImageAudioTextToTextSpeechResponseRequest&, ConfigView) = 0;
@@ -198,18 +206,21 @@ class IImageAudioTextToTextSpeechResponse {
 
 class ITextConversation {
   public:
+    using TaskInterface = ITextConversation;
     static constexpr std::string_view kTask = "text_conversation";
     virtual ~ITextConversation() = default;
     virtual ConversationResult run(const TextConversationRequest&, ConfigView) = 0;
 };
 class IImagesTextConversation {
   public:
+    using TaskInterface = IImagesTextConversation;
     static constexpr std::string_view kTask = "images_text_conversation";
     virtual ~IImagesTextConversation() = default;
     virtual ConversationResult run_conversation(const ImagesTextToTextRequest&, ConfigView) = 0;
 };
 class IVideoTextConversation {
   public:
+    using TaskInterface = IVideoTextConversation;
     static constexpr std::string_view kTask = "video_text_conversation";
     virtual ~IVideoTextConversation() = default;
     virtual ConversationResult run_conversation(const VideoTextToTextRequest&, ConfigView) = 0;
@@ -246,6 +257,7 @@ struct BatchTextConversationRequest {
 };
 class IBatchTextConversation {
   public:
+    using TaskInterface = IBatchTextConversation;
     static constexpr std::string_view kTask = "batch_text_conversation";
     using Request = BatchTextConversationRequest;
     virtual ~IBatchTextConversation() = default;
@@ -262,6 +274,7 @@ struct BatchVideoTextConversationRequest {
 };
 class IBatchVideoTextConversation {
   public:
+    using TaskInterface = IBatchVideoTextConversation;
     static constexpr std::string_view kTask = "batch_video_text_conversation";
     using Request = BatchVideoTextConversationRequest;
     virtual ~IBatchVideoTextConversation() = default;
@@ -278,6 +291,7 @@ struct BatchAudioTextConversationRequest {
 };
 class IBatchAudioTextConversation {
   public:
+    using TaskInterface = IBatchAudioTextConversation;
     static constexpr std::string_view kTask = "batch_audio_text_conversation";
     using Request = BatchAudioTextConversationRequest;
     virtual ~IBatchAudioTextConversation() = default;
@@ -294,6 +308,7 @@ struct BatchImageAudioTextConversationRequest {
 };
 class IBatchImageAudioTextConversation {
   public:
+    using TaskInterface = IBatchImageAudioTextConversation;
     static constexpr std::string_view kTask = "batch_image_audio_text_conversation";
     using Request = BatchImageAudioTextConversationRequest;
     virtual ~IBatchImageAudioTextConversation() = default;
@@ -310,6 +325,7 @@ struct BatchTextImagesVideoConversationsRequest {
 };
 class IBatchTextImagesVideoConversations {
   public:
+    using TaskInterface = IBatchTextImagesVideoConversations;
     static constexpr std::string_view kTask = "batch_text_images_video_conversations";
     using Request = BatchTextImagesVideoConversationsRequest;
     virtual ~IBatchTextImagesVideoConversations() = default;
@@ -326,6 +342,7 @@ struct BatchTextImagesAudioConversationsRequest {
 };
 class IBatchTextImagesAudioConversations {
   public:
+    using TaskInterface = IBatchTextImagesAudioConversations;
     static constexpr std::string_view kTask = "batch_text_images_audio_conversations";
     using Request = BatchTextImagesAudioConversationsRequest;
     virtual ~IBatchTextImagesAudioConversations() = default;
@@ -343,6 +360,7 @@ struct BatchImagesTextConversationRequest {
 };
 class IBatchImagesTextConversation {
   public:
+    using TaskInterface = IBatchImagesTextConversation;
     static constexpr std::string_view kTask = "batch_images_text_conversation";
     using Request = BatchImagesTextConversationRequest;
     virtual ~IBatchImagesTextConversation() = default;
@@ -351,6 +369,7 @@ class IBatchImagesTextConversation {
 
 class ITextLabelClassification {
   public:
+    using TaskInterface = ITextLabelClassification;
     static constexpr std::string_view kTask = "text_label_classification";
     virtual ~ITextLabelClassification() = default;
     virtual GeneratedLabelResult run(const TextLabelClassificationRequest&, ConfigView) = 0;
@@ -358,6 +377,7 @@ class ITextLabelClassification {
 
 class ITextPairLabelClassification {
   public:
+    using TaskInterface = ITextPairLabelClassification;
     static constexpr std::string_view kTask = "text_pair_label_classification";
     virtual ~ITextPairLabelClassification() = default;
     virtual GeneratedLabelResult run(const TextPairLabelClassificationRequest&, ConfigView) = 0;
@@ -365,6 +385,7 @@ class ITextPairLabelClassification {
 
 class ITextEncoderDecoderHiddenStates {
   public:
+    using TaskInterface = ITextEncoderDecoderHiddenStates;
     static constexpr std::string_view kTask = "text_encoder_decoder_hidden_states";
     virtual ~ITextEncoderDecoderHiddenStates() = default;
     virtual EncoderDecoderStatesResult run(const TextEncoderDecoderHiddenStatesRequest&,

@@ -383,20 +383,20 @@ class Model final : public IModel,
   public:
     explicit Model(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
-        return {{IFramesToDetectedMaskTracks::kTask, 1, 0},
-                {IFramesTextToMaskTracks::kTask, 1, 0},
-                {IPromptFrameTextToMaskTracks::kTask, 1, 0},
-                {IInteractiveImageMasks::kTask, 1, 0},
-                {IFramesPointsToMaskTracks::kTask, 1, 0},
-                {IFramesBoxToMaskTracks::kTask, 1, 0},
-                {IFramesMaskToMaskTracks::kTask, 1, 0},
-                {IInteractiveFramesTextToMaskTracks::kTask, 1, 0},
-                {IFramesBoxExemplarToMaskTracks::kTask, 1, 0},
-                {ICropPoseTracking::kTask, 1, 0},
-                {IRgbdInitializedPoseToTrackedPose::kTask, 1, 0}};
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<IFramesToDetectedMaskTracks>(*this),
+                bind<IFramesTextToMaskTracks>(*this),
+                bind<IPromptFrameTextToMaskTracks>(*this),
+                bind<IInteractiveImageMasks>(*this),
+                bind<IFramesPointsToMaskTracks>(*this),
+                bind<IFramesBoxToMaskTracks>(*this),
+                bind<IFramesMaskToMaskTracks>(*this),
+                bind<IInteractiveFramesTextToMaskTracks>(*this),
+                bind<IFramesBoxExemplarToMaskTracks>(*this),
+                bind<ICropPoseTracking>(*this),
+                bind<IRgbdInitializedPoseToTrackedPose>(*this)};
     }
-    std::vector<ConfigField> config_fields(std::string_view) const override { return {}; }
+
     std::unique_ptr<IDetectedClipSession> create_detected_session(ConfigView config) override {
         empty(config);
         return std::make_unique<DetectorSession>(mode_ != "host_only");

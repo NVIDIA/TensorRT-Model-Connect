@@ -47,6 +47,7 @@ inline bool uses_existing_task_runtime(std::string_view primary_task) noexcept {
         INeuralOperator::kTask,
         ITimeSeriesForecast::kTask,
         IRobotControl::kTask,
+        IStructurePrediction::kTask,
     };
     for (const auto* task : tasks) {
         if (primary_task == task)

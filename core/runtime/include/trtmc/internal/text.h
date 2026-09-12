@@ -27,6 +27,7 @@ using TextResult = trtmc::TextResult;
 
 class ITextContinuation {
   public:
+    using TaskInterface = ITextContinuation;
     static constexpr std::string_view kTask = "text_continuation";
     virtual ~ITextContinuation() = default;
     virtual TextResult run(const TextContinuationRequest& request, ConfigView config) = 0;
@@ -59,6 +60,7 @@ struct ContextQuestionAnsweringRequest {
 
 class IConditionalTextGeneration {
   public:
+    using TaskInterface = IConditionalTextGeneration;
     static constexpr std::string_view kTask = "conditional_text_generation";
     virtual ~IConditionalTextGeneration() = default;
     // Return generated target text; source is conditioning, not a decoder prefix.
@@ -67,6 +69,7 @@ class IConditionalTextGeneration {
 
 class ICorruptedTextReconstruction {
   public:
+    using TaskInterface = ICorruptedTextReconstruction;
     static constexpr std::string_view kTask = "corrupted_text_reconstruction";
     virtual ~ICorruptedTextReconstruction() = default;
     // Return complete reconstructed text, not just the replacements.
@@ -75,6 +78,7 @@ class ICorruptedTextReconstruction {
 
 class IUnconditionalTextGeneration {
   public:
+    using TaskInterface = IUnconditionalTextGeneration;
     static constexpr std::string_view kTask = "unconditional_text_generation";
     virtual ~IUnconditionalTextGeneration() = default;
     virtual TextResult run(ConfigView) = 0;
@@ -82,6 +86,7 @@ class IUnconditionalTextGeneration {
 
 class ITextTranslation {
   public:
+    using TaskInterface = ITextTranslation;
     static constexpr std::string_view kTask = "text_translation";
     virtual ~ITextTranslation() = default;
     virtual TextResult run(const TextTranslationRequest&, ConfigView) = 0;
@@ -89,6 +94,7 @@ class ITextTranslation {
 
 class ITextSummarization {
   public:
+    using TaskInterface = ITextSummarization;
     static constexpr std::string_view kTask = "text_summarization";
     virtual ~ITextSummarization() = default;
     virtual TextResult run(const TextSummarizationRequest&, ConfigView) = 0;
@@ -96,6 +102,7 @@ class ITextSummarization {
 
 class ITextPrefixSuffixInfilling {
   public:
+    using TaskInterface = ITextPrefixSuffixInfilling;
     static constexpr std::string_view kTask = "text_prefix_suffix_infilling";
     virtual ~ITextPrefixSuffixInfilling() = default;
     // Own any sentinel/template mapping here and return only the missing middle.
@@ -104,6 +111,7 @@ class ITextPrefixSuffixInfilling {
 
 class IContextQuestionAnswering {
   public:
+    using TaskInterface = IContextQuestionAnswering;
     static constexpr std::string_view kTask = "context_question_answering";
     virtual ~IContextQuestionAnswering() = default;
     // This is a generated answer, not an extractive span or a score vector.
@@ -121,6 +129,7 @@ using BatchTextResult = std::vector<TextResult>;
 
 class IBatchTextContinuation {
   public:
+    using TaskInterface = IBatchTextContinuation;
     static constexpr std::string_view kTask = "batch_text_continuation";
     virtual ~IBatchTextContinuation() = default;
     // Validate all items before execution; a successful result preserves order

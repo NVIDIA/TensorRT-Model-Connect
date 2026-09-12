@@ -3,12 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
+#include <iterator>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 
 namespace {
 using Json = nlohmann::json;
@@ -40,11 +44,11 @@ void bundle(const std::filesystem::path& path, const std::string& task, const st
         output.put(static_cast<char>((static_cast<std::uint64_t>(header.size()) >> shift) & 255U));
     output << header;
 }
-void image(const std::filesystem::path& path, int width, unsigned char red) {
+void image(const std::filesystem::path& path, int width, unsigned char red, int height = 1) {
     std::ofstream output(path, std::ios::binary);
     output.exceptions(std::ios::failbit | std::ios::badbit);
-    output << "P6\n" << width << " 1\n255\n";
-    for (int i = 0; i < width; ++i) {
+    output << "P6\n" << width << ' ' << height << "\n255\n";
+    for (int i = 0; i < width * height; ++i) {
         output.put(static_cast<char>(red));
         output.put(0);
         output.put(0);
@@ -133,6 +137,326 @@ int main(int argc, char** argv) {
             request["operation"] = operation;
             request["request"] = std::move(args);
         };
+        const auto tracking_frame = runtime / "benchmark_tracking_frame.ppm";
+        image(tracking_frame, 3, 128, 2);
+        const Json tracking_input{
+            {"frame_paths", std::vector<std::string>(5, tracking_frame.string())},
+            {"timestamps_seconds", {0.0, 0.2, 0.5, 0.7, 1.0}}};
+        select("frames_to_detected_mask_tracks", "tracking_fixture", "track_masks", tracking_input);
+        for (const bool include_assets : {false, true}) {
+            request["measurement"]["asset_loading_included"] = include_assets;
+            const auto value = run().at("output_summary");
+            const auto& first = value.at("frames").at(0);
+            check(value.at("tracked_frames") == 5 && value.at("mask_elements") == 30 &&
+                      first.at("masks") == Json::array({1, 1, 1, 1, 1, 1}) &&
+                      first.at("object_ids") == Json::array({7}) &&
+                      first.at("class_ids") == Json::array({2}) &&
+                      first.at("source_memory") == "host" &&
+                      first.at("mask_element_type") == "uint8" &&
+                      value.at("frames").at(2).at("timestamp_seconds") == 0.5 &&
+                      value.at("initial_detections").at(0).at("prompt_box") ==
+                          Json::array({0, 0, 3, 2}),
+                  "tracking preserves all host mask pixels, identities, initial detections and "
+                  "explicit timestamps");
+        }
+        request["request"]["device_masks"] = true;
+        check(run(false).at("error").get<std::string>().find("CUDA mask") != std::string::npos,
+              "CPU fixture CUDA placeholders are rejected by real pointer validation, never copied "
+              "as host memory");
+        request["request"] = tracking_input;
+        request["request"]["frame_paths"].erase(4);
+        request["request"].erase("timestamps_seconds");
+        run(false);
+        for (const auto* task :
+             {"frames_text_to_mask_tracks", "prompt_frame_text_to_mask_tracks"}) {
+            auto input = tracking_input;
+            input["prompt"] = "bird";
+            select(task, "tracking_fixture", "track_masks", input);
+            const auto value = run().at("output_summary");
+            const auto& first = value.at("frames").at(0);
+            check(value.at("tracked_frames") == 5 && first.at("mask_element_type") == "float32" &&
+                      first.at("object_ids") == Json::array({13}) &&
+                      first.at("detection_scores") == Json::array({0.875}) &&
+                      first.at("tracking_scores") == Json::array({0.625}) &&
+                      first.at("removed_object_ids") == Json::array({19}) &&
+                      first.at("suppressed_object_ids") == Json::array({23}),
+                  "text tracking preserves float masks and all per-frame metadata");
+            if (std::string(task) == "prompt_frame_text_to_mask_tracks")
+                check(value.at("prompt_snapshot").at("frames").at(0).at("masks").at(0) == 1.0 &&
+                          first.at("masks").at(0) == 0.0 && value.at("frames").size() == 5,
+                      "prompt-frame lifecycle retains the original prompt and replaces frame zero "
+                      "with consolidation without prepending");
+            request["request"]["prompt"] = "cat";
+            run(false);
+        }
+        std::filesystem::remove(tracking_frame);
+
+        std::vector<std::filesystem::path> pose_files;
+        auto floats = [&](const std::vector<float>& values) {
+            const auto path =
+                runtime / ("benchmark_pose_" + std::to_string(pose_files.size()) + ".f32");
+            std::ofstream file(path, std::ios::binary);
+            file.exceptions(std::ios::badbit | std::ios::failbit);
+            file.write(reinterpret_cast<const char*>(values.data()),
+                       static_cast<std::streamsize>(values.size() * sizeof(float)));
+            file.close();
+            pose_files.push_back(path);
+            return path.string();
+        };
+        auto poses = [](std::initializer_list<float> xs, float y = 0) {
+            std::vector<float> values(xs.size() * 16, 0);
+            std::size_t n = 0;
+            for (const auto x : xs) {
+                for (int k = 0; k < 4; ++k)
+                    values[n * 16 + k * 5] = 1;
+                values[n * 16 + 3] = x;
+                values[n * 16 + 7] = y;
+                ++n;
+            }
+            return values;
+        };
+        auto crop = [&](const char* stage, int iteration, const std::vector<float>& query,
+                        float rendered, std::initializer_list<float> observed) {
+            const auto count = query.size() / 16;
+            std::vector<float> a(count * 6, rendered), b(count * 6, 0.25F);
+            std::size_t n = 0;
+            for (const auto value : observed)
+                b[n++ * 6] = value;
+            return Json{{"stage", stage},
+                        {"iteration", iteration},
+                        {"shape", {count, 1, 1, 6}},
+                        {"query_poses_path", floats(query)},
+                        {"rendered_path", floats(a)},
+                        {"observed_path", floats(b)}};
+        };
+        const auto initial_poses = poses({0.5F, 0.75F});
+        const auto candidate_path = floats(initial_poses);
+        const Json refine_input{
+            {"candidate_poses_path", candidate_path},
+            {"hypothesis_count", 2},
+            {"mesh_diameter_meters", 2.0},
+            {"crop_batches",
+             Json::array({crop("refinement", 0, initial_poses, 0.25F, {0.25F, 0.25F}),
+                          crop("refinement", 1, poses({1, 1.25F}, 0.25F), 0.5F, {0.25F, 0.25F}),
+                          crop("scoring", 2, poses({2, 2.25F}, 0.5F), 0.0F, {0.25F, 0.5F})})},
+            {"config", {{"refinement_iterations", 2}, {"score_hypotheses", true}}}};
+        select("pose_hypotheses_crops_to_refined_poses", "perception_fixture", "refine_pose",
+               refine_input);
+        for (const bool include_assets : {false, true}) {
+            request["measurement"]["asset_loading_included"] = include_assets;
+            const auto value = run().at("output_summary");
+            check(value.at("refined_hypotheses") == 2 &&
+                      value.at("refined_poses") == poses({2, 2.25F}, 0.5F) &&
+                      value.at("scores") == Json::array({1, 2}) && value.at("best_index") == 1 &&
+                      value.at("all_poses_rigid") == true && value.at("crop_queries").size() == 3 &&
+                      value.at("crop_queries").at(2).at("iteration") == 2 &&
+                      value.at("refinement_ms") == 1.5 && value.at("scoring_ms") == 0.5,
+                  "pose refinement consumes exact prepared callbacks and preserves full poses, "
+                  "scores, selection and timing");
+        }
+        request["request"]["crop_batches"].erase(2);
+        run(false);
+        request["request"] = refine_input;
+        request["request"]["crop_batches"][0]["iteration"] = 1;
+        run(false);
+        request["request"] = refine_input;
+        request["request"]["crop_batches"].push_back(refine_input.at("crop_batches").back());
+        run(false);
+
+        const Json initialize{
+            {"candidate_poses_path", candidate_path},
+            {"hypothesis_count", 2},
+            {"mesh_diameter_meters", 2.0},
+            {"crop_batches",
+             Json::array({crop("refinement", 0, initial_poses, 0.25F, {0.25F, 0.25F}),
+                          crop("scoring", 0, poses({1, 1.25F}), 0.0F, {0.25F, 0.5F})})}};
+        const Json pose_tracking{
+            {"initialization", initialize},
+            {"updates",
+             Json::array({{{"crop_batches",
+                            Json::array({crop("refinement", 0, poses({1.25F}), 0.5F, {0.25F}),
+                                         crop("scoring", 0, poses({2.25F}), 0.0F, {0.75F})})}},
+                          {{"crop_batches",
+                            Json::array({crop("refinement", 0, poses({2.25F}), 0.25F, {0.25F}),
+                                         crop("scoring", 0, poses({2.75F}), 0.0F, {0.5F})})}}})}};
+        select("crop_pose_tracking", "tracking_fixture", "track_pose", pose_tracking);
+        const auto pose_measurement = run();
+        for (const auto& value : pose_measurement.at("observations")) {
+            check(value.at("pose_updates") == 2 &&
+                      value.at("initialization").at("best_index") == 1 &&
+                      value.at("updates").at(0).at("refined_poses") == poses({2.25F}) &&
+                      value.at("updates").at(1).at("refined_poses") == poses({2.75F}) &&
+                      value.at("lifecycle_scope") == "fresh_create_initialize_track_all_close",
+                  "each fresh pose session initializes, tracks from its selected pose and closes "
+                  "with owned snapshots");
+        }
+        request["request"]["updates"][0]["crop_batches"][0]["query_poses_path"] = candidate_path;
+        run(false);
+        request["request"] = pose_tracking;
+        request["request"]["updates"] = Json::array();
+        run(false);
+        for (const auto& path : pose_files)
+            std::filesystem::remove(path);
+
+        select("image_to_metric_geometry", "perception_fixture", "geometry",
+               {{"image_path", left.string()}, {"config", {{"fov_x", 42.0}}}});
+        std::filesystem::path geometry_prefix(output);
+        geometry_prefix.replace_extension(".geometry");
+        const auto points_path = geometry_prefix.string() + ".points.f32";
+        const auto depth_path = geometry_prefix.string() + ".depth.f32";
+        const auto mask_path = geometry_prefix.string() + ".mask.u8";
+        for (const bool include_assets : {false, true}) {
+            request["measurement"]["asset_loading_included"] = include_assets;
+            const auto value = run();
+            const auto& geometry = value.at("output_summary");
+            check(geometry.at("geometry_pixels") == 2 && geometry.at("valid_pixels") == 1 &&
+                      geometry.at("point_shape") == Json::array({1, 2, 3}) &&
+                      geometry.at("units") == "meters" &&
+                      geometry.at("camera_axes") == Json::array({"right", "down", "forward"}) &&
+                      geometry.at("intrinsics_coordinates") == "normalized_uv" &&
+                      std::abs(geometry.at("normalized_intrinsics").at(0).at(0).get<double>() -
+                               0.42) < 1e-6,
+                  "geometry preserves metric axes, normalized intrinsics and actual output grid");
+            float points[6]{}, depth[2]{};
+            unsigned char mask[2]{};
+            std::ifstream(points_path, std::ios::binary)
+                .read(reinterpret_cast<char*>(points), sizeof(points));
+            std::ifstream(depth_path, std::ios::binary)
+                .read(reinterpret_cast<char*>(depth), sizeof(depth));
+            std::ifstream(mask_path, std::ios::binary)
+                .read(reinterpret_cast<char*>(mask), sizeof(mask));
+            check(
+                std::isinf(points[0]) && std::isinf(points[1]) && std::isinf(points[2]) &&
+                    points[3] == 2 && std::isinf(depth[0]) && depth[1] == 2 && mask[0] == 0 &&
+                    mask[1] == 1 && std::filesystem::file_size(points_path) == sizeof(points) &&
+                    std::filesystem::file_size(depth_path) == sizeof(depth) &&
+                    std::filesystem::file_size(mask_path) == sizeof(mask),
+                "raw geometry artifacts retain invalid infinities and authoritative validity mask");
+            check(value.at("asset_loading_included") == include_assets &&
+                      value.at("observation_serialization_included") == false &&
+                      value.at("observations").size() == 2 &&
+                      value.at("observations").at(0).at("geometry_images") == 1,
+                  "geometry maps are serialized after measured typed calls");
+        }
+        request["request"]["config"] = {{"fov_x", "wrong"}};
+        run(false);
+        for (const auto& path : {points_path, depth_path, mask_path})
+            std::filesystem::remove(path);
+
+        select("image_to_boxes", "image_boxes_fixture", "detect", {{"image_path", left.string()}});
+        for (const bool include_assets : {false, true}) {
+            request["measurement"]["asset_loading_included"] = include_assets;
+            const auto value = run();
+            const auto& detected = value.at("output_summary");
+            check(detected.at("detected_images") == 1 && detected.at("detections") == 2 &&
+                      detected.at("boxes") == Json::array({-2, 1, 5, 1, 0, 0, 1, 1}) &&
+                      detected.at("scores") == Json::array({0.75, 0.0}) &&
+                      detected.at("class_ids") == Json::array({42, 7}) &&
+                      detected.at("image_height") == 1 && detected.at("image_width") == 2 &&
+                      detected.at("coordinates") == "xyxy" && detected.at("units") == "pixels",
+                  "image-only detection preserves out-of-frame boxes, zero scores and numeric "
+                  "class IDs");
+            check(value.at("observations").size() == 2 &&
+                      value.at("asset_loading_included") == include_assets,
+                  "detection preserves per-call observations and asset timing policy");
+        }
+        request["request"]["config"] = {{"empty", true}};
+        const auto empty_detection = run().at("output_summary");
+        check(empty_detection.at("detections") == 0 && empty_detection.at("boxes").empty() &&
+                  empty_detection.at("scores").empty() && empty_detection.at("image_width") == 2,
+              "empty detections remain a valid result with original image dimensions");
+        request["request"]["config"] = {{"score", 0.0}};
+        check(run().at("output_summary").at("scores") == Json::array({0.0, 0.0}),
+              "explicit zero detector score is not replaced by a default");
+        request["request"]["prompt"] = "";
+        run(false);
+        request["request"].erase("prompt");
+        request["request"]["config"] = {{"score", "wrong"}};
+        run(false);
+
+        const auto document = runtime / "benchmark_structure.b2rq";
+        {
+            std::ofstream file(document, std::ios::binary);
+            file.write("B2RQ\0\x7f", 6);
+        }
+        auto read_document = [](const std::string& path) {
+            std::ifstream file(path, std::ios::binary);
+            if (!file)
+                throw std::runtime_error("cannot read structure artifact");
+            return std::string{std::istreambuf_iterator<char>(file),
+                               std::istreambuf_iterator<char>()};
+        };
+        select("molecular_document_to_structure", "structure_fixture", "predict_structure",
+               {{"document_path", document.string()}, {"source_path", "relative/original.yaml"}});
+        for (const bool include_assets : {false, true}) {
+            request["measurement"]["asset_loading_included"] = include_assets;
+            const auto value = run();
+            const auto& structure = value.at("output_summary");
+            const auto contents = read_document(structure.at("structure_artifact"));
+            const auto metadata = Json::parse(read_document(structure.at("metadata_artifact")));
+            check(contents == "data_fixture\n# b2rq:42325251007f\n" &&
+                      structure.at("document_bytes") == 6 &&
+                      structure.at("structure_bytes") == contents.size() &&
+                      structure.at("format") == "mmcif" &&
+                      structure.at("input_encoding") == "b2rq" &&
+                      structure.at("source_path") == "relative/original.yaml" &&
+                      metadata.at("source_path") == "relative/original.yaml" &&
+                      metadata.at("seed") == 42 && metadata.at("sampling_steps") == 200,
+                  "structure input bytes including NUL, source provenance and family defaults are "
+                  "preserved");
+            const auto& confidence = structure.at("confidence");
+            check(confidence.size() == 8 && confidence.at("plddt") == Json::array({88, 0, 99}) &&
+                      confidence.at("complex_plddt") == 66 &&
+                      confidence.at("complex_iplddt") == 77 &&
+                      std::abs(confidence.at("confidence_score").get<double>() - 0.1) < 1e-6,
+                  "all confidence fields retain family units and valid zero entries");
+            check(value.at("observations").size() == 2 &&
+                      value.at("observations").at(0).at("structures") == 1 &&
+                      value.at("asset_loading_included") == include_assets &&
+                      value.at("observation_serialization_included") == false,
+                  "structure bytes are written after the measured public Task calls");
+        }
+        request["request"]["input_encoding"] = "yaml";
+        request["request"]["source_path"] = "";
+        request["request"]["config"] = {{"seed", 0},
+                                        {"include_confidence", false},
+                                        {"output_format", "pdb"},
+                                        {"sampling_steps", 7}};
+        auto structure = run().at("output_summary");
+        check(structure.at("format") == "pdb" && structure.at("confidence").is_null() &&
+                  structure.at("source_path") == "" && structure.at("input_encoding") == "yaml" &&
+                  read_document(structure.at("structure_artifact")) ==
+                      "HEADER fixture\nREMARK yaml:42325251007f\n",
+              "explicit encoding and empty provenance are not inferred again; absent confidence is "
+              "null");
+        auto metadata = Json::parse(read_document(structure.at("metadata_artifact")));
+        check(metadata.at("seed") == 0 && metadata.at("sampling_steps") == 7,
+              "structure Config preserves explicit zero and sampling-step values");
+        const std::string provenance("source\0path", 11);
+        request["request"]["source_path"] = provenance;
+        structure = run().at("output_summary");
+        const auto raw_metadata = read_document(structure.at("metadata_artifact"));
+        check(raw_metadata.find(provenance) != std::string::npos &&
+                  raw_metadata.size() == structure.at("metadata_bytes") &&
+                  structure.at("source_path") == provenance,
+              "metadata result bytes and source-path view are never truncated at NUL");
+        request["request"]["source_path"] = "";
+        request["request"]["input_encoding"] = "";
+        run(false);
+        request["request"]["input_encoding"] = "other";
+        run(false);
+        request["request"]["input_encoding"] = "b2rq";
+        request["request"]["seed"] = 0;
+        run(false); // A duplicate flat/nested Config value must not be overwritten.
+        request["request"].erase("seed");
+        request["request"]["config"] = {{"seed", "0"}};
+        run(false);
+        std::filesystem::path structure_prefix(output);
+        structure_prefix.replace_extension(".structure");
+        for (const auto* suffix : {".cif", ".pdb", ".metadata.json"})
+            std::filesystem::remove(structure_prefix.string() + suffix);
+        std::filesystem::remove(document);
+
         select("image_to_class_scores", "features_fixture", "classify",
                {{"image_path", left.string()}});
         auto result = run();
@@ -275,6 +599,54 @@ int main(int argc, char** argv) {
               "stateless action chunk retains values, schema, bounds and fresh-call timing");
         bundle(model, "image_state_action_queue", "action_fixture");
         run(false);
+
+        const auto next_state = runtime / "benchmark_remaining_next_state.f32";
+        {
+            const float values[]{20, 40};
+            std::ofstream file(next_state, std::ios::binary);
+            file.write(reinterpret_cast<const char*>(values), sizeof(values));
+        }
+        const Json queue_input{
+            {"observations",
+             Json::array({{{"image_path", one.string()}, {"state_path", state.string()}},
+                          {{"image_path", zero.string()}, {"state_path", next_state.string()}},
+                          {{"image_path", one.string()}, {"state_path", next_state.string()}}})},
+            {"config", {{"tag", "session"}}}};
+        select("image_state_action_queue", "action_fixture", "control_queue", queue_input);
+        for (const bool include_assets : {false, true}) {
+            request["measurement"]["asset_loading_included"] = include_assets;
+            const auto measured = run();
+            for (const auto& observation : measured.at("observations")) {
+                const auto& steps = observation.at("steps");
+                check(observation.at("action_steps") == 3 &&
+                          observation.at("lifecycle_scope") == "fresh_create_act_all_close" &&
+                          steps.at(0).at("actions") == Json::array({2, -3}) &&
+                          steps.at(1).at("actions") == Json::array({2, 8}) &&
+                          steps.at(2).at("actions") == Json::array({21, -3}),
+                      "action queue uses its queued prediction before refilling from the next "
+                      "observation");
+                check(steps.at(0).at("inference_ms") == 1 && steps.at(1).at("inference_ms") == 0 &&
+                          steps.at(2).at("inference_ms") == 2 &&
+                          steps.at(0).at("started_new_chunk") == true &&
+                          steps.at(1).at("started_new_chunk") == false &&
+                          steps.at(2).at("started_new_chunk") == true,
+                      "every measured iteration starts with a fresh queue and releases the "
+                      "previous session");
+                check(steps.at(0).at("schema").at("domain") == "fixture.session" &&
+                          steps.at(0).at("within_training_bounds") == true &&
+                          steps.at(1).at("within_training_bounds") == false,
+                      "per-step schema, timing and bounds remain owned after session close");
+            }
+        }
+        request["request"]["observations"][0]["config"] = {{"tag", "not-an-act-option"}};
+        run(false);
+        request["request"] = queue_input;
+        request["request"]["observations"] = Json::array();
+        run(false);
+        request["request"] = queue_input;
+        request["request"]["observations"][1].erase("state_path");
+        run(false);
+        std::filesystem::remove(next_state);
 
         select("text_to_image", "image_fixture", "generate_image", {{"prompt", "Hello"}});
         summary = run().at("output_summary");

@@ -68,12 +68,14 @@ struct SpeechToSpeechResponseRequest {
 
 class ITextToAudio {
   public:
+    using TaskInterface = ITextToAudio;
     static constexpr std::string_view kTask = "text_to_audio";
     virtual ~ITextToAudio() = default;
     virtual AudioResult run(const TextToAudioRequest&, ConfigView) = 0;
 };
 class ITextAudioTokenHistoryToAudio {
   public:
+    using TaskInterface = ITextAudioTokenHistoryToAudio;
     static constexpr std::string_view kTask = "text_audio_token_history_to_audio";
     virtual ~ITextAudioTokenHistoryToAudio() = default;
     // Required history borrows caller storage through synchronous return.
@@ -82,6 +84,7 @@ class ITextAudioTokenHistoryToAudio {
 };
 class ITextToSpeech {
   public:
+    using TaskInterface = ITextToSpeech;
     static constexpr std::string_view kTask = "text_to_speech";
     virtual ~ITextToSpeech() = default;
     // Speech realizes the supplied transcript; speaker/normalization controls
@@ -90,6 +93,7 @@ class ITextToSpeech {
 };
 class ISpeechTranscription {
   public:
+    using TaskInterface = ISpeechTranscription;
     static constexpr std::string_view kTask = "speech_transcription";
     virtual ~ISpeechTranscription() = default;
     // Same-language transcript. Segment timestamps are not implied word alignment.
@@ -97,6 +101,7 @@ class ISpeechTranscription {
 };
 class ISpeechTranslation {
   public:
+    using TaskInterface = ISpeechTranslation;
     static constexpr std::string_view kTask = "speech_translation";
     virtual ~ISpeechTranslation() = default;
     // Absent language values use only the loaded family's declared defaults;
@@ -105,6 +110,7 @@ class ISpeechTranslation {
 };
 class IAudioLanguageIdentification {
   public:
+    using TaskInterface = IAudioLanguageIdentification;
     static constexpr std::string_view kTask = "audio_language_identification";
     virtual ~IAudioLanguageIdentification() = default;
     // Every score needs its actual language label; ordinal-only output is not
@@ -113,6 +119,7 @@ class IAudioLanguageIdentification {
 };
 class ISpeechToSpeechResponse {
   public:
+    using TaskInterface = ISpeechToSpeechResponse;
     static constexpr std::string_view kTask = "speech_to_speech_response";
     virtual ~ISpeechToSpeechResponse() = default;
     // A response to the complete user speech, not arbitrary audio transformation.
@@ -136,12 +143,14 @@ struct BatchSpeechTranslationRequest {
 
 class IBatchSpeechTranscription {
   public:
+    using TaskInterface = IBatchSpeechTranscription;
     static constexpr std::string_view kTask = "batch_speech_transcription";
     virtual ~IBatchSpeechTranscription() = default;
     virtual BatchTextResult run_batch(const BatchSpeechTranscriptionRequest&) = 0;
 };
 class IBatchSpeechTranslation {
   public:
+    using TaskInterface = IBatchSpeechTranslation;
     static constexpr std::string_view kTask = "batch_speech_translation";
     virtual ~IBatchSpeechTranslation() = default;
     virtual BatchTextResult run_batch(const BatchSpeechTranslationRequest&) = 0;
@@ -160,6 +169,7 @@ struct MixedBatchSpeechToTextRequest {
 // Implementing a homogeneous batch does not imply this mixed contract.
 class IMixedBatchSpeechToText {
   public:
+    using TaskInterface = IMixedBatchSpeechToText;
     static constexpr std::string_view kTask = "mixed_batch_speech_to_text";
     virtual ~IMixedBatchSpeechToText() = default;
     virtual BatchTextResult run_batch(const MixedBatchSpeechToTextRequest&) = 0;
@@ -192,12 +202,14 @@ using BatchAudioResult = std::vector<AudioResult>;
 // actual sample rate/channels. Voice compatibility and RNG policy are family-owned.
 class IBatchTextToAudio {
   public:
+    using TaskInterface = IBatchTextToAudio;
     static constexpr std::string_view kTask = "batch_text_to_audio";
     virtual ~IBatchTextToAudio() = default;
     virtual BatchAudioResult run_batch(const BatchTextToAudioRequest&) = 0;
 };
 class IBatchTextAudioTokenHistoryToAudio {
   public:
+    using TaskInterface = IBatchTextAudioTokenHistoryToAudio;
     static constexpr std::string_view kTask = "batch_text_audio_token_history_to_audio";
     virtual ~IBatchTextAudioTokenHistoryToAudio() = default;
     // One immutable typed history conditions every independent prompt. This
@@ -206,6 +218,7 @@ class IBatchTextAudioTokenHistoryToAudio {
 };
 class IBatchTextToSpeech {
   public:
+    using TaskInterface = IBatchTextToSpeech;
     static constexpr std::string_view kTask = "batch_text_to_speech";
     virtual ~IBatchTextToSpeech() = default;
     virtual BatchAudioResult run_batch(const BatchTextToSpeechRequest&) = 0;

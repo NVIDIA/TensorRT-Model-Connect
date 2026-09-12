@@ -105,6 +105,7 @@ struct LatentTokenLogitsResult {
 #define TRTMC_NUMERIC_INTERFACE(Name, Id, Request, Result)                                         \
     class I##Name {                                                                                \
       public:                                                                                      \
+        using TaskInterface = I##Name;                                                             \
         static constexpr std::string_view kTask = Id;                                              \
         virtual ~I##Name() = default;                                                              \
         virtual Result run(const Request&, ConfigView) = 0;                                        \
@@ -139,6 +140,7 @@ struct BatchSeriesToPointForecastRequest {
 };
 class IBatchSeriesToPointForecast {
   public:
+    using TaskInterface = IBatchSeriesToPointForecast;
     static constexpr std::string_view kTask = "batch_series_to_point_forecast";
     using Request = BatchSeriesToPointForecastRequest;
     virtual ~IBatchSeriesToPointForecast() = default;
@@ -155,6 +157,7 @@ struct BatchSeriesToQuantileForecastRequest {
 };
 class IBatchSeriesToQuantileForecast {
   public:
+    using TaskInterface = IBatchSeriesToQuantileForecast;
     static constexpr std::string_view kTask = "batch_series_to_quantile_forecast";
     using Request = BatchSeriesToQuantileForecastRequest;
     virtual ~IBatchSeriesToQuantileForecast() = default;
@@ -171,6 +174,7 @@ struct BatchSeriesToPointAndQuantileForecastRequest {
 };
 class IBatchSeriesToPointAndQuantileForecast {
   public:
+    using TaskInterface = IBatchSeriesToPointAndQuantileForecast;
     static constexpr std::string_view kTask = "batch_series_to_point_and_quantile_forecast";
     using Request = BatchSeriesToPointAndQuantileForecastRequest;
     virtual ~IBatchSeriesToPointAndQuantileForecast() = default;

@@ -95,7 +95,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"predict-structure",
          {CommandKind::kPredictStructure,
-          {"--input", "--output", "--output-json", "--num-steps", "--seed"}}},
+          {"--input", "--input-encoding", "--output", "--output-json", "--num-steps", "--seed"}}},
         {"disparity", {CommandKind::kDisparity, {"--left", "--right"}}},
         {"geometry", {CommandKind::kGeometry, {"--image", "--output"}}},
         {"segment", {CommandKind::kSegment, {"--image"}}},
@@ -315,6 +315,18 @@ std::vector<std::string> read_lines(const std::string& path) {
     if (lines.empty())
         throw std::runtime_error("text file has no lines: " + path);
     return lines;
+}
+
+std::string read_structure_document(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        throw std::runtime_error("unable to open structure request: " + path);
+    std::string document{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    if (input.bad())
+        throw std::runtime_error("failed to read structure request: " + path);
+    if (document.empty())
+        throw std::invalid_argument("structure request must not be empty");
+    return document;
 }
 
 std::vector<std::string> read_nonempty_lines(const std::string& path) {
@@ -823,6 +835,8 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         reject_sdk_inputs({"--image", "--title", "--body", "--role"});
     if (command.kind == CommandKind::kRerank)
         reject_sdk_inputs({"--image", "--documents"});
+    if (command.kind == CommandKind::kPredictStructure)
+        reject_sdk_inputs({"--input-encoding"});
     if (command.kind == CommandKind::kGenerateAudio)
         reject_sdk_inputs({"--language"});
     if (command.kind == CommandKind::kGenerateImage)
@@ -904,14 +918,8 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
     }
     case CommandKind::kPredictStructure: {
         const std::string input_path = require_option(command, "--input");
-        std::ifstream input(input_path, std::ios::binary);
-        if (!input)
-            throw std::runtime_error("unable to open structure request: " + input_path);
         StructurePredictionRequest request;
-        request.document.assign(std::istreambuf_iterator<char>(input),
-                                std::istreambuf_iterator<char>());
-        if (request.document.empty())
-            throw std::invalid_argument("structure request must not be empty");
+        request.document = read_structure_document(input_path);
         request.source_path = input_path;
         request.config.sampling_steps =
             int_option(command, "--num-steps", request.config.sampling_steps, 1);
@@ -1384,6 +1392,8 @@ int dispatch(const Command& command, const Model& model, std::ostream& output) {
     if (id.empty())
         id = language_task_for_command(command, model);
     if (id.empty())
+        id = structure_task_for_command(command);
+    if (id.empty())
         id = model.info().bundle_task;
     const bool lora_path = has_option(command, "--lora-adapter");
     const bool lora_id = has_option(command, "--lora-adapter-id");
@@ -1499,6 +1509,8 @@ int dispatch(const Command& command, const Model& model, std::ostream& output) {
         return EXIT_SUCCESS;
     if (dispatch_sdk_language(command, model, id, output))
         return EXIT_SUCCESS;
+    if (dispatch_sdk_structure(command, model, id, output))
+        return EXIT_SUCCESS;
     throw std::invalid_argument("command '" + command.name + "' does not accept Task '" + id + "'");
 }
 
@@ -1528,6 +1540,10 @@ void print_usage(std::ostream& output) {
               "  [--max-input-seconds F] [--segment-length-seconds F]\n"
               "  [--segment-min-seconds F] [--segment-overlap-seconds F]\n"
               "  [--lcs-merge true|false]\n\n"
+              "Molecular structure input:\n"
+              "  predict-structure BUNDLE --input REQUEST [--input-encoding ENCODING]\n"
+              "  .yaml/.yml, .json and .b2rq select their declared encodings.\n"
+              "  SDK output defaults to prediction.cif or prediction.pdb.\n\n"
               "BYOK options:\n"
               "  --byok-library DSO --byok-function FUNCTION --byok-name KERNEL\n\n"
               "Runtime-sized KV cache:\n"

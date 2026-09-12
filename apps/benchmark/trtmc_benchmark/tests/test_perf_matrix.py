@@ -16,6 +16,7 @@ import yaml
 
 import tools.perf_matrix as perf
 from apps.benchmark.performance.baselines import (
+    hf_transformers,
     lance_reference,
     sana_wm_reference,
     task_reference,
@@ -24,6 +25,930 @@ from apps.benchmark.performance.baselines import (
 
 REPO = Path(__file__).resolve().parents[4]
 SUITE = REPO / "apps/benchmark/performance/release.yaml"
+
+
+def test_reference_config_preserves_explicit_values_without_defaults() -> None:
+    original = {
+        "source_text": "Hello",
+        "source_language": "eng_Latn",
+        "config": {
+            "temperature": 0.0,
+            "seed": 0,
+            "use_chat_template": False,
+            "labels": [],
+            "suffix": "",
+        },
+    }
+    flattened = hf_transformers.flatten_config(original)
+    assert flattened == {
+        "source_text": "Hello",
+        "source_language": "eng_Latn",
+        "temperature": 0.0,
+        "seed": 0,
+        "use_chat_template": False,
+        "labels": [],
+        "suffix": "",
+    }
+    assert "config" in original
+    assert hf_transformers.flatten_config({"prompt": "Hello"}) == {"prompt": "Hello"}
+    with pytest.raises(ValueError, match="duplicate"):
+        hf_transformers.flatten_config({"seed": 0, "config": {"seed": 1}})
+    with pytest.raises(ValueError, match="object"):
+        hf_transformers.flatten_config({"config": [1]})
+
+
+def test_translation_languages_use_tokenizer_controls_and_preserve_absence() -> None:
+    class Tokenizer:
+        src_lang = "default"
+        unk_token_id = 99
+
+        def convert_tokens_to_ids(self, token):
+            return {"eng_Latn": 10, "fra_Latn": 11}.get(token, 99)
+
+        def convert_ids_to_tokens(self, token):
+            return {10: "eng_Latn", 11: "fra_Latn"}[token]
+
+    tokenizer = Tokenizer()
+    assert hf_transformers._translation_controls(tokenizer, {}) == {}
+    assert tokenizer.src_lang == "default"
+    assert hf_transformers._translation_controls(
+        tokenizer, {"source_language": "eng_Latn", "target_language": "fra_Latn"}
+    ) == {"forced_bos_token_id": 11}
+    assert tokenizer.src_lang == "eng_Latn"
+    assert hf_transformers._translation_controls(
+        tokenizer, {"source_language_token_id": 10, "forced_bos_token_id": 0}
+    ) == {"forced_bos_token_id": 0}
+    with pytest.raises(ValueError, match="disagrees"):
+        hf_transformers._translation_controls(
+            tokenizer, {"target_language": "fra_Latn", "forced_bos_token_id": 10}
+        )
+    with pytest.raises(ValueError, match="recognize"):
+        hf_transformers._translation_controls(tokenizer, {"target_language": "invalid"})
+    fixed = SimpleNamespace(source_lang="en", target_lang="ru")
+    assert (
+        hf_transformers._translation_controls(
+            fixed, {"source_language": "en", "target_language": "ru"}
+        )
+        == {}
+    )
+    with pytest.raises(ValueError, match="target language"):
+        hf_transformers._translation_controls(fixed, {"target_language": "de"})
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        hf_transformers._translation_controls(tokenizer, {"forced_bos_token_id": -1.0})
+
+
+def test_translation_and_config_reach_reference_generate(monkeypatch) -> None:
+    class Tensor:
+        def __init__(self, values):
+            self.values = np.asarray(values)
+
+        @property
+        def shape(self):
+            return self.values.shape
+
+        def __getitem__(self, key):
+            return Tensor(self.values[key])
+
+        def to(self, *_args, **_kwargs):
+            return self
+
+        def detach(self):
+            return self
+
+        def tolist(self):
+            return self.values.tolist()
+
+    class Tokenizer:
+        pad_token_id = 0
+        unk_token_id = 99
+        src_lang = "default"
+
+        def convert_tokens_to_ids(self, language):
+            return {"eng_Latn": 10, "fra_Latn": 11}.get(language, 99)
+
+        def __call__(self, prompt, **_kwargs):
+            assert prompt == "source text"
+            return {"input_ids": Tensor([[self.convert_tokens_to_ids(self.src_lang), 17]])}
+
+        def decode(self, tokens, **_kwargs):
+            return "translated:" + str(tokens)
+
+    captured = {}
+
+    class Model:
+        config = SimpleNamespace(decoder_start_token_id=0, eos_token_id=3)
+
+        def generate(self, **kwargs):
+            captured.update(kwargs)
+            return Tensor([[0, 8, 3]])
+
+    fake = ModuleType("torch")
+    fake.float16, fake.float32, fake.bfloat16, fake.int64 = "fp16", "fp32", "bf16", "i64"
+    fake.inference_mode = nullcontext
+    fake.autocast = lambda **_kwargs: nullcontext()
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    invoke, summarize = hf_transformers._generation_call(
+        Tokenizer(),
+        Model(),
+        {
+            "source_text": "source text",
+            "source_language": "eng_Latn",
+            "target_language": "fra_Latn",
+            "config": {"max_new_tokens": 5, "temperature": 0.0, "repetition_penalty": 1.1},
+        },
+        "seq2seq-lm",
+        "strip-start-and-eos",
+        "fp32",
+        "generate",
+    )
+    output = summarize(invoke())
+    assert captured["input_ids"].tolist() == [[10, 17]]
+    assert captured["forced_bos_token_id"] == 11
+    assert captured["max_new_tokens"] == 5 and captured["do_sample"] is False
+    assert captured["repetition_penalty"] == 1.1
+    assert output["token_ids"] == [8]
+
+
+@pytest.mark.parametrize(
+    "entry_id,task,operation",
+    [
+        ("m2m_100.generate", "text_translation", "translate"),
+        ("marian.generate", "text_translation", "translate"),
+        ("patchtst.solve", "series_to_regression_distribution", "regress"),
+    ],
+)
+def test_release_entry_survives_semantic_primary_switch(
+    tmp_path, monkeypatch, entry_id, task, operation
+):
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(row for row in entries if row["id"] == entry_id)
+    original_resolve = perf.ManifestCatalog.resolve
+
+    def resolve(catalog, selector):
+        return replace(original_resolve(catalog, selector), task=task)
+
+    monkeypatch.setattr(perf.ManifestCatalog, "resolve", resolve)
+    entry = perf.resolve_entries([spec], environment)[0]
+    assert entry.spec["id"] == spec["id"]
+    assert entry.spec["operation"] == entry.case.operation == operation
+    assert entry.spec["measurement"] == spec["measurement"]
+    assert entry.spec["equivalence_margin_percent"] == spec["equivalence_margin_percent"]
+    assert spec["operation"] != operation
+    if operation == "translate":
+        assert entry.case.request["source_text"]
+        assert perf._baseline_task(entry) == "seq2seq-lm"
+        assert perf._contract_name(entry) == "exact-token-ids"
+
+
+def test_seq2seq_reference_choice_is_an_existing_entry_field_not_a_family_registry(tmp_path):
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    for name in ("bart", "m2m_100", "marian", "t5"):
+        spec = next(row for row in entries if row["id"] == name + ".generate")
+        assert spec["baseline"]["task"] == "seq2seq-lm"
+        entry = perf.resolve_entries([spec], environment)[0]
+        assert (
+            perf._baseline_task(replace(entry, model=replace(entry.model, family="new_owner")))
+            == "seq2seq-lm"
+        )
+
+
+class _SummaryTensor:
+    def __init__(self, values):
+        self.values = np.asarray(values)
+
+    @property
+    def shape(self):
+        return self.values.shape
+
+    def numel(self):
+        return self.values.size
+
+    def isfinite(self):
+        return _SummaryTensor(np.isfinite(self.values))
+
+    def all(self):
+        return _SummaryTensor(self.values.all())
+
+    def item(self):
+        return self.values.item()
+
+    def __getitem__(self, key):
+        return _SummaryTensor(self.values[key])
+
+    def detach(self):
+        return self
+
+    def float(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def tolist(self):
+        return self.values.tolist()
+
+
+def test_forecast_reference_names_axes_without_arbitrary_squeeze_or_sorting():
+    point = task_reference._forecast_summary(
+        _SummaryTensor(np.zeros((1, 4, 3))), "series_to_point_forecast"
+    )
+    assert point["shape"] == [4, 3] and point["axes"] == ["horizon", "channel"]
+    assert point["horizon_steps"] == [1, 2, 3, 4] and point["forecast_elements"] == 12
+    quantile = task_reference._forecast_summary(
+        _SummaryTensor(np.zeros((1, 3, 4))), "series_to_quantile_forecast", [0.1, 0.5, 0.9]
+    )
+    assert quantile["shape"] == [3, 4, 1]
+    assert quantile["axes"] == ["quantile", "horizon", "channel"]
+    assert quantile["quantile_levels"] == [0.1, 0.5, 0.9]
+    with pytest.raises(ValueError, match="one-series"):
+        task_reference._forecast_summary(
+            _SummaryTensor(np.zeros((2, 4, 3))), "series_to_point_forecast"
+        )
+    with pytest.raises(ValueError, match="quantile levels"):
+        task_reference._forecast_summary(
+            _SummaryTensor(np.zeros((1, 3, 4))), "series_to_quantile_forecast", []
+        )
+
+
+def test_semantic_forecast_comparison_rejects_swapped_or_missing_axes():
+    entry = SimpleNamespace(
+        spec={"baseline": {"output_contract": "forecast-shape"}},
+        model=SimpleNamespace(task="series_to_point_forecast"),
+    )
+    summary = {
+        "forecast_elements": 12,
+        "shape": [4, 3],
+        "axes": ["horizon", "channel"],
+        "horizon_steps": [1, 2, 3, 4],
+    }
+    assert perf._output_contract(
+        entry, {"output_summary": summary}, {"output_summary": dict(summary)}
+    )[0]
+    for patch in (
+        {"shape": [3, 4]},
+        {"axes": ["channel", "horizon"]},
+        {"axes": None},
+        {"horizon_steps": [1, 3, 5, 7]},
+    ):
+        assert not perf._output_contract(
+            entry, {"output_summary": summary}, {"output_summary": {**summary, **patch}}
+        )[0]
+    entry.model.task = "series_to_quantile_forecast"
+    quantiles = {"forecast_elements": 12, "shape": [3, 4, 1],
+                 "axes": ["quantile", "horizon", "channel"], "horizon_steps": [1, 2, 3, 4],
+                 "quantile_levels": [0.1, 0.5, 0.9]}
+    assert perf._output_contract(entry, {"output_summary": quantiles},
+                                 {"output_summary": dict(quantiles)})[0]
+    missing_levels = {key: value for key, value in quantiles.items() if key != "quantile_levels"}
+    assert not perf._output_contract(entry, {"output_summary": missing_levels},
+                                     {"output_summary": dict(missing_levels)})[0]
+
+
+def test_regression_distribution_keeps_parameter_names_and_target_axis():
+    values = (_SummaryTensor([[1.0, 2.0]]), _SummaryTensor([[0.5, 0.7]]))
+    summary = task_reference._regression_summary(values, "normal", ["loc", "scale"])
+    assert summary["target_count"] == 2 and summary["axes"] == ["target"]
+    assert summary["parameters"] == [
+        {"name": "location", "values": [1.0, 2.0]},
+        {"name": "scale", "values": [0.5, 0.7]},
+    ]
+    entry = SimpleNamespace(spec={"baseline": {"output_contract": "regression-distribution"}})
+    assert perf._output_contract(
+        entry, {"output_summary": summary}, {"output_summary": dict(summary)}
+    )[0]
+    assert not perf._output_contract(
+        entry,
+        {"output_summary": summary},
+        {"output_summary": {**summary, "distribution": "student_t"}},
+    )[0]
+    with pytest.raises(ValueError, match="same target axis"):
+        task_reference._regression_summary(
+            (_SummaryTensor([[1, 2]]), _SummaryTensor([[1]])), "normal", ["loc", "scale"]
+        )
+    student = task_reference._regression_summary(
+        (_SummaryTensor([[4.0]]), _SummaryTensor([[1.0]]), _SummaryTensor([[0.5]])),
+        "student_t", ["df", "loc", "scale"],
+    )
+    assert [parameter["name"] for parameter in student["parameters"]] == [
+        "degrees_of_freedom", "location", "scale"
+    ]
+    with pytest.raises(ValueError, match="parameter names"):
+        task_reference._regression_summary(values, "normal", ["loc", "location"])
+
+
+def test_timeseries_reference_preserves_observed_masks_and_unobserved_padding():
+    request = {"past_values": [1, 2, 3], "observed_mask": [1, 0, 1]}
+    observed = task_reference._observed_values(request, 3)
+    assert observed == [1.0, 0.0, 1.0]
+    assert task_reference._align(observed, 5, 0.0) == [0, 0, 1, 0, 1]
+    assert task_reference._observed_values({"past_values": [1, 2]}, 2) == [1, 1]
+    assert task_reference._observed_values({"observed_mask": []}, 2) == [1, 1]
+    with pytest.raises(ValueError, match="match past_values"):
+        task_reference._observed_values({"observed_mask": [1]}, 2)
+
+
+def _voicechat_reference_fixture(tmp_path, monkeypatch):
+    events = []
+    reference = tmp_path / "speech-reference"
+    utility = reference / "nemo/collections/speechlm2/inference/utils/offline_voicechat.py"
+    utility.parent.mkdir(parents=True)
+    utility.write_text("# official utility location fixture\n", encoding="utf-8")
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}", encoding="utf-8")
+    audio_path = tmp_path / "request.wav"
+    audio_path.write_bytes(b"fixture; decoded by the mocked official loader")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"task":"offline_speech_dialogue"}', encoding="utf-8")
+    arguments = SimpleNamespace(
+        model=str(checkpoint),
+        revision="checkpoint-revision",
+        manifest=manifest,
+        family="nemotron_voicechat",
+        precision="fp32",
+        operation="speech_dialogue",
+        local_files_only=True,
+    )
+    request = {"audio_path": str(audio_path)}
+    options = {"reference_repo": str(reference)}
+    state = {
+        "kwargs": [],
+        "prompts": [],
+        "events": events,
+        "metadata": SimpleNamespace(samplerate=16000, channels=1, frames=4),
+    }
+
+    class Tensor(_SummaryTensor):
+        def __init__(self, values, label="output"):
+            super().__init__(values)
+            self.label = label
+
+        def to(self, device):
+            events.append(("transfer", self.label, device))
+            return self
+
+        def __getitem__(self, key):
+            return Tensor(self.values[key], self.label)
+
+        def cpu(self):
+            events.append(("materialize", self.label))
+            return self
+
+        def numpy(self):
+            return np.asarray(self.values, dtype=np.float32)
+
+    class Model:
+        source_sample_rate = 16000
+        target_sample_rate = 22050
+
+        def float(self):
+            events.append("float32")
+            return self
+
+    model = Model()
+    signal = Tensor([[0.1, 0.2, 0.3, 0.4]], "signal")
+    lengths = Tensor([4], "lengths")
+    upstream = ModuleType("nemo.collections.speechlm2.inference.utils.offline_voicechat")
+    upstream.__file__ = str(utility)
+
+    def build_model(path, *, device):
+        events.append(("build", path, device))
+        return model
+
+    def load_wav(path, *, device):
+        events.append(("decode", path, device))
+        return signal, signal, lengths
+
+    def encode_prompt(received_model, prompt, *, device):
+        assert received_model is model
+        events.append(("prompt", prompt, device))
+        state["prompts"].append(prompt)
+        return "prompt-token-buffer", "prompt-length-buffer"
+
+    def inference(received_model, **kwargs):
+        assert received_model is model
+        events.append("infer")
+        state["kwargs"].append(kwargs)
+        # The padded NaN must not be included in the valid audio result.
+        return state.get(
+            "result",
+            {
+                "text": ["Full spoken answer."],
+                "audio": Tensor([[0.1, 0.2, 0.3, float("nan")]]),
+                "audio_len": Tensor([3]),
+            },
+        )
+
+    upstream.build_model = build_model
+    upstream.load_wav_16k_mono = load_wav
+    upstream.encode_system_prompt = encode_prompt
+    upstream.run_offline_inference = inference
+    sf = ModuleType("soundfile")
+    sf.info = lambda _path: state["metadata"]
+
+    def write(path, values, rate, **kwargs):
+        events.append(("write_audio", str(path), rate, kwargs))
+        state["written_audio"] = np.array(values, copy=True)
+
+    sf.write = write
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setitem(sys.modules, upstream.__name__, upstream)
+    monkeypatch.setitem(sys.modules, "soundfile", sf)
+    monkeypatch.setitem(sys.modules, "torch", ModuleType("torch"))
+    monkeypatch.setattr(
+        task_reference, "_seed_all", lambda _torch, seed: events.append(("seed", seed))
+    )
+    monkeypatch.setattr(task_reference, "_synchronize", lambda: events.append("barrier"))
+    return arguments, request, options, state, upstream, Tensor
+
+
+def test_voicechat_reference_builds_once_and_times_real_offline_calls(tmp_path, monkeypatch):
+    arguments, request, options, state, _upstream, _tensor = _voicechat_reference_fixture(
+        tmp_path, monkeypatch
+    )
+    session = task_reference._load_voicechat(arguments, request, options)
+    assert session.timing_scope == "task-pipeline-call-wall"
+    assert session.input_preparation_included is True and session.asset_loading_included is False
+    assert state["events"] == [
+        ("build", arguments.model, "cuda"),
+        "float32",
+        ("decode", request["audio_path"], "cpu"),
+    ]
+    samples, output = task_reference._measure(session, warmup=1, iterations=2)
+    assert len(samples) == 2 and all(value > 0 for value in samples)
+    assert sum(isinstance(event, tuple) and event[0] == "build" for event in state["events"]) == 1
+    assert sum(isinstance(event, tuple) and event[0] == "decode" for event in state["events"]) == 1
+    assert state["events"].count("infer") == 3
+    assert state["events"].count(("seed", 0)) == 3
+    assert state["events"].count(("transfer", "signal", "cuda")) == 3
+    assert state["prompts"] == [task_reference.VOICECHAT_SYSTEM_PROMPT] * 3
+    assert output["text"] == "Full spoken answer."
+    assert output["audio_samples"] == output["num_samples"] == 3
+    assert output["sample_rate"] == 22050 and output["channels"] == 1
+    assert output["input_samples"] == 4 and output["input_sample_rate"] == 16000
+    np.testing.assert_array_equal(
+        output["_audio_f32"], np.asarray([0.1, 0.2, 0.3], dtype=np.float32)
+    )
+    for kwargs in state["kwargs"]:
+        assert kwargs["decode_audio"] is True and kwargs["input_pad_len"] == 0
+        assert kwargs["prompt_tokens"] == "prompt-token-buffer"
+        assert kwargs["prompt_token_lens"] == "prompt-length-buffer"
+        assert not (
+            {"temperature", "top_p", "repetition_penalty", "function_calls"} & kwargs.keys()
+        )
+
+
+def test_voicechat_reference_preserves_explicit_prompt_sampling_and_seed(tmp_path, monkeypatch):
+    arguments, request, options, state, _upstream, _tensor = _voicechat_reference_fixture(
+        tmp_path, monkeypatch
+    )
+    session = task_reference._load_voicechat(
+        arguments,
+        {
+            **request,
+            "system_prompt": "  An explicit spoken prompt.  ",
+            "config": {
+                "seed": 17,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "repetition_penalty": 1.2,
+                "presence_penalty": 0.0,
+            },
+        },
+        options,
+    )
+    session.invoke()
+    kwargs = state["kwargs"][0]
+    assert state["prompts"] == ["  An explicit spoken prompt.  "]
+    assert ("seed", 17) in state["events"]
+    assert {
+        key: kwargs[key]
+        for key in ("temperature", "top_p", "repetition_penalty", "presence_penalty")
+    } == {"temperature": 0.0, "top_p": 1.0, "repetition_penalty": 1.2, "presence_penalty": 0.0}
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"tools": []},
+        {"tail_frames": 1},
+        {"finish_tail_frames": -1},
+        {"max_new_tokens": 256},
+        {"system_prompt": "   "},
+        {"seed": -1},
+        {"temperature": True},
+    ],
+)
+def test_voicechat_reference_rejects_unmatched_scope_before_loading(tmp_path, monkeypatch, patch):
+    arguments, request, options, state, _upstream, _tensor = _voicechat_reference_fixture(
+        tmp_path, monkeypatch
+    )
+    with pytest.raises(ValueError):
+        task_reference._load_voicechat(arguments, {**request, **patch}, options)
+    assert state["events"] == []
+
+
+def test_voicechat_reference_does_not_relabel_live_dialogue_as_offline(tmp_path, monkeypatch):
+    arguments, request, options, state, _upstream, _tensor = _voicechat_reference_fixture(
+        tmp_path, monkeypatch
+    )
+    arguments.manifest.write_text('{"task":"duplex_speech_dialogue"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="live or tool"):
+        task_reference._load_voicechat(arguments, request, options)
+    assert state["events"] == []
+
+
+def test_voicechat_empty_prompt_matches_native_default_selection(tmp_path, monkeypatch):
+    arguments, request, options, state, _upstream, _tensor = _voicechat_reference_fixture(
+        tmp_path, monkeypatch)
+    session = task_reference._load_voicechat(arguments, {**request, "system_prompt": ""}, options)
+    session.invoke()
+    assert state["prompts"] == [task_reference.VOICECHAT_SYSTEM_PROMPT]
+
+
+def test_voicechat_reference_rejects_unmatched_audio_and_stale_import(tmp_path, monkeypatch):
+    arguments, request, options, state, upstream, _tensor = _voicechat_reference_fixture(
+        tmp_path, monkeypatch
+    )
+    state["metadata"] = SimpleNamespace(samplerate=48000, channels=2, frames=4)
+    with pytest.raises(ValueError, match="16 kHz mono"):
+        task_reference._load_voicechat(arguments, request, options)
+    assert state["events"] == []
+    upstream.__file__ = str(tmp_path / "another-installation.py")
+    with pytest.raises(RuntimeError, match="different NeMo installation"):
+        task_reference._load_voicechat(arguments, request, options)
+    assert state["events"] == []
+
+
+def test_voicechat_reference_rejects_invalid_live_output(tmp_path, monkeypatch):
+    arguments, request, options, state, _upstream, tensor = _voicechat_reference_fixture(
+        tmp_path, monkeypatch
+    )
+    session = task_reference._load_voicechat(arguments, request, options)
+    state["result"] = {
+        "text": ["real text"],
+        "audio": tensor([[0.1, 0.2]]),
+        "audio_len": tensor([3]),
+    }
+    with pytest.raises(RuntimeError, match="audio_len"):
+        session.invoke()
+    state["result"] = {
+        "text": ["real text"],
+        "audio": tensor([[float("nan")]]),
+        "audio_len": tensor([1]),
+    }
+    with pytest.raises(RuntimeError, match="nonfinite"):
+        session.invoke()
+
+
+def test_voicechat_runner_writes_audio_after_measurement(tmp_path, monkeypatch):
+    arguments, request, options, state, _upstream, _tensor = _voicechat_reference_fixture(
+        tmp_path, monkeypatch
+    )
+    arguments.adapter = "nemo-voicechat"
+    arguments.request_json = json.dumps(request)
+    arguments.adapter_options_json = json.dumps(options)
+    arguments.timing_contract_json = json.dumps(
+        {
+            "timing_scope": "task-pipeline-call-wall",
+            "input_preparation_included": True,
+            "asset_loading_included": False,
+        }
+    )
+    arguments.mode = "pytorch-eager"
+    arguments.padding = "longest"
+    arguments.warmup, arguments.iterations = 1, 2
+    arguments.case_name = "offline-voicechat"
+    arguments.output = tmp_path / "reference.json"
+    monkeypatch.setattr(task_reference, "_environment", lambda: {})
+    assert task_reference.run(arguments) == 0
+    result = json.loads(arguments.output.read_text(encoding="utf-8"))
+    assert result["model_load_included"] is False
+    assert result["measurement_policy"]["input_preparation_included"] is True
+    assert result["output_summary"]["text"] == "Full spoken answer."
+    assert result["output_summary"]["audio_artifact"].endswith("reference.audio.wav")
+    assert "_audio_f32" not in result["output_summary"]
+    assert state["events"][-1] == (
+        "write_audio",
+        str(tmp_path / "reference.audio.wav"),
+        22050,
+        {"subtype": "FLOAT"},
+    )
+    np.testing.assert_array_equal(
+        state["written_audio"], np.asarray([0.1, 0.2, 0.3], dtype=np.float32)
+    )
+
+
+def _moge_reference_fixture(tmp_path, monkeypatch):
+    events = []
+    reference = tmp_path / "moge-reference"
+    module_path = reference / "moge/model/v2.py"
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("# upstream location fixture\n", encoding="utf-8")
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "model.pt").write_bytes(b"fixture weights")
+    image_path = tmp_path / "input.png"
+    image_path.write_bytes(b"fixture decoded by mocked PIL")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"task":"image_to_metric_geometry"}', encoding="utf-8")
+    arguments = SimpleNamespace(
+        model=str(checkpoint),
+        revision="checkpoint-revision",
+        manifest=manifest,
+        family="moge",
+        operation="geometry",
+        precision="fp32",
+        local_files_only=True,
+    )
+    state = {
+        "events": events,
+        "inputs": [],
+        "inference": [],
+        "pixels": np.asarray([[[255, 0, 127], [0, 255, 64]]], dtype=np.uint8),
+        "checkpoint": {"model_config": {"encoder": "fixture"}, "model": {"weight": "fixture"}},
+        "arrays": {
+            "points": np.asarray([[[0.25, -0.5, 2], [np.inf, np.inf, np.inf]]], dtype=np.float32),
+            "depth": np.asarray([[2, np.inf]], dtype=np.float32),
+            "mask": np.asarray([[True, False]]),
+            "intrinsics": np.asarray([[0.8, 0, 0.5], [0, 1.1, 0.5], [0, 0, 1]], dtype=np.float32),
+        },
+    }
+
+    class Tensor:
+        def __init__(self, values):
+            self.values = np.asarray(values)
+
+        def permute(self, *axes):
+            events.append(("permute", axes))
+            return Tensor(self.values.transpose(axes))
+
+        def to(self, device):
+            events.append(("input_transfer", device))
+            return self
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            events.append("materialize")
+            return self
+
+        def numpy(self):
+            return self.values
+
+    class Model:
+        def __init__(self, **kwargs):
+            events.append(("construct", kwargs))
+            state["model"] = self
+
+        def load_state_dict(self, weights, *, strict):
+            events.append(("load_state", weights, strict))
+            return state.get("state_mismatch", ([], []))
+
+        def eval(self):
+            events.append("eval")
+            return self
+
+        def float(self):
+            events.append("float32")
+            return self
+
+        def to(self, device):
+            events.append(("model_transfer", device))
+            return self
+
+        def infer(self, tensor, **kwargs):
+            events.append("infer")
+            state["inputs"].append(np.array(tensor.values, copy=True))
+            state["inference"].append(kwargs)
+            return {name: Tensor(value) for name, value in state["arrays"].items()}
+
+    module = ModuleType("moge.model.v2")
+    module.__file__ = str(module_path)
+    module.MoGeModel = Model
+    attention = ModuleType("torch.nn.attention")
+    attention.SDPBackend = SimpleNamespace(MATH=object())
+
+    class MathContext:
+        def __enter__(self):
+            events.append("math_enter")
+
+        def __exit__(self, *_args):
+            events.append("math_exit")
+
+    def sdpa_kernel(backends):
+        assert backends == [attention.SDPBackend.MATH]
+        events.append("math_backend")
+        return MathContext()
+
+    attention.sdpa_kernel = sdpa_kernel
+    fake_torch = ModuleType("torch")
+
+    def load(path, **kwargs):
+        events.append(("load_checkpoint", str(path), kwargs))
+        return state["checkpoint"]
+
+    def from_numpy(values):
+        events.append("prepare_tensor")
+        return Tensor(values)
+
+    fake_torch.load = load
+    fake_torch.from_numpy = from_numpy
+    fake_torch.backends = SimpleNamespace(
+        cuda=SimpleNamespace(matmul=SimpleNamespace(allow_tf32=True)),
+        cudnn=SimpleNamespace(allow_tf32=True),
+    )
+
+    class Image:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            events.append("close_image")
+
+        def convert(self, mode):
+            events.append(("color", mode))
+            return self
+
+        def __array__(self, dtype=None, copy=None):
+            return np.asarray(state["pixels"], dtype=dtype)
+
+    def open_image(path):
+        events.append(("decode_image", str(path)))
+        return Image()
+
+    pil = ModuleType("PIL")
+    pil.Image = SimpleNamespace(open=open_image)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "PIL", pil)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setitem(sys.modules, attention.__name__, attention)
+    monkeypatch.setattr(task_reference, "_synchronize", lambda: events.append("barrier"))
+    return (
+        arguments,
+        {"image_path": str(image_path)},
+        {"reference_repo": str(reference), "num_tokens": 1800},
+        state,
+    )
+
+
+def test_moge_reference_uses_public_upstream_apis_and_loads_once(tmp_path, monkeypatch):
+    arguments, request, options, state = _moge_reference_fixture(tmp_path, monkeypatch)
+    session = task_reference._load_moge(arguments, request, options)
+    assert session.timing_scope == "task-pipeline-call-wall"
+    assert session.input_preparation_included and not session.asset_loading_included
+    assert (
+        "load_checkpoint",
+        str(Path(arguments.model) / "model.pt"),
+        {"map_location": "cpu", "weights_only": True, "mmap": True},
+    ) in state["events"]
+    assert state["model"].onnx_compatible_mode is True
+    assert "prepare_tensor" not in state["events"] and "infer" not in state["events"]
+    samples, summary = task_reference._measure(session, warmup=1, iterations=2)
+    assert len(samples) == 2 and all(value > 0 for value in samples)
+    assert (
+        sum(isinstance(event, tuple) and event[0] == "load_checkpoint" for event in state["events"])
+        == 1
+    )
+    assert (
+        sum(isinstance(event, tuple) and event[0] == "decode_image" for event in state["events"])
+        == 1
+    )
+    assert state["events"].count("prepare_tensor") == 3
+    assert (
+        state["events"].count("infer")
+        == state["events"].count("math_backend")
+        == state["events"].count("math_enter")
+        == state["events"].count("math_exit")
+        == 3
+    )
+    for controls in state["inference"]:
+        assert controls == {
+            "num_tokens": 1800,
+            "use_fp16": False,
+            "force_projection": True,
+            "apply_mask": True,
+        }
+    expected = (state["pixels"].astype(np.float32) / 255.0).transpose(2, 0, 1)
+    for values in state["inputs"]:
+        np.testing.assert_array_equal(values, expected)
+    assert summary["point_shape"] == [1, 2, 3] and summary["units"] == "meters"
+    assert summary["requested_fov_x"] is None
+    assert np.isposinf(summary["_geometry_arrays"]["depth"][0, 1])
+
+
+def test_moge_reference_preserves_explicit_fov_degrees(tmp_path, monkeypatch):
+    arguments, request, options, state = _moge_reference_fixture(tmp_path, monkeypatch)
+    session = task_reference._load_moge(arguments, {**request, "config": {"fov_x": 72.5}}, options)
+    summary = session.invoke()
+    assert state["inference"][0]["fov_x"] == 72.5
+    assert summary["requested_fov_x"] == 72.5
+
+
+@pytest.mark.parametrize(
+    "request_update,options_update",
+    [
+        ({}, {"num_tokens": None}),
+        ({"num_tokens": 3600}, {}),
+        ({"num_tokens": 1800}, {"num_tokens": 3600}),
+        ({"fov_x": 0}, {}),
+        ({"fov_x": 180}, {}),
+        ({"fov_x": True}, {}),
+        ({"apply_mask": False}, {}),
+    ],
+)
+def test_moge_reference_rejects_unqualified_controls_before_model_load(
+    tmp_path, monkeypatch, request_update, options_update
+):
+    arguments, request, options, state = _moge_reference_fixture(tmp_path, monkeypatch)
+    with pytest.raises(ValueError):
+        task_reference._load_moge(
+            arguments, {**request, **request_update}, {**options, **options_update}
+        )
+    assert not any(
+        isinstance(event, tuple) and event[0] == "load_checkpoint" for event in state["events"]
+    )
+
+
+def test_moge_reference_preserves_strict_checkpoint_contract(tmp_path, monkeypatch):
+    arguments, request, options, state = _moge_reference_fixture(tmp_path, monkeypatch)
+    state["state_mismatch"] = (["uninitialized_weight"], [])
+    with pytest.raises(ValueError, match="state mismatch"):
+        task_reference._load_moge(arguments, request, options)
+    assert "infer" not in state["events"]
+    state["checkpoint"]["unexpected"] = 1
+    with pytest.raises(ValueError, match="top-level"):
+        task_reference._load_moge(arguments, request, options)
+
+
+def test_moge_geometry_artifacts_preserve_masked_infinity_and_calibration(tmp_path, monkeypatch):
+    arguments, request, options, state = _moge_reference_fixture(tmp_path, monkeypatch)
+    summary = dict(task_reference._load_moge(arguments, request, options).invoke())
+    task_reference._write_geometry_artifacts(summary, tmp_path / "reference.json")
+    assert "_geometry_arrays" not in summary
+    assert summary["height"] == 1 and summary["width"] == 2 and summary["valid_pixels"] == 1
+    np.testing.assert_array_equal(
+        np.fromfile(summary["points_artifact"], dtype="<f4").reshape(1, 2, 3),
+        state["arrays"]["points"],
+    )
+    np.testing.assert_array_equal(
+        np.fromfile(summary["depth_artifact"], dtype="<f4").reshape(1, 2), state["arrays"]["depth"]
+    )
+    np.testing.assert_array_equal(np.fromfile(summary["valid_mask_artifact"], dtype="u1"), [1, 0])
+    calibration = json.loads(Path(summary["intrinsics_artifact"]).read_text(encoding="utf-8"))
+    assert (
+        calibration["normalized"] is True
+        and calibration["height"] == 1
+        and calibration["width"] == 2
+    )
+    np.testing.assert_array_equal(
+        np.asarray(calibration["intrinsics"], dtype=np.float32), state["arrays"]["intrinsics"]
+    )
+    invalid = dict(summary, _geometry_arrays={**state["arrays"], "mask": np.asarray([[1, 2]])})
+    with pytest.raises(RuntimeError, match="arrays"):
+        task_reference._write_geometry_artifacts(invalid, tmp_path / "invalid.json")
+    invalid = dict(summary, _geometry_arrays={**state["arrays"], "depth": np.asarray([[2, 0]])})
+    with pytest.raises(RuntimeError, match="positive infinity"):
+        task_reference._write_geometry_artifacts(invalid, tmp_path / "invalid.json")
+    assert not (tmp_path / "invalid.geometry.points.f32").exists()
+
+
+def test_moge_runner_writes_geometry_only_after_measurement(tmp_path, monkeypatch):
+    arguments, request, options, state = _moge_reference_fixture(tmp_path, monkeypatch)
+    arguments.adapter, arguments.mode = "upstream-moge", "pytorch-eager"
+    arguments.request_json = json.dumps(request)
+    arguments.adapter_options_json = json.dumps(options)
+    arguments.timing_contract_json = json.dumps(
+        {
+            "timing_scope": "task-pipeline-call-wall",
+            "input_preparation_included": True,
+            "asset_loading_included": False,
+        }
+    )
+    arguments.padding = "longest"
+    arguments.warmup, arguments.iterations = 1, 2
+    arguments.case_name, arguments.output = "moge-geometry", tmp_path / "reference.json"
+    monkeypatch.setattr(task_reference, "_environment", lambda: {})
+    writer = task_reference._write_geometry_artifacts
+
+    def write(summary, path):
+        state["events"].append("write_geometry")
+        writer(summary, path)
+
+    monkeypatch.setattr(task_reference, "_write_geometry_artifacts", write)
+    assert task_reference.run(arguments) == 0
+    result = json.loads(arguments.output.read_text(encoding="utf-8"))
+    assert result["model_load_included"] is False and result["measurement"]["iterations"] == 2
+    assert state["events"][-1] == "write_geometry"
+    assert state["events"].count("infer") == 3
+    summary = result["output_summary"]
+    assert summary["camera_axes"] == ["right", "down", "forward"]
+    assert summary["intrinsics_coordinates"] == "normalized_uv"
+    assert "_geometry_arrays" not in summary and Path(summary["depth_artifact"]).is_file()
 
 
 def _environment(tmp_path: Path) -> tuple[Path, perf.Environment]:
@@ -261,9 +1186,13 @@ def test_release_suite_expands_profiles_and_covers_ready_catalog() -> None:
     [
         ("bert", "task-pipeline-call-wall", True, [], ["tokenize", "model"]),
         ("eagle_vlm", "task-model-call-wall", False, ["tokenize"], ["tokenize", "model"]),
+        ("bert", "task-model-call-wall", False, ["tokenize"], ["tokenize", "model"]),
+        ("eagle_vlm", "task-pipeline-call-wall", True, [], ["tokenize", "model"]),
+        ("renamed_embedding", "task-model-call-wall", False, ["tokenize"], ["tokenize", "model"]),
+        ("renamed_embedding", "task-pipeline-call-wall", True, [], ["tokenize", "model"]),
     ],
 )
-def test_embedding_reference_measures_the_family_timing_contract(
+def test_embedding_reference_measures_the_declared_timing_contract(
     monkeypatch,
     family,
     expected_scope,
@@ -355,6 +1284,11 @@ def test_embedding_reference_measures_the_family_timing_contract(
         revision="model-revision",
         trust_remote_code=False,
         local_files_only=True,
+        timing_contract_json=json.dumps({
+            "timing_scope": expected_scope,
+            "input_preparation_included": input_preparation_included,
+            "asset_loading_included": False,
+        }),
     )
 
     session = task_reference.LOADERS["hf-transformers-embedding"](

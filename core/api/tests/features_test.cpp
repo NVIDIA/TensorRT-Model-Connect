@@ -372,7 +372,7 @@ int main(int argc, char** argv) {
             auto absent =
                 trtmc::Model::load((root / ("features_" + mode + ".bundle")).string(), options);
             check(absent.tasks().empty() && !absent.supports<trtmc::TextToEmbedding>(),
-                  "declaration alone and interface alone do not advertise a task");
+                  "a loaded variant without bindings does not advertise a task");
         }
         auto bad = trtmc::Model::load((root / "features_bad_shape.bundle").string(), options);
         rejects([&] { bad.task<trtmc::TextToTokenFeatures>().run({std::string{"x"}}); },
@@ -445,6 +445,23 @@ int main(int argc, char** argv) {
         }();
         check(retained.embedding_space() == "fixture.embedding",
               "C++ result retains owned metadata after model scope");
+        const auto unidentified_path = root / "features_unknown_embedding_space.bundle";
+        bundle(unidentified_path, "unknown_embedding_space");
+        auto unidentified = trtmc::Model::load(unidentified_path.string(), options);
+        auto unidentified_result = unidentified.task<trtmc::TextToEmbedding>().run({"local"});
+        check(unidentified_result.values().size() == 2 && unidentified_result.values()[0] == 4 &&
+                  unidentified_result.embedding_space().empty() &&
+                  unidentified_result.pooling() == "mean" &&
+                  unidentified_result.normalization() == "none",
+              "unknown checkpoint identity preserves computed embeddings without a fabricated ID");
+        auto unidentified_batch = unidentified.task<trtmc::BatchTextToEmbedding>().run(
+            {{{{"a", trtmc::EmbeddingRole::Default}, {}},
+              {{"b", trtmc::EmbeddingRole::Query}, {}}}});
+        check(unidentified_batch.size() == 2 && unidentified_batch[0].count == 4 &&
+                  unidentified_batch[1].count == 4 &&
+                  unidentified_batch[0].embedding_space.size == 0 &&
+                  unidentified_batch[1].embedding_space.size == 0,
+              "native batch also preserves unknown space metadata without inventing a shared ID");
     } catch (const std::exception& error) {
         std::cerr << "unexpected: " << error.what() << '\n';
         return 1;

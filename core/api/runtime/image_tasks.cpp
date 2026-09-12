@@ -101,6 +101,8 @@ trtmc_status TRTMC_CALL generate_image(trtmc_model* model,
         auto& family =
             require_interface<internal::ITextToImage>(model, internal::ITextToImage::kTask);
         const ConvertedConfig options(config);
+        validate_task_config(model_owner(model), internal::contract_key<internal::ITextToImage>(),
+                             options.view());
         *out = make_result<ImageStorage>(
             family.run({string_view(request->prompt),
                         checked_span(request->initial_latents.data, request->initial_latents.size)},
@@ -126,6 +128,9 @@ trtmc_status TRTMC_CALL edit_images(trtmc_model* model,
         for (const auto& image : source)
             images.push_back(image_input(image));
         const ConvertedConfig options(config);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IImagesTextToImageEdit>(),
+                             options.view());
         const internal::ImagesTextToImageEditRequest input{
             {images.data(), images.size()},
             string_view(request->prompt),
@@ -153,6 +158,9 @@ trtmc_status TRTMC_CALL edit_masked_image(
         const internal::MaskedImageTextToImageRequest input{
             source, {mask, source.height, source.width}, string_view(request->prompt)};
         const ConvertedConfig options(config);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IMaskedImageTextToImage>(),
+                             options.view());
         *out = make_result<ImageStorage>(family.run(input, options.view()));
     });
 }
@@ -175,11 +183,14 @@ trtmc_status TRTMC_CALL generate_batch(trtmc_model* model,
         items.reserve(source.size());
         for (const auto& item : source) {
             configs.emplace_back(&item.config);
+
             items.push_back(
                 {{string_view(item.input.prompt),
                   checked_span(item.input.initial_latents.data, item.input.initial_latents.size)},
                  configs.back().view()});
         }
+        validate_batch_configs(model_owner(model),
+                               internal::contract_key<internal::IBatchTextToImage>(), configs);
         auto results = family.run_batch({{items.data(), items.size()}});
         if (results.size() != items.size())
             throw ApiFailure{TRTMC_INTERNAL_ERROR,
@@ -220,13 +231,10 @@ const trtmc_batch_text_to_image_api_v1 batch_api{
     {1, 0, sizeof(trtmc_batch_text_to_image_api_v1)}, generate_batch, batch_count, batch_item};
 
 const TaskBinding bindings[] = {
-    {internal::ITextToImage::kTask, 1, 0, &generate_api.header, implements<internal::ITextToImage>},
-    {internal::IImagesTextToImageEdit::kTask, 1, 0, &edit_api.header,
-     implements<internal::IImagesTextToImageEdit>},
-    {internal::IMaskedImageTextToImage::kTask, 1, 0, &masked_api.header,
-     implements<internal::IMaskedImageTextToImage>},
-    {internal::IBatchTextToImage::kTask, 1, 0, &batch_api.header,
-     implements<internal::IBatchTextToImage>},
+    {internal::ITextToImage::kTask, 1, 0, &generate_api.header},
+    {internal::IImagesTextToImageEdit::kTask, 1, 0, &edit_api.header},
+    {internal::IMaskedImageTextToImage::kTask, 1, 0, &masked_api.header},
+    {internal::IBatchTextToImage::kTask, 1, 0, &batch_api.header},
 };
 
 } // namespace
