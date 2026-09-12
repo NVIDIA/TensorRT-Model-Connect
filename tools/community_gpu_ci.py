@@ -49,16 +49,24 @@ def _family_list(raw: str, label: str) -> tuple[str, ...]:
     return tuple(values)
 
 
-def selected_families(scope: str, families: str, added_families: str) -> tuple[str, ...]:
+def selected_families(
+    scope: str,
+    families: str,
+    direct_families: str,
+    added_families: str,
+) -> tuple[str, ...]:
     """Resolve the family jobs without reading contributor-controlled shell text."""
     selected = _family_list(families, "TRTMC_GPU_FAMILIES")
+    direct = _family_list(direct_families, "TRTMC_GPU_DIRECT_FAMILIES")
     added = _family_list(added_families, "TRTMC_GPU_ADDED_FAMILIES")
     if set(selected) & set(added):
         raise CiError("added families overlap the trusted family inventory")
+    if not set(direct) <= set(selected):
+        raise CiError("direct families must belong to the trusted family inventory")
     if scope == "all":
-        return tuple(sorted(set(SHARED_SMOKE_FAMILIES) | set(added)))
+        return tuple(sorted(set(SHARED_SMOKE_FAMILIES) | set(direct) | set(added)))
     if scope == "families":
-        if not selected or added:
+        if not selected or direct != selected or added:
             raise CiError("family scope requires existing families only")
         return selected
     raise CiError(f"GPU execution received non-GPU scope: {scope!r}")
@@ -199,6 +207,7 @@ def run(repository: Path, env: dict[str, str]) -> None:
     selected = selected_families(
         env.get("TRTMC_GPU_SCOPE", ""),
         env.get("TRTMC_GPU_FAMILIES", ""),
+        env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
         env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
     )
     failures: list[tuple[str, str]] = []

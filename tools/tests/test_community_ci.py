@@ -120,6 +120,7 @@ def test_impact_publishes_only_the_public_cpu_scope(
         lambda *_args: community_ci.test_impact.Impact(
             scope="families",
             families=("qwen",),
+            direct_families=("qwen",),
             changed_files=("families/qwen/model.py",),
             run_core_tests=True,
             run_docs=False,
@@ -283,6 +284,9 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     assert gpu_authorize["outputs"]["added_families"] == (
         "${{ steps.impact.outputs.added_families }}"
     )
+    assert gpu_authorize["outputs"]["direct_families"] == (
+        "${{ steps.impact.outputs.direct_families }}"
+    )
     assert gpu_authorize["outputs"]["gpu_enabled"] == ("${{ steps.impact.outputs.gpu_enabled }}")
     assert gpu_authorize["outputs"]["run_gpu"] == "${{ steps.impact.outputs.run_gpu }}"
     gpu_authorize_steps = {step["name"]: step for step in gpu_authorize["steps"]}
@@ -337,11 +341,15 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
         "persist-credentials": False,
     }
     assert gpu_test["env"]["MERGE_SHA"] == "${{ needs.gpu-authorize.outputs.merge_sha }}"
+    assert gpu_test["env"]["DIRECT_FAMILIES"] == (
+        "${{ needs.gpu-authorize.outputs.direct_families }}"
+    )
     assert "refs/pull/$PR_NUMBER/merge" in gpu_test["run"]
     assert r"\$(git rev-parse FETCH_HEAD)" in gpu_test["run"]
     assert '= $MERGE_SHA && git checkout --detach $MERGE_SHA"' in gpu_test["run"]
     assert "python3.12 -m tools.community_gpu_ci" in gpu_test["run"]
     assert "python3 -m tools.brev_exec" in gpu_test["run"]
+    assert "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" in gpu_test["run"]
     assert "tests/e2e/models" not in gpu_test["run"]
     assert "py-only" not in gpu_test["run"]
     assert "python3.12 -m pytest" not in gpu_test["run"]
@@ -731,11 +739,17 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
 
 
 @pytest.mark.parametrize(
-    ("changed_path", "expected_scope", "expected_families", "expected_added_families"),
+    (
+        "changed_path",
+        "expected_scope",
+        "expected_families",
+        "expected_direct_families",
+        "expected_added_families",
+    ),
     [
-        ("families/bert/model.py", "families", ["bert"], []),
-        ("families/new_family/model.py", "all", ["bert", "gpt2"], ["new_family"]),
-        ("README.md", "docs", [], []),
+        ("families/bert/model.py", "families", ["bert"], ["bert"], []),
+        ("families/new_family/model.py", "all", ["bert", "gpt2"], [], ["new_family"]),
+        ("README.md", "docs", [], [], []),
     ],
 )
 def test_gpu_impact_executes_only_trusted_base_code(
@@ -743,6 +757,7 @@ def test_gpu_impact_executes_only_trusted_base_code(
     changed_path: str,
     expected_scope: str,
     expected_families: list[str],
+    expected_direct_families: list[str],
     expected_added_families: list[str],
 ) -> None:
     repository = tmp_path / "repository"
@@ -834,6 +849,8 @@ def test_gpu_impact_executes_only_trusted_base_code(
             assert summary["scope"] == expected_scope
             assert summary["families"] == expected_families
         assert json.loads(values["families"]) == summary["families"]
+        assert summary["direct_families"] == expected_direct_families
+        assert json.loads(values["direct_families"]) == expected_direct_families
         assert json.loads(values["added_families"]) == expected_added_families
         assert values["scope"] == summary["scope"]
         assert values["gpu_enabled"] == "false"

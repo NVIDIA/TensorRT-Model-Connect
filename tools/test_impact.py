@@ -23,6 +23,9 @@ DOC_FILES = {
     "CONTRIBUTING.md",
     "README.md",
 }
+MODEL_PROOF_NEUTRAL_FILES = {
+    "apps/benchmark/performance/release.yaml",
+}
 SHARED_PREFIXES = (
     ".github/",
     "apps/",
@@ -58,6 +61,7 @@ SHARED_FILES = {
 class Impact:
     scope: str
     families: tuple[str, ...]
+    direct_families: tuple[str, ...]
     changed_files: tuple[str, ...]
     run_core_tests: bool
     run_docs: bool
@@ -107,6 +111,8 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
         if path in DOC_FILES or path.startswith(DOC_PREFIXES):
             docs = True
             continue
+        if path in MODEL_PROOF_NEUTRAL_FILES:
+            continue
         if len(parts) == 1 and path.endswith(".py"):
             shared = True
             continue
@@ -120,11 +126,12 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
 
     if unknown:
         raise ValueError("unclassified changed paths: " + ", ".join(unknown))
+    direct_families = tuple(sorted(selected))
     if shared:
-        return Impact("all", tuple(sorted(known)), changed, True, docs)
+        return Impact("all", tuple(sorted(known)), direct_families, changed, True, docs)
     if selected:
-        return Impact("families", tuple(sorted(selected)), changed, True, docs)
-    return Impact("docs" if docs else "none", (), changed, False, docs)
+        return Impact("families", direct_families, direct_families, changed, True, docs)
+    return Impact("docs" if docs else "none", (), (), changed, False, docs)
 
 
 def changed_files(repo: Path, base: str, head: str) -> list[str]:

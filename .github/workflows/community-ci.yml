@@ -300,6 +300,7 @@ jobs:
       base_sha: ${{ needs.authorize.outputs.base_sha }}
       merge_sha: ${{ needs.authorize.outputs.merge_sha }}
       families: ${{ steps.impact.outputs.families }}
+      direct_families: ${{ steps.impact.outputs.direct_families }}
       added_families: ${{ steps.impact.outputs.added_families }}
       scope: ${{ steps.impact.outputs.scope }}
       gpu_enabled: ${{ steps.impact.outputs.gpu_enabled }}
@@ -382,6 +383,11 @@ jobs:
                   file=output,
               )
               print(
+                  "direct_families="
+                  + json.dumps(summary["direct_families"], separators=(",", ":")),
+                  file=output,
+              )
+              print(
                   "added_families="
                   + json.dumps(sorted(added_families), separators=(",", ":")),
                   file=output,
@@ -403,6 +409,7 @@ jobs:
       - name: Validate the GPU selection
         env:
           FAMILIES: ${{ steps.impact.outputs.families }}
+          DIRECT_FAMILIES: ${{ steps.impact.outputs.direct_families }}
           ADDED_FAMILIES: ${{ steps.impact.outputs.added_families }}
           SCOPE: ${{ steps.impact.outputs.scope }}
           GPU_ENABLED: ${{ steps.impact.outputs.gpu_enabled }}
@@ -416,6 +423,7 @@ jobs:
 
           pattern = re.compile(r"^[a-z][a-z0-9_]*$")
           families = json.loads(os.environ["FAMILIES"])
+          direct_families = json.loads(os.environ["DIRECT_FAMILIES"])
           added_families = json.loads(os.environ["ADDED_FAMILIES"])
           scope = os.environ["SCOPE"]
           gpu_enabled = os.environ["GPU_ENABLED"]
@@ -435,6 +443,14 @@ jobs:
               raise SystemExit("invalid family selection")
           if families != sorted(set(families)):
               raise SystemExit("family selection must be sorted and unique")
+          if not isinstance(direct_families, list) or not all(
+              isinstance(name, str) and pattern.fullmatch(name) for name in direct_families
+          ):
+              raise SystemExit("invalid direct-family selection")
+          if direct_families != sorted(set(direct_families)):
+              raise SystemExit("direct-family selection must be sorted and unique")
+          if not set(direct_families) <= set(families):
+              raise SystemExit("direct families must belong to the trusted family inventory")
           if not isinstance(added_families, list) or not all(
               isinstance(name, str) and pattern.fullmatch(name) for name in added_families
           ):
@@ -445,9 +461,9 @@ jobs:
               raise SystemExit("added families must not be in the trusted family inventory")
           if scope != "all" and added_families:
               raise SystemExit("only all scope may select added families")
-          if scope == "families" and not families:
-              raise SystemExit("family scope requires at least one family")
-          if scope in {"docs", "none"} and families:
+          if scope == "families" and (not families or direct_families != families):
+              raise SystemExit("family scope requires its directly changed families")
+          if scope in {"docs", "none"} and (families or direct_families):
               raise SystemExit(f"{scope} scope must not select families")
           PY
 
@@ -457,13 +473,14 @@ jobs:
           RUN_GPU: ${{ steps.impact.outputs.run_gpu }}
           SCOPE: ${{ steps.impact.outputs.scope }}
           FAMILIES: ${{ steps.impact.outputs.families }}
+          DIRECT_FAMILIES: ${{ steps.impact.outputs.direct_families }}
         run: |
           set -euo pipefail
           if [ "$GPU_ENABLED" = "false" ]; then
             message="Automatic Community GPU execution is disabled and is not a merge gate."
             echo "::notice::$message"
-            printf '## Community GPU\n\n%s\n\nImpact scope: `%s`; selected families: `%s`.\n' \
-              "$message" "$SCOPE" "$FAMILIES" >> "$GITHUB_STEP_SUMMARY"
+            printf '## Community GPU\n\n%s\n\nImpact scope: `%s`; directly changed families: `%s`.\n' \
+              "$message" "$SCOPE" "$DIRECT_FAMILIES" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           message="Experimental Community GPU smoke was manually enabled; it is not a merge gate."
@@ -561,6 +578,7 @@ jobs:
           MERGE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
           PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
           FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
+          DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
           ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
           SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -582,7 +600,7 @@ jobs:
           # against huggingface_hub.get_token()); no code change is needed
           # in tools.community_gpu_ci to consume it. GitHub Actions masks
           # the secret value everywhere it appears, including here.
-          echo "Changed families: $FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
+          echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
           python3 -m tools.brev_exec \
             --instance "$INSTANCE_NAME" \
             --log /tmp/gpu-ci-output.log \
@@ -591,6 +609,7 @@ jobs:
             -v /tmp/model_connect:/src -w /src \
             -e "TRTMC_GPU_SCOPE=$SCOPE" \
             -e "TRTMC_GPU_FAMILIES=$FAMILIES" \
+            -e "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
             -e "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
             -e "HF_TOKEN=$HF_TOKEN" \
             -e CMAKE_CUDA_ARCHITECTURES=89 \

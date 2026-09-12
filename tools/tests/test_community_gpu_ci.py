@@ -28,36 +28,42 @@ def _family(repository: Path, name: str, manifests: list[dict[str, object]]) -> 
     return root
 
 
-def test_shared_gpu_plan_adds_new_families_without_replacing_smoke_coverage() -> None:
-    """Shared changes retain the fixed smoke set and include new family owners."""
+def test_shared_gpu_plan_includes_direct_and_new_families() -> None:
+    """Shared changes retain smoke coverage and every directly affected owner."""
     selected = community_gpu_ci.selected_families(
         "all",
-        '["bert","gpt2"]',
+        '["bert","gpt2","llama"]',
+        '["llama"]',
         '["new_family"]',
     )
 
-    assert selected == tuple(sorted((*community_gpu_ci.SHARED_SMOKE_FAMILIES, "new_family")))
+    assert selected == tuple(
+        sorted((*community_gpu_ci.SHARED_SMOKE_FAMILIES, "llama", "new_family"))
+    )
 
 
 @pytest.mark.parametrize(
-    ("scope", "families", "added"),
+    ("scope", "families", "direct", "added"),
     [
-        ("docs", "[]", "[]"),
-        ("families", "[]", "[]"),
-        ("families", '["bert"]', '["new_family"]'),
-        ("all", '["bert"]', '["bert"]'),
-        ("all", '["not-valid"]', "[]"),
-        ("all", '["gpt2","bert"]', "[]"),
+        ("docs", "[]", "[]", "[]"),
+        ("families", "[]", "[]", "[]"),
+        ("families", '["bert"]', '["bert"]', '["new_family"]'),
+        ("families", '["bert"]', "[]", "[]"),
+        ("all", '["bert"]', '["bert"]', '["bert"]'),
+        ("all", '["bert"]', '["gpt2"]', "[]"),
+        ("all", '["not-valid"]', "[]", "[]"),
+        ("all", '["gpt2","bert"]', "[]", "[]"),
     ],
 )
 def test_gpu_plan_rejects_malformed_or_inconsistent_selection(
     scope: str,
     families: str,
+    direct: str,
     added: str,
 ) -> None:
     """Selection crossing into the isolated runner stays fail closed."""
     with pytest.raises(CiError):
-        community_gpu_ci.selected_families(scope, families, added)
+        community_gpu_ci.selected_families(scope, families, direct, added)
 
 
 def test_family_plan_selects_only_explicit_premerge_cases(tmp_path: Path) -> None:
@@ -225,6 +231,7 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         {
             "TRTMC_GPU_SCOPE": "families",
             "TRTMC_GPU_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
             "TRTMC_GPU_ADDED_FAMILIES": "[]",
             "TRTMC_NATIVE_BUILD_DIR": str(build),
         },
@@ -300,6 +307,7 @@ def test_gpu_run_continues_after_one_family_fails(
             {
                 "TRTMC_GPU_SCOPE": "families",
                 "TRTMC_GPU_FAMILIES": '["alpha","beta"]',
+                "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta"]',
                 "TRTMC_GPU_ADDED_FAMILIES": "[]",
                 "TRTMC_NATIVE_BUILD_DIR": str(build),
             },
