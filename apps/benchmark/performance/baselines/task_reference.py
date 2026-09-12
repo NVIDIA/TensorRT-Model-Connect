@@ -1716,12 +1716,12 @@ def _load_voicechat(
     import torch
 
     request = flatten_config(request)
-    manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+    task = _selected_task(arguments)
     if arguments.operation == "speech_dialogue":
-        if manifest.get("task") != "offline_speech_dialogue":
+        if task != "offline_speech_dialogue":
             raise ValueError("offline VoiceChat reference cannot qualify live or tool dialogue")
     elif arguments.operation == "speak":
-        if manifest.get("task") not in {
+        if task not in {
             "speech_to_speech",
             "speech_to_speech_response",
             "speech_session",
