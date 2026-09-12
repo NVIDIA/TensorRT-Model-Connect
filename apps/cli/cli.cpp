@@ -46,6 +46,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"run",
          {CommandKind::kRun,
           {"--prompt",
+           "--system-prompt",
            "--image",
            "--max-new-tokens",
            "--source-language-token-id",
@@ -632,6 +633,8 @@ int dispatch_run(const Command& command, ITask& task, std::ostream& output) {
     if (has_option(command, "--enable-thinking"))
         config.enable_thinking =
             parse_bool(command.options.at("--enable-thinking"), "--enable-thinking");
+    if (has_option(command, "--system-prompt"))
+        config.system_prompt = command.options.at("--system-prompt");
     const bool has_lora_path = has_option(command, "--lora-adapter");
     const bool has_lora_id = has_option(command, "--lora-adapter-id");
     if (has_lora_path != has_lora_id)

@@ -18,6 +18,11 @@ defaults:
     asset_loading_included: false
 
 excluded_profiles:
+  - model: s1-mini-fp16
+    reason: >-
+      families/s1_mini has no release-performance workload or receipt yet;
+      E2E parity has not been established on this head. Excluded pending a
+      defined workload and a verified receipt.
   - model: lfm2-1.2b
     reason: &lfm2_performance_exclusion >-
       Dense LFM2 functional and reference-parity qualification is present, but

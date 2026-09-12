@@ -358,6 +358,7 @@ struct TextGenerationConfig {
     std::vector<float> sde_noises;
     std::int32_t eos_token_id{-1};
     std::string text_generation_mode{"auto"};
+    std::string system_prompt;
     std::int32_t block_length{0};
     float confidence_threshold{-1.0F};
     bool use_chat_template{false};
