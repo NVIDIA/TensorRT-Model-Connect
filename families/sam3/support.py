@@ -3,6 +3,10 @@
 
 """Family-owned model and task support for sam3."""
 
+# Trivial comment-only change: live-fire test payload for Community GPU
+# (gated-model HF_TOKEN path via facebook/sam3, plus rotated BREV_API_KEY).
+# Not a real change.
+
 from tensorrt_model_connect.model_support import family_support
 
 
