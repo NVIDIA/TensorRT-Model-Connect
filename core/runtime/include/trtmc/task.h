@@ -558,6 +558,25 @@ class IAudioGeneration : public virtual ITask {
                                        const AudioGenerationConfig& config = {}) = 0;
 };
 
+// Optional capability for request-time voice conditioning. The caller supplies
+// decoded mono PCM; resampling, features and speaker semantics belong to the
+// family. Implementations must not retain references to this request after return.
+struct AudioReference {
+    std::vector<float> samples;
+    std::int32_t sample_rate{0};
+    // Exact transcript when supplied; empty means no transcript was provided.
+    std::string transcript;
+};
+
+class IReferenceAudioGeneration {
+  public:
+    static constexpr const char* kTask = IAudioGeneration::kTask;
+    virtual ~IReferenceAudioGeneration() = default;
+    virtual AudioResult generate_audio_with_reference(const std::string& prompt,
+                                                      const AudioReference& reference,
+                                                      const AudioGenerationConfig& config = {}) = 0;
+};
+
 // Optional task capability for families that produce audio before an utterance
 // is complete. It is separate from IAudioGeneration so non-streaming families
 // never need an adapter or a fake implementation.

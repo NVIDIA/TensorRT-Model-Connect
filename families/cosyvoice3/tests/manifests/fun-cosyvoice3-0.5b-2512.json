@@ -1,0 +1,17 @@
+{
+  "name": "fun-cosyvoice3-0.5b-2512",
+  "family": "cosyvoice3",
+  "task": "audio_generation",
+  "hf_id": "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+  "hf_revision": "29e01c4e8d000f4bcd70751be16fa94bf3d85a18",
+  "testcases": [
+    {
+      "name": "cosyvoice3-native-contract",
+      "premerge": true
+    },
+    {
+      "name": "cosyvoice3-reference-audio",
+      "premerge": true
+    }
+  ]
+}

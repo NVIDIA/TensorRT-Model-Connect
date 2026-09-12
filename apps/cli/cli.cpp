@@ -91,7 +91,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"generate-audio",
          {CommandKind::kGenerateAudio,
           {"--prompt", "--output", "--max-new-tokens", "--talker-max-new-tokens", "--seed",
-           "--stream", "--chunk-frames"}}},
+           "--stream", "--chunk-frames", "--reference-audio", "--reference-text"}}},
         {"transcribe",
          {CommandKind::kTranscribe,
           {"--input", "--max-output-tokens", "--source-language", "--target-language",
@@ -983,6 +983,11 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         config.seed = int_option(command, "--seed", -1);
         const bool streaming = has_option(command, "--stream") &&
                                parse_bool(command.options.at("--stream"), "--stream");
+        const bool reference_audio = has_option(command, "--reference-audio");
+        if (has_option(command, "--reference-text") && !reference_audio)
+            throw std::invalid_argument("--reference-text requires --reference-audio");
+        if (streaming && reference_audio)
+            throw std::invalid_argument("reference-conditioned streaming is not supported");
         if (!streaming && has_option(command, "--chunk-frames"))
             throw std::invalid_argument("--chunk-frames requires --stream true");
         const std::string path = require_option(command, "--output");
@@ -1019,8 +1024,22 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
                                 {"num_samples", total}});
             return EXIT_SUCCESS;
         }
-        const auto result = require_interface<IAudioGeneration>(task).generate_audio(
-            require_option(command, "--prompt"), config);
+        AudioResult result;
+        if (reference_audio) {
+            auto& generator = require_interface<IReferenceAudioGeneration>(task);
+            auto decoded = read_audio(require_option(command, "--reference-audio"));
+            require_finite(decoded.samples, "reference audio");
+            AudioReference reference;
+            reference.samples = std::move(decoded.samples);
+            reference.sample_rate = decoded.sample_rate;
+            if (has_option(command, "--reference-text"))
+                reference.transcript = command.options.at("--reference-text");
+            result = generator.generate_audio_with_reference(require_option(command, "--prompt"),
+                                                             reference, config);
+        } else {
+            result = require_interface<IAudioGeneration>(task).generate_audio(
+                require_option(command, "--prompt"), config);
+        }
         require_finite(result.samples, "generated audio");
         io::write_wav(result, path);
         write_json(output, {{"output", path},

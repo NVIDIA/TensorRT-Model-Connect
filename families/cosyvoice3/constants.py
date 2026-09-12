@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Model-owned floating-point constants for the published DiT computation.
+
+The timestep sinusoid uses exp(arange(128) * -log(10000)/127). Re-evaluating
+this expression with NumPy float64 or a different exp implementation changes
+the rounded coefficients. Multiplication by 1000 amplifies that difference.
+
+These are the FP32 coefficients in the published model's estimator export,
+stored as IEEE-754 bits to avoid decimal parsing/rounding ambiguity. They are
+fixed model constants on EVERY platform, not a GPU-specific alternate graph.
+The ONNX artifact is not read or required by the engine builder.
+
+Source: FunAudioLLM/Fun-CosyVoice3-0.5B-2512,
+revision 29e01c4e8d000f4bcd70751be16fa94bf3d85a18,
+flow.decoder.estimator.fp32.onnx, /time_embed/time_embed/Constant_2,
+The constants are copied from the pinned published graph.
+"""
+
+import numpy as np
+
+_TIME_FREQUENCY_BITS = (
+    1065353216, 1064179564, 1063088017, 1062072828, 1061128656, 1060250535, 1059433843, 1058674281,
+    1057967855, 1057310848, 1056434994, 1055298393, 1054241302, 1053258160, 1052343793, 1051493392,
+    1050702479, 1049966895, 1049282771, 1048646503, 1047533490, 1046432769, 1045409047, 1044456939,
+    1043571439, 1042747882, 1041981936, 1041269573, 1040607044, 1039794334, 1038648178, 1037582202,
+    1036590797, 1035668745, 1034811196, 1034013637, 1033271873, 1032581997, 1031940382, 1030888517,
+    1029778543, 1028746218, 1027786112, 1026893167, 1026062688, 1025290306, 1024571955, 1023903857,
+    1023154820, 1021999031, 1020924096, 1019924359, 1018994558, 1018129800, 1017325538, 1016577540,
+    1015881865, 1015234859, 1014244660, 1013125353, 1012084354, 1011116174, 1010215727, 1009378265,
+    1008599394, 1007875009, 1007201293, 1006516462, 1005350956, 1004266991, 1003258848, 1002321236,
+    1001449214, 1000638189, 999883904, 999182381, 998529937, 997601919, 996473206, 995423458,
+    994447139, 993539125, 992694624, 991909207, 991178734, 990499356, 989867508, 988703971,
+    987610895, 986594280, 985648787, 984769435, 983951595, 983190971, 982483552, 981825625,
+    980960308, 979822110, 978763539, 977779014, 976863369, 976011771, 975219753, 974483139,
+    973798052, 973160894, 972058080, 970955818, 969930657, 968977218, 968090477, 967265767,
+    966498741, 965785381, 965121924, 964319838, 963172080, 962104598, 961111806, 960188464,
+    959329715, 958531030, 957788227, 957097385, 956454872, 955413300, 954301759, 953267990,
+)
+
+
+def time_frequencies(time_dim=256):
+    if time_dim == 256:
+        return np.array(_TIME_FREQUENCY_BITS, dtype=np.uint32).view(np.float32)
+    # Reduced synthetic architectures used by component unit tests.
+    half = time_dim // 2
+    return np.exp(np.arange(half, dtype=np.float32) * np.float32(-np.log(10000) / (half - 1)))
