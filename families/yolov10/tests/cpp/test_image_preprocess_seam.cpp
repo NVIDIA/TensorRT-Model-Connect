@@ -95,6 +95,41 @@ void test_letterbox_reports_a_mapping_that_inverts() {
                 "letterbox mapping inverts");
 }
 
+void check_letterbox_padding(int height, int width, int size, int top, int left) {
+    const std::vector<float> pixels(static_cast<std::size_t>(height) * width * 3U, 0.25F);
+    trtmc::Yolov10PreprocessConfig config;
+    config.input_image_h = size;
+    config.input_image_w = size;
+    config.pad_value = 0.75F;
+    trtmc::Yolov10Letterbox letterbox;
+    const auto values =
+        trtmc::preprocess_yolov10_image(pixels.data(), height, width, config, letterbox);
+
+    check_close(values[static_cast<std::size_t>(top) * size + left], 0.25F, 1e-6F,
+                "image starts at the expected integer padding");
+    if (top > 0)
+        check_close(values[static_cast<std::size_t>(top - 1) * size + left], 0.75F, 1e-6F,
+                    "row before the image is padding");
+    if (left > 0)
+        check_close(values[static_cast<std::size_t>(top) * size + left - 1], 0.75F, 1e-6F,
+                    "column before the image is padding");
+    check_close(letterbox.pad_y, static_cast<float>(top), 1e-6F,
+                "reported vertical padding matches image placement");
+    check_close(letterbox.pad_x, static_cast<float>(left), 1e-6F,
+                "reported horizontal padding matches image placement");
+}
+
+void test_letterbox_reports_actual_padding() {
+    // An odd margin puts the extra pixel below or to the right of the image.
+    check_letterbox_padding(3, 8, 8, 2, 0);
+    check_letterbox_padding(8, 3, 8, 0, 2);
+    check_letterbox_padding(125, 256, 64, 16, 0);
+    check_letterbox_padding(256, 125, 64, 0, 16);
+    check_letterbox_padding(4, 8, 8, 2, 0);
+    check_letterbox_padding(8, 4, 8, 0, 2);
+    check_letterbox_padding(8, 8, 8, 0, 0);
+}
+
 void test_preprocess_rejects_an_empty_image() {
     bool threw = false;
     try {
@@ -113,6 +148,7 @@ int main() {
     test_letterbox_keeps_aspect_and_centres_the_image();
     test_preprocess_reads_interleaved_and_writes_planar();
     test_letterbox_reports_a_mapping_that_inverts();
+    test_letterbox_reports_actual_padding();
     test_preprocess_rejects_an_empty_image();
 
     if (g_failures != 0) {
