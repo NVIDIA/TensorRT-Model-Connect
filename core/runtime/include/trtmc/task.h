@@ -104,9 +104,13 @@ struct ImageResult {
 };
 
 struct AudioResult {
+    // Interleaved float32 [-1, 1]. `channels` samples share each time step, so
+    // samples.size() == num_samples * channels. Speech families retain the
+    // mono default; stereo families set this to 2.
     std::vector<float> samples;
     std::int32_t num_samples{0};
     std::int32_t sample_rate{24000};
+    std::int32_t channels{1};
 };
 
 struct TranscriptionStreamConfig {
@@ -399,6 +403,8 @@ struct AudioGenerationConfig {
     std::int32_t max_new_tokens{128};
     std::int32_t talker_max_new_tokens{0};
     std::int32_t seed{-1};
+    // Optional secondary text conditioning for music and other audio models.
+    std::string description;
 };
 
 using AudioChunkCallback =

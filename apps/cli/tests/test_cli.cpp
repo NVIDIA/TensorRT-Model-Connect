@@ -589,6 +589,7 @@ int main() {
     audio_command.options.emplace("--output", audio_path.string());
     audio_command.options.emplace("--max-new-tokens", "9");
     audio_command.options.emplace("--seed", "17");
+    audio_command.options.emplace("--description", "warm acoustic backing");
     audio_command.options.emplace("--stream", "true");
     audio_command.options.emplace("--chunk-frames", "4");
     FakeStreamingAudio audio;
@@ -597,7 +598,8 @@ int main() {
           "streaming audio task dispatch succeeds");
     check(std::filesystem::file_size(audio_path) == 3 * sizeof(float),
           "streaming audio writes raw float32 samples");
-    check(audio.seen.max_new_tokens == 9 && audio.seen.seed == 17 && audio.seen_chunk_frames == 4,
+    check(audio.seen.max_new_tokens == 9 && audio.seen.seed == 17 &&
+              audio.seen.description == "warm acoustic backing" && audio.seen_chunk_frames == 4,
           "streaming audio options reach the Task API");
     check(audio_output.str().find("\"format\":\"float32le\"") != std::string::npos,
           "streaming audio output format is explicit");
@@ -849,6 +851,17 @@ int main() {
     const auto loaded_wav = trtmc::cli::io::read_wav(wav_path.string());
     check(loaded_wav.sample_rate == 16000 && loaded_wav.samples == wav.samples,
           "float WAV round trip succeeds");
+    std::filesystem::remove(wav_path);
+    trtmc::AudioResult stereo;
+    stereo.samples = {-1.0F, 1.0F, 0.25F, 0.75F};
+    stereo.num_samples = 2;
+    stereo.sample_rate = 44100;
+    stereo.channels = 2;
+    trtmc::cli::io::write_wav(stereo, wav_path.string());
+    const auto stereo_as_mono = trtmc::cli::io::read_wav(wav_path.string());
+    check(stereo_as_mono.channels == 1 && stereo_as_mono.num_samples == 2 &&
+              stereo_as_mono.samples == std::vector<float>({0.0F, 0.5F}),
+          "stereo WAV headers preserve frames and input downmixes to mono");
     std::filesystem::remove(wav_path);
     check(throws_runtime([&] { trtmc::cli::io::read_wav(wav_path.string()); }),
           "missing WAV is rejected");

@@ -90,8 +90,8 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"video-segment", {CommandKind::kVideoSegment, {"--frame", "--prompt"}}},
         {"generate-audio",
          {CommandKind::kGenerateAudio,
-          {"--prompt", "--output", "--max-new-tokens", "--talker-max-new-tokens", "--seed",
-           "--stream", "--chunk-frames"}}},
+          {"--prompt", "--description", "--output", "--max-new-tokens", "--talker-max-new-tokens",
+           "--seed", "--stream", "--chunk-frames"}}},
         {"transcribe",
          {CommandKind::kTranscribe,
           {"--input", "--max-output-tokens", "--source-language", "--target-language",
@@ -981,6 +981,8 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         config.max_new_tokens = int_option(command, "--max-new-tokens", 128, 1);
         config.talker_max_new_tokens = int_option(command, "--talker-max-new-tokens", 0, 0);
         config.seed = int_option(command, "--seed", -1);
+        if (has_option(command, "--description"))
+            config.description = command.options.at("--description");
         const bool streaming = has_option(command, "--stream") &&
                                parse_bool(command.options.at("--stream"), "--stream");
         if (!streaming && has_option(command, "--chunk-frames"))
@@ -1025,7 +1027,8 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         io::write_wav(result, path);
         write_json(output, {{"output", path},
                             {"sample_rate", result.sample_rate},
-                            {"num_samples", result.samples.size()}});
+                            {"num_samples", result.num_samples},
+                            {"channels", result.channels}});
         return EXIT_SUCCESS;
     }
     case CommandKind::kTranscribe: {
