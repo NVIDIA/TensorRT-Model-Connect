@@ -39,6 +39,12 @@ excluded_profiles:
       Pinned BF16 build and exact linear Psi-Spec parity qualification are
       present, but the algorithmic committed-token receipt is not a matched
       wall-clock release-performance workload.
+  - model: glmasr-nano-fp16
+    reason: >-
+      Pinned FP16 build and Hugging Face reference-parity qualification (WER
+      and normalized edit distance against the official checkpoint) are
+      present, but no matching release-performance workload or receipt has
+      been collected.
   - model: minimax-h3-768p
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
