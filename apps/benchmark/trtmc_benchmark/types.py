@@ -121,6 +121,7 @@ class ResolvedCase:
     runtime_root: Path | None
     measurement: MeasurementSpec
     sources: Mapping[str, str]
+    bundle_is_explicit: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -129,6 +130,7 @@ class ResolvedCase:
             "model": self.model.summary(),
             "testcase": self.testcase_name,
             "bundle_path": str(self.bundle_path),
+            "bundle_is_explicit": self.bundle_is_explicit,
             "operation": self.operation,
             "request": dict(self.request),
             "runtime_root": str(self.runtime_root) if self.runtime_root else "",
@@ -144,6 +146,8 @@ class ResolvedCase:
             "schema_version": 2,
             "case_name": self.name,
             "bundle": str(self.bundle_path),
+            "expected_family": self.model.family,
+            "expected_task": self.model.task,
             "runtime_root": str(self.runtime_root),
             "operation": self.operation,
             "request": _absolute_artifact_paths(self.request, model_root),
@@ -164,6 +168,7 @@ class ResolvedCase:
         runtime_root: Path | None = None,
         measurement: MeasurementSpec | None = None,
         sources: Mapping[str, str] | None = None,
+        bundle_is_explicit: bool | None = None,
     ) -> "ResolvedCase":
         return replace(
             self,
@@ -173,6 +178,9 @@ class ResolvedCase:
             runtime_root=self.runtime_root if runtime_root is None else runtime_root,
             measurement=self.measurement if measurement is None else measurement,
             sources=self.sources if sources is None else sources,
+            bundle_is_explicit=(
+                self.bundle_is_explicit if bundle_is_explicit is None else bundle_is_explicit
+            ),
         )
 
 
@@ -180,7 +188,8 @@ def _absolute_artifact_paths(value: Any, model_root: Path) -> Any:
     if isinstance(value, Mapping):
         resolved: dict[str, Any] = {}
         for name, nested in value.items():
-            if isinstance(nested, str) and name.endswith("_path"):
+            # source_path is typed document provenance, not an asset to relocate.
+            if isinstance(nested, str) and name.endswith("_path") and name != "source_path":
                 path = Path(nested).expanduser()
                 resolved[name] = str(path if path.is_absolute() else (model_root / path).resolve())
             else:

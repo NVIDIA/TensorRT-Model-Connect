@@ -1,49 +1,95 @@
 ---
-title: Configuration Boundaries
+title: Family-owned Runtime Configuration
 ---
 
-The pre-#1093 schema registry and generic `--config` / `--set` surface were
-removed. Current build inputs are explicit `BuildRequest` fields, runtime
-inputs are typed Task request/config fields, and family-only build/runtime data
-belongs to family-owned code and bundle sections.
+A Task defines required inputs, outputs, and the execution lifecycle. A family
+implements that Task and declares its optional runtime parameters in a field
+table. The semantic Task SDK transports these parameters through the C API;
+it does not require a shared registry entry for every parameter name.
 
-## Choose the narrow owner
+Build inputs still use the existing Python `BuildRequest`. Families that have
+not migrated to the semantic SDK keep their existing execution path until
+their own migration.
 
-| Need | Current owner |
+## Choose the owner
+
+| Need | Owner |
 | --- | --- |
-| Stable model-agnostic build input | `BuildRequest` and the Python build CLI under `core/builder/tensorrt_model_connect/`. |
-| Stable user-visible runtime input | The relevant interface/config in `core/runtime/include/trtmc/task.h` and its CLI adapter in `apps/cli/`. |
-| Backend-only load setting | The loader/Engine contract, only when independent of model semantics. |
-| Family-specific build or runtime policy | `families/<family>/model.py`, family bundle sections, and `families/<family>/runtime/`. |
+| Required input such as text, an image, or source frames | The typed Task request; the family implements its meaning. |
+| Native batch or streaming execution | A separate Task interface, not a Config switch. |
+| Optional sampling, limits, or model-specific controls | The family's Config field table and implementation. |
+| Model identity, graph construction, weights, and build dependencies | The family's `support.py`, `model.py`, and dependency declarations. |
+| Model-independent loading or resource control | The existing loader or control API. |
 
-Do not create a shared schema, options bag, environment-variable convention,
-or generic dictionary for a family-only knob. Prefer deriving family policy
-from the exact checkpoint, task, and existing request fields.
+## Declare and bind parameters inside the family
 
-## Adding a shared field
+Reuse `ConfigField` from `trtmc/internal/config.h`. Supported values are int64,
+double, bool, string, and homogeneous lists of int64, double, or strings.
 
-Before adding a field, demonstrate that it is stable and model-agnostic. Then:
+```cpp
+static const trtmc::internal::ConfigField sampling[] = {
+    {"temperature", trtmc::internal::ConfigKind::F64,
+     trtmc::internal::ConfigValue{1.0}, "Sampling temperature"},
+    {"max_new_tokens", trtmc::internal::ConfigKind::I64,
+     std::nullopt, "Default derived from the available context"},
+};
 
-1. add the typed field at the narrow public boundary;
-2. validate its range before control transfers to a family or backend;
-3. make every family either implement or explicitly reject non-default values;
-4. add parser/API tests for invalid and boundary inputs;
-5. add at least one end-to-end family proof that the value changes observable
-   behavior as documented.
+// Inside the family's IModel implementation:
+std::vector<trtmc::internal::TaskInstance> task_bindings() override {
+    return {trtmc::internal::bind<trtmc::internal::ITextContinuation>(
+        *this, sampling)};
+}
+```
 
-Do not silently ignore an unsupported value or retry another family/backend.
+The field storage is static or model-owned, not a temporary vector returned
+while constructing a binding. The Core snapshots the declared metadata during
+load; the family must continue to use the same immutable field definitions.
+The binding helper records the adjusted Task-interface address, not a copy of
+the model or a global registration.
 
-## Examples in the current API
+## Resolve defaults and validate behavior
 
-- Build dimensions, precision, parallel sizes, family-owned quantization, and
-  direct dynamic-KV selection are typed `BuildRequest` fields.
-- Text sampling lives in `TextGenerationConfig` because it is part of the
-  public text-generation task.
-- Runtime-sized KV capacity is a narrow loader input consumed only by
-  compatible families.
-- TensorRT-RTX cache and CUDA graph settings are backend load options and are
-  rejected for standard TensorRT bundles.
+The Core rejects unknown keys, duplicate keys, and incorrect value types before
+calling the family. The family checks ranges, parameter combinations, and
+input-dependent limits before changing execution state.
 
-The restored
-[config-registry status document](../context/config-registry-status.md) is a
-historical record of the retired implementation, not current API guidance.
+```cpp
+auto temperature = trtmc::internal::config_get<double>(
+    config, sampling, "temperature").value();
+auto requested = trtmc::internal::config_get<std::int64_t>(
+    config, sampling, "max_new_tokens");
+auto limit = requested ? *requested : context_dependent_default(request);
+validate_generation_settings(request, temperature, limit); // family-owned
+```
+
+An absent fixed default means the family decides from its input or context, or
+rejects the request if it cannot choose a meaningful value. Explicit
+`0`, `false`, empty strings, and empty lists are not absence.
+`config_provided(config, name)` checks whether the caller supplied a value.
+The Core does not insert defaults into the caller's Config.
+
+Strings and lists in internal `ConfigView`, including values returned by
+`config_get`, are borrowed. A stream or session must copy or parse everything
+it retains before the start/create call returns.
+
+## Call through the existing SDK and CLI
+
+```cpp
+auto text = model.task<trtmc::TextContinuation>();
+auto fields = text.config_fields();
+auto result = text.run({"Hello"}, {{"temperature", 0.8}});
+```
+
+The CLI uses the same discovered field metadata to parse `--set name=value`.
+A parameter does not need a new dedicated CLI flag. Programs using the C API
+pass the existing typed name/value entries; the family chooses which names it
+accepts.
+
+Adding an optional key using an existing value type changes the owning family
+and its tests, not the shared Task, C ABI, or wrapper. Adding a genuinely new
+Task or value type is a shared-contract change and must be implemented and
+tested at that boundary first. Do not silently ignore unsupported parameters
+or retry another family or execution path.
+
+The [config-registry status document](../context/config-registry-status.md)
+records the retired registry; it is not the semantic SDK configuration design.

@@ -36,6 +36,7 @@ class ITextStream {
 
 class IStreamingTextContinuation {
   public:
+    using TaskInterface = IStreamingTextContinuation;
     static constexpr std::string_view kTask = "streaming_text_continuation";
     virtual ~IStreamingTextContinuation() = default;
     // Copy/parse every retained input/config before returning. The family
@@ -44,6 +45,7 @@ class IStreamingTextContinuation {
 };
 class IStreamingImagesTextToText {
   public:
+    using TaskInterface = IStreamingImagesTextToText;
     static constexpr std::string_view kTask = "streaming_images_text_to_text";
     virtual ~IStreamingImagesTextToText() = default;
     virtual std::unique_ptr<ITextStream> start_images_text(const ImagesTextToTextRequest&,
@@ -86,6 +88,7 @@ class IConversationStream {
 };
 class IStreamingTextConversation {
   public:
+    using TaskInterface = IStreamingTextConversation;
     static constexpr std::string_view kTask = "streaming_text_conversation";
     virtual ~IStreamingTextConversation() = default;
     virtual std::unique_ptr<IConversationStream>
@@ -94,6 +97,7 @@ class IStreamingTextConversation {
 
 class IStreamingVideoTextToText {
   public:
+    using TaskInterface = IStreamingVideoTextToText;
     static constexpr std::string_view kTask = "streaming_video_text_to_text";
     virtual ~IStreamingVideoTextToText() = default;
     virtual std::unique_ptr<ITextStream> start_video_text(const VideoTextToTextRequest&,
@@ -101,6 +105,7 @@ class IStreamingVideoTextToText {
 };
 class IStreamingImageVideoTextToText {
   public:
+    using TaskInterface = IStreamingImageVideoTextToText;
     static constexpr std::string_view kTask = "streaming_image_video_text_to_text";
     virtual ~IStreamingImageVideoTextToText() = default;
     virtual std::unique_ptr<ITextStream> start_image_video_text(const ImageVideoTextToTextRequest&,
@@ -108,6 +113,7 @@ class IStreamingImageVideoTextToText {
 };
 class IStreamingImagesTextConversation {
   public:
+    using TaskInterface = IStreamingImagesTextConversation;
     static constexpr std::string_view kTask = "streaming_images_text_conversation";
     virtual ~IStreamingImagesTextConversation() = default;
     virtual std::unique_ptr<IConversationStream>
@@ -115,6 +121,7 @@ class IStreamingImagesTextConversation {
 };
 class IStreamingVideoTextConversation {
   public:
+    using TaskInterface = IStreamingVideoTextConversation;
     static constexpr std::string_view kTask = "streaming_video_text_conversation";
     virtual ~IStreamingVideoTextConversation() = default;
     virtual std::unique_ptr<IConversationStream>

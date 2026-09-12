@@ -38,7 +38,9 @@ for source in (REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE):
         sys.path.insert(0, str(source))
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract  # noqa: E402
+from apps.benchmark.performance.baselines.hf_transformers import flatten_config  # noqa: E402
 from trtmc_benchmark.catalog import ManifestCatalog, resolve_case  # noqa: E402
+from trtmc_benchmark.task_adapters import default_operation  # noqa: E402
 from trtmc_benchmark.types import BenchmarkError  # noqa: E402
 
 
@@ -67,6 +69,7 @@ OUTPUT_CONTRACTS = {
     "exact-text",
     "exact-token-ids",
     "forecast-shape",
+    "regression-distribution",
     "generated-token-count",
     "image-features-shape",
     "localization",
@@ -78,7 +81,6 @@ OUTPUT_CONTRACTS = {
     "segmentation-shape",
     "transcription-text",
 }
-SEQUENCE_FAMILIES = {"bart", "m2m_100", "marian", "t5"}
 REFERENCE_INPUTS = {
     "pytorch-lerobot-act": (("source_root", "lerobot_repo"),),
     "upstream-elf": (("reference_repo", "elf_repo"),),
@@ -473,17 +475,23 @@ def resolve_entries(
                 raise PerfMatrixError(
                     f"entry {spec['id']} family {spec['family']} does not match {model.family}"
                 )
+            operation = default_operation(model.task)
+            if (spec["operation"], operation) in {("generate", "translate"), ("solve", "regress")}:
+                # A semantic primary may separate a formerly overloaded operation.
+                # Keep the release entry identity and all measurement thresholds.
+                spec = {**spec, "operation": operation}
             workload = spec["workload"]
             overrides = {
                 f"request.{name}": value for name, value in workload.get("request", {}).items()
             }
-            timing = timing_contract(runner=str(spec["baseline"]["runner"]), family=model.family)
+            timing = timing_contract(runner=str(spec["baseline"]["runner"]), declared=spec["baseline"])
+            baseline_timing = _baseline_timing(timing)
             overrides.update(
                 {
                     "measurement.warmup": int(spec["measurement"]["warmup"]),
                     "measurement.iterations": int(spec["measurement"]["iterations"]),
-                    "measurement.timing_scope": "public_task_call_wall",
-                    "measurement.asset_loading_included": bool(timing["asset_loading_included"]),
+                    "measurement.timing_scope": timing["candidate_timing_scope"],
+                    "measurement.asset_loading_included": baseline_timing["asset_loading_included"],
                     "telemetry.gpu": "off",
                 }
             )
@@ -497,7 +505,6 @@ def resolve_entries(
             ).with_values(runtime_root=environment.runtime_root)
             manifest = json.loads(model.manifest_path.read_text(encoding="utf-8"))
             reference_precision = _reference_precision(spec, case.testcase_name, manifest, model)
-            baseline_timing = _baseline_timing(spec, timing)
         except (BenchmarkError, OSError, ValueError, json.JSONDecodeError) as error:
             raise PerfMatrixError(f"cannot resolve {spec['id']}: {error}") from error
         resolved.append(
@@ -523,17 +530,12 @@ def _reference_precision(
     return str(model.precision)
 
 
-def _baseline_timing(spec: Mapping[str, Any], declared: Mapping[str, Any]) -> dict[str, Any]:
-    baseline = spec["baseline"]
-    result = {
+def _baseline_timing(declared: Mapping[str, Any]) -> dict[str, Any]:
+    return {
         "timing_scope": declared["timing_scope"],
         "input_preparation_included": declared["input_preparation_included"],
         "asset_loading_included": declared["asset_loading_included"],
     }
-    for name in tuple(result):
-        if name in baseline:
-            result[name] = baseline[name]
-    return result
 
 
 def preflight(
@@ -659,9 +661,11 @@ def candidate_command(
 
 
 def _baseline_task(entry: ResolvedEntry) -> str:
+    if configured := entry.spec["baseline"].get("task"):
+        return str(configured)
     if entry.spec["operation"] in {"encode", "embed"}:
         return "encoder"
-    return "seq2seq-lm" if entry.model.family in SEQUENCE_FAMILIES else "causal-lm"
+    return "causal-lm"
 
 
 def _adapter_options(entry: ResolvedEntry, environment: Environment) -> dict[str, Any]:
@@ -703,7 +707,7 @@ def _validate_reference_path(entry: ResolvedEntry, field: str, path: Path) -> No
 def baseline_command(entry: ResolvedEntry, environment: Environment, output: Path) -> list[str]:
     baseline = entry.spec["baseline"]
     runner = str(baseline["runner"])
-    request = json.dumps(entry.case.request, ensure_ascii=True, separators=(",", ":"))
+    request = json.dumps(flatten_config(entry.case.request), ensure_ascii=True, separators=(",", ":"))
     common = [
         "--model",
         str(_adapter_options(entry, environment).get("model_id", entry.model.hf_id)),
@@ -1042,8 +1046,8 @@ def _contract_name(entry: ResolvedEntry) -> str:
     configured = entry.spec["baseline"].get("output_contract")
     if configured:
         contract = str(configured)
-    elif entry.spec["operation"] == "generate":
-        if float(entry.case.request.get("temperature", 0.0)) > 0.0:
+    elif entry.spec["operation"] in {"generate", "translate"}:
+        if float(flatten_config(entry.case.request).get("temperature", 0.0)) > 0.0:
             contract = "generated-token-count"
         else:
             contract = "exact-token-ids"
@@ -1055,6 +1059,7 @@ def _contract_name(entry: ResolvedEntry) -> str:
             "control": "robot-action-shape",
             "segment": "segmentation-shape",
             "solve": "forecast-shape",
+            "regress": "regression-distribution",
             "transcribe": "transcription-text",
         }.get(str(entry.spec["operation"]), "")
     if contract not in OUTPUT_CONTRACTS:
@@ -1189,6 +1194,25 @@ def _output_contract(
         right_elements = right.get("forecast_elements", right.get("element_count"))
         left_shape = left.get("shape")
         right_shape = right.get("shape")
+        semantic = entry.model.task in {"series_to_point_forecast", "series_to_quantile_forecast"}
+        expected_axes = (["horizon", "channel"] if entry.model.task == "series_to_point_forecast"
+                         else ["quantile", "horizon", "channel"])
+        shape_matches = (
+            left_shape == right_shape and isinstance(left_shape, list)
+            and len(left_shape) == len(expected_axes)
+            and left.get("axes") == right.get("axes") == expected_axes
+            and isinstance(left.get("horizon_steps"), list)
+            and len(left["horizon_steps"]) == left_shape[expected_axes.index("horizon")]
+            and left.get("horizon_steps") == right.get("horizon_steps")
+            and left.get("quantile_levels") == right.get("quantile_levels")
+        ) if semantic else (
+            isinstance(left_shape, list) and isinstance(right_shape, list)
+            and sorted(left_shape) == sorted(right_shape)
+        )
+        if semantic and entry.model.task == "series_to_quantile_forecast":
+            levels = left.get("quantile_levels")
+            shape_matches = (shape_matches and isinstance(levels, list)
+                             and len(levels) == left_shape[0])
         matched = (
             isinstance(left_elements, int)
             and not isinstance(left_elements, bool)
@@ -1196,9 +1220,36 @@ def _output_contract(
             and left_elements == right_elements
             and isinstance(left_shape, list)
             and isinstance(right_shape, list)
-            and sorted(left_shape) == sorted(right_shape)
+            and shape_matches
         )
         return matched, "forecast output shape differs" if not matched else "", None
+    if contract == "regression-distribution":
+        def signature(value: Mapping[str, Any]) -> tuple[Any, ...] | None:
+            targets = value.get("target_count")
+            parameters = value.get("parameters")
+            if (value.get("distribution") not in {"normal", "student_t", "negative_binomial"}
+                    or isinstance(targets, bool) or not isinstance(targets, int) or targets <= 0
+                    or not isinstance(parameters, list) or not parameters
+                    or value.get("axes") != ["target"]):
+                return None
+            names = []
+            for parameter in parameters:
+                if (not isinstance(parameter, Mapping) or not isinstance(parameter.get("name"), str)
+                        or not parameter["name"]):
+                    return None
+                values = parameter.get("values")
+                if not isinstance(values, list) or len(values) != targets:
+                    return None
+                if any(isinstance(item, bool) or not isinstance(item, (int, float))
+                       or not math.isfinite(item) for item in values):
+                    return None
+                names.append(parameter["name"])
+            if len(names) != len(set(names)):
+                return None
+            return value.get("distribution"), targets, tuple(names)
+        left_signature, right_signature = signature(left), signature(right)
+        matched = left_signature is not None and left_signature == right_signature
+        return matched, "regression distribution/target axes differ" if not matched else "", None
     raise PerfMatrixError(f"output contract is not implemented: {contract}")
 
 

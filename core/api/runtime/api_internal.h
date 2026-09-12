@@ -115,13 +115,7 @@ struct TaskBinding {
     std::uint32_t major;
     std::uint32_t minor;
     const trtmc_api_header* api;
-    bool (*implemented)(ITask&) noexcept;
 };
-
-template <class Interface>
-bool implements(ITask& family) noexcept {
-    return dynamic_cast<Interface*>(&family) != nullptr;
-}
 
 // These spans refer to immutable per-Task tables, not a registration service.
 Span<const TaskBinding> text_continuation_bindings() noexcept;
@@ -138,9 +132,15 @@ Span<const TaskBinding> tracking_task_bindings() noexcept;
 Span<const TaskBinding> speech_task_bindings() noexcept;
 Span<const TaskBinding> action_task_bindings() noexcept;
 Span<const TaskBinding> recurrent_task_bindings() noexcept;
+Span<const TaskBinding> structure_task_bindings() noexcept;
 
 struct ModelState;
 std::shared_ptr<ModelState> model_owner(const trtmc_model* model);
+void* task_implementation(const std::shared_ptr<ModelState>& state, internal::TaskKey key);
+void validate_task_config(const std::shared_ptr<ModelState>& state, internal::TaskKey key,
+                          internal::ConfigView supplied);
+void validate_batch_configs(const std::shared_ptr<ModelState>& state, internal::TaskKey key,
+                            const std::vector<ConvertedConfig>& supplied);
 std::mutex& model_mutex(const trtmc_model* model);
 std::mutex& model_mutex(const std::shared_ptr<ModelState>& state);
 ITask& model_family(const trtmc_model* model);
@@ -169,10 +169,10 @@ class ModelSession {
 template <class Interface>
 Interface& require_interface(const trtmc_model* model, std::string_view task) {
     require_model_idle(model);
-    auto* interface = dynamic_cast<Interface*>(&require_family(model, task));
-    if (interface == nullptr)
-        throw ApiFailure{TRTMC_UNSUPPORTED, "family has not implemented this Task interface"};
-    return *interface;
+    const auto key = internal::contract_key<Interface>();
+    if (key.id != task)
+        throw ApiFailure{TRTMC_INTERNAL_ERROR, "Task entry uses the wrong interface"};
+    return *static_cast<Interface*>(task_implementation(model_owner(model), key));
 }
 
 struct ResultStorage {

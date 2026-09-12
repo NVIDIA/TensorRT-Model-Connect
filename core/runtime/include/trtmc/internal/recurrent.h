@@ -152,6 +152,7 @@ struct RecurrentBatchItem {
 #define TRTMC_RECURRENT_INTERFACE(Name, Id, Method, Request, Result)                               \
     class I##Name {                                                                                \
       public:                                                                                      \
+        using TaskInterface = I##Name;                                                             \
         static constexpr std::string_view kTask = Id;                                              \
         virtual ~I##Name() = default;                                                              \
         virtual std::unique_ptr<IRecurrentState> create_recurrent_state() = 0;                     \
@@ -175,6 +176,7 @@ TRTMC_RECURRENT_INTERFACE(RecurrentEmbeddingsToHiddenStates,
 #define TRTMC_RECURRENT_BATCH_INTERFACE(Name, Id, Method, Request, Result)                         \
     class I##Name {                                                                                \
       public:                                                                                      \
+        using TaskInterface = I##Name;                                                             \
         static constexpr std::string_view kTask = Id;                                              \
         virtual ~I##Name() = default;                                                              \
         virtual std::unique_ptr<IRecurrentState> create_recurrent_state() = 0;                     \

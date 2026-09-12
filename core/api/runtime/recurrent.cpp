@@ -48,10 +48,8 @@ void require_usable(const trtmc_recurrent_state& state) {
 }
 template <class Interface>
 Interface& family_interface(const std::shared_ptr<ModelState>& owner) {
-    auto* family = dynamic_cast<Interface*>(&require_family(owner, Interface::kTask));
-    if (!family)
-        throw ApiFailure{TRTMC_UNSUPPORTED, "family has not implemented the recurrent Task"};
-    return *family;
+    return *static_cast<Interface*>(
+        task_implementation(owner, internal::contract_key<Interface>()));
 }
 Memory memory(std::uint32_t value, bool default_host = false) {
     if (default_host && value == 0)
@@ -554,6 +552,7 @@ trtmc_status forward_one(trtmc_recurrent_state* input, const Request* request,
         require_usable(state);
         const auto value = request_input(*request);
         const ConvertedConfig options(config);
+        validate_task_config(state.owner, internal::contract_key<Interface>(), options.view());
         auto& family = family_interface<Interface>(state.owner);
         // Mutation can precede execution/packing errors. Never silently retry.
         state.poisoned = true;
@@ -619,8 +618,10 @@ trtmc_status forward_batch(const WireItem* input, std::uint64_t count, trtmc_res
             require_usable(state);
             const auto request = request_input(item.request);
             configs.emplace_back(&item.config);
+
             items.push_back({state.implementation.get(), request, configs.back().view()});
         }
+        validate_batch_configs(owner, internal::contract_key<Interface>(), configs);
         for (auto* state : states)
             state->poisoned = true;
         auto results = [&] {
@@ -708,7 +709,7 @@ RECURRENT_BATCH_TABLE(batch_embeddings_hidden_api,
 Span<const TaskBinding> recurrent_task_bindings() noexcept {
 #define B(Interface, Table)                                                                        \
     {                                                                                              \
-        internal::Interface::kTask, 1, 0, &Table.header, implements<internal::Interface>           \
+        internal::Interface::kTask, 1, 0, &Table.header                                            \
     }
     static const TaskBinding bindings[] = {
         B(IRecurrentTokensToLogits, tokens_logits_api),

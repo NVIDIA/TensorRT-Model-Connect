@@ -81,7 +81,7 @@ The runtime CMake file creates `trtmc_model_my_family`. Its factory exports
 `trtmc_create_family`, reads only sections owned by this family, and returns a
 concrete `trtmc::internal::IModel` implementing the selected semantic Task
 interfaces from `trtmc/internal/`. For example, these are the declarations a
-text family implements; model execution and config parsing stay in its own files:
+text family implements; model execution and configuration policy stay in its own files:
 
 ```cpp
 #include <trtmc/internal/model.h>
@@ -93,9 +93,9 @@ public:
     const char* task() const noexcept override {
         return trtmc::internal::ITextContinuation::kTask.data();
     }
-    std::vector<trtmc::internal::TaskInfo> task_info() const override;
-    std::vector<trtmc::internal::ConfigField>
-    config_fields(std::string_view task_id) const override;
+    std::vector<trtmc::internal::TaskInstance> task_bindings() override {
+        return {trtmc::internal::bind<trtmc::internal::ITextContinuation>(*this)};
+    }
     trtmc::internal::TextResult run(
         const trtmc::internal::TextContinuationRequest&,
         trtmc::internal::ConfigView) override;
@@ -107,10 +107,24 @@ entry point directly invokes the implemented virtual method. Do not add a
 family-specific C export, shared adapter, or user-facing family header. Multiple
 inheritance is allowed for distinct runtime Tasks; builder inheritance is not.
 
-`support.py` declares accepted **build/primary Task modes**. `IModel::task_info()`
+`support.py` declares accepted **build/primary Task modes**. `IModel::task_bindings()`
 declares all semantic Tasks available on this particular **loaded bundle**;
 these sets need not be identical. The primary `task()` must match the bundle
 header, and every advertised semantic Task must actually be implemented.
+
+The `bind` call belongs to the family. It returns a Task key, the correctly
+adjusted interface pointer, and an optional Config field table; it does not
+create a model, execute inference, or modify a global registry. Always name the
+shared interface, as in `bind<ITextContinuation>(*this, fields)`, not the concrete
+family class. The Core Runtime snapshots the records and calls those interfaces;
+the Family Runtime owns their implementation. Shared interfaces carry their own
+`TaskInterface` type identity so accidental concrete-model binding is rejected
+at compile time. Families must not redefine that identity.
+
+The example has no optional parameters. For parameters, pass a stable field
+table and use the existing [Config helpers](add-config-schema.md); do not return
+a view into a temporary vector. Core checks names, duplicates and types, while
+family code checks ranges, combinations and input-dependent defaults.
 
 If the family graph contains distributed collectives, that same family owns
 its communicator setup and NCCL loading. A replicated plan that only selects a

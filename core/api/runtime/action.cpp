@@ -12,6 +12,7 @@
 
 struct trtmc_image_state_action_session {
     std::mutex operation;
+    std::shared_ptr<trtmc::api::ModelState> owner;
     std::unique_ptr<trtmc::api::ModelSession> model;
     std::unique_ptr<trtmc::internal::IImageStateActionSession> implementation;
     // Reverse member destruction stops the family session before the model reservation.
@@ -76,6 +77,9 @@ trtmc_status TRTMC_CALL predict(trtmc_model* model,
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<internal::IImageStateToActionChunk>(
             model, internal::IImageStateToActionChunk::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IImageStateToActionChunk>(),
+                             options.view());
         *output = make_result<ActionChunkStorage>(family.run(request, options.view()));
     });
 }
@@ -92,6 +96,10 @@ trtmc_status TRTMC_CALL create(trtmc_model* model, const trtmc_config_view_v1* c
             std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<internal::IImageStateActionQueue>(
                 model, internal::IImageStateActionQueue::kTask);
+            session->owner = model_owner(model);
+            validate_task_config(session->owner,
+                                 internal::contract_key<internal::IImageStateActionQueue>(),
+                                 options.view());
             session->model = std::make_unique<ModelSession>(model);
             session->implementation = family.create_action_session(options.view());
         }
@@ -117,6 +125,9 @@ trtmc_status TRTMC_CALL act(trtmc_image_state_action_session* session,
         auto lock = operation(session);
         const auto request = observation(*input);
         const ConvertedConfig options(config);
+        validate_task_config(session->owner,
+                             internal::contract_key<internal::IImageStateActionQueue>(),
+                             options.view());
         *output =
             make_result<ActionStepStorage>(session->implementation->act(request, options.view()));
     });
@@ -141,10 +152,9 @@ const trtmc_image_state_action_queue_api_v1 queue_api = {
     result_view<ActionStepStorage, trtmc_action_step_view_v1>, reset,  release};
 static_assert(offsetof(trtmc_image_state_to_action_chunk_api_v1, header) == 0);
 static_assert(offsetof(trtmc_image_state_action_queue_api_v1, header) == 0);
-const TaskBinding bindings[] = {{internal::IImageStateToActionChunk::kTask, 1, 0, &chunk_api.header,
-                                 implements<internal::IImageStateToActionChunk>},
-                                {internal::IImageStateActionQueue::kTask, 1, 0, &queue_api.header,
-                                 implements<internal::IImageStateActionQueue>}};
+const TaskBinding bindings[] = {
+    {internal::IImageStateToActionChunk::kTask, 1, 0, &chunk_api.header},
+    {internal::IImageStateActionQueue::kTask, 1, 0, &queue_api.header}};
 } // namespace
 Span<const TaskBinding> action_task_bindings() noexcept {
     return bindings;

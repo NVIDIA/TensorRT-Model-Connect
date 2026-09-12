@@ -129,6 +129,65 @@ void test_metadata_ownership(const std::string& bundle, const trtmc::LoadOptions
           "fixed and computed defaults remain distinguishable");
 }
 
+void test_instance_bindings(const std::string& bundle, trtmc::LoadOptions options) {
+    options.kv_cache_size_bytes = 16;
+    auto first = trtmc::Model::load(bundle, options).task<trtmc::TextContinuation>();
+    options.kv_cache_size_bytes = 32;
+    auto second = trtmc::Model::load(bundle, options).task<trtmc::TextContinuation>();
+    check(first.run({"first"}).setup_ms() == 16 && second.run({"second"}).setup_ms() == 32 &&
+              first.run({"again"}).setup_ms() == 16,
+          "bindings belong to each loaded instance, not the first object in a static table");
+}
+
+void test_invalid_bindings(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    const std::pair<const char*, trtmc_status> cases[] = {
+        {"unknown_binding", TRTMC_UNSUPPORTED},  {"wrong_version", TRTMC_VERSION_MISMATCH},
+        {"null_binding", TRTMC_INTERNAL_ERROR},  {"duplicate_binding", TRTMC_INTERNAL_ERROR},
+        {"empty_field", TRTMC_INTERNAL_ERROR},   {"duplicate_field", TRTMC_INTERNAL_ERROR},
+        {"wrong_default", TRTMC_INTERNAL_ERROR},
+    };
+    for (const auto& item : cases) {
+        const auto path = root / (std::string("invalid-") + item.first + ".bundle");
+        write_bundle(path, item.first);
+        bool rejected = false;
+        try {
+            (void)trtmc::Model::load(path.string(), options);
+        } catch (const trtmc::Error& error) {
+            rejected = error.code() == item.second;
+        }
+        std::filesystem::remove(path);
+        check(rejected, item.first);
+    }
+}
+
+void test_config_precedes_execution(const std::filesystem::path& root,
+                                    const trtmc::LoadOptions& options) {
+    const auto path = root / "config-preflight.bundle";
+    write_bundle(path, "must_not_run");
+    auto task = trtmc::Model::load(path.string(), options).task<trtmc::TextContinuation>();
+    for (const trtmc::Config& config : {
+             trtmc::Config{{"unknown", true}},
+             trtmc::Config{{"temperature", "not-a-number"}},
+             trtmc::Config{{"temperature", 0.5}, {"temperature", 0.6}},
+         }) {
+        bool rejected = false;
+        try {
+            (void)task.run({"Hello"}, config);
+        } catch (const trtmc::Error& error) {
+            rejected = error.code() == TRTMC_INVALID_CONFIG;
+        }
+        check(rejected, "Core rejects invalid config before the family execution trap");
+    }
+    bool executed = false;
+    try {
+        (void)task.run({"Hello"});
+    } catch (const trtmc::Error& error) {
+        executed = error.code() == TRTMC_INTERNAL_ERROR;
+    }
+    check(executed, "valid config reaches the deliberately throwing fixture");
+    std::filesystem::remove(path);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -148,6 +207,9 @@ int main(int argc, char** argv) {
         test_model_and_tasks(bundle.string(), disabled.string(), options);
         test_calls_and_ownership(bundle.string(), options);
         test_metadata_ownership(bundle.string(), options);
+        test_instance_bindings(bundle.string(), options);
+        test_invalid_bindings(root, options);
+        test_config_precedes_execution(root, options);
     } catch (const std::exception& error) {
         std::cerr << "Unexpected exception: " << error.what() << '\n';
         ++failures;

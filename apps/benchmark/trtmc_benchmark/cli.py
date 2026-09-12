@@ -249,7 +249,9 @@ def _resolve_cases(
                 case_name=str(testcase) if testcase is not None else None,
                 operation=operation,
                 overrides=overrides,
-            ).with_values(name=display, runtime_root=runtime_root)
+            ).with_values(
+                name=display, runtime_root=runtime_root, bundle_is_explicit=explicit is not None
+            )
             sweeps = _merge_sweeps(case_spec.get("sweep", {}), cli_sweeps)
             resolved.extend(expand_sweeps(base, sweeps))
     if selected_names and arguments.config:

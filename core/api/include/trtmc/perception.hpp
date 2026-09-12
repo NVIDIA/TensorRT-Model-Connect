@@ -59,6 +59,9 @@ struct StereoImagesToDisparityRequest {
 struct ImageToMetricGeometryRequest {
     ImageInput image;
 };
+struct ImageToBoxesRequest {
+    ImageInput image;
+};
 struct ImageTextToBoxesRequest {
     ImageInput image;
     std::string text;
@@ -121,6 +124,7 @@ using MasksResult = detail::ViewResult<trtmc_masks_view_v1>;
 using DisparityResult = detail::ViewResult<trtmc_disparity_view_v1>;
 using MetricGeometryResult = detail::ViewResult<trtmc_metric_geometry_view_v1>;
 using GroundedBoxesResult = detail::ViewResult<trtmc_grounded_boxes_view_v1>;
+using DetectedBoxesResult = detail::ViewResult<trtmc_detected_boxes_view_v1>;
 using GroundedPointsResult = detail::ViewResult<trtmc_grounded_points_view_v1>;
 using RefinedPosesResult = detail::ViewResult<trtmc_refined_poses_view_v1>;
 using ObjectPoseResult = detail::ViewResult<trtmc_object_pose_view_v1>;
@@ -144,6 +148,9 @@ inline auto perception_request(const ImageToMaskProposalsRequest& input) {
     return PerceptionRequest<trtmc_perception_image_request_v1>({input.image.wire});
 }
 inline auto perception_request(const ImageToMetricGeometryRequest& input) {
+    return PerceptionRequest<trtmc_perception_image_request_v1>({input.image.wire});
+}
+inline auto perception_request(const ImageToBoxesRequest& input) {
     return PerceptionRequest<trtmc_perception_image_request_v1>({input.image.wire});
 }
 inline auto perception_request(const ImagePointsToMasksRequest& input) {
@@ -320,6 +327,8 @@ TRTMC_PERCEPTION_WRAPPER(StereoImagesToDisparity, TRTMC_TASK_STEREO_IMAGES_TO_DI
                          trtmc_stereo_images_to_disparity_api_v1, DisparityResult)
 TRTMC_PERCEPTION_WRAPPER(ImageToMetricGeometry, TRTMC_TASK_IMAGE_TO_METRIC_GEOMETRY,
                          trtmc_image_to_metric_geometry_api_v1, MetricGeometryResult)
+TRTMC_PERCEPTION_WRAPPER(ImageToBoxes, TRTMC_TASK_IMAGE_TO_BOXES, trtmc_image_to_boxes_api_v1,
+                         DetectedBoxesResult)
 TRTMC_PERCEPTION_WRAPPER(ImageTextToBoxes, TRTMC_TASK_IMAGE_TEXT_TO_BOXES,
                          trtmc_image_text_to_boxes_api_v1, GroundedBoxesResult)
 TRTMC_PERCEPTION_WRAPPER(ImageTextToPoints, TRTMC_TASK_IMAGE_TEXT_TO_POINTS,

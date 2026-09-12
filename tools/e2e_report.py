@@ -280,6 +280,17 @@ _TEXT_KEYS = (
 )
 _DEMO_TEXT_TASKS = {
     "text_generation",
+    "text_continuation",
+    "conditional_text_generation",
+    "unconditional_text_generation",
+    "text_translation",
+    "speech_transcription",
+    "speech_translation",
+    "streaming_text_continuation",
+    "streaming_speech_transcription",
+    "images_text_to_text",
+    "latent_conditioned_text_generation",
+    "latent_replay_to_text",
     "translation",
     "transcription",
     "transcription_streaming",
@@ -324,7 +335,20 @@ _OUTPUT_NAMES = {
     "reranking": "Ranking scores",
     "segmentation": "Segmentation masks",
     "video_segmentation": "Segmentation masks",
+    "image_to_class_scores": "Class scores",
+    "text_to_embedding": "Embedding vector",
+    "text_to_pooled_features": "Encoded features",
+    "image_to_embedding": "Embedding vector",
+    "image_to_token_and_pooled_features": "Encoded features",
+    "series_to_point_forecast": "Forecast",
+    "series_to_quantile_forecast": "Forecast",
+    "series_to_point_and_quantile_forecast": "Forecast",
 }
+
+
+def _is_classification_task(task: str) -> bool:
+    # The semantic SDK names the result type instead of the old execution mode.
+    return "classification" in task or task == "image_to_class_scores"
 
 
 def _label(key: str) -> str:
@@ -728,7 +752,7 @@ def _output_summary(value: Any, *, role: str, task: str, peer: Any = None) -> st
     if isinstance(value, str):
         return _text_preview(value)
     if isinstance(value, (int, float)):
-        label = "Class ID" if "classification" in task else "Recorded value"
+        label = "Class ID" if _is_classification_task(task) else "Recorded value"
         return _facts([(label, value)])
     if isinstance(value, list):
         return _numeric_preview(
@@ -743,14 +767,14 @@ def _output_summary(value: Any, *, role: str, task: str, peer: Any = None) -> st
     )
     if text:
         parts.append(_text_preview(text))
-    elif role == "native" and task == "text_generation":
+    elif role == "native" and task in _DEMO_TEXT_TASKS:
         message = "Decoded text not recorded."
         if isinstance(value.get("token_ids"), list):
             message += " Recorded token IDs remain in technical details."
         elif "logits" in value:
             message += " Saved token scores are summarized below."
         parts.append(f"<p class='note'>{message}</p>")
-    if "classification" in task:
+    if _is_classification_task(task):
         parts.append(_classification_summary(value))
     numeric = _numeric_preview(value, _OUTPUT_NAMES.get(task, "Numeric output"), peer=peer)
     if numeric:
@@ -1619,7 +1643,7 @@ def _demo_output(value: Any, *, role: str, task: str, media: str = "", peer: Any
     """Show one useful output representation instead of generic tensor metadata."""
     if (value is None or _mapping(value).get("mode") == "contract_only") and not media:
         return ""
-    if "classification" in task:
+    if _is_classification_task(task):
         chosen = value.get("top_class") if isinstance(value, dict) else value
         if isinstance(chosen, (int, float)):
             return f'<p class="class-result">Class ID <strong>{_escape(chosen)}</strong></p>'
@@ -1635,7 +1659,7 @@ def _demo_output(value: Any, *, role: str, task: str, media: str = "", peer: Any
         return (_demo_text(text, limit=len(text)) if text else "") + media + notices
     if text:
         return _demo_text(text, limit=len(text)) + notices
-    if task == "text_generation":
+    if task in _DEMO_TEXT_TASKS:
         keys = (
             ("reference_ids", "token_ids")
             if role == "reference"
@@ -2324,7 +2348,7 @@ def _content(
         or previews.get("reference")
         or _demo_text_value(reference, "reference")
         or (
-            "classification" in task
+            _is_classification_task(task)
             and reference is not None
             and _mapping(reference).get("mode") != "contract_only"
         )
@@ -2342,8 +2366,8 @@ def _content(
             and numeric
             and paired
             and numeric[0] == paired[0]
-            and "classification" not in task
-            and task != "text_generation"
+            and not _is_classification_task(task)
+            and task not in _DEMO_TEXT_TASKS
             and not _demo_text_value(native, "native")
             and not _demo_text_value(reference, "reference")
         ):
@@ -2351,7 +2375,7 @@ def _content(
             if first is not None and second is not None and first[1:] == second[1:]:
                 combined = _demo_numeric_comparison(native, reference, task)
         text_comparison = _demo_text_comparison(native, reference, task)
-        classification_comparison = "classification" in task and bool(other) and not text_comparison
+        classification_comparison = _is_classification_task(task) and bool(other) and not text_comparison
         if combined:
             notices = dict.fromkeys((_demo_nonfinite(native), _demo_nonfinite(reference)))
             primary = combined + "".join(notices)

@@ -55,6 +55,7 @@ class ISpeechTranscriptionStream {
 };
 class IStreamingSpeechTranscription {
   public:
+    using TaskInterface = IStreamingSpeechTranscription;
     static constexpr std::string_view kTask = "streaming_speech_transcription";
     virtual ~IStreamingSpeechTranscription() = default;
     virtual std::unique_ptr<ISpeechTranscriptionStream>
@@ -71,6 +72,7 @@ struct StreamingAudioSummary {
 using AudioChunkSink = std::function<bool(const AudioView&)>;
 class IStreamingTextToSpeech {
   public:
+    using TaskInterface = IStreamingTextToSpeech;
     static constexpr std::string_view kTask = "streaming_text_to_speech";
     virtual ~IStreamingTextToSpeech() = default;
     // Invoke serially on the calling thread, only during run. Chunks borrow
@@ -161,6 +163,7 @@ class ISpeechDialogueSession {
 
 class IDuplexSpeechDialogue {
   public:
+    using TaskInterface = IDuplexSpeechDialogue;
     static constexpr std::string_view kTask = "duplex_speech_dialogue";
     virtual ~IDuplexSpeechDialogue() = default;
     virtual std::unique_ptr<ISpeechDialogueSession>
@@ -168,6 +171,7 @@ class IDuplexSpeechDialogue {
 };
 class IOfflineSpeechDialogue {
   public:
+    using TaskInterface = IOfflineSpeechDialogue;
     static constexpr std::string_view kTask = "offline_speech_dialogue";
     virtual ~IOfflineSpeechDialogue() = default;
     virtual std::unique_ptr<ISpeechDialogueSession>
@@ -175,6 +179,7 @@ class IOfflineSpeechDialogue {
 };
 class IToolSpeechDialogue {
   public:
+    using TaskInterface = IToolSpeechDialogue;
     static constexpr std::string_view kTask = "tool_speech_dialogue";
     virtual ~IToolSpeechDialogue() = default;
     virtual std::unique_ptr<ISpeechDialogueSession>

@@ -186,6 +186,18 @@ void conversation_tests(trtmc::Model& model, const std::filesystem::path& root) 
     auto request = conversation_input();
     const auto one_shot = model.task<trtmc::TextConversation>().run(request);
     auto stream = task.start(request);
+    check(fails(TRTMC_BUSY,
+                [&] {
+                    (void)model.task<trtmc::TextConversation>().run(conversation_input(),
+                                                                    {{"unknown", true}});
+                }),
+          "active execution takes precedence over semantic Config validation");
+    check(fails(TRTMC_BUSY,
+                [&] {
+                    (void)model.task<trtmc::TextContinuation>().run({"blocked"},
+                                                                    {{"unknown", true}});
+                }),
+          "text and conversation Tasks preserve the same busy/config precedence");
     request.messages.clear();
     request.tools.clear();
     check(stream.poll(0).status == trtmc::StreamPollStatus::Timeout,

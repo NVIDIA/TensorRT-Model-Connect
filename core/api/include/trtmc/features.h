@@ -52,6 +52,8 @@ typedef struct {
 typedef struct {
     const float* values;
     uint64_t count;
+    /* Empty means the checkpoint space is unknown, not a shared space ID.
+     * Do not infer cross-model compatibility from two empty identifiers. */
     trtmc_string_view embedding_space;
     trtmc_string_view pooling;
     trtmc_string_view normalization;

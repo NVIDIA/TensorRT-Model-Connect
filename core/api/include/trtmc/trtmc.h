@@ -17,6 +17,7 @@
 #include "trtmc/recurrent.h"
 #include "trtmc/speech.h"
 #include "trtmc/stream.h"
+#include "trtmc/structure.h"
 #include "trtmc/tracking.h"
 #include "trtmc/types.h"
 #include "trtmc/video.h"

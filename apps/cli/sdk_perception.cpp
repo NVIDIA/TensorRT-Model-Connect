@@ -74,6 +74,31 @@ ImageInput image_view(const io::LoadedImage& image) {
             static_cast<std::uint32_t>(image.width)};
 }
 
+void detect(const Command& command, const Model& model, std::ostream& output) {
+    if (has_option(command, "--prompt"))
+        throw std::invalid_argument("image-only detection does not accept --prompt");
+    const auto image = detail::read_image(require_option(command, "--image"));
+    const auto task = model.task<ImageToBoxes>();
+    const auto config = detail::task_config(command, task.config_fields(), {"--image"});
+    const auto result = task.run({image_view(image)}, config);
+    const auto view = result.view();
+    nlohmann::json boxes = nlohmann::json::array(), scores = nlohmann::json::array(),
+                   classes = nlohmann::json::array();
+    for (std::uint64_t i = 0; i < view.count; ++i) {
+        for (const auto& coordinate : box_json(view.boxes[i].box))
+            boxes.push_back(coordinate);
+        scores.push_back(view.boxes[i].score);
+        classes.push_back(view.boxes[i].class_id);
+    }
+    detail::write_json(output, {{"boxes", std::move(boxes)},
+                                {"scores", std::move(scores)},
+                                {"classes", std::move(classes)},
+                                {"image_height", view.image_height},
+                                {"image_width", view.image_width},
+                                {"coordinate_space", "original_image_pixels"},
+                                {"box_format", "xyxy"}});
+}
+
 void disparity(const Command& command, const Model& model, std::ostream& output) {
     const auto left = detail::read_image(require_option(command, "--left"));
     const auto right = detail::read_image(require_option(command, "--right"));
@@ -359,13 +384,21 @@ void video_segment(const Command& command, const Model& model, std::string_view 
     VideoInput clip;
     for (const auto& image : images)
         clip.frames.push_back(image_view(image));
-    // The existing frame-file command carries ordering but no physical times.
-    // It delegates one complete clip; family owns any two-stage composition.
+    // File order has no physical timestamps. Prompt-frame Tasks explicitly
+    // accept frame zero before continuation; whole-clip Tasks retain their
+    // complete-clip execution contract.
     if (id == FramesTextToMaskTracks::kTask) {
         const auto task = model.task<FramesTextToMaskTracks>();
         const auto config = detail::task_config(command, task.config_fields(), {"--prompt"});
         auto session = task.create(config);
         const auto result = session.segment(clip, require_option(command, "--prompt"));
+        detail::write_json(output, tracks_json(result.view()));
+    } else if (id == PromptFrameTextToMaskTracks::kTask) {
+        const auto task = model.task<PromptFrameTextToMaskTracks>();
+        const auto config = detail::task_config(command, task.config_fields(), {"--prompt"});
+        auto session = task.create(require_option(command, "--prompt"), config);
+        const auto prompt = session.accept_prompt_frame(clip.frames.front());
+        const auto result = session.continue_borrowed(prompt, clip);
         detail::write_json(output, tracks_json(result.view()));
     } else {
         if (has_option(command, "--prompt"))
@@ -399,13 +432,16 @@ std::string_view perception_task_for_command(const Command& command, const Model
     if (command.kind == CommandKind::kSegmentPrompted)
         return has_option(command, "--prompt") ? ImageTextToInstanceMasks::kTask
                                                : ImagePointsToMasks::kTask;
-    if (command.kind == CommandKind::kDetect)
+    if (command.kind == CommandKind::kDetect) {
+        if (!has_option(command, "--prompt"))
+            return ImageToBoxes::kTask;
         return model.info().bundle_task == ImageTextToPoints::kTask ? ImageTextToPoints::kTask
                                                                     : ImageTextToBoxes::kTask;
+    }
     if (command.kind == CommandKind::kVideoSegment) {
         const auto primary = model.info().bundle_task;
         if (primary == PromptFrameTextToMaskTracks::kTask)
-            return PromptFrameTextToMaskTracks::kTask; // Not silently adapted to a whole clip.
+            return PromptFrameTextToMaskTracks::kTask;
         return has_option(command, "--prompt") || primary == FramesTextToMaskTracks::kTask
                    ? FramesTextToMaskTracks::kTask
                    : FramesToDetectedMaskTracks::kTask;
@@ -415,6 +451,10 @@ std::string_view perception_task_for_command(const Command& command, const Model
 
 bool dispatch_sdk_perception(const Command& command, const Model& model, std::string_view id,
                              std::ostream& output) {
+    if (command.kind == CommandKind::kDetect && id == ImageToBoxes::kTask) {
+        detect(command, model, output);
+        return true;
+    }
     if (command.kind == CommandKind::kDisparity && id == StereoImagesToDisparity::kTask) {
         disparity(command, model, output);
         return true;
@@ -450,7 +490,8 @@ bool dispatch_sdk_perception(const Command& command, const Model& model, std::st
         return true;
     }
     if (command.kind == CommandKind::kVideoSegment &&
-        (id == FramesTextToMaskTracks::kTask || id == FramesToDetectedMaskTracks::kTask)) {
+        (id == FramesTextToMaskTracks::kTask || id == FramesToDetectedMaskTracks::kTask ||
+         id == PromptFrameTextToMaskTracks::kTask)) {
         video_segment(command, model, id, output);
         return true;
     }

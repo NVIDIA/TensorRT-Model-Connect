@@ -190,28 +190,38 @@ class Model final : public IModel,
     }
     ~Model() override { --live_models; }
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "disabled")
-            return {{ITextContinuation::kTask, 1, 0}};
-        return {{IRecurrentTokensToLogits::kTask, 1, 0},
-                {IRecurrentEmbeddingsToLogits::kTask, 1, 0},
-                {IRecurrentTokensToHiddenStates::kTask, 1, 0},
-                {IRecurrentEmbeddingsToHiddenStates::kTask, 1, 0},
-                {IBatchRecurrentTokensToLogits::kTask, 1, 0},
-                {IBatchRecurrentEmbeddingsToLogits::kTask, 1, 0},
-                {IBatchRecurrentTokensToHiddenStates::kTask, 1, 0},
-                {IBatchRecurrentEmbeddingsToHiddenStates::kTask, 1, 0},
-                {ITextContinuation::kTask, 1, 0},
-                {IStreamingTextContinuation::kTask, 1, 0}};
+            return {bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask))};
+        return {
+            bind<IRecurrentTokensToLogits>(*this, fields_for(IRecurrentTokensToLogits::kTask)),
+            bind<IRecurrentEmbeddingsToLogits>(*this,
+                                               fields_for(IRecurrentEmbeddingsToLogits::kTask)),
+            bind<IRecurrentTokensToHiddenStates>(*this,
+                                                 fields_for(IRecurrentTokensToHiddenStates::kTask)),
+            bind<IRecurrentEmbeddingsToHiddenStates>(
+                *this, fields_for(IRecurrentEmbeddingsToHiddenStates::kTask)),
+            bind<IBatchRecurrentTokensToLogits>(*this,
+                                                fields_for(IBatchRecurrentTokensToLogits::kTask)),
+            bind<IBatchRecurrentEmbeddingsToLogits>(
+                *this, fields_for(IBatchRecurrentEmbeddingsToLogits::kTask)),
+            bind<IBatchRecurrentTokensToHiddenStates>(
+                *this, fields_for(IBatchRecurrentTokensToHiddenStates::kTask)),
+            bind<IBatchRecurrentEmbeddingsToHiddenStates>(
+                *this, fields_for(IBatchRecurrentEmbeddingsToHiddenStates::kTask)),
+            bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask)),
+            bind<IStreamingTextContinuation>(*this, fields_for(IStreamingTextContinuation::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view task) const override {
+    trtmc::Span<const ConfigField> fields_for(std::string_view task) const {
         if (task == ITextContinuation::kTask || task == IStreamingTextContinuation::kTask)
             return {};
-        return {{"failure", ConfigKind::String, ConfigValue{std::string_view{}},
-                 "Synthetic failure mode"},
-                {"wait", ConfigKind::Bool, ConfigValue{false}, "Wait for test release"},
-                {"output_hidden_states", ConfigKind::Bool, ConfigValue{false},
-                 "Return same-evaluation trace"}};
+        static const ConfigField declared[] = {
+            {"failure", ConfigKind::String, ConfigValue{std::string_view{}},
+             "Synthetic failure mode"},
+            {"wait", ConfigKind::Bool, ConfigValue{false}, "Wait for test release"},
+            {"output_hidden_states", ConfigKind::Bool, ConfigValue{false},
+             "Return same-evaluation trace"}};
+        return declared;
     }
     std::unique_ptr<IRecurrentState> create_recurrent_state() override {
         return std::make_unique<State>(context_);
@@ -421,7 +431,7 @@ class Model final : public IModel,
 
   private:
     std::vector<ConfigValue> parse(ConfigView config) const {
-        const auto fields = config_fields(IRecurrentTokensToLogits::kTask);
+        const auto fields = fields_for(IRecurrentTokensToLogits::kTask);
         std::vector<ConfigValue> values;
         for (const auto& field : fields)
             values.push_back(*field.default_value);

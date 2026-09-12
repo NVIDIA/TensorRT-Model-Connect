@@ -103,8 +103,11 @@ trtmc_status TRTMC_CALL run(trtmc_model* model, const WireRequest* input,
         LanguageInputs storage;
         const auto request = storage.convert(*input);
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<Interface>(model, Interface::kTask);
+        validate_task_config(model_owner(model), internal::contract_key<Interface>(),
+                             options.view());
         auto result = [&] {
             if constexpr (std::is_same_v<Interface, internal::IImagesTextConversation> ||
                           std::is_same_v<Interface, internal::IVideoTextConversation>)
@@ -191,6 +194,9 @@ template <class Function>
 auto language_item(size_t index, Function function) {
     try {
         return function();
+    } catch (const internal::ConfigError& failure) {
+        throw OwnedApiFailure{TRTMC_INVALID_CONFIG,
+                              "batch item[" + std::to_string(index) + "]: " + failure.what()};
     } catch (const ApiFailure& failure) {
         throw OwnedApiFailure{failure.status,
                               "batch item[" + std::to_string(index) + "]: " + failure.message};
@@ -254,11 +260,13 @@ trtmc_status TRTMC_CALL run_conversation_batch(trtmc_model* model, const WireReq
             language_item(index, [&] {
                 storage.emplace_back();
                 configs.emplace_back(&source[index].config);
+
                 items.push_back(
                     {storage.back().convert(source[index].input), configs.back().view()});
             });
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<Interface>(model, Interface::kTask);
+        validate_batch_configs(model_owner(model), internal::contract_key<Interface>(), configs);
         auto results = family.run_batch(Request{{items.data(), items.size()}});
         output_check(results.size() == items.size(),
                      "family conversation batch result count differs from input count");
@@ -342,54 +350,33 @@ const trtmc_text_encoder_decoder_hidden_states_api_v1 text_encoder_decoder_hidde
 static_assert(offsetof(trtmc_text_encoder_decoder_hidden_states_api_v1, header) == 0);
 
 const TaskBinding bindings[] = {
-    {internal::IBatchTextConversation::kTask, 1, 0, &batch_text_conversation_api.header,
-     implements<internal::IBatchTextConversation>},
-    {internal::IBatchVideoTextConversation::kTask, 1, 0, &batch_video_text_conversation_api.header,
-     implements<internal::IBatchVideoTextConversation>},
-    {internal::IBatchAudioTextConversation::kTask, 1, 0, &batch_audio_text_conversation_api.header,
-     implements<internal::IBatchAudioTextConversation>},
+    {internal::IBatchTextConversation::kTask, 1, 0, &batch_text_conversation_api.header},
+    {internal::IBatchVideoTextConversation::kTask, 1, 0, &batch_video_text_conversation_api.header},
+    {internal::IBatchAudioTextConversation::kTask, 1, 0, &batch_audio_text_conversation_api.header},
     {internal::IBatchImageAudioTextConversation::kTask, 1, 0,
-     &batch_image_audio_text_conversation_api.header,
-     implements<internal::IBatchImageAudioTextConversation>},
+     &batch_image_audio_text_conversation_api.header},
     {internal::IBatchTextImagesVideoConversations::kTask, 1, 0,
-     &batch_text_images_video_conversations_api.header,
-     implements<internal::IBatchTextImagesVideoConversations>},
+     &batch_text_images_video_conversations_api.header},
     {internal::IBatchTextImagesAudioConversations::kTask, 1, 0,
-     &batch_text_images_audio_conversations_api.header,
-     implements<internal::IBatchTextImagesAudioConversations>},
-    {internal::IImagesTextToText::kTask, 1, 0, &images_text_to_text_api.header,
-     implements<internal::IImagesTextToText>},
-    {internal::IVideoTextToText::kTask, 1, 0, &video_text_to_text_api.header,
-     implements<internal::IVideoTextToText>},
-    {internal::IImageVideoTextToText::kTask, 1, 0, &image_video_text_to_text_api.header,
-     implements<internal::IImageVideoTextToText>},
-    {internal::IAudioTextToText::kTask, 1, 0, &audio_text_to_text_api.header,
-     implements<internal::IAudioTextToText>},
-    {internal::IImageAudioToText::kTask, 1, 0, &image_audio_to_text_api.header,
-     implements<internal::IImageAudioToText>},
-    {internal::IAudioVideoTextToText::kTask, 1, 0, &audio_video_text_to_text_api.header,
-     implements<internal::IAudioVideoTextToText>},
-    {internal::IImageAudioTextToText::kTask, 1, 0, &image_audio_text_to_text_api.header,
-     implements<internal::IImageAudioTextToText>},
+     &batch_text_images_audio_conversations_api.header},
+    {internal::IImagesTextToText::kTask, 1, 0, &images_text_to_text_api.header},
+    {internal::IVideoTextToText::kTask, 1, 0, &video_text_to_text_api.header},
+    {internal::IImageVideoTextToText::kTask, 1, 0, &image_video_text_to_text_api.header},
+    {internal::IAudioTextToText::kTask, 1, 0, &audio_text_to_text_api.header},
+    {internal::IImageAudioToText::kTask, 1, 0, &image_audio_to_text_api.header},
+    {internal::IAudioVideoTextToText::kTask, 1, 0, &audio_video_text_to_text_api.header},
+    {internal::IImageAudioTextToText::kTask, 1, 0, &image_audio_text_to_text_api.header},
     {internal::IImageAudioTextToTextSpeechResponse::kTask, 1, 0,
-     &image_audio_text_to_text_speech_response_api.header,
-     implements<internal::IImageAudioTextToTextSpeechResponse>},
-    {internal::ITextConversation::kTask, 1, 0, &text_conversation_api.header,
-     implements<internal::ITextConversation>},
-    {internal::IImagesTextConversation::kTask, 1, 0, &images_conversation_api.header,
-     implements<internal::IImagesTextConversation>},
-    {internal::IVideoTextConversation::kTask, 1, 0, &video_conversation_api.header,
-     implements<internal::IVideoTextConversation>},
-    {internal::IBatchImagesTextConversation::kTask, 1, 0, &batch_images_conversation_api.header,
-     implements<internal::IBatchImagesTextConversation>},
-    {internal::ITextLabelClassification::kTask, 1, 0, &text_label_classification_api.header,
-     implements<internal::ITextLabelClassification>},
+     &image_audio_text_to_text_speech_response_api.header},
+    {internal::ITextConversation::kTask, 1, 0, &text_conversation_api.header},
+    {internal::IImagesTextConversation::kTask, 1, 0, &images_conversation_api.header},
+    {internal::IVideoTextConversation::kTask, 1, 0, &video_conversation_api.header},
+    {internal::IBatchImagesTextConversation::kTask, 1, 0, &batch_images_conversation_api.header},
+    {internal::ITextLabelClassification::kTask, 1, 0, &text_label_classification_api.header},
     {internal::ITextPairLabelClassification::kTask, 1, 0,
-     &text_pair_label_classification_api.header,
-     implements<internal::ITextPairLabelClassification>},
+     &text_pair_label_classification_api.header},
     {internal::ITextEncoderDecoderHiddenStates::kTask, 1, 0,
-     &text_encoder_decoder_hidden_states_api.header,
-     implements<internal::ITextEncoderDecoderHiddenStates>},
+     &text_encoder_decoder_hidden_states_api.header},
 };
 
 } // namespace

@@ -209,6 +209,9 @@ trtmc_status TRTMC_CALL asr_create(trtmc_model* model,
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<internal::IStreamingSpeechTranscription>(
                 model, internal::IStreamingSpeechTranscription::kTask);
+            validate_task_config(model_owner(model),
+                                 internal::contract_key<internal::IStreamingSpeechTranscription>(),
+                                 options.view());
             owner = std::make_unique<ModelSession>(model);
             implementation = family.create(input, options.view());
         }
@@ -349,6 +352,9 @@ trtmc_status TRTMC_CALL tts_run(trtmc_model* model, const trtmc_text_to_speech_r
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             family = &require_interface<internal::IStreamingTextToSpeech>(
                 model, internal::IStreamingTextToSpeech::kTask);
+            validate_task_config(model_owner(model),
+                                 internal::contract_key<internal::IStreamingTextToSpeech>(),
+                                 options.view());
             execution = std::make_unique<ModelSession>(model);
         }
         ChunkBridge bridge{callback, context, 0, 0, 0, false, std::nullopt};
@@ -439,6 +445,8 @@ trtmc_status create_dialogue(trtmc_model* model, const trtmc_speech_dialogue_req
         {
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<Provider>(model, Provider::kTask);
+            validate_task_config(model_owner(model), internal::contract_key<Provider>(),
+                                 options.view());
             owner = std::make_unique<ModelSession>(model);
             implementation = (family.*Create)(input, options.view());
         }
@@ -500,6 +508,9 @@ trtmc_status TRTMC_CALL tool_create(trtmc_model* model,
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<internal::IToolSpeechDialogue>(
                 model, internal::IToolSpeechDialogue::kTask);
+            validate_task_config(model_owner(model),
+                                 internal::contract_key<internal::IToolSpeechDialogue>(),
+                                 options.view());
             owner = std::make_unique<ModelSession>(model);
             implementation = family.create_tool_session(input, options.view());
         }
@@ -728,16 +739,11 @@ const trtmc_offline_speech_dialogue_api_v1 offline_api{
 const trtmc_tool_speech_dialogue_api_v1 tool_api{
     {1, 0, sizeof(tool_api)}, tool_create, &session_api};
 const TaskBinding bindings[] = {
-    {internal::IStreamingSpeechTranscription::kTask, 1, 0, &asr_api.header,
-     implements<internal::IStreamingSpeechTranscription>},
-    {internal::IStreamingTextToSpeech::kTask, 1, 0, &tts_api.header,
-     implements<internal::IStreamingTextToSpeech>},
-    {internal::IDuplexSpeechDialogue::kTask, 1, 0, &duplex_api.header,
-     implements<internal::IDuplexSpeechDialogue>},
-    {internal::IOfflineSpeechDialogue::kTask, 1, 0, &offline_api.header,
-     implements<internal::IOfflineSpeechDialogue>},
-    {internal::IToolSpeechDialogue::kTask, 1, 0, &tool_api.header,
-     implements<internal::IToolSpeechDialogue>},
+    {internal::IStreamingSpeechTranscription::kTask, 1, 0, &asr_api.header},
+    {internal::IStreamingTextToSpeech::kTask, 1, 0, &tts_api.header},
+    {internal::IDuplexSpeechDialogue::kTask, 1, 0, &duplex_api.header},
+    {internal::IOfflineSpeechDialogue::kTask, 1, 0, &offline_api.header},
+    {internal::IToolSpeechDialogue::kTask, 1, 0, &tool_api.header},
 };
 
 } // namespace

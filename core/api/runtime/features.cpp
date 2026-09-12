@@ -84,9 +84,9 @@ struct PooledFeaturesStorage final : ResultStorage {
 struct SemanticEmbeddingStorage final : ResultStorage {
     explicit SemanticEmbeddingStorage(internal::SemanticEmbeddingResult result)
         : value(std::move(result)) {
-        result_require(!value.values.empty() && !value.embedding_space.empty() &&
-                           !value.pooling.empty() && !value.normalization.empty(),
-                       "semantic embedding requires values and trained-space metadata");
+        result_require(!value.values.empty() && !value.pooling.empty() &&
+                           !value.normalization.empty(),
+                       "semantic embedding requires values and pooling/normalization metadata");
         view = {value.values.data(), value.values.size(), borrowed_string(value.embedding_space),
                 borrowed_string(value.pooling), borrowed_string(value.normalization)};
     }
@@ -359,8 +359,11 @@ trtmc_status TRTMC_CALL run(trtmc_model* model, const Request* input,
         require(input != nullptr && out != nullptr, "feature input or result output is null");
         const auto request = convert(*input);
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<Interface>(model, Interface::kTask);
+        validate_task_config(model_owner(model), internal::contract_key<Interface>(),
+                             options.view());
         auto result = family.run(request, options.view());
         if constexpr (std::is_same_v<Interface, internal::ITextPairToPretrainingRelationScores>)
             result_require(!result.scores.empty() && result.labels.size() == result.scores.size(),
@@ -510,9 +513,13 @@ trtmc_status TRTMC_CALL query_documents_run(
         const internal::TextQueryDocumentsToRelevanceRequest request{
             string_view(input->query), {documents.data(), documents.size()}};
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<internal::ITextQueryDocumentsToRelevance>(
             model, internal::ITextQueryDocumentsToRelevance::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ITextQueryDocumentsToRelevance>(),
+                             options.view());
         auto result = family.run(request, options.view());
         result_require(result.scores.size() == documents.size(),
                        "document relevance result count differs from document count");
@@ -538,6 +545,9 @@ template <class Function>
 auto feature_item(size_t index, Function function) {
     try {
         return function();
+    } catch (const internal::ConfigError& failure) {
+        throw OwnedApiFailure{TRTMC_INVALID_CONFIG,
+                              "batch item[" + std::to_string(index) + "]: " + failure.what()};
     } catch (const ApiFailure& failure) {
         throw OwnedApiFailure{failure.status,
                               "batch item[" + std::to_string(index) + "]: " + failure.message};
@@ -605,11 +615,13 @@ trtmc_status TRTMC_CALL run_feature_batch(trtmc_model* model, const WireRequest*
         for (size_t index = 0; index < source.size(); ++index) {
             feature_item(index, [&] {
                 configs.emplace_back(&source[index].config);
+
                 items.push_back({convert(source[index].input), configs.back().view()});
             });
         }
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<Interface>(model, Interface::kTask);
+        validate_batch_configs(model_owner(model), internal::contract_key<Interface>(), configs);
         auto results = family.run_batch(Request{{items.data(), items.size()}});
         result_require(results.size() == items.size(),
                        "family batch result count differs from input count");
@@ -673,65 +685,39 @@ const trtmc_batch_image_to_token_and_pooled_features_api_v1
 static_assert(offsetof(trtmc_batch_image_to_token_and_pooled_features_api_v1, header) == 0);
 
 const TaskBinding bindings[] = {
-    {internal::IBatchImageToTokenFeatures::kTask, 1, 0, &batch_image_to_token_features_api.header,
-     implements<internal::IBatchImageToTokenFeatures>},
+    {internal::IBatchImageToTokenFeatures::kTask, 1, 0, &batch_image_to_token_features_api.header},
     {internal::IBatchImageToSpatialFeatures::kTask, 1, 0,
-     &batch_image_to_spatial_features_api.header,
-     implements<internal::IBatchImageToSpatialFeatures>},
-    {internal::IBatchImageToPooledFeatures::kTask, 1, 0, &batch_image_to_pooled_features_api.header,
-     implements<internal::IBatchImageToPooledFeatures>},
-    {internal::IBatchTextToEmbedding::kTask, 1, 0, &batch_text_to_embedding_api.header,
-     implements<internal::IBatchTextToEmbedding>},
-    {internal::IBatchTextToTokenFeatures::kTask, 1, 0, &batch_text_to_token_features_api.header,
-     implements<internal::IBatchTextToTokenFeatures>},
+     &batch_image_to_spatial_features_api.header},
+    {internal::IBatchImageToPooledFeatures::kTask, 1, 0,
+     &batch_image_to_pooled_features_api.header},
+    {internal::IBatchTextToEmbedding::kTask, 1, 0, &batch_text_to_embedding_api.header},
+    {internal::IBatchTextToTokenFeatures::kTask, 1, 0, &batch_text_to_token_features_api.header},
     {internal::IBatchImageToTokenAndPooledFeatures::kTask, 1, 0,
-     &batch_image_to_token_and_pooled_features_api.header,
-     implements<internal::IBatchImageToTokenAndPooledFeatures>},
-    {internal::IBatchImageToClassScores::kTask, 1, 0, &batch_image_to_class_scores_api.header,
-     implements<internal::IBatchImageToClassScores>},
+     &batch_image_to_token_and_pooled_features_api.header},
+    {internal::IBatchImageToClassScores::kTask, 1, 0, &batch_image_to_class_scores_api.header},
     {internal::IImageToTokenAndPooledFeatures::kTask, 1, 0,
-     &image_to_token_and_pooled_features_api.header,
-     implements<internal::IImageToTokenAndPooledFeatures>},
-    {internal::ITextQueryDocumentsToRelevance::kTask, 1, 0, &query_documents_api.header,
-     implements<internal::ITextQueryDocumentsToRelevance>},
-    {internal::ITextToTokenFeatures::kTask, 1, 0, &text_to_token_features_api.header,
-     implements<internal::ITextToTokenFeatures>},
-    {internal::ITextPairToTokenFeatures::kTask, 1, 0, &text_pair_to_token_features_api.header,
-     implements<internal::ITextPairToTokenFeatures>},
-    {internal::ITextToPooledFeatures::kTask, 1, 0, &text_to_pooled_features_api.header,
-     implements<internal::ITextToPooledFeatures>},
-    {internal::ITextToEmbedding::kTask, 1, 0, &text_to_embedding_api.header,
-     implements<internal::ITextToEmbedding>},
-    {internal::ITitleBodyToEmbedding::kTask, 1, 0, &title_body_to_embedding_api.header,
-     implements<internal::ITitleBodyToEmbedding>},
-    {internal::IMaskedTextToTokenScores::kTask, 1, 0, &masked_text_to_token_scores_api.header,
-     implements<internal::IMaskedTextToTokenScores>},
+     &image_to_token_and_pooled_features_api.header},
+    {internal::ITextQueryDocumentsToRelevance::kTask, 1, 0, &query_documents_api.header},
+    {internal::ITextToTokenFeatures::kTask, 1, 0, &text_to_token_features_api.header},
+    {internal::ITextPairToTokenFeatures::kTask, 1, 0, &text_pair_to_token_features_api.header},
+    {internal::ITextToPooledFeatures::kTask, 1, 0, &text_to_pooled_features_api.header},
+    {internal::ITextToEmbedding::kTask, 1, 0, &text_to_embedding_api.header},
+    {internal::ITitleBodyToEmbedding::kTask, 1, 0, &title_body_to_embedding_api.header},
+    {internal::IMaskedTextToTokenScores::kTask, 1, 0, &masked_text_to_token_scores_api.header},
     {internal::ITextPairToPretrainingRelationScores::kTask, 1, 0,
-     &text_pair_to_pretraining_relation_scores_api.header,
-     implements<internal::ITextPairToPretrainingRelationScores>},
-    {internal::ITextToReplacedTokenScores::kTask, 1, 0, &text_to_replaced_token_scores_api.header,
-     implements<internal::ITextToReplacedTokenScores>},
+     &text_pair_to_pretraining_relation_scores_api.header},
+    {internal::ITextToReplacedTokenScores::kTask, 1, 0, &text_to_replaced_token_scores_api.header},
     {internal::ITextPredictionPositionsToTokenScores::kTask, 1, 0,
-     &text_prediction_positions_to_token_scores_api.header,
-     implements<internal::ITextPredictionPositionsToTokenScores>},
-    {internal::IImageToTokenFeatures::kTask, 1, 0, &image_to_token_features_api.header,
-     implements<internal::IImageToTokenFeatures>},
-    {internal::IImageToSpatialFeatures::kTask, 1, 0, &image_to_spatial_features_api.header,
-     implements<internal::IImageToSpatialFeatures>},
-    {internal::IImageToPooledFeatures::kTask, 1, 0, &image_to_pooled_features_api.header,
-     implements<internal::IImageToPooledFeatures>},
-    {internal::IImageToEmbedding::kTask, 1, 0, &image_to_embedding_api.header,
-     implements<internal::IImageToEmbedding>},
-    {internal::IImageTextToEmbedding::kTask, 1, 0, &image_text_to_embedding_api.header,
-     implements<internal::IImageTextToEmbedding>},
-    {internal::ITextPairToRelevance::kTask, 1, 0, &text_pair_to_relevance_api.header,
-     implements<internal::ITextPairToRelevance>},
-    {internal::ITextImageToRelevance::kTask, 1, 0, &text_image_to_relevance_api.header,
-     implements<internal::ITextImageToRelevance>},
-    {internal::ITextImageTextToRelevance::kTask, 1, 0, &text_image_text_to_relevance_api.header,
-     implements<internal::ITextImageTextToRelevance>},
-    {internal::IImageToClassScores::kTask, 1, 0, &image_to_class_scores_api.header,
-     implements<internal::IImageToClassScores>},
+     &text_prediction_positions_to_token_scores_api.header},
+    {internal::IImageToTokenFeatures::kTask, 1, 0, &image_to_token_features_api.header},
+    {internal::IImageToSpatialFeatures::kTask, 1, 0, &image_to_spatial_features_api.header},
+    {internal::IImageToPooledFeatures::kTask, 1, 0, &image_to_pooled_features_api.header},
+    {internal::IImageToEmbedding::kTask, 1, 0, &image_to_embedding_api.header},
+    {internal::IImageTextToEmbedding::kTask, 1, 0, &image_text_to_embedding_api.header},
+    {internal::ITextPairToRelevance::kTask, 1, 0, &text_pair_to_relevance_api.header},
+    {internal::ITextImageToRelevance::kTask, 1, 0, &text_image_to_relevance_api.header},
+    {internal::ITextImageTextToRelevance::kTask, 1, 0, &text_image_text_to_relevance_api.header},
+    {internal::IImageToClassScores::kTask, 1, 0, &image_to_class_scores_api.header},
 };
 
 } // namespace

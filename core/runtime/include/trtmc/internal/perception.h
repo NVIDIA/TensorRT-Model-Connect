@@ -76,6 +76,9 @@ struct StereoImagesToDisparityRequest {
 struct ImageToMetricGeometryRequest {
     ImageView image;
 };
+struct ImageToBoxesRequest {
+    ImageView image;
+};
 struct ImageTextToBoxesRequest {
     ImageView image;
     std::string_view text;
@@ -156,6 +159,11 @@ struct GroundedPointsResult {
     bool parse_complete{true};
 };
 
+// Fixed-label detections, without a text query. Reuse the existing owned
+// result: original-image XYXY pixels, numeric class IDs and detector scores.
+// Families own filtering, suppression and all model-specific postprocessing.
+using DetectedBoxesResult = trtmc::ObjectDetectionResult;
+
 struct PoseMatricesView {
     Span<const float> values;
     std::uint64_t count{0};
@@ -216,6 +224,7 @@ struct ObjectPoseResult {
 #define TRTMC_PERCEPTION_INTERFACE(Name, Id, Result)                                               \
     class I##Name {                                                                                \
       public:                                                                                      \
+        using TaskInterface = I##Name;                                                             \
         static constexpr std::string_view kTask = Id;                                              \
         virtual ~I##Name() = default;                                                              \
         virtual Result run(const Name##Request&, ConfigView) = 0;                                  \
@@ -231,6 +240,7 @@ TRTMC_PERCEPTION_INTERFACE(ImageBoxExemplarsToInstanceMasks,
                            "image_box_exemplars_to_instance_masks", MasksResult)
 TRTMC_PERCEPTION_INTERFACE(StereoImagesToDisparity, "stereo_images_to_disparity", DisparityResult)
 TRTMC_PERCEPTION_INTERFACE(ImageToMetricGeometry, "image_to_metric_geometry", MetricGeometryResult)
+TRTMC_PERCEPTION_INTERFACE(ImageToBoxes, "image_to_boxes", DetectedBoxesResult)
 TRTMC_PERCEPTION_INTERFACE(ImageTextToBoxes, "image_text_to_boxes", GroundedBoxesResult)
 TRTMC_PERCEPTION_INTERFACE(ImageTextToPoints, "image_text_to_points", GroundedPointsResult)
 TRTMC_PERCEPTION_INTERFACE(PoseHypothesesCropsToRefinedPoses,
@@ -248,6 +258,7 @@ struct BatchImageTextToBoxesRequest {
 };
 class IBatchImageTextToBoxes {
   public:
+    using TaskInterface = IBatchImageTextToBoxes;
     static constexpr std::string_view kTask = "batch_image_text_to_boxes";
     virtual ~IBatchImageTextToBoxes() = default;
     // Family validates all complete items before one native batch generation;

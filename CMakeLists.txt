@@ -149,6 +149,7 @@ add_library(trtmc_c SHARED
   core/api/runtime/speech.cpp
   core/api/runtime/action.cpp
   core/api/runtime/recurrent.cpp
+  core/api/runtime/structure.cpp
 )
 add_library(trtmc::c ALIAS trtmc_c)
 target_include_directories(trtmc_c
@@ -333,6 +334,7 @@ add_library(trtmc_cli STATIC
   apps/cli/sdk_numeric.cpp
   apps/cli/sdk_perception.cpp
   apps/cli/sdk_language.cpp
+  apps/cli/sdk_structure.cpp
 )
 target_include_directories(trtmc_cli
   PUBLIC ${PROJECT_SOURCE_DIR}/apps
@@ -375,6 +377,7 @@ if(TRTMC_BUILD_EXAMPLES)
     trtmc_media_io
     trtmc_c
     trtmc_runtime
+    CUDA::cudart
     nlohmann_json::nlohmann_json
   )
   target_compile_options(trtmc_benchmark_worker PRIVATE -Wall -Wextra -Wpedantic)
@@ -532,7 +535,7 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME sdk_cli_e2e COMMAND test_sdk_cli "${_trtmc_api_test_runtime_root}")
   set_tests_properties(sdk_cli_e2e PROPERTIES LABELS "cpu;e2e")
 
-  foreach(_trtmc_fixture IN ITEMS text image audio features numeric stream video perception language tracking speech action recurrent)
+  foreach(_trtmc_fixture IN ITEMS text image image_boxes audio features numeric stream video perception language tracking speech action recurrent structure)
     add_library(trtmc_api_test_${_trtmc_fixture}_family SHARED
       core/api/tests/${_trtmc_fixture}_family.cpp
     )
@@ -628,6 +631,17 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME sdk_perception_cli_e2e COMMAND test_sdk_perception_cli "${_trtmc_api_test_runtime_root}")
   set_tests_properties(sdk_perception_cli_e2e PROPERTIES LABELS "cpu;e2e")
 
+  add_executable(test_sdk_detection_structure_cli
+    apps/cli/tests/test_sdk_detection_structure_cli.cpp)
+  target_link_libraries(test_sdk_detection_structure_cli PRIVATE
+    trtmc_cli trtmc_c nlohmann_json::nlohmann_json)
+  target_compile_options(test_sdk_detection_structure_cli PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_dependencies(test_sdk_detection_structure_cli trtmc_api_test_backend
+    trtmc_api_test_image_boxes_family trtmc_api_test_structure_family)
+  add_test(NAME sdk_detection_structure_cli_e2e COMMAND test_sdk_detection_structure_cli
+    "${_trtmc_api_test_runtime_root}")
+  set_tests_properties(sdk_detection_structure_cli_e2e PROPERTIES LABELS "cpu;e2e")
+
   add_executable(test_sdk_language_cli apps/cli/tests/test_sdk_language_cli.cpp)
   target_link_libraries(test_sdk_language_cli PRIVATE trtmc_cli nlohmann_json::nlohmann_json)
   target_compile_options(test_sdk_language_cli PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -635,7 +649,7 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME sdk_language_cli_e2e COMMAND test_sdk_language_cli "${_trtmc_api_test_runtime_root}")
   set_tests_properties(sdk_language_cli_e2e PROPERTIES LABELS "cpu;e2e")
 
-  foreach(_trtmc_group IN ITEMS audio features numeric stream video perception language tracking speech action recurrent)
+  foreach(_trtmc_group IN ITEMS image_boxes audio features numeric stream video perception language tracking speech action recurrent structure)
     add_executable(test_${_trtmc_group}_c_api core/api/tests/${_trtmc_group}_c_test.c)
     add_executable(test_${_trtmc_group}_cpp_api core/api/tests/${_trtmc_group}_test.cpp)
     foreach(_trtmc_language IN ITEMS c cpp)
@@ -834,7 +848,9 @@ if(TRTMC_BUILD_TESTS)
     target_compile_options(test_benchmark_remaining_e2e PRIVATE -Wall -Wextra -Wpedantic)
     add_dependencies(test_benchmark_remaining_e2e trtmc_benchmark_worker trtmc_api_test_backend
       trtmc_api_test_perception_family trtmc_api_test_features_family trtmc_api_test_image_family
-      trtmc_api_test_video_family trtmc_api_test_action_family)
+      trtmc_api_test_video_family trtmc_api_test_action_family
+      trtmc_api_test_image_boxes_family trtmc_api_test_structure_family
+      trtmc_api_test_tracking_family)
     add_test(NAME benchmark_remaining_e2e COMMAND test_benchmark_remaining_e2e
       $<TARGET_FILE:trtmc_benchmark_worker> "${_trtmc_api_test_runtime_root}")
     set_tests_properties(benchmark_remaining_e2e PROPERTIES LABELS "cpu;e2e")

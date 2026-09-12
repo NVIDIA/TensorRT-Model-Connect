@@ -314,6 +314,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/internal/scores.h",
         "core/runtime/include/trtmc/internal/speech.h",
         "core/runtime/include/trtmc/internal/stream.h",
+        "core/runtime/include/trtmc/internal/structure.h",
         "core/runtime/include/trtmc/internal/text.h",
         "core/runtime/include/trtmc/internal/tools.h",
         "core/runtime/include/trtmc/internal/tracking.h",
@@ -364,6 +365,9 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/api/tests/fake_control_family.cpp",
         "core/api/tests/fake_family.cpp",
         "core/api/tests/image_family.cpp",
+        "core/api/tests/image_boxes_family.cpp",
+        "core/api/tests/image_boxes_test.cpp",
+        "core/api/tests/image_boxes_c_test.c",
         "core/api/tests/test_c_api.c",
         "core/api/tests/test_control_api.c",
         "core/api/tests/test_control_cpp.cpp",
@@ -380,7 +384,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     # not admit arbitrary new shared files or model-specific implementations.
     for group in (
         "audio", "features", "numeric", "stream", "video", "perception",
-        "language", "tracking", "speech", "action", "recurrent",
+        "language", "tracking", "speech", "action", "recurrent", "structure",
     ):
         expected_api.update(
             {

@@ -12,6 +12,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <thread>
 
 namespace {
@@ -51,6 +52,52 @@ trtmc::Model load(const std::filesystem::path& root, const std::string& mode) {
     options.runtime_root = root.string();
     return trtmc::Model::load(path.string(), options);
 }
+void exercise_released_model(const std::filesystem::path& root) {
+    using namespace trtmc;
+    const auto path = root / "action_released_model.bundle";
+    bundle(path, "all");
+    const auto runtime_root = root.string();
+    const auto& core = detail::core_api();
+    const trtmc_load_options_v1 options{sizeof(options), detail::c_string(runtime_root), 0, {}, 0};
+    trtmc_error* error = nullptr;
+    auto checked = [&](trtmc_status status) {
+        auto* current = std::exchange(error, nullptr);
+        detail::check(core, status, current);
+    };
+    trtmc_model* raw_model = nullptr;
+    checked(core.model_load(detail::c_string(path.string()), &options, &raw_model, &error));
+    std::unique_ptr<trtmc_model, decltype(core.model_release)> model(raw_model, core.model_release);
+    const trtmc_api_header* table = nullptr;
+    checked(core.model_get_task_api(raw_model, detail::c_string(ImageStateActionQueue::kTask), 1, 0,
+                                    &table, &error));
+    ImageStateActionQueue::validate_table(table);
+    const auto* queue = reinterpret_cast<const trtmc_image_state_action_queue_api_v1*>(table);
+    trtmc_image_state_action_session* raw_session = nullptr;
+    checked(queue->create(raw_model, nullptr, &raw_session, &error));
+    std::unique_ptr<trtmc_image_state_action_session, decltype(queue->release)> session(
+        raw_session, queue->release);
+    model.reset(); // The continuation must never access this released public handle.
+
+    const float pixels[]{0.5F, 0.25F, 0.125F}, state[]{2, 4};
+    const ImageStateObservation observation{ImageInput({pixels, 3}, 1, 1), {state, 2}};
+    const auto input = detail::action_observation(observation);
+    const Config invalid{{"tag", 1}};
+    const auto entries = invalid.c_entries();
+    const auto config = entries.view();
+    trtmc_result* output = nullptr;
+    const auto status = queue->act(raw_session, &input, &config, &output, &error);
+    check(status == TRTMC_INVALID_CONFIG && output == nullptr,
+          "session validates Config through its owner after public model release");
+    core.error_release(std::exchange(error, nullptr));
+    core.result_release(std::exchange(output, nullptr));
+    checked(queue->act(raw_session, &input, nullptr, &output, &error));
+    std::unique_ptr<trtmc_result, decltype(core.result_release)> result(output,
+                                                                        core.result_release);
+    trtmc_action_step_view_v1 view{};
+    checked(queue->result_view(output, &view, &error));
+    check(view.inference_ms == 1,
+          "rejected Config does not consume the released-model session's first chunk");
+}
 void exercise(const std::filesystem::path& root) {
     using namespace trtmc;
     auto model = load(root, "all");
@@ -61,6 +108,10 @@ void exercise(const std::filesystem::path& root) {
     const ImageInput image({pixels, 3}, 1, 1);
     const ImageStateObservation observation{image, {state, 2}};
     const auto predictor = model.task<ImageStateToActionChunk>();
+    for (const Config& invalid :
+         std::vector<Config>{{{"unknown", 1}}, {{"tag", 1}}, {{"tag", "a"}, {"tag", "b"}}})
+        rejects([&] { (void)predictor.run({observation}, invalid); }, TRTMC_INVALID_CONFIG,
+                "action prediction rejects invalid Config before consuming an inference");
     auto first_chunk = predictor.run({observation});
     check(first_chunk.actions().rows == 2 && first_chunk.actions().columns == 2 &&
               first_chunk.actions().values[0] == 2.5F && first_chunk.actions().values[1] == -3 &&
@@ -79,6 +130,8 @@ void exercise(const std::filesystem::path& root) {
     auto second_chunk = predictor.run({observation});
     check(second_chunk.inference_ms() == 102, "stateless calls are independent predictions");
     const auto factory = model.task<ImageStateActionQueue>();
+    rejects([&] { (void)factory.create({{"unknown", true}}); }, TRTMC_INVALID_CONFIG,
+            "queue creation rejects undeclared Config without reserving the model");
     Config config{{"tag", "copied"}};
     auto session = factory.create(config);
     config = Config{{"tag", "changed"}};
@@ -161,7 +214,7 @@ void exercise(const std::filesystem::path& root) {
     for (const std::string mode : {"none", "missing"}) {
         auto absent = load(root, mode);
         check(absent.tasks().empty() && !absent.supports<ImageStateActionQueue>(),
-              "metadata is declaration/intersection, not optimistic DSO-wide support");
+              "unbound model variants do not expose DSO-wide action interfaces");
     }
     auto malformed = load(root, "bad_chunk");
     rejects([&] { malformed.task<ImageStateToActionChunk>().run({observation}); },
@@ -188,6 +241,7 @@ int main(int argc, char** argv) {
         return 2;
     try {
         exercise(argv[1]);
+        exercise_released_model(argv[1]);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 2;

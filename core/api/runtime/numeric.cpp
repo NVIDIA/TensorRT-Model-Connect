@@ -272,6 +272,8 @@ trtmc_status run(trtmc_model* model, const Request* request, const trtmc_config_
         auto& family = require_interface<Interface>(model, Interface::kTask);
         const auto input = convert(*request);
         const ConvertedConfig options(config);
+        validate_task_config(model_owner(model), internal::contract_key<Interface>(),
+                             options.view());
         *out = make_result<Store>(family.run(input, options.view()));
     });
 }
@@ -306,6 +308,9 @@ template <class Function>
 auto forecast_item(size_t index, Function function) {
     try {
         return function();
+    } catch (const internal::ConfigError& failure) {
+        throw OwnedApiFailure{TRTMC_INVALID_CONFIG,
+                              "batch item[" + std::to_string(index) + "]: " + failure.what()};
     } catch (const ApiFailure& failure) {
         throw OwnedApiFailure{failure.status,
                               "batch item[" + std::to_string(index) + "]: " + failure.message};
@@ -366,11 +371,13 @@ trtmc_status TRTMC_CALL run_forecast_batch(trtmc_model* model,
         for (size_t i = 0; i < source.size(); ++i) {
             forecast_item(i, [&] {
                 configs.emplace_back(&source[i].config);
+
                 items.push_back({{history(source[i].input)}, configs.back().view()});
             });
         }
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<Interface>(model, Interface::kTask);
+        validate_batch_configs(model_owner(model), internal::contract_key<Interface>(), configs);
         auto results = family.run_batch(Request{{items.data(), items.size()}});
         output_check(results.size() == items.size(),
                      "forecast batch result count differs from input count");
@@ -430,30 +437,19 @@ const trtmc_latent_to_token_logits_api_v1 logits_api{
 Span<const TaskBinding> numeric_task_bindings() noexcept {
     static const TaskBinding bindings[] = {
         {internal::IBatchSeriesToPointForecast::kTask, 1, 0,
-         &batch_series_to_point_forecast_api.header,
-         implements<internal::IBatchSeriesToPointForecast>},
+         &batch_series_to_point_forecast_api.header},
         {internal::IBatchSeriesToQuantileForecast::kTask, 1, 0,
-         &batch_series_to_quantile_forecast_api.header,
-         implements<internal::IBatchSeriesToQuantileForecast>},
+         &batch_series_to_quantile_forecast_api.header},
         {internal::IBatchSeriesToPointAndQuantileForecast::kTask, 1, 0,
-         &batch_series_to_point_and_quantile_forecast_api.header,
-         implements<internal::IBatchSeriesToPointAndQuantileForecast>},
-        {internal::ISeriesToPointAndQuantileForecast::kTask, 1, 0, &point_quantile_api.header,
-         implements<internal::ISeriesToPointAndQuantileForecast>},
-        {internal::ISeriesToPointForecast::kTask, 1, 0, &point_api.header,
-         implements<internal::ISeriesToPointForecast>},
-        {internal::ISeriesToQuantileForecast::kTask, 1, 0, &quantile_api.header,
-         implements<internal::ISeriesToQuantileForecast>},
-        {internal::ISeriesToRegressionDistribution::kTask, 1, 0, &regression_api.header,
-         implements<internal::ISeriesToRegressionDistribution>},
-        {internal::ILatentConditionedTextGeneration::kTask, 1, 0, &condition_api.header,
-         implements<internal::ILatentConditionedTextGeneration>},
-        {internal::ILatentReplayToText::kTask, 1, 0, &replay_api.header,
-         implements<internal::ILatentReplayToText>},
-        {internal::ILatentDenoisingStep::kTask, 1, 0, &denoise_api.header,
-         implements<internal::ILatentDenoisingStep>},
-        {internal::ILatentToTokenLogits::kTask, 1, 0, &logits_api.header,
-         implements<internal::ILatentToTokenLogits>},
+         &batch_series_to_point_and_quantile_forecast_api.header},
+        {internal::ISeriesToPointAndQuantileForecast::kTask, 1, 0, &point_quantile_api.header},
+        {internal::ISeriesToPointForecast::kTask, 1, 0, &point_api.header},
+        {internal::ISeriesToQuantileForecast::kTask, 1, 0, &quantile_api.header},
+        {internal::ISeriesToRegressionDistribution::kTask, 1, 0, &regression_api.header},
+        {internal::ILatentConditionedTextGeneration::kTask, 1, 0, &condition_api.header},
+        {internal::ILatentReplayToText::kTask, 1, 0, &replay_api.header},
+        {internal::ILatentDenoisingStep::kTask, 1, 0, &denoise_api.header},
+        {internal::ILatentToTokenLogits::kTask, 1, 0, &logits_api.header},
     };
     return {bindings};
 }

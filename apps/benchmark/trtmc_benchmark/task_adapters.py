@@ -21,6 +21,14 @@ _BATCH_FORECAST = frozenset({
     "batch_series_to_point_forecast", "batch_series_to_quantile_forecast",
     "batch_series_to_point_and_quantile_forecast",
 })
+_BATCH_SPEECH = frozenset({
+    "batch_speech_transcription", "batch_speech_translation", "mixed_batch_speech_to_text",
+})
+_LATENT_TEXT = frozenset({"latent_conditioned_text_generation", "latent_replay_to_text"})
+_LATENT_STEPS = frozenset({"latent_denoising_step", "latent_to_token_logits"})
+_SPEECH_DIALOGUE = frozenset({"duplex_speech_dialogue", "offline_speech_dialogue", "tool_speech_dialogue"})
+_TRACKING = frozenset({"frames_to_detected_mask_tracks", "frames_text_to_mask_tracks", "prompt_frame_text_to_mask_tracks"})
+_POSE = frozenset({"crop_pose_tracking", "pose_hypotheses_crops_to_refined_poses"})
 
 
 @dataclass(frozen=True)
@@ -38,6 +46,8 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "text_to_video": ("generate_image", 1, 5),
     "image_text_action_to_video": ("generate_image", 1, 5),
     "image_to_class_scores": ("classify", 50, 500),
+    "image_to_boxes": ("detect", 50, 500),
+    "molecular_document_to_structure": ("predict_structure", 1, 5),
     "image_to_token_and_pooled_features": ("extract_features", 50, 500),
     "image_to_token_features": ("extract_features", 50, 500),
     "image_to_pooled_features": ("extract_features", 50, 500),
@@ -46,19 +56,36 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "image_points_to_masks": ("segment", 50, 500),
     "image_text_to_instance_masks": ("segment_prompted", 10, 100),
     "stereo_images_to_disparity": ("disparity", 3, 100),
+    "image_to_metric_geometry": ("geometry", 3, 100),
     "text_to_pooled_features": ("encode", 50, 500),
     "text_to_token_features": ("encode", 50, 500),
     "text_to_embedding": ("embed", 50, 500),
     "text_query_documents_to_relevance": ("rerank", 10, 100),
     "image_state_to_action_chunk": ("control", 2, 10),
+    "image_state_action_queue": ("control_queue", 2, 10),
+    "duplex_speech_dialogue": ("speech_dialogue", 1, 5),
+    "offline_speech_dialogue": ("speech_dialogue", 1, 5),
+    "tool_speech_dialogue": ("speech_dialogue", 1, 5),
+    "frames_to_detected_mask_tracks": ("track_masks", 1, 5),
+    "frames_text_to_mask_tracks": ("track_masks", 1, 5),
+    "prompt_frame_text_to_mask_tracks": ("track_masks", 1, 5),
+    "crop_pose_tracking": ("track_pose", 1, 5),
+    "pose_hypotheses_crops_to_refined_poses": ("refine_pose", 1, 5),
     "text_continuation": ("generate", 5, 50),
     "conditional_text_generation": ("generate", 5, 50),
     "corrupted_text_reconstruction": ("generate", 5, 50),
     "text_summarization": ("generate", 5, 50),
+    "unconditional_text_generation": ("generate", 5, 50),
+    "latent_conditioned_text_generation": ("generate", 5, 50),
+    "latent_replay_to_text": ("generate", 5, 50),
+    "latent_denoising_step": ("denoise", 5, 50),
+    "latent_to_token_logits": ("decode_logits", 5, 50),
+    "text_translation": ("translate", 5, 50),
     "images_text_to_text": ("generate", 1, 10),
     "series_to_point_forecast": ("solve", 50, 500),
     "series_to_quantile_forecast": ("solve", 50, 500),
     "series_to_point_and_quantile_forecast": ("solve", 50, 500),
+    "series_to_regression_distribution": ("regress", 50, 500),
     "batch_series_to_point_forecast": ("solve", 50, 500),
     "batch_series_to_quantile_forecast": ("solve", 50, 500),
     "batch_series_to_point_and_quantile_forecast": ("solve", 50, 500),
@@ -69,6 +96,9 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "speech_transcription": ("transcribe", 1, 10),
     "speech_translation": ("transcribe", 1, 10),
     "streaming_speech_transcription": ("transcribe", 1, 10),
+    "batch_speech_transcription": ("transcribe", 1, 10),
+    "batch_speech_translation": ("transcribe", 1, 10),
+    "mixed_batch_speech_to_text": ("transcribe", 1, 10),
     "text_generation": ("generate", 5, 50),
     "vision_language_generation": ("generate", 1, 10),
     "image_generation": ("generate_image", 1, 5),
@@ -143,12 +173,18 @@ def resolve_task_case(
     ):
         raise BenchmarkError("segment uses the center helper; explicit point controls require segment_prompted")
     if "config" in testcase:
+        if task in _BATCH_SPEECH:
+            raise BenchmarkError("batch speech Config belongs to each inputs.items entry")
         if task in _BATCH_FORECAST:
             raise BenchmarkError("batch forecast Config belongs to each inputs.items entry")
-        if task not in _SEMANTIC_REMAINING and task not in {
+        if task not in _SEMANTIC_REMAINING | _LATENT_TEXT | _LATENT_STEPS | _SPEECH_DIALOGUE | _TRACKING | _POSE and task not in {
             "text_continuation", "conditional_text_generation", "corrupted_text_reconstruction",
-            "text_summarization", "images_text_to_text", "series_to_point_forecast",
+            "unconditional_text_generation",
+            "text_summarization", "text_translation", "images_text_to_text", "series_to_point_forecast",
             "series_to_quantile_forecast", "series_to_point_and_quantile_forecast",
+            "series_to_regression_distribution", "image_to_metric_geometry",
+            "image_to_boxes", "molecular_document_to_structure",
+            "image_state_action_queue",
             "text_to_audio", "text_to_speech", "streaming_text_to_speech",
             "speech_to_speech_response", "speech_transcription", "speech_translation",
             "streaming_speech_transcription",
@@ -160,6 +196,11 @@ def resolve_task_case(
     if task in _SEMANTIC_REMAINING:
         _check_semantic_duplicates(request)
     sources = {name: _MANIFEST for name in request}
+    if task == "molecular_document_to_structure":
+        if _explicit(testcase, "input_encoding", "encoding") is _MISSING:
+            sources["input_encoding"] = _DEFAULT
+        if _explicit(testcase, "source_path") is _MISSING:
+            sources["source_path"] = _DEFAULT
     if task in _SEMANTIC_REMAINING and "media_type" in request and _explicit(testcase, "media_type") is _MISSING:
         sources["media_type"] = _DEFAULT
     return CaseResolution(
@@ -171,6 +212,132 @@ def resolve_task_case(
 
 
 def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    if task in _TRACKING:
+        frames = _explicit(case, "frame_paths", "frames")
+        if not isinstance(frames, list) or not frames or not all(isinstance(path, str) and path for path in frames):
+            raise BenchmarkError("tracking requires nonempty frame_paths in complete clip order")
+        request = {"frame_paths": [str(_asset(path, root)) for path in frames]}
+        _copy_explicit(request, case, "timestamps_seconds", "device_masks", "segment_config")
+        if task == "frames_to_detected_mask_tracks":
+            if any(_explicit(case, name) is not _MISSING for name in ("prompt", "source_text", "prompt_file", "prompt_repeat")):
+                raise BenchmarkError("detector tracking has no text prompt input")
+        else:
+            request["prompt"] = _semantic_prompt(case, root)
+            if "device_masks" in request:
+                raise BenchmarkError("device_masks requires frames_to_detected_mask_tracks")
+        if task == "prompt_frame_text_to_mask_tracks" and "segment_config" in request:
+            raise BenchmarkError("prompt-frame Task accepts Config at session creation only")
+        return request
+    if task == "pose_hypotheses_crops_to_refined_poses":
+        return _pose_input(case, root)
+    if task == "crop_pose_tracking":
+        initial = _explicit(case, "initialization")
+        updates = _explicit(case, "updates")
+        if not isinstance(initial, Mapping) or not isinstance(updates, list) or not updates:
+            raise BenchmarkError("pose tracking requires initialization and a nonempty updates array")
+        prepared = []
+        for update in updates:
+            if not isinstance(update, Mapping):
+                raise BenchmarkError("pose tracking updates must be objects")
+            value = deepcopy(dict(update))
+            value["crop_batches"] = _crop_batches(_explicit(update, "crop_batches"), root)
+            prepared.append(value)
+        return {"initialization": _pose_input(initial, root), "updates": prepared}
+    if task == "image_state_action_queue":
+        items = _explicit(case, "observations")
+        if not isinstance(items, list) or not items or not all(isinstance(item, Mapping) for item in items):
+            raise BenchmarkError("action queue requires a nonempty observations array")
+        observations = []
+        for item in items:
+            value = deepcopy(dict(item))
+            value["image_path"] = _semantic_asset(item, root, "image_path", "image")
+            value["state_path"] = _semantic_asset(item, root, "state_path", "state")
+            value.pop("image", None)
+            value.pop("state", None)
+            observations.append(value)
+        return {"observations": observations}
+    if task in _SPEECH_DIALOGUE:
+        request = {"audio_path": _semantic_asset(case, root, "audio_path", "audio", "input")}
+        _copy_explicit(request, case, "system_prompt", "chunk_frames", "timeout_ms")
+        tool_fields = ("tools", "tool_replies", "acknowledgements", "default_acknowledgements")
+        if task == "tool_speech_dialogue":
+            tools = _explicit(case, "tools")
+            replies = _explicit(case, "tool_replies")
+            if not isinstance(tools, list) or not tools or not isinstance(replies, list):
+                raise BenchmarkError("tool dialogue requires nonempty tools and an explicit tool_replies array")
+            for name in tool_fields:
+                value = _explicit(case, name)
+                if value is not _MISSING:
+                    request[name] = deepcopy(value)
+        elif any(_explicit(case, name) is not _MISSING for name in tool_fields):
+            raise BenchmarkError("tool definitions and preset replies require tool_speech_dialogue")
+        return request
+    if task == "image_to_boxes":
+        if _explicit(case, "prompt", "test_prompt", "source_text") is not _MISSING:
+            raise BenchmarkError("image-only detection has no prompt input")
+        return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
+    if task == "molecular_document_to_structure":
+        document = _semantic_asset(case, root, "document_path", "input_path", "input")
+        encoding = _explicit(case, "input_encoding", "encoding")
+        if encoding is _MISSING:
+            encoding = {".yaml": "yaml", ".yml": "yaml", ".json": "json", ".b2rq": "b2rq"}.get(Path(document).suffix)
+            if encoding is None:
+                raise BenchmarkError("unknown structure request extension; specify input_encoding")
+        source_path = _explicit(case, "source_path")
+        request = {
+            "document_path": document, "input_encoding": encoding,
+            "source_path": document if source_path is _MISSING else source_path,
+        }
+        _copy_explicit(request, case, "seed", "include_confidence", "output_format")
+        steps = _explicit(case, "sampling_steps", "num_steps")
+        if steps is not _MISSING:
+            request["sampling_steps"] = steps
+        return request
+    if task == "unconditional_text_generation":
+        if any(_explicit(case, name) is not _MISSING for name in (
+            "prompt", "test_prompt", "source_text", "prompt_file", "prompt_repeat",
+        )):
+            raise BenchmarkError("unconditional text generation has no prompt input")
+        return _text_controls(case, include_defaults=False)
+    if task in _LATENT_TEXT | _LATENT_STEPS:
+        return _latent_request(task, case, root)
+    if task == "image_to_metric_geometry":
+        request = {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
+        _copy_explicit(request, case, "fov_x")
+        return request
+    if task == "series_to_regression_distribution":
+        values = _explicit(case, "past_values")
+        if not isinstance(values, list) or not values:
+            raise BenchmarkError("regression testcase requires nonempty past_values")
+        request = {"past_values": deepcopy(values)}
+        _copy_explicit(request, case, "observed_mask", "shape", "distribution", "frequency")
+        return request
+    if task in _BATCH_SPEECH:
+        for name in ("source_language", "target_language", "language", "max_new_tokens",
+                     "max_output_tokens", "streaming"):
+            if name in case:
+                raise BenchmarkError(f"batch speech {name} belongs to each inputs.items entry")
+        inputs = _inputs(case)
+        items = inputs.get("items")
+        if set(inputs) != {"items"} or not isinstance(items, list) or not items:
+            raise BenchmarkError("batch speech requires only a nonempty inputs.items array")
+        prepared = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise BenchmarkError("batch speech items must be objects")
+            entry = deepcopy(dict(item))
+            path = _semantic_asset(item, root, "audio_path", "audio")
+            entry.pop("audio", None)
+            entry["audio_path"] = path
+            prepared.append(entry)
+        return {"items": prepared}
+    if task == "text_translation":
+        request = {
+            "source_text": _semantic_prompt(case, root),
+            **_text_controls(case, include_defaults=False),
+        }
+        _copy_explicit(request, case, "source_language", "target_language")
+        return request
     if task in _BATCH_FORECAST:
         inputs = _inputs(case)
         items = inputs.get("items")
@@ -344,6 +511,89 @@ def _copy_explicit(request: dict[str, Any], case: Mapping[str, Any], *names: str
             request[name] = value
 
 
+def _latent_request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    if task in _LATENT_TEXT:
+        request = _text_controls(case, include_defaults=False)
+        operands = (
+            ("condition_latents_path", "condition_latents_raw"),
+            ("condition_mask_path", "condition_mask_raw"),
+            ("initial_latents_path", "initial_latents_raw"),
+            ("sde_noises_path", "sde_noise_path", "sde_noise_raw"),
+            ("sampling_steps_path", "sampling_steps_raw"),
+        )
+        for names in operands:
+            if _explicit(case, *names) is not _MISSING:
+                request[names[0]] = _semantic_asset(case, root, *names)
+        conditioned = task == "latent_conditioned_text_generation"
+        if conditioned:
+            if not {"condition_latents_path", "condition_mask_path"} <= request.keys():
+                raise BenchmarkError("conditioned generation requires condition latents and mask")
+        elif "condition_latents_path" in request or "condition_mask_path" in request:
+            raise BenchmarkError("raw condition inputs require the conditioned latent Task")
+        elif not {"initial_latents_path", "sde_noises_path"} & request.keys():
+            raise BenchmarkError("latent replay requires initial latents or SDE noise")
+        if any(_explicit(case, name) is not _MISSING for name in (
+            "prompt", "test_prompt", "source_text", "prompt_file", "prompt_repeat",
+        )):
+            request["prompt"] = _semantic_prompt(case, root)
+        _copy_explicit(request, case, "sampling_steps")
+        return request
+    request: dict[str, Any] = {}
+    packed = any(_explicit(case, *names) is not _MISSING for names in (
+        ("branch_path", "branch"), ("trunk_path", "trunk"),
+    ))
+    if packed:
+        for names in (("branch_path", "branch"), ("trunk_path", "trunk")):
+            request[names[0]] = _semantic_asset(case, root, *names)
+        if any(_explicit(case, name) is not _MISSING for name in (
+            "latents_path", "shape", "timestep", "self_condition_path",
+        )):
+            raise BenchmarkError("native-packed branch/trunk cannot be combined with logical latent inputs")
+    else:
+        request["latents_path"] = _semantic_asset(case, root, "latents_path")
+        for name in ("shape", "timestep"):
+            value = _explicit(case, name)
+            if value is _MISSING:
+                raise BenchmarkError(f"logical latent input requires {name}")
+            request[name] = deepcopy(value)
+        if _explicit(case, "self_condition_path") is not _MISSING:
+            request["self_condition_path"] = _semantic_asset(case, root, "self_condition_path")
+    _copy_explicit(request, case, "self_cond_cfg_scale")
+    return request
+
+
+def _crop_batches(items: Any, root: Path) -> list[dict[str, Any]]:
+    if not isinstance(items, list) or not items:
+        raise BenchmarkError("pose provider requires nonempty preprocessed crop_batches")
+    prepared = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise BenchmarkError("crop_batches entries must be objects")
+        result = {}
+        for name in ("stage", "iteration", "shape"):
+            value = _explicit(item, name)
+            if value is _MISSING:
+                raise BenchmarkError(f"preprocessed crop batch requires {name}")
+            result[name] = deepcopy(value)
+        for name in ("query_poses_path", "rendered_path", "observed_path"):
+            result[name] = _semantic_asset(item, root, name)
+        prepared.append(result)
+    return prepared
+
+
+def _pose_input(case: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    result = {"candidate_poses_path": _semantic_asset(case, root, "candidate_poses_path")}
+    for name in ("hypothesis_count", "mesh_diameter_meters"):
+        value = _explicit(case, name)
+        if value is _MISSING:
+            raise BenchmarkError(f"pose input requires {name}")
+        result[name] = value
+    result["crop_batches"] = _crop_batches(_explicit(case, "crop_batches"), root)
+    if "config" in case:
+        result["config"] = deepcopy(case["config"])
+    return result
+
+
 def _request_count(case: Mapping[str, Any], count: int, request: dict[str, Any]) -> None:
     supplied = _explicit(case, "batch_size")
     if supplied is _MISSING:
@@ -512,8 +762,12 @@ def _semantic_media_request(task: str, case: Mapping[str, Any], root: Path) -> d
 def _text_request(
     case: Mapping[str, Any], root: Path, *, include_defaults: bool = True
 ) -> dict[str, Any]:
+    return {"prompt": _prompt(case, root), **_text_controls(case, include_defaults=include_defaults)}
+
+
+def _text_controls(case: Mapping[str, Any], *, include_defaults: bool) -> dict[str, Any]:
     inputs = _inputs(case)
-    request: dict[str, Any] = {"prompt": _prompt(case, root)}
+    request: dict[str, Any] = {}
     controls = (
         ("max_new_tokens", 128, int), ("temperature", 1.0, float), ("top_k", 1, int),
         ("top_p", 1.0, float), ("min_p", 0.0, float), ("seed", -1, int),

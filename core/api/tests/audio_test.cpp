@@ -221,7 +221,7 @@ void test_history_batch(const std::string& path, const trtmc::LoadOptions& optio
     const auto declared_path = root / "history_declared_only.bundle";
     write_bundle(declared_path, "history_declared_only");
     check(Model::load(declared_path.string(), options).tasks().empty(),
-          "declaration without either implementation is not exposed");
+          "history tasks without a bound implementation are not exposed");
     auto owned = Model::load(path, options).task<BatchTextAudioTokenHistoryToAudio>().run(request);
     semantic[0] = coarse[0] = fine[0] = 999;
     check(owned[0].samples[0] == 11 && owned[1].samples[2] == 10.5F && owned[1].samples[5] == 50,

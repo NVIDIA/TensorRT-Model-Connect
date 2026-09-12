@@ -25,21 +25,25 @@ class ControlModel final : public IModel,
         : mode_(context.reader.info().task), backend_(context.backend) {}
 
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override { return {{ITextContinuation::kTask, 1, 0}}; }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask))};
+    }
     trtmc::ILoraAdapterManager* lora_adapters() noexcept override {
         return mode_ == "enabled" ? this : nullptr;
     }
-    std::vector<ConfigField> config_fields(std::string_view id) const override {
+    trtmc::Span<const ConfigField> fields_for(std::string_view id) const {
         if (id != ITextContinuation::kTask)
             throw UnsupportedTask("unknown control fixture task");
         if (mode_ != "enabled")
             return {};
-        return {{"lora_adapter_id", ConfigKind::String, ConfigValue{std::string_view{}},
-                 "Choose a loaded, model-local adapter; empty uses the base model"}};
+        static const ConfigField declared[] = {
+            {"lora_adapter_id", ConfigKind::String, ConfigValue{std::string_view{}},
+             "Choose a loaded, model-local adapter; empty uses the base model"}};
+        return declared;
     }
 
     TextResult run(const TextContinuationRequest& request, ConfigView config) override {
-        const auto fields = config_fields(ITextContinuation::kTask);
+        const auto fields = fields_for(ITextContinuation::kTask);
         std::string_view adapter;
         if (!fields.empty())
             adapter = config_value_as<std::string_view>(*fields[0].default_value);

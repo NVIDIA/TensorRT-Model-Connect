@@ -39,36 +39,49 @@ class LanguageFixture final : public IModel,
   public:
     explicit LanguageFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "none")
             return {};
         if (mode_ == "single_only")
-            return {{IImagesTextToText::kTask, 1, 0}};
-        return {{IImagesTextToText::kTask, 1, 0},
-                {IVideoTextToText::kTask, 1, 0},
-                {IImageVideoTextToText::kTask, 1, 0},
-                {IAudioTextToText::kTask, 1, 0},
-                {IImageAudioToText::kTask, 1, 0},
-                {IAudioVideoTextToText::kTask, 1, 0},
-                {IImageAudioTextToText::kTask, 1, 0},
-                {IImageAudioTextToTextSpeechResponse::kTask, 1, 0},
-                {ITextConversation::kTask, 1, 0},
-                {IBatchImagesTextConversation::kTask, 1, 0},
-                {IBatchTextConversation::kTask, 1, 0},
-                {IBatchVideoTextConversation::kTask, 1, 0},
-                {IBatchAudioTextConversation::kTask, 1, 0},
-                {IBatchImageAudioTextConversation::kTask, 1, 0},
-                {IBatchTextImagesVideoConversations::kTask, 1, 0},
-                {IBatchTextImagesAudioConversations::kTask, 1, 0},
-                {ITextLabelClassification::kTask, 1, 0},
-                {ITextPairLabelClassification::kTask, 1, 0},
-                {ITextEncoderDecoderHiddenStates::kTask, 1, 0}};
+            return {bind<IImagesTextToText>(*this, fields_for(IImagesTextToText::kTask))};
+        return {bind<IImagesTextToText>(*this, fields_for(IImagesTextToText::kTask)),
+                bind<IVideoTextToText>(*this, fields_for(IVideoTextToText::kTask)),
+                bind<IImageVideoTextToText>(*this, fields_for(IImageVideoTextToText::kTask)),
+                bind<IAudioTextToText>(*this, fields_for(IAudioTextToText::kTask)),
+                bind<IImageAudioToText>(*this, fields_for(IImageAudioToText::kTask)),
+                bind<IAudioVideoTextToText>(*this, fields_for(IAudioVideoTextToText::kTask)),
+                bind<IImageAudioTextToText>(*this, fields_for(IImageAudioTextToText::kTask)),
+                bind<IImageAudioTextToTextSpeechResponse>(
+                    *this, fields_for(IImageAudioTextToTextSpeechResponse::kTask)),
+                bind<ITextConversation>(*this, fields_for(ITextConversation::kTask)),
+                bind<IBatchImagesTextConversation>(*this,
+                                                   fields_for(IBatchImagesTextConversation::kTask)),
+                bind<IBatchTextConversation>(*this, fields_for(IBatchTextConversation::kTask)),
+                bind<IBatchVideoTextConversation>(*this,
+                                                  fields_for(IBatchVideoTextConversation::kTask)),
+                bind<IBatchAudioTextConversation>(*this,
+                                                  fields_for(IBatchAudioTextConversation::kTask)),
+                bind<IBatchImageAudioTextConversation>(
+                    *this, fields_for(IBatchImageAudioTextConversation::kTask)),
+                bind<IBatchTextImagesVideoConversations>(
+                    *this, fields_for(IBatchTextImagesVideoConversations::kTask)),
+                bind<IBatchTextImagesAudioConversations>(
+                    *this, fields_for(IBatchTextImagesAudioConversations::kTask)),
+                bind<ITextLabelClassification>(*this, fields_for(ITextLabelClassification::kTask)),
+                bind<ITextPairLabelClassification>(*this,
+                                                   fields_for(ITextPairLabelClassification::kTask)),
+                bind<ITextEncoderDecoderHiddenStates>(
+                    *this, fields_for(ITextEncoderDecoderHiddenStates::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view task) const override {
-        if (task.substr(0, 6) == "batch_")
-            return batch_fields();
-        return {{"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}},
-                 "Synthetic response suffix."}};
+    trtmc::Span<const ConfigField> fields_for(std::string_view task) const {
+        if (task.substr(0, 6) == "batch_") {
+            static const auto declared = batch_fields();
+            return {declared.data(), declared.size()};
+        }
+        static const ConfigField declared[] = {{"suffix", ConfigKind::String,
+                                                ConfigValue{std::string_view{"!"}},
+                                                "Synthetic response suffix."}};
+        return declared;
     }
     TextResult run(const ImagesTextToTextRequest& input, ConfigView config) override {
         if (!input.tools.empty())
@@ -433,12 +446,7 @@ class LanguageFixture final : public IModel,
 class DeclaredOnly final : public IModel {
   public:
     const char* task() const noexcept override { return "missing"; }
-    std::vector<TaskInfo> task_info() const override {
-        return {{IImagesTextToText::kTask, 1, 0},
-                {IBatchTextConversation::kTask, 1, 0},
-                {IBatchTextImagesAudioConversations::kTask, 1, 0}};
-    }
-    std::vector<ConfigField> config_fields(std::string_view) const override { return {}; }
+    std::vector<TaskInstance> task_bindings() override { return {}; }
 };
 } // namespace
 

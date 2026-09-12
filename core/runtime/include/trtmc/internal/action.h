@@ -30,6 +30,7 @@ struct ActionStepResult {
 };
 class IImageStateToActionChunk {
   public:
+    using TaskInterface = IImageStateToActionChunk;
     static constexpr std::string_view kTask = "image_state_to_action_chunk";
     virtual ~IImageStateToActionChunk() = default;
     // Does not create, consume or mutate the family's action queue.
@@ -45,6 +46,7 @@ class IImageStateActionSession {
 };
 class IImageStateActionQueue {
   public:
+    using TaskInterface = IImageStateActionQueue;
     static constexpr std::string_view kTask = "image_state_action_queue";
     virtual ~IImageStateActionQueue() = default;
     // Copy or parse retained config before returning. No shared queue algorithm.

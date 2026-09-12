@@ -113,16 +113,19 @@ class ActionFixture final : public IModel,
   public:
     explicit ActionFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "none" || mode_ == "example_recorded_unsupported")
             return {};
-        return {{IImageStateToActionChunk::kTask, 1, 0}, {IImageStateActionQueue::kTask, 1, 0}};
+        return {bind<IImageStateToActionChunk>(*this, fields_for(IImageStateToActionChunk::kTask)),
+                bind<IImageStateActionQueue>(*this, fields_for(IImageStateActionQueue::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view) const override {
+    trtmc::Span<const ConfigField> fields_for(std::string_view) const {
         if (mode_.find("example_recorded") == 0)
             return {};
-        return {{"tag", ConfigKind::String, ConfigValue{std::string_view{"default"}},
-                 "Synthetic schema tag for chunk run or queue creation; act accepts no config."}};
+        static const ConfigField declared[] = {
+            {"tag", ConfigKind::String, ConfigValue{std::string_view{"default"}},
+             "Synthetic schema tag for chunk run or queue creation; act accepts no config."}};
+        return declared;
     }
     ImageStateActionChunkResult run(const ImageStateToActionChunkRequest& input,
                                     ConfigView config) override {
@@ -171,10 +174,7 @@ class ActionFixture final : public IModel,
 class DeclaredOnly final : public IModel {
   public:
     const char* task() const noexcept override { return "missing"; }
-    std::vector<TaskInfo> task_info() const override {
-        return {{IImageStateActionQueue::kTask, 1, 0}};
-    }
-    std::vector<ConfigField> config_fields(std::string_view) const override { return {}; }
+    std::vector<TaskInstance> task_bindings() override { return {}; }
 };
 // Independent old-path fixture, not an adapter over a new SDK implementation.
 class ExistingRecorded final : public trtmc::IRobotControl {

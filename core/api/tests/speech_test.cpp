@@ -97,6 +97,16 @@ void test_asr(const trtmc::Model& model) {
 
 void test_tts(const trtmc::Model& model) {
     auto tts = model.task<trtmc::StreamingTextToSpeech>();
+    std::size_t invalid_callbacks = 0;
+    check(fails(TRTMC_INVALID_CONFIG,
+                [&] {
+                    (void)tts.run({"Hello"}, [&](const trtmc::AudioView&) { ++invalid_callbacks; },
+                                  {{"undeclared", true}});
+                }),
+          "streaming TTS rejects undeclared Config before delivery");
+    check(invalid_callbacks == 0 &&
+              model.task<trtmc::TextContinuation>().run({"idle"}).text() == "sync",
+          "TTS Config preflight neither invokes callbacks nor retains execution ownership");
     const auto thread = std::this_thread::get_id();
     std::size_t chunks = 0;
     std::vector<float> copied;

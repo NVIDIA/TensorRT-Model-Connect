@@ -8,9 +8,7 @@
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
-#include <algorithm>
 #include <cmath>
-#include <set>
 #include <string>
 
 namespace {
@@ -18,33 +16,36 @@ namespace {
 using namespace trtmc::internal;
 using trtmc::Span;
 
-enum FieldIndex {
-    MaxNewTokens,
-    Temperature,
-    EmitEos,
-    Suffix,
-    TokenBiases,
-    Schedule,
-    Labels,
-    ContextLimit
-};
-
 class FixtureModel final : public IModel, public ITextContinuation {
   public:
     FixtureModel(std::string mode, trtmc::IBackend& backend, std::uint64_t kv_bytes)
-        : mode_(std::move(mode)), backend_(backend), kv_bytes_(kv_bytes) {}
+        : mode_(std::move(mode)), backend_(backend), kv_bytes_(kv_bytes), fields_(make_fields()) {
+        if (mode_ == "empty_field")
+            fields_[0].name = {};
+        if (mode_ == "duplicate_field")
+            fields_.push_back(fields_[0]);
+        if (mode_ == "wrong_default")
+            fields_[0].default_value = ConfigValue{true};
+    }
 
     const char* task() const noexcept override { return mode_.c_str(); }
 
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "disabled")
             return {};
-        return {{ITextContinuation::kTask, 1, 0}};
+        auto task = bind<ITextContinuation>(*this, {fields_.data(), fields_.size()});
+        if (mode_ == "unknown_binding")
+            task.key.id = "unknown_fixture_task";
+        if (mode_ == "wrong_version")
+            task.key.minor = 999;
+        if (mode_ == "null_binding")
+            task.implementation = nullptr;
+        if (mode_ == "duplicate_binding")
+            return {task, task};
+        return {task};
     }
 
-    std::vector<ConfigField> config_fields(std::string_view task_id) const override {
-        if (mode_ == "disabled" || task_id != ITextContinuation::kTask)
-            throw UnsupportedTask("fixture bundle has no text continuation");
+    static std::vector<ConfigField> make_fields() {
         return {
             {"max_new_tokens", ConfigKind::I64, ConfigValue{std::int64_t{4}}, "Maximum new tokens"},
             {"temperature", ConfigKind::F64, ConfigValue{0.75}, "Sampling temperature"},
@@ -60,41 +61,27 @@ class FixtureModel final : public IModel, public ITextContinuation {
     }
 
     TextResult run(const TextContinuationRequest& request, ConfigView config) override {
+        if (mode_ == "must_not_run")
+            throw std::runtime_error("the fixture execution must not be reached");
         if (mode_ == "disabled")
             throw UnsupportedTask("fixture bundle has no text continuation");
         if (std::string(backend_.name()) != "fake")
             throw std::runtime_error("backend lifetime did not extend to the family call");
 
-        const auto fields = config_fields(ITextContinuation::kTask);
-        std::vector<ConfigValue> values;
-        values.reserve(fields.size());
-        for (const auto& field : fields) {
-            // Only context_limit has a computed default; its value comes from
-            // this loaded fixture's context rather than the public C layer.
-            values.push_back(field.default_value.value_or(
-                ConfigValue{static_cast<std::int64_t>(kv_bytes_ ? kv_bytes_ : 64)}));
-        }
-        std::set<std::string_view> supplied;
-        for (const auto& entry : config) {
-            if (!supplied.insert(entry.name).second)
-                throw ConfigError("duplicate config: " + std::string(entry.name));
-            const auto field =
-                std::find_if(fields.begin(), fields.end(),
-                             [&](const auto& candidate) { return candidate.name == entry.name; });
-            if (field == fields.end())
-                throw ConfigError("unknown config: " + std::string(entry.name));
-            if (config_kind(entry.value) != field->kind)
-                throw ConfigError("config type mismatch: " + std::string(entry.name));
-            values[static_cast<std::size_t>(field - fields.begin())] = entry.value;
-        }
-        const auto max_new_tokens = config_value_as<std::int64_t>(values[MaxNewTokens]);
-        const auto temperature = config_value_as<double>(values[Temperature]);
-        const auto emit_eos = config_value_as<bool>(values[EmitEos]);
-        const auto suffix = config_value_as<std::string_view>(values[Suffix]);
-        const auto biases = config_value_as<Span<const std::int64_t>>(values[TokenBiases]);
-        const auto schedule = config_value_as<Span<const double>>(values[Schedule]);
-        const auto labels = config_value_as<Span<const std::string_view>>(values[Labels]);
-        const auto context_limit = config_value_as<std::int64_t>(values[ContextLimit]);
+        const Span<const ConfigField> fields{fields_.data(), fields_.size()};
+        const auto max_new_tokens =
+            config_get<std::int64_t>(config, fields, "max_new_tokens").value();
+        const auto temperature = config_get<double>(config, fields, "temperature").value();
+        const auto emit_eos = config_get<bool>(config, fields, "emit_eos").value();
+        const auto suffix = config_get<std::string_view>(config, fields, "suffix").value();
+        const auto biases =
+            config_get<Span<const std::int64_t>>(config, fields, "token_biases").value();
+        const auto schedule = config_get<Span<const double>>(config, fields, "schedule").value();
+        const auto labels =
+            config_get<Span<const std::string_view>>(config, fields, "labels").value();
+        const auto context_limit =
+            config_get<std::int64_t>(config, fields, "context_limit")
+                .value_or(static_cast<std::int64_t>(kv_bytes_ ? kv_bytes_ : 64));
         if (max_new_tokens < 0 || max_new_tokens > 128)
             throw ConfigError("max_new_tokens must be between zero and 128");
         if (!std::isfinite(temperature) || temperature < 0.0 || temperature > 2.0)
@@ -134,6 +121,7 @@ class FixtureModel final : public IModel, public ITextContinuation {
     std::string mode_;
     trtmc::IBackend& backend_;
     std::uint64_t kv_bytes_;
+    std::vector<ConfigField> fields_;
 };
 
 } // namespace

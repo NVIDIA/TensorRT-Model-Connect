@@ -206,11 +206,19 @@ void tracked_clip(const std::filesystem::path& root, const std::filesystem::path
               "family final tracks retain score kinds, removal/suppression and unknown physical "
               "times");
     }
-    auto invalid = arguments(two_stage);
-    invalid.insert(invalid.end(), {"--prompt", "bird"});
-    const auto rejected = run(std::move(invalid));
-    check(rejected.status != 0 && rejected.output.empty(),
-          "whole-clip command does not emulate an independently declared two-stage lifecycle");
+    auto prompted = arguments(two_stage);
+    prompted.insert(prompted.end(), {"--prompt", "bird"});
+    const auto continued = run(std::move(prompted));
+    check(continued.status == 0, "prompt-frame Task executes acceptance then continuation");
+    if (continued.status == 0) {
+        const auto value = json::parse(continued.output);
+        check(value.at("frames").size() == 5 && value.at("frames").at(0).at("masks").at(0) == 0 &&
+                  value.at("frames").at(1).at("masks").at(0) == 1,
+              "continuation returns consolidated frame zero rather than its stale prompt snapshot");
+    }
+    const auto missing_prompt = run(arguments(two_stage));
+    check(missing_prompt.status != 0 && missing_prompt.output.empty(),
+          "prompt-frame Task cannot silently run the detector-only clip operation");
     const auto short_clip = run({"trtmc", "video-segment", detected.string(), "--runtime-root",
                                  root.string(), "--frame", image.string()});
     check(short_clip.status != 0 && short_clip.output.empty(),

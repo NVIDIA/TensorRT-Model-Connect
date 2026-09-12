@@ -155,6 +155,7 @@ entries:
       testcase: bart-base
     baseline:
       runner: hf-transformers
+      task: seq2seq-lm
       mode: torch-compile
       compile_scope: model.forward
       output_token_policy: strip-start-and-eos
@@ -578,6 +579,7 @@ entries:
       testcase: nllb-200-distilled-600m
     baseline:
       runner: hf-transformers
+      task: seq2seq-lm
       mode: torch-compile
       compile_scope: model.forward
       output_token_policy: strip-start-and-eos
@@ -615,6 +617,7 @@ entries:
       testcase: marian-en-ru
     baseline:
       runner: hf-transformers
+      task: seq2seq-lm
       mode: torch-compile
       compile_scope: model.forward
       output_token_policy: strip-start
@@ -1016,6 +1019,7 @@ entries:
       testcase: t5-small
     baseline:
       runner: hf-transformers
+      task: seq2seq-lm
       mode: torch-compile
       compile_scope: model.forward
       output_token_policy: strip-start

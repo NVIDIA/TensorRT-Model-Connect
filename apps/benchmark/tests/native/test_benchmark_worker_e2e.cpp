@@ -7,9 +7,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -156,6 +158,77 @@ int main(int argc, char** argv) {
             check(text.find("Hello") != std::string::npos && text.find("done") != std::string::npos,
                   "typed prompt and explicit family config reach benchmark output");
         }
+        write_bundle(bundle_path, "unconditional_text_generation", "text_fixture");
+        sdk["request"] = Json::object();
+        const auto unconditional = invoke().at("output_summary");
+        check(unconditional.at("text") == "unconditional!" &&
+                  unconditional.at("token_ids") == Json::array({13}) &&
+                  unconditional.at("output_tokens") == 1,
+              "unconditional generation invokes the no-request Task and counts real result tokens");
+        check(unconditional.at("segments").at(0).at("token_ids") == Json::array({13, 99}) &&
+                  unconditional.at("segments").at(0).at("end_seconds") == 0.5,
+              "text result segments are preserved independently of the actual output-token count");
+        sdk["request"] = {{"config", {{"suffix", ""}}}};
+        check(invoke().at("output_summary").at("text") == "unconditional",
+              "unconditional generation preserves explicit empty Config");
+        sdk["request"]["prompt"] = "";
+        invoke(false);
+
+        write_bundle(bundle_path, "text_translation", "text_fixture");
+        sdk["operation"] = "translate";
+        sdk["expected_family"] = "text_fixture";
+        sdk["expected_task"] = "text_translation";
+        sdk["request"] = {{"source_text", "Bonjour"}};
+        auto translated = invoke();
+        check(translated.at("task") == "text_translation" &&
+                  translated.at("operation") == "translate" &&
+                  translated.at("output_summary").at("text") ==
+                      "translation:fixed-src->en:Bonjour!",
+              "translation leaves absent source and target languages to the family");
+        for (const auto& observation : translated.at("observations")) {
+            check(observation.at("token_ids") == Json::array({14}) &&
+                      observation.at("output_tokens") == 1 && observation.at("prefill_ms") == 2 &&
+                      observation.at("decode_ms") == 3 &&
+                      observation.at("runtime_e2e_wall_ms").get<double>() >= 0,
+                  "translation preserves text tokens, family stages and Task-call timing");
+        }
+        const std::string source_text("Bon\0jour", 8);
+        sdk["request"] = {{"source_text", source_text},
+                          {"source_language", "fr"},
+                          {"target_language", "de"},
+                          {"config", {{"suffix", "done"}}}};
+        translated = invoke();
+        check(translated.at("output_summary").at("text") ==
+                  "translation:fr->de:" + source_text + "done",
+              "translation preserves explicit typed languages, embedded NUL and family Config");
+        for (const auto* language : {"source_language", "target_language"}) {
+            for (const auto& invalid : Json::array({nullptr, "", false, 3})) {
+                sdk["request"] = {{"source_text", "Bonjour"}, {language, invalid}};
+                check(invoke(false).at("error").get<std::string>().find("non-empty string") !=
+                          std::string::npos,
+                      "present invalid language is rejected instead of becoming absent");
+            }
+        }
+        sdk["request"] = {{"source_text", "Bonjour"}, {"config", {{"target_language", "de"}}}};
+        invoke(false); // Language operands cannot be smuggled into family Config.
+        sdk["request"] = {{"source_text", "Bonjour"}};
+        sdk["runtime_root"] = (runtime_root / "missing-runtime").string();
+        sdk["expected_family"] = "other_family";
+        check(invoke(false).at("error").get<std::string>().find("bundle identity mismatch") !=
+                  std::string::npos,
+              "wrong family is rejected before any DSO load");
+        sdk["expected_family"] = "text_fixture";
+        sdk["expected_task"] = "text_generation";
+        check(invoke(false).at("error").get<std::string>().find("bundle identity mismatch") !=
+                  std::string::npos,
+              "old primary Task cache cannot stand in for a different requested Task");
+        sdk.erase("expected_task");
+        check(invoke(false).at("error").get<std::string>().find("requires both") !=
+                  std::string::npos,
+              "partial expected bundle identity is invalid");
+        sdk.erase("expected_family");
+        sdk["runtime_root"] = argv[3];
+        sdk["operation"] = "generate";
         write_bundle(bundle_path, "text_continuation", "api_fixture");
         sdk["request"] = {{"prompt", "Hello"}};
         auto value = invoke();
@@ -200,6 +273,154 @@ int main(int argc, char** argv) {
                   "VLM input and asset timing policy preserved");
         }
         std::filesystem::remove(image_path);
+
+        write_bundle(bundle_path, "series_to_regression_distribution", "numeric_fixture");
+        sdk["operation"] = "regress";
+        sdk["request"] = {{"past_values", {1.0, nullptr, 3.0, 4.0}},
+                          {"shape", {2, 2}},
+                          {"observed_mask", {1, 0, 1, 1}}};
+        for (const auto* distribution : {"normal", "student_t", "negative_binomial"}) {
+            sdk["request"]["config"] = {{"distribution", distribution}};
+            value = invoke();
+            const auto& output = value.at("output_summary");
+            const auto parameter_count = std::string(distribution) == "student_t" ? 3 : 2;
+            check(output.at("distribution") == distribution && output.at("target_count") == 2 &&
+                      output.at("axes") == Json::array({"target"}) &&
+                      output.at("regression_targets") == 2 &&
+                      output.at("parameter_elements") == parameter_count * 2 &&
+                      output.at("parameters").size() == static_cast<std::size_t>(parameter_count) &&
+                      output.at("target_names").empty() && output.at("target_units").empty() &&
+                      !output.contains("forecast_elements") && !output.contains("horizon_steps"),
+                  "regression distribution remains named per-target parameters without invented "
+                  "forecast axes");
+            const auto& first = output.at("parameters").at(0);
+            if (std::string(distribution) == "normal")
+                check(first.at("name") == "scale" && first.at("values") == Json::array({0.5, 1.0}),
+                      "normal parameter order and raw scale values preserved");
+            else if (std::string(distribution) == "student_t")
+                check(first.at("name") == "degrees_of_freedom" &&
+                          first.at("values") == Json::array({3, 4}),
+                      "Student-t degrees of freedom are not dropped");
+            else
+                check(first.at("name") == "total_count" &&
+                          output.at("parameters").at(1).at("values") == Json::array({-1, 1}),
+                      "negative-binomial logits are not normalized");
+        }
+        sdk["request"]["observed_mask"] = {1, 1, 1, 1};
+        invoke(false); // Null history must be explicitly masked out.
+        sdk["request"]["observed_mask"] = {1, 0, 1, 1};
+        sdk["request"]["shape"] = {3, 2};
+        invoke(false);
+        sdk["request"]["shape"] = {2, 2};
+        sdk["request"]["config"] = {{"distribution", "unknown"}};
+        invoke(false);
+
+        std::vector<std::filesystem::path> latent_files;
+        auto floats = [&](const char* name, std::initializer_list<float> values) {
+            const auto path = runtime_root / name;
+            std::ofstream file(path, std::ios::binary);
+            file.exceptions(std::ios::badbit | std::ios::failbit);
+            file.write(reinterpret_cast<const char*>(values.begin()),
+                       static_cast<std::streamsize>(values.size() * sizeof(float)));
+            file.close();
+            latent_files.push_back(path);
+            return path.string();
+        };
+        const auto condition = floats("benchmark_condition.f32", {1, 2, 3, 4});
+        const auto mask = floats("benchmark_condition_mask.f32", {1, 0.5F});
+        const auto initial = floats("benchmark_initial.f32", {9, 8, 7, 6});
+        const auto noise = floats("benchmark_noise.f32", {10, 11, 12, 13, 14, 15, 16, 17});
+        const auto steps = floats("benchmark_steps.f32", {0, 0.25F, 0.75F, 1});
+        const auto branch = floats("benchmark_branch.f32", {1, 2, 9, 8, 3, 4, 7, 6});
+        const auto denoise_trunk = floats("benchmark_denoise_trunk.f32", {0.25F, 3, 0});
+        const auto logits_trunk = floats("benchmark_logits_trunk.f32", {0.25F, 3, 0.8F});
+        write_bundle(bundle_path, "latent_conditioned_text_generation", "numeric_fixture");
+        sdk["operation"] = "generate";
+        const Json conditioned{{"condition_latents_path", condition}, {"condition_mask_path", mask},
+                               {"initial_latents_path", initial},     {"sde_noises_path", noise},
+                               {"sampling_steps_path", steps},        {"prompt", "kept"}};
+        for (const bool include_assets : {false, true}) {
+            sdk["measurement"]["asset_loading_included"] = include_assets;
+            sdk["request"] = conditioned;
+            value = invoke();
+            check(value.at("output_summary").at("text") == "conditioned" &&
+                      value.at("output_summary").at("token_ids") ==
+                          Json::array({1, 50, 9, 17, 25, 4}) &&
+                      value.at("output_summary").at("output_tokens") == 6 &&
+                      value.at("asset_loading_included") == include_assets,
+                  "condition, float mask, initial state, SDE noise, schedule and prompt reach one "
+                  "typed generation call");
+        }
+        sdk["request"]["config"] = {{"sampling_steps", {0.0, 0.5, 1.0}}};
+        invoke(false); // The raw schedule cannot overwrite a declared Config entry.
+        sdk["request"] = conditioned;
+        sdk["request"].erase("condition_mask_path");
+        invoke(false);
+        sdk["request"] = {{"condition_latents_path", condition}, {"condition_mask_path", mask}};
+        check(
+            invoke().at("output_summary").at("token_ids") == Json::array({1, 50, -1, -1, 50, 0}),
+            "missing optional replay operands retain family initialization and schedule defaults");
+
+        write_bundle(bundle_path, "latent_replay_to_text", "numeric_fixture");
+        sdk["request"] = {{"initial_latents_path", initial}};
+        value = invoke();
+        check(value.at("output_summary").at("text") == "|replayed" &&
+                  value.at("output_summary").at("token_ids") == Json::array({9, -1, 50}),
+              "initial-only replay does not invent prompt, noise or schedule");
+        sdk["request"] = {
+            {"sde_noises_path", noise}, {"sampling_steps_path", steps}, {"prompt", "kept"}};
+        check(invoke().at("output_summary").at("token_ids") == Json::array({-1, 17, 25}),
+              "SDE-only replay passes through without synthesizing initial latents");
+        sdk["request"].erase("sampling_steps_path");
+        invoke(false); // Family validates SDE count against its resolved schedule.
+        sdk["request"] = {{"prompt", "kept"}};
+        invoke(false);
+        sdk["request"] = conditioned;
+        invoke(false); // Conditioned input cannot silently select another Task.
+
+        for (const bool decoder : {false, true}) {
+            write_bundle(bundle_path, decoder ? "latent_to_token_logits" : "latent_denoising_step",
+                         "numeric_fixture");
+            sdk["operation"] = decoder ? "decode_logits" : "denoise";
+            const auto& trunk = decoder ? logits_trunk : denoise_trunk;
+            for (const bool include_assets : {false, true}) {
+                sdk["measurement"]["asset_loading_included"] = include_assets;
+                sdk["request"] = {{"branch_path", branch}, {"trunk_path", trunk}};
+                value = invoke();
+                const auto& output = value.at("output_summary");
+                check(output.at("shape") == (decoder ? Json::array({2, 3}) : Json::array({2, 2})) &&
+                          output.at("values").at(0) == 12.25 && !output.contains("output_tokens") &&
+                          output.at(decoder ? "logit_elements" : "latent_elements") ==
+                              (decoder ? 6 : 4),
+                      "native-packed latent call preserves guidance and output width without "
+                      "inventing token counts");
+                if (decoder)
+                    check(output.at("vocabulary_id") == "fixture-vocabulary" &&
+                              output.at("axes") == Json::array({"position", "vocabulary_id"}),
+                          "decoder logits retain vocabulary identity and axes");
+            }
+            sdk["request"] = {{"latents_path", condition},
+                              {"shape", {2, 2}},
+                              {"self_condition_path", initial},
+                              {"timestep", 0.25},
+                              {"config", {{"self_cond_cfg_scale", 3.0}}}};
+            check(invoke().at("output_summary").at("values").at(0) == 12.25,
+                  "logical latents with separate self-condition match native-packed call");
+            sdk["request"]["shape"] = {3, 2};
+            invoke(false);
+            sdk["request"] = {{"branch_path", branch},
+                              {"trunk_path", decoder ? denoise_trunk : logits_trunk}};
+            invoke(false);
+            sdk["request"] = {{"branch_path", branch},
+                              {"trunk_path", trunk},
+                              {"config", {{"self_cond_cfg_scale", 3.0}}}};
+            invoke(false); // Raw guidance cannot overwrite explicit Config.
+            sdk["request"] = {
+                {"branch_path", branch}, {"trunk_path", trunk}, {"self_condition_path", initial}};
+            invoke(false);
+        }
+        for (const auto& path : latent_files)
+            std::filesystem::remove(path);
 
         sdk["operation"] = "solve";
         sdk["request"] = {{"past_values", {1.0F, 2.0F, 3.0F}}, {"frequency", 2}};

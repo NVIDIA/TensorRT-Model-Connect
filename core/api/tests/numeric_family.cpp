@@ -28,41 +28,64 @@ class NumericModel final : public IModel,
   public:
     explicit NumericModel(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "regression_only")
-            return {{ISeriesToRegressionDistribution::kTask, 1, 0}};
-        return {{ISeriesToPointForecast::kTask, 1, 0},
-                {IBatchSeriesToPointForecast::kTask, 1, 0},
-                {IBatchSeriesToQuantileForecast::kTask, 1, 0},
-                {IBatchSeriesToPointAndQuantileForecast::kTask, 1, 0},
-                {ISeriesToQuantileForecast::kTask, 1, 0},
-                {ISeriesToPointAndQuantileForecast::kTask, 1, 0},
-                {ISeriesToRegressionDistribution::kTask, 1, 0},
-                {ILatentConditionedTextGeneration::kTask, 1, 0},
-                {ILatentReplayToText::kTask, 1, 0},
-                {ILatentDenoisingStep::kTask, 1, 0},
-                {ILatentToTokenLogits::kTask, 1, 0}};
+            return {bind<ISeriesToRegressionDistribution>(
+                *this, fields_for(ISeriesToRegressionDistribution::kTask))};
+        return {
+            bind<ISeriesToPointForecast>(*this, fields_for(ISeriesToPointForecast::kTask)),
+            bind<IBatchSeriesToPointForecast>(*this,
+                                              fields_for(IBatchSeriesToPointForecast::kTask)),
+            bind<IBatchSeriesToQuantileForecast>(*this,
+                                                 fields_for(IBatchSeriesToQuantileForecast::kTask)),
+            bind<IBatchSeriesToPointAndQuantileForecast>(
+                *this, fields_for(IBatchSeriesToPointAndQuantileForecast::kTask)),
+            bind<ISeriesToQuantileForecast>(*this, fields_for(ISeriesToQuantileForecast::kTask)),
+            bind<ISeriesToPointAndQuantileForecast>(
+                *this, fields_for(ISeriesToPointAndQuantileForecast::kTask)),
+            bind<ISeriesToRegressionDistribution>(
+                *this, fields_for(ISeriesToRegressionDistribution::kTask)),
+            bind<ILatentConditionedTextGeneration>(
+                *this, fields_for(ILatentConditionedTextGeneration::kTask)),
+            bind<ILatentReplayToText>(*this, fields_for(ILatentReplayToText::kTask)),
+            bind<ILatentDenoisingStep>(*this, fields_for(ILatentDenoisingStep::kTask)),
+            bind<ILatentToTokenLogits>(*this, fields_for(ILatentToTokenLogits::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view id) const override {
+    trtmc::Span<const ConfigField> fields_for(std::string_view id) const {
         if (id == ISeriesToPointForecast::kTask || id == ISeriesToQuantileForecast::kTask ||
             id == ISeriesToPointAndQuantileForecast::kTask ||
             id == IBatchSeriesToPointForecast::kTask ||
             id == IBatchSeriesToQuantileForecast::kTask ||
-            id == IBatchSeriesToPointAndQuantileForecast::kTask)
-            return {{"frequency", ConfigKind::I64,
-                     ConfigValue{std::int64_t{mode_ == "frequency_default_one" ? 1 : 0}},
-                     "Fixture frequency category"}};
-        if (id == ISeriesToRegressionDistribution::kTask)
-            return {{"distribution", ConfigKind::String, ConfigValue{std::string_view{"normal"}},
-                     "Distribution head"}};
+            id == IBatchSeriesToPointAndQuantileForecast::kTask) {
+            static const ConfigField default_zero[] = {{"frequency", ConfigKind::I64,
+                                                        ConfigValue{std::int64_t{0}},
+                                                        "Fixture frequency category"}};
+            static const ConfigField default_one[] = {{"frequency", ConfigKind::I64,
+                                                       ConfigValue{std::int64_t{1}},
+                                                       "Fixture frequency category"}};
+            if (mode_ == "frequency_default_one")
+                return default_one;
+            return default_zero;
+        }
+        if (id == ISeriesToRegressionDistribution::kTask) {
+            static const ConfigField declared[] = {{"distribution", ConfigKind::String,
+                                                    ConfigValue{std::string_view{"normal"}},
+                                                    "Distribution head"}};
+            return declared;
+        }
         if (id == ILatentConditionedTextGeneration::kTask || id == ILatentReplayToText::kTask) {
             static const double schedule[] = {0, 0.5, 1};
-            return {{"sampling_steps", ConfigKind::F64List,
-                     ConfigValue{trtmc::Span<const double>{schedule}}, "Explicit replay schedule"}};
+            static const ConfigField declared[] = {
+                {"sampling_steps", ConfigKind::F64List,
+                 ConfigValue{trtmc::Span<const double>{schedule}}, "Explicit replay schedule"}};
+            return declared;
         }
-        if (id == ILatentDenoisingStep::kTask || id == ILatentToTokenLogits::kTask)
-            return {{"self_cond_cfg_scale", ConfigKind::F64, ConfigValue{1.0},
-                     "Synthetic native-step guidance control."}};
+        if (id == ILatentDenoisingStep::kTask || id == ILatentToTokenLogits::kTask) {
+            static const ConfigField declared[] = {{"self_cond_cfg_scale", ConfigKind::F64,
+                                                    ConfigValue{1.0},
+                                                    "Synthetic native-step guidance control."}};
+            return declared;
+        }
         return {};
     }
     PointForecastResult run(const SeriesToPointForecastRequest& request,
@@ -334,7 +357,7 @@ class NumericModel final : public IModel,
     }
     std::map<std::string_view, ConfigValue> resolved(std::string_view task_id,
                                                      ConfigView config) const {
-        const auto fields = config_fields(task_id);
+        const auto fields = fields_for(task_id);
         std::map<std::string_view, ConfigValue> result;
         for (const auto& field : fields)
             result.emplace(field.name, *field.default_value);

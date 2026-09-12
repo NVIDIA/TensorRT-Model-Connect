@@ -4,9 +4,12 @@
  */
 
 #include "trtmc/internal/config.h"
+#include "trtmc/internal/model.h"
 
 #include <iostream>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -133,12 +136,144 @@ void test_lists_and_owned_snapshot() {
           "owned string snapshot copies both list and string payloads");
 }
 
+template <class Exception, class Function>
+bool throws_as(Function&& function) {
+    try {
+        function();
+    } catch (const Exception&) {
+        return true;
+    }
+    return false;
+}
+
+void test_table_driven_config() {
+    const ConfigField fields[] = {
+        {"count", ConfigKind::I64, ConfigValue{std::int64_t{4}}, ""},
+        {"enabled", ConfigKind::Bool, ConfigValue{true}, ""},
+        {"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}}, ""},
+        {"budget", ConfigKind::I64, std::nullopt, ""},
+    };
+    validate_config(fields, {});
+    check(config_get<std::int64_t>({}, fields, "count") == 4, "fixed default is resolved");
+    check(!config_get<std::int64_t>({}, fields, "budget"), "dynamic default remains absent");
+    check(!config_provided({}, "count"), "fixed default does not become explicit input");
+    const ConfigEntry explicit_values[] = {
+        {"count", std::int64_t{0}},
+        {"enabled", false},
+        {"suffix", std::string_view{}},
+    };
+    validate_config(fields, explicit_values);
+    check(config_get<std::int64_t>(explicit_values, fields, "count") == 0,
+          "explicit zero overrides the default");
+    check(config_get<bool>(explicit_values, fields, "enabled") == false,
+          "explicit false overrides the default");
+    check(config_get<std::string_view>(explicit_values, fields, "suffix")->empty(),
+          "explicit empty string overrides the default");
+    check(config_provided(explicit_values, "count"), "explicit zero retains presence");
+    const ConfigEntry unknown[] = {{"other", std::int64_t{1}}};
+    const ConfigEntry duplicate[] = {{"count", std::int64_t{1}}, {"count", std::int64_t{2}}};
+    const ConfigEntry wrong_type[] = {{"count", 1.0}};
+    check(throws_as<ConfigError>([&] { validate_config(fields, unknown); }), "reject unknown key");
+    check(throws_as<ConfigError>([&] { validate_config(fields, duplicate); }),
+          "reject duplicate key");
+    check(throws_as<ConfigError>([&] { validate_config(fields, wrong_type); }),
+          "reject wrong kind");
+    check(throws_as<std::logic_error>([&] { (void)config_get<double>({}, fields, "count"); }),
+          "wrong accessor type is a programming error even without an override");
+    check(throws_as<std::logic_error>([&] { (void)config_get<bool>({}, fields, "unknown"); }),
+          "undeclared accessor key is not treated as missing");
+    check(
+        throws_as<ConfigError>([&] { (void)config_get<std::int64_t>(duplicate, fields, "count"); }),
+        "accessor never chooses between duplicate overrides");
+}
+
+struct FirstTask {
+    using TaskInterface = FirstTask;
+    static constexpr std::string_view kTask = "first_test";
+    virtual ~FirstTask() = default;
+    virtual int first() const = 0;
+};
+struct SecondTask {
+    using TaskInterface = SecondTask;
+    static constexpr std::string_view kTask = "second_test";
+    virtual ~SecondTask() = default;
+    virtual int second() const = 0;
+};
+struct BoundModel final : FirstTask, SecondTask {
+    explicit BoundModel(int id) : id(id) {}
+    int first() const override { return id; }
+    int second() const override { return id + 1; }
+    int id;
+};
+
+struct LeadingBase {
+    virtual ~LeadingBase() = default;
+};
+struct SingleTaskModel final : LeadingBase, FirstTask {
+    int first() const override { return 42; }
+};
+
+template <class Interface, class Model, class = void>
+struct CanBind : std::false_type {};
+template <class Interface, class Model>
+struct CanBind<Interface, Model, std::void_t<decltype(bind<Interface>(std::declval<Model&>()))>>
+    : std::true_type {};
+static_assert(CanBind<SecondTask, BoundModel>::value);
+static_assert(!CanBind<SecondTask, FirstTask>::value,
+              "a family cannot bind an interface it does not implement");
+static_assert(CanBind<FirstTask, SingleTaskModel>::value);
+static_assert(!CanBind<SingleTaskModel, SingleTaskModel>::value,
+              "an inherited Task ID cannot turn a concrete model into its interface");
+static_assert(!CanBind<BoundModel, BoundModel>::value,
+              "a multiple-Task model cannot be bound as its own interface");
+
+template <class Model, class = void>
+struct CanInferBind : std::false_type {};
+template <class Model>
+struct CanInferBind<Model, std::void_t<decltype(bind(std::declval<Model&>()))>> : std::true_type {};
+static_assert(CanInferBind<FirstTask>::value,
+              "a reference already typed as its canonical interface is safe to bind");
+static_assert(!CanInferBind<SingleTaskModel>::value,
+              "omitting the interface must not erase an unadjusted model pointer");
+static_assert(!CanInferBind<BoundModel>::value);
+
+template <class Interface, class = void>
+struct CanGetContractKey : std::false_type {};
+template <class Interface>
+struct CanGetContractKey<Interface, std::void_t<decltype(contract_key<Interface>())>>
+    : std::true_type {};
+static_assert(CanGetContractKey<FirstTask>::value);
+static_assert(!CanGetContractKey<SingleTaskModel>::value);
+static_assert(!CanGetContractKey<BoundModel>::value);
+
+void test_interface_binding() {
+    BoundModel first(10), second(20);
+    const auto binding = bind<SecondTask>(first);
+    const auto other = bind<SecondTask>(second);
+    check(binding.key.id == SecondTask::kTask && binding.key.major == 1 && binding.key.minor == 0,
+          "Task key comes from its contract");
+    check(binding.implementation == static_cast<void*>(static_cast<SecondTask*>(&first)),
+          "binding stores the adjusted base-interface address");
+    check(static_cast<SecondTask*>(binding.implementation)->second() == 11,
+          "restored interface dispatches to the correct implementation");
+    check(static_cast<SecondTask*>(other.implementation)->second() == 21,
+          "independent instances keep distinct bindings");
+    check(binding.fields.empty(), "a Task can have no optional configuration");
+    SingleTaskModel single;
+    const auto single_binding = bind<FirstTask>(single);
+    check(single_binding.implementation == static_cast<void*>(static_cast<FirstTask*>(&single)) &&
+              static_cast<FirstTask*>(single_binding.implementation)->first() == 42,
+          "a single-Task model with another polymorphic base still binds the adjusted interface");
+}
+
 } // namespace
 
 int main() {
     test_scalars_and_presence();
     test_order_and_borrowing();
     test_lists_and_owned_snapshot();
+    test_table_driven_config();
+    test_interface_binding();
     std::cerr << (failures == 0 ? "ALL PASSED\n" : "SOME FAILED\n");
     return failures;
 }

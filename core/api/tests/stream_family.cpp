@@ -338,22 +338,26 @@ class Model final : public IModel,
     explicit Model(std::string mode) : mode_(std::move(mode)) { ++live_models; }
     ~Model() override { --live_models; }
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "disabled")
-            return {{ITextContinuation::kTask, 1, 0}};
-        return {{ITextContinuation::kTask, 1, 0},
-                {IStreamingTextContinuation::kTask, 1, 0},
-                {IStreamingImagesTextToText::kTask, 1, 0},
-                {ITextConversation::kTask, 1, 0},
-                {IStreamingTextConversation::kTask, 1, 0},
-                {IStreamingVideoTextToText::kTask, 1, 0},
-                {IStreamingImageVideoTextToText::kTask, 1, 0},
-                {IImagesTextConversation::kTask, 1, 0},
-                {IVideoTextConversation::kTask, 1, 0},
-                {IStreamingImagesTextConversation::kTask, 1, 0},
-                {IStreamingVideoTextConversation::kTask, 1, 0}};
+            return {bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask))};
+        return {
+            bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask)),
+            bind<IStreamingTextContinuation>(*this, fields_for(IStreamingTextContinuation::kTask)),
+            bind<IStreamingImagesTextToText>(*this, fields_for(IStreamingImagesTextToText::kTask)),
+            bind<ITextConversation>(*this, fields_for(ITextConversation::kTask)),
+            bind<IStreamingTextConversation>(*this, fields_for(IStreamingTextConversation::kTask)),
+            bind<IStreamingVideoTextToText>(*this, fields_for(IStreamingVideoTextToText::kTask)),
+            bind<IStreamingImageVideoTextToText>(*this,
+                                                 fields_for(IStreamingImageVideoTextToText::kTask)),
+            bind<IImagesTextConversation>(*this, fields_for(IImagesTextConversation::kTask)),
+            bind<IVideoTextConversation>(*this, fields_for(IVideoTextConversation::kTask)),
+            bind<IStreamingImagesTextConversation>(
+                *this, fields_for(IStreamingImagesTextConversation::kTask)),
+            bind<IStreamingVideoTextConversation>(
+                *this, fields_for(IStreamingVideoTextConversation::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view task) const override {
+    trtmc::Span<const ConfigField> fields_for(std::string_view task) const {
         if (task == ITextContinuation::kTask)
             return {};
         if ((task == IStreamingImagesTextToText::kTask ||
@@ -368,10 +372,12 @@ class Model final : public IModel,
              task != IStreamingVideoTextConversation::kTask) ||
             mode_ == "disabled")
             throw UnsupportedTask("stream is disabled");
-        return {{"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}}, "Text suffix"},
-                {"wait_for_cancel", ConfigKind::Bool, ConfigValue{false}, "Wait until cancelled"},
-                {"failure", ConfigKind::String, ConfigValue{std::string_view{}},
-                 "Protocol fault fixture"}};
+        static const ConfigField declared[] = {
+            {"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}}, "Text suffix"},
+            {"wait_for_cancel", ConfigKind::Bool, ConfigValue{false}, "Wait until cancelled"},
+            {"failure", ConfigKind::String, ConfigValue{std::string_view{}},
+             "Protocol fault fixture"}};
+        return declared;
     }
     TextResult run(const TextContinuationRequest&, ConfigView config) override {
         if (!config.empty())
@@ -512,7 +518,7 @@ class Model final : public IModel,
         return result;
     }
     std::vector<ConfigValue> stream_options(std::string_view task, ConfigView config) const {
-        const auto fields = config_fields(task);
+        const auto fields = fields_for(task);
         std::vector<ConfigValue> values;
         for (const auto& field : fields)
             values.push_back(*field.default_value);

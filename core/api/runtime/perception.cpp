@@ -219,6 +219,26 @@ struct BoxesStorage final : ResultStorage {
     std::vector<trtmc_grounded_box_v1> boxes;
     trtmc_grounded_boxes_view_v1 view{};
 };
+struct DetectedBoxesStorage final : ResultStorage {
+    explicit DetectedBoxesStorage(internal::DetectedBoxesResult result) {
+        valid_output(result.image_height > 0 && result.image_width > 0,
+                     "detection image dimensions must be positive");
+        boxes.reserve(result.boxes.size());
+        for (const auto& item : result.boxes) {
+            valid_output(std::isfinite(item.x_min) && std::isfinite(item.y_min) &&
+                             std::isfinite(item.x_max) && std::isfinite(item.y_max) &&
+                             item.x_min <= item.x_max && item.y_min <= item.y_max &&
+                             std::isfinite(item.score),
+                         "detections require finite ordered XYXY coordinates and scores");
+            boxes.push_back(
+                {{item.x_min, item.y_min, item.x_max, item.y_max}, item.score, item.class_id});
+        }
+        view = {boxes.data(), boxes.size(), static_cast<std::uint32_t>(result.image_height),
+                static_cast<std::uint32_t>(result.image_width)};
+    }
+    std::vector<trtmc_detected_box_v1> boxes;
+    trtmc_detected_boxes_view_v1 view{};
+};
 struct BoxesBatchStorage final : ResultStorage {
     explicit BoxesBatchStorage(std::vector<internal::GroundedBoxesResult> results) {
         for (auto& result : results)
@@ -241,12 +261,15 @@ trtmc_status TRTMC_CALL boxes_batch_run(trtmc_model* model,
         configs.reserve(supplied.size());
         for (const auto& item : supplied) {
             configs.emplace_back(&item.config);
+
             items.push_back({{image_input(item.input.image), string_view(item.input.text)},
                              configs.back().view()});
         }
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<internal::IBatchImageTextToBoxes>(
             model, internal::IBatchImageTextToBoxes::kTask);
+        validate_batch_configs(model_owner(model),
+                               internal::contract_key<internal::IBatchImageTextToBoxes>(), configs);
         auto results = family.run_batch({{items.data(), items.size()}});
         valid_output(results.size() == items.size(), "family changed boxes batch item count");
         *out = make_result<BoxesBatchStorage>(std::move(results));
@@ -344,6 +367,8 @@ trtmc_status dispatch(trtmc_model* model, const Request* request,
         const std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<Interface>(model, Interface::kTask);
         const ConvertedConfig options(config);
+        validate_task_config(model_owner(model), internal::contract_key<Interface>(),
+                             options.view());
         auto result = invoke(family, *request, options.view());
         if constexpr (std::is_same_v<Interface, internal::IImagePointsToMasks> ||
                       std::is_same_v<Interface, internal::IImageBoxToMasks> ||
@@ -515,6 +540,17 @@ TRTMC_PERCEPTION_RUN(stereo, IStereoImagesToDisparity, DisparityStorage,
 TRTMC_PERCEPTION_RUN(geometry, IImageToMetricGeometry, GeometryStorage,
                      trtmc_perception_image_request_v1,
                      { return family.run({image_input(in.image)}, options); })
+TRTMC_PERCEPTION_RUN(detect_boxes, IImageToBoxes, DetectedBoxesStorage,
+                     trtmc_perception_image_request_v1, {
+                         const auto image = image_input(in.image);
+                         auto result = family.run({image}, options);
+                         valid_output(
+                             result.image_height > 0 && result.image_width > 0 &&
+                                 static_cast<std::uint32_t>(result.image_height) == image.height &&
+                                 static_cast<std::uint32_t>(result.image_width) == image.width,
+                             "detection dimensions must match the original image");
+                         return result;
+                     })
 TRTMC_PERCEPTION_RUN(ground_boxes, IImageTextToBoxes, BoxesStorage, trtmc_image_query_request_v1,
                      { return family.run({image_input(in.image), string_view(in.text)}, options); })
 TRTMC_PERCEPTION_RUN(ground_points, IImageTextToPoints, PointsStorage, trtmc_image_query_request_v1,
@@ -548,12 +584,17 @@ trtmc_status TRTMC_CALL refine_pose(trtmc_model* model,
                 "pose request, callback and result output are required");
         const auto input = pose_refinement_input(*request);
         const ConvertedConfig options(config);
+
         internal::IPoseHypothesesCropsToRefinedPoses* family;
         std::unique_ptr<ModelSession> session;
         {
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             family = &require_interface<internal::IPoseHypothesesCropsToRefinedPoses>(
                 model, internal::IPoseHypothesesCropsToRefinedPoses::kTask);
+            validate_task_config(
+                model_owner(model),
+                internal::contract_key<internal::IPoseHypothesesCropsToRefinedPoses>(),
+                options.view());
             session = std::make_unique<ModelSession>(model);
         }
         *out = make_result<RefinedPosesStorage>(family->run(input, options.view()));
@@ -580,6 +621,8 @@ TRTMC_PERCEPTION_TABLE(stereo_api, trtmc_stereo_images_to_disparity_api_v1, ster
                        DisparityStorage, trtmc_disparity_view_v1)
 TRTMC_PERCEPTION_TABLE(geometry_api, trtmc_image_to_metric_geometry_api_v1, geometry,
                        GeometryStorage, trtmc_metric_geometry_view_v1)
+TRTMC_PERCEPTION_TABLE(detected_boxes_api, trtmc_image_to_boxes_api_v1, detect_boxes,
+                       DetectedBoxesStorage, trtmc_detected_boxes_view_v1)
 TRTMC_PERCEPTION_TABLE(boxes_api, trtmc_image_text_to_boxes_api_v1, ground_boxes, BoxesStorage,
                        trtmc_grounded_boxes_view_v1)
 TRTMC_PERCEPTION_TABLE(ground_points_api, trtmc_image_text_to_points_api_v1, ground_points,
@@ -658,7 +701,7 @@ trtmc_status TRTMC_CALL object_pose_result_view(const trtmc_result* result,
 Span<const TaskBinding> perception_task_bindings() noexcept {
 #define B(Interface, Table)                                                                        \
     {                                                                                              \
-        internal::Interface::kTask, 1, 0, &Table.header, implements<internal::Interface>           \
+        internal::Interface::kTask, 1, 0, &Table.header                                            \
     }
     static const TaskBinding bindings[] = {B(IBatchImageTextToBoxes, boxes_batch_api),
                                            B(IImageToSemanticSegmentation, semantic_api),
@@ -670,6 +713,7 @@ Span<const TaskBinding> perception_task_bindings() noexcept {
                                            B(IImageBoxExemplarsToInstanceMasks, exemplars_api),
                                            B(IStereoImagesToDisparity, stereo_api),
                                            B(IImageToMetricGeometry, geometry_api),
+                                           B(IImageToBoxes, detected_boxes_api),
                                            B(IImageTextToBoxes, boxes_api),
                                            B(IImageTextToPoints, ground_points_api),
                                            B(IPoseHypothesesCropsToRefinedPoses, refine_api),

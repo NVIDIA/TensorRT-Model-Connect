@@ -17,6 +17,7 @@
 #include "trtmc/recurrent.hpp"
 #include "trtmc/speech.hpp"
 #include "trtmc/stream.hpp"
+#include "trtmc/structure.hpp"
 #include "trtmc/text.hpp"
 #include "trtmc/tracking.hpp"
 #include "trtmc/video.hpp"

@@ -34,43 +34,58 @@ class PerceptionModel final : public IModel,
   public:
     explicit PerceptionModel(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInfo> task_info() const override {
+    std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "example_pose_unsupported")
             return {};
         if (mode_.rfind("batch", 0) == 0)
-            return {{IBatchImageTextToBoxes::kTask, 1, 0}};
+            return {bind<IBatchImageTextToBoxes>(*this, fields_for(IBatchImageTextToBoxes::kTask))};
         if (mode_ == "pose_only")
-            return {{IPoseHypothesesCropsToRefinedPoses::kTask, 1, 0}};
-        return {{IImageToSemanticSegmentation::kTask, 1, 0},
-                {IImagePointsToMasks::kTask, 1, 0},
-                {IImageBoxToMasks::kTask, 1, 0},
-                {IImageMaskToMasks::kTask, 1, 0},
-                {IImageToMaskProposals::kTask, 1, 0},
-                {IImageTextToInstanceMasks::kTask, 1, 0},
-                {IImageBoxExemplarsToInstanceMasks::kTask, 1, 0},
-                {IStereoImagesToDisparity::kTask, 1, 0},
-                {IImageToMetricGeometry::kTask, 1, 0},
-                {IImageTextToBoxes::kTask, 1, 0},
-                {IImageTextToPoints::kTask, 1, 0},
-                {IPoseHypothesesCropsToRefinedPoses::kTask, 1, 0},
-                {IRgbdMeshMaskToObjectPose::kTask, 1, 0}};
+            return {bind<IPoseHypothesesCropsToRefinedPoses>(
+                *this, fields_for(IPoseHypothesesCropsToRefinedPoses::kTask))};
+        return {
+            bind<IImageToSemanticSegmentation>(*this,
+                                               fields_for(IImageToSemanticSegmentation::kTask)),
+            bind<IImagePointsToMasks>(*this, fields_for(IImagePointsToMasks::kTask)),
+            bind<IImageBoxToMasks>(*this, fields_for(IImageBoxToMasks::kTask)),
+            bind<IImageMaskToMasks>(*this, fields_for(IImageMaskToMasks::kTask)),
+            bind<IImageToMaskProposals>(*this, fields_for(IImageToMaskProposals::kTask)),
+            bind<IImageTextToInstanceMasks>(*this, fields_for(IImageTextToInstanceMasks::kTask)),
+            bind<IImageBoxExemplarsToInstanceMasks>(
+                *this, fields_for(IImageBoxExemplarsToInstanceMasks::kTask)),
+            bind<IStereoImagesToDisparity>(*this, fields_for(IStereoImagesToDisparity::kTask)),
+            bind<IImageToMetricGeometry>(*this, fields_for(IImageToMetricGeometry::kTask)),
+            bind<IImageTextToBoxes>(*this, fields_for(IImageTextToBoxes::kTask)),
+            bind<IImageTextToPoints>(*this, fields_for(IImageTextToPoints::kTask)),
+            bind<IPoseHypothesesCropsToRefinedPoses>(
+                *this, fields_for(IPoseHypothesesCropsToRefinedPoses::kTask)),
+            bind<IRgbdMeshMaskToObjectPose>(*this, fields_for(IRgbdMeshMaskToObjectPose::kTask))};
     }
-    std::vector<ConfigField> config_fields(std::string_view id) const override {
-        if (mode_ == IImagePointsToMasks::kTask && id == IImagePointsToMasks::kTask)
-            return {{"benchmark_masks", ConfigKind::String, ConfigValue{std::string_view{}},
-                     "Explicit synthetic mask behavior for application regression tests"}};
-        if (id == IBatchImageTextToBoxes::kTask)
-            return {
+    trtmc::Span<const ConfigField> fields_for(std::string_view id) const {
+        if (mode_ == IImagePointsToMasks::kTask && id == IImagePointsToMasks::kTask) {
+            static const ConfigField declared[] = {
+                {"benchmark_masks", ConfigKind::String, ConfigValue{std::string_view{}},
+                 "Explicit synthetic mask behavior for application regression tests"}};
+            return declared;
+        }
+        if (id == IBatchImageTextToBoxes::kTask) {
+            static const ConfigField declared[] = {
                 {"score", ConfigKind::F64, ConfigValue{0.5}, "Synthetic score value"},
                 {"include_scores", ConfigKind::Bool, ConfigValue{true}, "Return synthetic scores"}};
-        if (id == IPoseHypothesesCropsToRefinedPoses::kTask)
-            return {{"refinement_iterations", ConfigKind::I64, ConfigValue{std::int64_t{2}},
-                     "Refinement callback iterations"},
-                    {"score_hypotheses", ConfigKind::Bool, ConfigValue{true},
-                     "Request final scoring crops"}};
-        if (id == IImageToMetricGeometry::kTask)
-            return {
+            return declared;
+        }
+        if (id == IPoseHypothesesCropsToRefinedPoses::kTask) {
+            static const ConfigField declared[] = {
+                {"refinement_iterations", ConfigKind::I64, ConfigValue{std::int64_t{2}},
+                 "Refinement callback iterations"},
+                {"score_hypotheses", ConfigKind::Bool, ConfigValue{true},
+                 "Request final scoring crops"}};
+            return declared;
+        }
+        if (id == IImageToMetricGeometry::kTask) {
+            static const ConfigField declared[] = {
                 {"fov_x", ConfigKind::F64, ConfigValue{60.0}, "Horizontal field of view, degrees"}};
+            return declared;
+        }
         return {};
     }
     SemanticSegmentationResult run(const ImageToSemanticSegmentationRequest& request,
@@ -394,7 +409,7 @@ class PerceptionModel final : public IModel,
         return result;
     }
     std::map<std::string_view, ConfigValue> options(std::string_view id, ConfigView config) const {
-        const auto fields = config_fields(id);
+        const auto fields = fields_for(id);
         std::map<std::string_view, ConfigValue> out;
         std::set<std::string_view> seen;
         for (const auto& field : fields)

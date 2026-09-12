@@ -215,6 +215,8 @@ trtmc_status start_stream(trtmc_model* model, const Request* request,
             const std::lock_guard<std::mutex> lock(model_mutex(model));
             auto& family = require_interface<Interface>(model, Interface::kTask);
             const ConvertedConfig options(config);
+            validate_task_config(model_owner(model), internal::contract_key<Interface>(),
+                                 options.view());
             owner = std::make_unique<ModelSession>(model);
             implementation = invoke(family, *request, options.view());
         }
@@ -421,20 +423,13 @@ const trtmc_streaming_images_text_conversation_api_v1 images_conversation_api{
 const trtmc_streaming_video_text_conversation_api_v1 video_conversation_api{
     {1, 0, sizeof(video_conversation_api)}, start_video_conversation, &conversation_stream_api};
 const TaskBinding bindings[] = {
-    {internal::IStreamingTextContinuation::kTask, 1, 0, &text_api.header,
-     implements<internal::IStreamingTextContinuation>},
-    {internal::IStreamingImagesTextToText::kTask, 1, 0, &images_api.header,
-     implements<internal::IStreamingImagesTextToText>},
-    {internal::IStreamingTextConversation::kTask, 1, 0, &conversation_api.header,
-     implements<internal::IStreamingTextConversation>},
-    {internal::IStreamingVideoTextToText::kTask, 1, 0, &video_text_api.header,
-     implements<internal::IStreamingVideoTextToText>},
-    {internal::IStreamingImageVideoTextToText::kTask, 1, 0, &image_video_text_api.header,
-     implements<internal::IStreamingImageVideoTextToText>},
-    {internal::IStreamingImagesTextConversation::kTask, 1, 0, &images_conversation_api.header,
-     implements<internal::IStreamingImagesTextConversation>},
-    {internal::IStreamingVideoTextConversation::kTask, 1, 0, &video_conversation_api.header,
-     implements<internal::IStreamingVideoTextConversation>},
+    {internal::IStreamingTextContinuation::kTask, 1, 0, &text_api.header},
+    {internal::IStreamingImagesTextToText::kTask, 1, 0, &images_api.header},
+    {internal::IStreamingTextConversation::kTask, 1, 0, &conversation_api.header},
+    {internal::IStreamingVideoTextToText::kTask, 1, 0, &video_text_api.header},
+    {internal::IStreamingImageVideoTextToText::kTask, 1, 0, &image_video_text_api.header},
+    {internal::IStreamingImagesTextConversation::kTask, 1, 0, &images_conversation_api.header},
+    {internal::IStreamingVideoTextConversation::kTask, 1, 0, &video_conversation_api.header},
 };
 
 } // namespace

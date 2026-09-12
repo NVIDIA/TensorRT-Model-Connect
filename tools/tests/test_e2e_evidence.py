@@ -548,9 +548,10 @@ def test_numeric_output_shows_dimensions_without_vectors(tmp_path: Path) -> None
     assert "float32" not in visible and "float32" in report
 
 
-def test_classification_preserves_ids_and_raw_score_meaning(tmp_path: Path) -> None:
+@pytest.mark.parametrize("task", ["image_classification", "image_to_class_scores"])
+def test_classification_preserves_ids_and_raw_score_meaning(tmp_path: Path, task: str) -> None:
     data = _case()
-    data["inputs"]["manifest"]["task"] = "image_classification"
+    data["inputs"]["manifest"]["task"] = task
     data["native"] = {"top_class": 7, "top_score": 12.5, "logits": [0.1] * 1000}
     data["reference"] = 7
     report = render_case(data, tmp_path)
@@ -570,11 +571,12 @@ def test_classification_preserves_ids_and_raw_score_meaning(tmp_path: Path) -> N
         (7, 80, "passed", False),
     ],
 )
+@pytest.mark.parametrize("task", ["classification", "image_to_class_scores"])
 def test_classification_reference_is_visible_beside_native(
-    tmp_path: Path, native_class: int, reference_class: int, status: str, checked: bool
+    tmp_path: Path, native_class: int, reference_class: int, status: str, checked: bool, task: str
 ) -> None:
     data = _case()
-    data["inputs"]["manifest"]["task"] = "classification"
+    data["inputs"]["manifest"]["task"] = task
     data["native"] = {"top_class": native_class}
     data["reference"] = {
         "top_class": reference_class,
@@ -1271,8 +1273,10 @@ def test_numeric_file_path_escape_and_symlinks_are_not_read(tmp_path: Path) -> N
         assert "Class index (from saved logits)" not in visible
 
 
-def test_text_generation_tokens_without_decoded_text_are_explicit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("task", ["text_generation", "text_continuation", "text_translation"])
+def test_text_generation_tokens_without_decoded_text_are_explicit(tmp_path: Path, task: str) -> None:
     data = _case()
+    data["inputs"]["manifest"]["task"] = task
     data["native"] = {"token_ids": [10, 11]}
     data["reference"].pop("actual_decoded")
     visible = _visible(render_case(data, tmp_path))

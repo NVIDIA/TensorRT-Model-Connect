@@ -72,9 +72,13 @@ trtmc_status TRTMC_CALL history_audio_run(
         const internal::TextAudioTokenHistoryToAudioRequest request{string_view(input->prompt),
                                                                     token_history(input->history)};
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<internal::ITextAudioTokenHistoryToAudio>(
             model, internal::ITextAudioTokenHistoryToAudio::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ITextAudioTokenHistoryToAudio>(),
+                             options.view());
         *output = make_result<AudioResultStorage>(family.run(request, options.view()));
     });
 }
@@ -110,9 +114,12 @@ extern "C" trtmc_status TRTMC_CALL text_to_audio_run(trtmc_model* model,
         require(input && output, "audio request and result output are required");
         const internal::TextToAudioRequest request{string_view(input->prompt)};
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task =
             require_interface<internal::ITextToAudio>(model, internal::ITextToAudio::kTask);
+        validate_task_config(model_owner(model), internal::contract_key<internal::ITextToAudio>(),
+                             options.view());
         *output = make_result<AudioResultStorage>(task.run(request, options.view()));
     });
 }
@@ -129,9 +136,12 @@ extern "C" trtmc_status TRTMC_CALL text_to_speech_run(trtmc_model* model,
         const internal::TextToSpeechRequest request{string_view(input->text),
                                                     language(input->has_language, input->language)};
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task =
             require_interface<internal::ITextToSpeech>(model, internal::ITextToSpeech::kTask);
+        validate_task_config(model_owner(model), internal::contract_key<internal::ITextToSpeech>(),
+                             options.view());
         *output = make_result<AudioResultStorage>(task.run(request, options.view()));
     });
 }
@@ -145,9 +155,13 @@ extern "C" trtmc_status TRTMC_CALL speech_transcription_run(
         require(input && output, "transcription request and result output are required");
         const auto request = transcription_request(*input);
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::ISpeechTranscription>(
             model, internal::ISpeechTranscription::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ISpeechTranscription>(),
+                             options.view());
         *output = make_result<TextResultStorage>(task.run(request, options.view()));
     });
 }
@@ -161,9 +175,13 @@ extern "C" trtmc_status TRTMC_CALL speech_translation_run(
         require(input && output, "speech translation request and result output are required");
         const auto request = translation_request(*input);
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::ISpeechTranslation>(
             model, internal::ISpeechTranslation::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ISpeechTranslation>(),
+                             options.view());
         *output = make_result<TextResultStorage>(task.run(request, options.view()));
     });
 }
@@ -177,9 +195,13 @@ extern "C" trtmc_status TRTMC_CALL language_identification_run(
         require(input && output, "language identification request and result output are required");
         const internal::AudioLanguageIdentificationRequest request{audio_view(input->audio)};
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IAudioLanguageIdentification>(
             model, internal::IAudioLanguageIdentification::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IAudioLanguageIdentification>(),
+                             options.view());
         auto result = task.run(request, options.view());
         if (result.labels.size() != result.scores.size())
             throw ApiFailure{TRTMC_INTERNAL_ERROR,
@@ -201,9 +223,13 @@ extern "C" trtmc_status TRTMC_CALL speech_response_run(
         require(input && output, "speech response request and result output are required");
         const internal::SpeechToSpeechResponseRequest request{audio_view(input->audio)};
         const ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::ISpeechToSpeechResponse>(
             model, internal::ISpeechToSpeechResponse::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ISpeechToSpeechResponse>(),
+                             options.view());
         *output = make_result<AudioResultStorage>(task.run(request, options.view()));
     });
 }
@@ -222,11 +248,15 @@ extern "C" trtmc_status TRTMC_CALL batch_transcription_run(
         items.reserve(source.size());
         for (const auto& item : source) {
             configs.emplace_back(&item.config);
+
             items.push_back({transcription_request(item.input), configs.back().view()});
         }
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IBatchSpeechTranscription>(
             model, internal::IBatchSpeechTranscription::kTask);
+        validate_batch_configs(model_owner(model),
+                               internal::contract_key<internal::IBatchSpeechTranscription>(),
+                               configs);
         auto result = task.run_batch({{items.data(), items.size()}});
         if (result.size() != items.size())
             throw ApiFailure{TRTMC_INTERNAL_ERROR,
@@ -249,11 +279,15 @@ batch_translation_run(trtmc_model* model, const trtmc_batch_speech_translation_r
         items.reserve(source.size());
         for (const auto& item : source) {
             configs.emplace_back(&item.config);
+
             items.push_back({translation_request(item.input), configs.back().view()});
         }
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IBatchSpeechTranslation>(
             model, internal::IBatchSpeechTranslation::kTask);
+        validate_batch_configs(model_owner(model),
+                               internal::contract_key<internal::IBatchSpeechTranslation>(),
+                               configs);
         auto result = task.run_batch({{items.data(), items.size()}});
         if (result.size() != items.size())
             throw ApiFailure{TRTMC_INTERNAL_ERROR,
@@ -276,6 +310,7 @@ mixed_batch_run(trtmc_model* model, const trtmc_mixed_batch_speech_to_text_reque
         items.reserve(source.size());
         for (const auto& item : source) {
             configs.emplace_back(&item.config);
+
             switch (item.kind) {
             case TRTMC_SPEECH_TEXT_TRANSCRIPTION:
                 items.push_back(
@@ -292,6 +327,9 @@ mixed_batch_run(trtmc_model* model, const trtmc_mixed_batch_speech_to_text_reque
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IMixedBatchSpeechToText>(
             model, internal::IMixedBatchSpeechToText::kTask);
+        validate_batch_configs(model_owner(model),
+                               internal::contract_key<internal::IMixedBatchSpeechToText>(),
+                               configs);
         auto result = task.run_batch({{items.data(), items.size()}});
         if (result.size() != items.size())
             throw ApiFailure{TRTMC_INTERNAL_ERROR,
@@ -349,7 +387,11 @@ trtmc_status TRTMC_CALL history_audio_batch_run(
         for (size_t index = 0; index < source.size(); ++index) {
             try {
                 configs.emplace_back(&source[index].config);
+
                 items.push_back({{string_view(source[index].input.prompt)}, configs.back().view()});
+            } catch (const internal::ConfigError& failure) {
+                throw OwnedApiFailure{TRTMC_INVALID_CONFIG, "batch item[" + std::to_string(index) +
+                                                                "]: " + failure.what()};
             } catch (const ApiFailure& failure) {
                 throw OwnedApiFailure{failure.status, "batch item[" + std::to_string(index) +
                                                           "]: " + failure.message};
@@ -358,6 +400,9 @@ trtmc_status TRTMC_CALL history_audio_batch_run(
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& family = require_interface<internal::IBatchTextAudioTokenHistoryToAudio>(
             model, internal::IBatchTextAudioTokenHistoryToAudio::kTask);
+        validate_batch_configs(
+            model_owner(model),
+            internal::contract_key<internal::IBatchTextAudioTokenHistoryToAudio>(), configs);
         auto results = family.run_batch({history, {items.data(), items.size()}});
         if (results.size() != items.size())
             throw ApiFailure{TRTMC_INTERNAL_ERROR,
@@ -381,11 +426,14 @@ trtmc_status TRTMC_CALL text_audio_batch_run(trtmc_model* model,
         items.reserve(source.size());
         for (const auto& item : source) {
             configs.emplace_back(&item.config);
+
             items.push_back({{string_view(item.input.prompt)}, configs.back().view()});
         }
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IBatchTextToAudio>(
             model, internal::IBatchTextToAudio::kTask);
+        validate_batch_configs(model_owner(model),
+                               internal::contract_key<internal::IBatchTextToAudio>(), configs);
         auto result = task.run_batch({{items.data(), items.size()}});
         if (result.size() != items.size())
             throw ApiFailure{TRTMC_INTERNAL_ERROR,
@@ -409,6 +457,7 @@ trtmc_status TRTMC_CALL text_speech_batch_run(trtmc_model* model,
         items.reserve(source.size());
         for (const auto& item : source) {
             configs.emplace_back(&item.config);
+
             items.push_back({{string_view(item.input.text),
                               language(item.input.has_language, item.input.language)},
                              configs.back().view()});
@@ -416,6 +465,8 @@ trtmc_status TRTMC_CALL text_speech_batch_run(trtmc_model* model,
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IBatchTextToSpeech>(
             model, internal::IBatchTextToSpeech::kTask);
+        validate_batch_configs(model_owner(model),
+                               internal::contract_key<internal::IBatchTextToSpeech>(), configs);
         auto result = task.run_batch({{items.data(), items.size()}});
         if (result.size() != items.size())
             throw ApiFailure{TRTMC_INTERNAL_ERROR,
@@ -470,32 +521,19 @@ const trtmc_batch_text_audio_token_history_to_audio_api_v1 history_audio_batch_a
 static_assert(offsetof(trtmc_batch_text_audio_token_history_to_audio_api_v1, header) == 0);
 
 const TaskBinding bindings[] = {
-    {internal::IBatchTextAudioTokenHistoryToAudio::kTask, 1, 0, &history_audio_batch_api.header,
-     implements<internal::IBatchTextAudioTokenHistoryToAudio>},
-    {internal::ITextAudioTokenHistoryToAudio::kTask, 1, 0, &history_audio_api.header,
-     implements<internal::ITextAudioTokenHistoryToAudio>},
-    {internal::ITextToAudio::kTask, 1, 0, &text_audio_api.header,
-     implements<internal::ITextToAudio>},
-    {internal::ITextToSpeech::kTask, 1, 0, &text_speech_api.header,
-     implements<internal::ITextToSpeech>},
-    {internal::ISpeechTranscription::kTask, 1, 0, &transcription_api.header,
-     implements<internal::ISpeechTranscription>},
-    {internal::ISpeechTranslation::kTask, 1, 0, &translation_api.header,
-     implements<internal::ISpeechTranslation>},
-    {internal::IAudioLanguageIdentification::kTask, 1, 0, &language_api.header,
-     implements<internal::IAudioLanguageIdentification>},
-    {internal::ISpeechToSpeechResponse::kTask, 1, 0, &response_api.header,
-     implements<internal::ISpeechToSpeechResponse>},
-    {internal::IBatchSpeechTranscription::kTask, 1, 0, &batch_transcription_api.header,
-     implements<internal::IBatchSpeechTranscription>},
-    {internal::IBatchSpeechTranslation::kTask, 1, 0, &batch_translation_api.header,
-     implements<internal::IBatchSpeechTranslation>},
-    {internal::IMixedBatchSpeechToText::kTask, 1, 0, &mixed_batch_api.header,
-     implements<internal::IMixedBatchSpeechToText>},
-    {internal::IBatchTextToAudio::kTask, 1, 0, &batch_text_audio_api.header,
-     implements<internal::IBatchTextToAudio>},
-    {internal::IBatchTextToSpeech::kTask, 1, 0, &batch_text_speech_api.header,
-     implements<internal::IBatchTextToSpeech>},
+    {internal::IBatchTextAudioTokenHistoryToAudio::kTask, 1, 0, &history_audio_batch_api.header},
+    {internal::ITextAudioTokenHistoryToAudio::kTask, 1, 0, &history_audio_api.header},
+    {internal::ITextToAudio::kTask, 1, 0, &text_audio_api.header},
+    {internal::ITextToSpeech::kTask, 1, 0, &text_speech_api.header},
+    {internal::ISpeechTranscription::kTask, 1, 0, &transcription_api.header},
+    {internal::ISpeechTranslation::kTask, 1, 0, &translation_api.header},
+    {internal::IAudioLanguageIdentification::kTask, 1, 0, &language_api.header},
+    {internal::ISpeechToSpeechResponse::kTask, 1, 0, &response_api.header},
+    {internal::IBatchSpeechTranscription::kTask, 1, 0, &batch_transcription_api.header},
+    {internal::IBatchSpeechTranslation::kTask, 1, 0, &batch_translation_api.header},
+    {internal::IMixedBatchSpeechToText::kTask, 1, 0, &mixed_batch_api.header},
+    {internal::IBatchTextToAudio::kTask, 1, 0, &batch_text_audio_api.header},
+    {internal::IBatchTextToSpeech::kTask, 1, 0, &batch_text_speech_api.header},
 };
 
 } // namespace

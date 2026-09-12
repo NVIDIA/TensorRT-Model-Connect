@@ -18,9 +18,13 @@ extern "C" trtmc_status TRTMC_CALL conditional_run(
         require(input && output, "input and result output are required");
         internal::ConditionalTextGenerationRequest request{text_source(input->source)};
         ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IConditionalTextGeneration>(
             model, internal::IConditionalTextGeneration::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IConditionalTextGeneration>(),
+                             options.view());
         *output = make_result<TextResultStorage>(task.run(request, options.view()));
     });
 }
@@ -34,9 +38,13 @@ extern "C" trtmc_status TRTMC_CALL reconstruction_run(
         require(input && output, "input and result output are required");
         internal::CorruptedTextReconstructionRequest request{string_view(input->corrupted_text)};
         ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::ICorruptedTextReconstruction>(
             model, internal::ICorruptedTextReconstruction::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ICorruptedTextReconstruction>(),
+                             options.view());
         *output = make_result<TextResultStorage>(task.run(request, options.view()));
     });
 }
@@ -50,9 +58,13 @@ extern "C" trtmc_status TRTMC_CALL unconditional_run(trtmc_model* model,
     return guarded(error, [&] {
         require(output != nullptr, "result output is required");
         ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IUnconditionalTextGeneration>(
             model, internal::IUnconditionalTextGeneration::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IUnconditionalTextGeneration>(),
+                             options.view());
         *output = make_result<TextResultStorage>(task.run(options.view()));
     });
 }
@@ -78,9 +90,12 @@ extern "C" trtmc_status TRTMC_CALL translation_run(trtmc_model* model,
             require(!request.source_language->empty(), "present source language must not be empty");
         }
         ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task =
             require_interface<internal::ITextTranslation>(model, internal::ITextTranslation::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ITextTranslation>(), options.view());
         *output = make_result<TextResultStorage>(task.run(request, options.view()));
     });
 }
@@ -94,9 +109,13 @@ extern "C" trtmc_status TRTMC_CALL summarization_run(
         require(input && output, "input and result output are required");
         internal::TextSummarizationRequest request{string_view(input->document)};
         ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::ITextSummarization>(
             model, internal::ITextSummarization::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ITextSummarization>(),
+                             options.view());
         *output = make_result<TextResultStorage>(task.run(request, options.view()));
     });
 }
@@ -111,9 +130,13 @@ extern "C" trtmc_status TRTMC_CALL infilling_run(
         internal::TextPrefixSuffixInfillingRequest request{string_view(input->prefix),
                                                            string_view(input->suffix)};
         ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::ITextPrefixSuffixInfilling>(
             model, internal::ITextPrefixSuffixInfilling::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ITextPrefixSuffixInfilling>(),
+                             options.view());
         *output = make_result<TextResultStorage>(task.run(request, options.view()));
     });
 }
@@ -128,9 +151,13 @@ extern "C" trtmc_status TRTMC_CALL question_answering_run(
         internal::ContextQuestionAnsweringRequest request{string_view(input->question),
                                                           string_view(input->context)};
         ConvertedConfig options(config);
+
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IContextQuestionAnswering>(
             model, internal::IContextQuestionAnswering::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IContextQuestionAnswering>(),
+                             options.view());
         *output = make_result<TextResultStorage>(task.run(request, options.view()));
     });
 }
@@ -149,11 +176,14 @@ extern "C" trtmc_status TRTMC_CALL batch_run(trtmc_model* model,
         requests.reserve(items.size());
         for (const auto& item : items) {
             configs.emplace_back(&item.config);
+
             requests.push_back({{text_source(item.input.prefix)}, configs.back().view()});
         }
         std::lock_guard<std::mutex> lock(model_mutex(model));
         auto& task = require_interface<internal::IBatchTextContinuation>(
             model, internal::IBatchTextContinuation::kTask);
+        validate_batch_configs(model_owner(model),
+                               internal::contract_key<internal::IBatchTextContinuation>(), configs);
         auto result = task.run_batch({{requests.data(), requests.size()}});
         if (result.size() != items.size())
             throw ApiFailure{TRTMC_INTERNAL_ERROR,
@@ -180,22 +210,14 @@ const trtmc_batch_text_continuation_api_v1 batch_api{
     {1, 0, sizeof(batch_api)}, batch_run, text_batch_result_count, text_batch_result_item_view};
 
 const TaskBinding bindings[] = {
-    {internal::IConditionalTextGeneration::kTask, 1, 0, &conditional_api.header,
-     implements<internal::IConditionalTextGeneration>},
-    {internal::ICorruptedTextReconstruction::kTask, 1, 0, &reconstruction_api.header,
-     implements<internal::ICorruptedTextReconstruction>},
-    {internal::IUnconditionalTextGeneration::kTask, 1, 0, &unconditional_api.header,
-     implements<internal::IUnconditionalTextGeneration>},
-    {internal::ITextTranslation::kTask, 1, 0, &translation_api.header,
-     implements<internal::ITextTranslation>},
-    {internal::ITextSummarization::kTask, 1, 0, &summarization_api.header,
-     implements<internal::ITextSummarization>},
-    {internal::ITextPrefixSuffixInfilling::kTask, 1, 0, &infilling_api.header,
-     implements<internal::ITextPrefixSuffixInfilling>},
-    {internal::IContextQuestionAnswering::kTask, 1, 0, &qa_api.header,
-     implements<internal::IContextQuestionAnswering>},
-    {internal::IBatchTextContinuation::kTask, 1, 0, &batch_api.header,
-     implements<internal::IBatchTextContinuation>},
+    {internal::IConditionalTextGeneration::kTask, 1, 0, &conditional_api.header},
+    {internal::ICorruptedTextReconstruction::kTask, 1, 0, &reconstruction_api.header},
+    {internal::IUnconditionalTextGeneration::kTask, 1, 0, &unconditional_api.header},
+    {internal::ITextTranslation::kTask, 1, 0, &translation_api.header},
+    {internal::ITextSummarization::kTask, 1, 0, &summarization_api.header},
+    {internal::ITextPrefixSuffixInfilling::kTask, 1, 0, &infilling_api.header},
+    {internal::IContextQuestionAnswering::kTask, 1, 0, &qa_api.header},
+    {internal::IBatchTextContinuation::kTask, 1, 0, &batch_api.header},
 };
 
 } // namespace
