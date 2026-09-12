@@ -413,8 +413,9 @@ int activePrefixCount(const FeatureTensor& mask, int profile_count, std::string_
 }
 
 bool hasRequiredEngines(const EngineSet& engines) {
-    return engines.input && engines.trunk_init && engines.msa && engines.conditioning &&
-           engines.score_input && engines.score_output && engines.confidence;
+    return engines.input && engines.trunk_init && engines.template_engine && engines.msa &&
+           engines.conditioning && engines.score_input && engines.score_output &&
+           engines.confidence;
 }
 
 void requireStream(const std::unique_ptr<ITrtModule>& module, cudaStream_t stream) {
@@ -832,6 +833,7 @@ void Boltz2Pipeline::validateStreams() {
     if (stream_ == nullptr)
         throw std::invalid_argument("Boltz-2 TensorRT stream is null");
     requireStream(engines_.trunk_init, stream_);
+    requireStream(engines_.template_engine, stream_);
     requireStream(engines_.msa, stream_);
     requireStream(engines_.conditioning, stream_);
     requireStream(engines_.score_input, stream_);
@@ -853,11 +855,22 @@ void Boltz2Pipeline::configureProfile() {
     const auto& atom_mask = feature("atom_pad_mask");
     const auto& token_mask = feature("token_pad_mask");
     const auto& frames = feature("frames_idx");
+    const auto& template_mask = feature("template_mask");
     requireFeatureStorage(atom_mask, DType::kFloat32, static_cast<std::size_t>(atom_count_));
     requireFeatureStorage(token_mask, DType::kFloat32, static_cast<std::size_t>(token_count_));
     requireFeatureStorage(frames, DType::kInt32, static_cast<std::size_t>(token_count_) * 3U);
+    requireFeatureStorage(template_mask, DType::kFloat32,
+                          static_cast<std::size_t>(kTemplateCount * token_count_));
     active_atom_count_ = activePrefixCount(atom_mask, atom_count_, "atom");
     active_token_count_ = activePrefixCount(token_mask, token_count_, "token");
+    use_templates_ = false;
+    const auto* template_values = reinterpret_cast<const float*>(template_mask.data.data());
+    for (int index = 0; index < kTemplateCount * token_count_; ++index) {
+        const float value = template_values[index];
+        if (value != 0.0F && value != 1.0F)
+            throw std::invalid_argument("Boltz-2 template_mask must be binary");
+        use_templates_ = use_templates_ || value == 1.0F;
+    }
     if (!matchesRandomProfile(artifacts_.random_samples, 42, 200, atom_count_))
         throw std::invalid_argument("Boltz-2 random samples differ from feature atom count");
 }
@@ -888,6 +901,7 @@ void Boltz2Pipeline::activateRequest(PreparedRequest request) {
             throw std::invalid_argument(
                 "Boltz-2 structure metadata atom count differs from the active request");
         uploadFeatures();
+        bindTemplatePath();
     } catch (...) {
         artifacts_.features = std::move(previous_features);
         artifacts_.random_samples = std::move(previous_random_samples);
@@ -895,6 +909,7 @@ void Boltz2Pipeline::activateRequest(PreparedRequest request) {
         artifacts_.structure_metadata_json = std::move(previous_metadata);
         configureProfile();
         uploadFeatures();
+        bindTemplatePath();
         throw;
     }
 }
@@ -934,28 +949,49 @@ void Boltz2Pipeline::bindTrunkEngines() {
           "method_feature", "modified", "cyclic_period", "mol_type"})
         bindFeature(*engines_.input, name);
 
-    requireExactCounts(*engines_.trunk_init, 12, 3);
+    requireExactCounts(*engines_.trunk_init, 13, 3);
     requireNames(*engines_.trunk_init,
                  {"s_inputs", "recycle_s", "recycle_z", "asym_id", "residue_index", "entity_id",
-                  "token_index", "sym_id", "token_bonds", "type_bonds", "contact_conditioning",
-                  "contact_threshold"},
+                  "token_index", "sym_id", "cyclic_period", "token_bonds", "type_bonds",
+                  "contact_conditioning", "contact_threshold"},
                  {"s", "z", "relative_position_encoding"});
     bindPointer(*engines_.trunk_init, "s_inputs", *engines_.input, "s_inputs");
     for (const auto name :
-         {"asym_id", "residue_index", "entity_id", "token_index", "sym_id", "token_bonds",
-          "type_bonds", "contact_conditioning", "contact_threshold"})
+         {"asym_id", "residue_index", "entity_id", "token_index", "sym_id", "cyclic_period",
+          "token_bonds", "type_bonds", "contact_conditioning", "contact_threshold"})
         bindFeature(*engines_.trunk_init, name);
+
+    requireExactCounts(*engines_.template_engine, 11, 1);
+    requireNames(*engines_.template_engine,
+                 {"z", "template_restype", "template_frame_rot", "template_frame_t", "template_cb",
+                  "template_ca", "template_mask_cb", "template_mask_frame", "template_mask",
+                  "visibility_ids", "token_mask"},
+                 {"z_out"});
+    bindPointer(*engines_.template_engine, "z", *engines_.trunk_init, "z");
+    for (const auto name : {"template_restype", "template_frame_rot", "template_frame_t",
+                            "template_cb", "template_ca", "template_mask_cb", "template_mask_frame",
+                            "template_mask", "visibility_ids"})
+        bindFeature(*engines_.template_engine, name);
+    engines_.template_engine->bind_external("token_mask",
+                                            device_features_.at("token_pad_mask").data());
 
     requireExactCounts(*engines_.msa, 8, 1);
     requireNames(*engines_.msa,
                  {"z", "s_inputs", "msa", "has_deletion", "deletion_value", "msa_paired",
                   "msa_mask", "token_mask"},
                  {"z_out"});
-    bindPointer(*engines_.msa, "z", *engines_.trunk_init, "z");
     bindPointer(*engines_.msa, "s_inputs", *engines_.input, "s_inputs");
     for (const auto name : {"msa", "has_deletion", "deletion_value", "msa_paired", "msa_mask"})
         bindFeature(*engines_.msa, name);
     engines_.msa->bind_external("token_mask", device_features_.at("token_pad_mask").data());
+    bindTemplatePath();
+}
+
+void Boltz2Pipeline::bindTemplatePath() {
+    if (use_templates_)
+        bindPointer(*engines_.msa, "z", *engines_.template_engine, "z_out");
+    else
+        bindPointer(*engines_.msa, "z", *engines_.trunk_init, "z");
 }
 
 ITrtModule* Boltz2Pipeline::bindPairformerEngines() {
@@ -1035,20 +1071,20 @@ void Boltz2Pipeline::bindDiffusionEngines(ITrtModule& trunk_output) {
 }
 
 void Boltz2Pipeline::bindConfidenceEngine(ITrtModule& trunk_output) {
-    requireExactCounts(*engines_.confidence, 15, 7);
+    requireExactCounts(*engines_.confidence, 16, 7);
     requireNames(*engines_.confidence,
                  {"s_inputs", "s", "z", "x_pred", "token_to_rep_atom", "asym_id", "residue_index",
-                  "entity_id", "token_index", "sym_id", "token_bonds", "type_bonds",
-                  "contact_conditioning", "contact_threshold", "token_mask"},
+                  "entity_id", "token_index", "sym_id", "cyclic_period", "token_bonds",
+                  "type_bonds", "contact_conditioning", "contact_threshold", "token_mask"},
                  {"pae_logits", "pde_logits", "plddt_logits", "resolved_logits",
                   "representative_distance", "pdistogram", "pbfactor"});
     bindPointer(*engines_.confidence, "s_inputs", *engines_.input, "s_inputs");
     bindPointer(*engines_.confidence, "s", trunk_output, "s_out");
     bindPointer(*engines_.confidence, "z", trunk_output, "z_out");
     engines_.confidence->bind_external("x_pred", x_pred_.data());
-    for (const auto name :
-         {"token_to_rep_atom", "asym_id", "residue_index", "entity_id", "token_index", "sym_id",
-          "token_bonds", "type_bonds", "contact_conditioning", "contact_threshold"})
+    for (const auto name : {"token_to_rep_atom", "asym_id", "residue_index", "entity_id",
+                            "token_index", "sym_id", "cyclic_period", "token_bonds", "type_bonds",
+                            "contact_conditioning", "contact_threshold"})
         bindFeature(*engines_.confidence, name);
     engines_.confidence->bind_external("token_mask", device_features_.at("token_pad_mask").data());
 }
@@ -1066,6 +1102,8 @@ void Boltz2Pipeline::runTrunk() {
                                                engines_.pairformer.back()->device_ptr("z_out"));
         }
         engines_.trunk_init->forward_device_async({});
+        if (use_templates_)
+            engines_.template_engine->forward_device_async({});
         engines_.msa->forward_device_async({});
         for (auto& module : engines_.pairformer)
             module->forward_device_async({});

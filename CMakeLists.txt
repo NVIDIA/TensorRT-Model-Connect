@@ -371,7 +371,7 @@ if(TRTMC_BUILD_TESTS)
     ${PROJECT_SOURCE_DIR}/core/runtime/include
     ${PROJECT_SOURCE_DIR}/apps
   )
-  target_link_libraries(test_cli PRIVATE trtmc_cli)
+  target_link_libraries(test_cli PRIVATE trtmc_cli nlohmann_json::nlohmann_json)
   target_compile_options(test_cli PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME cli COMMAND test_cli
     "${_trtmc_test_runtime_root}"

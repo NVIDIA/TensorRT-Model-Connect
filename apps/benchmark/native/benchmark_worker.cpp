@@ -596,6 +596,18 @@ Json run_classify(trtmc::ITask& task, const Json& request, const Timing& timing)
                         {"top_score", result.top_score}};
         });
 }
+Json run_detect(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& interface = require_interface<trtmc::IObjectDetection>(task, "IObjectDetection");
+    const Image image = read_image(request.at("image_path").get<std::string>());
+    return measure(
+        timing, [&]() { return interface.detect(image.pixels.data(), image.height, image.width); },
+        [](const trtmc::ObjectDetectionResult& result) {
+            return Json{{"detected_images", 1},
+                        {"detections", result.boxes.size()},
+                        {"image_height", result.image_height},
+                        {"image_width", result.image_width}};
+        });
+}
 
 Json run_extract_features(trtmc::ITask& task, const Json& request, const Timing& timing) {
     auto& interface =
@@ -775,6 +787,7 @@ Json execute(const Json& request, const std::string& output_path) {
         {"segment", run_segment},
         {"segment_prompted", run_segment_prompted},
         {"classify", run_classify},
+        {"detect", run_detect},
         {"extract_features", run_extract_features},
         {"disparity", run_disparity},
         {"rerank", run_rerank},

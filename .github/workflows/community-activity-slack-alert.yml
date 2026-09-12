@@ -13,10 +13,10 @@ on:
   discussion_comment:
     types: [created]
   workflow_run:
-    workflows: ["Community CPU"]
+    workflows: ["Community CI"]
     types: [completed]
 
-# Community CPU completion is a trusted, default-branch event. The readiness
+# Community CI completion is a trusted, default-branch event. The readiness
 # job consumes only GitHub metadata and never downloads artifacts, checks out a
 # pull-request head, or executes contributor-controlled code.
 # General pull-request comments arrive through issue_comment. Maintainer
@@ -31,6 +31,7 @@ jobs:
   notify-ready-pr:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.event.workflow_run.event == 'pull_request_target' &&
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 7
@@ -44,7 +45,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL }}
           REPOSITORY: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           WORKFLOW_RUN_NAME: ${{ github.event.workflow_run.display_title }}
         run: |
           set -euo pipefail
@@ -54,17 +54,24 @@ jobs:
             exit 1
           fi
 
-          run_name_pattern='^PR #([1-9][0-9]*) · public CPU · merge [0-9a-f]{40}$'
+          run_name_pattern='^PR #([1-9][0-9]*) · community CI · head ([0-9a-f]{40}) · base ([0-9a-f]{40})$'
           if [[ ! "$WORKFLOW_RUN_NAME" =~ $run_name_pattern ]]; then
-            echo "::error::Unexpected Community CPU run name: $WORKFLOW_RUN_NAME"
+            echo "::error::Unexpected Community CI run name: $WORKFLOW_RUN_NAME"
             exit 1
           fi
           pr_number="${BASH_REMATCH[1]}"
+          HEAD_SHA="${BASH_REMATCH[2]}"
+          BASE_SHA="${BASH_REMATCH[3]}"
 
           pr_json="$(gh api "repos/$REPOSITORY/pulls/$pr_number")"
           current_head_sha="$(jq -r ".head.sha" <<<"$pr_json")"
           if [ "$current_head_sha" != "$HEAD_SHA" ]; then
             echo "::notice::PR #$pr_number advanced beyond $HEAD_SHA; skipping the stale readiness alert."
+            exit 0
+          fi
+          current_base_sha="$(jq -r ".base.sha" <<<"$pr_json")"
+          if [ "$current_base_sha" != "$BASE_SHA" ]; then
+            echo "::notice::PR #$pr_number has a newer base revision; skipping the stale readiness alert."
             exit 0
           fi
           if [ "$(jq -r ".state" <<<"$pr_json")" != "open" ]; then
@@ -99,6 +106,11 @@ jobs:
             current_head_sha="$(jq -r ".head.sha" <<<"$pr_json")"
             if [ "$current_head_sha" != "$HEAD_SHA" ]; then
               echo "::notice::PR #$pr_number advanced while checking readiness; skipping the stale alert."
+              exit 0
+            fi
+            current_base_sha="$(jq -r ".base.sha" <<<"$pr_json")"
+            if [ "$current_base_sha" != "$BASE_SHA" ]; then
+              echo "::notice::PR #$pr_number base advanced while checking readiness; skipping the stale alert."
               exit 0
             fi
 
@@ -170,7 +182,7 @@ jobs:
                  {
                    type: "section",
                    fields: [
-                     {type: "mrkdwn", text: "*Checks:*\nCommunity CPU · DCO · PR Metadata"},
+                     {type: "mrkdwn", text: "*Checks:*\nCommunity CI · DCO · PR Metadata"},
                      {type: "mrkdwn", text: ("*Head:*\n" + $head)}
                    ]
                  },

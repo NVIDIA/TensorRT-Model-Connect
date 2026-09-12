@@ -16,7 +16,8 @@ inline constexpr int kPairformerSegments = 8;
 inline constexpr int kTokenSegments = 4;
 inline constexpr int kMaxTokenCount = 117;
 inline constexpr int kMaxAtomCount = 928;
-inline constexpr int kMsaDepth = 1;
+inline constexpr int kMsaDepth = 8;
+inline constexpr int kTemplateCount = 4;
 inline constexpr int kAtomWindowQueries = 32;
 
 inline constexpr std::array<std::string_view, kPairformerSegments> kPairformerSections{
@@ -32,7 +33,7 @@ inline constexpr std::array<std::string_view, kTokenSegments> kTokenSections{
     "boltz2_diffusion_token_18_24_plan",
 };
 
-inline constexpr std::array<std::string_view, 31> kFeatureNames{
+inline constexpr std::array<std::string_view, 40> kFeatureNames{
     "ref_pos",
     "ref_space_uid",
     "ref_charge",
@@ -64,6 +65,15 @@ inline constexpr std::array<std::string_view, 31> kFeatureNames{
     "token_pad_mask",
     "token_to_rep_atom",
     "frames_idx",
+    "template_restype",
+    "template_frame_rot",
+    "template_frame_t",
+    "template_cb",
+    "template_ca",
+    "template_mask_cb",
+    "template_mask_frame",
+    "template_mask",
+    "visibility_ids",
 };
 
 } // namespace trtmc::boltz2

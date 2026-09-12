@@ -16,7 +16,7 @@ import numpy as np
 
 
 MAGIC: Final = b"B2FT"
-VERSION: Final = 1
+VERSION: Final = 2
 DTYPE_TO_CODE: Final = {
     np.dtype("float32"): 1,
     np.dtype("int32"): 2,
@@ -45,6 +45,7 @@ INT32_FEATURE_NAMES: Final = frozenset(
         "msa_mask",
         "token_to_rep_atom",
         "frames_idx",
+        "template_restype",
     }
 )
 FEATURE_NAMES: Final = (
@@ -79,15 +80,24 @@ FEATURE_NAMES: Final = (
     "token_pad_mask",
     "token_to_rep_atom",
     "frames_idx",
+    "template_restype",
+    "template_frame_rot",
+    "template_frame_t",
+    "template_cb",
+    "template_ca",
+    "template_mask_cb",
+    "template_mask_frame",
+    "template_mask",
+    "visibility_ids",
 )
 
 
 def profile_feature_shapes(
-    token_count: int, atom_count: int, msa_depth: int
+    token_count: int, atom_count: int, msa_depth: int, template_count: int = 4
 ) -> dict[str, tuple[int, ...]]:
     """Return the complete runtime feature contract for one reusable profile."""
 
-    if token_count <= 0 or atom_count <= 0 or msa_depth <= 0:
+    if token_count <= 0 or atom_count <= 0 or msa_depth <= 0 or template_count <= 0:
         raise ValueError("Boltz-2 profile dimensions must be positive")
     return {
         "ref_pos": (1, atom_count, 3),
@@ -121,6 +131,15 @@ def profile_feature_shapes(
         "token_pad_mask": (1, token_count),
         "token_to_rep_atom": (1, token_count, atom_count),
         "frames_idx": (1, 1, token_count, 3),
+        "template_restype": (1, template_count, token_count, 33),
+        "template_frame_rot": (1, template_count, token_count, 3, 3),
+        "template_frame_t": (1, template_count, token_count, 3),
+        "template_cb": (1, template_count, token_count, 3),
+        "template_ca": (1, template_count, token_count, 3),
+        "template_mask_cb": (1, template_count, token_count),
+        "template_mask_frame": (1, template_count, token_count),
+        "template_mask": (1, template_count, token_count),
+        "visibility_ids": (1, template_count, token_count),
     }
 
 

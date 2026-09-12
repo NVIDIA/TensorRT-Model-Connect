@@ -484,6 +484,14 @@ def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
     assert "nvidia/nccl/lib" in dockerfile
 
 
+def test_internal_ci_image_supports_embedded_workflow_shell_regressions() -> None:
+    """Protected units need the same jq executable used by workflow scripts."""
+    repository = Path(__file__).resolve().parents[2]
+    dockerfile = (repository / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "      jq \\\n" in dockerfile
+
+
 def test_source_quality_runs_complexity_before_other_checks() -> None:
     source = inspect.getsource(SourceQualityChecks.run)
     assert source.index("self.family_coverage()") < source.index("self.complexity()")
@@ -534,6 +542,22 @@ def test_internal_bridge_waits_for_the_exact_run_until_the_job_timeout() -> None
     assert "Protected failure details are not transferred to the public repository." in source
 
 
+def test_internal_bridge_remains_a_one_shot_maintainer_label_trigger() -> None:
+    workflow = Path(__file__).resolve().parents[2] / ".github/workflows/internal-ci-bridge.yml"
+    source = workflow.read_text(encoding="utf-8")
+
+    assert "\n  pull_request_target:\n" in source
+    assert "types: [labeled]" in source
+    assert "github.event.label.name == 'run-internal-ci'" in source
+    assert "maintain|admin" in source
+    assert "issues/$PR_NUMBER/labels/run-internal-ci" in source
+    assert "workflow_run:" not in source
+    assert "Community CPU / Required must pass" in source
+    assert "/actions/runs/$community_ci_run/jobs?filter=latest&per_page=100" in source
+    assert 'name == "Community CPU / Required" and .conclusion == "success"' in source
+    assert "Community CI must pass" not in source
+
+
 def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     path = (
         Path(__file__).resolve().parents[2] / ".github/workflows/community-activity-slack-alert.yml"
@@ -543,7 +567,9 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     ready = workflow["jobs"]["notify-ready-pr"]
     activity = workflow["jobs"]["notify-activity"]
 
+    assert 'workflows: ["Community CI"]' in source
     assert workflow["permissions"] == {}
+    assert "github.event.workflow_run.event == 'pull_request_target'" in ready["if"]
     assert ready["permissions"] == {
         "actions": "read",
         "checks": "read",
@@ -582,8 +608,12 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     assert "External maintainer request" in script
 
     ready_script = ready["steps"][0]["run"]
+    assert "· community CI · head" in ready_script
+    assert "· base" in ready_script
+    assert "Unexpected Community CI run name" in ready_script
     assert "for attempt in {1..30}; do" in ready_script
     assert "sleep 10" in ready_script
+    assert ready_script.count('current_base_sha="$(jq -r ".base.sha" <<<"$pr_json")"') == 2
     for check in ("Community CPU / Required", "PR Metadata / Required", "DCO"):
         assert check in ready_script
     assert "sort_by(.started_at) | last" in ready_script

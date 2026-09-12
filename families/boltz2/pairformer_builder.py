@@ -148,7 +148,7 @@ def _triangle_attention(
     gate = graph.sigmoid(graph.linear(normalized_lowp, f"{prefix}.mha.linear_g"))
     gate = graph.reshape(gate, (batch, tokens, tokens, heads, head_width))
     output = graph.mul(output, gate)
-    output = graph.reshape(output, (batch, tokens, tokens, channels))
+    output = graph.reshape(output, (batch, tokens, tokens, heads * head_width))
     output = graph.linear(output, f"{prefix}.mha.linear_o")
     if not starting:
         output = graph.transpose(output, (0, 2, 1, 3))

@@ -132,7 +132,7 @@ class Boltz2Plugin:
     def __init__(self) -> None:
         self._token_count = _TOKEN_COUNT
         self._atom_count = _ATOM_COUNT
-        self._msa_depth = 1
+        self._msa_depth = INITIAL_BF16_PROFILE.max_msa_depth
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower().replace("-", "_") in {
@@ -184,7 +184,7 @@ class Boltz2Plugin:
             features, request_token_count, request_atom_count, request_msa_depth
         )
         active_tokens = int(features["token_pad_mask"].sum().item())
-        if active_tokens != request.token_count or request_msa_depth != len(msa_rows):
+        if active_tokens != request.token_count or len(msa_rows) > request_msa_depth:
             raise ValueError(
                 "Boltz-2 processed features do not match the packaged request and MSA"
             )
@@ -204,6 +204,7 @@ class Boltz2Plugin:
             "token_count": self._token_count,
             "atom_count": self._atom_count,
             "msa_depth": self._msa_depth,
+            "template_count": INITIAL_BF16_PROFILE.max_templates,
             "recycling_steps": 3,
             "sampling_steps": 200,
             "diffusion_samples": 1,
@@ -262,6 +263,7 @@ class Boltz2Plugin:
         from .diffusion_token_builder import build_diffusion_token_engine
         from .msa_builder import build_msa_engine
         from .pairformer_builder import build_pairformer_engine
+        from .template_builder import build_template_engine
         from .trunk_init_builder import build_trunk_init_engine
 
         root = _root(weights)
@@ -290,6 +292,15 @@ class Boltz2Plugin:
                 checkpoint,
                 token_count=token_count,
                 msa_depth=msa_depth,
+                verbose=verbose,
+            )
+            sections["boltz2_template_plan"] = _plan_bytes(
+                temporary,
+                "template",
+                build_template_engine,
+                checkpoint,
+                token_count=token_count,
+                template_count=INITIAL_BF16_PROFILE.max_templates,
                 verbose=verbose,
             )
             for start in range(0, 64, 8):
@@ -362,6 +373,8 @@ class Boltz2Plugin:
                 "boltz2_graph_manifest.json": graph_manifest_json(
                     token_count=token_count,
                     atom_count=atom_count,
+                    msa_depth=msa_depth,
+                    template_count=INITIAL_BF16_PROFILE.max_templates,
                     sampling_steps=200,
                     tensorrt_version=trt_compat.tensorrt_version(),
                 ),
@@ -372,7 +385,7 @@ class Boltz2Plugin:
 
 
 def build(request: Any, writer: Any) -> None:
-    """Build the bounded BF16 protein-structure prediction profile."""
+    """Build the bounded BF16 biomolecular structure-prediction profile."""
 
     if request.backend != "trt":
         raise NotImplementedError("boltz2 supports only the TensorRT backend")

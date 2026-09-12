@@ -34,6 +34,7 @@ static_assert(std::is_abstract_v<trtmc::IPointPromptedSegmentation>);
 static_assert(std::is_abstract_v<trtmc::ITextPromptedSegmentation>);
 static_assert(std::is_abstract_v<trtmc::IStereoDisparity>);
 static_assert(std::is_abstract_v<trtmc::IImageClassification>);
+static_assert(std::is_abstract_v<trtmc::IObjectDetection>);
 static_assert(std::is_abstract_v<trtmc::IPoseHypothesisRefinement>);
 static_assert(std::is_abstract_v<trtmc::IImageFeatureExtractor>);
 static_assert(std::is_abstract_v<trtmc::IVideoSegmentation>);
@@ -69,6 +70,29 @@ void test_robot_observation() {
     if (observation.image_pixels.size() != 3 || observation.state.size() != 1)
         throw std::runtime_error("RobotObservation did not preserve its input spans");
 }
+class DetectionTask final : public trtmc::IObjectDetection {
+  public:
+    const char* task() const noexcept override { return trtmc::IObjectDetection::kTask; }
+
+    trtmc::ObjectDetectionResult detect(const float*, std::int32_t, std::int32_t) override {
+        trtmc::ObjectDetectionResult result;
+        result.boxes.push_back(trtmc::DetectionBox{1.0F, 2.0F, 3.0F, 4.0F, 0.9F, 3});
+        result.image_height = 2;
+        result.image_width = 2;
+        return result;
+    }
+};
+
+void test_object_detection_task() {
+    const float pixels[] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+    DetectionTask detection_task;
+    auto result = detection_task.detect(pixels, 2, 2);
+    if (result.boxes.size() != 1 || result.boxes[0].class_id != 3 ||
+        result.boxes[0].score != 0.9F || result.boxes[0].x_max != 3.0F ||
+        result.image_height != 2 || result.image_width != 2) {
+        throw std::runtime_error("DetectionTask did not preserve the detection result");
+    }
+}
 
 } // namespace
 
@@ -87,6 +111,7 @@ int main() {
         return 1;
 
     test_robot_observation();
+    test_object_detection_task();
 
     std::unique_ptr<trtmc::ITask> task = std::make_unique<TextAndEmbedding>();
     if (std::string(task->task()) != trtmc::ITextGeneration::kTask)

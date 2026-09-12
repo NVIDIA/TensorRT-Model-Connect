@@ -43,6 +43,21 @@ excluded_profiles:
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
       into the release performance runner.
+  - model: yolov5n
+    reason: >-
+      Functional and reference-parity qualification is present, but the release
+      performance baseline runs Ultralytics, which cannot load a legacy YOLOv5
+      archive: those archives pickle classes from the standalone yolov5
+      repository, which is not a dependency here.
+  - model: mobilenetv4-conv-small
+    reason: &mobilenetv4_performance_exclusion >-
+      Functional and timm reference-parity qualification is present for every
+      claimed MobileNetV4 width, but the release-performance workload and
+      receipt were collected only for the 050 width.
+  - model: mobilenetv4-conv-medium
+    reason: *mobilenetv4_performance_exclusion
+  - model: mobilenetv4-conv-large
+    reason: *mobilenetv4_performance_exclusion
   - model: dpn92-mx-in1k
     reason: >-
       Functional and timm reference-parity qualification is present for every
@@ -73,8 +88,27 @@ excluded_profiles:
       three published MobileViT v1 checkpoints, but the release-performance
       workload and receipt were collected only for mobilevit_s, which is the
       width the release entry names.
+  - model: xcit-nano-12-p16-224-fb-in1k
+    reason: >-
+      Functional and timm reference-parity qualification is present for the
+      nano width, which is the only one whose class-attention norm covers a
+      single token, but the release-performance workload and receipt were
+      collected only for xcit_tiny_12_p16_224.
 
 entries:
+  - id: detr.detect
+    family: detr
+    operation: detect
+    model: detr-resnet-50
+    workload:
+      testcase: detr-resnet-50
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: albert.encode
     family: albert
     operation: encode
@@ -1234,6 +1268,45 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: yolov8.detect
+    family: yolov8
+    operation: detect
+    model: yolov8n
+    workload:
+      testcase: yolov8n
+    baseline:
+      runner: task-reference
+      adapter: ultralytics-detection
+      mode: torch-eager
+      reference_backend: ultralytics
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: yolo11.detect
+    family: yolo11
+    operation: detect
+    model: yolo11n
+    workload:
+      testcase: yolo11n
+    baseline:
+      runner: task-reference
+      adapter: ultralytics-detection
+      mode: torch-eager
+      reference_backend: ultralytics
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_xcit.classify
+    family: timm_xcit
+    operation: classify
+    model: xcit-tiny-12-p16-224-fb-in1k
+    workload:
+      testcase: xcit-tiny-12-p16-224-fb-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: timm_repvgg.classify
     family: timm_repvgg
     operation: classify
@@ -1305,6 +1378,19 @@ entries:
     model: efficientnet-b0-ra-in1k
     workload:
       testcase: efficientnet-b0-ra-in1k
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+  - id: timm_mobilenetv4.classify
+    family: timm_mobilenetv4
+    operation: classify
+    model: mobilenetv4-conv-small-050
+    workload:
+      testcase: mobilenetv4-conv-small-050
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision

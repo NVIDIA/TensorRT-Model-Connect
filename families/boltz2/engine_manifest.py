@@ -104,6 +104,24 @@ COMPONENT_ENGINE_SPECS: Final = (
         outputs=("s", "z", "relative_position_encoding"),
     ),
     ComponentEngineSpec(
+        role="template",
+        section="boltz2_template_plan",
+        inputs=(
+            "z",
+            "template_restype",
+            "template_frame_rot",
+            "template_frame_t",
+            "template_cb",
+            "template_ca",
+            "template_mask_cb",
+            "template_mask_frame",
+            "template_mask",
+            "visibility_ids",
+            "token_mask",
+        ),
+        outputs=("z_out",),
+    ),
+    ComponentEngineSpec(
         role="msa",
         section="boltz2_msa_plan",
         inputs=("z", "s_inputs", "msa_features", "token_mask"),
@@ -159,9 +177,9 @@ COMPONENT_ENGINE_SPECS: Final = (
 )
 
 ALL_ENGINE_SPECS: Final = (
-    *COMPONENT_ENGINE_SPECS[:3],
+    *COMPONENT_ENGINE_SPECS[:4],
     *PAIRFORMER_ENGINE_SPECS,
-    *COMPONENT_ENGINE_SPECS[3:],
+    *COMPONENT_ENGINE_SPECS[4:],
 )
 
 
@@ -185,6 +203,8 @@ def graph_manifest_json(
     token_count: int,
     tensorrt_version: str,
     atom_count: int = 928,
+    msa_depth: int = 8,
+    template_count: int = 4,
     sampling_steps: int = 200,
 ) -> bytes:
     """Serialize graph roles and bindings for bundle inspection and native loading."""
@@ -194,17 +214,19 @@ def graph_manifest_json(
         raise ValueError("Boltz-2 graph manifest token_count must be positive")
     if not tensorrt_version:
         raise ValueError("Boltz-2 graph manifest requires a TensorRT version")
-    if atom_count <= 0 or sampling_steps <= 0:
+    if atom_count <= 0 or msa_depth <= 0 or template_count <= 0 or sampling_steps <= 0:
         raise ValueError("Boltz-2 graph manifest shape and sampling counts must be positive")
     sections = [spec.section for spec in ALL_ENGINE_SPECS]
     if len(sections) != len(set(sections)):
         raise ValueError("Boltz-2 graph manifest engine section names must be unique")
     document = {
-        "schema_version": 1,
+        "schema_version": 2,
         "family": "boltz2",
         "precision": "bf16-mixed",
         "token_count": token_count,
         "atom_count": atom_count,
+        "msa_depth": msa_depth,
+        "template_count": template_count,
         "recycling_passes": 4,
         "sampling_steps": sampling_steps,
         "tensorrt_version": tensorrt_version,

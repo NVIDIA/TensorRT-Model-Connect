@@ -44,6 +44,20 @@ def test_family_requirements_select_only_the_owner(tmp_path: Path) -> None:
     assert impact.families == ("alpha",)
 
 
+def test_release_performance_policy_does_not_expand_family_scope(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    impact = test_impact.classify(
+        repo,
+        [
+            "apps/benchmark/performance/release.yaml",
+            "families/alpha/model.py",
+        ],
+    )
+
+    assert impact.scope == "families"
+    assert impact.families == ("alpha",)
+
+
 def test_base_requirements_select_all_families(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     impact = test_impact.classify(repo, ["requirements/base.txt"])
@@ -56,6 +70,21 @@ def test_shared_contract_selects_all_directly(tmp_path: Path) -> None:
     impact = test_impact.classify(repo, ["core/runtime/include/trtmc/task.h"])
     assert impact.scope == "all"
     assert impact.families == ("alpha", "beta")
+
+
+def test_shared_change_preserves_directly_changed_family(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    impact = test_impact.classify(
+        repo,
+        [
+            "core/runtime/include/trtmc/task.h",
+            "families/alpha/model.py",
+        ],
+    )
+
+    assert impact.scope == "all"
+    assert impact.families == ("alpha", "beta")
+    assert impact.direct_families == ("alpha",)
 
 
 def test_families_package_selects_all_directly(tmp_path: Path) -> None:

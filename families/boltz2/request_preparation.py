@@ -17,7 +17,13 @@ import yaml
 from tensorrt_model_connect.build import content_cache_key
 
 from .checkpoint import validate_artifact, validate_structure_checkpoint
-from .contracts import INITIAL_BF16_PROFILE, parse_request_yaml, validate_a3m
+from .contracts import (
+    INITIAL_BF16_PROFILE,
+    PolymerKind,
+    parse_request_yaml,
+    validate_a3m,
+    validate_csv_msa,
+)
 from .feature_bundle import profile_feature_shapes, serialize_features, structure_metadata_json
 from .model_config import CHECKPOINT, MOLS, MOLS_ARCHIVE, resolve_package_root
 from .provenance import PINNED_BOLTZ2
@@ -25,7 +31,22 @@ from .random_samples import serialize_profile_random_samples
 
 
 MAGIC: Final = b"B2RQ"
-VERSION: Final = 2
+VERSION: Final = 3
+
+_TEMPLATE_FEATURES: Final = (
+    "template_restype",
+    "template_frame_rot",
+    "template_frame_t",
+    "template_cb",
+    "template_ca",
+    "template_mask_cb",
+    "template_mask_frame",
+    "template_mask",
+    "visibility_ids",
+    "query_to_template",
+    "template_force",
+    "template_force_threshold",
+)
 
 
 def _seed() -> None:
@@ -55,7 +76,25 @@ def load_profile_features(processed_dir: Path, mol_dir: Path) -> dict[str, Any]:
         def process(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
             kwargs["max_atoms"] = profile.max_padded_atoms
             kwargs["max_tokens"] = profile.max_tokens
-            return super().process(*args, **kwargs)
+            kwargs["max_seqs"] = profile.max_msa_depth
+            kwargs["pad_to_max_seqs"] = True
+            features = super().process(*args, **kwargs)
+            template_count = int(features["template_mask"].shape[0])
+            if template_count > profile.max_templates:
+                raise ValueError(
+                    f"Boltz-2 request produced {template_count} templates; "
+                    f"the profile accepts at most {profile.max_templates}"
+                )
+            if template_count < profile.max_templates:
+                for name in _TEMPLATE_FEATURES:
+                    if name not in features:
+                        continue
+                    tensor = features[name]
+                    padding = tensor.new_zeros(
+                        (profile.max_templates - template_count, *tensor.shape[1:])
+                    )
+                    features[name] = torch.cat((tensor, padding), dim=0)
+            return features
 
     manifest = Manifest.load(processed_dir / "manifest.json")
     if len(manifest.records) != 1:
@@ -111,34 +150,53 @@ def serialize_prepared_request(
     return header + b"".join(sections)
 
 
-def _request_inputs(request_path: Path) -> tuple[bytes, int, tuple[tuple[Path, bytes], ...]]:
+def _resolve_input(root: Path, relative: Path, label: str) -> tuple[Path, bytes]:
+    path = (root / relative).resolve(strict=True)
+    try:
+        path.relative_to(root)
+    except ValueError as error:
+        raise ValueError(f"Boltz-2 {label} path must remain inside the request root") from error
+    if not path.is_file():
+        raise ValueError(f"Boltz-2 {label} path is not a file: {path}")
+    return path, path.read_bytes()
+
+
+def _request_inputs(
+    request_path: Path,
+) -> tuple[bytes, int, tuple[tuple[Path, bytes], ...], tuple[tuple[Path, bytes], ...]]:
     request_bytes = request_path.read_bytes()
     try:
         request_text = request_bytes.decode("utf-8")
     except UnicodeDecodeError as error:
-        raise ValueError("Boltz-2 request YAML must be UTF-8") from error
+        raise ValueError("Boltz-2 request YAML/JSON must be UTF-8") from error
     request = parse_request_yaml(request_text)
     request_root = request_path.parent.resolve(strict=True)
     msa_inputs: list[tuple[Path, bytes]] = []
     for sequence in request.sequences:
-        msa_path = (request_root / sequence.msa_path).resolve(strict=True)
-        try:
-            msa_path.relative_to(request_root)
-        except ValueError as error:
-            raise ValueError("Boltz-2 A3M path must remain inside the request root") from error
-        if not msa_path.is_file():
-            raise ValueError(f"Boltz-2 A3M path is not a file: {msa_path}")
-        msa_bytes = msa_path.read_bytes()
+        if sequence.kind is not PolymerKind.PROTEIN or sequence.msa_path is None:
+            continue
+        msa_path, msa_bytes = _resolve_input(request_root, Path(sequence.msa_path), "MSA")
         try:
             msa_text = msa_bytes.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise ValueError("Boltz-2 A3M must be UTF-8") from error
-        validate_a3m(msa_text, expected_query=sequence.sequence)
+            raise ValueError("Boltz-2 MSA must be UTF-8") from error
+        if msa_path.suffix.lower() == ".a3m":
+            validate_a3m(msa_text, expected_query=sequence.sequence)
+        else:
+            validate_csv_msa(msa_text, expected_query=sequence.sequence)
         msa_inputs.append((msa_path, msa_bytes))
-    return request_bytes, request.token_count, tuple(msa_inputs)
+    template_inputs = tuple(
+        _resolve_input(request_root, Path(template.path), "template")
+        for template in request.templates
+    )
+    return request_bytes, request.token_count, tuple(msa_inputs), template_inputs
 
 
-def _cache_key(request: bytes, msa_inputs: tuple[tuple[Path, bytes], ...]) -> str:
+def _cache_key(
+    request: bytes,
+    msa_inputs: tuple[tuple[Path, bytes], ...],
+    template_inputs: tuple[tuple[Path, bytes], ...],
+) -> str:
     profile = INITIAL_BF16_PROFILE
     identity = json.dumps(
         {
@@ -148,11 +206,12 @@ def _cache_key(request: bytes, msa_inputs: tuple[tuple[Path, bytes], ...]) -> st
             "tokens": profile.max_tokens,
             "atoms": profile.max_padded_atoms,
             "msa_depth": profile.max_msa_depth,
+            "templates": profile.max_templates,
         },
         sort_keys=True,
     ).encode("utf-8")
-    msa_payloads = tuple(payload for _, payload in msa_inputs)
-    return content_cache_key("boltz2-prepared-request-v2", identity, request, *msa_payloads)
+    assets = tuple(payload for _, payload in (*msa_inputs, *template_inputs))
+    return content_cache_key("boltz2-prepared-request-v3", identity, request, *assets)
 
 
 def _write_atomic(path: Path, payload: bytes) -> None:
@@ -176,13 +235,37 @@ def _write_atomic(path: Path, payload: bytes) -> None:
 
 
 def _stage_request(
-    path: Path, request: bytes, msa_inputs: tuple[tuple[Path, bytes], ...]
+    path: Path,
+    request: bytes,
+    msa_inputs: tuple[tuple[Path, bytes], ...],
+    template_inputs: tuple[tuple[Path, bytes], ...],
 ) -> None:
     document = yaml.safe_load(request.decode("utf-8"))
-    if len(document["sequences"]) != len(msa_inputs):
+    msa_iterator = iter(msa_inputs)
+    msa_index = 0
+    for entry in document["sequences"]:
+        polymer_type, polymer = next(iter(entry.items()))
+        if polymer_type == "protein" and polymer.get("msa") != "empty":
+            msa_path, msa_payload = next(msa_iterator)
+            staged_msa = path.parent / f"msa_{msa_index}{msa_path.suffix.lower()}"
+            _write_atomic(staged_msa, msa_payload)
+            polymer["msa"] = str(staged_msa.resolve())
+            msa_index += 1
+    try:
+        next(msa_iterator)
+    except StopIteration:
+        pass
+    else:
         raise ValueError("Boltz-2 request and MSA inputs are inconsistent")
-    for entry, (msa_path, _) in zip(document["sequences"], msa_inputs, strict=True):
-        entry["protein"]["msa"] = str(msa_path)
+    if len(document.get("templates", [])) != len(template_inputs):
+        raise ValueError("Boltz-2 request and template inputs are inconsistent")
+    for template_index, (template, (template_path, template_payload)) in enumerate(
+        zip(document.get("templates", []), template_inputs, strict=True)
+    ):
+        format_name = "cif" if "cif" in template else "pdb"
+        staged_template = path.parent / f"template_{template_index}{template_path.suffix.lower()}"
+        _write_atomic(staged_template, template_payload)
+        template[format_name] = str(staged_template.resolve())
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
 
@@ -193,7 +276,7 @@ def prepare_structure_request(
     *,
     cache_dir: str | Path | None = None,
 ) -> dict[str, object]:
-    """Prepare one raw YAML/A3M request without rebuilding TensorRT plans."""
+    """Prepare one raw YAML/JSON request without rebuilding TensorRT plans."""
 
     root = resolve_package_root(model_dir)
     if root is None:
@@ -203,8 +286,10 @@ def prepare_structure_request(
     validate_artifact(root / MOLS_ARCHIVE, PINNED_BOLTZ2.molecular_archive)
     request_path = Path(request_path).resolve(strict=True)
     output_path = Path(output_path)
-    request_bytes, request_token_count, msa_inputs = _request_inputs(request_path)
-    key = _cache_key(request_bytes, msa_inputs)
+    request_bytes, request_token_count, msa_inputs, template_inputs = _request_inputs(
+        request_path
+    )
+    key = _cache_key(request_bytes, msa_inputs, template_inputs)
     cache_root = (
         Path(cache_dir)
         if cache_dir is not None
@@ -212,7 +297,11 @@ def prepare_structure_request(
     )
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_root = cache_root.resolve(strict=True)
-    entry = cache_root / key[:2] / key
+    shard = cache_root / key[:2]
+    if shard.is_symlink():
+        raise ValueError(f"Boltz-2 cache shard must not be a symlink: {shard}")
+    shard.mkdir(parents=True, exist_ok=True)
+    entry = shard / key
     if entry.is_symlink():
         raise ValueError(f"Boltz-2 cache entry must not be a symlink: {entry}")
     cached_request = entry / "request.b2rq"
@@ -229,11 +318,11 @@ def prepare_structure_request(
         work = entry / "work"
         if work.is_symlink():
             raise ValueError(f"Boltz-2 cache work directory must not be a symlink: {work}")
-        staged_request = work / request_path.name
+        staged_request = work / "request.yaml"
         work.mkdir(parents=True, exist_ok=True)
         if staged_request.is_symlink():
             raise ValueError(f"Boltz-2 staged request must not be a symlink: {staged_request}")
-        _stage_request(staged_request, request_bytes, msa_inputs)
+        _stage_request(staged_request, request_bytes, msa_inputs, template_inputs)
         process_inputs(
             data=[staged_request],
             out_dir=work,
@@ -276,5 +365,5 @@ def prepare_structure_request(
         "prepared_request": str(output_path),
         "cache_key": key,
         "cache_hit": cache_hit,
-        "profile": "tokens_117_atoms_928_msa_1",
+        "profile": "tokens_117_atoms_928_msa_8_templates_4",
     }

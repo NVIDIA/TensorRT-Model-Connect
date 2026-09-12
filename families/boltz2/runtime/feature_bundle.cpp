@@ -16,8 +16,8 @@ namespace trtmc::boltz2 {
 namespace {
 
 constexpr std::array<char, 4> kMagic{'B', '2', 'F', 'T'};
-constexpr uint32_t kVersion = 1;
-constexpr uint32_t kExpectedTensorCount = 31;
+constexpr uint32_t kVersion = 2;
+constexpr uint32_t kExpectedTensorCount = 40;
 
 class Reader {
   public:
@@ -132,7 +132,7 @@ FeatureBundle FeatureBundle::parse(const void* data, std::size_t size) {
         throw std::invalid_argument("unsupported Boltz-2 feature section version");
     const uint32_t count = source.littleEndian<uint32_t>();
     if (count != kExpectedTensorCount)
-        throw std::invalid_argument("Boltz-2 feature section must contain exactly 31 tensors");
+        throw std::invalid_argument("Boltz-2 feature section must contain exactly 40 tensors");
 
     FeatureBundle result;
     result.tensors_.reserve(count);
