@@ -86,8 +86,51 @@ struct Fixture {
         check(result.status != 0 && result.output.empty(), message);
     }
 };
+void global_pooled_contracts(const Fixture& fixture) {
+    for (const char* mode : {"global_pooled", "unknown_image_role"}) {
+        const auto path = fixture.root / (std::string("features-cli-") + mode + ".bundle");
+        bundle(path, mode);
+        const auto result = run({"trtmc", "extract-features", path.string(), "--runtime-root",
+                                 fixture.root.string(), "--task",
+                                 std::string(trtmc::ImageToTokenAndPooledFeatures::kTask),
+                                 "--image", fixture.image.string(), "--set", "scale=2"});
+        if (std::string_view(mode) == "unknown_image_role") {
+            check(result.status != 0 && result.output.empty(),
+                  "CLI rejects unknown image roles without printing a partial feature result");
+            continue;
+        }
+        check(result.status == 0, "CLI global pooled token extraction succeeds");
+        if (result.status != 0) {
+            std::cerr << result.error;
+            continue;
+        }
+        const auto output = json::parse(result.output);
+        check(output.at("task") == trtmc::ImageToTokenAndPooledFeatures::kTask &&
+                  output.at("last_hidden_state") == json::array({40, 1, 39, 0, 41, 2}) &&
+                  output.at("last_hidden_state_shape") == json::array({1, 3, 2}) &&
+                  output.at("axes") == json::array({"batch", "token", "feature"}) &&
+                  output.at("pooler_output") == json::array({40, 1}) &&
+                  output.at("pooler_output_shape") == json::array({1, 2}) &&
+                  output.at("pooling") == "mean" && output.at("normalization") == "none",
+              "CLI preserves the complete global pooled prefix, patch matrix and pooled output");
+        const auto expected_tokens = json::array({json{{"role", "global_pooled"}},
+                                                  json{{"role", "patch"},
+                                                       {"grid_row", 0},
+                                                       {"grid_column", 0},
+                                                       {"source_normalized_box", {0, 0, 0.5, 1}}},
+                                                  json{{"role", "patch"},
+                                                       {"grid_row", 0},
+                                                       {"grid_column", 1},
+                                                       {"source_normalized_box", {0.5, 0, 1, 1}}}});
+        check(output.at("tokens") == expected_tokens &&
+                  output.at("grid_shape") == json::array({1, 2}),
+              "CLI labels the prefix global_pooled and keeps ordered patch coordinates");
+    }
+}
+
 void exercise(const Fixture& f) {
     using namespace trtmc;
+    global_pooled_contracts(f);
     auto token = f.success("encode", TextToTokenFeatures::kTask, {"--text", "abc"});
     check(token.at("dim") == 2 && token.at("values") == json::array({1, 3}) &&
               token.at("shape") == json::array({1, 2}) &&

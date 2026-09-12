@@ -155,7 +155,8 @@ struct ImageTokenFeaturesStorage final : ResultStorage {
         tokens.reserve(value.tokens.size());
         for (const auto& token : value.tokens) {
             const auto role = static_cast<uint32_t>(token.role);
-            result_require(role >= TRTMC_IMAGE_TOKEN_PATCH && role <= TRTMC_IMAGE_TOKEN_REGISTER,
+            result_require(role >= TRTMC_IMAGE_TOKEN_PATCH &&
+                               role <= TRTMC_IMAGE_TOKEN_GLOBAL_POOLED,
                            "unknown image feature token role");
             if (token.role == internal::ImageFeatureTokenRole::Patch) {
                 result_require(token.grid_row < value.grid_rows &&

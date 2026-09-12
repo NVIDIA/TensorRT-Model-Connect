@@ -598,6 +598,55 @@ int main(int argc, char** argv) {
                       summary.at("pooler_output_shape") == Json::array({1, 3}),
                   "one joint feature call returns both arrays with a matching invocation marker");
         }
+        select("global_pooled", "features_fixture", "extract_features",
+               {{"image_path", left.string()}, {"config", {{"scale", 0.5}}}});
+        request["selected_task"] = "image_to_token_and_pooled_features";
+        const auto global_pooled_tokens =
+            Json::array({Json{{"role", "global_pooled"}},
+                         Json{{"role", "patch"},
+                              {"grid_row", 0},
+                              {"grid_column", 0},
+                              {"source_normalized_box", {0, 0, 0.5, 1}}},
+                         Json{{"role", "patch"},
+                              {"grid_row", 0},
+                              {"grid_column", 1},
+                              {"source_normalized_box", {0.5, 0, 1, 1}}}});
+        for (bool include_assets : {false, true}) {
+            request["measurement"]["asset_loading_included"] = include_assets;
+            const auto measured = run();
+            check(measured.at("selected_task") == "image_to_token_and_pooled_features" &&
+                      measured.at("observations").size() == 2 &&
+                      measured.at("observation_serialization_included") == false,
+                  "global pooled benchmark records both measured calls through the existing Task");
+            int invocation = 2;
+            for (const auto& observation : measured.at("observations")) {
+                check(
+                    observation.at("last_hidden_state") ==
+                            Json::array({10, invocation, 9, invocation - 1, 11, invocation + 1}) &&
+                        observation.at("pooler_output") == Json::array({10, invocation}),
+                    "each global pooled observation retains every matrix row and joint call "
+                    "marker");
+                ++invocation;
+            }
+            summary = measured.at("output_summary");
+            check(summary.at("last_hidden_state") == Json::array({10, 3, 9, 2, 11, 4}) &&
+                      summary.at("last_hidden_state_shape") == Json::array({1, 3, 2}) &&
+                      summary.at("axes") == Json::array({"batch", "token", "feature"}) &&
+                      summary.at("pooler_output") == Json::array({10, 3}) &&
+                      summary.at("pooler_output_shape") == Json::array({1, 2}) &&
+                      summary.at("feature_elements") == 8 && summary.at("processed_images") == 1 &&
+                      summary.at("pooling") == "mean" && summary.at("normalization") == "none",
+                  "benchmark preserves the complete global pooled prefix, patch matrix and pooled "
+                  "output");
+            check(
+                summary.at("tokens") == global_pooled_tokens &&
+                    summary.at("grid_shape") == Json::array({1, 2}),
+                "benchmark labels the prefix global_pooled and retains ordered patch coordinates");
+        }
+        select("unknown_image_role", "features_fixture", "extract_features",
+               {{"image_path", left.string()}});
+        run(false);
+        request.erase("selected_task");
         for (const auto* task :
              {"image_to_token_features", "image_to_pooled_features", "image_to_spatial_features"}) {
             select(task, "features_fixture", "extract_features", {{"image_path", left.string()}});

@@ -63,7 +63,13 @@ struct ReplacedTokenScoresResult {
     std::vector<float> logits; // Positive logits favor "replaced", not "original".
     std::vector<FeatureToken> tokens;
 };
-enum class ImageFeatureTokenRole : uint32_t { Patch = 1, Class = 2, Register = 3 };
+enum class ImageFeatureTokenRole : uint32_t {
+    Patch = 1,
+    Class = 2,
+    Register = 3,
+    // A global pooled row retained in the token matrix, not a class token.
+    GlobalPooled = 4,
+};
 struct ImageFeatureToken {
     ImageFeatureTokenRole role{ImageFeatureTokenRole::Patch};
     uint64_t grid_row{0};

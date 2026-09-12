@@ -1487,6 +1487,8 @@ Json image_token_observation(const Result& result) {
             item["role"] = "class";
         else if (token.role == TRTMC_IMAGE_TOKEN_REGISTER)
             item["role"] = "register";
+        else if (token.role == TRTMC_IMAGE_TOKEN_GLOBAL_POOLED)
+            item["role"] = "global_pooled";
         else if (token.role == TRTMC_IMAGE_TOKEN_PATCH)
             item = {
                 {"role", "patch"},
