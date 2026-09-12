@@ -415,7 +415,7 @@ int activePrefixCount(const FeatureTensor& mask, int profile_count, std::string_
 bool hasRequiredEngines(const EngineSet& engines) {
     return engines.input && engines.trunk_init && engines.template_engine && engines.msa &&
            engines.conditioning && engines.score_input && engines.score_output &&
-           engines.confidence;
+           engines.confidence && engines.affinity[0] && engines.affinity[1];
 }
 
 void requireStream(const std::unique_ptr<ITrtModule>& module, cudaStream_t stream) {
@@ -426,30 +426,90 @@ void requireStream(const std::unique_ptr<ITrtModule>& module, cudaStream_t strea
 bool matchesRandomProfile(const RandomSamples& samples, int32_t seed, int32_t sampling_steps,
                           int atom_count) {
     return samples.seed == seed && samples.sampling_steps == sampling_steps &&
-           samples.atom_count == atom_count;
+           samples.atom_count == atom_count && samples.sample_count == 6;
+}
+
+bool hasTemplates(const FeatureTensor& mask, int element_count) {
+    const auto* values = reinterpret_cast<const float*>(mask.data.data());
+    bool result = false;
+    for (int index = 0; index < element_count; ++index) {
+        if (values[index] != 0.0F && values[index] != 1.0F)
+            throw std::invalid_argument("Boltz-2 template_mask must be binary");
+        result = result || values[index] == 1.0F;
+    }
+    return result;
+}
+
+int32_t affinityBinderChain(const FeatureTensor& mask, const FeatureTensor& mol_type,
+                            const FeatureTensor& asym_id, int token_count, int active_count) {
+    const auto* values = reinterpret_cast<const int32_t*>(mask.data.data());
+    const auto* mol_types = reinterpret_cast<const int32_t*>(mol_type.data.data());
+    const auto* asym_ids = reinterpret_cast<const int32_t*>(asym_id.data.data());
+    int32_t binder_chain = -1;
+    for (int index = 0; index < token_count; ++index) {
+        if (values[index] != 0 && values[index] != 1)
+            throw std::invalid_argument("Boltz-2 affinity_token_mask must be binary");
+        if (values[index] == 0)
+            continue;
+        if (index >= active_count || mol_types[index] != 3)
+            throw std::invalid_argument(
+                "Boltz-2 affinity mask must select active non-polymer tokens");
+        if (binder_chain != -1 && binder_chain != asym_ids[index])
+            throw std::invalid_argument("Boltz-2 affinity mask must select one ligand chain");
+        binder_chain = asym_ids[index];
+    }
+    return binder_chain;
+}
+
+void requireCompleteAffinityChain(const FeatureTensor& mask, const FeatureTensor& mol_type,
+                                  const FeatureTensor& asym_id, int active_count,
+                                  int32_t binder_chain) {
+    if (binder_chain == -1)
+        return;
+    const auto* values = reinterpret_cast<const int32_t*>(mask.data.data());
+    const auto* mol_types = reinterpret_cast<const int32_t*>(mol_type.data.data());
+    const auto* asym_ids = reinterpret_cast<const int32_t*>(asym_id.data.data());
+    for (int index = 0; index < active_count; ++index) {
+        if (mol_types[index] == 3 && asym_ids[index] == binder_chain && values[index] == 0)
+            throw std::invalid_argument(
+                "Boltz-2 affinity mask must cover the complete ligand chain");
+    }
+}
+
+bool hasProteinReceptor(const FeatureTensor& mol_type, int active_count) {
+    const auto* values = reinterpret_cast<const int32_t*>(mol_type.data.data());
+    for (int index = 0; index < active_count; ++index) {
+        if (values[index] == 0)
+            return true;
+    }
+    return false;
 }
 
 std::vector<Vec3> initialCoordinates(const RandomSamples& random, const std::vector<float>& sigmas,
-                                     int atom_count) {
+                                     int atom_count, int sample_index) {
     std::vector<Vec3> coordinates(static_cast<std::size_t>(atom_count));
+    const auto sample_offset = static_cast<std::size_t>(sample_index * atom_count * 3);
     for (int atom = 0; atom < random.atom_count; ++atom) {
         for (int axis = 0; axis < 3; ++axis) {
             coordinates[atom][axis] =
-                sigmas[0] * random.initial[static_cast<std::size_t>(atom * 3 + axis)];
+                sigmas[0] *
+                random.initial[sample_offset + static_cast<std::size_t>(atom * 3 + axis)];
         }
     }
     return coordinates;
 }
 
 std::vector<Vec3> addStepNoise(const std::vector<Vec3>& coordinates, const RandomSamples& random,
-                               int32_t step, float noise_scale) {
+                               int32_t step, float noise_scale, int sample_index) {
     std::vector<Vec3> noisy = coordinates;
+    const auto sample_offset =
+        static_cast<std::size_t>(sample_index * random.sampling_steps * random.atom_count * 3);
     for (int atom = 0; atom < random.atom_count; ++atom) {
         for (int axis = 0; axis < 3; ++axis) {
             noisy[atom][axis] +=
                 noise_scale *
-                random
-                    .noise[static_cast<std::size_t>((step * random.atom_count + atom) * 3 + axis)];
+                random.noise[sample_offset + static_cast<std::size_t>(
+                                                 (step * random.atom_count + atom) * 3 + axis)];
         }
     }
     return noisy;
@@ -526,13 +586,58 @@ bool validFrameGeometry(const std::vector<Vec3>& points, const std::array<int32_
            std::abs(dot / ((first_norm + 1.0e-6F) * (second_norm + 1.0e-6F))) < 0.9063F;
 }
 
+int32_t representativeAtom(const float* token_to_rep_atom, int token, int atom_count) {
+    const auto offset = static_cast<std::size_t>(token) * atom_count;
+    for (int atom = 0; atom < atom_count; ++atom)
+        if (token_to_rep_atom[offset + static_cast<std::size_t>(atom)] != 0.0F)
+            return atom;
+    return -1;
+}
+
+std::optional<std::array<int32_t, 3>> ligandFrame(const std::vector<Vec3>& points, int token,
+                                                  const float* token_mask, const int32_t* asym_id,
+                                                  const int32_t* mol_type,
+                                                  const float* token_to_rep_atom, int token_count,
+                                                  int atom_count) {
+    // Upstream confidence rebuilds nonpolymer frames from every predicted pose.
+    constexpr int32_t kNonPolymer = 3;
+    if (mol_type[token] != kNonPolymer)
+        return std::nullopt;
+    const int32_t center = representativeAtom(token_to_rep_atom, token, atom_count);
+    if (center < 0)
+        return std::nullopt;
+    std::vector<std::pair<float, int32_t>> neighbors;
+    for (int candidate = 0; candidate < token_count; ++candidate) {
+        if (token_mask[candidate] == 0.0F || asym_id[candidate] != asym_id[token])
+            continue;
+        const int32_t atom = representativeAtom(token_to_rep_atom, candidate, atom_count);
+        if (atom < 0)
+            continue;
+        float squared_distance = 0.0F;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float difference = points[center][axis] - points[atom][axis];
+            squared_distance += difference * difference;
+        }
+        neighbors.emplace_back(squared_distance, atom);
+    }
+    if (neighbors.size() < 3)
+        return std::nullopt;
+    std::sort(neighbors.begin(), neighbors.end());
+    return std::array<int32_t, 3>{neighbors[1].second, neighbors[0].second, neighbors[2].second};
+}
+
 std::vector<float> confidenceFrameMask(const std::vector<float>& coordinates, const int32_t* frames,
-                                       const float* token_mask, int token_count, int atom_count) {
+                                       const float* token_mask, const int32_t* asym_id,
+                                       const int32_t* mol_type, const float* token_to_rep_atom,
+                                       int token_count, int atom_count) {
     const auto points = unpackCoordinates(coordinates, atom_count);
     std::vector<float> frame_mask(static_cast<std::size_t>(token_count));
     for (int token = 0; token < token_count; ++token) {
-        const std::array<int32_t, 3> frame{frames[token * 3], frames[token * 3 + 1],
-                                           frames[token * 3 + 2]};
+        std::array<int32_t, 3> frame{frames[token * 3], frames[token * 3 + 1],
+                                     frames[token * 3 + 2]};
+        if (const auto dynamic = ligandFrame(points, token, token_mask, asym_id, mol_type,
+                                             token_to_rep_atom, token_count, atom_count))
+            frame = *dynamic;
         if (validFrameIndices(frame, atom_count) && validFrameGeometry(points, frame))
             frame_mask[static_cast<std::size_t>(token)] = token_mask[token];
     }
@@ -751,6 +856,31 @@ std::vector<AtomRow> structureRows(const nlohmann::json& document, int atom_coun
     return rows;
 }
 
+void applyAtomTokenMap(std::vector<AtomRow>& rows, const FeatureTensor& mapping, int atom_count,
+                       int token_count, int active_token_count) {
+    requireFeatureStorage(mapping, DType::kInt32,
+                          static_cast<std::size_t>(atom_count * token_count));
+    const auto* values = reinterpret_cast<const int32_t*>(mapping.data.data());
+    for (std::size_t atom = 0; atom < rows.size(); ++atom) {
+        int selected = -1;
+        for (int token = 0; token < token_count; ++token) {
+            const int32_t value = values[atom * static_cast<std::size_t>(token_count) + token];
+            if (value != 0 && value != 1)
+                throw std::invalid_argument("Boltz-2 atom_to_token must be one-hot");
+            if (value == 1) {
+                if (selected != -1)
+                    throw std::invalid_argument("Boltz-2 atom maps to multiple tokens");
+                selected = token;
+            }
+        }
+        if (selected == -1)
+            throw std::invalid_argument("Boltz-2 active atom has no token mapping");
+        if (selected >= active_token_count)
+            throw std::invalid_argument("Boltz-2 active atom maps to a padding token");
+        rows[atom].token_index = static_cast<std::size_t>(selected);
+    }
+}
+
 std::string writePdb(const std::vector<AtomRow>& rows, const std::vector<float>& coordinates,
                      const StructureConfidence& confidence) {
     std::ostringstream output;
@@ -824,6 +954,7 @@ void Boltz2Pipeline::validateAndBindEngines() {
     ITrtModule* trunk_output = bindPairformerEngines();
     bindDiffusionEngines(*trunk_output);
     bindConfidenceEngine(*trunk_output);
+    bindAffinityEngines(*trunk_output);
 }
 
 void Boltz2Pipeline::validateStreams() {
@@ -839,6 +970,8 @@ void Boltz2Pipeline::validateStreams() {
     requireStream(engines_.score_input, stream_);
     requireStream(engines_.score_output, stream_);
     requireStream(engines_.confidence, stream_);
+    for (const auto& module : engines_.affinity)
+        requireStream(module, stream_);
     for (const auto& module : engines_.pairformer)
         requireStream(module, stream_);
     for (const auto& module : engines_.score_token)
@@ -856,21 +989,27 @@ void Boltz2Pipeline::configureProfile() {
     const auto& token_mask = feature("token_pad_mask");
     const auto& frames = feature("frames_idx");
     const auto& template_mask = feature("template_mask");
+    const auto& affinity_mask = feature("affinity_token_mask");
     requireFeatureStorage(atom_mask, DType::kFloat32, static_cast<std::size_t>(atom_count_));
     requireFeatureStorage(token_mask, DType::kFloat32, static_cast<std::size_t>(token_count_));
     requireFeatureStorage(frames, DType::kInt32, static_cast<std::size_t>(token_count_) * 3U);
     requireFeatureStorage(template_mask, DType::kFloat32,
                           static_cast<std::size_t>(kTemplateCount * token_count_));
+    requireFeatureStorage(affinity_mask, DType::kInt32, static_cast<std::size_t>(token_count_));
+    requireFeatureStorage(feature("mol_type"), DType::kInt32,
+                          static_cast<std::size_t>(token_count_));
+    requireFeatureStorage(feature("asym_id"), DType::kInt32,
+                          static_cast<std::size_t>(token_count_));
     active_atom_count_ = activePrefixCount(atom_mask, atom_count_, "atom");
     active_token_count_ = activePrefixCount(token_mask, token_count_, "token");
-    use_templates_ = false;
-    const auto* template_values = reinterpret_cast<const float*>(template_mask.data.data());
-    for (int index = 0; index < kTemplateCount * token_count_; ++index) {
-        const float value = template_values[index];
-        if (value != 0.0F && value != 1.0F)
-            throw std::invalid_argument("Boltz-2 template_mask must be binary");
-        use_templates_ = use_templates_ || value == 1.0F;
-    }
+    use_templates_ = hasTemplates(template_mask, kTemplateCount * token_count_);
+    const auto binder_chain = affinityBinderChain(
+        affinity_mask, feature("mol_type"), feature("asym_id"), token_count_, active_token_count_);
+    requireCompleteAffinityChain(affinity_mask, feature("mol_type"), feature("asym_id"),
+                                 active_token_count_, binder_chain);
+    has_affinity_ = binder_chain != -1;
+    if (has_affinity_ && !hasProteinReceptor(feature("mol_type"), active_token_count_))
+        throw std::invalid_argument("Boltz-2 affinity requires an active protein receptor");
     if (!matchesRandomProfile(artifacts_.random_samples, 42, 200, atom_count_))
         throw std::invalid_argument("Boltz-2 random samples differ from feature atom count");
 }
@@ -937,16 +1076,18 @@ void Boltz2Pipeline::allocateRuntimeTensors() {
 }
 
 void Boltz2Pipeline::bindTrunkEngines() {
-    requireExactCounts(*engines_.input, 14, 1);
+    requireExactCounts(*engines_.input, 17, 2);
     requireNames(*engines_.input,
                  {"ref_pos", "ref_space_uid", "ref_charge", "ref_element", "ref_atom_name_chars",
                   "atom_to_token", "atom_pad_mask", "res_type", "profile", "deletion_mean",
-                  "method_feature", "modified", "cyclic_period", "mol_type"},
-                 {"s_inputs"});
+                  "profile_affinity", "deletion_mean_affinity", "method_feature", "modified",
+                  "cyclic_period", "mol_type", "token_pad_mask"},
+                 {"s_inputs", "s_inputs_affinity"});
     for (const auto name :
          {"ref_pos", "ref_space_uid", "ref_charge", "ref_element", "ref_atom_name_chars",
           "atom_to_token", "atom_pad_mask", "res_type", "profile", "deletion_mean",
-          "method_feature", "modified", "cyclic_period", "mol_type"})
+          "profile_affinity", "deletion_mean_affinity", "method_feature", "modified",
+          "cyclic_period", "mol_type", "token_pad_mask"})
         bindFeature(*engines_.input, name);
 
     requireExactCounts(*engines_.trunk_init, 13, 3);
@@ -1089,9 +1230,38 @@ void Boltz2Pipeline::bindConfidenceEngine(ITrtModule& trunk_output) {
     engines_.confidence->bind_external("token_mask", device_features_.at("token_pad_mask").data());
 }
 
-void Boltz2Pipeline::runTrunk() {
-    engines_.input->forward_device_async({});
-    for (int pass = 0; pass < 4; ++pass) {
+void Boltz2Pipeline::bindAffinityEngines(ITrtModule& trunk_output) {
+    for (auto& module : engines_.affinity) {
+        requireExactCounts(*module, 7, 2);
+        requireNames(*module,
+                     {"s_inputs_affinity", "z", "x_pred", "token_to_rep_atom", "mol_type",
+                      "affinity_token_mask", "token_mask"},
+                     {"affinity_pred_value", "affinity_probability_binary"});
+        bindPointer(*module, "s_inputs_affinity", *engines_.input, "s_inputs_affinity");
+        bindPointer(*module, "z", trunk_output, "z_out");
+        module->bind_external("x_pred", x_pred_.data());
+        bindFeature(*module, "token_to_rep_atom");
+        bindFeature(*module, "mol_type");
+        bindFeature(*module, "affinity_token_mask");
+        module->bind_external("token_mask", device_features_.at("token_pad_mask").data());
+    }
+}
+
+void Boltz2Pipeline::bindInputEmbedding(bool affinity) {
+    const std::string_view output = affinity ? "s_inputs_affinity" : "s_inputs";
+    bindPointer(*engines_.trunk_init, "s_inputs", *engines_.input, output);
+    bindPointer(*engines_.msa, "s_inputs", *engines_.input, output);
+    bindPointer(*engines_.score_input, "s_inputs", *engines_.input, output);
+    bindPointer(*engines_.confidence, "s_inputs", *engines_.input, output);
+}
+
+void Boltz2Pipeline::runTrunk(int recycling_steps, bool affinity_input, bool apply_templates) {
+    bindInputEmbedding(affinity_input);
+    if (apply_templates && use_templates_)
+        bindTemplatePath();
+    else
+        bindPointer(*engines_.msa, "z", *engines_.trunk_init, "z");
+    for (int pass = 0; pass <= recycling_steps; ++pass) {
         if (pass == 0) {
             engines_.trunk_init->bind_external("recycle_s", zero_s_.data());
             engines_.trunk_init->bind_external("recycle_z", zero_z_.data());
@@ -1102,7 +1272,7 @@ void Boltz2Pipeline::runTrunk() {
                                                engines_.pairformer.back()->device_ptr("z_out"));
         }
         engines_.trunk_init->forward_device_async({});
-        if (use_templates_)
+        if (apply_templates && use_templates_)
             engines_.template_engine->forward_device_async({});
         engines_.msa->forward_device_async({});
         for (auto& module : engines_.pairformer)
@@ -1132,28 +1302,32 @@ std::vector<float> Boltz2Pipeline::runDiffusionScore(const std::vector<float>& m
     return update;
 }
 
-std::vector<float> Boltz2Pipeline::sampleCoordinates(int32_t seed, int32_t sampling_steps) {
+std::vector<float> Boltz2Pipeline::sampleCoordinates(int32_t seed, int32_t sampling_steps,
+                                                     int sample_index) {
     const auto& mask_feature = feature("atom_pad_mask");
     const auto* atom_mask = reinterpret_cast<const float*>(mask_feature.data.data());
     const auto& random = artifacts_.random_samples;
     if (!matchesRandomProfile(random, seed, sampling_steps, atom_count_))
         throw std::invalid_argument("Boltz-2 request differs from bundled random samples");
+    if (sample_index < 0 || sample_index >= random.sample_count)
+        throw std::invalid_argument("Boltz-2 diffusion sample index is outside its random stream");
     const auto sigmas = sigmaSchedule(sampling_steps);
-    auto coordinates = initialCoordinates(random, sigmas, atom_count_);
+    auto coordinates = initialCoordinates(random, sigmas, atom_count_, sample_index);
     std::vector<Vec3> denoised;
     bool has_denoised = false;
     for (int32_t step = 0; step < sampling_steps; ++step) {
         const float sigma_tm = sigmas[static_cast<std::size_t>(step)];
         const float sigma_t = sigmas[static_cast<std::size_t>(step + 1)];
         const float gamma = sigma_t > kGammaMin ? kGamma0 : 0.0F;
+        const auto random_step =
+            static_cast<std::size_t>(sample_index * random.sampling_steps + step);
         applyAugmentation(coordinates, has_denoised ? &denoised : nullptr,
-                          random.rotations[static_cast<std::size_t>(step)],
-                          random.translations[static_cast<std::size_t>(step)]);
+                          random.rotations[random_step], random.translations[random_step]);
         const float t_hat = sigma_tm * (1.0F + gamma);
         const float variance =
             kNoiseScale * kNoiseScale * std::max(0.0F, t_hat * t_hat - sigma_tm * sigma_tm);
         const float noise_scale = std::sqrt(variance);
-        auto noisy = addStepNoise(coordinates, random, step, noise_scale);
+        auto noisy = addStepNoise(coordinates, random, step, noise_scale, sample_index);
         const float c_in = 1.0F / std::sqrt(t_hat * t_hat + kSigmaData * kSigmaData);
         const float time_value = std::log(t_hat / kSigmaData) * 0.25F;
         const auto update = runDiffusionScore(scaledCoordinates(noisy, c_in), time_value);
@@ -1182,8 +1356,10 @@ StructureConfidence Boltz2Pipeline::runConfidence(const std::vector<float>& coor
                                            token_mask, asym_id, mol_type, token_count_);
 
     const auto* frames = reinterpret_cast<const int32_t*>(feature("frames_idx").data.data());
-    const auto frame_mask =
-        confidenceFrameMask(coordinates, frames, token_mask, token_count_, atom_count_);
+    const auto* token_to_rep_atom =
+        reinterpret_cast<const float*>(feature("token_to_rep_atom").data.data());
+    const auto frame_mask = confidenceFrameMask(coordinates, frames, token_mask, asym_id, mol_type,
+                                                token_to_rep_atom, token_count_, atom_count_);
     float valid_tokens = 0.0F;
     for (int token = 0; token < token_count_; ++token)
         valid_tokens += token_mask[token];
@@ -1204,20 +1380,82 @@ StructureConfidence Boltz2Pipeline::runConfidence(const std::vector<float>& coor
     return result;
 }
 
+AffinityPrediction Boltz2Pipeline::runAffinity(const std::vector<float>& coordinates) {
+    if (!x_pred_.copy_from_host(coordinates.data()))
+        throw std::runtime_error("Boltz-2 failed to upload affinity coordinates");
+    AffinityPrediction result;
+    for (std::size_t member = 0; member < engines_.affinity.size(); ++member) {
+        auto& module = *engines_.affinity[member];
+        module.forward_device_async({});
+        module.sync();
+        if (cudaMemcpy(&result.member_values[member], module.device_ptr("affinity_pred_value"),
+                       sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess ||
+            cudaMemcpy(&result.member_probabilities[member],
+                       module.device_ptr("affinity_probability_binary"), sizeof(float),
+                       cudaMemcpyDeviceToHost) != cudaSuccess) {
+            throw std::runtime_error("Boltz-2 failed to read affinity outputs");
+        }
+        if (!std::isfinite(result.member_values[member]) ||
+            !std::isfinite(result.member_probabilities[member])) {
+            throw std::runtime_error("Boltz-2 affinity engine produced a non-finite output");
+        }
+    }
+    result.value = (result.member_values[0] + result.member_values[1]) * 0.5F;
+    result.probability = (result.member_probabilities[0] + result.member_probabilities[1]) * 0.5F;
+    return result;
+}
+
+AffinityPrediction Boltz2Pipeline::predictAffinity(int32_t seed, int32_t sampling_steps) {
+    const auto* token_mask = reinterpret_cast<const float*>(feature("token_pad_mask").data.data());
+    std::vector<int64_t> affinity_method(static_cast<std::size_t>(token_count_), 0);
+    for (int token = 0; token < token_count_; ++token)
+        affinity_method[static_cast<std::size_t>(token)] = token_mask[token] == 0.0F ? 0 : 4;
+    auto& method_feature = device_features_.at("method_feature");
+    const auto* original_method = feature("method_feature").data.data();
+    if (!method_feature.copy_from_host(affinity_method.data()))
+        throw std::runtime_error("Boltz-2 failed to upload affinity method conditioning");
+    try {
+        engines_.input->forward_device_async({});
+        runTrunk(5, false, false);
+        runConditioning();
+        float best_iptm = -std::numeric_limits<float>::infinity();
+        std::vector<float> best_coordinates;
+        for (int sample = 1; sample <= 5; ++sample) {
+            auto candidate = sampleCoordinates(seed, sampling_steps, sample);
+            const auto candidate_confidence = runConfidence(candidate);
+            if (candidate_confidence.iptm > best_iptm) {
+                best_iptm = candidate_confidence.iptm;
+                best_coordinates = std::move(candidate);
+            }
+        }
+        auto result = runAffinity(best_coordinates);
+        if (!method_feature.copy_from_host(original_method))
+            throw std::runtime_error("Boltz-2 failed to restore method conditioning");
+        return result;
+    } catch (...) {
+        static_cast<void>(method_feature.copy_from_host(original_method));
+        throw;
+    }
+}
+
 std::string Boltz2Pipeline::writeStructure(const std::vector<float>& coordinates,
                                            StructureFormat format,
                                            const StructureConfidence& confidence) const {
     const auto document = nlohmann::json::parse(artifacts_.structure_metadata_json);
-    const auto rows = structureRows(document, atom_count_);
+    auto rows = structureRows(document, atom_count_);
     if (rows.size() != static_cast<std::size_t>(active_atom_count_))
         throw std::invalid_argument(
             "Boltz-2 structure metadata atom count differs from the active request");
+    applyAtomTokenMap(rows, feature("atom_to_token"), atom_count_, token_count_,
+                      active_token_count_);
     return format == StructureFormat::kPdb ? writePdb(rows, coordinates, confidence)
                                            : writeMmcif(rows, coordinates, confidence);
 }
 
-std::string Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
-                                           const StructureConfidence& confidence) const {
+std::string
+Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
+                               const StructureConfidence& confidence,
+                               const std::optional<AffinityPrediction>& affinity) const {
     nlohmann::json chains_ptm = nlohmann::json::object();
     nlohmann::json pair_chains_iptm = nlohmann::json::object();
     for (std::size_t first = 0; first < confidence_chain_ids_.size(); ++first) {
@@ -1229,7 +1467,7 @@ std::string Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
                 confidence_chain_pairs_[first][second];
         }
     }
-    const nlohmann::json metadata{
+    nlohmann::json metadata{
         {"schema_version", 1},
         {"family", "boltz2"},
         {"boltz_version", "2.2.1"},
@@ -1254,6 +1492,15 @@ std::string Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
         {"chain_pair_confidence", nlohmann::json::array()},
         {"pair_chains_iptm", std::move(pair_chains_iptm)},
     };
+    if (affinity.has_value()) {
+        metadata["schema_version"] = 2;
+        metadata["affinity_pred_value"] = affinity->value;
+        metadata["affinity_probability_binary"] = affinity->probability;
+        metadata["affinity_pred_value1"] = affinity->member_values[0];
+        metadata["affinity_probability_binary1"] = affinity->member_probabilities[0];
+        metadata["affinity_pred_value2"] = affinity->member_values[1];
+        metadata["affinity_probability_binary2"] = affinity->member_probabilities[1];
+    }
     return metadata.dump(2) + "\n";
 }
 
@@ -1273,15 +1520,24 @@ Boltz2Pipeline::predict_structure(const StructurePredictionRequest& request) {
         throw std::invalid_argument(
             "Boltz-2 bundle supports only recycling=3, sampling=200, samples=1, seed=42, mmCIF");
     }
-    runTrunk();
+    engines_.input->forward_device_async({});
+    runTrunk(3, false, true);
     runConditioning();
-    auto coordinates = sampleCoordinates(cfg.seed, cfg.sampling_steps);
+    auto coordinates = sampleCoordinates(cfg.seed, cfg.sampling_steps, 0);
     auto confidence = runConfidence(coordinates);
+    const auto structure_chain_ids = confidence_chain_ids_;
+    const auto structure_chain_pairs = confidence_chain_pairs_;
+    std::optional<AffinityPrediction> affinity;
+    if (has_affinity_) {
+        affinity = predictAffinity(cfg.seed, cfg.sampling_steps);
+        confidence_chain_ids_ = structure_chain_ids;
+        confidence_chain_pairs_ = structure_chain_pairs;
+    }
     StructurePredictionResult result;
     result.structure = writeStructure(coordinates, cfg.output_format, confidence);
     result.format = cfg.output_format;
     result.confidence = std::move(confidence);
-    result.metadata_json = resultMetadata(cfg, result.confidence);
+    result.metadata_json = resultMetadata(cfg, result.confidence, affinity);
     return result;
 }
 

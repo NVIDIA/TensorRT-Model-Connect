@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 CHECKPOINT = Path("boltz2_conf.ckpt")
+AFFINITY_CHECKPOINT = Path("boltz2_aff.ckpt")
 REQUEST = Path("protein_monomer.yaml")
 MSA = Path("protein_monomer.a3m")
 PROCESSED = Path("processed")
@@ -22,7 +23,7 @@ def resolve_package_root(model_dir: str | Path) -> Path | None:
     """Return a package root only when every pinned build input is present."""
 
     root = Path(model_dir)
-    required = (CHECKPOINT, REQUEST, MSA, STRUCTURE, RECORD, MOLS_ARCHIVE)
+    required = (CHECKPOINT, AFFINITY_CHECKPOINT, REQUEST, MSA, STRUCTURE, RECORD, MOLS_ARCHIVE)
     if root.is_symlink() or not root.is_dir():
         return None
     for relative in required:

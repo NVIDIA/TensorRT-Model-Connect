@@ -20,6 +20,7 @@ from .checkpoint import validate_artifact, validate_structure_checkpoint
 from .contracts import (
     INITIAL_BF16_PROFILE,
     PolymerKind,
+    SequenceInput,
     parse_request_yaml,
     validate_a3m,
     validate_csv_msa,
@@ -31,7 +32,7 @@ from .random_samples import serialize_profile_random_samples
 
 
 MAGIC: Final = b"B2RQ"
-VERSION: Final = 3
+VERSION: Final = 4
 
 _TEMPLATE_FEATURES: Final = (
     "template_restype",
@@ -111,6 +112,14 @@ def load_profile_features(processed_dir: Path, mol_dir: Path) -> dict[str, Any]:
     dataset.featurizer = ProfileFeaturizer()
     _seed()
     features = collate([dataset[0]])
+    token_mask = features["token_pad_mask"].unsqueeze(-1)
+    features["profile_affinity"] = (
+        torch.nn.functional.one_hot(features["msa"][:, 0], num_classes=33).float() * token_mask
+    )
+    features["deletion_mean_affinity"] = (
+        features["deletion_value"][:, 0] * features["token_pad_mask"]
+    )
+    features["affinity_token_mask"] = features["affinity_token_mask"].to(torch.int32)
     expected = profile_feature_shapes(
         profile.max_tokens,
         profile.max_padded_atoms,
@@ -163,7 +172,7 @@ def _resolve_input(root: Path, relative: Path, label: str) -> tuple[Path, bytes]
 
 def _request_inputs(
     request_path: Path,
-) -> tuple[bytes, int, tuple[tuple[Path, bytes], ...], tuple[tuple[Path, bytes], ...]]:
+) -> tuple[bytes, tuple[tuple[Path, bytes], ...], tuple[tuple[Path, bytes], ...]]:
     request_bytes = request_path.read_bytes()
     try:
         request_text = request_bytes.decode("utf-8")
@@ -173,7 +182,11 @@ def _request_inputs(
     request_root = request_path.parent.resolve(strict=True)
     msa_inputs: list[tuple[Path, bytes]] = []
     for sequence in request.sequences:
-        if sequence.kind is not PolymerKind.PROTEIN or sequence.msa_path is None:
+        if (
+            not isinstance(sequence, SequenceInput)
+            or sequence.kind is not PolymerKind.PROTEIN
+            or sequence.msa_path is None
+        ):
             continue
         msa_path, msa_bytes = _resolve_input(request_root, Path(sequence.msa_path), "MSA")
         try:
@@ -189,7 +202,7 @@ def _request_inputs(
         _resolve_input(request_root, Path(template.path), "template")
         for template in request.templates
     )
-    return request_bytes, request.token_count, tuple(msa_inputs), template_inputs
+    return request_bytes, tuple(msa_inputs), template_inputs
 
 
 def _cache_key(
@@ -211,7 +224,7 @@ def _cache_key(
         sort_keys=True,
     ).encode("utf-8")
     assets = tuple(payload for _, payload in (*msa_inputs, *template_inputs))
-    return content_cache_key("boltz2-prepared-request-v3", identity, request, *assets)
+    return content_cache_key("boltz2-prepared-request-v4", identity, request, *assets)
 
 
 def _write_atomic(path: Path, payload: bytes) -> None:
@@ -286,9 +299,7 @@ def prepare_structure_request(
     validate_artifact(root / MOLS_ARCHIVE, PINNED_BOLTZ2.molecular_archive)
     request_path = Path(request_path).resolve(strict=True)
     output_path = Path(output_path)
-    request_bytes, request_token_count, msa_inputs, template_inputs = _request_inputs(
-        request_path
-    )
+    request_bytes, msa_inputs, template_inputs = _request_inputs(request_path)
     key = _cache_key(request_bytes, msa_inputs, template_inputs)
     cache_root = (
         Path(cache_dir)
@@ -344,7 +355,11 @@ def prepare_structure_request(
         active_atoms = int(features["atom_pad_mask"].sum().item())
         with np.load(structure, allow_pickle=False) as archive:
             structure_atom_count = int(archive["atoms"].shape[0])
-        if active_tokens != request_token_count or active_atoms != structure_atom_count:
+            structure_token_count = sum(
+                int(chain["atom_num"] if chain["mol_type"] == 3 else chain["res_num"])
+                for chain in archive["chains"]
+            )
+        if active_tokens != structure_token_count or active_atoms != structure_atom_count:
             raise ValueError(
                 "Boltz-2 preprocessing cropped or changed the request outside the "
                 "tokens_117_atoms_928 profile"

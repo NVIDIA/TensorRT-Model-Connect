@@ -39,6 +39,7 @@ class Boltz2Provenance:
     checkpoint_revision: str
     checkpoint_license: str
     structure_checkpoint: PinnedArtifact
+    affinity_checkpoint: PinnedArtifact
     molecular_archive: PinnedArtifact
     reference_configuration: Boltz2ReferenceConfiguration
 
@@ -54,6 +55,10 @@ PINNED_BOLTZ2 = Boltz2Provenance(
     structure_checkpoint=PinnedArtifact(
         filename="boltz2_conf.ckpt",
         size_bytes=2_286_561_469,
+    ),
+    affinity_checkpoint=PinnedArtifact(
+        filename="boltz2_aff.ckpt",
+        size_bytes=2_062_139_170,
     ),
     molecular_archive=PinnedArtifact(
         filename="mols.tar",

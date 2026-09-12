@@ -11,6 +11,7 @@ describe = family_support(
     architectures=("Boltz2ForStructurePrediction",),
     required_files=(
         "boltz2_conf.ckpt",
+        "boltz2_aff.ckpt",
         "protein_monomer.yaml",
         "protein_monomer.a3m",
         "processed/structures/protein_monomer.npz",
