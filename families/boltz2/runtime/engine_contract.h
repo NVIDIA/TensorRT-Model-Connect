@@ -33,7 +33,7 @@ inline constexpr std::array<std::string_view, kTokenSegments> kTokenSections{
     "boltz2_diffusion_token_18_24_plan",
 };
 
-inline constexpr std::array<std::string_view, 40> kFeatureNames{
+inline constexpr std::array<std::string_view, 43> kFeatureNames{
     "ref_pos",
     "ref_space_uid",
     "ref_charge",
@@ -44,6 +44,8 @@ inline constexpr std::array<std::string_view, 40> kFeatureNames{
     "res_type",
     "profile",
     "deletion_mean",
+    "profile_affinity",
+    "deletion_mean_affinity",
     "method_feature",
     "modified",
     "cyclic_period",
@@ -74,6 +76,7 @@ inline constexpr std::array<std::string_view, 40> kFeatureNames{
     "template_mask_frame",
     "template_mask",
     "visibility_ids",
+    "affinity_token_mask",
 };
 
 } // namespace trtmc::boltz2

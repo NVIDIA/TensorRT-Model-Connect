@@ -37,10 +37,15 @@ void copyArray(const std::byte*& cursor, std::size_t& remaining, std::vector<T>&
     remaining -= bytes;
 }
 
+bool matchesPinnedHeader(const RandomSamples& samples) {
+    return samples.seed == 42 && samples.sampling_steps == 200 && samples.atom_count > 0 &&
+           samples.atom_count <= 928 && samples.sample_count == 6;
+}
+
 } // namespace
 
 RandomSamples RandomSamples::parse(const void* data, std::size_t size) {
-    if (data == nullptr || size < 20)
+    if (data == nullptr || size < 24)
         throw std::invalid_argument("truncated Boltz-2 random-sample section");
     auto* cursor = static_cast<const std::byte*>(data);
     std::size_t remaining = size;
@@ -48,20 +53,22 @@ RandomSamples RandomSamples::parse(const void* data, std::size_t size) {
         throw std::invalid_argument("invalid Boltz-2 random-sample magic");
     cursor += 4;
     remaining -= 4;
-    if (readU32(cursor, remaining) != 1)
+    if (readU32(cursor, remaining) != 2)
         throw std::invalid_argument("unsupported Boltz-2 random-sample version");
     RandomSamples result;
     result.seed = static_cast<int32_t>(readU32(cursor, remaining));
     result.sampling_steps = static_cast<int32_t>(readU32(cursor, remaining));
     result.atom_count = static_cast<int32_t>(readU32(cursor, remaining));
-    if (result.seed != 42 || result.sampling_steps != 200 || result.atom_count <= 0)
+    result.sample_count = static_cast<int32_t>(readU32(cursor, remaining));
+    if (!matchesPinnedHeader(result))
         throw std::invalid_argument("Boltz-2 random samples differ from the pinned profile");
     const std::size_t atoms = static_cast<std::size_t>(result.atom_count);
     const std::size_t steps = static_cast<std::size_t>(result.sampling_steps);
-    copyArray(cursor, remaining, result.initial, atoms * 3U);
-    copyArray(cursor, remaining, result.rotations, steps);
-    copyArray(cursor, remaining, result.translations, steps);
-    copyArray(cursor, remaining, result.noise, steps * atoms * 3U);
+    const std::size_t samples = static_cast<std::size_t>(result.sample_count);
+    copyArray(cursor, remaining, result.initial, samples * atoms * 3U);
+    copyArray(cursor, remaining, result.rotations, samples * steps);
+    copyArray(cursor, remaining, result.translations, samples * steps);
+    copyArray(cursor, remaining, result.noise, samples * steps * atoms * 3U);
     if (remaining != 0)
         throw std::invalid_argument("Boltz-2 random-sample section has trailing bytes");
     return result;

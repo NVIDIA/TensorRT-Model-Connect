@@ -36,9 +36,9 @@ void appendBytes(std::vector<std::byte>& output, const void* data, std::size_t s
 std::vector<std::byte> featureSection() {
     std::vector<std::byte> result;
     appendBytes(result, "B2FT", 4);
-    appendLittleEndian<uint32_t>(result, 2);
-    appendLittleEndian<uint32_t>(result, 40);
-    for (uint32_t index = 0; index < 40; ++index) {
+    appendLittleEndian<uint32_t>(result, 3);
+    appendLittleEndian<uint32_t>(result, 43);
+    for (uint32_t index = 0; index < 43; ++index) {
         const std::string name = "tensor_" + std::to_string(index);
         appendLittleEndian<uint16_t>(result, static_cast<uint16_t>(name.size()));
         appendBytes(result, name.data(), name.size());
@@ -55,13 +55,14 @@ std::vector<std::byte> featureSection() {
 std::vector<std::byte> randomSection(uint32_t atom_count = 928) {
     std::vector<std::byte> result;
     appendBytes(result, "B2RN", 4);
-    appendLittleEndian<uint32_t>(result, 1);
+    appendLittleEndian<uint32_t>(result, 2);
     appendLittleEndian<uint32_t>(result, 42);
     appendLittleEndian<uint32_t>(result, 200);
     appendLittleEndian<uint32_t>(result, atom_count);
+    appendLittleEndian<uint32_t>(result, 6);
     const std::size_t floats = static_cast<std::size_t>(atom_count) * 3U + 200U * 9U + 200U * 3U +
                                200U * static_cast<std::size_t>(atom_count) * 3U;
-    result.resize(result.size() + floats * sizeof(float));
+    result.resize(result.size() + 6U * floats * sizeof(float));
     return result;
 }
 
@@ -71,7 +72,7 @@ std::vector<std::byte> preparedRequestSection(const std::vector<std::byte>& feat
     const auto random = randomSection(32);
     std::vector<std::byte> result;
     appendBytes(result, "B2RQ", 4);
-    appendLittleEndian<uint32_t>(result, 3);
+    appendLittleEndian<uint32_t>(result, 4);
     appendLittleEndian<uint64_t>(result, request.size());
     appendLittleEndian<uint64_t>(result, features.size());
     appendLittleEndian<uint64_t>(result, random.size());
@@ -90,7 +91,7 @@ int main() {
         auto features = featureSection();
         const auto parsed_features =
             trtmc::boltz2::FeatureBundle::parse(features.data(), features.size());
-        check(parsed_features.size() == 40, "feature count");
+        check(parsed_features.size() == 43, "feature count");
         check(parsed_features.require("tensor_0").dtype == trtmc::DType::kFloat32, "feature dtype");
         features.pop_back();
         bool feature_threw = false;
@@ -108,7 +109,7 @@ int main() {
         const auto prepared =
             trtmc::boltz2::PreparedRequest::parse(prepared_bytes.data(), prepared_bytes.size());
         check(prepared.request == "version: 1\n", "prepared request document");
-        check(prepared.features.size() == 40, "prepared request features");
+        check(prepared.features.size() == 43, "prepared request features");
         check(prepared.random_samples.atom_count == 32, "prepared request random samples");
         check(prepared.structure_metadata_json == "{}", "prepared request metadata");
         auto truncated_prepared = prepared_bytes;

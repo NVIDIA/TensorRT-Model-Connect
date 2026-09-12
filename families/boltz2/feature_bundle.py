@@ -16,7 +16,7 @@ import numpy as np
 
 
 MAGIC: Final = b"B2FT"
-VERSION: Final = 2
+VERSION: Final = 3
 DTYPE_TO_CODE: Final = {
     np.dtype("float32"): 1,
     np.dtype("int32"): 2,
@@ -46,6 +46,7 @@ INT32_FEATURE_NAMES: Final = frozenset(
         "token_to_rep_atom",
         "frames_idx",
         "template_restype",
+        "affinity_token_mask",
     }
 )
 FEATURE_NAMES: Final = (
@@ -59,6 +60,8 @@ FEATURE_NAMES: Final = (
     "res_type",
     "profile",
     "deletion_mean",
+    "profile_affinity",
+    "deletion_mean_affinity",
     "method_feature",
     "modified",
     "cyclic_period",
@@ -89,6 +92,7 @@ FEATURE_NAMES: Final = (
     "template_mask_frame",
     "template_mask",
     "visibility_ids",
+    "affinity_token_mask",
 )
 
 
@@ -110,6 +114,8 @@ def profile_feature_shapes(
         "res_type": (1, token_count, 33),
         "profile": (1, token_count, 33),
         "deletion_mean": (1, token_count),
+        "profile_affinity": (1, token_count, 33),
+        "deletion_mean_affinity": (1, token_count),
         "method_feature": (1, token_count),
         "modified": (1, token_count),
         "cyclic_period": (1, token_count),
@@ -140,6 +146,7 @@ def profile_feature_shapes(
         "template_mask_frame": (1, template_count, token_count),
         "template_mask": (1, template_count, token_count),
         "visibility_ids": (1, template_count, token_count),
+        "affinity_token_mask": (1, token_count),
     }
 
 

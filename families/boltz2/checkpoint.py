@@ -65,6 +65,13 @@ def validate_structure_checkpoint(path: Path) -> None:
     _VALIDATED_CHECKPOINTS.add(_checkpoint_identity(path))
 
 
+def validate_affinity_checkpoint(path: Path) -> None:
+    """Validate the pinned public affinity checkpoint's file envelope."""
+
+    validate_artifact(path, PINNED_BOLTZ2.affinity_checkpoint)
+    _VALIDATED_CHECKPOINTS.add(_checkpoint_identity(path))
+
+
 @contextmanager
 def checkpoint_safe_globals():
     """Allow only the metadata classes used by the public Boltz checkpoint."""
@@ -181,6 +188,7 @@ def _load_checkpoint(
         )
 
     import torch
+
     with checkpoint_safe_globals():
         checkpoint = torch.load(
             checkpoint_path,

@@ -13,8 +13,13 @@ from typing import Any
 
 import numpy as np
 
-from .checkpoint import checkpoint_safe_globals, validate_structure_checkpoint
+from .checkpoint import (
+    checkpoint_safe_globals,
+    validate_affinity_checkpoint,
+    validate_structure_checkpoint,
+)
 from .provenance import PINNED_BOLTZ2
+from .random_samples import AFFINITY_DIFFUSION_RNG_OFFSET
 
 
 NATIVE_QUALIFICATION_THRESHOLDS = {
@@ -82,6 +87,54 @@ def load_reference_model(checkpoint: Path):
     return model.eval().cuda()
 
 
+def load_affinity_reference_model(checkpoint: Path):
+    """Load the pinned public affinity ensemble without unsafe pickle."""
+
+    from boltz.main import (
+        Boltz2DiffusionParams,
+        BoltzSteeringParams,
+        MSAModuleArgs,
+        PairformerArgsV2,
+    )
+    from boltz.model.models.boltz2 import Boltz2
+
+    validate_affinity_checkpoint(checkpoint)
+    with checkpoint_safe_globals():
+        model = Boltz2.load_from_checkpoint(
+            checkpoint,
+            strict=True,
+            weights_only=True,
+            predict_args={
+                "recycling_steps": 5,
+                "sampling_steps": 200,
+                "diffusion_samples": 5,
+                "max_parallel_samples": 1,
+                "write_confidence_summary": False,
+                "write_full_pae": False,
+                "write_full_pde": False,
+            },
+            map_location="cpu",
+            diffusion_process_args=asdict(Boltz2DiffusionParams()),
+            ema=False,
+            use_kernels=False,
+            pairformer_args=asdict(PairformerArgsV2()),
+            msa_args=asdict(
+                MSAModuleArgs(
+                    subsample_msa=True,
+                    num_subsampled_msa=8,
+                    use_paired_feature=True,
+                )
+            ),
+            steering_args=asdict(BoltzSteeringParams()),
+            affinity_mw_correction=False,
+            compile_msa=False,
+            compile_pairformer=False,
+            compile_structure=False,
+            compile_confidence=False,
+        )
+    return model.eval().cuda()
+
+
 def _seed() -> None:
     import torch
 
@@ -97,6 +150,20 @@ def predict_reference(model, batch):
     _seed()
     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
         return model.predict_step(batch, 0)
+
+
+def predict_affinity_reference(model, batch):
+    """Run the affinity pass at the official post-structure RNG boundary."""
+
+    import torch
+
+    _seed()
+    generator = torch.cuda.default_generators[torch.cuda.current_device()]
+    generator.set_offset(AFFINITY_DIFFUSION_RNG_OFFSET)
+    affinity_batch = dict(batch)
+    affinity_batch["method_feature"] = (affinity_batch["token_pad_mask"] * 4).to(torch.int64)
+    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        return model.predict_step(affinity_batch, 0)
 
 
 def _as_numpy(value: Any) -> np.ndarray:
@@ -179,9 +246,7 @@ def _lddt(reference: np.ndarray, candidate: np.ndarray, cutoff: float = 15.0) ->
     if not pairs.any():
         raise ValueError("no atom pairs are eligible for lDDT")
     delta = np.abs(candidate_distances[pairs] - reference_distances[pairs])
-    return float(
-        np.mean([(delta < threshold).mean() for threshold in (0.5, 1.0, 2.0, 4.0)])
-    )
+    return float(np.mean([(delta < threshold).mean() for threshold in (0.5, 1.0, 2.0, 4.0)]))
 
 
 def _native_mmcif_coords(path: Path) -> np.ndarray:
@@ -216,37 +281,28 @@ def _qualification(
         "token_count": int(metrics["token_count"]) == expected_token_count,
         "lddt": float(metrics["lddt"]) >= thresholds["lddt_min"],
         "kabsch_rmsd_angstrom": (
-            float(metrics["kabsch_rmsd_angstrom"])
-            <= thresholds["kabsch_rmsd_angstrom_max"]
+            float(metrics["kabsch_rmsd_angstrom"]) <= thresholds["kabsch_rmsd_angstrom_max"]
         ),
-        "plddt_mean_abs": (
-            float(metrics["plddt_mean_abs"]) <= thresholds["plddt_mean_abs_max"]
-        ),
+        "plddt_mean_abs": (float(metrics["plddt_mean_abs"]) <= thresholds["plddt_mean_abs_max"]),
         "confidence_score_abs": (
-            float(metrics["confidence_score_abs"])
-            <= thresholds["confidence_score_abs_max"]
+            float(metrics["confidence_score_abs"]) <= thresholds["confidence_score_abs_max"]
         ),
         "complex_plddt_abs": (
-            float(metrics["complex_plddt_abs"])
-            <= thresholds["complex_plddt_abs_max"]
+            float(metrics["complex_plddt_abs"]) <= thresholds["complex_plddt_abs_max"]
         ),
         "complex_iplddt_abs": (
-            float(metrics["complex_iplddt_abs"])
-            <= thresholds["complex_iplddt_abs_max"]
+            float(metrics["complex_iplddt_abs"]) <= thresholds["complex_iplddt_abs_max"]
         ),
         "ptm_abs": float(metrics["ptm_abs"]) <= thresholds["ptm_abs_max"],
         "iptm_abs": float(metrics["iptm_abs"]) <= thresholds["iptm_abs_max"],
         "protein_iptm_abs": (
-            float(metrics["protein_iptm_abs"])
-            <= thresholds["protein_iptm_abs_max"]
+            float(metrics["protein_iptm_abs"]) <= thresholds["protein_iptm_abs_max"]
         ),
         "chains_ptm_max_abs": (
-            float(metrics["chains_ptm_max_abs"])
-            <= thresholds["chains_ptm_max_abs_max"]
+            float(metrics["chains_ptm_max_abs"]) <= thresholds["chains_ptm_max_abs_max"]
         ),
         "pair_chains_iptm_max_abs": (
-            float(metrics["pair_chains_iptm_max_abs"])
-            <= thresholds["pair_chains_iptm_max_abs_max"]
+            float(metrics["pair_chains_iptm_max_abs"]) <= thresholds["pair_chains_iptm_max_abs_max"]
         ),
     }
     return {"thresholds": thresholds, "checks": checks, "passed": all(checks.values())}
@@ -271,18 +327,12 @@ def compare_native(
         reference_plddt = _masked_tokens(reference, "plddt")
         reference_confidence = float(np.asarray(reference["confidence_score"]).reshape(-1)[0])
         reference_complex_plddt = float(np.asarray(reference["complex_plddt"]).reshape(-1)[0])
-        reference_complex_iplddt = float(
-            np.asarray(reference["complex_iplddt"]).reshape(-1)[0]
-        )
+        reference_complex_iplddt = float(np.asarray(reference["complex_iplddt"]).reshape(-1)[0])
         reference_ptm = float(np.asarray(reference["ptm"]).reshape(-1)[0])
         reference_iptm = float(np.asarray(reference["iptm"]).reshape(-1)[0])
-        reference_protein_iptm = float(
-            np.asarray(reference["protein_iptm"]).reshape(-1)[0]
-        )
+        reference_protein_iptm = float(np.asarray(reference["protein_iptm"]).reshape(-1)[0])
         reference_chain_ids = np.asarray(reference["pair_chain_ids"], dtype=np.int32)
-        reference_pair_chains_iptm = np.asarray(
-            reference["pair_chains_iptm"], dtype=np.float64
-        )
+        reference_pair_chains_iptm = np.asarray(reference["pair_chains_iptm"], dtype=np.float64)
     candidate_coords = _native_mmcif_coords(candidate_mmcif)
     metadata = json.loads(candidate_metadata.read_text(encoding="utf-8"))
     candidate_plddt = np.asarray(metadata.get("plddt", []), dtype=np.float64)
@@ -310,9 +360,7 @@ def compare_native(
             raise ValueError("native pair-chain ipTM map is not square")
         candidate_chains_ptm[first_index] = float(candidate_chains[first_key])
         for second_index, second in enumerate(reference_chain_ids):
-            candidate_pair_chains_iptm[first_index, second_index] = float(
-                row[str(int(second))]
-            )
+            candidate_pair_chains_iptm[first_index, second_index] = float(row[str(int(second))])
     result = {
         "schema_version": 1,
         "atom_count": int(candidate_coords.shape[0]),
@@ -330,20 +378,12 @@ def compare_native(
         "kabsch_rmsd_angstrom": _kabsch_rmsd(reference_coords, candidate_coords),
         "plddt_max_abs": float(np.max(np.abs(reference_plddt - candidate_plddt))),
         "plddt_mean_abs": float(np.mean(np.abs(reference_plddt - candidate_plddt))),
-        "confidence_score_abs": abs(
-            reference_confidence - float(metadata["confidence_score"])
-        ),
-        "complex_plddt_abs": abs(
-            reference_complex_plddt - float(metadata["complex_plddt"])
-        ),
-        "complex_iplddt_abs": abs(
-            reference_complex_iplddt - float(metadata["complex_iplddt"])
-        ),
+        "confidence_score_abs": abs(reference_confidence - float(metadata["confidence_score"])),
+        "complex_plddt_abs": abs(reference_complex_plddt - float(metadata["complex_plddt"])),
+        "complex_iplddt_abs": abs(reference_complex_iplddt - float(metadata["complex_iplddt"])),
         "ptm_abs": abs(reference_ptm - float(metadata["ptm"])),
         "iptm_abs": abs(reference_iptm - float(metadata["iptm"])),
-        "protein_iptm_abs": abs(
-            reference_protein_iptm - float(metadata["protein_iptm"])
-        ),
+        "protein_iptm_abs": abs(reference_protein_iptm - float(metadata["protein_iptm"])),
         "chains_ptm_max_abs": float(
             np.max(np.abs(np.diag(reference_pair_chains_iptm) - candidate_chains_ptm))
         ),

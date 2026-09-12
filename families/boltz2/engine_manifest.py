@@ -33,9 +33,7 @@ def atom_attention_fence_outputs(prefix: str) -> tuple[str, ...]:
     """Return the explicit outputs that prevent an incorrect TRT 11.2 fusion."""
 
     return tuple(
-        f"{prefix}_{layer}_{name}"
-        for layer in range(3)
-        for name in ATOM_ATTENTION_FENCE_NAMES
+        f"{prefix}_{layer}_{name}" for layer in range(3) for name in ATOM_ATTENTION_FENCE_NAMES
     )
 
 
@@ -90,12 +88,15 @@ COMPONENT_ENGINE_SPECS: Final = (
             "res_type",
             "profile",
             "deletion_mean",
+            "profile_affinity",
+            "deletion_mean_affinity",
             "method_feature",
             "modified",
             "cyclic_period",
             "mol_type",
+            "token_pad_mask",
         ),
-        outputs=("s_inputs",),
+        outputs=("s_inputs", "s_inputs_affinity"),
     ),
     ComponentEngineSpec(
         role="trunk_init",
@@ -174,6 +175,23 @@ COMPONENT_ENGINE_SPECS: Final = (
             "pbfactor",
         ),
     ),
+    *tuple(
+        ComponentEngineSpec(
+            role=f"affinity_{member}",
+            section=f"boltz2_affinity_{member}_plan",
+            inputs=(
+                "s_inputs_affinity",
+                "z",
+                "x_pred",
+                "token_to_rep_atom",
+                "mol_type",
+                "affinity_token_mask",
+                "token_mask",
+            ),
+            outputs=("affinity_pred_value", "affinity_probability_binary"),
+        )
+        for member in (1, 2)
+    ),
 )
 
 ALL_ENGINE_SPECS: Final = (
@@ -220,7 +238,7 @@ def graph_manifest_json(
     if len(sections) != len(set(sections)):
         raise ValueError("Boltz-2 graph manifest engine section names must be unique")
     document = {
-        "schema_version": 2,
+        "schema_version": 3,
         "family": "boltz2",
         "precision": "bf16-mixed",
         "token_count": token_count,
@@ -229,6 +247,8 @@ def graph_manifest_json(
         "template_count": template_count,
         "recycling_passes": 4,
         "sampling_steps": sampling_steps,
+        "affinity_recycling_steps": 5,
+        "affinity_diffusion_samples": 5,
         "tensorrt_version": tensorrt_version,
         "engines": [asdict(spec) for spec in ALL_ENGINE_SPECS],
     }

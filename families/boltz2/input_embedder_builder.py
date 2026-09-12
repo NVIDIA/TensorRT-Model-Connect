@@ -329,7 +329,7 @@ def define_input_embedder_network(
     token_count: int,
     atom_count: int,
 ):
-    """Define the exact pinned no-affinity Boltz-2 input embedding graph."""
+    """Define the pinned structure and affinity input embedding graph."""
 
     windows = atom_windows(atom_count)
     bf16 = getattr(trt, "bfloat16", None)
@@ -348,10 +348,15 @@ def define_input_embedder_network(
     res_type = network.add_input("res_type", trt.int32, (1, token_count, 33))
     profile = network.add_input("profile", trt.float32, (1, token_count, 33))
     deletion_mean = network.add_input("deletion_mean", trt.float32, (1, token_count))
+    profile_affinity = network.add_input("profile_affinity", trt.float32, (1, token_count, 33))
+    deletion_mean_affinity = network.add_input(
+        "deletion_mean_affinity", trt.float32, (1, token_count)
+    )
     method_feature = network.add_input("method_feature", trt.int32, (1, token_count))
     modified = network.add_input("modified", trt.int32, (1, token_count))
     cyclic_period = network.add_input("cyclic_period", trt.float32, (1, token_count))
     mol_type = network.add_input("mol_type", trt.int32, (1, token_count))
+    token_pad_mask = network.add_input("token_pad_mask", trt.float32, (1, token_count))
 
     atom_features = graph.concatenate(
         (
@@ -406,9 +411,7 @@ def define_input_embedder_network(
     )
     p = graph.add(p, masked_linear(valid, "input_embedder.atom_encoder.embed_atompair_mask"))
     c_queries = graph.reshape(c, (1, windows, ATOM_WINDOW_QUERIES, 1, ATOM_CHANNELS))
-    c_keys = graph.reshape(
-        _to_keys(graph, c), (1, windows, 1, ATOM_WINDOW_KEYS, ATOM_CHANNELS)
-    )
+    c_keys = graph.reshape(_to_keys(graph, c), (1, windows, 1, ATOM_WINDOW_KEYS, ATOM_CHANNELS))
     p = graph.add(
         p,
         graph.linear(graph.relu(c_queries), "input_embedder.atom_encoder.c_to_p_trans_q.1"),
@@ -454,29 +457,43 @@ def define_input_embedder_network(
         trt.MatrixOperation.NONE,
     ).get_output(0)
 
-    token_embedding = graph.linear(graph.cast(res_type, bf16), "input_embedder.res_type_encoding")
-    profile_input = graph.concatenate(
-        (profile, graph.reshape(deletion_mean, (1, token_count, 1))), 2
+    def finish_embedding(profile_value: Any, deletion_value: Any, method_value: Any, name: str):
+        token_embedding = graph.linear(
+            graph.cast(res_type, bf16), "input_embedder.res_type_encoding"
+        )
+        profile_input = graph.concatenate(
+            (profile_value, graph.reshape(deletion_value, (1, token_count, 1))), 2
+        )
+        profile_embedding = graph.linear(
+            graph.cast(profile_input, bf16), "input_embedder.msa_profile_encoding"
+        )
+        result = graph.add(pooled, graph.cast(token_embedding, pooled.dtype))
+        result = graph.add(result, graph.cast(profile_embedding, result.dtype))
+        for indices, prefix in (
+            (method_value, "input_embedder.method_conditioning_init"),
+            (modified, "input_embedder.modified_conditioning_init"),
+            (mol_type, "input_embedder.mol_type_conditioning_init"),
+        ):
+            embedded = graph.embedding(indices, prefix, bf16)
+            result = graph.add(result, graph.cast(embedded, result.dtype))
+        cyclic = graph.minimum(cyclic_period, graph.scalar_like(1.0, cyclic_period))
+        cyclic = graph.reshape(cyclic, (1, token_count, 1))
+        cyclic = graph.linear(graph.cast(cyclic, bf16), "input_embedder.cyclic_conditioning_init")
+        result = graph.add(result, graph.cast(cyclic, result.dtype))
+        result.name = name
+        network.mark_output(result)
+        return result
+
+    s_inputs = finish_embedding(profile, deletion_mean, method_feature, "s_inputs")
+    affinity_method = graph.cast(token_pad_mask, trt.int32)
+    affinity_method = graph.mul(affinity_method, graph.integer_scalar_like(4, affinity_method))
+    s_inputs_affinity = finish_embedding(
+        profile_affinity,
+        deletion_mean_affinity,
+        affinity_method,
+        "s_inputs_affinity",
     )
-    profile_embedding = graph.linear(
-        graph.cast(profile_input, bf16), "input_embedder.msa_profile_encoding"
-    )
-    s_inputs = graph.add(pooled, graph.cast(token_embedding, pooled.dtype))
-    s_inputs = graph.add(s_inputs, graph.cast(profile_embedding, s_inputs.dtype))
-    for indices, prefix in (
-        (method_feature, "input_embedder.method_conditioning_init"),
-        (modified, "input_embedder.modified_conditioning_init"),
-        (mol_type, "input_embedder.mol_type_conditioning_init"),
-    ):
-        embedded = graph.embedding(indices, prefix, bf16)
-        s_inputs = graph.add(s_inputs, graph.cast(embedded, s_inputs.dtype))
-    cyclic = graph.minimum(cyclic_period, graph.scalar_like(1.0, cyclic_period))
-    cyclic = graph.reshape(cyclic, (1, token_count, 1))
-    cyclic = graph.linear(graph.cast(cyclic, bf16), "input_embedder.cyclic_conditioning_init")
-    s_inputs = graph.add(s_inputs, graph.cast(cyclic, s_inputs.dtype))
-    s_inputs.name = "s_inputs"
-    network.mark_output(s_inputs)
-    return s_inputs
+    return s_inputs, s_inputs_affinity
 
 
 def build_input_embedder_engine(
