@@ -148,6 +148,21 @@ int main(int argc, char** argv) {
                   "SDK success/failure receipt");
             return value;
         };
+        const auto text_request = sdk;
+        sdk = request;
+        sdk["request"]["token_ids"] = {7};
+        const auto rejected_ids = invoke(false);
+        check(rejected_ids.at("error").get<std::string>().find("token_ids") != std::string::npos &&
+                  !rejected_ids.contains("output_summary"),
+              "existing forecast route rejects token input instead of silently dropping it");
+        sdk = request;
+        sdk["selected_task"] = "series_to_point_forecast";
+        const auto rejected_selector = invoke(false);
+        check(rejected_selector.at("error").get<std::string>().find("selected_task") !=
+                      std::string::npos &&
+                  !rejected_selector.contains("output_summary"),
+              "explicit SDK Task selection cannot fall back through the existing interface");
+        sdk = text_request;
         for (const auto* id : {"text_continuation", "conditional_text_generation",
                                "corrupted_text_reconstruction", "text_summarization"}) {
             write_bundle(bundle_path, id, "text_fixture");
@@ -157,6 +172,52 @@ int main(int argc, char** argv) {
             const auto text = value.at("output_summary").at("text").get<std::string>();
             check(text.find("Hello") != std::string::npos && text.find("done") != std::string::npos,
                   "typed prompt and explicit family config reach benchmark output");
+        }
+        write_bundle(bundle_path, "images_text_to_text", "text_fixture");
+        sdk["request"] = {{"token_ids", {7, 9}}, {"config", {{"suffix", "done"}}}};
+        const auto text_secondary = invoke();
+        check(text_secondary.at("task") == "images_text_to_text" &&
+                  text_secondary.at("selected_task") == "text_continuation" &&
+                  text_secondary.at("output_summary")
+                          .at("text")
+                          .get<std::string>()
+                          .find("tokens:7:9") != std::string::npos,
+              "multimodal-primary text-only default retains its actual text continuation binding");
+        sdk["selected_task"] = "conditional_text_generation";
+        const auto conditional_secondary = invoke();
+        check(conditional_secondary.at("task") == "images_text_to_text" &&
+                  conditional_secondary.at("selected_task") == "conditional_text_generation",
+              "explicit generation selector overrides only execution, never physical identity");
+        sdk["selected_task"] = "images_text_to_text";
+        invoke(
+            false); // The synthetic text fixture has no bound multimodal Task; never choose text.
+        sdk.erase("selected_task");
+        sdk["request"] = text_request.at("request");
+        for (const auto* id : {"text_continuation", "conditional_text_generation"}) {
+            write_bundle(bundle_path, id, "text_fixture");
+            sdk["request"] = {{"token_ids", {7, 9}}, {"config", {{"suffix", "done"}}}};
+            const auto tokens = invoke().at("output_summary").at("text").get<std::string>();
+            check(tokens.find("tokens:7:9done") != std::string::npos,
+                  "text generation preserves typed token prefixes and family Config");
+            sdk["request"]["token_ids"] = Json::array();
+            check(invoke().at("output_summary").at("text").get<std::string>().find("tokensdone") !=
+                      std::string::npos,
+                  "empty token prefix is distinct from missing input");
+            sdk["request"]["prompt"] = "";
+            invoke(false);
+            sdk["request"].erase("prompt");
+            for (const auto& invalid_ids :
+                 {Json::array({true}), Json::array({1.5}), Json::array({2147483648LL}),
+                  Json::array({-2147483649LL})}) {
+                sdk["request"]["token_ids"] = invalid_ids;
+                invoke(false);
+            }
+        }
+        for (const auto* id : {"text_summarization", "corrupted_text_reconstruction",
+                               "unconditional_text_generation"}) {
+            write_bundle(bundle_path, id, "text_fixture");
+            sdk["request"] = {{"prompt", "Hello"}, {"token_ids", {7}}};
+            invoke(false);
         }
         write_bundle(bundle_path, "unconditional_text_generation", "text_fixture");
         sdk["request"] = Json::object();

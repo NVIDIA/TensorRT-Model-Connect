@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -18,6 +19,7 @@ class NumericModel final : public IModel,
                            public ISeriesToQuantileForecast,
                            public ISeriesToPointAndQuantileForecast,
                            public ISeriesToRegressionDistribution,
+                           public ISeriesToRegressionValues,
                            public ILatentConditionedTextGeneration,
                            public ILatentReplayToText,
                            public ILatentDenoisingStep,
@@ -29,10 +31,13 @@ class NumericModel final : public IModel,
     explicit NumericModel(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
     std::vector<TaskInstance> task_bindings() override {
+        if (mode_.find("regression_values") == 0 || mode_ == ISeriesToRegressionValues::kTask)
+            return {bind<ISeriesToRegressionValues>(*this,
+                                                    fields_for(ISeriesToRegressionValues::kTask))};
         if (mode_ == "regression_only")
             return {bind<ISeriesToRegressionDistribution>(
                 *this, fields_for(ISeriesToRegressionDistribution::kTask))};
-        return {
+        std::vector<TaskInstance> tasks{
             bind<ISeriesToPointForecast>(*this, fields_for(ISeriesToPointForecast::kTask)),
             bind<IBatchSeriesToPointForecast>(*this,
                                               fields_for(IBatchSeriesToPointForecast::kTask)),
@@ -50,8 +55,17 @@ class NumericModel final : public IModel,
             bind<ILatentReplayToText>(*this, fields_for(ILatentReplayToText::kTask)),
             bind<ILatentDenoisingStep>(*this, fields_for(ILatentDenoisingStep::kTask)),
             bind<ILatentToTokenLogits>(*this, fields_for(ILatentToTokenLogits::kTask))};
+        if (mode_ == ISeriesToPointForecast::kTask)
+            tasks.push_back(bind<ISeriesToRegressionValues>(
+                *this, fields_for(ISeriesToRegressionValues::kTask)));
+        return tasks;
     }
     trtmc::Span<const ConfigField> fields_for(std::string_view id) const {
+        if (id == ISeriesToRegressionValues::kTask) {
+            static const ConfigField fields[]{
+                {"scale", ConfigKind::F64, ConfigValue{1.0}, "Synthetic target scale"}};
+            return fields;
+        }
         if (id == ISeriesToPointForecast::kTask || id == ISeriesToQuantileForecast::kTask ||
             id == ISeriesToPointAndQuantileForecast::kTask ||
             id == IBatchSeriesToPointForecast::kTask ||
@@ -87,6 +101,36 @@ class NumericModel final : public IModel,
             return declared;
         }
         return {};
+    }
+    RegressionValuesResult run(const SeriesToRegressionValuesRequest& request,
+                               ConfigView config) override {
+        const auto fields = fields_for(ISeriesToRegressionValues::kTask);
+        validate_config(fields, config);
+        const auto scale = config_get<double>(config, fields, "scale").value();
+        if (!std::isfinite(scale))
+            throw ConfigError("target scale must be finite");
+        const auto input = resolve_history(request.history);
+        float sum = 0;
+        for (std::size_t i = 0; i < input.past_values.values.size(); ++i)
+            if (input.observed.empty() || input.observed[i])
+                sum += input.past_values.values[i];
+        RegressionValuesResult result{
+            {sum * static_cast<float>(scale), static_cast<float>(++regression_evaluations_)},
+            {},
+            {}};
+        if (mode_ == "regression_values_named") {
+            result.target_names = {"total", "evaluation"};
+            result.target_units = {"unit", "count"};
+        } else if (mode_ == "regression_values_bad_names") {
+            result.target_names = {"only_one"};
+        } else if (mode_ == "regression_values_bad_units") {
+            result.target_units = {"only_one"};
+        } else if (mode_ == "regression_values_empty") {
+            result.values.clear();
+        } else if (mode_ == "regression_values_nonfinite") {
+            result.values[0] = std::numeric_limits<float>::infinity();
+        }
+        return result;
     }
     PointForecastResult run(const SeriesToPointForecastRequest& request,
                             ConfigView config) override {
@@ -347,6 +391,7 @@ class NumericModel final : public IModel,
         return result;
     }
     std::uint64_t forecast_evaluations_{0};
+    std::uint64_t regression_evaluations_{0};
     static void check_latents(trtmc::Span<const float> values, bool required) {
         // The fixture owns its 2x2 layout; no shared API shape inference.
         if ((required || !values.empty()) && values.size() != 4)

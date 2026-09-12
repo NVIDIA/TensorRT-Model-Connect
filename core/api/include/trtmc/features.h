@@ -52,6 +52,15 @@ typedef struct {
 typedef struct {
     const float* values;
     uint64_t count;
+    const uint64_t* shape;
+    uint64_t rank;
+    uint32_t kind;
+    trtmc_string_view pooling;
+    trtmc_string_view normalization;
+} trtmc_head_scores_view_v1;
+typedef struct {
+    const float* values;
+    uint64_t count;
     /* Empty means the checkpoint space is unknown, not a shared space ID.
      * Do not infer cross-model compatibility from two empty identifiers. */
     trtmc_string_view embedding_space;
@@ -168,6 +177,9 @@ typedef struct {
     trtmc_text_source_v1 text;
 } trtmc_text_to_pooled_features_request_v1;
 typedef struct {
+    trtmc_text_source_v1 text;
+} trtmc_text_to_head_scores_request_v1;
+typedef struct {
     trtmc_string_view text;
     uint32_t role;
 } trtmc_text_to_embedding_request_v1;
@@ -260,6 +272,19 @@ typedef struct {
     trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_pooled_features_view_v1*,
                                           trtmc_error**);
 } trtmc_text_to_pooled_features_api_v1;
+
+/* Head scores retain their actual positive shape and raw/transformed score kind.
+ * The family performs all reductions and declares pooling/normalization; these
+ * are not vocabulary scores, hidden states or a trained embedding-space claim.
+ * Input buffers are borrowed through run; all output views belong to the result. */
+#define TRTMC_TASK_TEXT_TO_HEAD_SCORES "text_to_head_scores"
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_text_to_head_scores_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_head_scores_view_v1*,
+                                          trtmc_error**);
+} trtmc_text_to_head_scores_api_v1;
 
 #define TRTMC_TASK_TEXT_TO_EMBEDDING "text_to_embedding"
 typedef struct {

@@ -12,6 +12,16 @@ const test = require('node:test');
 const modelSupportInventoryPlugin = require('./index');
 const {collectModelSupportInventory} = modelSupportInventoryPlugin;
 
+test('head-score recipes are discovered without hidden or vocabulary claims', () => {
+  const root = repository();
+  addTaskManifest(root, 'text_to_head_scores');
+  const recipe = collectModelSupportInventory(root).taskRecipes.find(row => row.task === 'text_to_head_scores');
+  assert.equal(recipe.label, 'Text head scores');
+  assert.equal(recipe.recipeCount, 1);
+  assert.deepEqual(recipe.families[0].cliCommands, ['encode']);
+  assert.equal(recipe.hfUrl, null);
+});
+
 function repository() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'trtmc-inventory-'));
   for (const family of ['alpha', 'beta']) {
@@ -52,6 +62,39 @@ function addTaskManifest(root, task, family = 'alpha') {
     })
   );
 }
+
+test('family testcase Tasks share one physical profile without mixing Task commands', (context) => {
+  const root = repository();
+  context.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  const file = path.join(root, 'families/alpha/tests/manifests/small.json');
+  const payload = JSON.parse(fs.readFileSync(file));
+  payload.task = 'text_to_pooled_features';
+  payload.testcases = [
+    {name: 'default'},
+    {name: 'tokens', selected_task: 'text_to_token_features'},
+    {name: 'tokens-again', selected_task: 'text_to_token_features'},
+    {name: 'embedding', selected_task: 'text_to_embedding'},
+  ];
+  fs.writeFileSync(file, JSON.stringify(payload));
+  const inventory = collectModelSupportInventory(root);
+  assert.equal(inventory.manifestCount, 1);
+  const [profile] = inventory.modelProfiles;
+  assert.equal(profile.task, 'text_to_pooled_features');
+  assert.deepEqual(profile.tasks, ['text_to_pooled_features', 'text_to_token_features', 'text_to_embedding']);
+  assert.equal(inventory.taskRecipes.length, 3);
+  for (const recipe of inventory.taskRecipes) {
+    assert.equal(recipe.recipeCount, 1);
+    assert.deepEqual(recipe.families[0].cliCommands,
+      [recipe.task === 'text_to_embedding' ? 'embed' : 'encode']);
+  }
+  assert.deepEqual(profile.cliCommands, ['embed', 'encode']);
+  for (const selected_task of [null, '', 'unknown_task', false]) {
+    payload.testcases = [{name: 'invalid', selected_task}];
+    fs.writeFileSync(file, JSON.stringify(payload));
+    assert.throws(() => collectModelSupportInventory(root), /unknown selected_task/);
+  }
+});
+
 
 function semanticTaskIds() {
   const headers = path.resolve(__dirname, '../../../core/api/include/trtmc');
@@ -102,6 +145,7 @@ test('family-only semantic switches preserve identity and use implemented comman
   for (const [task, command] of [
     ['text_translation', 'run'],
     ['series_to_point_forecast', 'forecast'],
+    ['series_to_regression_values', 'forecast'],
     ['image_to_class_scores', 'classify'],
     ['images_text_to_text', 'run'],
     ['text_to_speech', 'generate-audio'],

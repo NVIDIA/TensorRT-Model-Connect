@@ -131,6 +131,28 @@ void exercise(const std::filesystem::path& root) {
               "regression target parameters are named rather than relabeled as a future forecast");
     }
     const auto channels = root / "numeric-cli-two-channels.bundle";
+    const auto targets = root / "numeric-cli-targets.bundle";
+    bundle(targets, std::string(trtmc::SeriesToRegressionValues::kTask));
+    auto target_args = base;
+    target_args[2] = targets.string();
+    target_args.insert(target_args.end(), {"--mask", mask.string(), "--set", "scale=2.0"});
+    const auto target_output = run(target_args);
+    check(target_output.status == 0,
+          "forecast command executes the explicit target-regression Task");
+    if (target_output.status == 0) {
+        const auto value = json::parse(target_output.output);
+        check(value.at("kind") == "regression_values" &&
+                  value.at("values") == json::array({18, 1}) && value.at("target_count") == 2 &&
+                  value.at("axes") == json::array({"target"}) && value.at("target_names").empty() &&
+                  value.at("target_units").empty() && !value.contains("distribution") &&
+                  !value.contains("horizon_steps"),
+              "target regression preserves all values without invented forecast/distribution "
+              "metadata");
+    }
+    target_args.insert(target_args.end(), {"--set", "distribution=normal"});
+    const auto unsupported_distribution = run(target_args);
+    check(unsupported_distribution.status != 0 && unsupported_distribution.output.empty(),
+          "a deterministic regression provider cannot silently accept a distribution selector");
     bundle(channels, "flat_channels_two");
     auto channel_args = base;
     channel_args[2] = channels.string();

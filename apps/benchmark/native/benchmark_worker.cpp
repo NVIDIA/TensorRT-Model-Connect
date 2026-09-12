@@ -212,6 +212,8 @@ Json measure(const Timing& timing, Invoke&& invoke, Observe&& observe) {
 }
 
 Json run_generate(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    if (request.contains("token_ids"))
+        throw std::invalid_argument("token_ids requires a semantic TextSource Task");
     const std::string prompt = request.at("prompt").get<std::string>();
     const auto config = text_config(request);
     if (!request.contains("image_path")) {
@@ -778,13 +780,21 @@ AudioInputSummary input_summary(const trtmc::cli::io::LoadedAudio& audio) {
             static_cast<std::uint32_t>(audio.channels)};
 }
 
-Json run_streaming_transcribe(const trtmc::Model& model, const Json& request,
-                              const Timing& timing) {
+template <class Task>
+Task task_for_operation(const trtmc::Model& model, std::string_view selected) {
+    if (selected != Task::kTask)
+        throw std::invalid_argument("operation cannot execute selected Task '" +
+                                    std::string(selected) + "'");
+    return model.task<Task>();
+}
+
+Json run_streaming_transcribe(const trtmc::Model& model, const Json& request, const Timing& timing,
+                              const std::string& task_id) {
     check_streaming_input(request, true);
     if (request.contains("target_language"))
         throw std::invalid_argument("streaming speech translation is not implemented");
     const auto language = language_input(request, "language");
-    const auto task = model.task<trtmc::StreamingSpeechTranscription>();
+    const auto task = task_for_operation<trtmc::StreamingSpeechTranscription>(model, task_id);
     const auto config = sdk_config(request, task.config_fields(),
                                    {"audio_path", "language", "streaming", "chunk_ms"});
     const auto path = request.at("audio_path").get<std::string>();
@@ -848,11 +858,12 @@ Json run_streaming_transcribe(const trtmc::Model& model, const Json& request,
         });
 }
 
-Json run_batch_transcribe(const trtmc::Model& model, const Json& request, const Timing& timing) {
+Json run_batch_transcribe(const trtmc::Model& model, const Json& request, const Timing& timing,
+                          const std::string& task_id) {
     if (!request.is_object() || request.size() != 1 || !request.contains("items") ||
         !request.at("items").is_array() || request.at("items").empty())
         throw std::invalid_argument("batch speech requires only a nonempty items array");
-    const auto primary = model.info().bundle_task;
+    const auto primary = task_id;
     const auto& items = request.at("items");
     struct Item {
         std::string path;
@@ -929,16 +940,16 @@ Json run_batch_transcribe(const trtmc::Model& model, const Json& request, const 
             });
     };
     if (primary == trtmc::BatchSpeechTranscription::kTask)
-        return batch(model.task<trtmc::BatchSpeechTranscription>(),
+        return batch(task_for_operation<trtmc::BatchSpeechTranscription>(model, task_id),
                      trtmc::BatchSpeechTranscriptionRequest{}, [](auto audio, const auto& item) {
                          return trtmc::SpeechTranscriptionRequest{audio, item.source};
                      });
     if (primary == trtmc::BatchSpeechTranslation::kTask)
-        return batch(model.task<trtmc::BatchSpeechTranslation>(),
+        return batch(task_for_operation<trtmc::BatchSpeechTranslation>(model, task_id),
                      trtmc::BatchSpeechTranslationRequest{}, [](auto audio, const auto& item) {
                          return trtmc::SpeechTranslationRequest{audio, item.target, item.source};
                      });
-    return batch(model.task<trtmc::MixedBatchSpeechToText>(),
+    return batch(task_for_operation<trtmc::MixedBatchSpeechToText>(model, task_id),
                  trtmc::MixedBatchSpeechToTextRequest{},
                  [](auto audio, const auto& item) -> trtmc::MixedSpeechTextRequest {
                      if (item.translation)
@@ -947,14 +958,15 @@ Json run_batch_transcribe(const trtmc::Model& model, const Json& request, const 
                  });
 }
 
-Json run_transcribe(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto primary = model.info().bundle_task;
+Json run_transcribe(const trtmc::Model& model, const Json& request, const Timing& timing,
+                    const std::string& task_id) {
+    const auto primary = task_id;
     if (primary == trtmc::BatchSpeechTranscription::kTask ||
         primary == trtmc::BatchSpeechTranslation::kTask ||
         primary == trtmc::MixedBatchSpeechToText::kTask)
-        return run_batch_transcribe(model, request, timing);
+        return run_batch_transcribe(model, request, timing, task_id);
     if (primary == trtmc::StreamingSpeechTranscription::kTask)
-        return run_streaming_transcribe(model, request, timing);
+        return run_streaming_transcribe(model, request, timing, task_id);
     if (primary != trtmc::SpeechTranscription::kTask && primary != trtmc::SpeechTranslation::kTask)
         throw std::invalid_argument("transcribe requires a transcription or translation Task");
     check_streaming_input(request, false);
@@ -998,9 +1010,9 @@ Json run_transcribe(const trtmc::Model& model, const Json& request, const Timing
             });
     };
     if (primary == trtmc::SpeechTranscription::kTask)
-        return run(model.task<trtmc::SpeechTranscription>(),
+        return run(task_for_operation<trtmc::SpeechTranscription>(model, task_id),
                    [&](auto audio) { return trtmc::SpeechTranscriptionRequest{audio, language}; });
-    return run(model.task<trtmc::SpeechTranslation>(), [&](auto audio) {
+    return run(task_for_operation<trtmc::SpeechTranslation>(model, task_id), [&](auto audio) {
         return trtmc::SpeechTranslationRequest{audio, target, language};
     });
 }
@@ -1017,21 +1029,22 @@ Json audio_observation(const trtmc::AudioGenerationResult& result) {
         {"inference_ms", result.inference_ms()}};
 }
 
-Json run_generate_audio(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto primary = model.info().bundle_task;
+Json run_generate_audio(const trtmc::Model& model, const Json& request, const Timing& timing,
+                        const std::string& task_id) {
+    const auto primary = task_id;
     const auto prompt = request.at("prompt").get<std::string>();
     const bool streaming = primary == trtmc::StreamingTextToSpeech::kTask;
     check_streaming_input(request, streaming);
     if (primary == trtmc::TextToAudio::kTask) {
         if (request.contains("language"))
             throw std::invalid_argument("typed synthesis language requires TextToSpeech");
-        const auto task = model.task<trtmc::TextToAudio>();
+        const auto task = task_for_operation<trtmc::TextToAudio>(model, task_id);
         const auto config = sdk_config(request, task.config_fields(), {"prompt", "streaming"});
         return measure(timing, [&]() { return task.run({prompt}, config); }, audio_observation);
     }
     const auto language = language_input(request, "language");
     if (primary == trtmc::TextToSpeech::kTask) {
-        const auto task = model.task<trtmc::TextToSpeech>();
+        const auto task = task_for_operation<trtmc::TextToSpeech>(model, task_id);
         const auto config =
             sdk_config(request, task.config_fields(), {"prompt", "language", "streaming"});
         return measure(
@@ -1039,7 +1052,7 @@ Json run_generate_audio(const trtmc::Model& model, const Json& request, const Ti
     }
     if (!streaming)
         throw std::invalid_argument("generate_audio requires an audio generation Task");
-    const auto task = model.task<trtmc::StreamingTextToSpeech>();
+    const auto task = task_for_operation<trtmc::StreamingTextToSpeech>(model, task_id);
     const auto config =
         sdk_config(request, task.config_fields(), {"prompt", "language", "streaming"});
     return measure(
@@ -1115,8 +1128,9 @@ Json speech_event_observation(const trtmc::SpeechDialogueEventView& event) {
     return value;
 }
 
-Json run_speech_dialogue(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto primary = model.info().bundle_task;
+Json run_speech_dialogue(const trtmc::Model& model, const Json& request, const Timing& timing,
+                         const std::string& task_id) {
+    const auto primary = task_id;
     const bool tools_enabled = primary == trtmc::ToolSpeechDialogue::kTask;
     if (!tools_enabled && primary != trtmc::DuplexSpeechDialogue::kTask &&
         primary != trtmc::OfflineSpeechDialogue::kTask)
@@ -1331,7 +1345,7 @@ Json run_speech_dialogue(const trtmc::Model& model, const Json& request, const T
                            "tool_replies", "acknowledgements", "default_acknowledgements"});
     };
     if (tools_enabled) {
-        const auto task = model.task<trtmc::ToolSpeechDialogue>();
+        const auto task = task_for_operation<trtmc::ToolSpeechDialogue>(model, task_id);
         const auto config = config_for(task);
         return perform([&](const auto& input) {
             tool_request.dialogue = input;
@@ -1339,19 +1353,20 @@ Json run_speech_dialogue(const trtmc::Model& model, const Json& request, const T
         });
     }
     if (primary == trtmc::OfflineSpeechDialogue::kTask) {
-        const auto task = model.task<trtmc::OfflineSpeechDialogue>();
+        const auto task = task_for_operation<trtmc::OfflineSpeechDialogue>(model, task_id);
         const auto config = config_for(task);
         return perform([&](const auto& input) { return task.create(input, config); });
     }
-    const auto task = model.task<trtmc::DuplexSpeechDialogue>();
+    const auto task = task_for_operation<trtmc::DuplexSpeechDialogue>(model, task_id);
     const auto config = config_for(task);
     return perform([&](const auto& input) { return task.create(input, config); });
 }
 
-Json run_speak(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    if (model.info().bundle_task != trtmc::SpeechToSpeechResponse::kTask)
+Json run_speak(const trtmc::Model& model, const Json& request, const Timing& timing,
+               const std::string& task_id) {
+    if (task_id != trtmc::SpeechToSpeechResponse::kTask)
         throw std::invalid_argument("speak requires SpeechToSpeechResponse");
-    const auto task = model.task<trtmc::SpeechToSpeechResponse>();
+    const auto task = task_for_operation<trtmc::SpeechToSpeechResponse>(model, task_id);
     const auto config = sdk_config(request, task.config_fields(), {"audio_path"});
     const auto path = request.at("audio_path").get<std::string>();
     std::optional<trtmc::cli::io::LoadedAudio> cached;
@@ -1422,11 +1437,12 @@ void check_batch_size(const Json& request, std::size_t count) {
         throw std::invalid_argument("batch_size must equal the actual request count");
 }
 
-Json run_classify(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    if (model.info().bundle_task != trtmc::ImageToClassScores::kTask)
+Json run_classify(const trtmc::Model& model, const Json& request, const Timing& timing,
+                  const std::string& task_id) {
+    if (task_id != trtmc::ImageToClassScores::kTask)
         throw std::invalid_argument("classify requires ImageToClassScores");
     check_batch_size(request, 1);
-    const auto task = model.task<trtmc::ImageToClassScores>();
+    const auto task = task_for_operation<trtmc::ImageToClassScores>(model, task_id);
     const auto config = sdk_config(request, task.config_fields(), {"image_path", "batch_size"});
     const auto path = request.at("image_path").get<std::string>();
     std::optional<Image> cached;
@@ -1535,7 +1551,8 @@ Json image_feature_observation(const trtmc::SpatialFeaturesResult& result) {
               {"coordinates", "image_edges"}}}};
 }
 
-Json run_extract_features(const trtmc::Model& model, const Json& request, const Timing& timing) {
+Json run_extract_features(const trtmc::Model& model, const Json& request, const Timing& timing,
+                          const std::string& task_id) {
     check_batch_size(request, 1);
     const auto path = request.at("image_path").get<std::string>();
     std::optional<Image> cached;
@@ -1553,27 +1570,73 @@ Json run_extract_features(const trtmc::Model& model, const Json& request, const 
             },
             [](const auto& result) { return image_feature_observation(result); });
     };
-    const auto primary = model.info().bundle_task;
+    const auto primary = task_id;
     if (primary == trtmc::ImageToTokenAndPooledFeatures::kTask)
-        return run(model.task<trtmc::ImageToTokenAndPooledFeatures>());
+        return run(task_for_operation<trtmc::ImageToTokenAndPooledFeatures>(model, task_id));
     if (primary == trtmc::ImageToTokenFeatures::kTask)
-        return run(model.task<trtmc::ImageToTokenFeatures>());
+        return run(task_for_operation<trtmc::ImageToTokenFeatures>(model, task_id));
     if (primary == trtmc::ImageToPooledFeatures::kTask)
-        return run(model.task<trtmc::ImageToPooledFeatures>());
+        return run(task_for_operation<trtmc::ImageToPooledFeatures>(model, task_id));
     if (primary == trtmc::ImageToSpatialFeatures::kTask)
-        return run(model.task<trtmc::ImageToSpatialFeatures>());
+        return run(task_for_operation<trtmc::ImageToSpatialFeatures>(model, task_id));
     throw std::invalid_argument("extract_features requires an image feature Task");
 }
 
-Json run_encode(const trtmc::Model& model, const Json& request, const Timing& timing) {
+trtmc::TextSource read_text_source(const Json& request) {
+    if (request.contains("prompt") == request.contains("token_ids"))
+        throw std::invalid_argument("text source requires exactly one prompt or token_ids input");
+    trtmc::TextSource source;
+    if (request.contains("prompt")) {
+        source = request.at("prompt").get<std::string>();
+    } else {
+        const auto& raw = request.at("token_ids");
+        if (!raw.is_array())
+            throw std::invalid_argument("token_ids must be an int32 array");
+        std::vector<int32_t> ids;
+        for (const auto& value : raw) {
+            if (!value.is_number_integer() ||
+                (value.is_number_unsigned() && value.get<uint64_t>() > INT32_MAX) ||
+                (!value.is_number_unsigned() &&
+                 (value.get<int64_t>() < INT32_MIN || value.get<int64_t>() > INT32_MAX)))
+                throw std::invalid_argument("token_ids must contain int32 values");
+            ids.push_back(value.get<int32_t>());
+        }
+        source = std::move(ids);
+    }
+    return source;
+}
+
+Json run_head_scores(const trtmc::Model& model, const Json& request, const Timing& timing,
+                     const std::string& task_id) {
     check_batch_size(request, 1);
-    const auto prompt = request.at("prompt").get<std::string>();
-    const auto primary = model.info().bundle_task;
+    const auto source = read_text_source(request);
+    const auto task = task_for_operation<trtmc::TextToHeadScores>(model, task_id);
+    const auto config =
+        sdk_config(request, task.config_fields(), {"prompt", "token_ids", "batch_size"});
+    return measure(
+        timing, [&]() { return task.run({source}, config); },
+        [](const trtmc::HeadScoresResult& result) {
+            return Json{{"head_score_tensors", 1},
+                        {"head_score_values", result.values().size()},
+                        {"values", json_values(result.values())},
+                        {"shape", json_values(result.shape())},
+                        {"score_kind", score_kind(result.kind())},
+                        {"pooling", std::string(result.pooling())},
+                        {"normalization", std::string(result.normalization())}};
+        });
+}
+
+Json run_encode(const trtmc::Model& model, const Json& request, const Timing& timing,
+                const std::string& task_id) {
+    check_batch_size(request, 1);
+    const auto source = read_text_source(request);
+    const auto primary = task_id;
     if (primary == trtmc::TextToPooledFeatures::kTask) {
-        const auto task = model.task<trtmc::TextToPooledFeatures>();
-        const auto config = sdk_config(request, task.config_fields(), {"prompt", "batch_size"});
+        const auto task = task_for_operation<trtmc::TextToPooledFeatures>(model, task_id);
+        const auto config =
+            sdk_config(request, task.config_fields(), {"prompt", "token_ids", "batch_size"});
         return measure(
-            timing, [&]() { return task.run({prompt}, config); },
+            timing, [&]() { return task.run({source}, config); },
             [](const trtmc::PooledFeaturesResult& result) {
                 return Json{{"embedding_vectors", 1},
                             {"embedding_elements", result.values().size()},
@@ -1586,10 +1649,11 @@ Json run_encode(const trtmc::Model& model, const Json& request, const Timing& ti
     }
     if (primary != trtmc::TextToTokenFeatures::kTask)
         throw std::invalid_argument("encode requires a pooled or token feature Task");
-    const auto task = model.task<trtmc::TextToTokenFeatures>();
-    const auto config = sdk_config(request, task.config_fields(), {"prompt", "batch_size"});
+    const auto task = task_for_operation<trtmc::TextToTokenFeatures>(model, task_id);
+    const auto config =
+        sdk_config(request, task.config_fields(), {"prompt", "token_ids", "batch_size"});
     return measure(
-        timing, [&]() { return task.run({prompt}, config); },
+        timing, [&]() { return task.run({source}, config); },
         [](const trtmc::TokenFeaturesResult& result) {
             const auto matrix = result.features();
             auto tokens = Json::array();
@@ -1610,11 +1674,12 @@ Json run_encode(const trtmc::Model& model, const Json& request, const Timing& ti
         });
 }
 
-Json run_embed(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    if (model.info().bundle_task != trtmc::TextToEmbedding::kTask)
+Json run_embed(const trtmc::Model& model, const Json& request, const Timing& timing,
+               const std::string& task_id) {
+    if (task_id != trtmc::TextToEmbedding::kTask)
         throw std::invalid_argument("embed requires TextToEmbedding");
     check_batch_size(request, 1);
-    const auto task = model.task<trtmc::TextToEmbedding>();
+    const auto task = task_for_operation<trtmc::TextToEmbedding>(model, task_id);
     const auto config = sdk_config(request, task.config_fields(), {"prompt", "role", "batch_size"});
     const auto prompt = request.at("prompt").get<std::string>();
     auto role = trtmc::EmbeddingRole::Default;
@@ -1640,10 +1705,11 @@ Json run_embed(const trtmc::Model& model, const Json& request, const Timing& tim
         });
 }
 
-Json run_rerank(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    if (model.info().bundle_task != trtmc::TextQueryDocumentsToRelevance::kTask)
+Json run_rerank(const trtmc::Model& model, const Json& request, const Timing& timing,
+                const std::string& task_id) {
+    if (task_id != trtmc::TextQueryDocumentsToRelevance::kTask)
         throw std::invalid_argument("document-list rerank requires TextQueryDocumentsToRelevance");
-    const auto task = model.task<trtmc::TextQueryDocumentsToRelevance>();
+    const auto task = task_for_operation<trtmc::TextQueryDocumentsToRelevance>(model, task_id);
     const auto config = sdk_config(request, task.config_fields(), {"query", "documents"});
     const auto query = request.at("query").get<std::string>();
     const auto documents = request.at("documents").get<std::vector<std::string>>();
@@ -1679,8 +1745,9 @@ Json action_sequence_observation(const trtmc_action_sequence_view_v1& view) {
         {"frame_spans", std::move(spans)}};
 }
 
-Json run_control_queue(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto task = model.task<trtmc::ImageStateActionQueue>();
+Json run_control_queue(const trtmc::Model& model, const Json& request, const Timing& timing,
+                       const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::ImageStateActionQueue>(model, task_id);
     const auto fields = task.config_fields();
     const auto config = sdk_config(request, fields, {"observations"});
     const auto& observations = request.at("observations");
@@ -1745,10 +1812,11 @@ Json run_control_queue(const trtmc::Model& model, const Json& request, const Tim
         });
 }
 
-Json run_control(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    if (model.info().bundle_task != trtmc::ImageStateToActionChunk::kTask)
+Json run_control(const trtmc::Model& model, const Json& request, const Timing& timing,
+                 const std::string& task_id) {
+    if (task_id != trtmc::ImageStateToActionChunk::kTask)
         throw std::invalid_argument("control requires a stateless ImageStateToActionChunk Task");
-    const auto task = model.task<trtmc::ImageStateToActionChunk>();
+    const auto task = task_for_operation<trtmc::ImageStateToActionChunk>(model, task_id);
     const auto config = sdk_config(request, task.config_fields(), {"image_path", "state_path"});
     const auto image_path = request.at("image_path").get<std::string>();
     const auto state_path = request.at("state_path").get<std::string>();
@@ -1828,9 +1896,9 @@ Json masks_observation(const trtmc_masks_view_v1& view) {
 }
 
 Json run_segment(const trtmc::Model& model, const Json& request, const Timing& timing,
-                 bool prompted) {
+                 const std::string& task_id, bool prompted) {
     check_batch_size(request, 1);
-    const auto primary = model.info().bundle_task;
+    const auto primary = task_id;
     const auto path = request.at("image_path").get<std::string>();
     std::optional<Image> cached;
     if (!timing.asset_loading_included)
@@ -1848,7 +1916,7 @@ Json run_segment(const trtmc::Model& model, const Json& request, const Timing& t
             observe);
     };
     if (!prompted && primary == trtmc::ImageToSemanticSegmentation::kTask) {
-        const auto task = model.task<trtmc::ImageToSemanticSegmentation>();
+        const auto task = task_for_operation<trtmc::ImageToSemanticSegmentation>(model, task_id);
         const auto config = sdk_config(request, task.config_fields(), {"image_path", "batch_size"});
         return with_image(
             task, config,
@@ -1889,7 +1957,7 @@ Json run_segment(const trtmc::Model& model, const Json& request, const Timing& t
         if (request.contains("is_foreground") && !request.at("is_foreground").is_boolean())
             throw std::invalid_argument("is_foreground must be boolean");
         const bool foreground = request.value("is_foreground", true);
-        const auto task = model.task<trtmc::ImagePointsToMasks>();
+        const auto task = task_for_operation<trtmc::ImagePointsToMasks>(model, task_id);
         const auto config =
             sdk_config(request, task.config_fields(),
                        {"image_path", "batch_size", "point_x", "point_y", "is_foreground"});
@@ -1930,7 +1998,7 @@ Json run_segment(const trtmc::Model& model, const Json& request, const Timing& t
         if (request.contains(key))
             throw std::invalid_argument("text-instance masks do not accept point controls");
     const auto prompt = request.at("prompt").get<std::string>();
-    const auto task = model.task<trtmc::ImageTextToInstanceMasks>();
+    const auto task = task_for_operation<trtmc::ImageTextToInstanceMasks>(model, task_id);
     const auto config =
         sdk_config(request, task.config_fields(), {"image_path", "batch_size", "prompt"});
     return with_image(
@@ -1982,8 +2050,9 @@ Json generated_video_observation(const trtmc::VideoGenerationResult& video) {
             {"inference_ms", video.inference_ms()}};
 }
 
-Json run_generate_image(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto primary = model.info().bundle_task;
+Json run_generate_image(const trtmc::Model& model, const Json& request, const Timing& timing,
+                        const std::string& task_id) {
+    const auto primary = task_id;
     const bool video =
         primary == trtmc::TextToVideo::kTask || primary == trtmc::ImageTextActionToVideo::kTask;
     if (request.contains("media_type") &&
@@ -1997,7 +2066,7 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
         check_batch_size(request, prompts.size());
         if (request.contains("initial_latents_path"))
             throw std::invalid_argument("a scalar replay path does not define batch replay inputs");
-        const auto task = model.task<trtmc::BatchTextToImage>();
+        const auto task = task_for_operation<trtmc::BatchTextToImage>(model, task_id);
         const auto fields = task.config_fields();
         const auto shared = sdk_config(
             request, fields, {"prompt", "seeds", "item_configs", "batch_size", "media_type"});
@@ -2090,7 +2159,7 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
         return generated_image_observation(result);
     };
     if (primary == trtmc::TextToImage::kTask) {
-        const auto task = model.task<trtmc::TextToImage>();
+        const auto task = task_for_operation<trtmc::TextToImage>(model, task_id);
         const auto config =
             sdk_config(request, task.config_fields(),
                        {"prompt", "batch_size", "media_type", "initial_latents_path"});
@@ -2103,7 +2172,7 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
             observe_image);
     }
     if (edit) {
-        const auto task = model.task<trtmc::ImagesTextToImageEdit>();
+        const auto task = task_for_operation<trtmc::ImagesTextToImageEdit>(model, task_id);
         const auto config = sdk_config(request, task.config_fields(),
                                        {"prompt", "image_path", "image_paths", "batch_size",
                                         "media_type", "initial_latents_path"});
@@ -2119,7 +2188,7 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
             observe_image);
     }
     if (primary == trtmc::TextToVideo::kTask) {
-        const auto task = model.task<trtmc::TextToVideo>();
+        const auto task = task_for_operation<trtmc::TextToVideo>(model, task_id);
         const auto config =
             sdk_config(request, task.config_fields(),
                        {"prompt", "batch_size", "media_type", "initial_latents_path"});
@@ -2148,7 +2217,7 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
     } else if (calibration.size() % 9 != 0)
         throw std::invalid_argument(
             "camera_intrinsics requires fx,fy,cx,cy or row-major 3x3 matrices");
-    const auto task = model.task<trtmc::ImageTextActionToVideo>();
+    const auto task = task_for_operation<trtmc::ImageTextActionToVideo>(model, task_id);
     const auto config =
         sdk_config(request, task.config_fields(),
                    {"prompt", "image_path", "image_paths", "action", "camera_intrinsics",
@@ -2167,10 +2236,11 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
         generated_video_observation);
 }
 
-Json run_disparity(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    if (model.info().bundle_task != trtmc::StereoImagesToDisparity::kTask)
+Json run_disparity(const trtmc::Model& model, const Json& request, const Timing& timing,
+                   const std::string& task_id) {
+    if (task_id != trtmc::StereoImagesToDisparity::kTask)
         throw std::invalid_argument("disparity requires StereoImagesToDisparity");
-    const auto task = model.task<trtmc::StereoImagesToDisparity>();
+    const auto task = task_for_operation<trtmc::StereoImagesToDisparity>(model, task_id);
     const auto config = sdk_config(request, task.config_fields(),
                                    {"left_image_path", "right_image_path", "_artifact_path"});
     const auto left_path = request.at("left_image_path").get<std::string>();
@@ -2355,8 +2425,9 @@ Json track_observation(const TrackSnapshot& snapshot, const std::vector<double>&
             {"device_copy_included", device_copy}};
 }
 
-Json run_track_masks(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto primary = model.info().bundle_task;
+Json run_track_masks(const trtmc::Model& model, const Json& request, const Timing& timing,
+                     const std::string& task_id) {
+    const auto primary = task_id;
     const bool detected = primary == trtmc::FramesToDetectedMaskTracks::kTask;
     const bool prompt_frame = primary == trtmc::PromptFrameTextToMaskTracks::kTask;
     if (!detected && !prompt_frame && primary != trtmc::FramesTextToMaskTracks::kTask)
@@ -2429,7 +2500,7 @@ Json run_track_masks(const trtmc::Model& model, const Json& request, const Timin
     };
     if (detected)
         return run(
-            model.task<trtmc::FramesToDetectedMaskTracks>(),
+            task_for_operation<trtmc::FramesToDetectedMaskTracks>(model, task_id),
             [&](const auto& task, const auto& config, const auto& segment, const auto& clip) {
                 auto session = task.create(config);
                 auto result = device ? session.device_masks().segment_device(clip, segment)
@@ -2439,7 +2510,7 @@ Json run_track_masks(const trtmc::Model& model, const Json& request, const Timin
                 return Result{std::move(snapshot), {}};
             });
     if (prompt_frame)
-        return run(model.task<trtmc::PromptFrameTextToMaskTracks>(),
+        return run(task_for_operation<trtmc::PromptFrameTextToMaskTracks>(model, task_id),
                    [&](const auto& task, const auto& config, const auto&, const auto& clip) {
                        auto session = task.create(prompt, config);
                        auto first =
@@ -2449,7 +2520,7 @@ Json run_track_masks(const trtmc::Model& model, const Json& request, const Timin
                        session.close();
                        return Result{std::move(consolidated), std::move(first)};
                    });
-    return run(model.task<trtmc::FramesTextToMaskTracks>(),
+    return run(task_for_operation<trtmc::FramesTextToMaskTracks>(model, task_id),
                [&](const auto& task, const auto& config, const auto& segment, const auto& clip) {
                    auto session = task.create(config);
                    auto result = snapshot_tracks(session.segment(clip, prompt, segment));
@@ -2563,8 +2634,9 @@ Json pose_observation(const PoseSnapshot& result) {
         {"scoring_ms", view.scoring_ms},
         {"crop_queries", std::move(queries)}};
 }
-Json run_refine_pose(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto task = model.task<trtmc::PoseHypothesesCropsToRefinedPoses>();
+Json run_refine_pose(const trtmc::Model& model, const Json& request, const Timing& timing,
+                     const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::PoseHypothesesCropsToRefinedPoses>(model, task_id);
     const auto config = sdk_config(
         request, task.config_fields(),
         {"candidate_poses_path", "hypothesis_count", "mesh_diameter_meters", "crop_batches"});
@@ -2592,8 +2664,9 @@ Json run_refine_pose(const trtmc::Model& model, const Json& request, const Timin
         },
         pose_observation);
 }
-Json run_track_pose(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto task = model.task<trtmc::CropPoseTracking>();
+Json run_track_pose(const trtmc::Model& model, const Json& request, const Timing& timing,
+                    const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::CropPoseTracking>(model, task_id);
     const auto fields = task.config_fields();
     const auto config = sdk_config(request, fields, {"initialization", "updates"});
     const auto& initial = request.at("initialization");
@@ -2677,8 +2750,9 @@ void write_binary_artifact(const std::string& path, const T* values, std::uint64
     output.close();
 }
 
-Json run_geometry(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto task = model.task<trtmc::ImageToMetricGeometry>();
+Json run_geometry(const trtmc::Model& model, const Json& request, const Timing& timing,
+                  const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::ImageToMetricGeometry>(model, task_id);
     const auto config =
         sdk_config(request, task.config_fields(), {"image_path", "_artifact_prefix"});
     const auto path = request.at("image_path").get<std::string>();
@@ -2732,10 +2806,11 @@ Json run_geometry(const trtmc::Model& model, const Json& request, const Timing& 
               {"valid_mask_artifact", prefix + ".mask.u8"}}}};
 }
 
-Json run_detect(const trtmc::Model& model, const Json& request, const Timing& timing) {
+Json run_detect(const trtmc::Model& model, const Json& request, const Timing& timing,
+                const std::string& task_id) {
     if (request.contains("prompt"))
         throw std::invalid_argument("image-only detection has no prompt input");
-    const auto task = model.task<trtmc::ImageToBoxes>();
+    const auto task = task_for_operation<trtmc::ImageToBoxes>(model, task_id);
     const auto config = sdk_config(request, task.config_fields(), {"image_path"});
     const auto path = request.at("image_path").get<std::string>();
     std::optional<Image> cached;
@@ -2776,8 +2851,9 @@ Json run_detect(const trtmc::Model& model, const Json& request, const Timing& ti
         });
 }
 
-Json run_structure(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto task = model.task<trtmc::MolecularDocumentToStructure>();
+Json run_structure(const trtmc::Model& model, const Json& request, const Timing& timing,
+                   const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::MolecularDocumentToStructure>(model, task_id);
     const auto config =
         sdk_config(request, task.config_fields(),
                    {"document_path", "input_encoding", "source_path", "_artifact_prefix"});
@@ -2876,8 +2952,9 @@ Json run_structure(const trtmc::Model& model, const Json& request, const Timing&
               {"metadata_artifact", metadata_path}}}};
 }
 
-Json run_translate(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto task = model.task<trtmc::TextTranslation>();
+Json run_translate(const trtmc::Model& model, const Json& request, const Timing& timing,
+                   const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::TextTranslation>(model, task_id);
     const trtmc::TextTranslationRequest input{request.at("source_text").get<std::string>(),
                                               language_input(request, "target_language"),
                                               language_input(request, "source_language")};
@@ -2891,9 +2968,9 @@ std::vector<float> optional_float32(const Json& request, const char* name) {
                                   : std::vector<float>{};
 }
 
-Json run_latent_generate(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const bool conditioned =
-        model.info().bundle_task == trtmc::LatentConditionedTextGeneration::kTask;
+Json run_latent_generate(const trtmc::Model& model, const Json& request, const Timing& timing,
+                         const std::string& task_id) {
+    const bool conditioned = task_id == trtmc::LatentConditionedTextGeneration::kTask;
     if (conditioned &&
         (!request.contains("condition_latents_path") || !request.contains("condition_mask_path")))
         throw std::invalid_argument(
@@ -2953,18 +3030,20 @@ Json run_latent_generate(const trtmc::Model& model, const Json& request, const T
         return trtmc::Span<const float>{values.data(), values.size()};
     };
     if (conditioned)
-        return run(model.task<trtmc::LatentConditionedTextGeneration>(), [&](const auto& input) {
-            return trtmc::LatentConditionedTextGenerationRequest{
-                view(input.condition), view(input.mask), view(input.initial), view(input.noise),
-                prompt};
+        return run(task_for_operation<trtmc::LatentConditionedTextGeneration>(model, task_id),
+                   [&](const auto& input) {
+                       return trtmc::LatentConditionedTextGenerationRequest{
+                           view(input.condition), view(input.mask), view(input.initial),
+                           view(input.noise), prompt};
+                   });
+    return run(
+        task_for_operation<trtmc::LatentReplayToText>(model, task_id), [&](const auto& input) {
+            return trtmc::LatentReplayToTextRequest{view(input.initial), prompt, view(input.noise)};
         });
-    return run(model.task<trtmc::LatentReplayToText>(), [&](const auto& input) {
-        return trtmc::LatentReplayToTextRequest{view(input.initial), prompt, view(input.noise)};
-    });
 }
 
 Json run_latent_step(const trtmc::Model& model, const Json& request, const Timing& timing,
-                     bool decoder) {
+                     const std::string& task_id, bool decoder) {
     const bool packed = request.contains("branch_path") || request.contains("trunk_path");
     if (packed) {
         if (!request.contains("branch_path") || !request.contains("trunk_path"))
@@ -3060,7 +3139,7 @@ Json run_latent_step(const trtmc::Model& model, const Json& request, const Timin
     };
     if (decoder)
         return run(
-            model.task<trtmc::LatentToTokenLogits>(),
+            task_for_operation<trtmc::LatentToTokenLogits>(model, task_id),
             [](const auto& input) {
                 return trtmc::LatentToTokenLogitsRequest{input.latents(), input.self_condition(),
                                                          input.timestep};
@@ -3074,7 +3153,7 @@ Json run_latent_step(const trtmc::Model& model, const Json& request, const Timin
                 return output;
             });
     return run(
-        model.task<trtmc::LatentDenoisingStep>(),
+        task_for_operation<trtmc::LatentDenoisingStep>(model, task_id),
         [](const auto& input) {
             return trtmc::LatentDenoisingStepRequest{input.latents(), input.self_condition(),
                                                      input.timestep};
@@ -3087,21 +3166,40 @@ Json run_latent_step(const trtmc::Model& model, const Json& request, const Timin
         });
 }
 
-Json run_generate(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto primary = model.info().bundle_task;
+Json run_generate(const trtmc::Model& model, const Json& request, const Timing& timing,
+                  const std::string& task_id) {
+    const auto primary = task_id;
+    const bool source_task = primary == trtmc::TextContinuation::kTask ||
+                             primary == trtmc::ConditionalTextGeneration::kTask;
+    if (source_task) {
+        check_batch_size(request, 1);
+        const auto source = read_text_source(request);
+        auto run = [&](const auto& task, const auto& input) {
+            const auto config =
+                sdk_config(request, task.config_fields(), {"prompt", "token_ids", "batch_size"});
+            return measure(timing, [&]() { return task.run(input, config); }, text_observation);
+        };
+        if (primary == trtmc::ConditionalTextGeneration::kTask)
+            return run(task_for_operation<trtmc::ConditionalTextGeneration>(model, task_id),
+                       trtmc::ConditionalTextGenerationRequest{source});
+        return run(task_for_operation<trtmc::TextContinuation>(model, task_id),
+                   trtmc::TextContinuationRequest{source});
+    }
+    if (request.contains("token_ids"))
+        throw std::invalid_argument("token_ids is not accepted by this Task input");
     if (primary == trtmc::UnconditionalTextGeneration::kTask) {
         if (request.contains("prompt"))
             throw std::invalid_argument("unconditional text generation has no prompt input");
-        const auto task = model.task<trtmc::UnconditionalTextGeneration>();
+        const auto task = task_for_operation<trtmc::UnconditionalTextGeneration>(model, task_id);
         const auto config = sdk_config(request, task.config_fields(), {});
         return measure(timing, [&]() { return task.run(config); }, text_observation);
     }
     if (primary == trtmc::LatentConditionedTextGeneration::kTask ||
         primary == trtmc::LatentReplayToText::kTask)
-        return run_latent_generate(model, request, timing);
+        return run_latent_generate(model, request, timing, task_id);
     const std::string prompt = request.at("prompt").get<std::string>();
     if (request.contains("image_path")) {
-        const auto task = model.task<trtmc::ImagesTextToText>();
+        const auto task = task_for_operation<trtmc::ImagesTextToText>(model, task_id);
         const auto config = sdk_config(request, task.config_fields(), {"prompt", "image_path"});
         const auto path = request.at("image_path").get<std::string>();
         std::optional<Image> cached;
@@ -3127,17 +3225,12 @@ Json run_generate(const trtmc::Model& model, const Json& request, const Timing& 
         const auto config = sdk_config(request, task.config_fields(), {"prompt"});
         return measure(timing, [&]() { return task.run(input, config); }, text_observation);
     };
-    if (primary == trtmc::TextContinuation::kTask ||
-        (primary == trtmc::ImagesTextToText::kTask && model.supports<trtmc::TextContinuation>()))
-        return run(model.task<trtmc::TextContinuation>(), trtmc::TextContinuationRequest{prompt});
-    if (primary == trtmc::ConditionalTextGeneration::kTask)
-        return run(model.task<trtmc::ConditionalTextGeneration>(),
-                   trtmc::ConditionalTextGenerationRequest{prompt});
     if (primary == trtmc::CorruptedTextReconstruction::kTask)
-        return run(model.task<trtmc::CorruptedTextReconstruction>(),
+        return run(task_for_operation<trtmc::CorruptedTextReconstruction>(model, task_id),
                    trtmc::CorruptedTextReconstructionRequest{prompt});
     if (primary == trtmc::TextSummarization::kTask)
-        return run(model.task<trtmc::TextSummarization>(), trtmc::TextSummarizationRequest{prompt});
+        return run(task_for_operation<trtmc::TextSummarization>(model, task_id),
+                   trtmc::TextSummarizationRequest{prompt});
     throw std::invalid_argument("prompt alone is not a complete generate input for Task '" +
                                 primary + "'");
 }
@@ -3195,8 +3288,29 @@ ForecastHistory forecast_history(const Json& request, bool shaped) {
     return history;
 }
 
-Json run_regress(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto task = model.task<trtmc::SeriesToRegressionDistribution>();
+Json run_regress(const trtmc::Model& model, const Json& request, const Timing& timing,
+                 const std::string& task_id) {
+    if (task_id == trtmc::SeriesToRegressionValues::kTask) {
+        check_batch_size(request, 1);
+        const auto task = task_for_operation<trtmc::SeriesToRegressionValues>(model, task_id);
+        const auto history = forecast_history(request, request.contains("shape"));
+        const auto config = sdk_config(request, task.config_fields(),
+                                       {"past_values", "observed_mask", "shape", "batch_size"});
+        return measure(
+            timing, [&] { return task.run({history.view()}, config); },
+            [](const auto& result) {
+                const auto& view = result.view();
+                return Json{{"kind", "regression_values"},
+                            {"values", json_values(view.values.data, view.values.size)},
+                            {"target_count", view.values.size},
+                            {"regression_targets", view.values.size},
+                            {"parameter_elements", 0},
+                            {"axes", {"target"}},
+                            {"target_names", json_strings(view.target_names)},
+                            {"target_units", json_strings(view.target_units)}};
+            });
+    }
+    const auto task = task_for_operation<trtmc::SeriesToRegressionDistribution>(model, task_id);
     const auto history = forecast_history(request, request.contains("shape"));
     const auto config =
         sdk_config(request, task.config_fields(), {"past_values", "observed_mask", "shape"});
@@ -3246,8 +3360,9 @@ void forecast_axes(Json& output, const trtmc_forecast_axes_v1& axes) {
     output["channel_units"] = json_strings(axes.channel_units);
 }
 
-Json run_solve(const trtmc::Model& model, const Json& request, const Timing& timing) {
-    const auto primary = model.info().bundle_task;
+Json run_solve(const trtmc::Model& model, const Json& request, const Timing& timing,
+               const std::string& task_id) {
+    const auto primary = task_id;
     auto point = [](const trtmc_point_forecast_view_v1& view) {
         Json output{{"windows", 1},
                     {"forecast_elements", view.values.count},
@@ -3313,14 +3428,15 @@ Json run_solve(const trtmc::Model& model, const Json& request, const Timing& tim
             });
     };
     if (primary == trtmc::BatchSeriesToPointForecast::kTask)
-        return batch(model.task<trtmc::BatchSeriesToPointForecast>(),
+        return batch(task_for_operation<trtmc::BatchSeriesToPointForecast>(model, task_id),
                      trtmc::BatchSeriesToPointForecastRequest{}, point);
     if (primary == trtmc::BatchSeriesToQuantileForecast::kTask)
-        return batch(model.task<trtmc::BatchSeriesToQuantileForecast>(),
+        return batch(task_for_operation<trtmc::BatchSeriesToQuantileForecast>(model, task_id),
                      trtmc::BatchSeriesToQuantileForecastRequest{}, quantiles);
     if (primary == trtmc::BatchSeriesToPointAndQuantileForecast::kTask)
-        return batch(model.task<trtmc::BatchSeriesToPointAndQuantileForecast>(),
-                     trtmc::BatchSeriesToPointAndQuantileForecastRequest{}, joint);
+        return batch(
+            task_for_operation<trtmc::BatchSeriesToPointAndQuantileForecast>(model, task_id),
+            trtmc::BatchSeriesToPointAndQuantileForecastRequest{}, joint);
     if (request.contains("items"))
         throw std::invalid_argument("a forecast items array requires a native batch Task");
     const auto owned = forecast_history(request, request.contains("shape"));
@@ -3331,15 +3447,15 @@ Json run_solve(const trtmc::Model& model, const Json& request, const Timing& tim
         return measure(timing, [&]() { return task.run(input, config); }, observe);
     };
     if (primary == trtmc::SeriesToPointForecast::kTask)
-        return run(model.task<trtmc::SeriesToPointForecast>(),
+        return run(task_for_operation<trtmc::SeriesToPointForecast>(model, task_id),
                    trtmc::SeriesToPointForecastRequest{history},
                    [&](const auto& result) { return point(result.view()); });
     if (primary == trtmc::SeriesToQuantileForecast::kTask)
-        return run(model.task<trtmc::SeriesToQuantileForecast>(),
+        return run(task_for_operation<trtmc::SeriesToQuantileForecast>(model, task_id),
                    trtmc::SeriesToQuantileForecastRequest{history},
                    [&](const auto& result) { return quantiles(result.view()); });
     if (primary == trtmc::SeriesToPointAndQuantileForecast::kTask)
-        return run(model.task<trtmc::SeriesToPointAndQuantileForecast>(),
+        return run(task_for_operation<trtmc::SeriesToPointAndQuantileForecast>(model, task_id),
                    trtmc::SeriesToPointAndQuantileForecastRequest{history},
                    [&](const auto& result) { return joint(result.view()); });
     throw std::invalid_argument("forecast history is not a complete solve input for Task '" +
@@ -3384,6 +3500,14 @@ Json execute(const Json& request, const std::string& output_path) {
                                         "'; rebuild the managed cache or select a matching bundle");
     }
     const auto& primary = info.task;
+    const bool explicit_task = request.contains("selected_task");
+    std::string selected = primary;
+    if (explicit_task) {
+        if (!request.at("selected_task").is_string() ||
+            request.at("selected_task").get_ref<const std::string&>().empty())
+            throw std::invalid_argument("selected_task must be a nonempty Task ID");
+        selected = request.at("selected_task").get<std::string>();
+    }
     double load_ms = 0;
     Json measured;
     if (!trtmc::app::uses_existing_task_runtime(primary)) {
@@ -3392,62 +3516,107 @@ Json execute(const Json& request, const std::string& output_path) {
         const auto load_started = Clock::now();
         const auto model = trtmc::Model::load(bundle, options);
         load_ms = elapsed_ms(load_started);
+        if (!explicit_task) {
+            // Preserve the established implicit choices once, before dispatch.
+            // Explicit selectors never enter this default-selection branch.
+            if (operation == "encode" && primary == trtmc::TextToEmbedding::kTask &&
+                model.supports<trtmc::TextToPooledFeatures>())
+                selected = trtmc::TextToPooledFeatures::kTask;
+            else if (operation == "generate" && primary == trtmc::ImagesTextToText::kTask &&
+                     !operation_request.contains("image_path") &&
+                     model.supports<trtmc::TextContinuation>())
+                selected = trtmc::TextContinuation::kTask;
+            // These existing operations already selected a single typed contract
+            // independently of the bundle primary; retain that behavior.
+            else if (operation == "head_scores")
+                selected = trtmc::TextToHeadScores::kTask;
+            else if (operation == "translate")
+                selected = trtmc::TextTranslation::kTask;
+            else if (operation == "geometry")
+                selected = trtmc::ImageToMetricGeometry::kTask;
+            else if (operation == "detect")
+                selected = trtmc::ImageToBoxes::kTask;
+            else if (operation == "predict_structure")
+                selected = trtmc::MolecularDocumentToStructure::kTask;
+            else if (operation == "control_queue")
+                selected = trtmc::ImageStateActionQueue::kTask;
+            else if (operation == "refine_pose")
+                selected = trtmc::PoseHypothesesCropsToRefinedPoses::kTask;
+            else if (operation == "track_pose")
+                selected = trtmc::CropPoseTracking::kTask;
+            else if (operation == "denoise")
+                selected = trtmc::LatentDenoisingStep::kTask;
+            else if (operation == "decode_logits")
+                selected = trtmc::LatentToTokenLogits::kTask;
+            else if (operation == "regress" && primary != trtmc::SeriesToRegressionValues::kTask)
+                selected = trtmc::SeriesToRegressionDistribution::kTask;
+        }
+        const auto tasks = model.tasks();
+        if (std::none_of(tasks.begin(), tasks.end(),
+                         [&](const auto& task) { return task.id == selected; }))
+            throw std::invalid_argument("selected Task is not bound by this model: " + selected);
         if (operation == "generate")
-            measured = run_generate(model, operation_request, timing);
+            measured = run_generate(model, operation_request, timing, selected);
         else if (operation == "translate")
-            measured = run_translate(model, operation_request, timing);
+            measured = run_translate(model, operation_request, timing, selected);
         else if (operation == "geometry")
-            measured = run_geometry(model, operation_request, timing);
+            measured = run_geometry(model, operation_request, timing, selected);
         else if (operation == "regress")
-            measured = run_regress(model, operation_request, timing);
+            measured = run_regress(model, operation_request, timing, selected);
         else if (operation == "denoise" || operation == "decode_logits")
-            measured =
-                run_latent_step(model, operation_request, timing, operation == "decode_logits");
+            measured = run_latent_step(model, operation_request, timing, selected,
+                                       operation == "decode_logits");
         else if (operation == "solve")
-            measured = run_solve(model, operation_request, timing);
+            measured = run_solve(model, operation_request, timing, selected);
         else if (operation == "transcribe")
-            measured = run_transcribe(model, operation_request, timing);
+            measured = run_transcribe(model, operation_request, timing, selected);
         else if (operation == "generate_audio")
-            measured = run_generate_audio(model, operation_request, timing);
+            measured = run_generate_audio(model, operation_request, timing, selected);
         else if (operation == "speak")
-            measured = run_speak(model, operation_request, timing);
+            measured = run_speak(model, operation_request, timing, selected);
         else if (operation == "speech_dialogue")
-            measured = run_speech_dialogue(model, operation_request, timing);
+            measured = run_speech_dialogue(model, operation_request, timing, selected);
         else if (operation == "disparity")
-            measured = run_disparity(model, operation_request, timing);
+            measured = run_disparity(model, operation_request, timing, selected);
         else if (operation == "classify")
-            measured = run_classify(model, operation_request, timing);
+            measured = run_classify(model, operation_request, timing, selected);
         else if (operation == "detect")
-            measured = run_detect(model, operation_request, timing);
+            measured = run_detect(model, operation_request, timing, selected);
         else if (operation == "predict_structure")
-            measured = run_structure(model, operation_request, timing);
+            measured = run_structure(model, operation_request, timing, selected);
         else if (operation == "extract_features")
-            measured = run_extract_features(model, operation_request, timing);
+            measured = run_extract_features(model, operation_request, timing, selected);
         else if (operation == "encode")
-            measured = run_encode(model, operation_request, timing);
+            measured = run_encode(model, operation_request, timing, selected);
+        else if (operation == "head_scores")
+            measured = run_head_scores(model, operation_request, timing, selected);
         else if (operation == "embed")
-            measured = run_embed(model, operation_request, timing);
+            measured = run_embed(model, operation_request, timing, selected);
         else if (operation == "rerank")
-            measured = run_rerank(model, operation_request, timing);
+            measured = run_rerank(model, operation_request, timing, selected);
         else if (operation == "control")
-            measured = run_control(model, operation_request, timing);
+            measured = run_control(model, operation_request, timing, selected);
         else if (operation == "control_queue")
-            measured = run_control_queue(model, operation_request, timing);
+            measured = run_control_queue(model, operation_request, timing, selected);
         else if (operation == "track_masks")
-            measured = run_track_masks(model, operation_request, timing);
+            measured = run_track_masks(model, operation_request, timing, selected);
         else if (operation == "refine_pose")
-            measured = run_refine_pose(model, operation_request, timing);
+            measured = run_refine_pose(model, operation_request, timing, selected);
         else if (operation == "track_pose")
-            measured = run_track_pose(model, operation_request, timing);
+            measured = run_track_pose(model, operation_request, timing, selected);
         else if (operation == "segment" || operation == "segment_prompted")
-            measured =
-                run_segment(model, operation_request, timing, operation == "segment_prompted");
+            measured = run_segment(model, operation_request, timing, selected,
+                                   operation == "segment_prompted");
         else if (operation == "generate_image")
-            measured = run_generate_image(model, operation_request, timing);
+            measured = run_generate_image(model, operation_request, timing, selected);
         else
             throw std::invalid_argument("semantic benchmark operation is not implemented: " +
                                         operation);
     } else {
+        if (explicit_task)
+            throw std::invalid_argument("selected_task requires a family migrated to the Task SDK");
+        if (operation_request.contains("token_ids"))
+            throw std::invalid_argument("token_ids requires a semantic TextSource Task");
         if (runtime_root.empty())
             throw std::invalid_argument("runtime_root is required for an existing bundle mode");
         const auto load_started = Clock::now();
@@ -3484,6 +3653,7 @@ Json execute(const Json& request, const std::string& output_path) {
         {"case_name", request.at("case_name")},
         {"operation", operation},
         {"task", primary},
+        {"selected_task", selected},
         {"timing_scope", "public_task_call_wall"},
         {"observation_serialization_included", false},
         {"asset_loading_included", timing.asset_loading_included},

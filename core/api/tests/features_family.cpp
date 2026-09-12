@@ -8,6 +8,7 @@
 #include "trtmc/runtime/family_factory.h"
 
 #include <cmath>
+#include <limits>
 #include <string>
 
 namespace {
@@ -18,6 +19,7 @@ class FeaturesFixture final : public IModel,
                               public ITextToTokenFeatures,
                               public ITextPairToTokenFeatures,
                               public ITextToPooledFeatures,
+                              public ITextToHeadScores,
                               public ITextToEmbedding,
                               public ITitleBodyToEmbedding,
                               public IMaskedTextToTokenScores,
@@ -62,6 +64,7 @@ class FeaturesFixture final : public IModel,
             bind<ITextToTokenFeatures>(*this, fields_for(ITextToTokenFeatures::kTask)),
             bind<ITextPairToTokenFeatures>(*this, fields_for(ITextPairToTokenFeatures::kTask)),
             bind<ITextToPooledFeatures>(*this, fields_for(ITextToPooledFeatures::kTask)),
+            bind<ITextToHeadScores>(*this, fields_for(ITextToHeadScores::kTask)),
             bind<ITextToEmbedding>(*this, fields_for(ITextToEmbedding::kTask)),
             bind<ITitleBodyToEmbedding>(*this, fields_for(ITitleBodyToEmbedding::kTask)),
             bind<IMaskedTextToTokenScores>(*this, fields_for(IMaskedTextToTokenScores::kTask)),
@@ -96,6 +99,12 @@ class FeaturesFixture final : public IModel,
             {"annotate", ConfigKind::Bool, ConfigValue{true}, "Add a synthetic probe offset."},
             {"tag", ConfigKind::String, ConfigValue{std::string_view{"default"}},
              "Synthetic metadata tag."}};
+        static const ConfigField head[] = {
+            {"scale", ConfigKind::F64, ConfigValue{1.0}, "Synthetic head score scale."},
+            {"representation", ConfigKind::String, ConfigValue{std::string_view{"raw"}},
+             "Synthetic family-owned representation: raw, first or unit."}};
+        if (task_id == ITextToHeadScores::kTask)
+            return head;
         if (task_id == IBatchImageToClassScores::kTask || task_id == IBatchTextToEmbedding::kTask)
             return tagged_batch;
         if (task_id.find("batch_") == 0)
@@ -151,6 +160,43 @@ class FeaturesFixture final : public IModel,
     PooledFeaturesResult run(const TextToPooledFeaturesRequest& request,
                              ConfigView config) override {
         return {{float(3 * scale(config)), float(text_size(request.text))}, "mean", "none"};
+    }
+    HeadScoresResult run(const TextToHeadScoresRequest& request, ConfigView config) override {
+        const auto factor =
+            config_get<double>(config, fields_for(ITextToHeadScores::kTask), "scale").value();
+        if (!std::isfinite(factor) || factor < 0)
+            throw ConfigError("scale must be finite and nonnegative");
+        HeadScoresResult result{{float(-2 * factor), float(text_size(request.text)),
+                                 float(3 * factor), float(-4 * factor)},
+                                {1, 2, 2},
+                                ScoreKind::Logit,
+                                "none",
+                                "none"};
+        const auto representation =
+            config_get<std::string_view>(config, fields_for(ITextToHeadScores::kTask),
+                                         "representation")
+                .value();
+        if (representation == "first")
+            result = {{float(-2 * factor)}, {1}, ScoreKind::Logit, "first_token", "none"};
+        else if (representation == "unit")
+            result = {{-0.6F, 0.8F}, {2}, ScoreKind::Unbounded, "mean", "l2"};
+        else if (representation != "raw")
+            throw ConfigError("unknown synthetic head representation");
+        if (mode_ == "head_bad_shape")
+            result.shape = {3, 2};
+        if (mode_ == "head_zero_dim")
+            result.shape = {0, 4};
+        if (mode_ == "head_empty_shape")
+            result.shape.clear();
+        if (mode_ == "head_overflow")
+            result.shape = {std::numeric_limits<uint64_t>::max(), 2};
+        if (mode_ == "head_bad_kind")
+            result.kind = static_cast<ScoreKind>(99);
+        if (mode_ == "head_missing_pooling")
+            result.pooling.clear();
+        if (mode_ == "head_missing_normalization")
+            result.normalization.clear();
+        return result;
     }
     SemanticEmbeddingResult run(const TextToEmbeddingRequest& request, ConfigView config) override {
         return embedding(float(4 * scale(config)), float(static_cast<uint32_t>(request.role)));

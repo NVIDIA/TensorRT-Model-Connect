@@ -54,6 +54,7 @@ class ManifestCatalog:
         for path in self._manifest_paths():
             try:
                 model = self._load(path)
+                task = selected_task_for_case(model)
             except BenchmarkError as error:
                 entries.append(
                     CatalogEntry(
@@ -61,7 +62,7 @@ class ManifestCatalog:
                     )
                 )
                 continue
-            if model.task not in supported:
+            if task not in supported:
                 entries.append(
                     CatalogEntry(
                         model.name,
@@ -70,12 +71,12 @@ class ManifestCatalog:
                         model.precision,
                         model.hf_id or "-",
                         "unsupported",
-                        f"task {model.task!r} has no benchmark implementation",
+                        f"task {task!r} has no benchmark implementation",
                         model,
                     )
                 )
                 continue
-            operation = default_operation(model.task)
+            operation = default_operation(task)
             tp = int(model.build_settings.get("tensor_parallel_size", 1))
             cp = int(model.build_settings.get("context_parallel_size", 1))
             if tp > 1 or cp > 1:
@@ -228,15 +229,20 @@ def resolve_case(
     *,
     case_name: str | None = None,
     operation: str | None = None,
+    selected_task: str | None = None,
     overrides: Mapping[str, Any] | None = None,
 ) -> ResolvedCase:
     testcase = _select_testcase(model, case_name)
+    task = selected_task_for_case(model, case_name, selected_task=selected_task)
     resolution = resolve_task_case(
-        model.task,
+        task,
         testcase,
         model.manifest_path.parent.parent,
         operation=operation,
     )
+    explicit_task = selected_task is not None or "selected_task" in testcase
+    if explicit_task and resolution.task != task:
+        raise BenchmarkError("operation cannot change an explicitly selected Task")
     request = dict(resolution.request)
     for field, manifest_field in (
         ("height", "image_height"),
@@ -259,8 +265,19 @@ def resolve_case(
         runtime_root=None,
         measurement=measurement,
         sources=sources,
+        selected_task=resolution.task if explicit_task or resolution.task != model.task else None,
     )
     return apply_overrides(resolved, overrides or {})
+
+
+def selected_task_for_case(
+    model: ModelDescriptor, case_name: str | None = None, *, selected_task: str | None = None,
+) -> str:
+    testcase = _select_testcase(model, case_name)
+    task = testcase.get("selected_task", model.task) if selected_task is None else selected_task
+    if not isinstance(task, str) or not task or task != task.strip():
+        raise BenchmarkError("selected_task must be a nonempty Task ID without surrounding whitespace")
+    return task
 
 
 def _select_testcase(model: ModelDescriptor, name: str | None) -> Mapping[str, Any]:

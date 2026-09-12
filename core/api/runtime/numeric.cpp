@@ -235,6 +235,25 @@ struct RegressionStorage final : ResultStorage {
     std::vector<trtmc_distribution_parameter_v1> parameters;
     trtmc_regression_distribution_view_v1 view{};
 };
+struct RegressionValuesStorage final : ResultStorage {
+    explicit RegressionValuesStorage(internal::RegressionValuesResult result)
+        : value(std::move(result)), target_names(names(value.target_names)),
+          target_units(names(value.target_units)) {
+        output_check(!value.values.empty(), "regression values require at least one target");
+        output_check(target_names.empty() || target_names.size() == value.values.size(),
+                     "regression target name count mismatch");
+        output_check(target_units.empty() || target_units.size() == value.values.size(),
+                     "regression target unit count mismatch");
+        for (const auto number : value.values)
+            output_check(std::isfinite(number), "regression target values must be finite");
+        view = {{value.values.data(), value.values.size()},
+                {target_names.data(), target_names.size()},
+                {target_units.data(), target_units.size()}};
+    }
+    internal::RegressionValuesResult value;
+    std::vector<trtmc_string_view> target_names, target_units;
+    trtmc_regression_values_view_v1 view{};
+};
 struct DenoisedStorage final : ResultStorage {
     explicit DenoisedStorage(internal::DenoisedLatentsResult result)
         : value(std::move(result)), view{matrix_result_view(value.latents)} {}
@@ -294,6 +313,9 @@ TRTMC_NUMERIC_RUN(point_quantile, ISeriesToPointAndQuantileForecast, PointAndQua
 TRTMC_NUMERIC_RUN(regression, ISeriesToRegressionDistribution, RegressionStorage,
                   trtmc_series_request_v1,
                   internal::SeriesToRegressionDistributionRequest{history(request)})
+TRTMC_NUMERIC_RUN(regression_values, ISeriesToRegressionValues, RegressionValuesStorage,
+                  trtmc_series_request_v1,
+                  internal::SeriesToRegressionValuesRequest{history(request)})
 TRTMC_NUMERIC_RUN(condition_text, ILatentConditionedTextGeneration, TextResultStorage,
                   trtmc_latent_conditioned_text_request_v1, conditioned(request))
 TRTMC_NUMERIC_RUN(replay_text, ILatentReplayToText, TextResultStorage,
@@ -420,6 +442,10 @@ const trtmc_series_to_regression_distribution_api_v1 regression_api{
     {1, 0, sizeof(regression_api)},
     regression,
     view_result<RegressionStorage, trtmc_regression_distribution_view_v1>};
+const trtmc_series_to_regression_values_api_v1 regression_values_api{
+    {1, 0, sizeof(regression_values_api)},
+    regression_values,
+    view_result<RegressionValuesStorage, trtmc_regression_values_view_v1>};
 const trtmc_latent_conditioned_text_generation_api_v1 condition_api{
     {1, 0, sizeof(condition_api)}, condition_text, text_result_view};
 const trtmc_latent_replay_to_text_api_v1 replay_api{
@@ -446,6 +472,7 @@ Span<const TaskBinding> numeric_task_bindings() noexcept {
         {internal::ISeriesToPointForecast::kTask, 1, 0, &point_api.header},
         {internal::ISeriesToQuantileForecast::kTask, 1, 0, &quantile_api.header},
         {internal::ISeriesToRegressionDistribution::kTask, 1, 0, &regression_api.header},
+        {internal::ISeriesToRegressionValues::kTask, 1, 0, &regression_values_api.header},
         {internal::ILatentConditionedTextGeneration::kTask, 1, 0, &condition_api.header},
         {internal::ILatentReplayToText::kTask, 1, 0, &replay_api.header},
         {internal::ILatentDenoisingStep::kTask, 1, 0, &denoise_api.header},

@@ -63,6 +63,15 @@ typedef struct {
     trtmc_strings_view target_units;
 } trtmc_regression_distribution_view_v1;
 
+/* Finite point predictions indexed by target, never horizon or distribution.
+ * Names/units are empty when unspecified; otherwise each has values.size entries.
+ * All views borrow the result handle and survive model release. */
+typedef struct {
+    trtmc_f32_view values;
+    trtmc_strings_view target_names;
+    trtmc_strings_view target_units;
+} trtmc_regression_values_view_v1;
+
 /* Borrowed float32 generation operands use the loaded family's documented
  * layout. Family validates latent dimensions, mask weights and resolved
  * schedule/noise counts. Empty optional buffers select family policy; shared
@@ -99,6 +108,7 @@ typedef struct {
 #define TRTMC_TASK_SERIES_TO_QUANTILE_FORECAST "series_to_quantile_forecast"
 #define TRTMC_TASK_SERIES_TO_POINT_AND_QUANTILE_FORECAST "series_to_point_and_quantile_forecast"
 #define TRTMC_TASK_SERIES_TO_REGRESSION_DISTRIBUTION "series_to_regression_distribution"
+#define TRTMC_TASK_SERIES_TO_REGRESSION_VALUES "series_to_regression_values"
 #define TRTMC_TASK_LATENT_CONDITIONED_TEXT_GENERATION "latent_conditioned_text_generation"
 #define TRTMC_TASK_LATENT_REPLAY_TO_TEXT "latent_replay_to_text"
 #define TRTMC_TASK_LATENT_DENOISING_STEP "latent_denoising_step"
@@ -122,6 +132,8 @@ TRTMC_NUMERIC_API(trtmc_series_to_point_and_quantile_forecast_api_v1, trtmc_seri
                   trtmc_point_and_quantile_forecast_view_v1)
 TRTMC_NUMERIC_API(trtmc_series_to_regression_distribution_api_v1, trtmc_series_request_v1,
                   trtmc_regression_distribution_view_v1)
+TRTMC_NUMERIC_API(trtmc_series_to_regression_values_api_v1, trtmc_series_request_v1,
+                  trtmc_regression_values_view_v1)
 TRTMC_NUMERIC_API(trtmc_latent_conditioned_text_generation_api_v1,
                   trtmc_latent_conditioned_text_request_v1, trtmc_text_result_view_v1)
 TRTMC_NUMERIC_API(trtmc_latent_replay_to_text_api_v1, trtmc_latent_replay_text_request_v1,

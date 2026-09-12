@@ -107,7 +107,7 @@ void padding_contracts(const trtmc::Model& padded, const trtmc::Model& valid_onl
 void exercise(const trtmc::Model& model) {
     const float pixels[] = {0.5F, 0.25F, 0.125F};
     const trtmc::ImageInput image({pixels, 3}, 1, 1);
-    check(model.tasks().size() == 27, "all 27 distinct typed feature contracts are discoverable");
+    check(model.tasks().size() == 28, "all 28 distinct typed feature contracts are discoverable");
     const trtmc::BatchImageToClassScoresRequest batch_input{
         {{{image}, {}}, {{image}, {{"scale", 2.0}}}}};
     auto batch_classes = model.task<trtmc::BatchImageToClassScores>().run(batch_input);
@@ -240,6 +240,22 @@ void exercise(const trtmc::Model& model) {
     auto pooled = model.task<trtmc::TextToPooledFeatures>().run({std::string{"abc"}});
     check(pooled.values()[0] == 3 && pooled.pooling() == "mean" && pooled.normalization() == "none",
           "raw pooled features describe pooling separately from trained embeddings");
+    auto head = model.task<trtmc::TextToHeadScores>().run({std::string{"abc"}}, {{"scale", 2.0}});
+    check(head.values().size() == 4 && head.values()[0] == -4 && head.values()[1] == 3 &&
+              head.shape().size() == 3 && head.shape()[0] == 1 && head.shape()[1] == 2 &&
+              head.shape()[2] == 2 && head.kind() == TRTMC_SCORE_LOGIT &&
+              head.pooling() == "none" && head.normalization() == "none",
+          "head scores retain real rank and values without hidden/vocabulary interpretation");
+    auto first_head = model.task<trtmc::TextToHeadScores>().run({std::vector<int32_t>{3, 4}},
+                                                                {{"representation", "first"}});
+    check(first_head.values().size() == 1 && first_head.values()[0] == -2 &&
+              first_head.shape()[0] == 1 && first_head.pooling() == "first_token",
+          "head score reduction belongs to family Config, not Core");
+    auto unit_head = model.task<trtmc::TextToHeadScores>().run({std::string{"abc"}},
+                                                               {{"representation", "unit"}});
+    check(unit_head.kind() == TRTMC_SCORE_UNBOUNDED && unit_head.normalization() == "l2" &&
+              unit_head.values()[0] == -0.6F && unit_head.values()[1] == 0.8F,
+          "normalized head scores remain distinct from raw logits");
     auto embedded = model.task<trtmc::TextToEmbedding>().run({"abc", trtmc::EmbeddingRole::Query},
                                                              {{"scale", 2.0}});
     check(embedded.values()[0] == 8 && embedded.values()[1] == 1 &&
@@ -375,6 +391,15 @@ int main(int argc, char** argv) {
                   "a loaded variant without bindings does not advertise a task");
         }
         auto bad = trtmc::Model::load((root / "features_bad_shape.bundle").string(), options);
+        for (const std::string mode :
+             {"head_bad_shape", "head_zero_dim", "head_empty_shape", "head_overflow",
+              "head_bad_kind", "head_missing_pooling", "head_missing_normalization"}) {
+            const auto path = root / (mode + ".bundle");
+            bundle(path, mode);
+            auto invalid = trtmc::Model::load(path.string(), options);
+            rejects([&] { invalid.task<trtmc::TextToHeadScores>().run({std::string{"x"}}); },
+                    TRTMC_INTERNAL_ERROR, "invalid head score shape/kind/metadata is rejected");
+        }
         rejects([&] { bad.task<trtmc::TextToTokenFeatures>().run({std::string{"x"}}); },
                 TRTMC_INTERNAL_ERROR,
                 "malformed family result fails without exposing wrong-sized arrays");
@@ -445,6 +470,14 @@ int main(int argc, char** argv) {
         }();
         check(retained.embedding_space() == "fixture.embedding",
               "C++ result retains owned metadata after model scope");
+        auto retained_head = [&] {
+            auto transient = trtmc::Model::load((root / "features_all.bundle").string(), options);
+            return transient.task<trtmc::TextToHeadScores>().run({std::string{"owned"}});
+        }();
+        auto moved_head = std::move(retained_head);
+        check(moved_head.values()[1] == 5 && moved_head.shape()[2] == 2 &&
+                  moved_head.pooling() == "none" && retained_head.values().empty(),
+              "head values, shape and metadata remain owned after model release and result move");
         const auto unidentified_path = root / "features_unknown_embedding_space.bundle";
         bundle(unidentified_path, "unknown_embedding_space");
         auto unidentified = trtmc::Model::load(unidentified_path.string(), options);

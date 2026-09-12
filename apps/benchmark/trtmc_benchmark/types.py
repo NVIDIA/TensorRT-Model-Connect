@@ -122,6 +122,11 @@ class ResolvedCase:
     measurement: MeasurementSpec
     sources: Mapping[str, str]
     bundle_is_explicit: bool = False
+    selected_task: str | None = None
+
+    @property
+    def effective_task(self) -> str:
+        return self.model.task if self.selected_task is None else self.selected_task
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -132,6 +137,7 @@ class ResolvedCase:
             "bundle_path": str(self.bundle_path),
             "bundle_is_explicit": self.bundle_is_explicit,
             "operation": self.operation,
+            "selected_task": self.effective_task,
             "request": dict(self.request),
             "runtime_root": str(self.runtime_root) if self.runtime_root else "",
             "measurement": self.measurement.to_json(),
@@ -150,6 +156,7 @@ class ResolvedCase:
             "expected_task": self.model.task,
             "runtime_root": str(self.runtime_root),
             "operation": self.operation,
+            **({"selected_task": self.selected_task} if self.selected_task is not None else {}),
             "request": _absolute_artifact_paths(self.request, model_root),
             "measurement": {
                 "warmup": self.measurement.warmup,

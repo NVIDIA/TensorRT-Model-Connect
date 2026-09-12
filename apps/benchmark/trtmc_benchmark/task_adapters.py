@@ -37,6 +37,7 @@ class CaseResolution:
     request: Mapping[str, Any]
     sources: Mapping[str, str]
     measurement: MeasurementSpec
+    task: str
 
 
 _DEFAULTS: dict[str, tuple[str, int, int]] = {
@@ -58,6 +59,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "stereo_images_to_disparity": ("disparity", 3, 100),
     "image_to_metric_geometry": ("geometry", 3, 100),
     "text_to_pooled_features": ("encode", 50, 500),
+    "text_to_head_scores": ("head_scores", 50, 500),
     "text_to_token_features": ("encode", 50, 500),
     "text_to_embedding": ("embed", 50, 500),
     "text_query_documents_to_relevance": ("rerank", 10, 100),
@@ -86,6 +88,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "series_to_quantile_forecast": ("solve", 50, 500),
     "series_to_point_and_quantile_forecast": ("solve", 50, 500),
     "series_to_regression_distribution": ("regress", 50, 500),
+    "series_to_regression_values": ("regress", 50, 500),
     "batch_series_to_point_forecast": ("solve", 50, 500),
     "batch_series_to_quantile_forecast": ("solve", 50, 500),
     "batch_series_to_point_and_quantile_forecast": ("solve", 50, 500),
@@ -127,6 +130,7 @@ _ALLOWED_OPERATIONS: dict[str, frozenset[str]] = {
     task: frozenset({operation}) for task, (operation, _, _) in _DEFAULTS.items()
 }
 _ALLOWED_OPERATIONS["embedding"] = frozenset({"embed", "encode"})
+_ALLOWED_OPERATIONS["text_to_embedding"] = frozenset({"embed", "encode"})
 _ALLOWED_OPERATIONS["image_points_to_masks"] = frozenset({"segment", "segment_prompted"})
 
 _SEMANTIC_REMAINING = frozenset({
@@ -136,6 +140,7 @@ _SEMANTIC_REMAINING = frozenset({
     "image_to_semantic_segmentation", "image_points_to_masks", "image_text_to_instance_masks",
     "stereo_images_to_disparity", "text_to_pooled_features", "text_to_token_features",
     "text_to_embedding", "text_query_documents_to_relevance", "image_state_to_action_chunk",
+    "text_to_head_scores",
 })
 
 
@@ -167,7 +172,12 @@ def resolve_task_case(
         raise BenchmarkError(
             f"task {task!r} cannot run operation {selected_operation!r}; expected {allowed}"
         )
-    request = _request(task, testcase, model_root)
+    request_task = "text_to_pooled_features" if (
+        task == "text_to_embedding" and selected_operation == "encode"
+    ) else task
+    request = _request(request_task, testcase, model_root)
+    if _explicit(testcase, "token_ids") is not _MISSING and "token_ids" not in request:
+        raise BenchmarkError(f"token_ids is not accepted by {request_task}")
     if task == "image_points_to_masks" and selected_operation == "segment" and any(
         name in request for name in ("point_x", "point_y", "is_foreground")
     ):
@@ -182,7 +192,7 @@ def resolve_task_case(
             "unconditional_text_generation",
             "text_summarization", "text_translation", "images_text_to_text", "series_to_point_forecast",
             "series_to_quantile_forecast", "series_to_point_and_quantile_forecast",
-            "series_to_regression_distribution", "image_to_metric_geometry",
+            "series_to_regression_distribution", "series_to_regression_values", "image_to_metric_geometry",
             "image_to_boxes", "molecular_document_to_structure",
             "image_state_action_queue",
             "text_to_audio", "text_to_speech", "streaming_text_to_speech",
@@ -208,6 +218,7 @@ def resolve_task_case(
         request,
         sources,
         MeasurementSpec(warmup=warmup, iterations=iterations),
+        request_task,
     )
 
 
@@ -295,7 +306,7 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return request
     if task == "unconditional_text_generation":
         if any(_explicit(case, name) is not _MISSING for name in (
-            "prompt", "test_prompt", "source_text", "prompt_file", "prompt_repeat",
+            "prompt", "test_prompt", "source_text", "prompt_file", "prompt_repeat", "token_ids",
         )):
             raise BenchmarkError("unconditional text generation has no prompt input")
         return _text_controls(case, include_defaults=False)
@@ -305,12 +316,16 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         request = {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
         _copy_explicit(request, case, "fov_x")
         return request
-    if task == "series_to_regression_distribution":
+    if task in {"series_to_regression_distribution", "series_to_regression_values"}:
         values = _explicit(case, "past_values")
         if not isinstance(values, list) or not values:
             raise BenchmarkError("regression testcase requires nonempty past_values")
         request = {"past_values": deepcopy(values)}
-        _copy_explicit(request, case, "observed_mask", "shape", "distribution", "frequency")
+        _copy_explicit(request, case, "observed_mask", "shape", "frequency")
+        if task == "series_to_regression_distribution":
+            _copy_explicit(request, case, "distribution")
+        elif _explicit(case, "distribution") is not _MISSING:
+            raise BenchmarkError("deterministic target regression has no distribution selector")
         return request
     if task in _BATCH_SPEECH:
         for name in ("source_language", "target_language", "language", "max_new_tokens",
@@ -355,17 +370,22 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         "streaming_speech_transcription",
     }:
         return _semantic_audio_request(task, case, root)
-    if task in {
-        "text_continuation", "conditional_text_generation", "corrupted_text_reconstruction",
-        "text_summarization", "images_text_to_text",
-    }:
+    if task in {"text_continuation", "conditional_text_generation"}:
+        return {**_text_source_request(case, root), **_text_controls(case, include_defaults=False)}
+    if task in {"corrupted_text_reconstruction", "text_summarization", "images_text_to_text"}:
+        if _explicit(case, "token_ids") is not _MISSING:
+            raise BenchmarkError(f"token_ids is not accepted by {task}")
         request = _text_request(case, root, include_defaults=False)
         if task == "images_text_to_text":
             request["image_path"] = _image_path(case, root)
         return request
     if task == "text_generation":
+        if _explicit(case, "token_ids") is not _MISSING:
+            raise BenchmarkError("token_ids requires a semantic TextSource Task")
         return _text_request(case, root)
     if task == "vision_language_generation":
+        if _explicit(case, "token_ids") is not _MISSING:
+            raise BenchmarkError("token_ids is not a vision-language text input")
         return {**_text_request(case, root), "image_path": _image_path(case, root)}
     if task in {"image_generation", "image_edit", "image_generation_batch"}:
         return _image_generation_request(task, case, root)
@@ -504,6 +524,22 @@ def _semantic_prompt(case: Mapping[str, Any], root: Path) -> str:
     raise BenchmarkError("testcase requires a prompt")
 
 
+def _text_source_request(case: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    token_ids = _explicit(case, "token_ids")
+    if token_ids is _MISSING:
+        return {"prompt": _semantic_prompt(case, root)}
+    if any(_explicit(case, name) is not _MISSING for name in (
+        "prompt", "test_prompt", "source_text", "prompt_repeat", "prompt_file",
+    )):
+        raise BenchmarkError("text source requires exactly one text or token_ids input")
+    if not isinstance(token_ids, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) or not -(1 << 31) <= value < (1 << 31)
+        for value in token_ids
+    ):
+        raise BenchmarkError("token_ids must be an int32 array")
+    return {"token_ids": list(token_ids)}
+
+
 def _copy_explicit(request: dict[str, Any], case: Mapping[str, Any], *names: str) -> None:
     for name in names:
         value = _explicit(case, name)
@@ -629,8 +665,17 @@ def _semantic_remaining_request(task: str, case: Mapping[str, Any], root: Path) 
     if generation:
         return _semantic_media_request(task, case, root)
     request: dict[str, Any] = {}
+    if task == "text_to_head_scores":
+        if _explicit(case, "role") is not _MISSING:
+            raise BenchmarkError("head scores do not accept an embedding role")
+        return _text_source_request(case, root)
     if task in {"text_to_pooled_features", "text_to_token_features", "text_to_embedding"}:
-        request["prompt"] = _semantic_prompt(case, root)
+        if task == "text_to_embedding":
+            if _explicit(case, "token_ids") is not _MISSING:
+                raise BenchmarkError("text_to_embedding requires UTF-8 text, not token_ids")
+            request["prompt"] = _semantic_prompt(case, root)
+        else:
+            request.update(_text_source_request(case, root))
         role = _explicit(case, "role")
         if role is not _MISSING:
             if task != "text_to_embedding" or role not in ("default", "query", "document"):

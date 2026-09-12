@@ -243,6 +243,66 @@ static void unknown_embedding_space_contract(const trtmc_core_api_v1* core, cons
     consume_error(core, &error);
 }
 
+static void head_score_contracts(const trtmc_core_api_v1* core, const char* root,
+                                 const trtmc_load_options_v1* options) {
+    char path[4096];
+    trtmc_model* model = NULL;
+    trtmc_error* error = NULL;
+    const trtmc_api_header* header = NULL;
+    if (snprintf(path, sizeof(path), "%s/features_c_head.bundle", root) >= (int)sizeof(path) ||
+        !write_bundle(path, "all") ||
+        core->model_load(str(path), options, &model, &error) != TRTMC_OK ||
+        core->model_get_task_api(model, str(TRTMC_TASK_TEXT_TO_HEAD_SCORES), 1, 0, &header,
+                                 &error) != TRTMC_OK) {
+        check(0, "load C head score table");
+        consume_error(core, &error);
+        core->model_release(model);
+        return;
+    }
+    const trtmc_text_to_head_scores_api_v1* task = (const trtmc_text_to_head_scores_api_v1*)header;
+    check(header->byte_size == sizeof(*task), "C head-score v1 table layout");
+    trtmc_text_to_head_scores_request_v1 input = {0};
+    input.text.kind = TRTMC_TEXT_TOKEN_IDS;
+    const int32_t ids[] = {7, 8};
+    input.text.as.token_ids = (trtmc_i32_view){ids, 2};
+    trtmc_result* result = NULL;
+    check(task->run(model, &input, NULL, &result, &error) == TRTMC_OK && result,
+          "C head scores accept the existing explicit token input");
+    core->model_release(model);
+    trtmc_head_scores_view_v1 view = {0};
+    check(task->result_view(result, &view, &error) == TRTMC_OK && view.count == 4 &&
+              view.values[0] == -2 && view.values[1] == 2 && view.rank == 3 && view.shape[0] == 1 &&
+              view.shape[1] == 2 && view.shape[2] == 2 && view.kind == TRTMC_SCORE_LOGIT &&
+              has_prefix(view.pooling, "none") && has_prefix(view.normalization, "none"),
+          "C head values, shape and metadata survive model release without reinterpretation");
+    core->result_release(result);
+    consume_error(core, &error);
+    const char* invalid_modes[] = {
+        "head_bad_shape", "head_zero_dim",        "head_empty_shape",          "head_overflow",
+        "head_bad_kind",  "head_missing_pooling", "head_missing_normalization"};
+    for (size_t i = 0; i < sizeof(invalid_modes) / sizeof(invalid_modes[0]); ++i) {
+        model = NULL;
+        result = (trtmc_result*)1;
+        if (snprintf(path, sizeof(path), "%s/features_c_%s.bundle", root, invalid_modes[i]) >=
+                (int)sizeof(path) ||
+            !write_bundle(path, invalid_modes[i]) ||
+            core->model_load(str(path), options, &model, &error) != TRTMC_OK) {
+            check(0, "load malformed C head-score fixture");
+            consume_error(core, &error);
+            continue;
+        }
+        check(task->run(model, &input, NULL, &result, &error) == TRTMC_INTERNAL_ERROR && !result,
+              "C malformed head-score results fail without partial results");
+        consume_error(core, &error);
+        core->model_release(model);
+    }
+    memset(&view, 0x7f, sizeof(view));
+    check(task->result_view(NULL, &view, &error) == TRTMC_INVALID_ARGUMENT && view.values == NULL &&
+              view.shape == NULL && view.rank == 0,
+          "C head result-view failure clears every borrowed field");
+    consume_error(core, &error);
+}
+
 int main(int argc, char** argv) {
     if (argc != 2)
         return 2;
@@ -262,6 +322,7 @@ int main(int argc, char** argv) {
     options.runtime_root = str(argv[1]);
     class_identity_contracts(core, argv[1], &options);
     unknown_embedding_space_contract(core, argv[1], &options);
+    head_score_contracts(core, argv[1], &options);
     trtmc_model *model = NULL, *disabled = NULL;
     if (core->model_load(str(path), &options, &model, &error) != TRTMC_OK)
         return 2;

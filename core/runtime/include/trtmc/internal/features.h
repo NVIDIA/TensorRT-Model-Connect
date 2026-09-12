@@ -37,6 +37,14 @@ struct PooledFeaturesResult {
     std::string pooling;       // e.g. "cls", "mean", "first_token"; family semantics.
     std::string normalization; // e.g. "none" or "l2".
 };
+struct HeadScoresResult {
+    // The loaded head's real, nonempty shape; no hidden-feature or vocabulary claim.
+    std::vector<float> values;
+    std::vector<std::uint64_t> shape;
+    ScoreKind kind{ScoreKind::Unbounded};
+    std::string pooling;
+    std::string normalization;
+};
 struct SemanticEmbeddingResult {
     std::vector<float> values;
     // Identifies the checkpoint space when known, not a content hash. Empty
@@ -134,6 +142,9 @@ struct TextPairToTokenFeaturesRequest {
 struct TextToPooledFeaturesRequest {
     TextSource text;
 };
+struct TextToHeadScoresRequest {
+    TextSource text;
+};
 struct TextToEmbeddingRequest {
     std::string_view text;
     EmbeddingRole role{EmbeddingRole::Default};
@@ -218,6 +229,16 @@ class ITextToPooledFeatures {
     static constexpr std::string_view kTask = "text_to_pooled_features";
     virtual ~ITextToPooledFeatures() = default;
     virtual PooledFeaturesResult run(const TextToPooledFeaturesRequest&, ConfigView) = 0;
+};
+
+class ITextToHeadScores {
+  public:
+    using TaskInterface = ITextToHeadScores;
+    static constexpr std::string_view kTask = "text_to_head_scores";
+    virtual ~ITextToHeadScores() = default;
+    // The family owns tokenization, head execution, any reduction and defaults.
+    // Report the actual returned shape and interpretation, including transformed scores.
+    virtual HeadScoresResult run(const TextToHeadScoresRequest&, ConfigView) = 0;
 };
 
 class ITextToEmbedding {

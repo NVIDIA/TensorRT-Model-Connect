@@ -116,6 +116,31 @@ void exercise(const Fixture& f) {
     check(embedding.at("values") == json::array({4, 1}) &&
               embedding.at("embedding_space") == "fixture.embedding",
           "trained text embedding retains explicit retrieval role and embedding-space identity");
+    auto head =
+        f.success("encode", TextToHeadScores::kTask, {"--token-ids", "[7,8]", "--set", "scale=2"});
+    check(head.at("values") == json::array({-4, 2, 6, -8}) &&
+              head.at("shape") == json::array({1, 2, 2}) && head.at("score_kind") == "logit" &&
+              head.at("pooling") == "none" && !head.contains("embedding_space") &&
+              !head.contains("vocabulary_id") && !head.contains("tokens"),
+          "head scores retain real shape without hidden/token/vocabulary claims");
+    auto reduced = f.success("embed", TextToHeadScores::kTask,
+                             {"--text", "abc", "--set", "representation=first"});
+    check(reduced.at("values") == json::array({-2}) && reduced.at("shape") == json::array({1}) &&
+              reduced.at("pooling") == "first_token" && reduced.at("normalization") == "none",
+          "encode/embed only transport family-owned score representation selection");
+    f.rejects("encode", TextToHeadScores::kTask, {"--text", "x", "--token-ids", "[1]"},
+              "head scores reject ambiguous text inputs");
+    f.rejects("embed", TextToHeadScores::kTask, {"--text", "x", "--role", "query"},
+              "head scores cannot silently accept an embedding role");
+    f.rejects("embed", TextToEmbedding::kTask, {"--text", "x", "--token-ids", "[1]"},
+              "UTF8-only embedding rejects token IDs instead of ignoring them");
+    const auto secondary_head =
+        f.invoke("encode", TextPairToRelevance::kTask,
+                 {"--task", std::string(TextToHeadScores::kTask), "--text", "abc"});
+    check(secondary_head.status == 0 &&
+              json::parse(secondary_head.output).at("task") == TextToHeadScores::kTask &&
+              json::parse(secondary_head.output).at("shape") == json::array({1, 2, 2}),
+          "explicit --task invokes a secondary head-score binding on a relevance-primary model");
     auto title =
         f.success("embed", TitleBodyToEmbedding::kTask, {"--title", "ab", "--body", "xyz"});
     check(title.at("values") == json::array({7, 3}),

@@ -50,6 +50,9 @@ struct TextPairToTokenFeaturesRequest {
 struct TextToPooledFeaturesRequest {
     TextSource text;
 };
+struct TextToHeadScoresRequest {
+    TextSource text;
+};
 struct TextToEmbeddingRequest {
     std::string text;
     EmbeddingRole role{EmbeddingRole::Default};
@@ -165,6 +168,19 @@ class SemanticEmbeddingResult
         return {view_.values, static_cast<std::size_t>(view_.count)};
     }
     std::string_view embedding_space() const { return detail::string_view(view_.embedding_space); }
+    std::string_view pooling() const { return detail::string_view(view_.pooling); }
+    std::string_view normalization() const { return detail::string_view(view_.normalization); }
+};
+class HeadScoresResult : public detail::FeatureResultOwner<trtmc_head_scores_view_v1> {
+  public:
+    using FeatureResultOwner::FeatureResultOwner;
+    Span<const float> values() const noexcept {
+        return {view_.values, static_cast<std::size_t>(view_.count)};
+    }
+    Span<const uint64_t> shape() const noexcept {
+        return {view_.shape, static_cast<std::size_t>(view_.rank)};
+    }
+    uint32_t kind() const noexcept { return view_.kind; }
     std::string_view pooling() const { return detail::string_view(view_.pooling); }
     std::string_view normalization() const { return detail::string_view(view_.normalization); }
 };
@@ -376,6 +392,9 @@ inline trtmc_text_to_pooled_features_request_v1
 feature_request(const TextToPooledFeaturesRequest& input) {
     return {wire_text_source(input.text)};
 }
+inline trtmc_text_to_head_scores_request_v1 feature_request(const TextToHeadScoresRequest& input) {
+    return {wire_text_source(input.text)};
+}
 inline trtmc_text_to_embedding_request_v1 feature_request(const TextToEmbeddingRequest& input) {
     return {c_string(input.text), static_cast<uint32_t>(input.role)};
 }
@@ -507,6 +526,12 @@ struct TextToEmbeddingTraits {
     using Result = SemanticEmbeddingResult;
     using Table = trtmc_text_to_embedding_api_v1;
 };
+struct TextToHeadScoresTraits {
+    static constexpr std::string_view kTask = TRTMC_TASK_TEXT_TO_HEAD_SCORES;
+    using Request = TextToHeadScoresRequest;
+    using Result = HeadScoresResult;
+    using Table = trtmc_text_to_head_scores_api_v1;
+};
 struct TitleBodyToEmbeddingTraits {
     static constexpr std::string_view kTask = TRTMC_TASK_TITLE_BODY_TO_EMBEDDING;
     using Request = TitleBodyToEmbeddingRequest;
@@ -604,6 +629,7 @@ using TextToTokenFeatures = detail::FeatureTask<detail::TextToTokenFeaturesTrait
 using TextPairToTokenFeatures = detail::FeatureTask<detail::TextPairToTokenFeaturesTraits>;
 using TextToPooledFeatures = detail::FeatureTask<detail::TextToPooledFeaturesTraits>;
 using TextToEmbedding = detail::FeatureTask<detail::TextToEmbeddingTraits>;
+using TextToHeadScores = detail::FeatureTask<detail::TextToHeadScoresTraits>;
 using TitleBodyToEmbedding = detail::FeatureTask<detail::TitleBodyToEmbeddingTraits>;
 using MaskedTextToTokenScores = detail::FeatureTask<detail::MaskedTextToTokenScoresTraits>;
 using TextPairToPretrainingRelationScores =

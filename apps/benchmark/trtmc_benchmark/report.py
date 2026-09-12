@@ -161,6 +161,7 @@ def _history_key(
             cell.get("model"),
             cell.get("name"),
             cell.get("operation"),
+            resolved.get("selected_task", model.get("task")),
             _scope(cell, run),
             cell.get("asset_loading_included"),
             resolved.get("request"),
@@ -206,6 +207,7 @@ def _row(
     if resolved:
         model = _mapping(resolved.get("model"))
         reproduction = {
+            "selected_task": resolved.get("selected_task", model.get("task")),
             "request": resolved.get("request"),
             "model": {
                 key: model[key]

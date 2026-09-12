@@ -422,6 +422,57 @@ static void flat_history_tests(const char* root) {
     core->model_release(model);
 }
 
+static void regression_values_tests(const char* root) {
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/targets-c.bundle", root);
+    write_bundle(path, "regression_values_named");
+    trtmc_load_options_v1 options = {0};
+    options.struct_size = sizeof(options);
+    options.runtime_root = string(root);
+    trtmc_model* model = NULL;
+    trtmc_error* error = NULL;
+    checked(core->model_load(string(path), &options, &model, &error), TRTMC_OK, &error,
+            "C loads deterministic target regression");
+    if (!model)
+        return;
+    const trtmc_series_to_regression_values_api_v1* task =
+        (const trtmc_series_to_regression_values_api_v1*)get(
+            model, TRTMC_TASK_SERIES_TO_REGRESSION_VALUES);
+    if (!task) {
+        core->model_release(model);
+        return;
+    }
+    const float values[] = {1, 2, 3, 4};
+    const uint8_t observed[] = {1, 0, 1, 1};
+    trtmc_series_request_v1 input = {{values, 4, 2, 2}, observed, 4};
+    trtmc_result* result = NULL;
+    trtmc_config_entry_v1 scale = {0};
+    scale.name = string("scale");
+    scale.value.kind = TRTMC_CONFIG_F64;
+    scale.value.as.f64 = 2;
+    const trtmc_config_view_v1 config = {&scale, 1};
+    checked(task->run(model, &input, &config, &result, &error), TRTMC_OK, &error,
+            "C target regression receives typed history and config");
+    const trtmc_api_header* unsupported = NULL;
+    checked(core->model_get_task_api(model, string(TRTMC_TASK_SERIES_TO_POINT_FORECAST), 1, 0,
+                                     &unsupported, &error),
+            TRTMC_UNSUPPORTED, &error, "target regression does not advertise a forecast");
+    input.observed_count = 1;
+    trtmc_result* rejected = NULL;
+    checked(task->run(model, &input, NULL, &rejected, &error), TRTMC_INVALID_ARGUMENT, &error,
+            "C rejects a malformed target-regression mask");
+    check(rejected == NULL, "invalid target input yields no owned result");
+    core->model_release(model);
+    trtmc_regression_values_view_v1 view = {0};
+    checked(task->result_view(result, &view, &error), TRTMC_OK, &error,
+            "C target-regression view survives actual model release");
+    check(view.values.size == 2 && view.values.data[0] == 16 && view.values.data[1] == 1 &&
+              view.target_names.size == 2 && same(view.target_names.data[0], "total") &&
+              view.target_units.size == 2 && same(view.target_units.data[1], "count"),
+          "C complete target arrays and metadata retain order and ownership");
+    core->result_release(result);
+}
+
 int main(int argc, char** argv) {
     char full[4096], restricted_path[4096];
     trtmc_load_options_v1 options = {0};
@@ -483,6 +534,7 @@ int main(int argc, char** argv) {
     }
     core->result_release(retained_batch);
     flat_history_tests(argv[1]);
+    regression_values_tests(argv[1]);
     fprintf(stderr, "%s\n", failures ? "SOME FAILED" : "ALL PASSED");
     return failures ? 1 : 0;
 }

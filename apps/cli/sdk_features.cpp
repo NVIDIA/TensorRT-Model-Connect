@@ -16,6 +16,7 @@ namespace trtmc::cli {
 namespace {
 using detail::has_option;
 using detail::require_option;
+using detail::text_source;
 using nlohmann::json;
 
 json floats(Span<const float> values) {
@@ -67,6 +68,16 @@ json output_json(const PooledFeaturesResult& result) {
             {"pooling", std::string(result.pooling())},
             {"normalization", std::string(result.normalization())},
             {"feature_kind", "pooled"}};
+}
+json output_json(const HeadScoresResult& result) {
+    auto shape = json::array();
+    for (const auto dimension : result.shape())
+        shape.push_back(dimension);
+    return {{"values", floats(result.values())},
+            {"shape", std::move(shape)},
+            {"score_kind", score_kind(result.kind())},
+            {"pooling", std::string(result.pooling())},
+            {"normalization", std::string(result.normalization())}};
 }
 json output_json(const SemanticEmbeddingResult& result) {
     return {{"dim", result.values().size()},
@@ -220,13 +231,6 @@ std::vector<T> integer_array(const Command& command, const char* option, bool op
     }
     return output;
 }
-TextSource text_source(const Command& command) {
-    const bool text = has_option(command, "--text"), ids = has_option(command, "--token-ids");
-    if (text == ids)
-        throw std::invalid_argument("exactly one of --text and --token-ids is required");
-    return text ? TextSource{require_option(command, "--text")}
-                : TextSource{integer_array<int32_t>(command, "--token-ids")};
-}
 void reject_options(const Command& command, std::initializer_list<const char*> options) {
     for (const auto* option : options)
         if (has_option(command, option))
@@ -253,6 +257,15 @@ json invoke(const Command& command, const Model& model, const typename Task::Req
     return result;
 }
 } // namespace
+
+TextSource detail::text_source(const Command& command, const char* text_option) {
+    const bool text = has_option(command, text_option), ids = has_option(command, "--token-ids");
+    if (text == ids)
+        throw std::invalid_argument(std::string("exactly one of ") + text_option +
+                                    " and --token-ids is required");
+    return text ? TextSource{require_option(command, text_option)}
+                : TextSource{integer_array<int32_t>(command, "--token-ids")};
+}
 
 bool dispatch_sdk_features(const Command& command, const Model& model, std::string_view task_id,
                            std::ostream& output) {
@@ -287,6 +300,12 @@ bool dispatch_sdk_features(const Command& command, const Model& model, std::stri
         return emit(invoke<TextToPooledFeatures>(command, model, {text_source(command)},
                                                  {"--text", "--token-ids"}));
     }
+    if (task_id == TextToHeadScores::kTask) {
+        if (command.kind != CommandKind::kEncode && command.kind != CommandKind::kEmbed)
+            throw std::invalid_argument("text_to_head_scores requires encode or embed");
+        return emit(invoke<TextToHeadScores>(command, model, {text_source(command)},
+                                             {"--text", "--token-ids"}));
+    }
     if (task_id == MaskedTextToTokenScores::kTask) {
         command_kind(command, CommandKind::kEncode, task_id);
         return emit(invoke<MaskedTextToTokenScores>(command, model, {text_source(command)},
@@ -319,6 +338,7 @@ bool dispatch_sdk_features(const Command& command, const Model& model, std::stri
     }
     if (task_id == TextToEmbedding::kTask) {
         command_kind(command, CommandKind::kEmbed, task_id);
+        reject_options(command, {"--token-ids"});
         EmbeddingRole role = EmbeddingRole::Default;
         if (has_option(command, "--role")) {
             const auto name = require_option(command, "--role");
@@ -334,6 +354,7 @@ bool dispatch_sdk_features(const Command& command, const Model& model, std::stri
     }
     if (task_id == TitleBodyToEmbedding::kTask) {
         command_kind(command, CommandKind::kEmbed, task_id);
+        reject_options(command, {"--token-ids"});
         return emit(invoke<TitleBodyToEmbedding>(
             command, model, {require_option(command, "--title"), require_option(command, "--body")},
             {"--title", "--body"}));

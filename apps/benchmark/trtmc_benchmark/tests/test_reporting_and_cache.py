@@ -326,6 +326,25 @@ def test_report_preserves_legacy_contract_and_exposes_metrics_and_evidence(tmp_p
     assert "% vs" not in document
 
 
+def test_report_transports_head_score_metrics_without_embedding_claims(tmp_path):
+    root = tmp_path / "head"
+    run = _run(root, "1")
+    run["cells"][0]["operation"] = "head_scores"
+    run["cells"][0]["metrics"] = {
+        "latency_ms": {"p50": 10.0, "p95": 11.0},
+        "head_score_tensors_per_s": 100.0, "head_score_values_per_s": 400.0,
+    }
+    (root / "result.json").write_text(json.dumps(run))
+    report, warnings = generate_collection_report([root], tmp_path / "report")
+    document = (tmp_path / "report/report.html").read_text()
+    assert not warnings
+    assert "400.000 head_score_values_per_s" in document
+    assert "100.000 head_score_tensors_per_s" in document
+    assert "embedding_vectors_per_s" not in document
+    assert report["cells"][0]["operation"] == "head_scores"
+    assert "% vs" not in document
+
+
 def test_history_compares_only_matching_workloads_and_timing(tmp_path):
     _run(tmp_path / "first", "1", p50=10.0)
     _run(tmp_path / "second", "2", p50=8.0)
@@ -337,6 +356,29 @@ def test_history_compares_only_matching_workloads_and_timing(tmp_path):
     changed.write_text(json.dumps(request))
     generate_collection_report([tmp_path], tmp_path / "report")
     assert "% vs" not in (tmp_path / "report/report.html").read_text()
+
+
+def test_secondary_task_does_not_rebuild_same_bundle(tmp_path, monkeypatch):
+    builder, case, _, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
+    selected = replace(case, selected_task="text_summarization")
+    _, reused = builder.prepare([selected], allow_build=False, rebuild=False, dry_run=False)
+    assert reused[0].status == "reused" and len(calls) == 1
+    assert selected.model.task == case.model.task
+
+
+def test_history_separates_tasks_with_same_bundle_operation_and_inputs(tmp_path):
+    _run(tmp_path / "first", "1", p50=10.0)
+    _run(tmp_path / "second", "2", p50=8.0)
+    for directory, task in (("first", "text_to_pooled_features"), ("second", "text_to_token_features")):
+        path = tmp_path / directory / "case/resolved-case.json"
+        resolved = json.loads(path.read_text())
+        resolved["selected_task"] = task
+        path.write_text(json.dumps(resolved))
+    generate_collection_report([tmp_path], tmp_path / "report")
+    document = (tmp_path / "report/report.html").read_text()
+    assert "% vs" not in document
+    assert "text_to_pooled_features" in document and "text_to_token_features" in document
 
 
 @pytest.mark.parametrize(
