@@ -5,12 +5,19 @@
 
 #include "trtmc/features.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 
 namespace {
+static_assert(TRTMC_IMAGE_TOKEN_PATCH == 1 && TRTMC_IMAGE_TOKEN_CLASS == 2 &&
+                  TRTMC_IMAGE_TOKEN_REGISTER == 3 && TRTMC_IMAGE_TOKEN_GLOBAL_POOLED == 4,
+              "image token roles retain their public ABI values");
+static_assert(sizeof(trtmc::ImageFeatureToken::role) == sizeof(uint32_t),
+              "image token role remains a fixed-width C ABI field");
+
 int failures = 0;
 void check(bool condition, const char* message) {
     if (!condition) {
@@ -102,6 +109,46 @@ void padding_contracts(const trtmc::Model& padded, const trtmc::Model& valid_onl
             TRTMC_INTERNAL_ERROR, 0,
             "batch shares padding metadata checks and reports the invalid item");
     }
+}
+
+void global_pooled_contracts(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    const auto path = root / "features_global_pooled.bundle";
+    bundle(path, "global_pooled");
+    const float pixels[] = {0.5F, 0.25F, 0.125F};
+    const trtmc::ImageInput image({pixels, 3}, 1, 1);
+    auto retained = [&] {
+        auto transient = trtmc::Model::load(path.string(), options);
+        return transient.task<trtmc::ImageToTokenAndPooledFeatures>().run({image},
+                                                                          {{"scale", 2.0}});
+    }();
+    auto result = std::move(retained);
+    const auto matrix = result.features();
+    const float expected[] = {40, 1, 39, 0, 41, 2};
+    check(matrix.rows == 3 && matrix.columns == 2 && matrix.values.size() == 6 &&
+              std::equal(matrix.values.begin(), matrix.values.end(), expected),
+          "C++ retains the global pooled prefix and every patch row after model release");
+    check(result.pooled_values().size() == 2 && result.pooled_values()[0] == 40 &&
+              result.pooled_values()[1] == 1 && result.pooling() == "mean" &&
+              result.normalization() == "none",
+          "C++ pooled output retains its values and mean-pooling metadata after model release");
+    const auto tokens = result.tokens();
+    check(tokens.size() == 3 && tokens[0].role == TRTMC_IMAGE_TOKEN_GLOBAL_POOLED &&
+              tokens[1].role == TRTMC_IMAGE_TOKEN_PATCH &&
+              tokens[2].role == TRTMC_IMAGE_TOKEN_PATCH && result.grid_rows() == 1 &&
+              result.grid_columns() == 2 && tokens[1].grid_row == 0 && tokens[1].grid_column == 0 &&
+              tokens[1].x_min == 0 && tokens[1].y_min == 0 && tokens[1].x_max == 0.5F &&
+              tokens[1].y_max == 1 && tokens[2].grid_row == 0 && tokens[2].grid_column == 1 &&
+              tokens[2].x_min == 0.5F && tokens[2].y_min == 0 && tokens[2].x_max == 1 &&
+              tokens[2].y_max == 1,
+          "C++ preserves a global pooled role distinct from CLS and ordered patch coordinates");
+    check(retained.tokens().empty() && retained.features().values.empty() &&
+              retained.pooled_values().empty(),
+          "moving global pooled results clears all borrowed source views");
+    const auto invalid_path = root / "features_unknown_image_role.bundle";
+    bundle(invalid_path, "unknown_image_role");
+    auto invalid = trtmc::Model::load(invalid_path.string(), options);
+    rejects([&] { invalid.task<trtmc::ImageToTokenAndPooledFeatures>().run({image}); },
+            TRTMC_INTERNAL_ERROR, "unknown image token roles remain rejected by C++ tasks");
 }
 
 void exercise(const trtmc::Model& model) {
@@ -367,6 +414,7 @@ int main(int argc, char** argv) {
         const std::filesystem::path root(argv[1]);
         trtmc::LoadOptions options;
         options.runtime_root = root.string();
+        global_pooled_contracts(root, options);
         for (const std::string mode :
              {"all", "none", "missing", "bad_shape", "bad_count", "missing_pooler",
               "bad_batch_count", "missing_batch_pooler", "padding"})

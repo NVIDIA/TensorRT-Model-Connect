@@ -9,6 +9,12 @@
 #include <stdio.h>
 #include <string.h>
 
+_Static_assert(TRTMC_IMAGE_TOKEN_PATCH == 1 && TRTMC_IMAGE_TOKEN_CLASS == 2 &&
+                   TRTMC_IMAGE_TOKEN_REGISTER == 3 && TRTMC_IMAGE_TOKEN_GLOBAL_POOLED == 4,
+               "image token roles retain their public ABI values");
+_Static_assert(sizeof(((trtmc_image_feature_token_v1*)0)->role) == sizeof(uint32_t),
+               "image token role remains a fixed-width C ABI field");
+
 static int failures;
 static void check(int condition, const char* message) {
     if (!condition) {
@@ -48,6 +54,80 @@ static void consume_error(const trtmc_core_api_v1* core, trtmc_error** error) {
     core->error_release(*error);
     *error = NULL;
 }
+static void global_pooled_contracts(const trtmc_core_api_v1* core, const char* root,
+                                    const trtmc_load_options_v1* options) {
+    const char* modes[] = {"global_pooled", "unknown_image_role"};
+    const float pixels[] = {0.5F, 0.25F, 0.125F};
+    const trtmc_image_to_token_and_pooled_features_request_v1 input = {
+        {pixels, sizeof(pixels), 1, 1, 3, TRTMC_IMAGE_FLOAT32}};
+    trtmc_config_entry_v1 scale = {0};
+    scale.name = str("scale");
+    scale.value.kind = TRTMC_CONFIG_F64;
+    scale.value.as.f64 = 2.0;
+    const trtmc_config_view_v1 config = {&scale, 1};
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+        char path[4096];
+        trtmc_model* model = NULL;
+        trtmc_error* error = NULL;
+        const trtmc_api_header* header = NULL;
+        if (snprintf(path, sizeof(path), "%s/features_c_%s.bundle", root, modes[i]) >=
+                (int)sizeof(path) ||
+            !write_bundle(path, modes[i]) ||
+            core->model_load(str(path), options, &model, &error) != TRTMC_OK ||
+            core->model_get_task_api(model, str(TRTMC_TASK_IMAGE_TO_TOKEN_AND_POOLED_FEATURES), 1,
+                                     0, &header, &error) != TRTMC_OK) {
+            check(0, "load C global pooled token fixture and task table");
+            consume_error(core, &error);
+            core->model_release(model);
+            continue;
+        }
+        const trtmc_image_to_token_and_pooled_features_api_v1* task =
+            (const trtmc_image_to_token_and_pooled_features_api_v1*)header;
+        check(header->major == 1 && header->minor == 0 && header->byte_size == sizeof(*task),
+              "global pooled tokens use the existing version-one C task table");
+        trtmc_result* result = (trtmc_result*)(uintptr_t)1;
+        const trtmc_status status = task->run(model, &input, &config, &result, &error);
+        core->model_release(model);
+        if (i == 1) {
+            check(status == TRTMC_INTERNAL_ERROR && result == NULL && error != NULL,
+                  "C rejects an unknown image token role without returning a partial result");
+        } else if (status == TRTMC_OK && result != NULL) {
+            trtmc_image_token_and_pooled_features_view_v1 view = {0};
+            check(
+                task->result_view(result, &view, &error) == TRTMC_OK &&
+                    view.tokens.features.rows == 3 && view.tokens.features.columns == 2 &&
+                    view.tokens.features.count == 6 && view.tokens.features.data[0] == 40 &&
+                    view.tokens.features.data[1] == 1 && view.tokens.features.data[2] == 39 &&
+                    view.tokens.features.data[3] == 0 && view.tokens.features.data[4] == 41 &&
+                    view.tokens.features.data[5] == 2,
+                "C retains the complete global pooled prefix and patch matrix after model release");
+            check(view.pooled.count == 2 && view.pooled.values[0] == 40 &&
+                      view.pooled.values[1] == 1 && view.pooled.pooling.size == 4 &&
+                      memcmp(view.pooled.pooling.data, "mean", 4) == 0 &&
+                      view.pooled.normalization.size == 4 &&
+                      memcmp(view.pooled.normalization.data, "none", 4) == 0,
+                  "C pooled values and mean-pooling metadata remain owned after model release");
+            check(view.tokens.token_count == 3 &&
+                      view.tokens.tokens[0].role == TRTMC_IMAGE_TOKEN_GLOBAL_POOLED &&
+                      view.tokens.tokens[1].role == TRTMC_IMAGE_TOKEN_PATCH &&
+                      view.tokens.tokens[2].role == TRTMC_IMAGE_TOKEN_PATCH &&
+                      view.tokens.grid_rows == 1 && view.tokens.grid_columns == 2 &&
+                      view.tokens.tokens[1].grid_row == 0 &&
+                      view.tokens.tokens[1].grid_column == 0 && view.tokens.tokens[1].x_min == 0 &&
+                      view.tokens.tokens[1].y_min == 0 && view.tokens.tokens[1].x_max == 0.5F &&
+                      view.tokens.tokens[1].y_max == 1 && view.tokens.tokens[2].grid_row == 0 &&
+                      view.tokens.tokens[2].grid_column == 1 &&
+                      view.tokens.tokens[2].x_min == 0.5F && view.tokens.tokens[2].y_min == 0 &&
+                      view.tokens.tokens[2].x_max == 1 && view.tokens.tokens[2].y_max == 1,
+                  "C distinguishes global pooling from CLS while preserving patch roles and boxes");
+            core->result_release(result);
+        } else {
+            check(0, "C global pooled token extraction succeeds");
+        }
+        consume_error(core, &error);
+    }
+}
+
 static void padding_contracts(const trtmc_core_api_v1* core, trtmc_model* padded,
                               trtmc_model* valid_only, const char* root,
                               const trtmc_load_options_v1* options) {
@@ -320,6 +400,7 @@ int main(int argc, char** argv) {
     trtmc_load_options_v1 options = {0};
     options.struct_size = sizeof(options);
     options.runtime_root = str(argv[1]);
+    global_pooled_contracts(core, argv[1], &options);
     class_identity_contracts(core, argv[1], &options);
     unknown_embedding_space_contract(core, argv[1], &options);
     head_score_contracts(core, argv[1], &options);

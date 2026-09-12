@@ -79,7 +79,13 @@ typedef struct {
     const trtmc_feature_token_v1* tokens;
     uint64_t token_count;
 } trtmc_replaced_token_scores_view_v1;
-enum { TRTMC_IMAGE_TOKEN_PATCH = 1, TRTMC_IMAGE_TOKEN_CLASS = 2, TRTMC_IMAGE_TOKEN_REGISTER = 3 };
+enum {
+    TRTMC_IMAGE_TOKEN_PATCH = 1,
+    TRTMC_IMAGE_TOKEN_CLASS = 2,
+    TRTMC_IMAGE_TOKEN_REGISTER = 3,
+    /* A global pooled row retained in the token matrix, not a class token. */
+    TRTMC_IMAGE_TOKEN_GLOBAL_POOLED = 4
+};
 typedef struct {
     uint32_t role;
     uint64_t grid_row;

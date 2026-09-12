@@ -139,6 +139,9 @@ json image_tokens_json(const Result& result) {
         case TRTMC_IMAGE_TOKEN_REGISTER:
             item["role"] = "register";
             break;
+        case TRTMC_IMAGE_TOKEN_GLOBAL_POOLED:
+            item["role"] = "global_pooled";
+            break;
         case TRTMC_IMAGE_TOKEN_PATCH:
             item = {
                 {"role", "patch"},

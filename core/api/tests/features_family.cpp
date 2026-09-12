@@ -261,6 +261,20 @@ class FeaturesFixture final : public IModel,
              1,
              1},
             {{marker, invocation, pixel(request.image)}, "cls", "none"}};
+        if (mode_ == "global_pooled" || mode_ == "unknown_image_role") {
+            result = {
+                {{{marker, invocation, marker - 1, invocation - 1, marker + 1, invocation + 1},
+                  3,
+                  2},
+                 {{ImageFeatureTokenRole::GlobalPooled, 0, 0, 0, 0, 0, 0},
+                  {ImageFeatureTokenRole::Patch, 0, 0, 0, 0, 0.5F, 1},
+                  {ImageFeatureTokenRole::Patch, 0, 1, 0.5F, 0, 1, 1}},
+                 1,
+                 2},
+                {{marker, invocation}, "mean", "none"}};
+            if (mode_ == "unknown_image_role")
+                result.tokens.tokens[0].role = static_cast<ImageFeatureTokenRole>(999);
+        }
         if (mode_ == "missing_pooler")
             result.pooled.values.clear();
         return result;
