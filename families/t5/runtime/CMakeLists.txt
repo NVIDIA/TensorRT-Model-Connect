@@ -47,4 +47,21 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_t5_runtime_config PRIVATE trtmc_model_t5)
   target_compile_options(test_t5_runtime_config PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME t5_runtime_config COMMAND test_t5_runtime_config)
+
+  # CPU CUDA stubs live in the test, so allocation failures can be injected
+  # without a GPU or cudart.
+  add_executable(test_t5_cross_kv_alloc
+    ${PROJECT_SOURCE_DIR}/families/t5/tests/cpp/test_t5_cross_kv_alloc.cpp
+  )
+  target_include_directories(test_t5_cross_kv_alloc PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_t5_cross_kv_alloc SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_compile_options(test_t5_cross_kv_alloc PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME t5_cross_kv_alloc COMMAND test_t5_cross_kv_alloc)
 endif()
