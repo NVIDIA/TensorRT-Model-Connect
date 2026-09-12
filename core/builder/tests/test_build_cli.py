@@ -260,3 +260,66 @@ def test_prepare_structure_dispatches_to_the_resolved_family(
         "cache_hit": False,
         "family": "boltz2",
     }
+
+
+def test_prepare_structure_uses_the_family_hook_after_task_migration(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
+    support = FamilySupport(
+        ("molecular_document_to_structure",), "molecular_document_to_structure"
+    )
+    monkeypatch.setattr(build_cli, "resolve_family", lambda metadata: ("example_owner", support))
+    monkeypatch.setattr(build_cli, "build", lambda request: pytest.fail("preparation invoked build"))
+    request = tmp_path / "request.yaml"
+    request.write_text("version: 1\n", encoding="utf-8")
+    output = tmp_path / "prepared.request"
+    calls = []
+
+    def prepare(model_dir, input_path, output_path, *, cache_dir):
+        calls.append((model_dir, input_path, output_path, cache_dir))
+        output_path.write_bytes(input_path.read_bytes())
+        return {"family": "example_owner", "output": str(output_path)}
+
+    def load_family(family):
+        assert family == "example_owner"
+        return SimpleNamespace(prepare_structure_request=prepare)
+
+    monkeypatch.setattr(build_cli, "_load_family", load_family)
+
+    assert build_cli.main([
+        "prepare-structure", str(model), "--input", str(request), "-o", str(output)
+    ]) == 0
+    assert calls == [(model, request, output, None)]
+    assert output.read_bytes() == request.read_bytes()
+    assert json.loads(capsys.readouterr().out) == {
+        "family": "example_owner", "output": str(output)
+    }
+
+
+@pytest.mark.parametrize("hook", ["absent", None, "not callable"])
+def test_prepare_structure_requires_a_callable_family_hook(
+    monkeypatch, tmp_path: Path, hook
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
+    support = FamilySupport(
+        ("molecular_document_to_structure",), "molecular_document_to_structure"
+    )
+    monkeypatch.setattr(build_cli, "resolve_family", lambda metadata: ("example_owner", support))
+    module = SimpleNamespace()
+    if hook != "absent":
+        module.prepare_structure_request = hook
+    monkeypatch.setattr(build_cli, "_load_family", lambda family: module)
+    monkeypatch.setattr(build_cli, "build", lambda request: pytest.fail("preparation invoked build"))
+    output = tmp_path / "prepared.request"
+
+    with pytest.raises(ValueError, match="family 'example_owner' does not support request preparation"):
+        build_cli.main([
+            "prepare-structure", str(model), "--input", str(tmp_path / "request.yaml"),
+            "-o", str(output),
+        ])
+    assert not output.exists()
