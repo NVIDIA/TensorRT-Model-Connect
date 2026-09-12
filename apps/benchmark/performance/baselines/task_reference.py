@@ -455,51 +455,6 @@ def _load_asr(
                 result = model.transcribe(transcription_input, batch_size=1)
             return {"text": transcription_text(result), "output_tokens": None}
 
-    elif arguments.family == "glmasr":
-        from transformers import GlmAsrForConditionalGeneration, GlmAsrProcessor
-
-        processor = GlmAsrProcessor.from_pretrained(arguments.model, **_processor_kwargs(arguments))
-        model = (
-            GlmAsrForConditionalGeneration.from_pretrained(
-                arguments.model, **_load_kwargs(arguments, torch)
-            )
-            .eval()
-            .to(device)
-        )
-        prompt = str(request.get("prompt", "") or "Please transcribe this audio into text")
-        conversation = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "audio", "audio": audio},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
-        inputs = _to_device(
-            processor.apply_chat_template(
-                conversation,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
-                sampling_rate=target_rate,
-            ),
-            device,
-        )
-        prompt_length = inputs["input_ids"].shape[1]
-
-        def invoke() -> Mapping[str, Any]:
-            with torch.inference_mode():
-                generated = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
-            new_tokens = generated[0, prompt_length:]
-            token_ids = [int(token) for token in new_tokens.detach().cpu().tolist()]
-            return {
-                "text": processor.tokenizer.decode(new_tokens, skip_special_tokens=True),
-                "token_ids": token_ids,
-                "output_tokens": len(token_ids),
-            }
-
     else:
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
