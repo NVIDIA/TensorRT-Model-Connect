@@ -104,9 +104,13 @@ struct ImageResult {
 };
 
 struct AudioResult {
+    // Interleaved PCM: frame 0 channel 0, frame 0 channel 1, ..., frame 1 channel 0.
     std::vector<float> samples;
+    // Total scalar samples, not frames per channel. Zero may mean unspecified.
     std::int32_t num_samples{0};
     std::int32_t sample_rate{24000};
+    // Appended to preserve existing three-field aggregate initialization.
+    std::int32_t num_channels{1};
 };
 
 struct TranscriptionStreamConfig {
@@ -401,6 +405,7 @@ struct AudioGenerationConfig {
     std::int32_t seed{-1};
 };
 
+// Legacy mono streaming callback; multichannel output is represented by AudioResult.
 using AudioChunkCallback =
     std::function<void(const float* samples, std::int32_t num_samples, std::int32_t sample_rate)>;
 
