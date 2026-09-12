@@ -48,6 +48,26 @@ static void test_detect_phi() {
     check(fmt == "phi", "phi detection");
 }
 
+// TinyLlama-1.1B-Chat / Zephyr: same role tags as Phi, but turns end with eos_token (</s>),
+// not Phi's literal <|end|>. Must not be classified as phi (issue #1271).
+static void test_detect_zephyr_tinyllama() {
+    std::string tpl = "{% for message in messages %}\n"
+                      "{% if message['role'] == 'user' %}\n"
+                      "{{ '<|user|>\n' + message['content'] + eos_token }}\n"
+                      "{% elif message['role'] == 'system' %}\n"
+                      "{{ '<|system|>\n' + message['content'] + eos_token }}\n"
+                      "{% elif message['role'] == 'assistant' %}\n"
+                      "{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n"
+                      "{% endif %}\n"
+                      "{% if loop.last and add_generation_prompt %}\n"
+                      "{{ '<|assistant|>' }}\n"
+                      "{% endif %}\n"
+                      "{% endfor %}";
+    auto fmt = trtmc::llama_detect_chat_template_format(tpl);
+    check(fmt == "zephyr", "zephyr/tinyllama detection");
+    check(fmt != "phi", "zephyr/tinyllama must not be phi");
+}
+
 static void test_detect_gemma() {
     std::string tpl = "{% for message in messages %}<start_of_turn>{{ message.role }}\n{{ "
                       "message.content }}<end_of_turn>\n{% endfor %}";
@@ -86,6 +106,18 @@ static void test_apply_phi() {
     check(result == "<|user|>\nhello<|end|>\n<|assistant|>\n", "phi application");
 }
 
+static void test_apply_zephyr_tinyllama() {
+    auto result = trtmc::llama_apply_chat_template("zephyr", "hello");
+    check(result == "<|user|>\nhello</s>\n<|assistant|>\n", "zephyr/tinyllama application");
+    // Issue #1271 e2e prompt: must use </s>, not Phi <|end|>.
+    auto e2e = trtmc::llama_apply_chat_template(
+        "zephyr", "What is the capital of France? Answer in one word.");
+    check(e2e == "<|user|>\nWhat is the capital of France? Answer in one word.</s>\n"
+                 "<|assistant|>\n",
+          "zephyr/tinyllama e2e prompt render");
+    check(e2e.find("<|end|>") == std::string::npos, "zephyr render must not inject <|end|>");
+}
+
 static void test_apply_gemma() {
     auto result = trtmc::llama_apply_chat_template("gemma", "hello");
     check(result == "<start_of_turn>user\nhello<end_of_turn>\n<start_of_turn>model\n",
@@ -104,12 +136,14 @@ int main() {
     test_detect_chatml();
     test_detect_mistral();
     test_detect_phi();
+    test_detect_zephyr_tinyllama();
     test_detect_gemma();
     test_detect_llama3();
     test_detect_nemotron_h();
     test_apply_chatml_no_thinking();
     test_apply_mistral_no_thinking_ignored();
     test_apply_phi();
+    test_apply_zephyr_tinyllama();
     test_apply_gemma();
     test_apply_llama3();
     test_apply_nemotron_h_no_thinking();
