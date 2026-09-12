@@ -74,11 +74,67 @@ def load_native_libraries(bin_dir: Path, families: tuple[str, ...]) -> None:
     script = """
 import ctypes
 import os
+from pathlib import Path
 import sys
 
-ctypes.CDLL(sys.argv[1], mode=os.RTLD_NOW | ctypes.RTLD_GLOBAL)
-for path in sys.argv[2:]:
-    ctypes.CDLL(path, mode=os.RTLD_NOW | ctypes.RTLD_LOCAL)
+core = ctypes.CDLL(sys.argv[1], mode=os.RTLD_NOW | ctypes.RTLD_GLOBAL)
+runtime = ctypes.CDLL(sys.argv[2], mode=os.RTLD_NOW | ctypes.RTLD_LOCAL)
+
+def build_identity(library, symbol):
+    function = getattr(library, symbol)
+    function.restype = ctypes.c_char_p
+    raw_identity = function()
+    identity = raw_identity.decode() if raw_identity is not None else "<null>"
+    if len(identity) != 32 or any(character not in "0123456789abcdef" for character in identity):
+        raise RuntimeError(f"invalid TRTMC product-build identity from {symbol}: {identity}")
+    return identity
+
+core_build_id = build_identity(core, "trtmc_core_build_id")
+runtime_build_id = build_identity(runtime, "trtmc_runtime_build_id")
+if core_build_id != runtime_build_id:
+    raise RuntimeError(
+        f"installed TRTMC core/runtime build mismatch: core={core_build_id} "
+        f"runtime={runtime_build_id}"
+    )
+
+class PluginDescriptorV1(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("descriptor_version", ctypes.c_uint32),
+        ("kind", ctypes.c_uint32),
+        ("id", ctypes.c_char_p),
+        ("build_id", ctypes.c_char_p),
+    ]
+
+for raw_path in sys.argv[3:]:
+    path = Path(raw_path)
+    library = ctypes.CDLL(path, mode=os.RTLD_NOW | ctypes.RTLD_LOCAL)
+    descriptor_function = library.trtmc_plugin_descriptor_v1
+    descriptor_function.restype = ctypes.POINTER(PluginDescriptorV1)
+    descriptor = descriptor_function().contents
+    name = path.name
+    if name.startswith("libtrtmc_backend_"):
+        expected_kind, expected_id = 1, name.removeprefix("libtrtmc_backend_").removesuffix(".so")
+    elif name.startswith("libtrtmc_model_"):
+        expected_kind, expected_id = 2, name.removeprefix("libtrtmc_model_").removesuffix(".so")
+    elif name == "libtrtmc_byok_tvm_ffi.so":
+        expected_kind, expected_id = 3, "tvm_ffi"
+    else:
+        raise RuntimeError(f"unknown TRTMC plugin library: {path}")
+    actual_id = descriptor.id.decode() if descriptor.id is not None else "<null>"
+    actual_build_id = descriptor.build_id.decode() if descriptor.build_id is not None else "<null>"
+    if (
+        descriptor.struct_size != ctypes.sizeof(PluginDescriptorV1)
+        or descriptor.descriptor_version != 1
+        or descriptor.kind != expected_kind
+        or actual_id != expected_id
+        or actual_build_id != runtime_build_id
+    ):
+        raise RuntimeError(
+            f"invalid TRTMC plugin descriptor: {path}: "
+            f"size={descriptor.struct_size} version={descriptor.descriptor_version} "
+            f"kind={descriptor.kind} id={actual_id} build={actual_build_id}"
+        )
 """
     environment = os.environ.copy()
     environment["LD_LIBRARY_PATH"] = ":".join(
@@ -117,6 +173,8 @@ class WheelArchiveValidator:
                 raise CiError(f"{wheel}: generated Python cache files are packaged")
             if "tensorrt_model_connect/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python core package is missing")
+            if "tensorrt_model_connect/native_cli.py" not in names:
+                raise CiError(f"{wheel}: native CLI console adapter is missing")
             if "trtmc_benchmark/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python benchmark application is missing")
             source_suffixes = {
@@ -262,20 +320,24 @@ class WheelArchiveValidator:
                 raise CiError(
                     f"{wheel}: expected only unaliased TensorRT backend DSOs, found {backend_dsos}"
                 )
-            scripts = [name for name in names if name.endswith(".data/scripts/trtmc")]
-            script_cores = [
-                name for name in names if name.endswith(".data/scripts/libtrtmc_core.so")
+            duplicate_native_payload = [
+                name
+                for name in names
+                if ".data/scripts/" in name
+                and Path(name).name in {"trtmc", "libtrtmc_core.so", "libtrtmc_runtime.so"}
             ]
-            script_runtimes = [
-                name for name in names if name.endswith(".data/scripts/libtrtmc_runtime.so")
-            ]
-            if len(scripts) != 1 or len(script_cores) != 1 or len(script_runtimes) != 1:
-                raise CiError(f"{wheel}: installed CLI payload is incomplete")
+            if duplicate_native_payload:
+                raise CiError(f"{wheel}: native product payload is duplicated in wheel scripts")
             entry_points = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
-            if len(entry_points) != 1 or "trtmc-bench" not in archive.read(entry_points[0]).decode(
-                "utf-8"
-            ):
-                raise CiError(f"{wheel}: trtmc-bench console entrypoint is missing")
+            if len(entry_points) != 1:
+                raise CiError(f"{wheel}: console entrypoints are missing")
+            entrypoint_text = archive.read(entry_points[0]).decode("utf-8")
+            required_entrypoints = (
+                "trtmc = tensorrt_model_connect.native_cli:main",
+                "trtmc-bench = trtmc_benchmark.cli:main",
+            )
+            if not all(entrypoint in entrypoint_text for entrypoint in required_entrypoints):
+                raise CiError(f"{wheel}: required console entrypoints are missing")
         print(f"validated wheel={wheel} families={len(expected_families)}")
 
 
@@ -369,6 +431,7 @@ print(json.dumps({
         )
         if not version.stdout.startswith("trtmc "):
             raise CiError("installed trtmc CLI returned an invalid version")
+        fixture_family = min(expected)
         with tempfile.TemporaryDirectory(prefix="trtmc-installed-wheel-") as directory:
             bundle = Path(directory) / "inspect.bundle"
             subprocess.run(
@@ -378,9 +441,11 @@ print(json.dumps({
                     "from pathlib import Path; "
                     "from tensorrt_model_connect.bundle_writer import BundleWriter; "
                     "writer = BundleWriter(Path(__import__('sys').argv[1])); "
-                    "writer.set_header(family='inspect', task='text_generation', backend='trt'); "
+                    "writer.set_header(family=__import__('sys').argv[2], "
+                    "task='package_validation', backend='trt'); "
                     "writer.finish()",
                     bundle,
+                    fixture_family,
                 ],
                 check=True,
                 cwd=Path("/tmp"),
@@ -395,8 +460,18 @@ print(json.dumps({
                 env=environment,
             )
             metadata = json.loads(inspected.stdout)
-            if metadata.get("family") != "inspect" or metadata.get("backend") != "trt":
+            if metadata.get("family") != fixture_family or metadata.get("backend") != "trt":
                 raise CiError("installed trtmc CLI failed bundle inspection")
+            executed = subprocess.run(
+                [executable, "run", bundle],
+                capture_output=True,
+                text=True,
+                cwd=Path("/tmp"),
+                env=environment,
+            )
+            selected = f"Using TRTMC runtime: {bin_dir}\n"
+            if executed.returncode == 0 or selected not in executed.stderr:
+                raise CiError("installed trtmc CLI failed automatic wheel runtime discovery")
         print(f"installed wheel={wheel} trtmc={executable} families={len(packaged)}")
 
 

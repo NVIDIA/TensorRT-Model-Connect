@@ -146,6 +146,7 @@ def test_selective_e2e_calls_family_tests_directly(
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     (runtime / "libtrtmc_core.so").write_text("")
+    (runtime / "libtrtmc_runtime.so").write_text("")
     (runtime / "libtrtmc_backend_trt.so").write_text("")
     (runtime / "libtrtmc_model_beta.so").write_text("")
     native_build = tmp_path / "native-build"
@@ -218,8 +219,37 @@ def test_selective_e2e_calls_family_tests_directly(
     assert options["updates"]["TRTMC_RUNTIME_ROOT"] != str(runtime)
     assert options["unset"] == ("PYTEST_ADDOPTS",)
     assert context.runtime_snapshots == [
-        ("libtrtmc_backend_trt.so", "libtrtmc_core.so", "libtrtmc_model_beta.so")
+        (
+            "libtrtmc_backend_trt.so",
+            "libtrtmc_core.so",
+            "libtrtmc_model_beta.so",
+            "libtrtmc_runtime.so",
+        )
     ]
+
+
+def test_isolated_runtime_root_materializes_root_local_trtmc_libraries(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    required = (
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_beta.so",
+    )
+    for name in required:
+        (runtime / name).write_text(name, encoding="utf-8")
+
+    runner = E2ERunner(RecordingContext(tmp_path, {}))
+    with runner._isolated_runtime_root(runtime, "beta") as isolated:
+        for name in required:
+            staged = isolated / name
+            assert staged.is_file()
+            assert not staged.is_symlink()
+            assert staged.resolve().parent == isolated.resolve()
+            assert staged.read_text(encoding="utf-8") == name
 
 
 def test_family_with_only_hardware_tests_accepts_exact_empty_cpu_result(
@@ -244,6 +274,7 @@ def test_family_with_only_hardware_tests_accepts_exact_empty_cpu_result(
     runtime.mkdir()
     for name in (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
         "libtrtmc_backend_trt.so",
         "libtrtmc_model_beta.so",
     ):
@@ -391,22 +422,26 @@ def test_e2e_rejects_multiple_family_environments(tmp_path: Path) -> None:
 
 
 def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
-    repository = Path(__file__).resolve().parents[2]
+    family = tmp_path / "families/alpha"
+    (family / "tests").mkdir(parents=True)
+    (family / "model.py").write_text("def build(request, writer): pass\n")
+    (family / "tests/test_e2e.py").write_text("def test_e2e(): pass\n")
     binary = tmp_path / "trtmc"
     binary.write_text("")
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     for name in (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
         "libtrtmc_backend_trt.so",
-        "libtrtmc_model_gpt2.so",
+        "libtrtmc_model_alpha.so",
     ):
         (runtime / name).write_text("")
     native_build = tmp_path / "native-build"
     native_build.mkdir()
     (native_build / "CTestTestfile.cmake").write_text("")
     context = RecordingContext(
-        repository,
+        tmp_path,
         {
             "TRTMC_BINARY": str(binary),
             "TRTMC_RUNTIME_ROOT": str(runtime),
@@ -416,7 +451,7 @@ def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
     context.missing_e2e_testcases.add("does-not-exist")
 
     with pytest.raises(CiError, match="missing requested E2E testcase: does-not-exist"):
-        E2ERunner(context)._run(("gpt2",), ("does-not-exist",))
+        E2ERunner(context)._run(("alpha",), ("does-not-exist",))
 
 
 def test_pipeline_exposes_only_active_stages(tmp_path: Path) -> None:
@@ -794,6 +829,7 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
     wheel = tmp_path / "package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("tensorrt_model_connect/__init__.py", "")
+        archive.writestr("tensorrt_model_connect/native_cli.py", "")
         archive.writestr("trtmc_benchmark/__init__.py", "")
         archive.writestr("families/__init__.py", "")
         archive.writestr("tensorrt_model_connect/bin/trtmc", "")
@@ -805,7 +841,9 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_byok_tvm_ffi.so", "")
         archive.writestr(
             "package-0.1.dist-info/entry_points.txt",
-            "[console_scripts]\ntrtmc-bench = trtmc_benchmark.cli:main\n",
+            "[console_scripts]\n"
+            "trtmc = tensorrt_model_connect.native_cli:main\n"
+            "trtmc-bench = trtmc_benchmark.cli:main\n",
         )
         archive.writestr(
             "package-0.1.dist-info/METADATA",
@@ -815,9 +853,6 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             "Provides-Extra: cutedsl\n"
             "Provides-Extra: test\n",
         )
-        archive.writestr("package-0.1.data/scripts/trtmc", "")
-        archive.writestr("package-0.1.data/scripts/libtrtmc_core.so", "")
-        archive.writestr("package-0.1.data/scripts/libtrtmc_runtime.so", "")
         for family in family_names:
             archive.writestr(
                 f"families/{family}/model.py",
@@ -826,6 +861,22 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             archive.writestr(f"tensorrt_model_connect/bin/libtrtmc_model_{family}.so", "")
 
     WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+
+    without_launcher = tmp_path / "without-launcher.whl"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(without_launcher, "w") as output:
+        for entry in source.infolist():
+            if entry.filename != "tensorrt_model_connect/native_cli.py":
+                output.writestr(entry, source.read(entry.filename))
+    with pytest.raises(CiError, match="console adapter is missing"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([without_launcher])
+
+    duplicated = tmp_path / "duplicated.whl"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(duplicated, "w") as output:
+        for entry in source.infolist():
+            output.writestr(entry, source.read(entry.filename))
+        output.writestr("package-0.1.data/scripts/trtmc", "")
+    with pytest.raises(CiError, match="duplicated in wheel scripts"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([duplicated])
 
     corrupt = tmp_path / "corrupt.whl"
     with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(corrupt, "w") as output:
@@ -876,17 +927,78 @@ def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> 
             check=True,
         )
 
-    compile_library("libtrtmc_core.so", "void core_symbol(void) {}\n")
-    compile_library("libtrtmc_runtime.so", "void runtime_symbol(void) {}\n")
-    compile_library("libtrtmc_backend_trt.so", "void backend_symbol(void) {}\n")
-    compile_library("libtrtmc_byok_tvm_ffi.so", "void byok_symbol(void) {}\n")
-    compile_library("libtrtmc_model_alpha.so", "void alpha_symbol(void) {}\n")
-    compile_library("libtrtmc_model_beta.so", "void beta_symbol(void) {}\n")
+    def plugin_source(
+        kind: int,
+        plugin_id: str,
+        implementation: str,
+        build_id: str = "1234567890abcdef1234567890abcdef",
+        struct_size: str = "sizeof(struct PluginDescriptorV1)",
+        descriptor_version: int = 1,
+    ) -> str:
+        return f"""
+#include <stdint.h>
+struct PluginDescriptorV1 {{
+    uint32_t struct_size;
+    uint32_t descriptor_version;
+    uint32_t kind;
+    const char *id;
+    const char *build_id;
+}};
+static const struct PluginDescriptorV1 descriptor = {{
+    {struct_size}, {descriptor_version}, {kind}, "{plugin_id}", "{build_id}"
+}};
+const struct PluginDescriptorV1 *trtmc_plugin_descriptor_v1(void) {{ return &descriptor; }}
+{implementation}
+"""
+
+    build_id = "1234567890abcdef1234567890abcdef"
+    compile_library(
+        "libtrtmc_core.so",
+        f'const char *trtmc_core_build_id(void) {{ return "{build_id}"; }}\n',
+    )
+    compile_library(
+        "libtrtmc_runtime.so",
+        f'const char *trtmc_runtime_build_id(void) {{ return "{build_id}"; }}\n',
+    )
+    compile_library(
+        "libtrtmc_backend_trt.so", plugin_source(1, "trt", "void backend_symbol(void) {}")
+    )
+    compile_library(
+        "libtrtmc_byok_tvm_ffi.so",
+        plugin_source(3, "tvm_ffi", "void byok_symbol(void) {}"),
+    )
+    compile_library(
+        "libtrtmc_model_alpha.so", plugin_source(2, "alpha", "void alpha_symbol(void) {}")
+    )
+    compile_library("libtrtmc_model_beta.so", plugin_source(2, "beta", "void beta_symbol(void) {}"))
     load_native_libraries(tmp_path, ("alpha", "beta"))
+
+    invalid_descriptors = (
+        ("size=0", plugin_source(2, "beta", "", struct_size="0")),
+        ("version=2", plugin_source(2, "beta", "", descriptor_version=2)),
+        ("kind=1", plugin_source(1, "beta", "")),
+        ("id=gamma", plugin_source(2, "gamma", "")),
+        (
+            "build=00000000000000000000000000000000",
+            plugin_source(2, "beta", "", build_id="00000000000000000000000000000000"),
+        ),
+    )
+    for expected_error, source in invalid_descriptors:
+        compile_library("libtrtmc_model_beta.so", source)
+        with pytest.raises(CiError, match=expected_error):
+            load_native_libraries(tmp_path, ("alpha", "beta"))
+
+    compile_library("libtrtmc_model_beta.so", "void beta_symbol(void) {}")
+    with pytest.raises(CiError, match="trtmc_plugin_descriptor_v1"):
+        load_native_libraries(tmp_path, ("alpha", "beta"))
 
     compile_library(
         "libtrtmc_model_beta.so",
-        "extern void missing_symbol(void); void beta_symbol(void) { missing_symbol(); }\n",
+        plugin_source(
+            2,
+            "beta",
+            "extern void missing_symbol(void); void beta_symbol(void) { missing_symbol(); }",
+        ),
     )
     with pytest.raises(CiError, match="undefined symbol: missing_symbol"):
         load_native_libraries(tmp_path, ("alpha", "beta"))

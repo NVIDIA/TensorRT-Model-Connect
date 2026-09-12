@@ -32,7 +32,6 @@ python -m tensorrt_model_connect build Qwen/Qwen3-0.6B \
   --max-sequence-length 16384 \
   --output qwen3-0.6b.bundle
 trtmc run ./qwen3-0.6b.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "What is the capital of France? Answer in one word." \
   --use-chat-template true \
   --enable-thinking false

@@ -7,12 +7,6 @@ checkpoint, task, precision, topology, dependency, and validation support is
 generated on [Models & Recipes](../models-recipes/overview.md) from the current
 family-owned manifests.
 
-Set the runtime root once for the examples:
-
-```bash
-export TRTMC_RUNTIME_ROOT=/opt/trtmc/lib
-```
-
 ## Text generation
 
 ```bash
@@ -22,7 +16,6 @@ python -m tensorrt_model_connect build Qwen/Qwen3-0.6B \
   --output /tmp/qwen.bundle
 
 trtmc run /tmp/qwen.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --temperature 0 \
@@ -42,7 +35,6 @@ python -m tensorrt_model_connect build Qwen/Qwen2.5-VL-3B-Instruct \
   --output /tmp/qwen25vl.bundle
 
 trtmc run /tmp/qwen25vl.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --prompt "Describe this image." \
   --image families/qwen_vl/tests/data/test_img.jpeg \
   --max-new-tokens 48
@@ -59,7 +51,6 @@ python -m tensorrt_model_connect build openai/whisper-large-v3-turbo \
   --output /tmp/whisper.bundle
 
 trtmc transcribe /tmp/whisper.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --input families/whisper/tests/data/Recording.wav \
   --max-output-tokens 224
 ```
@@ -70,7 +61,6 @@ python -m tensorrt_model_connect build nvidia/magpie_tts_multilingual_357m \
   --output /tmp/magpie.bundle
 
 trtmc generate-audio /tmp/magpie.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --prompt "A clear short test sentence." \
   --output /tmp/magpie.wav
 ```
@@ -91,7 +81,6 @@ python -m tensorrt_model_connect build nvidia/segformer-b0-finetuned-ade-512-512
   --output /tmp/segformer.bundle
 
 trtmc segment /tmp/segformer.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --image families/segformer/tests/data/test_img.jpeg
 ```
 
@@ -109,7 +98,6 @@ python -m tensorrt_model_connect build amazon/chronos-bolt-tiny \
   --output /tmp/chronos.bundle
 
 trtmc forecast /tmp/chronos.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --input /path/to/history.f32
 ```
 

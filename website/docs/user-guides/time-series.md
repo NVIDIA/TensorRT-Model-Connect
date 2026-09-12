@@ -9,7 +9,6 @@ input files.
 
 ```bash
 trtmc forecast forecast.bundle \
-  --runtime-root /opt/trtmc/lib \
   --input history.f32
 ```
 
@@ -17,7 +16,6 @@ Other model contracts can use:
 
 ```bash
 trtmc solve operator.bundle \
-  --runtime-root /opt/trtmc/lib \
   --branch branch.f32 \
   --trunk trunk.f32
 ```

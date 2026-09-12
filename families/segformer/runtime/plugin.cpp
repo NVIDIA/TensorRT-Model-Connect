@@ -46,6 +46,8 @@ SegformerPreprocessConfig parse_config(const std::vector<char>& data, std::int32
 } // namespace
 } // namespace trtmc::segformer
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("segformer")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("segformer does not support --kv-cache-size");

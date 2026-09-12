@@ -358,6 +358,8 @@ ITask* create_bart(const FamilyContext& context) {
 
 } // namespace trtmc
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("bart")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("bart does not support --kv-cache-size");

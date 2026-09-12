@@ -4,7 +4,8 @@ description: Select the native command matching the bundle's declared Task.
 ---
 
 Inspect the bundle, then call the Task named by its family manifest/header.
-Every execution command requires `--runtime-root DIR`.
+Execution commands discover the active installation by default. Use
+`--runtime-root DIR` only to select one exact plugin root.
 
 | Task | Command | Primary result |
 | --- | --- | --- |
@@ -19,13 +20,13 @@ Every execution command requires `--runtime-root DIR`.
 
 ```bash
 trtmc run qwen3-0.6b.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --temperature 0 \
   --top-k 1
 ```
 
-The CLI loads exactly one family DSO and backend DSO from the runtime root. A
-wrong Task command fails instead of attempting another family or interface.
-See the [CLI Reference](../api/cli-reference.md) for command-specific inputs.
+The CLI selects one root, then the Runtime Loader validates and loads exactly
+one family DSO and backend DSO from it. A wrong Task command or mismatched-build
+plugin fails instead of attempting another root, family, or interface. See the
+[CLI Reference](../api/cli-reference.md) for command-specific inputs.

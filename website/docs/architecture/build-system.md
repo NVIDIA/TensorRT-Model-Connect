@@ -23,10 +23,18 @@ private dependencies, warnings, tests, output name, and install rule. Adding a
 normal family never changes a central model source list.
 
 The wheel packages `core/builder/tensorrt_model_connect`, the top-level
-`families` package, benchmark Python code, and installed native binaries/DSOs.
+`families` package, benchmark Python code, and one native product directory at
+`tensorrt_model_connect/bin`. The `trtmc` console entry point is a Python
+adapter that uses `exec` to replace itself with the native CLI in that
+directory; it does not duplicate native files into the wheel scripts area.
 Optional family dependencies remain in each
 `families/<family>/requirements.txt`; package validation does not import every
 family implementation.
+
+CMake generates one private product-build header for all native targets in a
+build tree. It is not installed. A release build may set the 32-character
+`TRTMC_BUILD_ID` explicitly for coordinated reproducibility; never reuse that
+identity across independently compiled native artifact sets.
 
 ## Typical source build
 
