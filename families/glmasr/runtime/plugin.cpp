@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "families/glmasr/runtime/glmasr_config.h"
 #include "families/glmasr/runtime/pipeline.h"
 #include "families/glmasr/runtime/plugin_helpers.h"
