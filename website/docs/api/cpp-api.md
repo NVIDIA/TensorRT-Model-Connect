@@ -69,6 +69,13 @@ several Tasks, but only advertises those supported by this particular bundle.
 Single request, native batch and streaming are separate execution contracts;
 required images, frames, state and actions remain typed operands.
 
+Selecting another Task does not change the bundle's primary Task or rebuild it.
+The native CLI uses `--task TASK_ID` for explicit selection. Benchmark testcases
+can declare `selected_task` in their family-owned manifest, or use
+`trtmc-bench run --task TASK_ID` with the usual model and input options.
+Selection stays outside Config and must name an interface bound by the loaded
+model; unsupported selections fail without retrying another Task.
+
 ## C calling convention
 
 `trtmc_get_api(1, 0, &core)` is the only exported SDK symbol. It returns a
@@ -107,6 +114,12 @@ An embedding result may have an empty `embedding_space` when a local checkpoint
 has no known space identifier. Its vectors, pooling and normalization are still
 available; two empty identifiers do not imply cross-model compatibility. Families
 must not fabricate identifiers or require a hash just to compute an embedding.
+
+`SeriesToRegressionValues` consumes one `SeriesHistory` and returns finite
+predictions indexed by target, with optional target names and units. It has no
+forecast horizon or probability-distribution parameters. It uses the existing
+`forecast --input` CLI and `regress` benchmark operation; independent-series
+batching is not implied by the scalar Task.
 
 Family Runtime returns `IModel::task_bindings()` records built with
 `bind<SharedTaskInterface>(*this, fields)`. Core Runtime retains the correctly

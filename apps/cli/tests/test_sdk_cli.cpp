@@ -174,7 +174,10 @@ int main(int argc, char** argv) {
     };
     for (const auto& item : std::vector<TextCase>{
              {"text_continuation", {"--prompt", ""}, "single:!"},
+             {"text_continuation", {"--token-ids", "[7,9]"}, "single:tokens:7:9!"},
+             {"text_continuation", {"--token-ids", "[]"}, "single:tokens!"},
              {"conditional_text_generation", {"--prompt", "Q"}, "conditional:Q!"},
+             {"conditional_text_generation", {"--token-ids", "[7,9]"}, "conditional:tokens:7:9!"},
              {"corrupted_text_reconstruction", {"--prompt", "Q"}, "reconstructed:Q!"},
              {"unconditional_text_generation", {}, "unconditional!"},
              {"text_translation", {"--prompt", "Q"}, "translation:fixed-src->en:Q!"},
@@ -193,6 +196,24 @@ int main(int argc, char** argv) {
         if (result.status == 0)
             check(nlohmann::json::parse(result.output).at("text") == item.expected,
                   "typed text inputs arrive at the matching family method");
+    }
+    for (const auto& ids : {"[true]", "[1.5]", "[2147483648]", "[-2147483649]", "null"}) {
+        const auto invalid = run({"trtmc", "run", text_bundle.string(), "--runtime-root",
+                                  root.string(), "--token-ids", ids});
+        check(invalid.status != 0 && invalid.output.empty(),
+              "run rejects malformed token IDs without returning model output");
+    }
+    const auto ambiguous_source = run({"trtmc", "run", text_bundle.string(), "--runtime-root",
+                                       root.string(), "--prompt", "", "--token-ids", "[]"});
+    check(ambiguous_source.status != 0 && ambiguous_source.output.empty(),
+          "run does not choose silently between text and token IDs, even when empty");
+    for (const auto* task :
+         {"unconditional_text_generation", "text_summarization", "text_translation",
+          "corrupted_text_reconstruction", "batch_text_continuation"}) {
+        const auto invalid = run({"trtmc", "run", text_bundle.string(), "--runtime-root",
+                                  root.string(), "--task", task, "--token-ids", "[7]"});
+        check(invalid.status != 0 && invalid.output.empty(),
+              "run rejects token IDs on a different Task input contract");
     }
     const auto prompts = root / "cli-sdk-prompts.txt";
     {
@@ -235,6 +256,18 @@ int main(int argc, char** argv) {
               "stream delivers typed delta and complete events in order");
     } else {
         check(false, "stream did not return both events");
+    }
+    const auto id_stream = run({"trtmc", "run", stream_bundle.string(), "--runtime-root",
+                                root.string(), "--token-ids", "[7,9]"});
+    check(id_stream.status == 0, "stream accepts the same typed token-ID prefix");
+    if (id_stream.status == 0) {
+        std::istringstream events(id_stream.output);
+        std::getline(events, delta);
+        std::getline(events, complete);
+        check(
+            nlohmann::json::parse(delta).at("text") == "tokens!" &&
+                nlohmann::json::parse(complete).at("token_ids") == nlohmann::json::array({7, 9}),
+            "stream retains token IDs and its family-owned output without decoding in shared code");
     }
     std::filesystem::remove(text_bundle);
     std::filesystem::remove(stream_bundle);

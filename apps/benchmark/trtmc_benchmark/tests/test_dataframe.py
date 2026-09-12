@@ -294,6 +294,14 @@ def test_nonfinite_predictions_are_not_missing_quantile_cells(value):
         format_forecast_frame(prepare_forecast_frame(_frame(), freq="D"), summary)
 
 
+def test_regression_targets_are_not_rendered_as_forecast_horizons():
+    prepared = prepare_forecast_frame(_frame(), freq="D")
+    summary = {"items": [{"kind": "regression_values", "values": [1, 2],
+                          "target_count": 2, "axes": ["target"]} for _ in prepared.series_ids]}
+    with pytest.raises(ValueError, match="forecast"):
+        format_forecast_frame(prepared, summary)
+
+
 def test_mixed_numeric_ids_retain_original_identity():
     frame = _frame()
     frame["unique_id"] = pd.Series([9007199254740993, 9007199254740993, 2.5, 2.5], dtype=object)

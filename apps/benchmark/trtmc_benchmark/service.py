@@ -96,6 +96,7 @@ class BenchmarkService:
                 "name": case.name,
                 "model": case.model.name,
                 "operation": case.operation,
+                "selected_task": worker_result.get("selected_task", case.effective_task),
                 "artifact_dir": directory_name,
                 "metrics": metrics,
                 "samples_ms": [
@@ -114,6 +115,7 @@ class BenchmarkService:
                 "name": case.name,
                 "model": case.model.name,
                 "operation": case.operation,
+                "selected_task": case.effective_task,
                 "artifact_dir": directory_name,
                 "error": str(error),
             }

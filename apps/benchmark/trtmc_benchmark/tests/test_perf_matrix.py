@@ -175,6 +175,7 @@ def test_translation_and_config_reach_reference_generate(monkeypatch) -> None:
         ("m2m_100.generate", "text_translation", "translate"),
         ("marian.generate", "text_translation", "translate"),
         ("patchtst.solve", "series_to_regression_distribution", "regress"),
+        ("patchtst.solve", "series_to_regression_values", "regress"),
     ],
 )
 def test_release_entry_survives_semantic_primary_switch(
@@ -212,6 +213,61 @@ def test_seq2seq_reference_choice_is_an_existing_entry_field_not_a_family_regist
             perf._baseline_task(replace(entry, model=replace(entry.model, family="new_owner")))
             == "seq2seq-lm"
         )
+
+
+def test_family_secondary_task_reaches_candidate_reference_and_output_contract(tmp_path, monkeypatch):
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(row for row in entries if row["id"] == "patchtst.solve")
+    original_resolve = perf.ManifestCatalog.resolve
+
+    def resolve(catalog, selector):
+        model = original_resolve(catalog, selector)
+        cases = tuple({**case, "selected_task": "series_to_regression_values"} for case in model.testcases)
+        return replace(model, task="series_to_point_forecast", testcases=cases)
+
+    monkeypatch.setattr(perf.ManifestCatalog, "resolve", resolve)
+    entry, = perf.resolve_entries([spec], environment)
+    assert entry.case.effective_task == "series_to_regression_values"
+    assert entry.model.task == entry.case.worker_request()["expected_task"] == "series_to_point_forecast"
+    assert entry.spec["operation"] == "regress"
+    assert perf._contract_name(entry) == "regression-values"
+    candidate = perf.candidate_command(entry, environment, tmp_path / "candidate")
+    reference = perf.baseline_command(entry, environment, tmp_path / "reference.json")
+    assert candidate[candidate.index("--task") + 1] == "series_to_regression_values"
+    assert reference[reference.index("--selected-task") + 1] == "series_to_regression_values"
+    assert reference[reference.index("--manifest") + 1] == str(entry.model.manifest_path)
+    request = json.loads(reference[reference.index("--request-json") + 1])
+    assert "selected_task" not in request
+    assert entry.spec["measurement"] == spec["measurement"]
+    assert entry.spec["equivalence_margin_percent"] == spec["equivalence_margin_percent"]
+
+
+def test_reference_selection_does_not_rewrite_manifest_or_silently_choose_default(tmp_path):
+    manifest = tmp_path / "model.json"
+    manifest.write_text('{"task":"series_to_point_forecast"}')
+    original = manifest.read_bytes()
+    arguments = SimpleNamespace(manifest=manifest, selected_task="series_to_quantile_forecast")
+    assert task_reference._selected_task(arguments) == "series_to_quantile_forecast"
+    assert manifest.read_bytes() == original
+    arguments.selected_task = None
+    assert task_reference._selected_task(arguments) == "series_to_point_forecast"
+    for invalid in ("", " ", " series_to_point_forecast", 7):
+        arguments.selected_task = invalid
+        with pytest.raises(ValueError, match="selected_task"):
+            task_reference._selected_task(arguments)
+
+
+@pytest.mark.parametrize("payload", [{"token_ids": []}, {"token_ids": [7], "prompt": "hello"}])
+def test_text_only_reference_loaders_never_replace_token_input_with_empty_text(payload):
+    with pytest.raises(ValueError, match="token_ids"):
+        hf_transformers._batch_prompt(payload)
+    arguments = SimpleNamespace(timing_contract_json=json.dumps({
+        "timing_scope": "task-model-call-wall", "input_preparation_included": False,
+        "asset_loading_included": False,
+    }))
+    with pytest.raises(ValueError, match="token_ids"):
+        task_reference._load_embedding(arguments, payload, {})
 
 
 class _SummaryTensor:
@@ -276,6 +332,7 @@ def test_semantic_forecast_comparison_rejects_swapped_or_missing_axes():
     entry = SimpleNamespace(
         spec={"baseline": {"output_contract": "forecast-shape"}},
         model=SimpleNamespace(task="series_to_point_forecast"),
+        case=SimpleNamespace(selected_task=None),
     )
     summary = {
         "forecast_elements": 12,
@@ -304,6 +361,30 @@ def test_semantic_forecast_comparison_rejects_swapped_or_missing_axes():
     missing_levels = {key: value for key, value in quantiles.items() if key != "quantile_levels"}
     assert not perf._output_contract(entry, {"output_summary": missing_levels},
                                      {"output_summary": dict(missing_levels)})[0]
+
+
+def test_regression_values_reference_retains_single_target_axis():
+    summary = task_reference._regression_values_summary(_SummaryTensor([[1.5, -2.0]]))
+    assert summary["values"] == [1.5, -2.0]
+    assert summary["axes"] == ["target"] and summary["target_count"] == 2
+    assert summary["target_names"] == [] and summary["target_units"] == []
+    assert "distribution" not in summary and "horizon_steps" not in summary
+    entry = SimpleNamespace(spec={"baseline": {"output_contract": "regression-values"}})
+    assert perf._output_contract(entry, {"output_summary": summary},
+                                 {"output_summary": dict(summary)})[0]
+    assert not perf._output_contract(
+        entry, {"output_summary": {**summary, "target_names": ["x", "y"]}},
+        {"output_summary": {**summary, "target_names": ["y", "x"]}})[0]
+    for invalid in ({**summary, "axes": ["horizon"]}, {**summary, "target_count": 1},
+                    {**summary, "values": [float("nan"), 2]},
+                    {**summary, "target_names": ["one"]}):
+        assert not perf._output_contract(entry, {"output_summary": invalid},
+                                         {"output_summary": dict(invalid)})[0]
+    for shape in ((2,), (2, 2), (1, 0), (1, 2, 1)):
+        with pytest.raises(ValueError, match="one batch"):
+            task_reference._regression_values_summary(_SummaryTensor(np.zeros(shape)))
+    with pytest.raises(ValueError, match="finite"):
+        task_reference._regression_values_summary(_SummaryTensor([[float("inf")]]))
 
 
 def test_regression_distribution_keeps_parameter_names_and_target_axis():

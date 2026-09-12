@@ -1068,6 +1068,19 @@ def test_family_and_settings_cannot_inject_markup(tmp_path: Path) -> None:
     assert "https://nvidia.github.io/TensorRT-Model-Connect/" in report
 
 
+def test_target_regression_preview_is_not_a_forecast() -> None:
+    from tools.e2e_report import _demo_output
+
+    output = _demo_output(
+        {"kind": "regression_values", "values": [1.25, -2.5], "target_count": 2,
+         "axes": ["target"], "target_names": [], "target_units": []},
+        role="native", task="series_to_regression_values")
+    assert "Regression target values" in output
+    assert "1.25" in output and "-2.5" in output
+    assert "All 2 values" in output
+    assert "Forecast" not in output and "horizon" not in output
+
+
 def test_config_values_keep_exact_spelling(tmp_path: Path) -> None:
     data = _case()
     data["inputs"]["case"]["sampling_mode"] = "sample_with_seed"

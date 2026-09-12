@@ -189,6 +189,13 @@ _OPERATIONS = (
         ),
     ),
     OperationSpec(
+        name="head_scores",
+        rate_metrics=(
+            RateMetric("head_score_tensors", "head_score_tensors_per_s"),
+            RateMetric("head_score_values", "head_score_values_per_s"),
+        ),
+    ),
+    OperationSpec(
         name="embed",
         rate_metrics=(
             RateMetric("embedding_vectors", "embedding_vectors_per_s"),

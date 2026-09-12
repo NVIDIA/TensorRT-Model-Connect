@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pure table conversions for the native batch forecast worker.
+"""Pure table conversions for native head-score outputs and batch forecasts.
 
 Calendar frequency only locates timestamps. Model frequency categories, missing
 value treatment, and native batching remain the selected family's responsibility.
@@ -27,6 +27,53 @@ def _pandas():
     except ImportError as error:
         raise ImportError("DataFrame helpers require pandas: pip install pandas") from error
     return pd
+
+
+def head_score_rows(observation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Tabulate one real head-score tensor without reducing or renaming its axes."""
+    shape = observation.get("shape")
+    values = observation.get("values")
+    if (
+        not isinstance(shape, list)
+        or not shape
+        or any(isinstance(size, bool) or not isinstance(size, int) or size <= 0 for size in shape)
+    ):
+        raise ValueError("head scores require a positive tensor shape")
+    count = 1
+    for size in shape:
+        count *= size
+    if not isinstance(values, list) or len(values) != count:
+        raise ValueError("head score values do not match their shape")
+    if observation.get("score_kind") not in {"logit", "probability", "unbounded"}:
+        raise ValueError("head scores require a declared score kind")
+    for name in ("pooling", "normalization"):
+        if not isinstance(observation.get(name), str) or not observation[name]:
+            raise ValueError(f"head scores require {name} metadata")
+    rows = []
+    for flat_index, value in enumerate(values):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("head score values must be numeric")
+        remaining = flat_index
+        coordinates = [0] * len(shape)
+        for axis in range(len(shape) - 1, -1, -1):
+            remaining, coordinates[axis] = divmod(remaining, shape[axis])
+        rows.append(
+            {
+                **{f"axis_{axis}": index for axis, index in enumerate(coordinates)},
+                "value": value,
+                "score_kind": observation["score_kind"],
+                "pooling": observation["pooling"],
+                "normalization": observation["normalization"],
+            }
+        )
+    return rows
+
+
+def format_head_scores_frame(observation: Mapping[str, Any]) -> pd.DataFrame:
+    """One row per original score, with row-major coordinates and truthful metadata."""
+    result = _pandas().DataFrame(head_score_rows(observation))
+    result.attrs["shape"] = list(observation["shape"])
+    return result
 
 
 @dataclass(frozen=True)
@@ -240,6 +287,8 @@ def format_forecast_frame(
     rows, actual_levels = [], []
     for index, item in enumerate(items):
         try:
+            if item.get("axes") == ["target"]:
+                raise ValueError("target regression cannot be formatted as a forecast")
             if "point" in item or "quantiles" in item:
                 point = _forecast_part(item["point"], False)
                 quantiles = _forecast_part(item["quantiles"], True)

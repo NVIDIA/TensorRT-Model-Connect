@@ -35,7 +35,7 @@ for source_root in (
         sys.path.insert(0, str(source_root))
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract  # noqa: E402
-from apps.benchmark.performance.baselines.hf_transformers import flatten_config  # noqa: E402
+from apps.benchmark.performance.baselines.hf_transformers import _batch_prompt, flatten_config  # noqa: E402
 
 SYSTEM_PROMPT_QWEN3_OMNI = (
     "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True)
     parser.add_argument("--revision")
     parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--selected-task", help="Semantic Task selected independently of bundle identity")
     parser.add_argument("--request-json", required=True)
     parser.add_argument("--adapter-options-json", default="{}")
     parser.add_argument("--timing-contract-json", default="{}")
@@ -143,6 +144,15 @@ def _json_object(raw: str, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must contain an object")
     return value
+
+
+def _selected_task(arguments: argparse.Namespace) -> str:
+    selected = getattr(arguments, "selected_task", None)
+    if selected is None:
+        return json.loads(arguments.manifest.read_text(encoding="utf-8"))["task"]
+    if not isinstance(selected, str) or not selected or selected != selected.strip():
+        raise ValueError("selected_task must be a nonempty Task ID without surrounding whitespace")
+    return selected
 
 
 def _reference_checkout(checkout: str, *, repository: str) -> str:
@@ -301,6 +311,19 @@ def _forecast_summary(
         forecast_elements=summary["element_count"], horizon_steps=list(range(1, horizon + 1))
     )
     return summary
+
+
+def _regression_values_summary(value: Any) -> dict[str, Any]:
+    summary = _tensor_summary(value)
+    shape = summary["shape"]
+    if len(shape) != 2 or shape[0] != 1 or shape[1] <= 0:
+        raise ValueError("deterministic regression requires one batch with a nonempty target axis")
+    if not summary["finite"]:
+        raise ValueError("deterministic regression target values must be finite")
+    return {"kind": "regression_values", "target_count": shape[1],
+            "regression_targets": shape[1], "parameter_elements": 0,
+            "values": value[0].detach().float().cpu().tolist(), "axes": ["target"],
+            "target_names": [], "target_units": []}
 
 
 def _regression_summary(
@@ -829,6 +852,9 @@ def _load_embedding(
     declared_timing = timing_contract(runner="task-reference", declared=configured)
     if declared_timing["asset_loading_included"]:
         raise ValueError("embedding reference preloads its assets; asset_loading_included must be false")
+    prompts = _batch_prompt(request)
+    if len(prompts) != 1:
+        raise ValueError("embedding reference requires exactly one text input")
     import torch
     from transformers import AutoModel, AutoTokenizer
 
@@ -839,7 +865,7 @@ def _load_embedding(
         .eval()
         .to(device)
     )
-    prompt = str(request.get("prompt", ""))
+    prompt = prompts[0]
 
     def prepare_inputs() -> Mapping[str, Any]:
         return _to_device(
@@ -1299,7 +1325,7 @@ def _load_timeseries(
 
     device = torch.device("cuda")
     dtype = _torch_dtype(torch, arguments.precision)
-    task_id = json.loads(arguments.manifest.read_text(encoding="utf-8"))["task"]
+    task_id = _selected_task(arguments)
     if arguments.family == "chronos_bolt":
         from chronos import ChronosBoltPipeline
 
@@ -1422,6 +1448,8 @@ def _load_timeseries(
             if task_id == "series_to_regression_distribution":
                 return _regression_summary(output, config.distribution_output,
                                            tuple(model.distribution_output.args_dim))
+            if task_id == "series_to_regression_values":
+                return _regression_values_summary(output)
             if isinstance(output, (tuple, list)):
                 output = torch.stack(list(output), dim=-1)
             return _forecast_summary(output, task_id)

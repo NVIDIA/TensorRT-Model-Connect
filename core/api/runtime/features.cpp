@@ -93,6 +93,36 @@ struct SemanticEmbeddingStorage final : ResultStorage {
     internal::SemanticEmbeddingResult value;
     trtmc_semantic_embedding_view_v1 view{};
 };
+struct HeadScoresStorage final : ResultStorage {
+    explicit HeadScoresStorage(internal::HeadScoresResult result) : value(std::move(result)) {
+        result_require(!value.shape.empty() && !value.pooling.empty() &&
+                           !value.normalization.empty(),
+                       "head scores require shape and pooling/normalization metadata");
+        std::size_t count = 1;
+        for (const auto dimension : value.shape) {
+            result_require(dimension > 0 &&
+                               dimension <= static_cast<std::size_t>(
+                                                std::numeric_limits<std::ptrdiff_t>::max()) /
+                                                sizeof(float) / count,
+                           "head score shape is zero or overflows host storage");
+            count *= static_cast<std::size_t>(dimension);
+        }
+        result_require(count == value.values.size(), "head score data does not match its shape");
+        result_require(value.kind == internal::ScoreKind::Logit ||
+                           value.kind == internal::ScoreKind::Probability ||
+                           value.kind == internal::ScoreKind::Unbounded,
+                       "head scores have an unknown score kind");
+        view = {value.values.data(),
+                value.values.size(),
+                value.shape.data(),
+                value.shape.size(),
+                static_cast<uint32_t>(value.kind),
+                borrowed_string(value.pooling),
+                borrowed_string(value.normalization)};
+    }
+    internal::HeadScoresResult value;
+    trtmc_head_scores_view_v1 view{};
+};
 struct VocabularyScoresStorage final : ResultStorage {
     explicit VocabularyScoresStorage(internal::VocabularyScoresResult result)
         : value(std::move(result)), positions(token_views(value.positions)) {
@@ -251,6 +281,9 @@ internal::TextToPooledFeaturesRequest
 convert(const trtmc_text_to_pooled_features_request_v1& input) {
     return {text_source(input.text)};
 }
+internal::TextToHeadScoresRequest convert(const trtmc_text_to_head_scores_request_v1& input) {
+    return {text_source(input.text)};
+}
 
 internal::TextToEmbeddingRequest convert(const trtmc_text_to_embedding_request_v1& input) {
     require(input.role <= TRTMC_EMBEDDING_DOCUMENT, "unknown embedding input role");
@@ -394,6 +427,11 @@ const trtmc_text_to_pooled_features_api_v1 text_to_pooled_features_api = {
         PooledFeaturesStorage>,
     result_view<PooledFeaturesStorage, trtmc_pooled_features_view_v1>};
 static_assert(offsetof(trtmc_text_to_pooled_features_api_v1, header) == 0);
+const trtmc_text_to_head_scores_api_v1 text_to_head_scores_api = {
+    {1, 0, sizeof(trtmc_text_to_head_scores_api_v1)},
+    run<internal::ITextToHeadScores, trtmc_text_to_head_scores_request_v1, HeadScoresStorage>,
+    result_view<HeadScoresStorage, trtmc_head_scores_view_v1>};
+static_assert(offsetof(trtmc_text_to_head_scores_api_v1, header) == 0);
 
 const trtmc_text_to_embedding_api_v1 text_to_embedding_api = {
     {1, 0, sizeof(trtmc_text_to_embedding_api_v1)},
@@ -701,6 +739,7 @@ const TaskBinding bindings[] = {
     {internal::ITextToTokenFeatures::kTask, 1, 0, &text_to_token_features_api.header},
     {internal::ITextPairToTokenFeatures::kTask, 1, 0, &text_pair_to_token_features_api.header},
     {internal::ITextToPooledFeatures::kTask, 1, 0, &text_to_pooled_features_api.header},
+    {internal::ITextToHeadScores::kTask, 1, 0, &text_to_head_scores_api.header},
     {internal::ITextToEmbedding::kTask, 1, 0, &text_to_embedding_api.header},
     {internal::ITitleBodyToEmbedding::kTask, 1, 0, &title_body_to_embedding_api.header},
     {internal::IMaskedTextToTokenScores::kTask, 1, 0, &masked_text_to_token_scores_api.header},

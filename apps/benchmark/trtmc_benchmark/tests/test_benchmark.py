@@ -352,6 +352,22 @@ def test_unknown_structure_extension_requires_explicit_encoding(tmp_path: Path) 
     assert "output_tokens_per_s" not in metrics
 
 
+def test_regression_values_preserve_target_semantics(tmp_path: Path) -> None:
+    supplied = {"inputs": {"past_values": [1, 2, 3, 4], "shape": [2, 2],
+                           "observed_mask": [1, 0, 1, 1]}, "config": {"scale": 0.0}}
+    resolved = resolve_task_case("series_to_regression_values", supplied, tmp_path)
+    assert resolved.operation == "regress"
+    assert resolved.request == {**supplied["inputs"], "config": {"scale": 0.0}}
+    assert "horizon_steps" not in resolved.request and "distribution" not in resolved.request
+    with pytest.raises(BenchmarkError, match="no distribution"):
+        resolve_task_case("series_to_regression_values",
+                          {**supplied, "distribution": "normal"}, tmp_path)
+    metrics = reduce_metrics("regress", [
+        {"runtime_e2e_wall_ms": 20.0, "regression_targets": 2, "parameter_elements": 0}])
+    assert metrics["targets_per_s"] == 100.0
+    assert metrics["parameter_elements_per_s"] == 0.0
+
+
 def test_regression_distribution_preserves_masked_history_and_target_semantics(tmp_path: Path) -> None:
     supplied = {"inputs": {"past_values": [1.0, None, 3.0, 4.0], "shape": [2, 2],
                             "observed_mask": [1, 0, 1, 1]},

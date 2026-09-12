@@ -9,6 +9,7 @@
 #include "cli/io.h"
 #include "trtmc/core.hpp"
 #include "trtmc/image.hpp"
+#include "trtmc/text.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -24,6 +25,7 @@ namespace trtmc::cli::detail {
 std::string require_option(const Command&, const std::string&);
 bool has_option(const Command&, const std::string&);
 bool parse_bool(const std::string&, const std::string&);
+TextSource text_source(const Command&, const char* text_option = "--text");
 std::int32_t int_option(const Command&, const std::string&, std::int32_t, std::int32_t);
 float float_option(const Command&, const std::string&, float);
 io::LoadedImage read_image(const std::string&);

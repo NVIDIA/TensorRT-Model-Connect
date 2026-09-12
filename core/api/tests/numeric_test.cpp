@@ -41,6 +41,51 @@ void rejects(F invoke, trtmc_status expected, const char* label) {
 bool name(trtmc_string_view value, std::string_view expected) {
     return trtmc::detail::string_view(value) == expected;
 }
+void regression_values(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    const auto load = [&](const std::string& mode) {
+        const auto path = root / (mode + ".bundle");
+        bundle(path, mode);
+        return trtmc::Model::load(path.string(), options);
+    };
+    const float values[]{1, 2, 3, 4};
+    const std::uint8_t mask[]{1, 0, 1, 1};
+    const trtmc::SeriesHistory history{{{values}, 2, 2}, {mask}};
+    auto model = load("regression_values");
+    check(model.tasks().size() == 1 && model.supports<trtmc::SeriesToRegressionValues>() &&
+              !model.supports<trtmc::SeriesToRegressionDistribution>() &&
+              !model.supports<trtmc::SeriesToPointForecast>(),
+          "deterministic targets are a distinct loaded Task, not a distribution or horizon");
+    auto task = model.task<trtmc::SeriesToRegressionValues>();
+    check(task.config_fields().size() == 1, "target regression declares its own configuration");
+    rejects([&] { task.run({history}, {{"unknown", 1}}); }, TRTMC_INVALID_CONFIG,
+            "unknown config cannot execute target regression");
+    rejects([&] { task.run({history}, {{"scale", std::int64_t{1}}}); }, TRTMC_INVALID_CONFIG,
+            "wrong config type cannot execute target regression");
+    auto first = task.run({history}, {{"scale", 2.0}});
+    check(first.view().values.size == 2 && first.view().values.data[0] == 16 &&
+              first.view().values.data[1] == 1 && first.view().target_names.size == 0 &&
+              first.view().target_units.size == 0,
+          "target order, complete values, observed mask and absence of metadata survive");
+    auto zero = task.run({history}, {{"scale", 0.0}});
+    check(zero.view().values.data[0] == 0 && zero.view().values.data[1] == 2,
+          "explicit zero is preserved and invalid configurations caused no side effects");
+    auto retained = [&] {
+        auto named = load("regression_values_named");
+        return named.task<trtmc::SeriesToRegressionValues>().run(
+            {trtmc::SeriesHistory::from_flat({values})});
+    }();
+    check(retained.view().values.data[0] == 10 &&
+              name(retained.view().target_names.data[0], "total") &&
+              name(retained.view().target_units.data[1], "count"),
+          "owned target values and optional names/units survive the caller model scope");
+    auto moved = std::move(retained);
+    check(retained.view().values.size == 0 && moved.view().values.data[0] == 10,
+          "moving target regression results retains ownership");
+    for (const auto mode : {"regression_values_empty", "regression_values_nonfinite",
+                            "regression_values_bad_names", "regression_values_bad_units"})
+        rejects([&] { load(mode).task<trtmc::SeriesToRegressionValues>().run({history}); },
+                TRTMC_INTERNAL_ERROR, "malformed target values or metadata are rejected");
+}
 void forecasts(const trtmc::Model& model, const trtmc::SeriesHistory& history) {
     auto joint =
         model.task<trtmc::SeriesToPointAndQuantileForecast>().run({history}, {{"frequency", 2}});
@@ -429,6 +474,7 @@ int main(int argc, char** argv) {
         trtmc::LoadOptions options;
         options.runtime_root = root.string();
         auto model = trtmc::Model::load(full.string(), options);
+        regression_values(root, options);
         const float values[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
         const std::uint8_t mask[] = {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
         const trtmc::SeriesHistory history{{{values}, 4, 3}, {mask}};

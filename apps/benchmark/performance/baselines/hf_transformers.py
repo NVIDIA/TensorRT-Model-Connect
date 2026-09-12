@@ -166,6 +166,8 @@ def _compile(model: Any, arguments: argparse.Namespace) -> dict[str, Any] | None
 
 
 def _batch_prompt(request: Mapping[str, Any]) -> list[str]:
+    if "token_ids" in request:
+        raise ValueError("this reference text loader does not accept token_ids")
     if "prompt" in request and "source_text" in request:
         raise ValueError("reference request must not provide both prompt and source_text")
     prompt = request.get("source_text", request.get("prompt"))

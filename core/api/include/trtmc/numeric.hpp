@@ -33,6 +33,9 @@ struct SeriesToPointAndQuantileForecastRequest {
 struct SeriesToRegressionDistributionRequest {
     SeriesHistory history;
 };
+struct SeriesToRegressionValuesRequest {
+    SeriesHistory history;
+};
 // Borrow generation operands until the synchronous call returns. Layout and
 // schedule validation belong to the loaded family, not this wrapper.
 struct LatentConditionedTextGenerationRequest {
@@ -82,6 +85,9 @@ inline trtmc_series_request_v1 numeric_request(const SeriesToPointAndQuantileFor
 inline trtmc_series_request_v1 numeric_request(const SeriesToRegressionDistributionRequest& in) {
     return numeric_series(in.history);
 }
+inline trtmc_series_request_v1 numeric_request(const SeriesToRegressionValuesRequest& in) {
+    return numeric_series(in.history);
+}
 inline trtmc_latent_conditioned_text_request_v1
 numeric_request(const LatentConditionedTextGenerationRequest& in) {
     return {{in.condition_latents.data(), in.condition_latents.size()},
@@ -126,6 +132,7 @@ using QuantileForecastResult = detail::ViewResult<trtmc_quantile_forecast_view_v
 using PointAndQuantileForecastResult =
     detail::ViewResult<trtmc_point_and_quantile_forecast_view_v1>;
 using RegressionDistributionResult = detail::ViewResult<trtmc_regression_distribution_view_v1>;
+using RegressionValuesResult = detail::ViewResult<trtmc_regression_values_view_v1>;
 using DenoisedLatentsResult = detail::ViewResult<trtmc_denoised_latents_view_v1>;
 using LatentTokenLogitsResult = detail::ViewResult<trtmc_latent_token_logits_view_v1>;
 
@@ -261,6 +268,9 @@ TRTMC_NUMERIC_WRAPPER(SeriesToPointAndQuantileForecast,
 TRTMC_NUMERIC_WRAPPER(SeriesToRegressionDistribution, TRTMC_TASK_SERIES_TO_REGRESSION_DISTRIBUTION,
                       trtmc_series_to_regression_distribution_api_v1,
                       SeriesToRegressionDistributionRequest, RegressionDistributionResult)
+TRTMC_NUMERIC_WRAPPER(SeriesToRegressionValues, TRTMC_TASK_SERIES_TO_REGRESSION_VALUES,
+                      trtmc_series_to_regression_values_api_v1, SeriesToRegressionValuesRequest,
+                      RegressionValuesResult)
 TRTMC_NUMERIC_WRAPPER(LatentConditionedTextGeneration,
                       TRTMC_TASK_LATENT_CONDITIONED_TEXT_GENERATION,
                       trtmc_latent_conditioned_text_generation_api_v1,

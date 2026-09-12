@@ -58,6 +58,7 @@ const TASKS = {
   text_to_token_features: ['Text token features', 'Natural Language Processing', 'feature-extraction', 'encode'],
   text_pair_to_token_features: ['Text-pair token features', 'Natural Language Processing', 'feature-extraction', 'encode'],
   text_to_pooled_features: ['Pooled text features', 'Natural Language Processing', 'feature-extraction', 'encode'],
+  text_to_head_scores: ['Text head scores', 'Natural Language Processing', null, 'encode'],
   text_to_embedding: ['Text embedding', 'Natural Language Processing', 'feature-extraction', 'embed'],
   title_body_to_embedding: ['Title and body embedding', 'Natural Language Processing', 'feature-extraction', 'embed'],
   masked_text_to_token_scores: ['Masked text token scores', 'Natural Language Processing', 'fill-mask', 'encode'],
@@ -132,6 +133,7 @@ const TASKS = {
   series_to_quantile_forecast: ['Quantile forecasting', 'Time Series', null, 'forecast'],
   series_to_point_and_quantile_forecast: ['Point and quantile forecasting', 'Time Series', null, 'forecast'],
   series_to_regression_distribution: ['Series regression distribution', 'Time Series', null, 'forecast'],
+  series_to_regression_values: ['Series target regression', 'Time Series', null, 'forecast'],
   latent_conditioned_text_generation: ['Latent-conditioned text generation', 'Natural Language Processing', null, 'run'],
   latent_replay_to_text: ['Latent replay to text', 'Natural Language Processing', null, 'run'],
   latent_denoising_step: ['Latent denoising step', 'Natural Language Processing', null, 'solve'],
@@ -257,6 +259,15 @@ function profileFromManifest(repoRoot, family, filePath) {
   }
   const task = Object.hasOwn(TASKS, manifest.task) ? TASKS[manifest.task] : undefined;
   if (!task) throw new Error(`${filePath} declares unknown task ${manifest.task}`);
+  const tasks = new Set([manifest.task]);
+  for (const testcase of Array.isArray(manifest.testcases) ? manifest.testcases : []) {
+    if (!Object.hasOwn(testcase, 'selected_task')) continue;
+    const selected = testcase.selected_task;
+    if (typeof selected !== 'string' || !Object.hasOwn(TASKS, selected)) {
+      throw new Error(`${filePath} declares unknown selected_task ${selected}`);
+    }
+    tasks.add(selected);
+  }
   if (typeof manifest.precision !== 'string' || !Number.isInteger(manifest.tensor_parallel_size)) {
     throw new Error(`${filePath} must declare precision and tensor_parallel_size`);
   }
@@ -277,8 +288,9 @@ function profileFromManifest(repoRoot, family, filePath) {
     bundle: manifest.bundle,
     family: family.name,
     task: manifest.task,
-    taskSlugs: [manifest.task.replaceAll('_', '-')],
-    cliCommands: task[3] ? [task[3]] : [],
+    tasks: [...tasks],
+    taskSlugs: [...tasks].map((name) => name.replaceAll('_', '-')),
+    cliCommands: [...new Set([...tasks].map((name) => TASKS[name][3]).filter(Boolean))].sort(),
     precision: manifest.precision,
     quantization: manifest.quantization || 'none',
     parallelMode,
@@ -312,7 +324,7 @@ function taskRecipe(taskName, profiles) {
       slug: family.replaceAll('_', '-'),
       recipeCount: familyProfiles.length,
       hfIds: [...new Set(familyProfiles.map((profile) => profile.hfId))].sort(),
-      cliCommands: [...new Set(familyProfiles.flatMap((profile) => profile.cliCommands))].sort(),
+      cliCommands: TASKS[taskName][3] ? [TASKS[taskName][3]] : [],
     })).sort((left, right) => left.family.localeCompare(right.family)),
   };
 }
@@ -343,8 +355,10 @@ function collectModelSupportInventory(repoRoot) {
   });
   const profilesByTask = new Map();
   for (const profile of profiles) {
-    if (!profilesByTask.has(profile.task)) profilesByTask.set(profile.task, []);
-    profilesByTask.get(profile.task).push(profile);
+    for (const task of profile.tasks) {
+      if (!profilesByTask.has(task)) profilesByTask.set(task, []);
+      profilesByTask.get(task).push(profile);
+    }
   }
   const taskRecipes = [...profilesByTask.entries()]
     .map(([task, taskProfiles]) => taskRecipe(task, taskProfiles))

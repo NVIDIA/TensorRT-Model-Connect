@@ -343,6 +343,7 @@ _OUTPUT_NAMES = {
     "series_to_point_forecast": "Forecast",
     "series_to_quantile_forecast": "Forecast",
     "series_to_point_and_quantile_forecast": "Forecast",
+    "series_to_regression_values": "Regression target values",
 }
 
 
@@ -1334,7 +1335,8 @@ def _demo_numeric_value(value: Any, task: str = "") -> tuple[str, Any] | None:
     ):
         candidate = _demo_numeric_candidate(value.get(key))
         if candidate is not None:
-            return _label(key), candidate
+            return (label if task == "series_to_regression_values" and key == "values"
+                    else _label(key)), candidate
     return None
 
 

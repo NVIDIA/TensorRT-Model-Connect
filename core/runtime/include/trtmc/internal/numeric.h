@@ -29,6 +29,9 @@ struct SeriesToPointAndQuantileForecastRequest {
 struct SeriesToRegressionDistributionRequest {
     SeriesHistory history;
 };
+struct SeriesToRegressionValuesRequest {
+    SeriesHistory history;
+};
 
 struct ForecastAxes {
     std::vector<std::int64_t> horizon_steps; // Positive offsets after last input step.
@@ -64,6 +67,11 @@ struct RegressionDistributionResult {
     std::vector<DistributionParameter> parameters;
     std::vector<std::string> target_names; // Empty when checkpoint does not identify targets.
     std::vector<std::string> target_units;
+};
+struct RegressionValuesResult {
+    std::vector<float> values; // [target], finite point predictions, not future horizon.
+    std::vector<std::string> target_names; // Empty or exactly one name per target.
+    std::vector<std::string> target_units; // Empty means unspecified.
 };
 
 // Generation buffers use the loaded family's documented float32 layout.
@@ -118,6 +126,8 @@ TRTMC_NUMERIC_INTERFACE(SeriesToPointAndQuantileForecast, "series_to_point_and_q
                         SeriesToPointAndQuantileForecastRequest, PointAndQuantileForecastResult)
 TRTMC_NUMERIC_INTERFACE(SeriesToRegressionDistribution, "series_to_regression_distribution",
                         SeriesToRegressionDistributionRequest, RegressionDistributionResult)
+TRTMC_NUMERIC_INTERFACE(SeriesToRegressionValues, "series_to_regression_values",
+                        SeriesToRegressionValuesRequest, RegressionValuesResult)
 TRTMC_NUMERIC_INTERFACE(LatentConditionedTextGeneration, "latent_conditioned_text_generation",
                         LatentConditionedTextGenerationRequest, TextResult)
 TRTMC_NUMERIC_INTERFACE(LatentReplayToText, "latent_replay_to_text", LatentReplayToTextRequest,

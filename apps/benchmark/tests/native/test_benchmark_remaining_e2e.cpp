@@ -137,6 +137,79 @@ int main(int argc, char** argv) {
             request["operation"] = operation;
             request["request"] = std::move(args);
         };
+        select("text_to_head_scores", "features_fixture", "head_scores",
+               {{"token_ids", {7, 8}}, {"config", {{"scale", 2.0}}}});
+        auto head = run();
+        const auto& head_output = head.at("output_summary");
+        check(head.at("observations").size() == 2 &&
+                  head.at("observation_serialization_included") == false &&
+                  head_output.at("values") == Json::array({-4, 2, 6, -8}) &&
+                  head_output.at("shape") == Json::array({1, 2, 2}) &&
+                  head_output.at("score_kind") == "logit" &&
+                  head_output.at("head_score_values") == 4 &&
+                  !head_output.contains("embedding_vectors") && !head_output.contains("tokens"),
+              "head score benchmark measures the public call and retains typed raw values/shape");
+        request["request"] = {{"prompt", "abc"}, {"config", {{"representation", "unit"}}}};
+        bundle(model, "text_query_documents_to_relevance", "features_fixture");
+        head = run();
+        check(head.at("task") == "text_query_documents_to_relevance" &&
+                  head.at("selected_task") == "text_to_head_scores",
+              "implicit unique head-score operation records the actual secondary Task");
+        check(head.at("output_summary").at("score_kind") == "unbounded" &&
+                  head.at("output_summary").at("shape") == Json::array({2}) &&
+                  head.at("output_summary").at("normalization") == "l2",
+              "secondary head-score binding is callable and preserves family-transformed metadata");
+        request["request"]["token_ids"] = {1};
+        run(false);
+        request["request"] = {{"token_ids", {2147483648LL}}};
+        run(false);
+        request["request"] = {{"prompt", "x"}, {"config", {{"representation", "unknown"}}}};
+        run(false);
+        request["request"] = {{"prompt", "abc"}};
+        request["selected_task"] = "text_to_pooled_features";
+        check(run(false).at("error").get<std::string>().find(
+                  "operation cannot execute selected Task") != std::string::npos,
+              "a unique head-score operation never ignores an explicit different bound Task");
+        request["selected_task"] = "text_to_head_scores";
+        check(run().at("selected_task") == "text_to_head_scores",
+              "explicit secondary head-score selection also succeeds");
+        request.erase("selected_task");
+
+        select("text_to_embedding", "features_fixture", "encode", {{"token_ids", {77, 88}}});
+        request["expected_family"] = "features_fixture";
+        request["expected_task"] = "text_to_embedding";
+        request["selected_task"] = "text_to_token_features";
+        auto selected = run();
+        check(selected.at("task") == "text_to_embedding" &&
+                  selected.at("selected_task") == "text_to_token_features" &&
+                  selected.at("output_summary").at("feature_kind") == "token" &&
+                  selected.at("output_summary").at("tokens")[0].at("token_id") == 77,
+              "one physical embedding bundle can explicitly execute token features");
+        request["selected_task"] = "text_to_pooled_features";
+        selected = run();
+        check(selected.at("task") == "text_to_embedding" &&
+                  selected.at("selected_task") == "text_to_pooled_features" &&
+                  selected.at("output_summary").at("feature_kind") == "pooled",
+              "same primary and operation can explicitly execute a different bound Task");
+        request["expected_task"] = "text_to_pooled_features";
+        check(run(false).at("error").get<std::string>().find("bundle identity mismatch") !=
+                  std::string::npos,
+              "selected Task never replaces physical bundle identity validation");
+        request["expected_task"] = "text_to_embedding";
+        request["selected_task"] = "text_to_embedding";
+        run(false); // Explicit embedding cannot take the implicit encode -> pooled alias.
+        for (const auto& invalid : {Json("not_a_task"), Json("image_to_metric_geometry"), Json(""),
+                                    Json(7), Json(nullptr)}) {
+            request["selected_task"] = invalid;
+            run(false);
+        }
+        request.erase("selected_task");
+        selected = run();
+        check(selected.at("selected_task") == "text_to_pooled_features" &&
+                  selected.at("output_summary").at("feature_kind") == "pooled",
+              "existing implicit embedding encode alias remains unchanged");
+        request.erase("expected_family");
+        request.erase("expected_task");
         const auto tracking_frame = runtime / "benchmark_tracking_frame.ppm";
         image(tracking_frame, 3, 128, 2);
         const Json tracking_input{
@@ -457,10 +530,52 @@ int main(int argc, char** argv) {
             std::filesystem::remove(structure_prefix.string() + suffix);
         std::filesystem::remove(document);
 
+        select("series_to_regression_values", "numeric_fixture", "regress",
+               {{"past_values", {1, 2, 3, 4}},
+                {"shape", {2, 2}},
+                {"observed_mask", {1, 0, 1, 1}},
+                {"config", {{"scale", 2.0}}}});
+        auto summary = run().at("output_summary");
+        check(summary.at("kind") == "regression_values" && summary.at("values").size() == 2 &&
+                  summary.at("values")[0] == 16 && summary.at("target_count") == 2 &&
+                  summary.at("regression_targets") == 2 && summary.at("parameter_elements") == 0 &&
+                  summary.at("axes") == Json::array({"target"}) &&
+                  summary.at("target_names").empty() && summary.at("target_units").empty() &&
+                  !summary.contains("distribution") && !summary.contains("horizon_steps"),
+              "deterministic target regression retains full target values, mask and semantic axes");
+        request["request"]["batch_size"] = 2;
+        run(false);
+        request["request"].erase("batch_size");
+        request["request"]["config"]["distribution"] = "normal";
+        run(false);
+
+        select("series_to_point_forecast", "numeric_fixture", "regress",
+               {{"past_values", {1, 2, 3, 4}},
+                {"shape", {2, 2}},
+                {"observed_mask", {1, 0, 1, 1}},
+                {"config", {{"scale", 2.0}}}});
+        request["selected_task"] = "series_to_regression_values";
+        auto target_values = run();
+        check(target_values.at("task") == "series_to_point_forecast" &&
+                  target_values.at("selected_task") == "series_to_regression_values" &&
+                  target_values.at("output_summary").at("kind") == "regression_values" &&
+                  target_values.at("output_summary").at("values")[0] == 16,
+              "deterministic regression is selectable independently of physical forecast primary");
+        request["selected_task"] = "series_to_regression_distribution";
+        request["request"]["config"] = {{"distribution", "normal"}};
+        auto target_distribution = run();
+        check(target_distribution.at("task") == "series_to_point_forecast" &&
+                  target_distribution.at("selected_task") == "series_to_regression_distribution" &&
+                  target_distribution.at("output_summary").at("distribution") == "normal",
+              "same physical numeric model can select its other regression contract");
+        request["selected_task"] = "series_to_point_forecast";
+        run(false); // No fallback to distribution when an explicit Task conflicts with regress.
+        request.erase("selected_task");
+
         select("image_to_class_scores", "features_fixture", "classify",
                {{"image_path", left.string()}});
         auto result = run();
-        auto summary = result.at("output_summary");
+        summary = result.at("output_summary");
         check(summary.at("scores") == Json::array({18, 1}) && summary.at("score_kind") == "logit" &&
                   summary.at("top_class") == 0 && summary.at("top_score") == 18 &&
                   summary.at("labels") == Json::array({"left", "right"}),
@@ -509,6 +624,17 @@ int main(int argc, char** argv) {
         check(summary.at("shape") == Json::array({1, 2}) && summary.at("dim") == 2 &&
                   summary.at("feature_kind") == "token" && summary.at("tokens").size() == 1,
               "explicit token features retain token metadata and feature dimension");
+        request["request"] = {{"token_ids", {77, 88}}, {"config", {{"scale", 2.0}}}};
+        summary = run().at("output_summary");
+        check(summary.at("values") == Json::array({2, 2}) &&
+                  summary.at("tokens").at(0).at("token_id") == 77,
+              "token feature benchmark preserves caller token IDs without retokenizing");
+        select("text_to_embedding", "features_fixture", "encode", {{"token_ids", {77, 88}}});
+        summary = run().at("output_summary");
+        check(summary.at("values") == Json::array({3, 2}) && summary.at("feature_kind") == "pooled",
+              "embedding bundle's existing encode operation uses its actual pooled Task");
+        request["request"]["prompt"] = "";
+        run(false);
         select("text_to_embedding", "features_fixture", "embed",
                {{"prompt", "Hello"}, {"role", "document"}});
         summary = run().at("output_summary");

@@ -53,7 +53,7 @@ export default function ModelFamilyRecipePage({familySlug}) {
             <tr>
               <th>Recipe</th>
               <th>Checkpoint</th>
-              <th>Abstract task</th>
+              <th>Task interfaces (primary first)</th>
               <th>Build</th>
               <th>Manifest</th>
             </tr>
@@ -63,7 +63,7 @@ export default function ModelFamilyRecipePage({familySlug}) {
               <tr key={profile.sourcePath}>
                 <td><code>{profile.profile}</code></td>
                 <td><code>{profile.hfId}</code></td>
-                <td><code>{profile.task}</code></td>
+                <td>{profile.tasks.map((task) => <div key={task}><code>{task}</code></div>)}</td>
                 <td>{profile.precision}; {parallelLabel(profile)}</td>
                 <td><code>{profile.sourcePath}</code></td>
               </tr>

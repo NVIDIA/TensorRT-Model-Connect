@@ -39,7 +39,7 @@ for source in (REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE):
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract  # noqa: E402
 from apps.benchmark.performance.baselines.hf_transformers import flatten_config  # noqa: E402
-from trtmc_benchmark.catalog import ManifestCatalog, resolve_case  # noqa: E402
+from trtmc_benchmark.catalog import ManifestCatalog, resolve_case, selected_task_for_case  # noqa: E402
 from trtmc_benchmark.task_adapters import default_operation  # noqa: E402
 from trtmc_benchmark.types import BenchmarkError  # noqa: E402
 
@@ -70,6 +70,7 @@ OUTPUT_CONTRACTS = {
     "exact-token-ids",
     "forecast-shape",
     "regression-distribution",
+    "regression-values",
     "generated-token-count",
     "image-features-shape",
     "localization",
@@ -475,12 +476,12 @@ def resolve_entries(
                 raise PerfMatrixError(
                     f"entry {spec['id']} family {spec['family']} does not match {model.family}"
                 )
-            operation = default_operation(model.task)
+            workload = spec["workload"]
+            operation = default_operation(selected_task_for_case(model, str(workload["testcase"])))
             if (spec["operation"], operation) in {("generate", "translate"), ("solve", "regress")}:
                 # A semantic primary may separate a formerly overloaded operation.
                 # Keep the release entry identity and all measurement thresholds.
                 spec = {**spec, "operation": operation}
-            workload = spec["workload"]
             overrides = {
                 f"request.{name}": value for name, value in workload.get("request", {}).items()
             }
@@ -612,6 +613,8 @@ def _candidate_base(entry: ResolvedEntry, environment: Environment) -> list[str]
         "--bundle-cache",
         str(environment.bundle_cache),
     ]
+    if entry.case.selected_task is not None:
+        arguments.extend(("--task", entry.case.selected_task))
     for root in environment.bundle_roots:
         arguments.extend(("--bundle-root", str(root)))
     arguments.extend(
@@ -776,6 +779,8 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
             str(baseline.get("padding", "longest")),
             *common,
         ]
+        if entry.case.selected_task is not None:
+            arguments.extend(("--selected-task", entry.case.selected_task))
     revision = entry.model.hf_revision
     if revision:
         arguments.extend(("--revision", revision))
@@ -1042,6 +1047,10 @@ def _timing_mismatch(
     return ""
 
 
+def _effective_task(entry: ResolvedEntry) -> str:
+    return entry.model.task if entry.case.selected_task is None else entry.case.selected_task
+
+
 def _contract_name(entry: ResolvedEntry) -> str:
     configured = entry.spec["baseline"].get("output_contract")
     if configured:
@@ -1059,7 +1068,8 @@ def _contract_name(entry: ResolvedEntry) -> str:
             "control": "robot-action-shape",
             "segment": "segmentation-shape",
             "solve": "forecast-shape",
-            "regress": "regression-distribution",
+            "regress": ("regression-values" if _effective_task(entry) == "series_to_regression_values"
+                        else "regression-distribution"),
             "transcribe": "transcription-text",
         }.get(str(entry.spec["operation"]), "")
     if contract not in OUTPUT_CONTRACTS:
@@ -1194,8 +1204,9 @@ def _output_contract(
         right_elements = right.get("forecast_elements", right.get("element_count"))
         left_shape = left.get("shape")
         right_shape = right.get("shape")
-        semantic = entry.model.task in {"series_to_point_forecast", "series_to_quantile_forecast"}
-        expected_axes = (["horizon", "channel"] if entry.model.task == "series_to_point_forecast"
+        task = _effective_task(entry)
+        semantic = task in {"series_to_point_forecast", "series_to_quantile_forecast"}
+        expected_axes = (["horizon", "channel"] if task == "series_to_point_forecast"
                          else ["quantile", "horizon", "channel"])
         shape_matches = (
             left_shape == right_shape and isinstance(left_shape, list)
@@ -1209,7 +1220,7 @@ def _output_contract(
             isinstance(left_shape, list) and isinstance(right_shape, list)
             and sorted(left_shape) == sorted(right_shape)
         )
-        if semantic and entry.model.task == "series_to_quantile_forecast":
+        if semantic and task == "series_to_quantile_forecast":
             levels = left.get("quantile_levels")
             shape_matches = (shape_matches and isinstance(levels, list)
                              and len(levels) == left_shape[0])
@@ -1223,6 +1234,29 @@ def _output_contract(
             and shape_matches
         )
         return matched, "forecast output shape differs" if not matched else "", None
+    if contract == "regression-values":
+        def signature(value: Mapping[str, Any]) -> tuple[Any, ...] | None:
+            targets, values = value.get("target_count"), value.get("values")
+            if (isinstance(targets, bool) or not isinstance(targets, int) or targets <= 0
+                    or not isinstance(values, list) or len(values) != targets
+                    or value.get("axes") != ["target"]
+                    or value.get("kind") != "regression_values"):
+                return None
+            if any(isinstance(item, bool) or not isinstance(item, (int, float))
+                   or not math.isfinite(item) for item in values):
+                return None
+            for key in ("target_names", "target_units"):
+                metadata = value.get(key, [])
+                if (not isinstance(metadata, list) or len(metadata) not in {0, targets}
+                        or not all(isinstance(item, str) for item in metadata)):
+                    return None
+            return targets,
+        first, second = signature(left), signature(right)
+        matched = first is not None and first == second
+        for key in ("target_names", "target_units"):
+            if left.get(key) and right.get(key) and left[key] != right[key]:
+                matched = False
+        return matched, "regression value/target axes differ" if not matched else "", None
     if contract == "regression-distribution":
         def signature(value: Mapping[str, Any]) -> tuple[Any, ...] | None:
             targets = value.get("target_count")

@@ -39,6 +39,35 @@ are mutable and are rebuilt rather than assumed unchanged. An explicitly
 supplied bundle outside the managed cache remains the caller's provenance
 responsibility. `--rebuild` forces a fresh managed build.
 
+### Select another Task from the same bundle
+
+A family-owned testcase can select a secondary Task without changing the
+manifest's primary `task` or rebuilding the bundle:
+
+```json
+{
+  "name": "token-features",
+  "selected_task": "text_to_token_features",
+  "inputs": {"token_ids": [7, 9]},
+  "config": {}
+}
+```
+
+The existing `--case token-features` option selects this workload. Alternatively,
+`--task text_to_token_features` selects the interface for the chosen testcase;
+its inputs must match that interface. The operation defaults from the selected
+Task. An explicit incompatible operation is an error, not a request to try
+another interface. `selected_task` is call selection, not family Config.
+
+The worker checks that the loaded model actually binds the requested Task.
+Bundle identity and managed-cache checks still use the manifest's primary Task.
+Results, reproduction records and history comparison retain the selected Task,
+so token features and pooled features cannot become the same performance series.
+Performance references receive the selection separately from the unchanged
+manifest. Their input and output support must match the chosen contract; the
+text-only reference loaders reject token IDs instead of replacing them with
+empty text. This selection path requires a family migrated to the Task SDK.
+
 ## DataFrame forecast formatting
 
 Install `pandas` separately (`pip install pandas`) when using the optional table

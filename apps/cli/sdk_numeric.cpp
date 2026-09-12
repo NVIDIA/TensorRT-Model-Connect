@@ -15,7 +15,8 @@ using nlohmann::json;
 std::string_view forecast_id(std::string_view id) {
     for (const auto candidate :
          {SeriesToPointForecast::kTask, SeriesToQuantileForecast::kTask,
-          SeriesToPointAndQuantileForecast::kTask, SeriesToRegressionDistribution::kTask})
+          SeriesToPointAndQuantileForecast::kTask, SeriesToRegressionDistribution::kTask,
+          SeriesToRegressionValues::kTask})
         if (candidate == id)
             return candidate;
     return {};
@@ -226,6 +227,19 @@ bool dispatch_sdk_numeric(const Command& command, const Model& model, std::strin
         const auto config =
             detail::task_config(command, task.config_fields(), {"--input", "--mask"});
         result = joint_json(task.run({input.view()}, config).view());
+    } else if (id == SeriesToRegressionValues::kTask) {
+        const auto task = model.task<SeriesToRegressionValues>();
+        const auto config =
+            detail::task_config(command, task.config_fields(), {"--input", "--mask"});
+        const auto result_owner = task.run({input.view()}, config);
+        const auto& view = result_owner.view();
+        result = {
+            {"kind", "regression_values"},
+            {"values", values({view.values.data, static_cast<std::size_t>(view.values.size)})},
+            {"target_count", view.values.size},
+            {"axes", {"target"}},
+            {"target_names", names(view.target_names)},
+            {"target_units", names(view.target_units)}};
     } else {
         const auto task = model.task<SeriesToRegressionDistribution>();
         const auto config =

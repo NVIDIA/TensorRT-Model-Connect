@@ -51,6 +51,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"run",
          {CommandKind::kRun,
           {"--prompt",
+           "--token-ids",
            "--prompts",
            "--prefix",
            "--suffix",
@@ -88,7 +89,9 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
          {CommandKind::kEncode,
           {"--text", "--text-pair", "--token-ids", "--segment-ids", "--attention-mask",
            "--blocked-attention", "--prediction-positions"}}},
-        {"embed", {CommandKind::kEmbed, {"--text", "--image", "--title", "--body", "--role"}}},
+        {"embed",
+         {CommandKind::kEmbed,
+          {"--text", "--token-ids", "--image", "--title", "--body", "--role"}}},
         {"rerank", {CommandKind::kRerank, {"--query", "--document", "--image", "--documents"}}},
         {"classify", {CommandKind::kClassify, {"--image"}}},
         {"detect", {CommandKind::kDetect, {"--image", "--prompt"}}},
@@ -826,13 +829,13 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         }
     };
     if (command.kind == CommandKind::kRun)
-        reject_sdk_inputs({"--prompts", "--images", "--prefix", "--suffix", "--context",
-                           "--source-language", "--target-language"});
+        reject_sdk_inputs({"--prompts", "--token-ids", "--images", "--prefix", "--suffix",
+                           "--context", "--source-language", "--target-language"});
     if (command.kind == CommandKind::kEncode)
         reject_sdk_inputs({"--text-pair", "--token-ids", "--segment-ids", "--attention-mask",
                            "--blocked-attention", "--prediction-positions"});
     if (command.kind == CommandKind::kEmbed)
-        reject_sdk_inputs({"--image", "--title", "--body", "--role"});
+        reject_sdk_inputs({"--token-ids", "--image", "--title", "--body", "--role"});
     if (command.kind == CommandKind::kRerank)
         reject_sdk_inputs({"--image", "--documents"});
     if (command.kind == CommandKind::kPredictStructure)
@@ -1395,6 +1398,14 @@ int dispatch(const Command& command, const Model& model, std::ostream& output) {
         id = structure_task_for_command(command);
     if (id.empty())
         id = model.info().bundle_task;
+    std::optional<TextSource> text_input;
+    if (command.kind == CommandKind::kRun) {
+        if (id == TextContinuation::kTask || id == ConditionalTextGeneration::kTask ||
+            id == StreamingTextContinuation::kTask)
+            text_input = text_source(command, "--prompt");
+        else if (has_option(command, "--token-ids"))
+            throw std::invalid_argument("--token-ids is not accepted by this Task input");
+    }
     const bool lora_path = has_option(command, "--lora-adapter");
     const bool lora_id = has_option(command, "--lora-adapter-id");
     if (lora_path != lora_id)
@@ -1411,13 +1422,12 @@ int dispatch(const Command& command, const Model& model, std::ostream& output) {
     };
     if (command.kind == CommandKind::kRun) {
         if (id == TextContinuation::kTask) {
-            return emit(model.task<TextContinuation>(),
-                        TextContinuationRequest{require_option(command, "--prompt")}, {"--prompt"});
+            return emit(model.task<TextContinuation>(), TextContinuationRequest{*text_input},
+                        {"--prompt", "--token-ids"});
         }
         if (id == ConditionalTextGeneration::kTask) {
             return emit(model.task<ConditionalTextGeneration>(),
-                        ConditionalTextGenerationRequest{require_option(command, "--prompt")},
-                        {"--prompt"});
+                        ConditionalTextGenerationRequest{*text_input}, {"--prompt", "--token-ids"});
         }
         if (id == CorruptedTextReconstruction::kTask) {
             return emit(model.task<CorruptedTextReconstruction>(),
@@ -1471,8 +1481,9 @@ int dispatch(const Command& command, const Model& model, std::ostream& output) {
         }
         if (id == StreamingTextContinuation::kTask) {
             const auto task = model.task<StreamingTextContinuation>();
-            const auto config = task_config(command, task.config_fields(), {"--prompt"});
-            auto stream = task.start({require_option(command, "--prompt")}, config);
+            const auto config =
+                task_config(command, task.config_fields(), {"--prompt", "--token-ids"});
+            auto stream = task.start({*text_input}, config);
             while (auto event = stream.next()) {
                 if (event->kind() == StreamEventKind::Delta) {
                     write_json(output,
