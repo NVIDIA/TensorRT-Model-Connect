@@ -5,6 +5,7 @@
 
 // Flux-owned GPU matmul via cuBLAS for preprocessor ops not yet baked into TRT engines.
 
+#include "families/flux/runtime/device_buffer.h"
 #include "families/flux/runtime/gpu_matmul.h"
 
 #include <cstdlib>
@@ -18,20 +19,7 @@ namespace {
 cublasHandle_t g_cublas = nullptr;
 cudaStream_t g_stream = nullptr;
 
-struct DevBuf {
-    float* ptr = nullptr;
-    size_t bytes = 0;
-};
-DevBuf g_dA, g_dB, g_dC;
-
-void ensure_buf(DevBuf& buf, size_t need) {
-    if (buf.bytes >= need)
-        return;
-    if (buf.ptr)
-        cudaFree(buf.ptr);
-    cudaMalloc(reinterpret_cast<void**>(&buf.ptr), need);
-    buf.bytes = need;
-}
+flux::GrowableBuffer g_dA, g_dB, g_dC;
 
 } // namespace
 
@@ -44,16 +32,9 @@ void flux_gpu_matmul_init() {
 }
 
 void flux_gpu_matmul_shutdown() {
-    auto free_buf = [](DevBuf& b) {
-        if (b.ptr) {
-            cudaFree(b.ptr);
-            b.ptr = nullptr;
-            b.bytes = 0;
-        }
-    };
-    free_buf(g_dA);
-    free_buf(g_dB);
-    free_buf(g_dC);
+    g_dA = flux::GrowableBuffer{};
+    g_dB = flux::GrowableBuffer{};
+    g_dC = flux::GrowableBuffer{};
     if (g_stream) {
         cudaStreamDestroy(g_stream);
         g_stream = nullptr;
@@ -70,18 +51,21 @@ void flux_gpu_matmul_bias(const float* A, const float* B, const float* bias, flo
     const size_t sB = size_t(K) * N * sizeof(float);
     const size_t sC = size_t(M) * N * sizeof(float);
 
-    ensure_buf(g_dA, sA);
-    ensure_buf(g_dB, sB);
-    ensure_buf(g_dC, sC);
+    flux::ensure_buf(g_dA, sA);
+    flux::ensure_buf(g_dB, sB);
+    flux::ensure_buf(g_dC, sC);
 
-    cudaMemcpyAsync(g_dA.ptr, A, sA, cudaMemcpyHostToDevice, g_stream);
-    cudaMemcpyAsync(g_dB.ptr, B, sB, cudaMemcpyHostToDevice, g_stream);
+    auto* dA = static_cast<float*>(g_dA.buf.get());
+    auto* dB = static_cast<float*>(g_dB.buf.get());
+    auto* dC = static_cast<float*>(g_dC.buf.get());
+
+    cudaMemcpyAsync(dA, A, sA, cudaMemcpyHostToDevice, g_stream);
+    cudaMemcpyAsync(dB, B, sB, cudaMemcpyHostToDevice, g_stream);
 
     const float alpha = 1.0f, beta = 0.0f;
-    cublasSgemm(g_cublas, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, g_dB.ptr, N, g_dA.ptr, K,
-                &beta, g_dC.ptr, N);
+    cublasSgemm(g_cublas, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, dB, N, dA, K, &beta, dC, N);
 
-    cudaMemcpyAsync(out, g_dC.ptr, sC, cudaMemcpyDeviceToHost, g_stream);
+    cudaMemcpyAsync(out, dC, sC, cudaMemcpyDeviceToHost, g_stream);
     cudaStreamSynchronize(g_stream);
 
     if (bias) {
