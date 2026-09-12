@@ -6,6 +6,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        - ARCH=${ARCH:-aarch64}
     container_name: trtmc-dev
     working_dir: /workspace/tensorrt-model-connect
     tty: true
