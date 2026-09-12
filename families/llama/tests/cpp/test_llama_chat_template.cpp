@@ -51,19 +51,18 @@ static void test_detect_phi() {
 // TinyLlama-1.1B-Chat / Zephyr: same role tags as Phi, but turns end with eos_token (</s>),
 // not Phi's literal <|end|>. Must not be classified as phi (issue #1271).
 static void test_detect_zephyr_tinyllama() {
-    std::string tpl =
-        "{% for message in messages %}\n"
-        "{% if message['role'] == 'user' %}\n"
-        "{{ '<|user|>\n' + message['content'] + eos_token }}\n"
-        "{% elif message['role'] == 'system' %}\n"
-        "{{ '<|system|>\n' + message['content'] + eos_token }}\n"
-        "{% elif message['role'] == 'assistant' %}\n"
-        "{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n"
-        "{% endif %}\n"
-        "{% if loop.last and add_generation_prompt %}\n"
-        "{{ '<|assistant|>' }}\n"
-        "{% endif %}\n"
-        "{% endfor %}";
+    std::string tpl = "{% for message in messages %}\n"
+                      "{% if message['role'] == 'user' %}\n"
+                      "{{ '<|user|>\n' + message['content'] + eos_token }}\n"
+                      "{% elif message['role'] == 'system' %}\n"
+                      "{{ '<|system|>\n' + message['content'] + eos_token }}\n"
+                      "{% elif message['role'] == 'assistant' %}\n"
+                      "{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n"
+                      "{% endif %}\n"
+                      "{% if loop.last and add_generation_prompt %}\n"
+                      "{{ '<|assistant|>' }}\n"
+                      "{% endif %}\n"
+                      "{% endfor %}";
     auto fmt = trtmc::llama_detect_chat_template_format(tpl);
     check(fmt == "zephyr", "zephyr/tinyllama detection");
     check(fmt != "phi", "zephyr/tinyllama must not be phi");
