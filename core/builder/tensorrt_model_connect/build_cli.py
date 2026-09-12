@@ -52,8 +52,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     model_dir = _resolve_model(args.model, args.revision)
     family, support = resolve_family(load_model_metadata(model_dir))
     if args.command == "prepare-structure":
-        if "structure_prediction" not in support.tasks:
-            raise ValueError(f"family {family!r} does not support structure prediction")
         family_module = _load_family(family)
         prepare = getattr(family_module, "prepare_structure_request", None)
         if not callable(prepare):

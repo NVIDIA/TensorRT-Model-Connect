@@ -7,6 +7,7 @@
 
 #include <exception>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <tvm/ffi/c_api.h>
@@ -128,10 +129,18 @@ extern "C" const char* trtmc_load_byok_kernel(const char* library, const char* f
         trtmc::load_kernel(library != nullptr ? library : "", function != nullptr ? function : "",
                            kernel_name != nullptr ? kernel_name : "");
         return nullptr;
+    } catch (const std::bad_alloc&) {
+        return "BYOK loader out of memory";
     } catch (const std::exception& exception) {
-        error = exception.what();
+        try {
+            error = exception.what();
+        } catch (...) {
+            // This entrypoint is noexcept; formatting an error must not
+            // terminate the process when allocation itself failed.
+            return "BYOK loader out of memory";
+        }
     } catch (...) {
-        error = "unknown BYOK loader error";
+        return "unknown BYOK loader error";
     }
     return error.c_str();
 }

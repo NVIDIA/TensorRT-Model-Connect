@@ -12,7 +12,12 @@
 #include <iosfwd>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+namespace trtmc {
+class Model;
+}
 
 namespace trtmc::cli {
 
@@ -59,10 +64,13 @@ struct Command {
     std::uint64_t kv_cache_size_bytes{0};
     std::string runtime_cache_path;
     bool cuda_graphs{false};
+    std::string selected_task{};
+    std::vector<std::pair<std::string, std::string>> config_entries{};
 };
 
 Command parse_args(int argc, char** argv);
 int dispatch(const Command& command, ITask& task, std::ostream& output);
+int dispatch(const Command& command, const Model& model, std::ostream& output);
 void print_usage(std::ostream& output);
 int run(int argc, char** argv, std::ostream& output, std::ostream& error);
 

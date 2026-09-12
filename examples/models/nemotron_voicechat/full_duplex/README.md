@@ -3,7 +3,8 @@
 
 # Nemotron VoiceChat full-duplex microphone example
 
-This example runs one local, in-process `ISpeechSession`. It continuously
+This example runs one local, in-process full-duplex session. SDK-enabled bundles
+use `DuplexSpeechDialogue` over the C ABI. It continuously
 captures a Linux ALSA microphone while playing the agent's audio, so a user can
 interrupt the agent without waiting for playback to finish. It does not start a
 server, open a network port, or use WebSocket or Python at runtime.
@@ -12,6 +13,15 @@ On top of the repository-pinned TensorRT base, the application layer adds only
 the example executable, the core and explicit runtime loader, the TensorRT
 backend, the Nemotron VoiceChat model DSO, and ALSA runtime packages. It does
 not contain the checkpoint or a bundle.
+
+SDK session events retain their ownership until audio is copied into the
+existing playback queue. Input backpressure retries the same captured chunk
+without dropping it; session timeouts are distinct from termination. The
+resolved mono input/output rates must match the configured ALSA endpoints.
+All existing device/rate/latency/seed/system-prompt flags remain available.
+For SDK bundles the runtime root defaults to the C SDK library directory.
+Existing bundle primary modes explicitly select the previous session path and
+retain its `/opt/trtmc/lib` default. An SDK failure never retries that path.
 
 ## Requirements
 

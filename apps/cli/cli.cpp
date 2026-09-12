@@ -6,7 +6,13 @@
 #include "cli/cli.h"
 
 #include "cli/io.h"
+#include "cli/sdk_dispatch.h"
+#include "config.h"
+#include "task_runtime.h"
+#include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
+#include "trtmc/stream.hpp"
+#include "trtmc/text.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -14,7 +20,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -32,7 +37,7 @@
 
 namespace trtmc::cli {
 
-namespace {
+namespace detail {
 
 namespace fs = std::filesystem;
 
@@ -46,7 +51,15 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"run",
          {CommandKind::kRun,
           {"--prompt",
+           "--token-ids",
+           "--prompts",
+           "--prefix",
+           "--suffix",
+           "--context",
+           "--source-language",
+           "--target-language",
            "--image",
+           "--images",
            "--max-new-tokens",
            "--source-language-token-id",
            "--forced-bos-token-id",
@@ -72,15 +85,20 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
            "--condition-mask-raw",
            "--sampling-steps-raw",
            "--sde-noise-raw"}}},
-        {"encode", {CommandKind::kEncode, {"--text"}}},
-        {"embed", {CommandKind::kEmbed, {"--text"}}},
-        {"rerank", {CommandKind::kRerank, {"--query", "--document"}}},
+        {"encode",
+         {CommandKind::kEncode,
+          {"--text", "--text-pair", "--token-ids", "--segment-ids", "--attention-mask",
+           "--blocked-attention", "--prediction-positions"}}},
+        {"embed",
+         {CommandKind::kEmbed,
+          {"--text", "--token-ids", "--image", "--title", "--body", "--role"}}},
+        {"rerank", {CommandKind::kRerank, {"--query", "--document", "--image", "--documents"}}},
         {"classify", {CommandKind::kClassify, {"--image"}}},
-        {"detect", {CommandKind::kDetect, {"--image"}}},
+        {"detect", {CommandKind::kDetect, {"--image", "--prompt"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"predict-structure",
          {CommandKind::kPredictStructure,
-          {"--input", "--output", "--output-json", "--num-steps", "--seed"}}},
+          {"--input", "--input-encoding", "--output", "--output-json", "--num-steps", "--seed"}}},
         {"disparity", {CommandKind::kDisparity, {"--left", "--right"}}},
         {"geometry", {CommandKind::kGeometry, {"--image", "--output"}}},
         {"segment", {CommandKind::kSegment, {"--image"}}},
@@ -91,7 +109,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"generate-audio",
          {CommandKind::kGenerateAudio,
           {"--prompt", "--output", "--max-new-tokens", "--talker-max-new-tokens", "--seed",
-           "--stream", "--chunk-frames"}}},
+           "--stream", "--chunk-frames", "--language"}}},
         {"transcribe",
          {CommandKind::kTranscribe,
           {"--input", "--max-output-tokens", "--source-language", "--target-language",
@@ -115,8 +133,9 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
          {CommandKind::kSpeechSession, {"--input", "--output", "--system-prompt", "--timeout-ms"}}},
         {"generate-image",
          {CommandKind::kGenerateImage,
-          {"--prompt", "--image", "--output", "--negative-prompt", "--height", "--width",
-           "--num-steps", "--seed", "--guidance-scale", "--cfg-scale", "--initial-latents-raw"}}},
+          {"--prompt", "--image", "--images", "--mask", "--output", "--negative-prompt", "--height",
+           "--width", "--num-steps", "--seed", "--guidance-scale", "--cfg-scale",
+           "--initial-latents-raw"}}},
         {"generate-image-batch",
          {CommandKind::kGenerateImageBatch,
           {"--prompts", "--seeds", "--output", "--negative-prompt", "--height", "--width",
@@ -130,8 +149,9 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"control", {CommandKind::kControl, {"--image", "--state", "--output"}}},
         {"generate-world",
          {CommandKind::kGenerateWorld,
-          {"--prompt", "--image", "--action", "--intrinsics", "--num-frames", "--output",
-           "--height", "--width", "--num-steps", "--seed", "--guidance-scale", "--cfg-scale"}}},
+          {"--prompt", "--image", "--action", "--camera-trajectory", "--intrinsics", "--num-frames",
+           "--output", "--initial-latents-raw", "--height", "--width", "--num-steps", "--seed",
+           "--guidance-scale", "--cfg-scale"}}},
     };
     return specs;
 }
@@ -141,28 +161,9 @@ bool is_byok_option(const std::string& option) {
 }
 
 void load_byok_extension(const Command& command) {
-    using LoadKernelFn = const char* (*)(const char*, const char*, const char*) noexcept;
-    const fs::path extension = fs::path(command.runtime_root) / "libtrtmc_byok_tvm_ffi.so";
-    dlerror();
-    void* handle = dlopen(extension.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (handle == nullptr) {
-        const char* error = dlerror();
-        throw std::runtime_error("unable to load BYOK extension '" + extension.string() +
-                                 "': " + (error != nullptr ? error : "unknown dlopen error"));
-    }
-    static auto* handles = new std::vector<void*>;
-    handles->push_back(handle);
-    dlerror();
-    auto load = reinterpret_cast<LoadKernelFn>(dlsym(handle, "trtmc_load_byok_kernel"));
-    if (const char* error = dlerror(); error != nullptr || load == nullptr) {
-        throw std::runtime_error("BYOK extension is missing trtmc_load_byok_kernel");
-    }
-    if (const char* error = load(command.options.at("--byok-library").c_str(),
-                                 command.options.at("--byok-function").c_str(),
-                                 command.options.at("--byok-name").c_str())) {
-        const std::string message = error;
-        throw std::runtime_error(message);
-    }
+    trtmc::load_byok_kernel(command.options.at("--byok-library"),
+                            command.options.at("--byok-function"),
+                            command.options.at("--byok-name"), command.runtime_root);
 }
 
 std::string take_value(int argc, char** argv, int& index, const std::string& option) {
@@ -170,7 +171,11 @@ std::string take_value(int argc, char** argv, int& index, const std::string& opt
         throw std::invalid_argument(option + " requires a value");
     ++index;
     std::string value = argv[index];
-    if (value.empty())
+    const bool text_input = option == "--prompt" || option == "--prefix" || option == "--suffix" ||
+                            option == "--context" || option == "--text" || option == "--query" ||
+                            option == "--document" || option == "--system-prompt" ||
+                            option == "--text-pair" || option == "--title" || option == "--body";
+    if (value.empty() && !text_input)
         throw std::invalid_argument(option + " requires a non-empty value");
     return value;
 }
@@ -302,15 +307,34 @@ std::vector<float> read_float32_file(const std::string& path) {
     return values;
 }
 
-std::vector<std::string> read_nonempty_lines(const std::string& path) {
+std::vector<std::string> read_lines(const std::string& path) {
     std::ifstream input(path);
     if (!input)
         throw std::runtime_error("unable to open text file: " + path);
     std::vector<std::string> lines;
     for (std::string line; std::getline(input, line);) {
-        if (!line.empty())
-            lines.push_back(std::move(line));
+        lines.push_back(std::move(line));
     }
+    if (lines.empty())
+        throw std::runtime_error("text file has no lines: " + path);
+    return lines;
+}
+
+std::string read_structure_document(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        throw std::runtime_error("unable to open structure request: " + path);
+    std::string document{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    if (input.bad())
+        throw std::runtime_error("failed to read structure request: " + path);
+    if (document.empty())
+        throw std::invalid_argument("structure request must not be empty");
+    return document;
+}
+
+std::vector<std::string> read_nonempty_lines(const std::string& path) {
+    auto lines = read_lines(path);
+    lines.erase(std::remove(lines.begin(), lines.end(), std::string{}), lines.end());
     if (lines.empty())
         throw std::runtime_error("text file has no non-empty lines: " + path);
     return lines;
@@ -369,19 +393,6 @@ void write_json(std::ostream& output, const nlohmann::json& value) {
     output << value.dump() << '\n';
 }
 
-template <typename Value>
-void write_binary(const fs::path& path, const std::vector<Value>& values) {
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output)
-        throw std::runtime_error("failed to create output: " + path.string());
-    if (!values.empty()) {
-        output.write(reinterpret_cast<const char*>(values.data()),
-                     static_cast<std::streamsize>(values.size() * sizeof(Value)));
-    }
-    if (!output)
-        throw std::runtime_error("failed to write output: " + path.string());
-}
-
 nlohmann::json text_json(const TextResult& result) {
     nlohmann::json value{{"text", result.text},
                          {"token_ids", result.token_ids},
@@ -398,6 +409,60 @@ nlohmann::json text_json(const TextResult& result) {
         }
     }
     return value;
+}
+
+nlohmann::json text_json(const TextResultView& result) {
+    nlohmann::json ids = nlohmann::json::array();
+    for (const auto id : result.token_ids)
+        ids.push_back(id);
+    nlohmann::json value{{"text", std::string(result.text)},
+                         {"token_ids", std::move(ids)},
+                         {"setup_ms", result.setup_ms},
+                         {"prefill_ms", result.prefill_ms},
+                         {"decode_ms", result.decode_ms}};
+    if (!result.segments.empty()) {
+        value["segments"] = nlohmann::json::array();
+        for (const auto& segment : result.segments) {
+            nlohmann::json token_ids = nlohmann::json::array();
+            for (const auto id : segment.token_ids)
+                token_ids.push_back(id);
+            value["segments"].push_back({{"start_seconds", segment.start_seconds},
+                                         {"end_seconds", segment.end_seconds},
+                                         {"text", std::string(segment.text)},
+                                         {"token_ids", std::move(token_ids)}});
+        }
+    }
+    return value;
+}
+
+nlohmann::json text_json(const TextContinuationResult& result) {
+    return text_json(TextResultView{result.text(), result.token_ids(), result.setup_ms(),
+                                    result.prefill_ms(), result.decode_ms(), result.segments()});
+}
+
+Config task_config(const Command& command, const std::vector<ConfigField>& fields,
+                   std::initializer_list<std::string_view> input_options) {
+    Config config;
+    auto add = [&](std::string name, const std::string& text) {
+        const auto field =
+            std::find_if(fields.begin(), fields.end(),
+                         [&](const ConfigField& field) { return field.name == name; });
+        if (field == fields.end())
+            throw std::invalid_argument("selected model/Task does not declare config '" + name +
+                                        "'");
+        config.add(std::move(name), app::parse_config_value(text, *field));
+    };
+    for (const auto& [option, value] : command.options) {
+        if (is_byok_option(option) || option == "--lora-adapter" ||
+            std::find(input_options.begin(), input_options.end(), option) != input_options.end())
+            continue;
+        auto name = option.substr(2);
+        std::replace(name.begin(), name.end(), '-', '_');
+        add(std::move(name), value);
+    }
+    for (const auto& [name, value] : command.config_entries)
+        add(name, value); // Preserve duplicates so the family rejects them.
+    return config;        // Missing keys stay missing; no application defaults.
 }
 
 nlohmann::json stream_result_json(const TranscriptionStreamResult& result) {
@@ -656,7 +721,9 @@ int dispatch_run(const Command& command, ITask& task, std::ostream& output) {
     return EXIT_SUCCESS;
 }
 
-} // namespace
+} // namespace detail
+
+using namespace detail;
 
 Command parse_args(int argc, char** argv) {
     if (argc < 2)
@@ -687,6 +754,21 @@ Command parse_args(int argc, char** argv) {
     Command command{spec->second.kind, name, argv[2], {}, {}, {}, {}, 0, {}, false};
     for (int index = 3; index < argc; ++index) {
         const std::string option = argv[index];
+        if (option == "--task") {
+            if (!command.selected_task.empty())
+                throw std::invalid_argument("--task may be specified only once");
+            command.selected_task = take_value(argc, argv, index, option);
+            continue;
+        }
+        if (option == "--set") {
+            const auto entry = take_value(argc, argv, index, option);
+            const auto separator = entry.find('=');
+            if (separator == std::string::npos || separator == 0)
+                throw std::invalid_argument("--set requires NAME=VALUE");
+            command.config_entries.emplace_back(entry.substr(0, separator),
+                                                entry.substr(separator + 1));
+            continue;
+        }
         if (option == "--runtime-root") {
             if (!command.runtime_root.empty())
                 throw std::invalid_argument("--runtime-root may be specified only once");
@@ -725,8 +807,6 @@ Command parse_args(int argc, char** argv) {
             throw std::invalid_argument(option + " may be specified only once");
         command.options.emplace(option, take_value(argc, argv, index, option));
     }
-    if (command.runtime_root.empty())
-        throw std::invalid_argument("--runtime-root is required for " + name);
     const int byok_option_count = static_cast<int>(command.options.count("--byok-library") +
                                                    command.options.count("--byok-function") +
                                                    command.options.count("--byok-name"));
@@ -738,6 +818,36 @@ Command parse_args(int argc, char** argv) {
 }
 
 int dispatch(const Command& command, ITask& task, std::ostream& output) {
+    if (!command.selected_task.empty() || !command.config_entries.empty())
+        throw std::invalid_argument("--task and --set require a family migrated to the Task SDK");
+    auto reject_sdk_inputs = [&](std::initializer_list<const char*> inputs) {
+        for (const auto* option : inputs) {
+            if (has_option(command, option))
+                throw std::invalid_argument(
+                    std::string(option) +
+                    " requires an explicit Task SDK contract, not the existing interface");
+        }
+    };
+    if (command.kind == CommandKind::kRun)
+        reject_sdk_inputs({"--prompts", "--token-ids", "--images", "--prefix", "--suffix",
+                           "--context", "--source-language", "--target-language"});
+    if (command.kind == CommandKind::kEncode)
+        reject_sdk_inputs({"--text-pair", "--token-ids", "--segment-ids", "--attention-mask",
+                           "--blocked-attention", "--prediction-positions"});
+    if (command.kind == CommandKind::kEmbed)
+        reject_sdk_inputs({"--token-ids", "--image", "--title", "--body", "--role"});
+    if (command.kind == CommandKind::kRerank)
+        reject_sdk_inputs({"--image", "--documents"});
+    if (command.kind == CommandKind::kPredictStructure)
+        reject_sdk_inputs({"--input-encoding"});
+    if (command.kind == CommandKind::kGenerateAudio)
+        reject_sdk_inputs({"--language"});
+    if (command.kind == CommandKind::kGenerateImage)
+        reject_sdk_inputs({"--images", "--mask"});
+    if (command.kind == CommandKind::kGenerateWorld)
+        reject_sdk_inputs({"--camera-trajectory"});
+    if (command.kind == CommandKind::kDetect)
+        reject_sdk_inputs({"--prompt"});
     switch (command.kind) {
     case CommandKind::kRun:
         return dispatch_run(command, task, output);
@@ -811,14 +921,8 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
     }
     case CommandKind::kPredictStructure: {
         const std::string input_path = require_option(command, "--input");
-        std::ifstream input(input_path, std::ios::binary);
-        if (!input)
-            throw std::runtime_error("unable to open structure request: " + input_path);
         StructurePredictionRequest request;
-        request.document.assign(std::istreambuf_iterator<char>(input),
-                                std::istreambuf_iterator<char>());
-        if (request.document.empty())
-            throw std::invalid_argument("structure request must not be empty");
+        request.document = read_structure_document(input_path);
         request.source_path = input_path;
         request.config.sampling_steps =
             int_option(command, "--num-steps", request.config.sampling_steps, 1);
@@ -1273,11 +1377,159 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
     throw std::logic_error("non-execution command reached Task dispatch");
 }
 
+int dispatch(const Command& command, const Model& model, std::ostream& output) {
+    const auto replay = replay_task_for_inputs(command);
+    std::string id = command.selected_task;
+    if (id.empty())
+        id = replay;
+    if (id.empty())
+        id = audio_task_for_command(command, model);
+    if (id.empty())
+        id = image_task_for_command(command, model);
+    if (id.empty())
+        id = video_task_for_command(command, model);
+    if (id.empty())
+        id = numeric_task_for_command(command, model);
+    if (id.empty())
+        id = perception_task_for_command(command, model);
+    if (id.empty())
+        id = language_task_for_command(command, model);
+    if (id.empty())
+        id = structure_task_for_command(command);
+    if (id.empty())
+        id = model.info().bundle_task;
+    std::optional<TextSource> text_input;
+    if (command.kind == CommandKind::kRun) {
+        if (id == TextContinuation::kTask || id == ConditionalTextGeneration::kTask ||
+            id == StreamingTextContinuation::kTask)
+            text_input = text_source(command, "--prompt");
+        else if (has_option(command, "--token-ids"))
+            throw std::invalid_argument("--token-ids is not accepted by this Task input");
+    }
+    const bool lora_path = has_option(command, "--lora-adapter");
+    const bool lora_id = has_option(command, "--lora-adapter-id");
+    if (lora_path != lora_id)
+        throw std::invalid_argument(
+            "--lora-adapter and --lora-adapter-id must be supplied together");
+    if (lora_path)
+        model.lora_adapters().load(require_option(command, "--lora-adapter-id"),
+                                   require_option(command, "--lora-adapter"));
+    auto emit = [&](const auto& task, const auto& request,
+                    std::initializer_list<std::string_view> inputs) {
+        auto config = task_config(command, task.config_fields(), inputs);
+        write_json(output, text_json(task.run(request, config)));
+        return EXIT_SUCCESS;
+    };
+    if (command.kind == CommandKind::kRun) {
+        if (id == TextContinuation::kTask) {
+            return emit(model.task<TextContinuation>(), TextContinuationRequest{*text_input},
+                        {"--prompt", "--token-ids"});
+        }
+        if (id == ConditionalTextGeneration::kTask) {
+            return emit(model.task<ConditionalTextGeneration>(),
+                        ConditionalTextGenerationRequest{*text_input}, {"--prompt", "--token-ids"});
+        }
+        if (id == CorruptedTextReconstruction::kTask) {
+            return emit(model.task<CorruptedTextReconstruction>(),
+                        CorruptedTextReconstructionRequest{require_option(command, "--prompt")},
+                        {"--prompt"});
+        }
+        if (id == UnconditionalTextGeneration::kTask) {
+            const auto task = model.task<UnconditionalTextGeneration>();
+            auto config = task_config(command, task.config_fields(), {});
+            write_json(output, text_json(task.run(config)));
+            return EXIT_SUCCESS;
+        }
+        if (id == TextTranslation::kTask) {
+            TextTranslationRequest request{require_option(command, "--prompt")};
+            if (has_option(command, "--source-language"))
+                request.source_language = command.options.at("--source-language");
+            if (has_option(command, "--target-language"))
+                request.target_language = command.options.at("--target-language");
+            return emit(model.task<TextTranslation>(), request,
+                        {"--prompt", "--source-language", "--target-language"});
+        }
+        if (id == TextSummarization::kTask) {
+            return emit(model.task<TextSummarization>(),
+                        TextSummarizationRequest{require_option(command, "--prompt")},
+                        {"--prompt"});
+        }
+        if (id == TextPrefixSuffixInfilling::kTask) {
+            return emit(model.task<TextPrefixSuffixInfilling>(),
+                        TextPrefixSuffixInfillingRequest{require_option(command, "--prefix"),
+                                                         require_option(command, "--suffix")},
+                        {"--prefix", "--suffix"});
+        }
+        if (id == ContextQuestionAnswering::kTask) {
+            return emit(model.task<ContextQuestionAnswering>(),
+                        ContextQuestionAnsweringRequest{require_option(command, "--prompt"),
+                                                        require_option(command, "--context")},
+                        {"--prompt", "--context"});
+        }
+        if (id == BatchTextContinuation::kTask) {
+            const auto task = model.task<BatchTextContinuation>();
+            const auto config = task_config(command, task.config_fields(), {"--prompts"});
+            BatchTextContinuationRequest request;
+            for (const auto& prompt : read_lines(require_option(command, "--prompts")))
+                request.items.push_back({TextContinuationRequest{prompt}, config});
+            const auto results = task.run(request);
+            nlohmann::json items = nlohmann::json::array();
+            for (std::size_t i = 0; i < results.size(); ++i)
+                items.push_back(text_json(results[i]));
+            write_json(output, {{"results", std::move(items)}});
+            return EXIT_SUCCESS;
+        }
+        if (id == StreamingTextContinuation::kTask) {
+            const auto task = model.task<StreamingTextContinuation>();
+            const auto config =
+                task_config(command, task.config_fields(), {"--prompt", "--token-ids"});
+            auto stream = task.start({*text_input}, config);
+            while (auto event = stream.next()) {
+                if (event->kind() == StreamEventKind::Delta) {
+                    write_json(output,
+                               {{"event", "delta"}, {"text", std::string(event->text_delta())}});
+                } else if (auto final = event->final_result()) {
+                    auto value = text_json(*final);
+                    value["event"] = "complete";
+                    write_json(output, value);
+                } else {
+                    write_json(output, {{"event", "cancelled"}});
+                }
+                output.flush();
+                if (!output)
+                    throw std::runtime_error("failed to write stream event");
+            }
+            return EXIT_SUCCESS;
+        }
+    }
+    if (dispatch_sdk_features(command, model, id, output))
+        return EXIT_SUCCESS;
+    if (dispatch_sdk_action(command, model, id, output))
+        return EXIT_SUCCESS;
+    if (dispatch_sdk_replay(command, model, id, output))
+        return EXIT_SUCCESS;
+    if (dispatch_sdk_audio(command, model, id, output))
+        return EXIT_SUCCESS;
+    if (dispatch_sdk_image(command, model, id, output))
+        return EXIT_SUCCESS;
+    if (dispatch_sdk_video(command, model, id, output))
+        return EXIT_SUCCESS;
+    if (dispatch_sdk_numeric(command, model, id, output))
+        return EXIT_SUCCESS;
+    if (dispatch_sdk_perception(command, model, id, output))
+        return EXIT_SUCCESS;
+    if (dispatch_sdk_language(command, model, id, output))
+        return EXIT_SUCCESS;
+    if (dispatch_sdk_structure(command, model, id, output))
+        return EXIT_SUCCESS;
+    throw std::invalid_argument("command '" + command.name + "' does not accept Task '" + id + "'");
+}
+
 void print_usage(std::ostream& output) {
     output << "Usage:\n"
               "  trtmc version\n"
               "  trtmc inspect BUNDLE\n"
-              "  trtmc COMMAND BUNDLE --runtime-root DIR [OPTIONS]\n\n"
+              "  trtmc COMMAND BUNDLE [--runtime-root DIR] [OPTIONS]\n\n"
               "Execution commands:\n"
               "  run, encode, embed, rerank, classify, detect, extract-features,\n"
               "  predict-structure, disparity, geometry,\n"
@@ -1299,13 +1551,19 @@ void print_usage(std::ostream& output) {
               "  [--max-input-seconds F] [--segment-length-seconds F]\n"
               "  [--segment-min-seconds F] [--segment-overlap-seconds F]\n"
               "  [--lcs-merge true|false]\n\n"
+              "Molecular structure input:\n"
+              "  predict-structure BUNDLE --input REQUEST [--input-encoding ENCODING]\n"
+              "  .yaml/.yml, .json and .b2rq select their declared encodings.\n"
+              "  SDK output defaults to prediction.cif or prediction.pdb.\n\n"
               "BYOK options:\n"
               "  --byok-library DSO --byok-function FUNCTION --byok-name KERNEL\n\n"
               "Runtime-sized KV cache:\n"
               "  [--kv-cache-size BYTES|GB|GiB]\n\n"
               "TensorRT-RTX runtime options:\n"
               "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
-              "Execution never searches for runtimes; --runtime-root is always required.\n";
+              "Task SDK options: [--task TASK_ID] [--set NAME=VALUE]...\n"
+              "Task SDK families default to the installed runtime directory.\n"
+              "Existing bundle modes still require an explicit --runtime-root.\n";
 }
 
 int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
@@ -1320,7 +1578,7 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
             return EXIT_SUCCESS;
         }
         if (command.kind == CommandKind::kInspect) {
-            const BundleInfo bundle = InspectBundle(command.bundle);
+            const auto bundle = trtmc::Bundle::open(command.bundle).info();
             nlohmann::json sections = nlohmann::json::object();
             for (const auto& section : bundle.sections)
                 sections[section.name] = {{"offset", section.offset}, {"length", section.length}};
@@ -1341,6 +1599,15 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
             }
             load_byok_extension(command);
         }
+        const auto primary_task = trtmc::Bundle::open(command.bundle).info().task;
+        if (!app::uses_existing_task_runtime(primary_task)) {
+            const LoadOptions options{command.runtime_root, command.kv_cache_size_bytes,
+                                      command.runtime_cache_path, command.cuda_graphs};
+            const auto model = Model::load(command.bundle, options);
+            return dispatch(command, model, output);
+        }
+        if (command.runtime_root.empty())
+            throw std::invalid_argument("--runtime-root is required for an existing bundle mode");
         std::unique_ptr<ITask> task =
             load_task(command.bundle, command.runtime_root, command.kv_cache_size_bytes,
                       command.runtime_cache_path, command.cuda_graphs);

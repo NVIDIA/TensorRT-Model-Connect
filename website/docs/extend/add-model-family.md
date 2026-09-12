@@ -14,6 +14,7 @@ families/my_family/
 │   ├── CMakeLists.txt
 │   └── plugin.cpp
 └── tests/
+    ├── test_support.py       # dependency-free identity/default-task policy
     ├── test_e2e.py
     ├── manifests/<case>.json
     └── thresholds/<testcase>.json  # optional numeric override
@@ -28,8 +29,8 @@ from tensorrt_model_connect.model_support import family_support
 describe = family_support(
     model_types=("my_model",),
     architectures=("MyModelForGeneration",),
-    tasks=("text_generation", "embedding"),
-    default_task="text_generation",
+    tasks=("text_continuation",),
+    default_task="text_continuation",
 )
 ```
 
@@ -53,9 +54,11 @@ def _build_my_family_engine(request):
 def build(request, writer):
     if request.context_parallel_size != 1:
         raise ValueError("my_family does not support context parallelism")
-    if request.task != "text_generation":
-        raise ValueError("my_family supports only text_generation")
-    writer.set_header(family="my_family", task=request.task, backend="trt")
+    if request.task != "text_continuation":
+        raise ValueError("my_family supports only text_continuation")
+    if request.backend != "trt":
+        raise ValueError("my_family supports only the trt backend")
+    writer.set_header(family="my_family", task=request.task, backend=request.backend)
     writer.add_json("runtime.json", {"tensor_parallel_size": 1})
     writer.add_bytes("engine.plan", _build_my_family_engine(request))
 ```
@@ -63,6 +66,10 @@ def build(request, writer):
 The builder must not inherit from a base class. It may import the shared
 `BuildRequest` and `BundleWriter` contracts, but it must not import another
 family or shared model implementation.
+
+The snippet is a structural example, not a model builder. A real implementation
+must consume or explicitly reject every build option it receives; it must not
+silently discard dimensions, precision, parallelism or backend choices.
 
 If build, official reference, or E2E code needs a package outside the pinned
 base environment, put the ordinary pip requirement directly in the optional
@@ -72,9 +79,52 @@ no extra dependency omit the file.
 
 The runtime CMake file creates `trtmc_model_my_family`. Its factory exports
 `trtmc_create_family`, reads only sections owned by this family, and returns a
-concrete implementation of an abstract interface in `trtmc/task.h`.
-The family pipeline depends on and implements `trtmc/task.h`; `trtmc/task.h`
-never includes or links a family.
+concrete `trtmc::internal::IModel` implementing the selected semantic Task
+interfaces from `trtmc/internal/`. For example, these are the declarations a
+text family implements; model execution and configuration policy stay in its own files:
+
+```cpp
+#include <trtmc/internal/model.h>
+#include <trtmc/internal/text.h>
+
+class MyModel final : public trtmc::internal::IModel,
+                      public trtmc::internal::ITextContinuation {
+public:
+    const char* task() const noexcept override {
+        return trtmc::internal::ITextContinuation::kTask.data();
+    }
+    std::vector<trtmc::internal::TaskInstance> task_bindings() override {
+        return {trtmc::internal::bind<trtmc::internal::ITextContinuation>(*this)};
+    }
+    trtmc::internal::TextResult run(
+        const trtmc::internal::TextContinuationRequest&,
+        trtmc::internal::ConfigView) override;
+};
+```
+
+The internal interfaces never include or link a concrete family. The shared C
+entry point directly invokes the implemented virtual method. Do not add a
+family-specific C export, shared adapter, or user-facing family header. Multiple
+inheritance is allowed for distinct runtime Tasks; builder inheritance is not.
+
+`support.py` declares accepted **build/primary Task modes**. `IModel::task_bindings()`
+declares all semantic Tasks available on this particular **loaded bundle**;
+these sets need not be identical. The primary `task()` must match the bundle
+header, and every advertised semantic Task must actually be implemented.
+
+The `bind` call belongs to the family. It returns a Task key, the correctly
+adjusted interface pointer, and an optional Config field table; it does not
+create a model, execute inference, or modify a global registry. Always name the
+shared interface, as in `bind<ITextContinuation>(*this, fields)`, not the concrete
+family class. The Core Runtime snapshots the records and calls those interfaces;
+the Family Runtime owns their implementation. Shared interfaces carry their own
+`TaskInterface` type identity so accidental concrete-model binding is rejected
+at compile time. Families must not redefine that identity.
+
+The example has no optional parameters. For parameters, pass a stable field
+table and use the existing [Config helpers](add-config-schema.md); do not return
+a view into a temporary vector. Core checks names, duplicates and types, while
+family code checks ranges, combinations and input-dependent defaults.
 
 If the family graph contains distributed collectives, that same family owns
 its communicator setup and NCCL loading. A replicated plan that only selects a
@@ -104,6 +154,44 @@ comparator, or sibling-family fixture.
 The expected diff boundary for a normal family contribution is
 `families/my_family/**`. Examples, benchmarks, and BYOK are optional consumers
 of public APIs; neither a family nor core may import their implementation.
+
+## Migrate an existing family to the Task SDK
+
+Keep the migration in that family's directory:
+
+1. Select the existing internal contracts that match the actual required
+   operands, outputs and lifecycle. Batch is not a loop over the scalar API;
+   prompt images, prior masks, frames and state are not Config values.
+2. Implement `IModel` and those Tasks on the family pipeline. Declare support
+   for the loaded checkpoint/bundle, not every interface present in the DSO.
+   Keep defaults, configuration validation and model execution family-owned.
+3. Update `support.py`, the builder's bundle primary Task and the affected
+   family manifests together. Retaining an old primary ID while changing only
+   the DSO selects the old application path; do not rely on a failed call to
+   discover the new API. Existing unused primary modes must not remain advertised.
+4. Return complete typed outputs: preserve raw tensors, token/feature axes,
+   clocks, masks and actual scores. Initial detector boxes are not newly tracked
+   boxes; an independent point forecast is not an interpolated median. Do not
+   invent unavailable values to fill a result.
+5. Keep checkpoint identity/default assertions in `tests/test_support.py`;
+   the existing CPU pre-merge invocation discovers these files without a central
+   family list. Update the family's runtime tests, manifests, fixtures and
+   oracles without weakening their passing criteria.
+6. Prove one minimal build/load/run before expanding. Run existing examples and
+   benchmark workloads through the unchanged shared applications, plus direct
+   C/C++ calls for the newly implemented Tasks. Then qualify the actual model's
+   numerical, device and performance behavior in its family tests.
+
+The shared SDK contains more Tasks than the CLI or benchmark frontends expose.
+Preserve each family's existing application workloads during migration; do not
+claim an unrelated new CLI command exists just because its SDK Task is defined.
+A new Task contract or new frontend workload is a separate shared change, not
+an excuse to add a cross-family implementation dependency.
+
+Runtime, backend and family DSOs ship together. The public binary boundary is
+the [C SDK](../api/cpp-api.md), with the convenience C++ header compiled by the
+application. The old internal interfaces can be removed after their last family
+has migrated; they are not a promised backward-compatible user ABI.
 
 An E2E manifest may declare an exact `hf_id` (and, when available,
 `hf_revision`) or omit `hf_id` for a prepared local checkpoint supplied through

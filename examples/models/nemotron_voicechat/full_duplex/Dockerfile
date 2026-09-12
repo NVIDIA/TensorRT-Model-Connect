@@ -55,8 +55,9 @@ RUN apt-get update && \
     mkdir -p /opt/trtmc/bin /opt/trtmc/lib /opt/trtmc/licenses
 
 # The repository-wide install target includes every model DSO. Stage only the
-# application and the four native runtime layers this example actually uses.
+# application, C SDK, and native runtime layers this example actually uses.
 COPY --from=builder /build/trtmc_voicechat_full_duplex /opt/trtmc/bin/
+COPY --from=builder /build/trtmc/libtrtmc_c.so.1 /opt/trtmc/lib/
 COPY --from=builder /build/trtmc/libtrtmc_core.so /opt/trtmc/lib/
 COPY --from=builder /build/trtmc/libtrtmc_runtime.so /opt/trtmc/lib/
 COPY --from=builder /build/trtmc/libtrtmc_backend_trt.so /opt/trtmc/lib/

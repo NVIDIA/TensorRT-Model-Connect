@@ -25,7 +25,9 @@ add_subdirectory("${TRTMC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/trtmc")
 add_executable(trtmc_voicechat_full_duplex main.cpp)
 target_compile_features(trtmc_voicechat_full_duplex PRIVATE cxx_std_17)
 target_compile_options(trtmc_voicechat_full_duplex PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(trtmc_voicechat_full_duplex PRIVATE "${TRTMC_SOURCE_DIR}/apps")
 target_link_libraries(trtmc_voicechat_full_duplex PRIVATE
+  trtmc_c
   trtmc_runtime
   ALSA::ALSA
   Threads::Threads

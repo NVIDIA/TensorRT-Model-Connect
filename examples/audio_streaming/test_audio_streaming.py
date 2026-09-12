@@ -32,12 +32,54 @@ def example_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
             r"""
             #include "trtmc/runtime/family_loader.h"
             #include "trtmc/task.h"
+            #include "trtmc/trtmc.h"
 
             #include <cstdint>
             #include <memory>
             #include <stdexcept>
             #include <string>
             #include <vector>
+
+            // Keep the existing loader-only unit seam independent of an SDK
+            // installation. This stub supplies metadata for the OLD branch;
+            // real SDK execution is tested separately against the loaded DSO.
+            struct trtmc_bundle {};
+            extern "C" trtmc_status TRTMC_CALL trtmc_get_api(
+                uint32_t major, uint32_t minor, const trtmc_core_api_v1** out) {
+                static const auto api = [] {
+                    trtmc_core_api_v1 value{};
+                    value.header = {1, 0, sizeof(value)};
+                    value.bundle_open = [](trtmc_string_view, trtmc_bundle** result, trtmc_error** error) {
+                        *error = nullptr;
+                        *result = new trtmc_bundle;
+                        return trtmc_status{TRTMC_OK};
+                    };
+                    value.bundle_release = [](trtmc_bundle* bundle) { delete bundle; };
+                    value.bundle_info = [](const trtmc_bundle*, trtmc_bundle_info_v1* info, trtmc_error** error) {
+                        *error = nullptr;
+                        *info = {};
+                        info->format = 1;
+                        info->family = {"unit_fixture", 12};
+                        info->task = {"audio_generation", 16};
+                        info->backend = {"fake", 4};
+                        return trtmc_status{TRTMC_OK};
+                    };
+                    value.error_release = [](trtmc_error*) {};
+                    value.model_load = [](trtmc_string_view, const trtmc_load_options_v1*,
+                                           trtmc_model** result, trtmc_error** error) {
+                        *result = nullptr;
+                        *error = nullptr;
+                        return trtmc_status{TRTMC_UNSUPPORTED};
+                    };
+                    value.model_release = [](trtmc_model*) {};
+                    return value;
+                }();
+                *out = nullptr;
+                if (major != 1 || minor != 0)
+                    return TRTMC_VERSION_MISMATCH;
+                *out = &api;
+                return TRTMC_OK;
+            }
 
             namespace {
 
@@ -116,6 +158,10 @@ def example_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "-Werror",
             "-I",
             str(REPO / "core/runtime/include"),
+            "-I",
+            str(REPO / "core/api/include"),
+            "-I",
+            str(REPO / "apps"),
             str(EXAMPLE / "main.cpp"),
             str(fake_loader),
             "-o",
@@ -217,9 +263,10 @@ def test_help_does_not_write_to_the_pcm_channel(example_binary: Path) -> None:
     assert b"Usage:" in completed.stderr
 
 
-def test_cmake_links_only_the_public_runtime_target() -> None:
+def test_cmake_links_public_sdk_and_existing_runtime_targets() -> None:
     cmake = (EXAMPLE / "CMakeLists.txt").read_text(encoding="utf-8")
     source = (EXAMPLE / "main.cpp").read_text(encoding="utf-8")
-    assert "find_package(trtmc CONFIG REQUIRED)" in cmake
+    assert "find_package(trtmc CONFIG REQUIRED COMPONENTS runtime)" in cmake
+    assert "trtmc::c" in cmake
     assert "trtmc::trtmc_runtime" in cmake
     assert "families/" not in cmake + source

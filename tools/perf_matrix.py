@@ -15,6 +15,7 @@ import re
 import shlex
 import shutil
 import statistics
+import struct
 import subprocess
 import sys
 import time
@@ -38,7 +39,9 @@ for source in (REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE):
         sys.path.insert(0, str(source))
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract  # noqa: E402
-from trtmc_benchmark.catalog import ManifestCatalog, resolve_case  # noqa: E402
+from apps.benchmark.performance.baselines.hf_transformers import flatten_config  # noqa: E402
+from trtmc_benchmark.catalog import ManifestCatalog, resolve_case, selected_task_for_case  # noqa: E402
+from trtmc_benchmark.task_adapters import default_operation  # noqa: E402
 from trtmc_benchmark.types import BenchmarkError  # noqa: E402
 
 
@@ -67,18 +70,24 @@ OUTPUT_CONTRACTS = {
     "exact-text",
     "exact-token-ids",
     "forecast-shape",
+    "head-scores-shape",
+    "regression-distribution",
+    "regression-values",
     "generated-token-count",
     "image-features-shape",
     "localization",
     "media-shape",
+    "metric-geometry-shape",
+    "molecular-structure-shape",
     "normalized-text",
     "ocr-text",
+    "offline-speech-shape",
+    "pose-refinement-shape",
     "reranking-order",
     "robot-action-shape",
     "segmentation-shape",
     "transcription-text",
 }
-SEQUENCE_FAMILIES = {"bart", "m2m_100", "marian", "t5"}
 REFERENCE_INPUTS = {
     "pytorch-lerobot-act": (("source_root", "lerobot_repo"),),
     "upstream-elf": (("reference_repo", "elf_repo"),),
@@ -182,7 +191,37 @@ def _deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str,
 
 
 def load_suite(path: Path) -> tuple[str, list[dict[str, Any]], set[str]]:
+    owner = (
+        path.parent.parent.name
+        if path.name == "performance.yaml" and path.parent.name == "tests"
+        and path.parent.parent.parent.resolve() == MANIFEST_ROOT.resolve()
+        else None
+    )
+    if owner is not None:
+        _family_file(owner, "tests/performance.yaml", "performance suite")
+    name, entries, excluded = _load_suite_file(path, owner=owner)
+    canonical = REPOSITORY / "apps/benchmark/performance/release.yaml"
+    if path.resolve() != canonical.resolve():
+        return name, entries, excluded
+    ids = {entry["id"] for entry in entries}
+    for family_suite in sorted(MANIFEST_ROOT.glob("*/tests/performance.yaml")):
+        owner = family_suite.parents[1].name
+        _family_file(owner, "tests/performance.yaml", "performance suite")
+        _, owned_entries, _ = _load_suite_file(family_suite, owner=owner)
+        for entry in owned_entries:
+            if entry["id"] in ids:
+                raise PerfMatrixError(f"duplicate suite entry {entry['id']!r}")
+            ids.add(entry["id"])
+            entries.append(entry)
+    return name, entries, excluded
+
+
+def _load_suite_file(
+    path: Path, *, owner: str | None = None,
+) -> tuple[str, list[dict[str, Any]], set[str]]:
     raw = _read_yaml(path.resolve(), "performance suite")
+    if owner is not None and "excluded_profiles" in raw:
+        raise PerfMatrixError(f"family suite {owner!r} cannot declare exclusions")
     if raw.get("schema_version") != SUITE_SCHEMA:
         raise PerfMatrixError(f"suite schema_version must be {SUITE_SCHEMA}")
     name = raw.get("name")
@@ -252,7 +291,49 @@ def load_suite(path: Path) -> tuple[str, list[dict[str, Any]], set[str]]:
         if not isinstance(value.get("reason"), str) or not value["reason"].strip():
             raise PerfMatrixError(f"excluded profile {value['model']} requires a reason")
         excluded.add(value["model"])
+    if owner is not None:
+        for entry in entries:
+            _validate_family_entry(entry, owner)
     return name, entries, excluded
+
+
+def _family_file(family: str, relative: str, label: str) -> Path:
+    if (not isinstance(relative, str) or not relative or "\\" in relative
+            or Path(relative).is_absolute() or ".." in Path(relative).parts):
+        raise PerfMatrixError(f"{label} must be a relative path inside its family")
+    if (not isinstance(family, str) or not family or family in {".", ".."}
+            or "/" in family or "\\" in family):
+        raise PerfMatrixError(f"{label} has an invalid family owner")
+    root = MANIFEST_ROOT / family
+    path = root
+    for part in ("", *Path(relative).parts):
+        path = path / part
+        if path.is_symlink():
+            raise PerfMatrixError(f"{label} cannot use symlinks")
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root.resolve()) or not resolved.is_file():
+        raise PerfMatrixError(f"{label} is missing or outside its family: {relative}")
+    return resolved
+
+
+def _family_script(entry: Mapping[str, Any]) -> Path:
+    script = entry["baseline"].get("script")
+    if not isinstance(script, str) or Path(script).suffix != ".py":
+        raise PerfMatrixError(f"entry {entry['id']} requires a family-local .py script")
+    return _family_file(str(entry["family"]), script, "reference script")
+
+
+def _validate_family_entry(entry: Mapping[str, Any], owner: str) -> None:
+    if entry["family"] != owner:
+        raise PerfMatrixError(f"family suite {owner!r} cannot declare another family")
+    try:
+        model = ManifestCatalog(MANIFEST_ROOT).resolve(str(entry["model"]))
+        selected_task_for_case(model, str(entry["workload"]["testcase"]))
+    except BenchmarkError as error:
+        raise PerfMatrixError(f"entry {entry['id']} has no owned model/testcase: {error}") from error
+    manifests = (MANIFEST_ROOT / owner / "tests/manifests").resolve()
+    if model.family != owner or not model.manifest_path.is_relative_to(manifests):
+        raise PerfMatrixError(f"family suite {owner!r} cannot use another family's manifest")
 
 
 def _validate_entry(entry: Mapping[str, Any]) -> None:
@@ -269,7 +350,11 @@ def _validate_entry(entry: Mapping[str, Any]) -> None:
         "task-reference",
     }:
         raise PerfMatrixError(f"entry {entry['id']} has an invalid baseline runner")
-    if baseline["runner"] == "task-reference" and not isinstance(baseline.get("adapter"), str):
+    if "script" in baseline:
+        if baseline["runner"] != "task-reference" or "adapter" in baseline:
+            raise PerfMatrixError(f"entry {entry['id']} script requires task-reference without adapter")
+        _family_script(entry)
+    elif baseline["runner"] == "task-reference" and not isinstance(baseline.get("adapter"), str):
         raise PerfMatrixError(f"entry {entry['id']} requires baseline.adapter")
     if not isinstance(measurement, Mapping):
         raise PerfMatrixError(f"entry {entry['id']} requires measurement")
@@ -474,16 +559,22 @@ def resolve_entries(
                     f"entry {spec['id']} family {spec['family']} does not match {model.family}"
                 )
             workload = spec["workload"]
+            operation = default_operation(selected_task_for_case(model, str(workload["testcase"])))
+            if (spec["operation"], operation) in {("generate", "translate"), ("solve", "regress")}:
+                # A semantic primary may separate a formerly overloaded operation.
+                # Keep the release entry identity and all measurement thresholds.
+                spec = {**spec, "operation": operation}
             overrides = {
                 f"request.{name}": value for name, value in workload.get("request", {}).items()
             }
-            timing = timing_contract(runner=str(spec["baseline"]["runner"]), family=model.family)
+            timing = timing_contract(runner=str(spec["baseline"]["runner"]), declared=spec["baseline"])
+            baseline_timing = _baseline_timing(timing)
             overrides.update(
                 {
                     "measurement.warmup": int(spec["measurement"]["warmup"]),
                     "measurement.iterations": int(spec["measurement"]["iterations"]),
-                    "measurement.timing_scope": "public_task_call_wall",
-                    "measurement.asset_loading_included": bool(timing["asset_loading_included"]),
+                    "measurement.timing_scope": timing["candidate_timing_scope"],
+                    "measurement.asset_loading_included": baseline_timing["asset_loading_included"],
                     "telemetry.gpu": "off",
                 }
             )
@@ -497,7 +588,6 @@ def resolve_entries(
             ).with_values(runtime_root=environment.runtime_root)
             manifest = json.loads(model.manifest_path.read_text(encoding="utf-8"))
             reference_precision = _reference_precision(spec, case.testcase_name, manifest, model)
-            baseline_timing = _baseline_timing(spec, timing)
         except (BenchmarkError, OSError, ValueError, json.JSONDecodeError) as error:
             raise PerfMatrixError(f"cannot resolve {spec['id']}: {error}") from error
         resolved.append(
@@ -523,17 +613,12 @@ def _reference_precision(
     return str(model.precision)
 
 
-def _baseline_timing(spec: Mapping[str, Any], declared: Mapping[str, Any]) -> dict[str, Any]:
-    baseline = spec["baseline"]
-    result = {
+def _baseline_timing(declared: Mapping[str, Any]) -> dict[str, Any]:
+    return {
         "timing_scope": declared["timing_scope"],
         "input_preparation_included": declared["input_preparation_included"],
         "asset_loading_included": declared["asset_loading_included"],
     }
-    for name in tuple(result):
-        if name in baseline:
-            result[name] = baseline[name]
-    return result
 
 
 def preflight(
@@ -610,6 +695,8 @@ def _candidate_base(entry: ResolvedEntry, environment: Environment) -> list[str]
         "--bundle-cache",
         str(environment.bundle_cache),
     ]
+    if entry.case.selected_task is not None:
+        arguments.extend(("--task", entry.case.selected_task))
     for root in environment.bundle_roots:
         arguments.extend(("--bundle-root", str(root)))
     arguments.extend(
@@ -659,9 +746,11 @@ def candidate_command(
 
 
 def _baseline_task(entry: ResolvedEntry) -> str:
+    if configured := entry.spec["baseline"].get("task"):
+        return str(configured)
     if entry.spec["operation"] in {"encode", "embed"}:
         return "encoder"
-    return "seq2seq-lm" if entry.model.family in SEQUENCE_FAMILIES else "causal-lm"
+    return "causal-lm"
 
 
 def _adapter_options(entry: ResolvedEntry, environment: Environment) -> dict[str, Any]:
@@ -700,10 +789,14 @@ def _validate_reference_path(entry: ResolvedEntry, field: str, path: Path) -> No
         )
 
 
+def _baseline_mode(baseline: Mapping[str, Any]) -> str:
+    return str(baseline.get("mode", "reference" if "script" in baseline else "torch-compile"))
+
+
 def baseline_command(entry: ResolvedEntry, environment: Environment, output: Path) -> list[str]:
     baseline = entry.spec["baseline"]
     runner = str(baseline["runner"])
-    request = json.dumps(entry.case.request, ensure_ascii=True, separators=(",", ":"))
+    request = json.dumps(flatten_config(entry.case.request), ensure_ascii=True, separators=(",", ":"))
     common = [
         "--model",
         str(_adapter_options(entry, environment).get("model_id", entry.model.hf_id)),
@@ -712,7 +805,7 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
         "--precision",
         entry.reference_precision,
         "--mode",
-        str(baseline.get("mode", "torch-compile")),
+        _baseline_mode(baseline),
         "--warmup",
         str(entry.case.measurement.warmup),
         "--iterations",
@@ -749,11 +842,14 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
             if bool(baseline.get("dynamic", True)):
                 arguments.append("--compile-dynamic")
     else:
+        executable = (
+            [str(_family_script(entry.spec))]
+            if "script" in baseline
+            else [str(environment.task_runner), "--adapter", str(baseline["adapter"])]
+        )
         arguments = [
             sys.executable,
-            str(environment.task_runner),
-            "--adapter",
-            str(baseline["adapter"]),
+            *executable,
             "--family",
             entry.model.family,
             "--operation",
@@ -772,6 +868,8 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
             str(baseline.get("padding", "longest")),
             *common,
         ]
+        if "script" in baseline or entry.case.selected_task is not None:
+            arguments.extend(("--selected-task", _effective_task(entry)))
     revision = entry.model.hf_revision
     if revision:
         arguments.extend(("--revision", revision))
@@ -780,6 +878,46 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
     if bool(baseline.get("local_files_only", environment.local_files_only)):
         arguments.append("--local-files-only")
     return arguments
+
+
+def _validate_script_result(
+    entry: ResolvedEntry, environment: Environment, result: Mapping[str, Any],
+) -> None:
+    expected = {
+        "schema_version": "trtmc.perf-baseline/v1",
+        "status": "completed",
+        "model": str(_adapter_options(entry, environment).get("model_id", entry.model.hf_id)),
+        "family": entry.model.family,
+        "operation": str(entry.spec["operation"]),
+        "case_name": str(entry.spec["id"]),
+        "selected_task": _effective_task(entry),
+        "precision": entry.reference_precision,
+        "mode": _baseline_mode(entry.spec["baseline"]),
+    }
+    for field, value in expected.items():
+        if result.get(field) != value:
+            raise PerfMatrixError(f"family reference result has mismatched {field}")
+    measurement = result.get("measurement")
+    for field in ("warmup", "iterations"):
+        if (not isinstance(measurement, Mapping) or type(measurement.get(field)) is not int
+                or measurement[field] != getattr(entry.case.measurement, field)):
+            raise PerfMatrixError(f"family reference result has mismatched {field}")
+    policy = result.get("measurement_policy")
+    for field, value in entry.baseline_timing.items():
+        if (not isinstance(policy, Mapping) or result.get(field) != value
+                or policy.get(field) != value
+                or type(result.get(field)) is not type(value)
+                or type(policy.get(field)) is not type(value)):
+            raise PerfMatrixError(f"family reference result has mismatched {field}")
+    samples = result.get("samples_ms")
+    if (not isinstance(samples, list) or len(samples) != entry.case.measurement.iterations
+            or any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+                   for value in samples)):
+        raise PerfMatrixError("family reference must return one finite positive sample per iteration")
+    if _p50(result) != statistics.median(samples):
+        raise PerfMatrixError("family reference latency p50 does not match its samples")
+    if not isinstance(result.get("output_summary"), Mapping):
+        raise PerfMatrixError("family reference result has no output summary")
 
 
 def _command_environment() -> dict[str, str]:
@@ -1038,12 +1176,16 @@ def _timing_mismatch(
     return ""
 
 
+def _effective_task(entry: ResolvedEntry) -> str:
+    return entry.model.task if entry.case.selected_task is None else entry.case.selected_task
+
+
 def _contract_name(entry: ResolvedEntry) -> str:
     configured = entry.spec["baseline"].get("output_contract")
     if configured:
         contract = str(configured)
-    elif entry.spec["operation"] == "generate":
-        if float(entry.case.request.get("temperature", 0.0)) > 0.0:
+    elif entry.spec["operation"] in {"generate", "translate"}:
+        if float(flatten_config(entry.case.request).get("temperature", 0.0)) > 0.0:
             contract = "generated-token-count"
         else:
             contract = "exact-token-ids"
@@ -1052,10 +1194,20 @@ def _contract_name(entry: ResolvedEntry) -> str:
             "classify": "classification-top-class",
             "embed": "embedding-shape",
             "encode": "embedding-shape",
+            "head_scores": "head-scores-shape",
+            "geometry": "metric-geometry-shape",
+            "predict_structure": "molecular-structure-shape",
+            "refine_pose": "pose-refinement-shape",
             "control": "robot-action-shape",
             "segment": "segmentation-shape",
             "solve": "forecast-shape",
+            "regress": ("regression-values" if _effective_task(entry) == "series_to_regression_values"
+                        else "regression-distribution"),
             "transcribe": "transcription-text",
+            "speech_dialogue": (
+                "offline-speech-shape" if _effective_task(entry) == "offline_speech_dialogue"
+                else ""
+            ),
         }.get(str(entry.spec["operation"]), "")
     if contract not in OUTPUT_CONTRACTS:
         raise PerfMatrixError(
@@ -1113,6 +1265,25 @@ def _output_contract(
         )
     if contract == "localization":
         return _localization_contract(entry, left, right)
+    if contract in {"metric-geometry-shape", "molecular-structure-shape", "pose-refinement-shape"}:
+        signature = {
+            "metric-geometry-shape": _metric_geometry_signature,
+            "molecular-structure-shape": _molecular_structure_signature,
+            "pose-refinement-shape": _pose_refinement_signature,
+        }[contract]
+        evidence = {"contract": contract, "numerical_parity_checked": False}
+        try:
+            first = signature(left)
+        except (ValueError, OSError) as error:
+            return False, f"candidate {contract}: {error}", evidence
+        try:
+            second = signature(right)
+        except (ValueError, OSError) as error:
+            return False, f"reference {contract}: {error}", evidence
+        matched = first == second
+        return matched, f"{contract} representation differs" if not matched else "", evidence
+    if contract == "offline-speech-shape":
+        return _offline_speech_contract(entry, left, right)
     if contract == "audio-shape":
         left_shape = (
             left.get("num_samples", left.get("audio_samples")),
@@ -1184,11 +1355,52 @@ def _output_contract(
         right_elements = right.get("element_count", right.get("embedding_elements"))
         matched = left_elements == right_elements and left.get("dim") == right.get("dim")
         return matched, "embedding output shape differs" if not matched else "", None
+    if contract == "head-scores-shape":
+        def signature(value: Mapping[str, Any]) -> tuple[Any, ...] | None:
+            shape, values = value.get("shape"), value.get("values")
+            if (not isinstance(shape, list) or not shape
+                    or any(isinstance(size, bool) or not isinstance(size, int) or size <= 0
+                           for size in shape)
+                    or not isinstance(values, list) or len(values) != math.prod(shape)):
+                return None
+            if any(isinstance(item, bool) or not isinstance(item, (int, float))
+                   or not math.isfinite(item) for item in values):
+                return None
+            kind = value.get("score_kind")
+            if not isinstance(kind, str) or kind not in {"logit", "probability", "unbounded"}:
+                return None
+            metadata = (value.get("pooling"), value.get("normalization"))
+            if not all(isinstance(item, str) and item for item in metadata):
+                return None
+            return tuple(shape), kind, *metadata
+        first, second = signature(left), signature(right)
+        matched = first is not None and first == second
+        return matched, "head score shape or representation differs" if not matched else "", None
     if contract == "forecast-shape":
         left_elements = left.get("forecast_elements", left.get("element_count"))
         right_elements = right.get("forecast_elements", right.get("element_count"))
         left_shape = left.get("shape")
         right_shape = right.get("shape")
+        task = _effective_task(entry)
+        semantic = task in {"series_to_point_forecast", "series_to_quantile_forecast"}
+        expected_axes = (["horizon", "channel"] if task == "series_to_point_forecast"
+                         else ["quantile", "horizon", "channel"])
+        shape_matches = (
+            left_shape == right_shape and isinstance(left_shape, list)
+            and len(left_shape) == len(expected_axes)
+            and left.get("axes") == right.get("axes") == expected_axes
+            and isinstance(left.get("horizon_steps"), list)
+            and len(left["horizon_steps"]) == left_shape[expected_axes.index("horizon")]
+            and left.get("horizon_steps") == right.get("horizon_steps")
+            and left.get("quantile_levels") == right.get("quantile_levels")
+        ) if semantic else (
+            isinstance(left_shape, list) and isinstance(right_shape, list)
+            and sorted(left_shape) == sorted(right_shape)
+        )
+        if semantic and task == "series_to_quantile_forecast":
+            levels = left.get("quantile_levels")
+            shape_matches = (shape_matches and isinstance(levels, list)
+                             and len(levels) == left_shape[0])
         matched = (
             isinstance(left_elements, int)
             and not isinstance(left_elements, bool)
@@ -1196,10 +1408,391 @@ def _output_contract(
             and left_elements == right_elements
             and isinstance(left_shape, list)
             and isinstance(right_shape, list)
-            and sorted(left_shape) == sorted(right_shape)
+            and shape_matches
         )
         return matched, "forecast output shape differs" if not matched else "", None
+    if contract == "regression-values":
+        def signature(value: Mapping[str, Any]) -> tuple[Any, ...] | None:
+            targets, values = value.get("target_count"), value.get("values")
+            if (isinstance(targets, bool) or not isinstance(targets, int) or targets <= 0
+                    or not isinstance(values, list) or len(values) != targets
+                    or value.get("axes") != ["target"]
+                    or value.get("kind") != "regression_values"):
+                return None
+            if any(isinstance(item, bool) or not isinstance(item, (int, float))
+                   or not math.isfinite(item) for item in values):
+                return None
+            for key in ("target_names", "target_units"):
+                metadata = value.get(key, [])
+                if (not isinstance(metadata, list) or len(metadata) not in {0, targets}
+                        or not all(isinstance(item, str) for item in metadata)):
+                    return None
+            return targets,
+        first, second = signature(left), signature(right)
+        matched = first is not None and first == second
+        for key in ("target_names", "target_units"):
+            if left.get(key) and right.get(key) and left[key] != right[key]:
+                matched = False
+        return matched, "regression value/target axes differ" if not matched else "", None
+    if contract == "regression-distribution":
+        def signature(value: Mapping[str, Any]) -> tuple[Any, ...] | None:
+            targets = value.get("target_count")
+            parameters = value.get("parameters")
+            if (value.get("distribution") not in {"normal", "student_t", "negative_binomial"}
+                    or isinstance(targets, bool) or not isinstance(targets, int) or targets <= 0
+                    or not isinstance(parameters, list) or not parameters
+                    or value.get("axes") != ["target"]):
+                return None
+            names = []
+            for parameter in parameters:
+                if (not isinstance(parameter, Mapping) or not isinstance(parameter.get("name"), str)
+                        or not parameter["name"]):
+                    return None
+                values = parameter.get("values")
+                if not isinstance(values, list) or len(values) != targets:
+                    return None
+                if any(isinstance(item, bool) or not isinstance(item, (int, float))
+                       or not math.isfinite(item) for item in values):
+                    return None
+                names.append(parameter["name"])
+            if len(names) != len(set(names)):
+                return None
+            return value.get("distribution"), targets, tuple(names)
+        left_signature, right_signature = signature(left), signature(right)
+        matched = left_signature is not None and left_signature == right_signature
+        return matched, "regression distribution/target axes differ" if not matched else "", None
     raise PerfMatrixError(f"output contract is not implemented: {contract}")
+
+
+def _structured_int(value: Any, name: str, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
+def _structured_number(value: Any, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a finite number")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise ValueError(f"{name} must be a finite number")
+
+
+def _structured_values(value: Any, name: str, count: int | None = None) -> int:
+    if not isinstance(value, list) or (count is not None and len(value) != count):
+        raise ValueError(f"{name} has an invalid array length")
+    for item in value:
+        _structured_number(item, name)
+    return len(value)
+
+
+def _structured_artifact(summary: Mapping[str, Any], name: str, size: int) -> bytes:
+    value = summary.get(name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must identify an artifact file")
+    path = Path(value)
+    if not path.is_file() or path.stat().st_size != size:
+        raise ValueError(f"{name} artifact size does not match its declared shape/byte count")
+    payload = path.read_bytes()
+    if len(payload) != size:
+        raise ValueError(f"{name} artifact changed while being read")
+    return payload
+
+
+def _metric_geometry_signature(summary: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Check complete typed geometry representation, not predicted-value parity."""
+    height = _structured_int(summary.get("height"), "height", 1)
+    width = _structured_int(summary.get("width"), "width", 1)
+    pixels = height * width
+    images = _structured_int(summary.get("geometry_images"), "geometry_images", 1)
+    count = _structured_int(summary.get("geometry_pixels"), "geometry_pixels", 1)
+    shape = summary.get("point_shape")
+    if images != 1 or count != pixels or shape != [height, width, 3]:
+        raise ValueError("geometry grid/count/point shape differs from [H,W,3]")
+    if not isinstance(shape, list) or any(type(axis) is not int for axis in shape):
+        raise ValueError("point_shape must have integer axes")
+    if (summary.get("units") != "meters"
+            or summary.get("camera_axes") != ["right", "down", "forward"]
+            or summary.get("intrinsics_coordinates") != "normalized_uv"):
+        raise ValueError("geometry units, camera axes or intrinsics coordinates differ from the Task")
+    intrinsics = summary.get("normalized_intrinsics")
+    if not isinstance(intrinsics, list) or len(intrinsics) != 3:
+        raise ValueError("normalized_intrinsics must be a complete [3,3] matrix")
+    for row in intrinsics:
+        _structured_values(row, "normalized_intrinsics", 3)
+    # Raw float32 data is deliberately not filtered or rewritten: the validity
+    # mask is authoritative and invalid pixels may retain +Inf (or another
+    # family representation). Depth positivity is not a shared shape rule.
+    _structured_artifact(summary, "points_artifact", pixels * 3 * 4)
+    _structured_artifact(summary, "depth_artifact", pixels * 4)
+    mask = _structured_artifact(summary, "valid_mask_artifact", pixels)
+    valid = _structured_int(summary.get("valid_pixels"), "valid_pixels")
+    if valid != mask.count(1):
+        raise ValueError("valid_pixels differs from the complete mask artifact")
+    if "intrinsics_artifact" in summary:
+        path = summary["intrinsics_artifact"]
+        if not isinstance(path, str) or not path:
+            raise ValueError("intrinsics_artifact must identify an artifact file")
+        calibration = json.loads(Path(path).read_bytes())
+        if (not isinstance(calibration, Mapping)
+                or type(calibration.get("height")) is not int
+                or type(calibration.get("width")) is not int
+                or calibration.get("height") != height or calibration.get("width") != width
+                or calibration.get("normalized") is not True
+                or calibration.get("intrinsics") != intrinsics):
+            raise ValueError("intrinsics artifact differs from the output calibration")
+        for row in calibration["intrinsics"]:
+            _structured_values(row, "intrinsics artifact", 3)
+    return height, width, tuple(shape), "meters", ("right", "down", "forward"), "normalized_uv"
+
+
+def _molecular_structure_signature(summary: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Validate opaque outputs and confidence presence/shape, without PDB/CIF parsing."""
+    structures = _structured_int(summary.get("structures"), "structures", 1)
+    format_name = summary.get("format")
+    if structures != 1 or not isinstance(format_name, str) or format_name not in {"pdb", "mmcif"}:
+        raise ValueError("structure count or format is invalid")
+    structure_bytes = _structured_int(summary.get("structure_bytes"), "structure_bytes", 1)
+    metadata_bytes = _structured_int(summary.get("metadata_bytes"), "metadata_bytes")
+    document_bytes = _structured_int(summary.get("document_bytes"), "document_bytes", 1)
+    encoding, source_path = summary.get("input_encoding"), summary.get("source_path")
+    if not isinstance(encoding, str) or not encoding or not isinstance(source_path, str):
+        raise ValueError("structure input encoding/source_path is missing")
+    _structured_artifact(summary, "structure_artifact", structure_bytes)
+    # metadata_json is verbatim family output, including empty bytes or NULs.
+    # Parsing it here would invent a shared schema not present in the C API.
+    _structured_artifact(summary, "metadata_artifact", metadata_bytes)
+    if "confidence" not in summary:
+        raise ValueError("confidence must explicitly be null or a complete confidence object")
+    confidence = summary["confidence"]
+    confidence_shape = None
+    if confidence is not None:
+        if not isinstance(confidence, Mapping):
+            raise ValueError("confidence must be null or an object")
+        for name in ("confidence_score", "ptm", "iptm", "ligand_iptm", "protein_iptm",
+                     "complex_plddt", "complex_iplddt"):
+            _structured_number(confidence.get(name), f"confidence.{name}")
+        confidence_shape = _structured_values(confidence.get("plddt"), "confidence.plddt")
+    # Textual numbers may differ in width without changing the representation;
+    # each artifact length is checked above, not equated across predictions.
+    return structures, format_name, document_bytes, encoding, source_path, confidence_shape
+
+
+def _pose_refinement_signature(summary: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Validate all row-major pose/query arrays; family tests retain numerical oracles."""
+    count = _structured_int(summary.get("refined_hypotheses"), "refined_hypotheses", 1)
+    shape = summary.get("shape")
+    if (not isinstance(shape, list) or shape != [count, 4, 4]
+            or any(type(axis) is not int for axis in shape)):
+        raise ValueError("refined pose shape must be [N,4,4]")
+    _structured_values(summary.get("refined_poses"), "refined_poses", count * 16)
+    scores = _structured_values(summary.get("scores"), "scores")
+    if scores != count and not (count == 1 and scores == 0):
+        raise ValueError("scores must cover every hypothesis, except a single unscored pose")
+    best = _structured_int(summary.get("best_index"), "best_index")
+    if best >= count:
+        raise ValueError("best_index is outside the returned hypotheses")
+    rigid = summary.get("all_poses_rigid")
+    if not isinstance(rigid, bool):
+        raise ValueError("all_poses_rigid must preserve the family boolean flag")
+    for name in ("refinement_ms", "scoring_ms"):
+        _structured_number(summary.get(name), name)
+    queries = summary.get("crop_queries")
+    if not isinstance(queries, list):
+        raise ValueError("crop_queries must preserve the complete callback trace")
+    trace = []
+    for query in queries:
+        if not isinstance(query, Mapping):
+            raise ValueError("crop query must be an object")
+        stage = query.get("stage")
+        if not isinstance(stage, str) or stage not in {"refinement", "scoring"}:
+            raise ValueError("crop query has an unknown stage")
+        iteration = _structured_int(query.get("iteration"), "crop query iteration")
+        query_shape = query.get("shape")
+        if (not isinstance(query_shape, list) or len(query_shape) != 3
+                or query_shape[1:] != [4, 4]
+                or any(type(axis) is not int for axis in query_shape)):
+            raise ValueError("crop query shape must be [N,4,4]")
+        query_count = _structured_int(query_shape[0], "crop query count", 1)
+        _structured_values(query.get("poses"), "crop query poses", query_count * 16)
+        trace.append((stage, iteration, tuple(query_shape)))
+    # No argmax, rigid-transform tolerance or fixed iteration/scheduler policy.
+    return tuple(shape), scores, rigid, tuple(trace)
+
+
+def _offline_speech_wav_chunks(payload: bytes) -> dict[bytes, bytes]:
+    if (len(payload) < 12 or payload[:4] != b"RIFF" or payload[8:12] != b"WAVE"
+            or int.from_bytes(payload[4:8], "little") + 8 != len(payload)):
+        raise ValueError("audio_artifact must be a complete little-endian RIFF/WAVE file")
+    chunks: dict[bytes, bytes] = {}
+    offset = 12
+    while offset < len(payload):
+        if offset + 8 > len(payload):
+            raise ValueError("audio_artifact has a truncated chunk header")
+        kind = payload[offset:offset + 4]
+        size = int.from_bytes(payload[offset + 4:offset + 8], "little")
+        end = offset + 8 + size
+        if end + (size & 1) > len(payload):
+            raise ValueError("audio_artifact has a truncated chunk")
+        if kind in {b"fmt ", b"data"}:
+            if kind in chunks:
+                raise ValueError("audio_artifact repeats a format or data chunk")
+            chunks[kind] = payload[offset + 8:end]
+        offset = end + (size & 1)
+    if b"fmt " not in chunks or b"data" not in chunks:
+        raise ValueError("audio_artifact requires explicit format and data chunks")
+    return chunks
+
+
+def _offline_speech_wav(path_value: Any) -> tuple[list[float], int, int]:
+    # The reference writes soundfile subtype=FLOAT. The existing PCM WAV helper
+    # cannot read that format and also downmixes; neither conversion belongs here.
+    if not isinstance(path_value, str) or not path_value:
+        raise ValueError("audio_artifact must identify the complete Float32 WAV output")
+    chunks = _offline_speech_wav_chunks(Path(path_value).read_bytes())
+    if len(chunks[b"fmt "]) < 16:
+        raise ValueError("audio_artifact has an incomplete WAV format")
+    kind, channels, rate, byte_rate, alignment, bits = struct.unpack_from("<HHIIHH", chunks[b"fmt "])
+    if kind != 3 or bits != 32 or channels < 1 or rate < 1:
+        raise ValueError("audio_artifact must use IEEE Float32 WAV with a valid audio format")
+    data = chunks[b"data"]
+    if alignment != channels * 4 or byte_rate != rate * alignment or len(data) % alignment:
+        raise ValueError("audio_artifact byte layout does not match its complete audio frames")
+    values = array("f")
+    values.frombytes(data)
+    if sys.byteorder != "little":
+        values.byteswap()
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("audio_artifact contains nonfinite PCM")
+    return values.tolist(), rate, channels
+
+
+def _offline_speech_input(summary: Mapping[str, Any]) -> tuple[int, int, int]:
+    count = _structured_int(summary.get("input_samples"), "input_samples", 1)
+    rate = _structured_int(summary.get("input_sample_rate"), "input_sample_rate", 1)
+    channels = _structured_int(summary.get("input_channels"), "input_channels", 1)
+    if count > (1 << 64) - 1 or rate > (1 << 32) - 1 or channels > (1 << 32) - 1:
+        raise ValueError("input count or format exceeds its public integer representation")
+    if count % channels:
+        raise ValueError("input_samples must contain complete interleaved frames")
+    if "input_frames" in summary:
+        frames = _structured_int(summary["input_frames"], "input_frames", 1)
+        if frames != count // channels:
+            raise ValueError("input_frames differs from input_samples and channels")
+    return count, rate, channels
+
+
+def _offline_speech_duration(value: Any, samples: int, rate: int, channels: int) -> None:
+    _structured_number(value, "audio duration")
+    if not math.isclose(value, samples / channels / rate, rel_tol=1e-12, abs_tol=1e-12):
+        raise ValueError("audio duration differs from the complete PCM count and format")
+
+
+def _offline_speech_event(event: Any, rate: int, channels: int) -> tuple[str, int]:
+    kinds = {
+        "agent_audio", "agent_text", "user_transcript", "turn_started", "turn_finished",
+        "yielded", "reset", "input_finished", "user_speech_started", "user_speech_stopped",
+        "input_cleared",
+    }
+    if not isinstance(event, Mapping):
+        raise ValueError("offline speech events must be objects")
+    kind = event.get("kind")
+    if not isinstance(kind, str) or kind not in kinds:
+        raise ValueError("unsupported or failed offline speech event kind")
+    epoch = _structured_int(event.get("epoch"), "event epoch")
+    _structured_int(event.get("sequence"), "event sequence")
+    if not isinstance(event.get("text"), str) or not isinstance(event.get("is_final"), bool):
+        raise ValueError("speech event text and final marker must be explicit typed values")
+    count = _structured_int(event.get("audio_samples"), "event audio_samples")
+    _structured_values(event.get("audio"), "event audio", count)
+    if any(abs(value) > 3.4028234663852886e38 for value in event["audio"]):
+        raise ValueError("event audio exceeds the finite Float32 representation")
+    event_channels = _structured_int(event.get("channels"), "event channels")
+    event_rate = event.get("sample_rate")
+    if event_rate is not None:
+        _structured_int(event_rate, "event sample_rate", 1)
+    if kind == "agent_audio":
+        if (event_rate, event_channels) != (rate, channels) or count % channels:
+            raise ValueError("agent audio chunks must retain the declared output format")
+    elif count:
+        raise ValueError("non-audio speech event contains unaccounted PCM")
+    return kind, epoch
+
+
+def _offline_speech_candidate(summary: Mapping[str, Any]) -> dict[str, Any]:
+    events, output_format = summary.get("events"), summary.get("output_format")
+    if not isinstance(events, list) or not isinstance(output_format, Mapping):
+        raise ValueError("offline speech requires complete events and an explicit output format")
+    rate = _structured_int(output_format.get("sample_rate"), "output sample_rate", 1)
+    channels = _structured_int(output_format.get("channels"), "output channels", 1)
+    if rate > (1 << 32) - 1 or channels > (1 << 32) - 1:
+        raise ValueError("output audio format must fit its public uint32 representation")
+    turns: dict[int, dict[str, Any]] = {}
+    audio: list[float] = []
+    for event in events:
+        kind, epoch = _offline_speech_event(event, rate, channels)
+        if kind == "agent_audio":
+            audio.extend(event["audio"])
+        elif kind == "agent_text":
+            turn = turns.setdefault(epoch, {"partial": "", "final": None})
+            if event["is_final"]:
+                turn["final"] = event["text"]
+            else:
+                turn["partial"] += event["text"]
+    # Epoch order is first appearance, not numeric sorting. A final string is a
+    # complete replacement, never another delta appended to the partial text.
+    text = " ".join(piece for turn in turns.values()
+                    if (piece := turn["final"] if turn["final"] is not None else turn["partial"]))
+    _offline_speech_duration(summary.get("output_audio_seconds"), len(audio), rate, channels)
+    return {"text": text, "audio": audio, "sample_rate": rate, "channels": channels,
+            "input": _offline_speech_input(summary)}
+
+
+def _offline_speech_reference(summary: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(summary.get("text"), str):
+        raise ValueError("offline speech reference must retain its complete text output")
+    count = _structured_int(summary.get("num_samples"), "num_samples")
+    declared = _structured_int(summary.get("audio_samples"), "audio_samples")
+    rate = _structured_int(summary.get("sample_rate"), "sample_rate", 1)
+    channels = _structured_int(summary.get("channels"), "channels", 1)
+    audio, artifact_rate, artifact_channels = _offline_speech_wav(summary.get("audio_artifact"))
+    if count != declared or count != len(audio) or (rate, channels) != (artifact_rate, artifact_channels):
+        raise ValueError("reference counts/format differ from the complete PCM artifact")
+    if summary.get("finite") is not True:
+        raise ValueError("reference finite marker is missing or contradicts the PCM artifact")
+    _offline_speech_duration(summary.get("audio_seconds"), count, rate, channels)
+    return {"text": summary["text"], "audio": audio, "sample_rate": rate, "channels": channels,
+            "input": _offline_speech_input(summary)}
+
+
+def _offline_speech_contract(
+    entry: ResolvedEntry, left: Mapping[str, Any], right: Mapping[str, Any]
+) -> tuple[bool, str, dict[str, Any]]:
+    evidence: dict[str, Any] = {
+        "contract": "offline-speech-shape", "numerical_parity_checked": False,
+        "text_parity_checked": False,
+    }
+    if entry.spec["operation"] != "speech_dialogue" or _effective_task(entry) != "offline_speech_dialogue":
+        return False, "offline speech contract cannot qualify live, tool or non-dialogue Tasks", evidence
+    for side, summary, parse in (("candidate", left, _offline_speech_candidate),
+                                 ("reference", right, _offline_speech_reference)):
+        try:
+            value = parse(summary)
+        except (ValueError, OSError, OverflowError) as error:
+            return False, f"{side} offline-speech-shape: {error}", evidence
+        evidence[side] = {
+            "text": value["text"], "audio_samples": len(value["audio"]),
+            "sample_rate": value["sample_rate"], "channels": value["channels"],
+            "input_samples": value["input"][0], "input_sample_rate": value["input"][1],
+            "input_channels": value["input"][2],
+        }
+    names = ("audio_samples", "sample_rate", "channels", "input_samples",
+             "input_sample_rate", "input_channels")
+    matched = all(evidence["candidate"][name] == evidence["reference"][name] for name in names)
+    return matched, "offline speech PCM/input shape or format differs" if not matched else "", evidence
 
 
 def _token_count(value: Mapping[str, Any]) -> int | None:
@@ -1439,6 +2032,8 @@ def _execute_entry(
             reference = _json_file(reference_output, "reference result")
             if reference.get("status") != "completed":
                 raise PerfMatrixError(str(reference.get("error", "reference failed")))
+            if "script" in entry.spec["baseline"]:
+                _validate_script_result(entry, environment, reference)
 
             status, comparison = compare(entry, candidate, reference)
             if status not in TERMINAL_COMPARISONS:

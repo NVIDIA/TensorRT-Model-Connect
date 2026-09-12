@@ -11,14 +11,18 @@ from types import SimpleNamespace
 import pytest
 
 from tensorrt_model_connect import build_cli
+from tensorrt_model_connect.model_support import FamilySupport
 
 
 def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) -> None:
     captured = []
     monkeypatch.setattr(build_cli, "build", captured.append)
+    monkeypatch.setattr(build_cli, "resolve_family", lambda metadata: (
+        "example_owner", FamilySupport(("owner_default", "explicit_task"), "owner_default")
+    ))
     model = tmp_path / "model"
     model.mkdir()
-    (model / "config.json").write_text('{"model_type":"patchtsmixer"}', encoding="utf-8")
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
     output = tmp_path / "model.bundle"
 
     assert (
@@ -29,7 +33,7 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
                 "--output",
                 str(output),
                 "--task",
-                "time_series_forecast",
+                "explicit_task",
                 "--precision",
                 "fp16",
                 "--backend",
@@ -63,8 +67,8 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
     request = captured[0]
     assert request.model_dir == model
     assert request.output_path == output
-    assert request.family == "patchtsmixer"
-    assert request.task == "time_series_forecast"
+    assert request.family == "example_owner"
+    assert request.task == "explicit_task"
     assert request.precision == "fp16"
     assert request.backend == "trt_rtx"
     assert request.max_sequence_length == 1024
@@ -83,15 +87,96 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
 def test_build_command_uses_the_family_owned_default_task(monkeypatch, tmp_path: Path) -> None:
     captured = []
     monkeypatch.setattr(build_cli, "build", captured.append)
+    monkeypatch.setattr(build_cli, "resolve_family", lambda metadata: (
+        "example_owner", FamilySupport(("owner_default", "explicit_task"), "owner_default")
+    ))
     model = tmp_path / "model"
     model.mkdir()
-    (model / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
 
     assert build_cli.main(["build", str(model), "--output", str(tmp_path / "out.bundle")]) == 0
 
-    assert captured[0].family == "gpt2"
-    assert captured[0].task == "text_generation"
+    assert captured[0].family == "example_owner"
+    assert captured[0].task == "owner_default"
     assert captured[0].precision == "fp32"
+
+
+def test_console_build_reuses_the_existing_builder(monkeypatch) -> None:
+    from tensorrt_model_connect import __main__ as launcher
+
+    calls = []
+    monkeypatch.setattr(build_cli, "main", lambda arguments: calls.append(arguments) or 7)
+    monkeypatch.setattr(launcher.os, "execv", lambda *args: pytest.fail("build invoked runtime"))
+    arguments = ["build", "example/model", "-o", "model.bundle"]
+    assert launcher.main(arguments) == 7
+    assert calls == [arguments]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["run", "model.bundle", "--prompt", "Hello"],
+        ["run", "model.bundle", "--runtime-root", "/explicit/runtime", "--prompt", ""],
+        ["inspect", "model.bundle"],
+        ["version"],
+    ],
+)
+def test_console_runtime_executes_only_the_packaged_native_binary(
+    monkeypatch, tmp_path: Path, arguments: list[str]
+) -> None:
+    from tensorrt_model_connect import __main__ as launcher
+
+    monkeypatch.setattr(launcher, "__file__", str(tmp_path / "package" / "__main__.py"))
+    calls = []
+
+    class Replaced(BaseException):
+        pass
+
+    def execute(path, argv):
+        calls.append((path, argv))
+        raise Replaced
+
+    monkeypatch.setattr(launcher.os, "execv", execute)
+    original = list(arguments)
+    with pytest.raises(Replaced):
+        launcher.main(arguments)
+    native = tmp_path / "package" / "bin" / "trtmc"
+    expected = list(arguments)
+    if arguments[0] == "run" and "--runtime-root" not in arguments:
+        expected += ["--runtime-root", str(native.parent)]
+    assert calls == [(str(native), [str(native), *expected])]
+    assert arguments == original
+
+
+def test_console_missing_native_binary_fails_without_path_fallback(monkeypatch, capsys) -> None:
+    from tensorrt_model_connect import __main__ as launcher
+
+    calls = []
+
+    def missing(path, argv):
+        calls.append(path)
+        raise FileNotFoundError("packaged binary is missing")
+
+    monkeypatch.setattr(launcher.os, "execv", missing)
+    assert launcher.main(["version"]) == 1
+    assert len(calls) == 1
+    assert "cannot execute packaged trtmc" in capsys.readouterr().err
+
+
+def test_console_help_includes_build_and_delegates_native_help(monkeypatch, capsys) -> None:
+    from tensorrt_model_connect import __main__ as launcher
+
+    class Replaced(BaseException):
+        pass
+
+    def execute(path, argv):
+        assert argv == [path, "help"]
+        raise Replaced
+
+    monkeypatch.setattr(launcher.os, "execv", execute)
+    with pytest.raises(Replaced):
+        launcher.main(["--help"])
+    assert "trtmc build MODEL -o model.bundle" in capsys.readouterr().out
 
 
 def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_path: Path) -> None:
@@ -114,10 +199,13 @@ def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_pat
 def test_build_command_rejects_a_task_the_family_does_not_own(monkeypatch, tmp_path: Path) -> None:
     model = tmp_path / "model"
     model.mkdir()
-    (model / "config.json").write_text('{"model_type":"gpt2"}', encoding="utf-8")
-    monkeypatch.setattr(build_cli, "build", lambda request: None)
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
+    monkeypatch.setattr(build_cli, "resolve_family", lambda metadata: (
+        "example_owner", FamilySupport(("owner_default", "explicit_task"), "owner_default")
+    ))
+    monkeypatch.setattr(build_cli, "build", lambda request: pytest.fail("unsupported task reached build"))
 
-    with pytest.raises(ValueError, match="does not support task 'embedding'"):
+    with pytest.raises(ValueError, match="does not support task 'unowned_task'"):
         build_cli.main(
             [
                 "build",
@@ -125,7 +213,7 @@ def test_build_command_rejects_a_task_the_family_does_not_own(monkeypatch, tmp_p
                 "--output",
                 str(tmp_path / "out.bundle"),
                 "--task",
-                "embedding",
+                "unowned_task",
             ]
         )
 
@@ -172,3 +260,66 @@ def test_prepare_structure_dispatches_to_the_resolved_family(
         "cache_hit": False,
         "family": "boltz2",
     }
+
+
+def test_prepare_structure_uses_the_family_hook_after_task_migration(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
+    support = FamilySupport(
+        ("molecular_document_to_structure",), "molecular_document_to_structure"
+    )
+    monkeypatch.setattr(build_cli, "resolve_family", lambda metadata: ("example_owner", support))
+    monkeypatch.setattr(build_cli, "build", lambda request: pytest.fail("preparation invoked build"))
+    request = tmp_path / "request.yaml"
+    request.write_text("version: 1\n", encoding="utf-8")
+    output = tmp_path / "prepared.request"
+    calls = []
+
+    def prepare(model_dir, input_path, output_path, *, cache_dir):
+        calls.append((model_dir, input_path, output_path, cache_dir))
+        output_path.write_bytes(input_path.read_bytes())
+        return {"family": "example_owner", "output": str(output_path)}
+
+    def load_family(family):
+        assert family == "example_owner"
+        return SimpleNamespace(prepare_structure_request=prepare)
+
+    monkeypatch.setattr(build_cli, "_load_family", load_family)
+
+    assert build_cli.main([
+        "prepare-structure", str(model), "--input", str(request), "-o", str(output)
+    ]) == 0
+    assert calls == [(model, request, output, None)]
+    assert output.read_bytes() == request.read_bytes()
+    assert json.loads(capsys.readouterr().out) == {
+        "family": "example_owner", "output": str(output)
+    }
+
+
+@pytest.mark.parametrize("hook", ["absent", None, "not callable"])
+def test_prepare_structure_requires_a_callable_family_hook(
+    monkeypatch, tmp_path: Path, hook
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
+    support = FamilySupport(
+        ("molecular_document_to_structure",), "molecular_document_to_structure"
+    )
+    monkeypatch.setattr(build_cli, "resolve_family", lambda metadata: ("example_owner", support))
+    module = SimpleNamespace()
+    if hook != "absent":
+        module.prepare_structure_request = hook
+    monkeypatch.setattr(build_cli, "_load_family", lambda family: module)
+    monkeypatch.setattr(build_cli, "build", lambda request: pytest.fail("preparation invoked build"))
+    output = tmp_path / "prepared.request"
+
+    with pytest.raises(ValueError, match="family 'example_owner' does not support request preparation"):
+        build_cli.main([
+            "prepare-structure", str(model), "--input", str(tmp_path / "request.yaml"),
+            "-o", str(output),
+        ])
+    assert not output.exists()
