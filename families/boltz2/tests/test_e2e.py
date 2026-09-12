@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import struct
 import subprocess
 import tarfile
 from pathlib import Path
@@ -29,7 +30,19 @@ def _record_request_evidence(request: Path, prepared: Path | None = None) -> Non
     if not evidence_enabled():
         return
     try:
-        from families.boltz2.contracts import parse_request_yaml
+        from families.boltz2.contracts import LigandInput, parse_request_yaml
+
+        def entity_text(entity) -> str:
+            if isinstance(entity, LigandInput):
+                value = entity.smiles or ",".join(entity.ccd)
+                return "Ligand " + ", ".join(entity.chain_ids) + "\n" + value
+            return (
+                entity.kind.value.title()
+                + " "
+                + ", ".join(entity.chain_ids)
+                + "\n"
+                + entity.sequence
+            )
 
         record_evidence("inputs", {"request_file": request, "prepared_request": prepared})
         if request.stat().st_size > 65536:
@@ -39,25 +52,20 @@ def _record_request_evidence(request: Path, prepared: Path | None = None) -> Non
         record_evidence(
             "inputs",
             {
-                "text": "\n\n".join(
-                    sequence.kind.value.title()
-                    + " "
-                    + ", ".join(sequence.chain_ids)
-                    + "\n"
-                    + sequence.sequence
-                    for sequence in parsed.sequences
-                ),
+                "text": "\n\n".join(entity_text(entity) for entity in parsed.sequences),
                 "sequences": [
                     {
-                        "chain_ids": list(sequence.chain_ids),
-                        "sequence": sequence.sequence,
+                        "chain_ids": list(entity.chain_ids),
+                        "sequence": getattr(entity, "sequence", None),
+                        "smiles": getattr(entity, "smiles", None),
+                        "ccd": list(getattr(entity, "ccd", ())),
                         "msa": (
-                            request.parent / sequence.msa_path
-                            if sequence.msa_path is not None
+                            request.parent / entity.msa_path
+                            if getattr(entity, "msa_path", None) is not None
                             else None
                         ),
                     }
-                    for sequence in parsed.sequences
+                    for entity in parsed.sequences
                 ],
             },
         )
@@ -73,7 +81,10 @@ def _record_native_evidence(structure: Path, metadata: Path) -> None:
         if metadata.stat().st_size <= 8 * 1024 * 1024:
             record_evidence("native", json.loads(metadata.read_text(encoding="utf-8")))
         else:
-            record_evidence("native", {"metadata": metadata, "omitted": "metadata exceeds the JSON preview bound"})
+            record_evidence(
+                "native",
+                {"metadata": metadata, "omitted": "metadata exceeds the JSON preview bound"},
+            )
     except Exception as error:
         record_evidence("native_preview", {"error": f"{type(error).__name__}: {error}"})
 
@@ -84,7 +95,9 @@ def _record_reference_comparison(structure: Path, reference: Path, accuracy: Pat
     try:
         record_evidence("comparison_artifacts", {"accuracy": accuracy})
         if accuracy.stat().st_size > 8 * 1024 * 1024:
-            record_evidence("comparison_preview", {"omitted": "accuracy exceeds the JSON preview bound"})
+            record_evidence(
+                "comparison_preview", {"omitted": "accuracy exceeds the JSON preview bound"}
+            )
             return
         metrics = json.loads(accuracy.read_text(encoding="utf-8"))
         record_evidence("metrics", metrics)
@@ -120,14 +133,34 @@ def _record_reference_comparison(structure: Path, reference: Path, accuracy: Pat
                 ("lddt", "lDDT", ">=", "lddt_min"),
                 ("kabsch_rmsd_angstrom", "Aligned RMSD (Å)", "<=", "kabsch_rmsd_angstrom_max"),
                 ("plddt_mean_abs", "Mean pLDDT difference", "<=", "plddt_mean_abs_max"),
-                ("confidence_score_abs", "Confidence score difference", "<=", "confidence_score_abs_max"),
+                (
+                    "confidence_score_abs",
+                    "Confidence score difference",
+                    "<=",
+                    "confidence_score_abs_max",
+                ),
                 ("complex_plddt_abs", "Complex pLDDT difference", "<=", "complex_plddt_abs_max"),
-                ("complex_iplddt_abs", "Complex interface pLDDT difference", "<=", "complex_iplddt_abs_max"),
+                (
+                    "complex_iplddt_abs",
+                    "Complex interface pLDDT difference",
+                    "<=",
+                    "complex_iplddt_abs_max",
+                ),
                 ("ptm_abs", "pTM difference", "<=", "ptm_abs_max"),
                 ("iptm_abs", "ipTM difference", "<=", "iptm_abs_max"),
                 ("protein_iptm_abs", "Protein ipTM difference", "<=", "protein_iptm_abs_max"),
-                ("chains_ptm_max_abs", "Largest per-chain pTM difference", "<=", "chains_ptm_max_abs_max"),
-                ("pair_chains_iptm_max_abs", "Largest chain-pair ipTM difference", "<=", "pair_chains_iptm_max_abs_max"),
+                (
+                    "chains_ptm_max_abs",
+                    "Largest per-chain pTM difference",
+                    "<=",
+                    "chains_ptm_max_abs_max",
+                ),
+                (
+                    "pair_chains_iptm_max_abs",
+                    "Largest chain-pair ipTM difference",
+                    "<=",
+                    "pair_chains_iptm_max_abs_max",
+                ),
             )
         )
         record_evidence(
@@ -159,7 +192,7 @@ CASES = _cases()
 
 
 def test_biomolecular_request_contract() -> None:
-    from families.boltz2.contracts import PolymerKind, parse_request_yaml
+    from families.boltz2.contracts import LigandInput, PolymerKind, parse_request_yaml
 
     request = parse_request_yaml(
         """version: 1
@@ -182,18 +215,39 @@ sequences:
   - rna:
       id: E
       sequence: ACGUN
+  - ligand:
+      id: L
+      smiles: CCO
+  - ligand:
+      id: M
+      ccd: EOH
 templates:
   - cif: template.cif
     chain_id: [A, B]
     template_id: [X, Y]
+properties:
+  - affinity:
+      binder: L
+constraints:
+  - pocket:
+      binder: L
+      contacts: [[A, 1], [C, 2]]
+  - contact:
+      token1: [L, C1]
+      token2: [A, 2]
 """
     )
-    assert request.token_count == 23
+    assert request.token_count == 25
     assert request.sequences[0].chain_ids == ("A", "B")
     assert request.sequences[1].chain_ids == ("C",)
     assert request.sequences[1].cyclic is True
     assert request.sequences[2].kind is PolymerKind.DNA
     assert request.sequences[3].kind is PolymerKind.RNA
+    assert isinstance(request.sequences[4], LigandInput)
+    assert isinstance(request.sequences[5], LigandInput)
+    assert request.sequences[5].ccd == ("EOH",)
+    assert request.affinity is not None and request.affinity.binder == "L"
+    assert len(request.constraints) == 2
     assert request.templates[0].template_chain_ids == ("X", "Y")
 
 
@@ -221,7 +275,10 @@ def pytest_generate_tests(metafunc) -> None:
         "case_name",
         names
         if enabled
-        else [pytest.param(name, marks=pytest.mark.skip(reason="select Boltz-2 E2E explicitly")) for name in names],
+        else [
+            pytest.param(name, marks=pytest.mark.skip(reason="select Boltz-2 E2E explicitly"))
+            for name in names
+        ],
         ids=names,
     )
 
@@ -248,7 +305,7 @@ def _model_dir(manifest: dict, tmp_path: Path) -> Path:
                 repo_id=manifest["hf_id"],
                 revision=manifest["hf_revision"],
                 local_files_only=True,
-                allow_patterns=["boltz2_conf.ckpt", "mols.tar"],
+                allow_patterns=["boltz2_conf.ckpt", "boltz2_aff.ckpt", "mols.tar"],
             )
         )
     except Exception as error:
@@ -258,7 +315,7 @@ def _model_dir(manifest: dict, tmp_path: Path) -> Path:
 
     model_dir = tmp_path / "boltz2-model"
     model_dir.mkdir()
-    for name in ("boltz2_conf.ckpt", "mols.tar"):
+    for name in ("boltz2_conf.ckpt", "boltz2_aff.ckpt", "mols.tar"):
         source = snapshot / name
         assert source.is_file(), f"cached Boltz-2 snapshot is missing {name}"
         (model_dir / name).symlink_to(source.resolve(strict=True))
@@ -343,12 +400,88 @@ def _assert_live_reference_parity(
             _record_reference_comparison(structure, reference, output_dir / "accuracy.json")
 
 
+def _assert_live_affinity_parity(model_dir: Path, processed_dir: Path, metadata: Path) -> None:
+    import torch
+
+    from families.boltz2.reference import (
+        load_affinity_reference_model,
+        predict_affinity_reference,
+    )
+    from families.boltz2.request_preparation import load_profile_features
+
+    batch = None
+    model = None
+    prediction = None
+    checks = []
+    try:
+        batch = load_profile_features(processed_dir, model_dir / "mols")
+        model = load_affinity_reference_model(model_dir / "boltz2_aff.ckpt")
+        prediction = predict_affinity_reference(model, batch)
+        native = json.loads(metadata.read_text(encoding="utf-8"))
+        limits = {
+            "affinity_pred_value": 0.50,
+            "affinity_probability_binary": 0.03,
+            "affinity_pred_value1": 0.50,
+            "affinity_probability_binary1": 0.06,
+            "affinity_pred_value2": 0.50,
+            "affinity_probability_binary2": 0.06,
+        }
+        try:
+            for name, limit in limits.items():
+                reference = float(prediction[name].detach().float().cpu().reshape(-1)[0])
+                error = abs(float(native[name]) - reference)
+                checks.append(
+                    {
+                        "name": name,
+                        "actual": error,
+                        "operator": "<=",
+                        "expected": limit,
+                        "passed": error <= limit,
+                    }
+                )
+        finally:
+            record_evidence(
+                "affinity_reference_comparison", {"enforced": True, "checks": checks}
+            )
+        for check in checks:
+            assert check["passed"], (
+                f"{check['name']} absolute error {check['actual']} "
+                f"exceeds {check['expected']}"
+            )
+        assert np.isclose(
+            native["affinity_pred_value"],
+            (native["affinity_pred_value1"] + native["affinity_pred_value2"]) / 2.0,
+            rtol=0.0,
+            atol=1.0e-6,
+        )
+        assert np.isclose(
+            native["affinity_probability_binary"],
+            (
+                native["affinity_probability_binary1"]
+                + native["affinity_probability_binary2"]
+            )
+            / 2.0,
+            rtol=0.0,
+            atol=1.0e-6,
+        )
+    finally:
+        del prediction, model, batch
+        torch.cuda.empty_cache()
+
+
 def test_model_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     _record_request_evidence(TEST_ROOT / case["request"])
     model_dir = _model_dir(manifest, tmp_path)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest["hf_id"], "hf_revision": manifest["hf_revision"]})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest["hf_id"],
+            "hf_revision": manifest["hf_revision"],
+        },
+    )
     binary = _required_environment("TRTMC_BINARY")
     runtime_root = _required_environment("TRTMC_RUNTIME_ROOT")
     assert manifest["hf_id"] and manifest["hf_revision"]
@@ -394,13 +527,16 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
             env=environment,
             timeout=1800,
         )
-        record_evidence("native_process", {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr})
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
         record_evidence("native_summary", _last_json(completed.stdout))
         details = json.loads(metadata.read_text(encoding="utf-8"))
         record_evidence("native", {**details, "structure": structure, "metadata": metadata})
-    thresholds = json.loads(
-        (THRESHOLD_ROOT / f"{case_name}.json").read_text(encoding="utf-8")
-    )["threshold_overrides"]
+    thresholds = json.loads((THRESHOLD_ROOT / f"{case_name}.json").read_text(encoding="utf-8"))[
+        "threshold_overrides"
+    ]
     record_evidence("thresholds", thresholds)
     atom_count = sum(line.startswith("ATOM ") for line in structure.read_text().splitlines())
     token_count = len(details["plddt"])
@@ -470,12 +606,24 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
                 "sequences": [
                     {"protein": {"id": "A", "sequence": "ACDE", "msa": "a.csv", "cyclic": True}},
                     {"protein": {"id": "B", "sequence": "FGHIK", "msa": "b.csv"}},
-                    {"protein": {"id": "C", "sequence": "S", "msa": "empty", "modifications": [{"ccd": "SEP", "position": 1}]}},
+                    {
+                        "protein": {
+                            "id": "C",
+                            "sequence": "S",
+                            "msa": "empty",
+                            "modifications": [{"ccd": "SEP", "position": 1}],
+                        }
+                    },
                     {"dna": {"id": "D", "sequence": "ACGTN"}},
                     {"rna": {"id": "R", "sequence": "ACGUN"}},
+                    {"ligand": {"id": "L", "ccd": "EOH"}},
                 ],
-                "templates": [
-                    {"pdb": "template.pdb", "chain_id": "A", "template_id": "X1"}
+                "templates": [{"pdb": "template.pdb", "chain_id": "A", "template_id": "X1"}],
+                "properties": [{"affinity": {"binder": "L"}}],
+                "constraints": [
+                    {"bond": {"atom1": ["A", 1, "CA"], "atom2": ["B", 1, "CA"]}},
+                    {"pocket": {"binder": "L", "contacts": [["A", 1], ["B", 1]]}},
+                    {"contact": {"token1": ["A", 2], "token2": ["B", 2]}},
                 ],
             }
         ),
@@ -491,6 +639,58 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
     )
     record_evidence("request_preparation", preparation)
     _record_request_evidence(biomolecular_request, prepared)
+
+    from families.boltz2.feature_bundle import deserialize_features, serialize_features
+    from families.boltz2.request_preparation import serialize_prepared_request
+
+    prepared_payload = prepared.read_bytes()
+    prepared_header = struct.Struct("<4sI4Q")
+    magic, version, *section_sizes = prepared_header.unpack_from(prepared_payload)
+    assert magic == b"B2RQ" and version == 4
+    section_offset = prepared_header.size
+    prepared_sections = []
+    for section_size in section_sizes:
+        prepared_sections.append(
+            prepared_payload[section_offset : section_offset + section_size]
+        )
+        section_offset += section_size
+    assert section_offset == len(prepared_payload)
+    malformed_features = deserialize_features(prepared_sections[1])
+    affinity_mask = malformed_features["affinity_token_mask"].copy()
+    affinity_tokens = np.flatnonzero(affinity_mask)
+    assert affinity_tokens.size > 1
+    affinity_mask.flat[affinity_tokens[-1]] = 0
+    malformed_features["affinity_token_mask"] = affinity_mask
+    malformed_prepared = tmp_path / "biomolecular-partial-affinity-mask.b2rq"
+    malformed_prepared.write_bytes(
+        serialize_prepared_request(
+            prepared_sections[0],
+            serialize_features(malformed_features),
+            prepared_sections[2],
+            prepared_sections[3],
+        )
+    )
+    rejected = subprocess.run(
+        [
+            str(binary),
+            "predict-structure",
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            "--input",
+            str(malformed_prepared),
+            "--output",
+            str(tmp_path / "malformed.cif"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=60,
+    )
+    assert rejected.returncode != 0
+    assert "affinity mask must cover the complete ligand chain" in rejected.stderr
+
     biomolecular_structure = tmp_path / "biomolecular.cif"
     biomolecular_metadata = tmp_path / "biomolecular.json"
     with evidence_stage("native"):
@@ -514,9 +714,15 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
             env=environment,
             timeout=1800,
         )
-        record_evidence("native_process", {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr})
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
         record_evidence("native_summary", _last_json(completed.stdout))
     _record_native_evidence(biomolecular_structure, biomolecular_metadata)
+    affinity_metadata = json.loads(biomolecular_metadata.read_text(encoding="utf-8"))
+    assert np.isfinite(affinity_metadata["affinity_pred_value"])
+    assert 0.0 <= affinity_metadata["affinity_probability_binary"] <= 1.0
     processed_request = (
         request_cache
         / str(preparation["cache_key"])[:2]
@@ -534,11 +740,9 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
             bundle_stat.st_mtime_ns,
             bundle_stat.st_ctime_ns,
         ) == bundle_identity
-        biomolecular_details = json.loads(
-            biomolecular_metadata.read_text(encoding="utf-8")
-        )
+        biomolecular_details = json.loads(biomolecular_metadata.read_text(encoding="utf-8"))
         assert biomolecular_details["profile"] == "tokens_117_atoms_928"
-        assert biomolecular_details["active_token_count"] == 20
+        assert biomolecular_details["active_token_count"] == 23
         assert biomolecular_details["active_atom_count"] == active_atoms
         assert biomolecular_details["chain_pair_confidence"] == []
     _assert_live_reference_parity(
@@ -548,8 +752,10 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
         biomolecular_metadata,
         tmp_path / "biomolecular-reference",
         atom_count=active_atoms,
-        token_count=20,
+        token_count=23,
     )
+    with evidence_stage("affinity"):
+        _assert_live_affinity_parity(model_dir, processed_request, biomolecular_metadata)
     cached = prepare_structure_request(
         model_dir,
         biomolecular_request,

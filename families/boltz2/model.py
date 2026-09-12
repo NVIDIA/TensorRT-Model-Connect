@@ -11,8 +11,12 @@ from typing import Any, Callable
 
 from . import trt_compat
 
-from .checkpoint import validate_artifact, validate_structure_checkpoint
-from .contracts import INITIAL_BF16_PROFILE, parse_request_yaml, validate_a3m
+from .checkpoint import (
+    validate_affinity_checkpoint,
+    validate_artifact,
+    validate_structure_checkpoint,
+)
+from .contracts import INITIAL_BF16_PROFILE, SequenceInput, parse_request_yaml, validate_a3m
 from .engine_manifest import graph_manifest_json
 from .feature_bundle import (
     profile_feature_shapes,
@@ -20,6 +24,7 @@ from .feature_bundle import (
     structure_metadata_json,
 )
 from .model_config import (
+    AFFINITY_CHECKPOINT,
     CHECKPOINT,
     MOLS,
     MOLS_ARCHIVE,
@@ -101,8 +106,7 @@ def _validate_feature_profile(
         actual = _feature_shape(features, name)
         if actual != expected_shape:
             raise ValueError(
-                f"Boltz-2 processed feature {name!r} has shape {actual}, "
-                f"expected {expected_shape}"
+                f"Boltz-2 processed feature {name!r} has shape {actual}, expected {expected_shape}"
             )
 
 
@@ -160,6 +164,7 @@ class Boltz2Plugin:
         if root is None:
             raise ValueError(f"unsupported Boltz-2 package: {model_dir}")
         validate_structure_checkpoint(root / CHECKPOINT)
+        validate_affinity_checkpoint(root / AFFINITY_CHECKPOINT)
         validate_artifact(root / MOLS_ARCHIVE, PINNED_BOLTZ2.molecular_archive)
         request_payload = (root / REQUEST).read_bytes()
         try:
@@ -167,7 +172,11 @@ class Boltz2Plugin:
         except UnicodeDecodeError as error:
             raise ValueError("Boltz-2 request YAML must be UTF-8") from error
         request = parse_request_yaml(request_text)
-        if len(request.sequences) != 1 or len(request.sequences[0].chain_ids) != 1:
+        if (
+            len(request.sequences) != 1
+            or not isinstance(request.sequences[0], SequenceInput)
+            or len(request.sequences[0].chain_ids) != 1
+        ):
             raise ValueError(
                 "Boltz-2 bundle construction requires the pinned monomer package; "
                 "prepare compatible protein-complex requests after the bundle is built"
@@ -185,9 +194,7 @@ class Boltz2Plugin:
         )
         active_tokens = int(features["token_pad_mask"].sum().item())
         if active_tokens != request.token_count or len(msa_rows) > request_msa_depth:
-            raise ValueError(
-                "Boltz-2 processed features do not match the packaged request and MSA"
-            )
+            raise ValueError("Boltz-2 processed features do not match the packaged request and MSA")
         self._token_count = request_token_count
         self._atom_count = request_atom_count
         self._msa_depth = request_msa_depth
@@ -208,6 +215,8 @@ class Boltz2Plugin:
             "recycling_steps": 3,
             "sampling_steps": 200,
             "diffusion_samples": 1,
+            "affinity_recycling_steps": 5,
+            "affinity_diffusion_samples": 5,
             "seed": 42,
             "sigma_min": 0.0001,
             "sigma_max": 160.0,
@@ -256,6 +265,7 @@ class Boltz2Plugin:
         **_kwargs: Any,
     ) -> dict[str, bytes]:
         self._require_precision(precision)
+        from .affinity_builder import build_affinity_engine
         from .confidence_builder import build_confidence_engine
         from .diffusion_conditioning_builder import build_diffusion_conditioning_engine
         from .diffusion_score_input_builder import build_diffusion_score_input_engine
@@ -268,6 +278,7 @@ class Boltz2Plugin:
 
         root = _root(weights)
         checkpoint = root / CHECKPOINT
+        affinity_checkpoint = root / AFFINITY_CHECKPOINT
         # Resolve the model-owned feature payload before spending tens of
         # minutes compiling plans. This also makes a missing pinned Boltz
         # build dependency fail at preflight rather than after engine build.
@@ -363,6 +374,17 @@ class Boltz2Plugin:
                 atom_count=atom_count,
                 verbose=verbose,
             )
+            for member in (1, 2):
+                sections[f"boltz2_affinity_{member}_plan"] = _plan_bytes(
+                    temporary,
+                    f"affinity_{member}",
+                    build_affinity_engine,
+                    affinity_checkpoint,
+                    ensemble_member=member,
+                    token_count=token_count,
+                    atom_count=atom_count,
+                    verbose=verbose,
+                )
 
         sections.update(
             {
@@ -409,9 +431,7 @@ def build(request: Any, writer: Any) -> None:
         raise NotImplementedError("boltz2 max_sequence_length must match the 117-token profile")
 
     family = Boltz2Plugin()
-    weights = family.load_weights(
-        str(request.model_dir), None, precision=request.precision
-    )
+    weights = family.load_weights(str(request.model_dir), None, precision=request.precision)
     primary = family.build_engine(
         None, weights, 0, precision=request.precision, verbose=request.verbose
     )

@@ -68,6 +68,8 @@ boltz2::EngineSet loadEngines(const FamilyContext& context) {
         result.score_token[index] = loader.load(boltz2::kTokenSections[index]);
     result.score_output = loader.load("boltz2_diffusion_score_output_plan");
     result.confidence = loader.load("boltz2_confidence_plan");
+    result.affinity[0] = loader.load("boltz2_affinity_1_plan");
+    result.affinity[1] = loader.load("boltz2_affinity_2_plan");
     return result;
 }
 
