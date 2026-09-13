@@ -62,6 +62,14 @@ def silu(network, tensor):
     return output
 
 
+def leaky_relu(network, tensor):
+    layer = network.add_activation(tensor, trt.ActivationType.LEAKY_RELU)
+    if layer is None:
+        raise RuntimeError("TensorRT rejected a YOLOX leaky ReLU")
+    layer.alpha = 0.1
+    return layer.get_output(0)
+
+
 def add(network, left, right):
     layer = network.add_elementwise(left, right, trt.ElementWiseOperation.SUM)
     if layer is None:

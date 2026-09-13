@@ -24,10 +24,12 @@ int main(int argc, char** argv) {
     try {
         trtmc::YoloxPreprocessConfig config;
         trtmc::YoloxLetterbox letterbox;
-        if (argc == 5) {
+        if (argc == 5 || argc == 6) {
             // Family test seam: raw interleaved RGB float32 in, BGR CHW out.
             const int height = std::stoi(argv[2]);
             const int width = std::stoi(argv[3]);
+            if (argc == 6)
+                config.input_image_h = config.input_image_w = std::stoi(argv[5]);
             require(height > 0 && width > 0, "invalid image dimensions");
             std::vector<float> pixels(static_cast<std::size_t>(height) * width * 3U);
             std::ifstream input(argv[1], std::ios::binary);
@@ -41,7 +43,7 @@ int main(int argc, char** argv) {
             require(static_cast<bool>(output), "could not write preprocessed pixels");
             return 0;
         }
-        require(argc == 1, "expected no arguments or input height width output");
+        require(argc == 1, "expected no arguments or input height width output [size]");
         config.input_image_h = config.input_image_w = 2;
         const float red_blue[] = {1, 0, 0, 0, 0, 1};
         const auto values = trtmc::preprocess_yolox_image(red_blue, 1, 2, config, letterbox);

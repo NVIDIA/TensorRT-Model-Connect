@@ -17,7 +17,13 @@ namespace {
 
 constexpr float kScoreThreshold = 0.25F;
 constexpr float kIouThreshold = 0.45F;
-constexpr std::int32_t kMaxDetections = 8400;
+
+std::int32_t detection_slots(const YoloxPreprocessConfig& config) {
+    std::int32_t count = 0;
+    for (const int stride : {8, 16, 32})
+        count += (config.input_image_h / stride) * (config.input_image_w / stride);
+    return count;
+}
 
 std::vector<char> require_section(const BundleReader& bundle, const char* name) {
     const auto* section = bundle.find_section(name);
@@ -35,10 +41,11 @@ YoloxPreprocessConfig parse_config(const std::vector<char>& data) {
     const auto score = json.at("score_threshold").get<float>();
     const auto iou = json.at("iou_threshold").get<float>();
     const auto maximum = json.at("max_detections").get<std::int32_t>();
-    if (config.input_image_h != 640 || config.input_image_w != 640 || config.pad_value != 114.0F ||
-        json.at("num_classes").get<std::int32_t>() != 80 || maximum != kMaxDetections ||
+    if ((config.input_image_h != 416 && config.input_image_h != 640) ||
+        config.input_image_w != config.input_image_h || config.pad_value != 114.0F ||
+        json.at("num_classes").get<std::int32_t>() != 80 || maximum != detection_slots(config) ||
         score != kScoreThreshold || iou != kIouThreshold)
-        throw std::runtime_error("YOLOX-s runtime.json does not match its contract");
+        throw std::runtime_error("YOLOX runtime.json does not match its contract");
     return config;
 }
 
@@ -60,7 +67,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto plan = trtmc::yolox::require_section(context.reader, "engine.plan");
     auto config = trtmc::yolox::parse_config(config_data);
     auto engine = trtmc::yolox::load_engine(context.backend, plan);
-    return new trtmc::YoloxObjectDetectionPipeline(
-        std::move(engine), std::move(config), trtmc::yolox::kScoreThreshold,
-        trtmc::yolox::kIouThreshold, trtmc::yolox::kMaxDetections);
+    const auto maximum = trtmc::yolox::detection_slots(config);
+    return new trtmc::YoloxObjectDetectionPipeline(std::move(engine), std::move(config),
+                                                   trtmc::yolox::kScoreThreshold,
+                                                   trtmc::yolox::kIouThreshold, maximum);
 }

@@ -103,18 +103,18 @@ def _reference_root(manifest):
     return root
 
 
-def _native_pixels(image, binary, tmp_path):
+def _native_pixels(image, binary, tmp_path, image_size=640):
     height, width = image.shape[:2]
     rgb = np.ascontiguousarray(image[..., ::-1], dtype=np.float32) / 255.0
     input_path, output_path = tmp_path / "rgb.f32", tmp_path / "preprocessed.f32"
     rgb.tofile(input_path)
     subprocess.run(
-        [str(binary), str(input_path), str(height), str(width), str(output_path)],
+        [str(binary), str(input_path), str(height), str(width), str(output_path), str(image_size)],
         check=True,
         capture_output=True,
         timeout=30,
     )
-    return np.fromfile(output_path, dtype=np.float32).reshape(3, 640, 640)
+    return np.fromfile(output_path, dtype=np.float32).reshape(3, image_size, image_size)
 
 
 def _engine_outputs(bundle, pixels):
@@ -192,10 +192,15 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     native_build = Path(os.environ.get("TRTMC_NATIVE_BUILD_DIR", str(runtime_root)))
     seam = native_build / "families/yolox/test_yolox_image_preprocess"
     assert seam.is_file(), f"selected YOLOX E2E requires the native seam test: {seam}"
-    model_dir = _required_path(os.environ.get("TRTMC_YOLOX_MODEL_DIR"), "TRTMC_YOLOX_MODEL_DIR")
+    checkpoints = _required_path(os.environ.get("TRTMC_YOLOX_MODEL_DIR"), "TRTMC_YOLOX_MODEL_DIR")
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
     assert (runtime_root / "libtrtmc_model_yolox.so").is_file()
-    checkpoint_path = model_dir / manifest["external_files"][0]["path"]
+    checkpoint_path = checkpoints / manifest["external_files"][0]["path"]
+    assert checkpoint_path.is_file(), f"selected YOLOX checkpoint is missing: {checkpoint_path}"
+    # Each build sees exactly its selected archive, even when CI stages all sizes together.
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / checkpoint_path.name).symlink_to(checkpoint_path.resolve())
     assert torch.cuda.is_available(), "selected YOLOX E2E requires a CUDA GPU"
     bundle = tmp_path / manifest["bundle"]
     build(
@@ -205,11 +210,13 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             family=FAMILY,
             task=manifest["task"],
             precision=manifest["precision"],
+            tensor_parallel_size=manifest["tensor_parallel_size"],
         )
     )
-    reference = (
-        get_exp(str(reference_root / "exps/default/yolox_s.py"), None).get_model().eval().cuda()
-    )
+    experiment_name = "yolov3" if checkpoint_path.stem == "yolox_darknet" else checkpoint_path.stem
+    experiment = get_exp(str(reference_root / f"exps/default/{experiment_name}.py"), None)
+    reference = experiment.get_model().eval().cuda()
+    image_size = experiment.test_size[0]
     reference.load_state_dict(
         torch.load(checkpoint_path, map_location="cpu", weights_only=True)["model"], strict=True
     )
@@ -221,8 +228,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     portrait = np.full((width * 2, width, 3), 114, dtype=np.uint8)
     portrait[:height] = original
     for label, image in (("landscape", original), ("portrait", portrait)):
-        official_pixels, ratio = preproc(image, (640, 640))
-        native_pixels = _native_pixels(image, seam, tmp_path)
+        official_pixels, ratio = preproc(image, experiment.test_size)
+        native_pixels = _native_pixels(image, seam, tmp_path, image_size)
         # OpenCV's byte resize uses fixed-point rounding. No channel, padding,
         # scale or normalization error can fit within this one-byte bound.
         np.testing.assert_allclose(native_pixels, official_pixels, rtol=0, atol=1.0)
@@ -242,7 +249,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             ),
             axis=1,
         )
-        assert actual_raw["boxes"].shape == (8400, 4)
+        prediction_count = sum((image_size // stride) ** 2 for stride in (8, 16, 32))
+        assert actual_raw["boxes"].shape == (prediction_count, 4)
         assert all(np.isfinite(value).all() for value in actual_raw.values())
         np.testing.assert_allclose(actual_raw["scores"], expected_scores, rtol=0, atol=0.01)
         foreground = (expected_scores >= 0.1) | (actual_raw["scores"] >= 0.1)

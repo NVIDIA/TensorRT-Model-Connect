@@ -104,9 +104,13 @@ ObjectDetectionResult YoloxObjectDetectionPipeline::detect(const float* pixels, 
         static_cast<std::size_t>(classes->numel()) != count)
         throw std::runtime_error("YOLOX detection outputs disagree on their length");
 
-    if (count != 8400 || boxes->data == nullptr || scores->data == nullptr ||
+    std::size_t expected_count = 0;
+    for (const int stride : {8, 16, 32})
+        expected_count += static_cast<std::size_t>(preprocess_config_.input_image_h / stride) *
+                          (preprocess_config_.input_image_w / stride);
+    if (count != expected_count || boxes->data == nullptr || scores->data == nullptr ||
         classes->data == nullptr)
-        throw std::runtime_error("YOLOX-s requires 8400 populated detection slots");
+        throw std::runtime_error("YOLOX detection slots do not match the configured input size");
 
     const auto* box_values = static_cast<const float*>(boxes->data);
     const auto* score_values = static_cast<const float*>(scores->data);

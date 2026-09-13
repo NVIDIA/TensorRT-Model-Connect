@@ -14,15 +14,47 @@ import torch
 from families.yolox import graph
 from families.yolox.checkpoint import Checkpoint
 from families.yolox.model import _fold, build
-from families.yolox.support import describe
+from families.yolox.support import ARCHIVES, describe
 from tensorrt_model_connect import BuildRequest
 from tensorrt_model_connect.model_support import ModelMetadata
 
 
-def test_exact_checkpoint_identity():
-    assert describe(ModelMetadata(config={}, model_index={}, files=("yolox_s.pth",))) is not None
-    for name in ("yolox_m.pth", "yolov5n.pt", "yolox.pth"):
+@pytest.mark.parametrize("name", ARCHIVES)
+def test_exact_checkpoint_identity(name):
+    assert describe(ModelMetadata(config={}, model_index={}, files=(name,))) is not None
+
+
+def test_other_checkpoint_names_are_not_claimed():
+    for name in ("yolov5n.pt", "yolox.pth", "yolox_custom.pth"):
         assert describe(ModelMetadata(config={}, model_index={}, files=(name,))) is None
+
+
+@pytest.mark.parametrize(
+    "name,size",
+    [
+        ("nano", 416),
+        ("tiny", 416),
+        ("s", 640),
+        ("m", 640),
+        ("l", 640),
+        ("x", 640),
+        ("darknet", 640),
+    ],
+)
+def test_checkpoint_selection_and_published_image_size(tmp_path, name, size):
+    torch.save({"model": {"head.weight": torch.ones(1)}}, tmp_path / f"yolox_{name}.pth")
+    checkpoint = Checkpoint.open(tmp_path)
+    assert checkpoint.image_size == size
+    np.testing.assert_array_equal(checkpoint.tensor("head.weight"), [1.0])
+
+
+def test_checkpoint_selection_rejects_missing_or_ambiguous_archives(tmp_path):
+    with pytest.raises(ValueError, match="exactly one"):
+        Checkpoint.open(tmp_path)
+    for name in ("yolox_s.pth", "yolox_m.pth"):
+        torch.save({"model": {"head.weight": torch.ones(1)}}, tmp_path / name)
+    with pytest.raises(ValueError, match="exactly one"):
+        Checkpoint.open(tmp_path)
 
 
 @pytest.mark.parametrize(

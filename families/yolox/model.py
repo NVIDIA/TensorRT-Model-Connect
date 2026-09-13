@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""YOLOX-s: Focus/CSPDarknet, PAFPN and a decoupled anchor-free head.
+"""YOLOX: CSPDarknet/PAFPN or Darknet/FPN and a decoupled anchor-free head.
 
 The topology follows Megvii-BaseDetection/YOLOX at
-6ddff4824372906469a7fae2dc3206c7aa4bbaee, exps/default/yolox_s.py.
+6ddff4824372906469a7fae2dc3206c7aa4bbaee, exps/default/.
 TensorRT owns lowering and execution; this family specifies the graph.
 """
 
@@ -26,7 +26,6 @@ if TYPE_CHECKING:
 
 # Exp.get_model overrides the PyTorch default epsilon before loading weights.
 _BATCH_NORM_EPSILON = 1e-3
-_IMAGE_SIZE = 640
 _NUM_CLASSES = 80
 _STRIDES = (8, 16, 32)
 
@@ -63,24 +62,68 @@ class _Weights:
     def raw(self, name: str) -> np.ndarray:
         return self._checkpoint.tensor(name).astype(self._dtype)
 
+    def exists(self, name: str) -> bool:
+        return name in self._checkpoint.state
+
 
 def _conv(network, tensor, weights: _Weights, prefix: str, dtype, *, stride: int = 1):
+    if weights.exists(f"{prefix}.dconv.conv.weight"):
+        # Rounding between depthwise and pointwise convolutions amplifies score error.
+        if dtype == np.float16:
+            cast = network.add_cast(tensor, trt.float32)
+            if cast is None:
+                raise RuntimeError("TensorRT rejected the YOLOX depthwise input cast")
+            tensor = cast.get_output(0)
+        tensor = _conv(network, tensor, weights, f"{prefix}.dconv", np.float32, stride=stride)
+        tensor = _conv(network, tensor, weights, f"{prefix}.pconv", np.float32)
+        if dtype == np.float16:
+            cast = network.add_cast(tensor, trt.float16)
+            if cast is None:
+                raise RuntimeError("TensorRT rejected the YOLOX depthwise output cast")
+            tensor = cast.get_output(0)
+        return tensor
     weight, bias = weights.conv(prefix)
-    if weight.shape[1] != int(tensor.shape[1]):
-        raise ValueError(f"YOLOX-s input channel mismatch: {prefix}")
+    groups = int(tensor.shape[1]) if prefix.endswith(".dconv") else 1
+    if weight.shape[1] * groups != int(tensor.shape[1]):
+        raise ValueError(f"YOLOX input channel mismatch: {prefix}")
     tensor = graph.convolution(
-        network, tensor, weight, bias, stride=stride, padding=weight.shape[2] // 2, dtype=dtype
+        network,
+        tensor,
+        weight,
+        bias,
+        stride=stride,
+        padding=weight.shape[2] // 2,
+        groups=groups,
+        dtype=dtype,
     )
+    if weights.exists("backbone.backbone.stem.0.conv.weight"):
+        return graph.leaky_relu(network, tensor)
     return graph.silu(network, tensor)
 
 
-def _csp(network, tensor, weights: _Weights, prefix: str, dtype, *, count: int, residual: bool):
+def _csp(network, tensor, weights: _Weights, prefix: str, dtype, *, residual: bool):
     left = _conv(network, tensor, weights, f"{prefix}.conv1", dtype)
     right = _conv(network, tensor, weights, f"{prefix}.conv2", dtype)
-    for index in range(count):
-        inner = _conv(network, left, weights, f"{prefix}.m.{index}.conv1", dtype)
-        inner = _conv(network, inner, weights, f"{prefix}.m.{index}.conv2", dtype)
+    # Preserve the residual path around depthwise bottlenecks in FP32 as well.
+    inner_dtype = np.float32 if weights.exists(f"{prefix}.m.0.conv2.dconv.conv.weight") else dtype
+    if inner_dtype != dtype:
+        cast = network.add_cast(left, trt.float32)
+        if cast is None:
+            raise RuntimeError("TensorRT rejected the YOLOX bottleneck input cast")
+        left = cast.get_output(0)
+    index = 0
+    while weights.exists(f"{prefix}.m.{index}.conv1.conv.weight"):
+        inner = _conv(network, left, weights, f"{prefix}.m.{index}.conv1", inner_dtype)
+        inner = _conv(network, inner, weights, f"{prefix}.m.{index}.conv2", inner_dtype)
         left = graph.add(network, left, inner) if residual else inner
+        index += 1
+    if index == 0:
+        raise ValueError(f"YOLOX CSP block has no bottlenecks: {prefix}")
+    if inner_dtype != dtype:
+        cast = network.add_cast(left, right.dtype)
+        if cast is None:
+            raise RuntimeError("TensorRT rejected the YOLOX bottleneck output cast")
+        left = cast.get_output(0)
     return _conv(
         network, graph.concatenate(network, [left, right]), weights, f"{prefix}.conv3", dtype
     )
@@ -100,7 +143,48 @@ def _focus(network, tensor):
     return graph.concatenate(network, parts)
 
 
+def _spp(network, tensor, weights: _Weights, prefix: str, dtype):
+    entry = _conv(network, tensor, weights, f"{prefix}.conv1", dtype)
+    # Parallel SPP pools in the order used by the official implementation.
+    parts = [entry] + [
+        graph.max_pool(network, entry, kernel=k, stride=1, padding=k // 2) for k in (5, 9, 13)
+    ]
+    return _conv(network, graph.concatenate(network, parts), weights, f"{prefix}.conv2", dtype)
+
+
+def _darknet(network, pixels, weights: _Weights, dtype):
+    prefix = "backbone.backbone"
+    tensor = _conv(network, pixels, weights, f"{prefix}.stem.0", np.float32)
+    if dtype == np.float16:
+        cast = network.add_cast(tensor, trt.float16)
+        if cast is None:
+            raise RuntimeError("TensorRT rejected the YOLOX Darknet feature cast")
+        tensor = cast.get_output(0)
+    outputs = []
+    for stage in ("stem", "dark2", "dark3", "dark4", "dark5"):
+        index = 1 if stage == "stem" else 0
+        block = f"{prefix}.{stage}"
+        tensor = _conv(network, tensor, weights, f"{block}.{index}", dtype, stride=2)
+        index += 1
+        while weights.exists(f"{block}.{index}.layer1.conv.weight"):
+            inner = _conv(network, tensor, weights, f"{block}.{index}.layer1", dtype)
+            inner = _conv(network, inner, weights, f"{block}.{index}.layer2", dtype)
+            tensor = graph.add(network, tensor, inner)
+            index += 1
+        if stage == "dark5":
+            tensor = _conv(network, tensor, weights, f"{block}.{index}", dtype)
+            tensor = _conv(network, tensor, weights, f"{block}.{index + 1}", dtype)
+            tensor = _spp(network, tensor, weights, f"{block}.{index + 2}", dtype)
+            tensor = _conv(network, tensor, weights, f"{block}.{index + 3}", dtype)
+            tensor = _conv(network, tensor, weights, f"{block}.{index + 4}", dtype)
+        if stage in {"dark3", "dark4", "dark5"}:
+            outputs.append(tensor)
+    return outputs
+
+
 def _backbone(network, pixels, weights: _Weights, dtype):
+    if weights.exists("backbone.backbone.stem.0.conv.weight"):
+        return _darknet(network, pixels, weights, dtype)
     prefix = "backbone.backbone"
     # Preserve small color differences in the unnormalized BGR byte input.
     tensor = _conv(network, _focus(network, pixels), weights, f"{prefix}.stem.conv", np.float32)
@@ -109,37 +193,36 @@ def _backbone(network, pixels, weights: _Weights, dtype):
         if cast is None:
             raise RuntimeError("TensorRT rejected the YOLOX feature cast")
         tensor = cast.get_output(0)
-    if int(tensor.shape[1]) != 32:
-        raise ValueError("Only the YOLOX-s width=0.50 checkpoint is supported")
     outputs = []
-    for stage, count in ((2, 1), (3, 3), (4, 3), (5, 1)):
+    for stage in range(2, 6):
         tensor = _conv(network, tensor, weights, f"{prefix}.dark{stage}.0", dtype, stride=2)
         if stage == 5:
-            entry = _conv(network, tensor, weights, f"{prefix}.dark5.1.conv1", dtype)
-            # Parallel SPP pools, rather than the SPPF block of later YOLOs.
-            parts = [entry] + [
-                graph.max_pool(network, entry, kernel=k, stride=1, padding=k // 2)
-                for k in (5, 9, 13)
-            ]
-            tensor = _conv(
-                network,
-                graph.concatenate(network, parts),
-                weights,
-                f"{prefix}.dark5.1.conv2",
-                dtype,
-            )
+            tensor = _spp(network, tensor, weights, f"{prefix}.dark5.1", dtype)
         tensor = _csp(
             network,
             tensor,
             weights,
             f"{prefix}.dark{stage}.{2 if stage == 5 else 1}",
             dtype,
-            count=count,
             residual=stage != 5,
         )
         if stage >= 3:
             outputs.append(tensor)
     return outputs
+
+
+def _fpn(network, sources, weights: _Weights, dtype):
+    dark3, dark4, tensor = sources
+    outputs = [tensor]
+    for level, source in enumerate((dark4, dark3), start=1):
+        tensor = _conv(network, tensor, weights, f"backbone.out{level}_cbl", dtype)
+        tensor = graph.concatenate(network, [graph.nearest_upsample(network, tensor, 2), source])
+        index = 0
+        while weights.exists(f"backbone.out{level}.{index}.conv.weight"):
+            tensor = _conv(network, tensor, weights, f"backbone.out{level}.{index}", dtype)
+            index += 1
+        outputs.append(tensor)
+    return tuple(reversed(outputs))
 
 
 def _neck(network, sources, weights: _Weights, dtype):
@@ -152,28 +235,30 @@ def _neck(network, sources, weights: _Weights, dtype):
                 raise RuntimeError("TensorRT rejected the YOLOX PAFPN feature cast")
             source = cast.get_output(0)
         promoted.append(source)
+    if weights.exists("backbone.out1_cbl.conv.weight"):
+        return _fpn(network, promoted, weights, dtype)
     dark3, dark4, dark5 = promoted
     lateral = _conv(network, dark5, weights, "backbone.lateral_conv0", dtype)
     merged = graph.concatenate(network, [graph.nearest_upsample(network, lateral, 2), dark4])
-    upper = _csp(network, merged, weights, "backbone.C3_p4", dtype, count=1, residual=False)
+    upper = _csp(network, merged, weights, "backbone.C3_p4", dtype, residual=False)
     reduced = _conv(network, upper, weights, "backbone.reduce_conv1", dtype)
     merged = graph.concatenate(network, [graph.nearest_upsample(network, reduced, 2), dark3])
-    p3 = _csp(network, merged, weights, "backbone.C3_p3", dtype, count=1, residual=False)
+    p3 = _csp(network, merged, weights, "backbone.C3_p3", dtype, residual=False)
     merged = graph.concatenate(
         network, [_conv(network, p3, weights, "backbone.bu_conv2", dtype, stride=2), reduced]
     )
-    p4 = _csp(network, merged, weights, "backbone.C3_n3", dtype, count=1, residual=False)
+    p4 = _csp(network, merged, weights, "backbone.C3_n3", dtype, residual=False)
     merged = graph.concatenate(
         network, [_conv(network, p4, weights, "backbone.bu_conv1", dtype, stride=2), lateral]
     )
-    p5 = _csp(network, merged, weights, "backbone.C3_n4", dtype, count=1, residual=False)
+    p5 = _csp(network, merged, weights, "backbone.C3_n4", dtype, residual=False)
     return p3, p4, p5
 
 
 def _predict(network, tensor, weights: _Weights, prefix: str, dtype, *, channels: int):
     weight, bias = weights.raw(f"{prefix}.weight"), weights.raw(f"{prefix}.bias")
     if weight.shape != (channels, int(tensor.shape[1]), 1, 1) or bias.shape != (channels,):
-        raise ValueError(f"Unsupported YOLOX-s prediction shape: {prefix}")
+        raise ValueError(f"Unsupported YOLOX prediction shape: {prefix}")
     return graph.convolution(network, tensor, weight, bias, dtype=dtype)
 
 
@@ -243,7 +328,8 @@ def _build_engine(checkpoint: Checkpoint, precision: str, verbose: bool) -> byte
     config.builder_optimization_level = 1
     config.clear_flag(trt.BuilderFlag.TF32)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
-    pixels = network.add_input("pixel_values", trt.float32, (1, 3, _IMAGE_SIZE, _IMAGE_SIZE))
+    size = checkpoint.image_size
+    pixels = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
     if pixels is None:
         raise RuntimeError("TensorRT rejected the YOLOX input")
     sources = _backbone(network, pixels, weights, numpy_dtype)
@@ -260,7 +346,7 @@ def _build_engine(checkpoint: Checkpoint, precision: str, verbose: bool) -> byte
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build the official 80-class YOLOX-s, batch one, 640 x 640 detector."""
+    """Build an official 80-class YOLOX detector at its published input size."""
     if request.backend != "trt":
         raise NotImplementedError("yolox supports only backend=trt")
     if request.task != "object_detection":
@@ -290,12 +376,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.add_json(
         "runtime.json",
         {
-            "input_image_h": _IMAGE_SIZE,
-            "input_image_w": _IMAGE_SIZE,
+            "input_image_h": checkpoint.image_size,
+            "input_image_w": checkpoint.image_size,
             "pad_value": 114,
             "score_threshold": 0.25,
             "iou_threshold": 0.45,
             "num_classes": _NUM_CLASSES,
-            "max_detections": 8400,
+            "max_detections": sum((checkpoint.image_size // stride) ** 2 for stride in _STRIDES),
         },
     )
