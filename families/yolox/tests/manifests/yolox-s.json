@@ -1,0 +1,21 @@
+{
+  "name": "yolox-s",
+  "family": "yolox",
+  "task": "object_detection",
+  "bundle": "yolox-s.bundle",
+  "precision": "fp16",
+  "external_files": [
+    {
+      "path": "yolox_s.pth",
+      "url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.pth"
+    }
+  ],
+  "reference_revision": "6ddff4824372906469a7fae2dc3206c7aa4bbaee",
+  "testcases": [
+    {
+      "name": "yolox-s",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ]
+}

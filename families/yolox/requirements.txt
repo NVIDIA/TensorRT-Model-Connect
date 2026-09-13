@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# PyTorch is used to read the checkpoint; the remaining packages run the official reference.
+torch>=2.6
+torchvision
+opencv-python-headless
+loguru
+psutil
+pycocotools
+Pillow
+tabulate
+tqdm
