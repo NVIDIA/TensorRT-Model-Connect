@@ -4,6 +4,7 @@
   "task": "object_detection",
   "bundle": "yolox-s.bundle",
   "precision": "fp16",
+  "tensor_parallel_size": 1,
   "external_files": [
     {
       "path": "yolox_s.pth",
