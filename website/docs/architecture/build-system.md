@@ -12,6 +12,7 @@ family DSOs.
 | `trtmc_backend_trt` | Standard TensorRT Engine implementation. |
 | `trtmc_backend_rtx` | Optional TensorRT-RTX Engine implementation. |
 | `trtmc` | Native application under `apps/cli/`. |
+| `trtmc_server_native` | Private JSONL worker adapter under `server/native/`; linked downstream of the runtime loader. |
 | `trtmc_benchmark_worker` | Benchmark application under `apps/benchmark/`. |
 | `trtmc_model_<family>` | One family's complete native runtime. |
 
@@ -23,8 +24,8 @@ private dependencies, warnings, tests, output name, and install rule. Adding a
 normal family never changes a central model source list.
 
 The wheel packages `core/builder/tensorrt_model_connect`, the top-level
-`families` package, benchmark Python code, and installed native binaries/DSOs.
-Optional family dependencies remain in each
+`families` package, benchmark Python code, the optional `trtmc_server` control
+plane, and installed native binaries/DSOs. Optional family dependencies remain in each
 `families/<family>/requirements.txt`; package validation does not import every
 family implementation.
 

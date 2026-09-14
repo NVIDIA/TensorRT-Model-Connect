@@ -32,6 +32,10 @@ def test_coderabbit_covers_only_current_shared_paths() -> None:
 
     assert "model-agnostic" in instructions["core/**"]
     assert "public core" in instructions["apps/**"]
+    assert "one-way" in instructions["server/**"]
+    assert "fixed" in instructions["server/**"]
+    assert "self-healing" in instructions["server/**"]
+    assert "weakening" in instructions["server/tests/**"]
     assert "timed regions" in instructions["apps/benchmark/**"]
     assert not {
         "python/tensorrt_model_connect/families/**",

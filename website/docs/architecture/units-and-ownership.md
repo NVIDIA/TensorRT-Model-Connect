@@ -30,12 +30,14 @@ duplicated across families until a stable model-agnostic contract exists.
 | `core/runtime/tensorrt/` | Standard TensorRT and optional TensorRT-RTX Engine implementations. |
 | `apps/cli/` | Native command parsing and private image/WAV/file adapters. |
 | `apps/benchmark/` | Benchmark catalog, workers, reference runners, and reporting policy. |
+| `server/` | Optional local HTTP/WebSocket control plane, native worker process, and server-owned tests. |
 | `examples/` | Optional applications over public APIs. |
 
 ## Allowed dependency direction
 
 ```text
 applications -> public build/load/Task/BYOK contracts
+local server -> public loader + Task contracts
 family build -> BuildRequest + BundleWriter + TensorRT build API
 family runtime -> BundleReader + Task + Engine contracts
 runtime loader -> bundle + factory + backend contracts
@@ -47,3 +49,8 @@ family dependencies, backend-to-family dependencies, and family/core
 dependencies on applications. A family-local custom TensorRT plugin is allowed
 only when the family graph genuinely requires it; TVM-FFI BYOK remains the
 model-agnostic custom-kernel boundary.
+
+The server boundary is deliberately one-way. `server/` may link or call public
+library contracts; `core/` and `families/` must not import, include, link, or
+load server implementation. Applications integrate through the `trtmc serve`
+process and its HTTP/WebSocket contracts, not by importing `trtmc_server`.

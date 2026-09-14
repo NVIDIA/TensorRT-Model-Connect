@@ -72,6 +72,37 @@ def test_shared_contract_selects_all_directly(tmp_path: Path) -> None:
     assert impact.families == ("alpha", "beta")
 
 
+def test_server_change_runs_units_without_unrelated_family_proofs(tmp_path: Path) -> None:
+    impact = test_impact.classify(_repo(tmp_path), ["server/python/trtmc_server/app.py"])
+
+    assert impact.scope == "none"
+    assert impact.families == ()
+    assert impact.direct_families == ()
+    assert impact.run_core_tests is True
+    assert impact.run_docs is False
+
+
+def test_server_and_family_change_selects_only_the_family(tmp_path: Path) -> None:
+    impact = test_impact.classify(
+        _repo(tmp_path),
+        ["server/native/worker.cpp", "families/alpha/model.py"],
+    )
+
+    assert impact.scope == "families"
+    assert impact.families == ("alpha",)
+    assert impact.direct_families == ("alpha",)
+
+
+def test_server_does_not_narrow_a_shared_change(tmp_path: Path) -> None:
+    impact = test_impact.classify(
+        _repo(tmp_path),
+        ["server/native/worker.cpp", "core/runtime/include/trtmc/task.h"],
+    )
+
+    assert impact.scope == "all"
+    assert impact.families == ("alpha", "beta")
+
+
 def test_shared_change_preserves_directly_changed_family(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     impact = test_impact.classify(

@@ -8,13 +8,14 @@ Reference pages are for exact lookup. Begin with the
 or use the [User Guides](../user-guides/overview.md) for goal-oriented
 procedures.
 
-TensorRT-Model-Connect exposes three public entry layers:
+TensorRT-Model-Connect exposes four public entry layers:
 
 | API | Entry point | Best for |
 | --- | --- | --- |
 | Python build API | `python -m tensorrt_model_connect build` and `tensorrt_model_connect.build()` | Resolving a supported checkpoint and building a `.bundle`. |
 | Native CLI | `trtmc inspect` and task commands such as `trtmc run` | Inspecting a bundle or invoking one abstract Task interface. |
 | C++ Task API | `#include <trtmc/runtime/family_loader.h>` and `trtmc::load_task()` | Native applications that need task-specific results. |
+| Local serving process | `trtmc serve` | Local applications that need persistent bundle workers behind HTTP or WebSocket contracts. |
 
 The build and runtime entry points are intentionally separate. The Python
 builder resolves exactly one `families/<family>/support.py`, imports only that
@@ -30,6 +31,8 @@ Hugging Face model ID or local snapshot
   -> task-specific output
 ```
 
-There is no Python runtime wrapper, central model registry, runtime-strategy
-switch, backend search path, or fallback runtime discovery in the current
-architecture.
+The local server is a downstream application over the same loader and Task
+contracts. Its Python control plane never owns TensorRT objects or becomes a
+library dependency. There is no general Python runtime wrapper, central model
+registry, runtime-strategy switch, backend search path, or fallback runtime
+discovery in the current architecture.

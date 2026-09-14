@@ -732,7 +732,8 @@ int main() {
 
     std::ostringstream usage;
     trtmc::cli::print_usage(usage);
-    check(usage.str().find("--source-language-token-id") != std::string::npos &&
+    check(usage.str().find("trtmc serve --runtime-root DIR") != std::string::npos &&
+              usage.str().find("--source-language-token-id") != std::string::npos &&
               usage.str().find("--segment-overlap-seconds") != std::string::npos &&
               usage.str().find("--runtime-cache") != std::string::npos &&
               usage.str().find("--cuda-graphs") != std::string::npos,

@@ -1280,6 +1280,7 @@ void print_usage(std::ostream& output) {
     output << "Usage:\n"
               "  trtmc version\n"
               "  trtmc inspect BUNDLE\n"
+              "  trtmc serve --runtime-root DIR [SERVER OPTIONS]\n"
               "  trtmc COMMAND BUNDLE --runtime-root DIR [OPTIONS]\n\n"
               "Execution commands:\n"
               "  run, encode, embed, rerank, classify, detect, extract-features,\n"

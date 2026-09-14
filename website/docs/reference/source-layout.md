@@ -13,10 +13,14 @@ core/runtime/loader/           libtrtmc_runtime.so exact DSO loader
 core/runtime/tensorrt/         libtrtmc_backend_trt.so implementation
 apps/cli/                      native CLI and private image/audio file I/O
 apps/benchmark/                benchmark application, workers, and performance policy
+server/python/trtmc_server/    optional local HTTP/WebSocket control plane
+server/native/                 native JSONL worker over public runtime contracts
+server/tests/                  server-owned Python and native contract tests
 tools/model_ci.py              family inventory and impact
 website/                       documentation generated from family ownership
 ```
 
 `core/builder/` contains only Python. `core/runtime/` contains only C++ headers
-and sources. No production source lives under the retired `python/`, `src/`,
-`include/`, or `tests/` roots.
+and sources. The server is a separate downstream unit rather than part of
+either core tree. No production source lives under the retired `python/`,
+`src/`, `include/`, or `tests/` roots.

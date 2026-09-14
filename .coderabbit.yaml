@@ -138,6 +138,20 @@ reviews:
         outputs, owns family validation policy, or becomes a dependency of core
         or family implementation.
 
+    - path: "server/**"
+      instructions: |
+        Treat the local server as an optional application over public runtime
+        contracts. Preserve the one-way server-to-library dependency, fixed
+        bounded execution lanes, sanitized public errors, and source-build and
+        installed-wheel parity. Flag model-specific policy, reverse dependencies
+        from core or families, hidden queues, or claims of distributed scaling,
+        automatic placement, or worker self-healing that are not implemented.
+
+    - path: "server/tests/**"
+      instructions: |
+        Do not suggest weakening assertions, lifecycle and security boundaries,
+        expected values, or acceptance criteria merely to make tests pass.
+
     - path: "apps/benchmark/**"
       instructions: |
         Check semantic equivalence of timed regions, synchronization, warmup,

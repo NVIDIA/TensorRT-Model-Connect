@@ -7,6 +7,7 @@ import ast
 import importlib.util
 import json
 import re
+import tomllib
 from pathlib import Path
 
 
@@ -384,6 +385,7 @@ def test_applications_depend_only_on_public_model_connect_surfaces() -> None:
     application_roots = (
         REPO / "apps",
         REPO / "examples",
+        REPO / "server",
     )
     application_files = [path for root in application_roots for path in root.rglob("*")] + [
         REPO / "tools/perf_matrix.py"
@@ -426,7 +428,7 @@ def test_applications_depend_only_on_public_model_connect_surfaces() -> None:
             source = path.read_text(encoding="utf-8", errors="ignore")
             if path.suffix in {".cpp", ".h", ".hpp", ".cu"}:
                 for include in re.findall(r'#include\s+[<"]([^>"]+)', source):
-                    if include.startswith(("apps/", "examples/")):
+                    if include.startswith(("apps/", "examples/", "server/")):
                         violations.append(f"{path.relative_to(REPO)}:reverse-include:{include}")
     for path in (REPO / "core/builder/tensorrt_model_connect").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -437,7 +439,12 @@ def test_applications_depend_only_on_public_model_connect_surfaces() -> None:
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 modules.append(node.module)
             for module in modules:
-                if module == "trtmc_benchmark" or module.startswith("trtmc_benchmark."):
+                if (
+                    module == "trtmc_benchmark"
+                    or module.startswith("trtmc_benchmark.")
+                    or module == "trtmc_server"
+                    or module.startswith("trtmc_server.")
+                ):
                     violations.append(f"{path.relative_to(REPO)}:{node.lineno}:reverse:{module}")
     assert violations == []
 
@@ -764,11 +771,19 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
     pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
     assert 'requires-python = ">=3.12"' in pyproject
     assert "tomli" not in pyproject
-    optional = pyproject.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
-    assert set(re.findall(r"^([a-z][a-z0-9_-]*)\s*=", optional, re.MULTILINE)) == {
+    optional = tomllib.loads(pyproject)["project"]["optional-dependencies"]
+    assert set(optional) == {
         "cutedsl",
+        "serve",
         "test",
     }
+    assert optional["serve"] == [
+        "fastapi>=0.115,<0.142",
+        "pydantic>=2.11,<3",
+        "python-multipart>=0.0.9,<1",
+        "uvicorn>=0.30,<0.53",
+        "websockets>=13,<17",
+    ]
 
     requirements = sorted(FAMILIES.glob("*/requirements.txt"))
     assert requirements

@@ -14,8 +14,8 @@ contracts and mechanics.
 Run the structural validators before selecting expensive model tests:
 
 ```bash
-PYTHONPATH=core/builder:. python3 -m tools.model_ci validate
-PYTHONPATH=core/builder:. python3 tools/test_impact.py --validate
+PYTHONPATH=server/python:core/builder:. python3 -m tools.model_ci validate
+PYTHONPATH=server/python:core/builder:. python3 tools/test_impact.py --validate
 git diff --check
 ```
 
@@ -27,8 +27,19 @@ Run host-side Python tests with the builder package and repository root on the
 import path:
 
 ```bash
-PYTHONPATH=core/builder:. python3 -m pytest core/builder/tests tools/tests -q
+PYTHONPATH=server/python:core/builder:apps/benchmark:. python3 -m pytest \
+  core/builder/tests \
+  apps/benchmark/trtmc_benchmark/tests \
+  server/tests \
+  tools/tests \
+  -q -m "not gpu and not trt"
 ```
+
+`server/tests/` covers both the Python process/API contracts and the static
+one-way dependency boundary. Its native JSONL worker test is compiled into the
+same CTest tree and remains CPU-runnable. Package validation separately proves
+that the sdist carries `server/`, the wheel carries `trtmc_server`, and the
+installed native CLI can dispatch `trtmc serve --help` outside the checkout.
 
 After configuring a native build, run its compiled tests with CTest:
 

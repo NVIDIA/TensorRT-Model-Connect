@@ -21,6 +21,7 @@ from tools.ci.container import CiContainer
 from tools.ci.docker_image import DockerImageManager
 from tools.ci.e2e import E2ERunner, _require_e2e_junit, _require_passing_junit
 from tools.ci.package import (
+    InstalledWheelValidator,
     SourceArchiveValidator,
     WheelArchiveValidator,
     WheelPackageManager,
@@ -463,6 +464,14 @@ def test_source_quality_runs_complexity_before_other_checks() -> None:
     assert source.index("self.complexity()") < source.index("self.lint_changed_files()")
     assert source.index("self.lint_changed_files()") < source.index("self.architecture_contracts()")
 
+    complexity = inspect.getsource(SourceQualityChecks.complexity)
+    assert '"core/runtime"' in complexity
+    assert '"server/native"' in complexity
+
+    architecture = inspect.getsource(SourceQualityChecks.architecture_contracts)
+    assert '"server/tests/test_dependency_direction.py"' in architecture
+    assert "server/python" in architecture
+
 
 def test_source_quality_lints_only_files_that_still_exist(tmp_path: Path) -> None:
     (tmp_path / "kept.py").write_text("", encoding="utf-8")
@@ -643,6 +652,15 @@ def test_dev_images_install_the_pinned_requirements_without_deleted_docs() -> No
         assert "source-build.md" not in source
 
 
+def test_server_dependencies_are_isolated_from_the_shared_runtime_python() -> None:
+    dockerfile = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert "pip install --target /opt/trtmc-server-test-deps" in dockerfile
+    assert "PYTHONPATH=/opt/trtmc-server-test-deps" not in dockerfile
+
+
 def test_gpu_free_unit_scope_keeps_family_python_in_physical_jobs(tmp_path: Path) -> None:
     context = RecordingContext(
         tmp_path,
@@ -651,9 +669,9 @@ def test_gpu_free_unit_scope_keeps_family_python_in_physical_jobs(tmp_path: Path
 
     UnitTestRunner(context).premerge()
 
-    python_command = context.calls[2][0]
-    assert python_command[:3] == ["python", "-m", "pytest"]
-    assert python_command[3:9] == [
+    core_python_command = context.calls[2][0]
+    assert core_python_command[:3] == ["python", "-m", "pytest"]
+    assert core_python_command[3:9] == [
         "core/builder/tests",
         "apps/benchmark/trtmc_benchmark/tests",
         "examples/audio_streaming/test_audio_streaming.py",
@@ -661,9 +679,16 @@ def test_gpu_free_unit_scope_keeps_family_python_in_physical_jobs(tmp_path: Path
         ("examples/models/nemotron_voicechat/full_duplex/test_voicechat_full_duplex_source.py"),
         "tools/tests",
     ]
-    assert "families" not in python_command
+    assert "families" not in core_python_command
+    assert "server/python" not in context.calls[2][1]["updates"]["PYTHONPATH"]
 
-    ctest_command = context.calls[5][0]
+    server_python_command = context.calls[3][0]
+    assert server_python_command[:4] == ["python", "-m", "pytest", "server/tests"]
+    server_pythonpath = context.calls[3][1]["updates"]["PYTHONPATH"]
+    assert server_pythonpath.startswith("/opt/trtmc-server-test-deps:")
+    assert "server/python" in server_pythonpath
+
+    ctest_command = context.calls[6][0]
     assert ctest_command[-2:] == ["--label-exclude", "gpu"]
 
     source = inspect.getsource(UnitTestRunner.premerge)
@@ -776,6 +801,9 @@ def test_source_archive_carries_base_and_family_requirements(tmp_path: Path) -> 
     family.mkdir(parents=True)
     (family / "model.py").write_text("def build(request, writer): pass\n")
     (family / "requirements.txt").write_text("family-dependency\n")
+    server_readme = tmp_path / "server/README.md"
+    server_readme.parent.mkdir()
+    server_readme.write_text("server boundary\n")
     archive_path = tmp_path / "package.tar.gz"
 
     def write_archive(paths: tuple[str, ...]) -> None:
@@ -791,6 +819,12 @@ def test_source_archive_carries_base_and_family_requirements(tmp_path: Path) -> 
         SourceArchiveValidator(CiContext(tmp_path, {})).validate([archive_path])
 
     write_archive(("requirements/base.txt", "families/alpha/requirements.txt"))
+    with pytest.raises(CiError, match="server files are missing"):
+        SourceArchiveValidator(CiContext(tmp_path, {})).validate([archive_path])
+
+    write_archive(
+        ("requirements/base.txt", "families/alpha/requirements.txt", "server/README.md")
+    )
     SourceArchiveValidator(CiContext(tmp_path, {})).validate([archive_path])
 
 
@@ -800,10 +834,19 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         root = tmp_path / "families" / family
         root.mkdir(parents=True)
         (root / "model.py").write_text("def build(request, writer): pass\n")
+    server = tmp_path / "server/python/trtmc_server"
+    server.mkdir(parents=True)
+    (server / "__init__.py").write_text('"""Server package."""\n')
+    (server / "worker.py").write_text("READY = True\n")
     wheel = tmp_path / "package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("tensorrt_model_connect/__init__.py", "")
         archive.writestr("trtmc_benchmark/__init__.py", "")
+        archive.writestr(
+            "trtmc_server/__init__.py",
+            (server / "__init__.py").read_bytes(),
+        )
+        archive.writestr("trtmc_server/worker.py", (server / "worker.py").read_bytes())
         archive.writestr("families/__init__.py", "")
         archive.writestr("tensorrt_model_connect/bin/trtmc", "")
         archive.writestr("tensorrt_model_connect/bin/trtmc_benchmark_worker", "")
@@ -822,6 +865,7 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             "Name: package\n"
             "Version: 0.1\n"
             "Provides-Extra: cutedsl\n"
+            "Provides-Extra: serve\n"
             "Provides-Extra: test\n",
         )
         archive.writestr("package-0.1.data/scripts/trtmc", "")
@@ -835,6 +879,30 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             archive.writestr(f"tensorrt_model_connect/bin/libtrtmc_model_{family}.so", "")
 
     WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+
+    server_corrupt = tmp_path / "server-corrupt.whl"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(server_corrupt, "w") as output:
+        for entry in source.infolist():
+            payload = source.read(entry.filename)
+            if entry.filename == "trtmc_server/worker.py":
+                payload = b"READY = False\n"
+            output.writestr(entry, payload)
+    with pytest.raises(CiError, match="Python server files differ from Source"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([server_corrupt])
+
+    legacy = tmp_path / "legacy-server.whl"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(legacy, "w") as output:
+        for entry in source.infolist():
+            output.writestr(entry, source.read(entry.filename))
+        output.writestr("tensorrt_model_connect/serve/__init__.py", "")
+    with pytest.raises(CiError, match="legacy in-package server namespace"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([legacy])
+
+    server_helper = server / "new_helper.py"
+    server_helper.write_text("VALUE = 1\n")
+    with pytest.raises(CiError, match="Python server package is missing"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+    server_helper.unlink()
 
     corrupt = tmp_path / "corrupt.whl"
     with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(corrupt, "w") as output:
@@ -874,6 +942,14 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_backend_trt_11_1.so", "")
     with pytest.raises(CiError, match="unaliased"):
         WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+
+
+def test_installed_wheel_validation_checks_server_import_and_cli() -> None:
+    source = inspect.getsource(InstalledWheelValidator.validate)
+
+    assert 'import_module("trtmc_server")' in source
+    assert '[executable, "serve", "--help"]' in source
+    assert "installed trtmc serve CLI returned invalid help" in source
 
 
 def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> None:

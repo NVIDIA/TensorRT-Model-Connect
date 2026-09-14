@@ -123,5 +123,40 @@ speech commands expose only the options listed by their Task contracts in
 
 Unknown commands, unknown command-specific options, duplicate options, task
 interface mismatches, invalid values, and missing DSOs fail with a nonzero exit
-status. Run `trtmc help` for the compiled executable's concise synopsis and
+status.
+
+## Serve local bundles
+
+Install the optional control-plane dependencies, then register one or more
+bundles behind the local process API:
+
+```bash
+python -m pip install "tensorrt-model-connect[serve]"
+
+trtmc serve \
+  --runtime-root /opt/trtmc/lib \
+  --chat-model chat=/models/qwen.bundle \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+`--chat-model NAME=PATH` and `--transcription-model NAME=PATH` are repeatable.
+`--model-replicas NAME=N` sets a fixed number of independent native execution
+lanes for one registered model. `--require-streaming-transcription MODEL`
+fails startup unless every configured replica for that model passes the native
+streaming probe. The server has no waiting queue or dynamic worker placement;
+saturation returns HTTP 429, and a failed lane is not restarted. See
+[Serve Local Models](../user-guides/serve-local-models.md) for the HTTP,
+Realtime, readiness, security, and scaling boundaries.
+
+The initial chat endpoint accepts exactly one text-only `user` message. Stop
+sequences, multi-turn messages, text streaming, and tool calling are rejected.
+
+Use `--model-replicas` above `1` only for bundles that can be loaded as
+independent single-process workers. MPI/NCCL distributed bundles are not
+supported by `trtmc serve`. To use multiple GPUs, run one independent
+single-process server instance per GPU, pin each process with
+`CUDA_VISIBLE_DEVICES`, and put any routing outside this server.
+
+Run `trtmc help` for the compiled executable's concise synopsis and
 `python -m tensorrt_model_connect build --help` for the exact build parser.

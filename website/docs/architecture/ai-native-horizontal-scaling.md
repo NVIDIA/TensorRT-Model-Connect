@@ -281,6 +281,7 @@ interfaces cannot express.
 | Family runtime | factory contract, Task APIs, BundleReader, Engine API, model-owned custom plugin API when needed | sibling family, loader implementation, concrete backend implementation |
 | Engine backend | Engine API | family, Task behavior, model policy |
 | Examples and benchmark | public build, load, Task, and BYOK APIs | family/backend private implementation, reverse core dependency |
+| Local server | public loader and Task APIs | family/backend private implementation, reverse core dependency |
 
 ### Application dependency is one-way
 
@@ -292,13 +293,21 @@ flowchart BT
   Benchmark["Benchmark"] --> BuildAPI
   Benchmark --> LoadAPI
   Benchmark --> TaskAPI
+  Server["Local server"] --> LoadAPI
+  Server --> TaskAPI
   ByokExample["BYOK example"] --> ByokAPI["Public BYOK API"]
   ByokAPI --> TVMFFI["TVM-FFI C ABI"]
   ByokAPI --> TRTPlugin["TensorRT plugin API"]
 ```
 
 Core, families, and backend must not import, include, or link `examples/`,
-`apps/benchmark/`, or the benchmark Python package.
+`apps/benchmark/`, `server/`, or their Python packages.
+
+The local server's replicas are fixed process-local execution lanes. This is
+bounded concurrency within one placement domain, not the family-level
+horizontal scaling architecture described on this page. The server does not
+perform cluster discovery, cross-host routing, autoscaling, or worker restart;
+those remain external deployment concerns.
 
 The following dependencies are always forbidden:
 

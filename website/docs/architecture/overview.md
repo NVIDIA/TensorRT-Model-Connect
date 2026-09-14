@@ -45,8 +45,22 @@ second strategy dispatch.
 ## Applications stay above the public boundary
 
 The native CLI in `apps/cli/`, benchmark application in `apps/benchmark/`,
-examples, and TVM-FFI BYOK use public build, load, Task, and Engine contracts.
-Core and families never depend on those applications.
+the optional local server in `server/`, examples, and TVM-FFI BYOK use public
+build, load, Task, and Engine contracts. Core and families never depend on
+those applications.
+
+The server keeps HTTP and WebSocket handling in a Python control-plane process
+and loads bundles only in native child workers. Each configured replica is one
+fixed serial execution lane. Replicas are created at startup; there is no
+hidden request queue, dynamic placement, distributed scheduler, or worker
+self-healing. A failed lane is removed from scheduling and readiness becomes
+degraded while another lane remains healthy. One server process is one local
+placement domain, not a cluster-level scaling system.
+
+Replica fan-out applies only to independently loadable single-process bundles.
+MPI/NCCL distributed bundles are not supported by `trtmc serve`. Multi-GPU
+deployment uses independent single-process server instances pinned with
+`CUDA_VISIBLE_DEVICES`; placement and routing remain external concerns.
 
 See [AI-Native Horizontal Scaling Architecture](ai-native-horizontal-scaling.md)
 for the complete rules and [Source Layout](../reference/source-layout.md) for

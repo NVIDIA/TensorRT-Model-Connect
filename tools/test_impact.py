@@ -26,6 +26,10 @@ DOC_FILES = {
 MODEL_PROOF_NEUTRAL_FILES = {
     "apps/benchmark/performance/release.yaml",
 }
+# The server is an application over public runtime contracts. Its complete
+# Python and native contract suites run in the CPU unit stage, while unrelated
+# model-family E2E does not validate server behavior.
+UNIT_ONLY_PREFIXES = ("server/",)
 SHARED_PREFIXES = (
     ".github/",
     "apps/",
@@ -92,6 +96,7 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
     selected: set[str] = set()
     shared = False
     docs = False
+    unit_only = False
     unknown: list[str] = []
 
     for path in changed:
@@ -113,6 +118,9 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
             continue
         if path in MODEL_PROOF_NEUTRAL_FILES:
             continue
+        if path.startswith(UNIT_ONLY_PREFIXES):
+            unit_only = True
+            continue
         if len(parts) == 1 and path.endswith(".py"):
             shared = True
             continue
@@ -131,6 +139,8 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
         return Impact("all", tuple(sorted(known)), direct_families, changed, True, docs)
     if selected:
         return Impact("families", direct_families, direct_families, changed, True, docs)
+    if unit_only:
+        return Impact("none", (), (), changed, True, docs)
     return Impact("docs" if docs else "none", (), (), changed, False, docs)
 
 
