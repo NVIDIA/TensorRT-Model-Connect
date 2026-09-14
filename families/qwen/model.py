@@ -85,14 +85,12 @@ REFIT_MANIFEST_SECTION = "refit_manifest.json"
 
 
 def _strip_weights_requested(config: ModelConfig) -> bool:
-    """Read the family-owned weight-stripping build flag."""
-    if not config.raw.get("_strip_weights"):
-        return False
-    if config.raw.get("_quantized_build_requested"):
-        raise ValueError("strip_weights is not supported for quantized builds")
-    if config.raw.get("_parallel_build_enabled"):
-        raise ValueError("strip_weights is not supported for tensor-parallel builds")
-    return True
+    """Read the family-owned weight-stripping build flag.
+
+    Combinations that cannot strip are rejected in build() before any weight
+    is loaded, so this is a plain read.
+    """
+    return bool(config.raw.get("_strip_weights"))
 
 
 class _QwenModel:
@@ -469,7 +467,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
     config.raw["_quantized_build_requested"] = quantized
-    config.raw["_strip_weights"] = bool(getattr(request, "strip_weights", False))
+    strip_weights = bool(getattr(request, "strip_weights", False))
+    if strip_weights:
+        # Validated here rather than at engine-build time: only the native KV
+        # path consults the flag, so an unsupported build would otherwise drop
+        # it silently and emit a fully baked bundle.
+        if quantized:
+            raise ValueError("strip_weights is not supported for quantized builds")
+        if parallel.enabled:
+            raise ValueError("strip_weights is not supported for tensor-parallel builds")
+    config.raw["_strip_weights"] = strip_weights
     quant_ctx = None
     if quantized:
         from . import graph_ops
@@ -477,12 +484,14 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
         config.raw["_decoder_engine_layout"] = "dual_profile"
         quant_ctx = calibrate_qwen_fp8(model_dir, config, graph_ops)
-    native_layout = bool(getattr(request, "native_layout", False))
-    if native_layout and precision != "bf16":
-        raise ValueError("--native-layout requires --precision bf16 "
-                         "(the checkpoint dtype must match the engine dtype)")
-    if native_layout and quantized:
-        raise ValueError("--native-layout is not supported for quantized builds")
+    # Keeping the checkpoint's own layout is not a user choice: it is how a
+    # stripped build avoids transforming weights at all, which is what lets the
+    # bundle reference the checkpoint in place instead of carrying a copy. It
+    # needs the engine dtype to equal the checkpoint dtype, so an fp16 build
+    # keeps the transformed layout and ships an embedded refit section instead.
+    # Quantized and tensor-parallel builds are rejected above, so stripping
+    # here always means the single-device split path.
+    native_layout = strip_weights and precision == "bf16"
     checkpoint_mapper.set_native_layout(native_layout)
     try:
         weights = model.load_weights(str(model_dir), config, precision=precision)

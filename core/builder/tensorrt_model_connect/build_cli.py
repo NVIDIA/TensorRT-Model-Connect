@@ -38,10 +38,6 @@ def _parser() -> argparse.ArgumentParser:
         "--strip-weights", action="store_true",
         help="Build a stripped plan: GEMM weights become null placeholders "
              "and are supplied by refit at load time (supported families only)")
-    build_parser.add_argument(
-        "--native-layout", action="store_true",
-        help="Keep the checkpoint's weight layout and dtype; TensorRT transposes "
-             "in the matmul instead (bf16 only, supported families only)")
     build_parser.add_argument("--verbose", action="store_true")
     prepare_parser = commands.add_parser(
         "prepare-structure",
@@ -101,7 +97,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             fp32_layers=tuple(args.fp32_layer),
             dynamic_kv_cache=args.dynamic_kv_cache,
             strip_weights=args.strip_weights,
-            native_layout=args.native_layout,
             verbose=args.verbose,
         )
     )

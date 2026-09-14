@@ -12,13 +12,14 @@
 //
 //   refit_weights        a safetensors section embedded in the bundle, used
 //                        whenever the engine's weights are not byte-identical
-//                        to the checkpoint (fp16 from a bf16 checkpoint,
-//                        quantized, tensor-parallel).
+//                        to the checkpoint (an fp16 engine built from a bf16
+//                        checkpoint).
 //
-//   refit_manifest.json  offsets into the original HF checkpoint, used when
-//                        --native-layout made every weight byte-identical to a
-//                        tensor already on disk. The bundle then carries no
-//                        weights at all and the runtime maps the checkpoint.
+//   refit_manifest.json  offsets into the original HF checkpoint, used by a
+//                        bf16 build, where keeping the checkpoint's layout
+//                        leaves every weight byte-identical to a tensor
+//                        already on disk. The bundle then carries no weights
+//                        at all and the runtime maps the checkpoint.
 //
 // Either way the result is a RefitWeightMap handed to IRefitter before any
 // execution context exists. The backend only iterates it.

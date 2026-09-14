@@ -349,7 +349,9 @@ def _load_tensor_as_dtype(readers: list, name: str, dtype: np.dtype) -> np.ndarr
 # Native layout: projection weights keep the checkpoint's [out, in] layout and
 # the graph asks TensorRT to transpose them in the matmul instead (see
 # graph_ops.add_matmul_rhs_constant(hf_layout=True)). Removes the host-side
-# transpose and the array copy it forces.
+# transpose and the array copy it forces, which leaves every large weight
+# byte-identical to the checkpoint. Enabled by bf16 stripped builds only; see
+# the derivation in model.build().
 
 
 def set_native_layout(enabled: bool) -> None:

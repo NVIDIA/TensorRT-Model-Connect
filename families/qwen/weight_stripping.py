@@ -65,23 +65,6 @@ class StripSession:
     def total_bytes(self) -> int:
         return sum(int(value.nbytes) for value in self._entries.values())
 
-    def manifest(self) -> dict:
-        """Describe the stripped set without materializing the values."""
-        return {
-            "schema_version": 1,
-            "min_strip_bytes": self.min_bytes,
-            "count": len(self._entries),
-            "total_bytes": self.total_bytes,
-            "weights": {
-                name: {
-                    "shape": [int(dim) for dim in value.shape],
-                    "dtype": str(value.dtype),
-                    "bytes": int(value.nbytes),
-                }
-                for name, value in sorted(self._entries.items())
-            },
-        }
-
 
 _ACTIVE: ContextVar["StripSession | None"] = ContextVar(
     "qwen_weight_strip_session", default=None)
