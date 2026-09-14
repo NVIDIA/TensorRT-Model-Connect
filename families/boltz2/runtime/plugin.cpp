@@ -58,6 +58,7 @@ boltz2::EngineSet loadEngines(const FamilyContext& context) {
     boltz2::EngineSet result;
     result.input = loader.load("engine.plan");
     result.trunk_init = loader.load("boltz2_trunk_init_plan");
+    result.template_engine = loader.load("boltz2_template_plan");
     result.msa = loader.load("boltz2_msa_plan");
     for (std::size_t index = 0; index < result.pairformer.size(); ++index)
         result.pairformer[index] = loader.load(boltz2::kPairformerSections[index]);

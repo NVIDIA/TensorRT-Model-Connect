@@ -7,6 +7,7 @@
 // Encoder-decoder text-to-text pipeline for M2M-100 and NLLB models.
 
 #include "families/m2m_100/runtime/decode_runtime.h"
+#include "families/m2m_100/runtime/device_buffer.h"
 #include "families/m2m_100/runtime/kv_cache.h"
 #include "families/m2m_100/runtime/plugin_helpers.h"
 #include "families/m2m_100/runtime/request_tokens.h"
@@ -166,23 +167,8 @@ class M2M100Pipeline final : public ITextGeneration {
 
         cross_kv_bytes_ = static_cast<std::size_t>(max_source_length_) *
                           static_cast<std::size_t>(hidden_size_) * sizeof(float);
-        cross_k_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
-        cross_v_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
-        for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-            cudaMalloc(&cross_k_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
-            cudaMalloc(&cross_v_ptrs_[static_cast<std::size_t>(i)], cross_kv_bytes_);
-        }
-    }
-
-    ~M2M100Pipeline() override {
-        for (auto* ptr : cross_k_ptrs_) {
-            if (ptr)
-                cudaFree(ptr);
-        }
-        for (auto* ptr : cross_v_ptrs_) {
-            if (ptr)
-                cudaFree(ptr);
-        }
+        m2m_100::allocate_cross_kv(cross_k_ptrs_, cross_v_ptrs_, num_decoder_layers_,
+                                   cross_kv_bytes_);
     }
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg) override {
@@ -268,13 +254,17 @@ class M2M100Pipeline final : public ITextGeneration {
             throw std::runtime_error("M2M100Pipeline: no encoder_output");
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
             auto idx = static_cast<std::size_t>(i);
-            cudaMemcpy(cross_k_ptrs_[idx], enc_out, cross_kv_bytes_, cudaMemcpyDeviceToDevice);
-            cudaMemcpy(cross_v_ptrs_[idx], enc_out, cross_kv_bytes_, cudaMemcpyDeviceToDevice);
+            cudaMemcpy(cross_k_ptrs_[idx].get(), enc_out, cross_kv_bytes_,
+                       cudaMemcpyDeviceToDevice);
+            cudaMemcpy(cross_v_ptrs_[idx].get(), enc_out, cross_kv_bytes_,
+                       cudaMemcpyDeviceToDevice);
         }
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
             std::string s = "_" + std::to_string(i);
-            decoder_->bind_external("cross_k" + s, cross_k_ptrs_[static_cast<std::size_t>(i)]);
-            decoder_->bind_external("cross_v" + s, cross_v_ptrs_[static_cast<std::size_t>(i)]);
+            decoder_->bind_external("cross_k" + s,
+                                    cross_k_ptrs_[static_cast<std::size_t>(i)].get());
+            decoder_->bind_external("cross_v" + s,
+                                    cross_v_ptrs_[static_cast<std::size_t>(i)].get());
         }
     }
 
@@ -335,8 +325,8 @@ class M2M100Pipeline final : public ITextGeneration {
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
-    std::vector<void*> cross_k_ptrs_;
-    std::vector<void*> cross_v_ptrs_;
+    std::vector<m2m_100::DeviceBuffer> cross_k_ptrs_;
+    std::vector<m2m_100::DeviceBuffer> cross_v_ptrs_;
     std::vector<float> encoder_attention_mask_;
     std::size_t cross_kv_bytes_{0};
 };

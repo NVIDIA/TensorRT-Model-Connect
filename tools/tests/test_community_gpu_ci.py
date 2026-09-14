@@ -28,36 +28,42 @@ def _family(repository: Path, name: str, manifests: list[dict[str, object]]) -> 
     return root
 
 
-def test_shared_gpu_plan_adds_new_families_without_replacing_smoke_coverage() -> None:
-    """Shared changes retain the fixed smoke set and include new family owners."""
+def test_shared_gpu_plan_includes_direct_and_new_families() -> None:
+    """Shared changes retain smoke coverage and every directly affected owner."""
     selected = community_gpu_ci.selected_families(
         "all",
-        '["bert","gpt2"]',
+        '["bert","gpt2","llama"]',
+        '["llama"]',
         '["new_family"]',
     )
 
-    assert selected == tuple(sorted((*community_gpu_ci.SHARED_SMOKE_FAMILIES, "new_family")))
+    assert selected == tuple(
+        sorted((*community_gpu_ci.SHARED_SMOKE_FAMILIES, "llama", "new_family"))
+    )
 
 
 @pytest.mark.parametrize(
-    ("scope", "families", "added"),
+    ("scope", "families", "direct", "added"),
     [
-        ("docs", "[]", "[]"),
-        ("families", "[]", "[]"),
-        ("families", '["bert"]', '["new_family"]'),
-        ("all", '["bert"]', '["bert"]'),
-        ("all", '["not-valid"]', "[]"),
-        ("all", '["gpt2","bert"]', "[]"),
+        ("docs", "[]", "[]", "[]"),
+        ("families", "[]", "[]", "[]"),
+        ("families", '["bert"]', '["bert"]', '["new_family"]'),
+        ("families", '["bert"]', "[]", "[]"),
+        ("all", '["bert"]', '["bert"]', '["bert"]'),
+        ("all", '["bert"]', '["gpt2"]', "[]"),
+        ("all", '["not-valid"]', "[]", "[]"),
+        ("all", '["gpt2","bert"]', "[]", "[]"),
     ],
 )
 def test_gpu_plan_rejects_malformed_or_inconsistent_selection(
     scope: str,
     families: str,
+    direct: str,
     added: str,
 ) -> None:
     """Selection crossing into the isolated runner stays fail closed."""
     with pytest.raises(CiError):
-        community_gpu_ci.selected_families(scope, families, added)
+        community_gpu_ci.selected_families(scope, families, direct, added)
 
 
 def test_family_plan_selects_only_explicit_premerge_cases(tmp_path: Path) -> None:
@@ -128,7 +134,7 @@ def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path) -> Non
     for name in required:
         (build / name).write_bytes(b"native")
 
-    runtime = community_gpu_ci._runtime_root(build, (plan,))
+    runtime = community_gpu_ci._runtime_root(build, plan)
 
     assert all((runtime / name).is_symlink() for name in required)
 
@@ -225,16 +231,17 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         {
             "TRTMC_GPU_SCOPE": "families",
             "TRTMC_GPU_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
             "TRTMC_GPU_ADDED_FAMILIES": "[]",
             "TRTMC_NATIVE_BUILD_DIR": str(build),
         },
     )
 
     assert any(command[:2] == ["cmake", "-S"] for command in commands)
-    native_build = next(command for command in commands if command[:2] == ["cmake", "--build"])
-    assert "trtmc" in native_build
-    assert "trtmc_backend_trt" in native_build
-    assert "trtmc_model_alpha" in native_build
+    native_builds = [command for command in commands if command[:2] == ["cmake", "--build"]]
+    assert "trtmc" in native_builds[0]
+    assert "trtmc_backend_trt" in native_builds[0]
+    assert native_builds[1][-1] == "trtmc_model_alpha"
     assert len(e2e_calls) == 1
     runtime, families, testcases = e2e_calls[0]
     assert families == ("alpha",)
@@ -243,3 +250,109 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     assert runtime["TRTMC_RUNTIME_ROOT"] == str(build / "runtime")
     assert runtime["TRTMC_NATIVE_BUILD_DIR"] == str(build)
     assert runtime["HF_HUB_OFFLINE"] == "1"
+
+
+def test_gpu_run_continues_after_one_family_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One family failure is aggregated only after every selected family ran."""
+    for family in ("alpha", "beta"):
+        _family(
+            tmp_path,
+            family,
+            [
+                {
+                    "family": family,
+                    "testcases": [{"name": f"{family}-smoke", "premerge": True}],
+                }
+            ],
+        )
+    build = Path("/tmp") / f"{tmp_path.name}-isolated-native-build"
+    commands: list[list[str]] = []
+    e2e_calls: list[str] = []
+
+    class FakeContext:
+        def __init__(self, repository: Path, env: dict[str, str]):
+            self.repository = repository
+            self.env = env
+
+        def run(self, command, **_kwargs) -> subprocess.CompletedProcess[str]:
+            commands.append([str(argument) for argument in command])
+            return subprocess.CompletedProcess(command, 0)
+
+    class FakeE2ERunner:
+        def __init__(self, context: FakeContext):
+            self.context = context
+
+        def _run(self, families: tuple[str, ...], _testcases: tuple[str, ...]) -> None:
+            family = families[0]
+            e2e_calls.append(family)
+            if family == "alpha":
+                raise CiError("alpha exploded")
+
+    monkeypatch.setattr(community_gpu_ci, "CiContext", FakeContext)
+    monkeypatch.setattr(community_gpu_ci, "E2ERunner", FakeE2ERunner)
+    monkeypatch.setattr(community_gpu_ci, "_install_family_requirements", lambda *_args: None)
+    monkeypatch.setattr(community_gpu_ci, "_stage_checkpoints", lambda *_args: None)
+    monkeypatch.setattr(
+        community_gpu_ci,
+        "_runtime_root",
+        lambda native_build, plan: native_build / plan.family / "runtime",
+    )
+
+    with pytest.raises(CiError, match="alpha: alpha exploded"):
+        community_gpu_ci.run(
+            tmp_path,
+            {
+                "TRTMC_GPU_SCOPE": "families",
+                "TRTMC_GPU_FAMILIES": '["alpha","beta"]',
+                "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta"]',
+                "TRTMC_GPU_ADDED_FAMILIES": "[]",
+                "TRTMC_NATIVE_BUILD_DIR": str(build),
+            },
+        )
+
+    assert e2e_calls == ["alpha", "beta"]
+    family_builds = [
+        command
+        for command in commands
+        if command[:2] == ["cmake", "--build"]
+        and any(argument.startswith("trtmc_model_") for argument in command)
+    ]
+    assert [command[-1] for command in family_builds] == [
+        "trtmc_model_alpha",
+        "trtmc_model_beta",
+    ]
+
+
+def test_brev_wrapper_caches_application_failure_without_retry(tmp_path: Path) -> None:
+    """A nonzero remote application is reported once without Brev rerunning it."""
+    from tools import brev_exec
+
+    app = tmp_path / "app.sh"
+    counter = tmp_path / "counter"
+    result_file = tmp_path / "result"
+    app.write_text('#!/bin/sh\nprintf run >> "$1"\nexit 17\n', encoding="utf-8")
+    app.chmod(0o755)
+    marker = "__TRTMC_TEST_EXIT__="
+    wrapper = brev_exec.remote_wrapper((str(app), str(counter)), result_file, marker)
+
+    first = subprocess.run(["bash", "-c", wrapper], check=False, capture_output=True, text=True)
+    second = subprocess.run(["bash", "-c", wrapper], check=False, capture_output=True, text=True)
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    assert first.stdout.endswith(f"{marker}17\n")
+    assert second.stdout == f"{marker}17\n"
+    assert counter.read_text(encoding="utf-8") == "run"
+    assert brev_exec.parse_remote_status(first.stdout.splitlines(), marker) == 17
+
+
+def test_eagle_vlm_declares_remote_processor_http_dependency() -> None:
+    """The official checkpoint processor can import its requests dependency."""
+    requirements = (Path(__file__).parents[2] / "families/eagle_vlm/requirements.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert "requests==2.32.5" in requirements.splitlines()

@@ -12,6 +12,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
@@ -39,14 +40,22 @@ def _record_request_evidence(request: Path, prepared: Path | None = None) -> Non
             "inputs",
             {
                 "text": "\n\n".join(
-                    "Protein " + ", ".join(sequence.chain_ids) + "\n" + sequence.sequence
+                    sequence.kind.value.title()
+                    + " "
+                    + ", ".join(sequence.chain_ids)
+                    + "\n"
+                    + sequence.sequence
                     for sequence in parsed.sequences
                 ),
                 "sequences": [
                     {
                         "chain_ids": list(sequence.chain_ids),
                         "sequence": sequence.sequence,
-                        "msa": request.parent / sequence.msa_path,
+                        "msa": (
+                            request.parent / sequence.msa_path
+                            if sequence.msa_path is not None
+                            else None
+                        ),
                     }
                     for sequence in parsed.sequences
                 ],
@@ -149,8 +158,8 @@ def _cases() -> dict[str, tuple[dict, dict]]:
 CASES = _cases()
 
 
-def test_multichain_protein_request_contract() -> None:
-    from families.boltz2.contracts import parse_request_yaml
+def test_biomolecular_request_contract() -> None:
+    from families.boltz2.contracts import PolymerKind, parse_request_yaml
 
     request = parse_request_yaml(
         """version: 1
@@ -162,12 +171,30 @@ sequences:
   - protein:
       id: C
       sequence: FGHIK
-      msa: chain-c.a3m
+      msa: chain-c.csv
+      cyclic: true
+      modifications:
+        - ccd: MSE
+          position: 2
+  - dna:
+      id: D
+      sequence: ACGTN
+  - rna:
+      id: E
+      sequence: ACGUN
+templates:
+  - cif: template.cif
+    chain_id: [A, B]
+    template_id: [X, Y]
 """
     )
-    assert request.token_count == 13
+    assert request.token_count == 23
     assert request.sequences[0].chain_ids == ("A", "B")
     assert request.sequences[1].chain_ids == ("C",)
+    assert request.sequences[1].cyclic is True
+    assert request.sequences[2].kind is PolymerKind.DNA
+    assert request.sequences[3].kind is PolymerKind.RNA
+    assert request.templates[0].template_chain_ids == ("X", "Y")
 
 
 def pytest_generate_tests(metafunc) -> None:
@@ -401,37 +428,71 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
         bundle_stat.st_mtime_ns,
         bundle_stat.st_ctime_ns,
     )
-    from families.boltz2.contracts import parse_request_yaml
-
-    variant_request = TEST_ROOT / "data/protein_monomer_variant/protein_monomer_variant.yaml"
-    variant = parse_request_yaml(variant_request.read_text(encoding="utf-8"))
-    complex_sequence = variant.sequences[0].sequence[:50]
-    complex_root = tmp_path / "protein-complex"
-    complex_root.mkdir()
-    complex_a3m = complex_root / "protein_complex.a3m"
-    complex_a3m.write_text(f">query\n{complex_sequence}\n", encoding="utf-8")
-    complex_request = complex_root / "protein_complex.yaml"
-    complex_request.write_text(
-        "version: 1\n"
-        "sequences:\n"
-        "  - protein:\n"
-        "      id: [A, B]\n"
-        f"      sequence: {complex_sequence}\n"
-        f"      msa: {complex_a3m.name}\n",
+    request_root = tmp_path / "biomolecular-request"
+    request_root.mkdir()
+    (request_root / "a.csv").write_text(
+        "key,sequence\n-1,ACDE\n9606,ACNE\n10090,AGDE\n", encoding="utf-8"
+    )
+    (request_root / "b.csv").write_text(
+        "key,sequence\n-1,FGHIK\n9606,FGHVK\n10090,FGYIK\n", encoding="utf-8"
+    )
+    (request_root / "template.pdb").write_text(
+        "HEADER    SYNTHETIC BOLTZ2 E2E TEMPLATE\n"
+        "SEQRES   1 X    4  ALA CYS ASP GLU\n"
+        "ATOM      1  N   ALA X   1       0.000   0.000   0.000  1.00 20.00           N\n"
+        "ATOM      2  CA  ALA X   1       1.450   0.000   0.000  1.00 20.00           C\n"
+        "ATOM      3  C   ALA X   1       2.000   1.420   0.000  1.00 20.00           C\n"
+        "ATOM      4  O   ALA X   1       1.350   2.420   0.000  1.00 20.00           O\n"
+        "ATOM      5  CB  ALA X   1       1.950  -0.750  -1.220  1.00 20.00           C\n"
+        "ATOM      6  N   CYS X   2       3.250   1.500   0.000  1.00 20.00           N\n"
+        "ATOM      7  CA  CYS X   2       3.900   2.820   0.000  1.00 20.00           C\n"
+        "ATOM      8  C   CYS X   2       5.420   2.700   0.000  1.00 20.00           C\n"
+        "ATOM      9  O   CYS X   2       6.050   3.730   0.000  1.00 20.00           O\n"
+        "ATOM     10  CB  CYS X   2       3.350   3.650  -1.160  1.00 20.00           C\n"
+        "ATOM     11  N   ASP X   3       6.000   1.520   0.000  1.00 20.00           N\n"
+        "ATOM     12  CA  ASP X   3       7.450   1.350   0.000  1.00 20.00           C\n"
+        "ATOM     13  C   ASP X   3       8.000   2.770   0.000  1.00 20.00           C\n"
+        "ATOM     14  O   ASP X   3       7.340   3.770   0.000  1.00 20.00           O\n"
+        "ATOM     15  CB  ASP X   3       7.900   0.550  -1.220  1.00 20.00           C\n"
+        "ATOM     16  N   GLU X   4       9.250   2.850   0.000  1.00 20.00           N\n"
+        "ATOM     17  CA  GLU X   4       9.900   4.170   0.000  1.00 20.00           C\n"
+        "ATOM     18  C   GLU X   4      11.420   4.050   0.000  1.00 20.00           C\n"
+        "ATOM     19  O   GLU X   4      12.050   5.080   0.000  1.00 20.00           O\n"
+        "ATOM     20  CB  GLU X   4       9.350   5.000  -1.160  1.00 20.00           C\n"
+        "TER\nEND\n",
         encoding="utf-8",
     )
-    prepared = tmp_path / "protein_complex.b2rq"
+    biomolecular_request = request_root / "request.json"
+    biomolecular_request.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sequences": [
+                    {"protein": {"id": "A", "sequence": "ACDE", "msa": "a.csv", "cyclic": True}},
+                    {"protein": {"id": "B", "sequence": "FGHIK", "msa": "b.csv"}},
+                    {"protein": {"id": "C", "sequence": "S", "msa": "empty", "modifications": [{"ccd": "SEP", "position": 1}]}},
+                    {"dna": {"id": "D", "sequence": "ACGTN"}},
+                    {"rna": {"id": "R", "sequence": "ACGUN"}},
+                ],
+                "templates": [
+                    {"pdb": "template.pdb", "chain_id": "A", "template_id": "X1"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepared = tmp_path / "biomolecular.b2rq"
     request_cache = tmp_path / "request-cache"
     preparation = prepare_structure_request(
         model_dir,
-        complex_request,
+        biomolecular_request,
         prepared,
         cache_dir=request_cache,
     )
     record_evidence("request_preparation", preparation)
-    _record_request_evidence(complex_request, prepared)
-    complex_structure = tmp_path / "complex.cif"
-    complex_metadata = tmp_path / "complex.json"
+    _record_request_evidence(biomolecular_request, prepared)
+    biomolecular_structure = tmp_path / "biomolecular.cif"
+    biomolecular_metadata = tmp_path / "biomolecular.json"
     with evidence_stage("native"):
         completed = subprocess.run(
             [
@@ -443,9 +504,9 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
                 "--input",
                 str(prepared),
                 "--output",
-                str(complex_structure),
+                str(biomolecular_structure),
                 "--output-json",
-                str(complex_metadata),
+                str(biomolecular_metadata),
             ],
             check=True,
             capture_output=True,
@@ -455,7 +516,15 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
         )
         record_evidence("native_process", {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr})
         record_evidence("native_summary", _last_json(completed.stdout))
-    _record_native_evidence(complex_structure, complex_metadata)
+    _record_native_evidence(biomolecular_structure, biomolecular_metadata)
+    processed_request = (
+        request_cache
+        / str(preparation["cache_key"])[:2]
+        / str(preparation["cache_key"])
+        / "work/processed"
+    )
+    with np.load(processed_request / "structures/request.npz", allow_pickle=False) as archive:
+        active_atoms = int(archive["atoms"].shape[0])
     bundle_stat = bundle.stat()
     with evidence_stage("compare"):
         assert (
@@ -465,27 +534,26 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
             bundle_stat.st_mtime_ns,
             bundle_stat.st_ctime_ns,
         ) == bundle_identity
-        complex_details = json.loads(complex_metadata.read_text(encoding="utf-8"))
-        assert complex_details["profile"] == "tokens_117_atoms_928"
-        assert complex_details["active_token_count"] == 100
-        assert complex_details["active_atom_count"] == 794
-        assert complex_details["chain_pair_confidence"] == []
+        biomolecular_details = json.loads(
+            biomolecular_metadata.read_text(encoding="utf-8")
+        )
+        assert biomolecular_details["profile"] == "tokens_117_atoms_928"
+        assert biomolecular_details["active_token_count"] == 20
+        assert biomolecular_details["active_atom_count"] == active_atoms
+        assert biomolecular_details["chain_pair_confidence"] == []
     _assert_live_reference_parity(
         model_dir,
-        request_cache
-        / str(preparation["cache_key"])[:2]
-        / str(preparation["cache_key"])
-        / "work/processed",
-        complex_structure,
-        complex_metadata,
-        tmp_path / "complex-reference",
-        atom_count=794,
-        token_count=100,
+        processed_request,
+        biomolecular_structure,
+        biomolecular_metadata,
+        tmp_path / "biomolecular-reference",
+        atom_count=active_atoms,
+        token_count=20,
     )
     cached = prepare_structure_request(
         model_dir,
-        complex_request,
-        tmp_path / "protein_complex-cached.b2rq",
+        biomolecular_request,
+        tmp_path / "biomolecular-cached.b2rq",
         cache_dir=request_cache,
     )
     record_evidence("request_preparation", cached)

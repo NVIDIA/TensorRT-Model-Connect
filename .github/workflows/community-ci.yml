@@ -4,18 +4,18 @@
 name: Community CI
 
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && format('Manual PR #{0} · community CI', inputs.pr_number) || format('PR #{0} · community CI · head {1} · base {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.event.pull_request.base.sha) }}
+  ${{ github.event_name == 'workflow_dispatch' && format('Manual PR #{0} · community CI', inputs.pr_number) || format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) }}
 
 # Community CI is one ordered pull-request pipeline: the public CPU gate runs
-# first, and the external GPU stage can reserve a Brev instance only after
-# Community CPU / Required succeeds. pull_request_target is required because
-# fork pull_request runs cannot receive the Brev credential. Keep the trust
-# boundary job-local: CPU jobs execute the exact PR merge with read-only
-# permissions and no secrets, while secret-bearing GPU orchestration runs on
-# fresh hosted runners, consumes no CPU artifact or cache, and executes PR code
-# only on the isolated Brev instance.
+# first, followed by trusted GPU authorization and impact classification.
+# Automatic GPU execution is disabled below, so pull-request events reserve no
+# Brev instance and GPU validation is not a merge gate. A maintain/admin manual
+# dispatch may explicitly opt into the experimental smoke path after CPU. CPU
+# jobs execute the exact PR merge with read-only permissions and no secrets,
+# while secret-bearing GPU orchestration executes PR code only on an isolated
+# Brev instance.
 on:
-  pull_request_target:
+  pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
@@ -24,8 +24,19 @@ on:
         description: Open pull request number to test
         required: true
         type: string
+      run_gpu_smoke:
+        description: Run the experimental, non-gating Community GPU smoke test
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
+
+# Temporary automatic rollout policy. Change this only through review after
+# Community GPU runtime and cost have been qualified. A quoted string avoids
+# YAML boolean coercion when it crosses the GitHub output boundary.
+env:
+  COMMUNITY_GPU_EXECUTION_ENABLED: "false"
 
 concurrency:
   group: community-ci-${{ github.event.pull_request.number || inputs.pr_number }}
@@ -36,10 +47,15 @@ jobs:
     name: Community CI / Authorize
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
-      github.ref == 'refs/heads/main' &&
       (
-        github.event_name == 'pull_request_target' ||
-        github.event_name == 'workflow_dispatch'
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.base.ref == 'main'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main'
+        )
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -64,6 +80,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_MERGE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
@@ -87,31 +104,34 @@ jobs:
           state="$(jq -er '.state' <<<"$pull")"
           base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
-          base_sha="$(jq -er '.base.sha' <<<"$pull")"
-          head_sha="$(jq -er '.head.sha' <<<"$pull")"
-          merge_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pull")"
+          live_head_sha="$(jq -er '.head.sha' <<<"$pull")"
+          live_merge_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pull")"
 
           test "$state" = "open"
           test "$base_repo" = "$GITHUB_REPOSITORY"
           test "$base_ref" = "main"
-          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$live_head_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$EVENT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$EVENT_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::The Community CI event has no testable merge commit."
+              exit 1
+            }
+            if [ "$live_head_sha" != "$EVENT_HEAD_SHA" ]; then
+              echo "::error::The Community CI trigger was superseded by a newer PR head."
+              exit 1
+            fi
+            head_sha="$EVENT_HEAD_SHA"
+            merge_sha="$EVENT_MERGE_SHA"
+          else
+            head_sha="$live_head_sha"
+            merge_sha="$live_merge_sha"
+          fi
           [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]] || {
             echo "::error::Pull request #$PR_NUMBER has no testable merge commit."
             exit 1
           }
-          if [ "$EVENT_NAME" = "pull_request_target" ]; then
-            [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-            [[ "$EVENT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-            if [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
-              echo "::error::The Community CI trigger was superseded by a newer PR head."
-              exit 1
-            fi
-            if [ "$base_sha" != "$EVENT_BASE_SHA" ]; then
-              echo "::error::The Community CI trigger was superseded by a newer base."
-              exit 1
-            fi
-          fi
 
           merge="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/git/commits/$merge_sha")"
           resolved_merge="$(jq -er '.sha' <<<"$merge")"
@@ -120,8 +140,9 @@ jobs:
           merge_head="$(jq -er '.parents[1].sha' <<<"$merge")"
           test "$resolved_merge" = "$merge_sha"
           test "$parent_count" = "2"
-          test "$merge_base" = "$base_sha"
           test "$merge_head" = "$head_sha"
+          base_sha="$merge_base"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
 
           {
             echo "pr_number=$PR_NUMBER"
@@ -177,7 +198,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
 
@@ -286,10 +307,13 @@ jobs:
     outputs:
       pr_number: ${{ needs.authorize.outputs.pr_number }}
       head_sha: ${{ needs.authorize.outputs.head_sha }}
+      base_sha: ${{ needs.authorize.outputs.base_sha }}
       merge_sha: ${{ needs.authorize.outputs.merge_sha }}
       families: ${{ steps.impact.outputs.families }}
+      direct_families: ${{ steps.impact.outputs.direct_families }}
       added_families: ${{ steps.impact.outputs.added_families }}
       scope: ${{ steps.impact.outputs.scope }}
+      gpu_enabled: ${{ steps.impact.outputs.gpu_enabled }}
       run_gpu: ${{ steps.impact.outputs.run_gpu }}
 
     steps:
@@ -319,6 +343,9 @@ jobs:
         env:
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          GPU_EXECUTION_ENABLED: ${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}
+          MANUAL_GPU_EXECUTION_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.run_gpu_smoke || false }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           python3 -m tools.test_impact --base "$BASE_SHA" --head "$HEAD_SHA" \
@@ -334,6 +361,12 @@ jobs:
           summary = json.loads(
               (Path(os.environ["RUNNER_TEMP"]) / "trtmc-gpu-impact.json").read_text()
           )
+          gpu_enabled = os.environ["GPU_EXECUTION_ENABLED"].lower() == "true"
+          manual_gpu_enabled = (
+              os.environ["EVENT_NAME"] == "workflow_dispatch"
+              and os.environ["MANUAL_GPU_EXECUTION_ENABLED"].lower() == "true"
+          )
+          gpu_enabled = gpu_enabled or manual_gpu_enabled
           added_families = set()
           if summary["scope"] == "all":
               trusted_families = set(summary["families"])
@@ -360,24 +393,37 @@ jobs:
                   file=output,
               )
               print(
+                  "direct_families="
+                  + json.dumps(summary["direct_families"], separators=(",", ":")),
+                  file=output,
+              )
+              print(
                   "added_families="
                   + json.dumps(sorted(added_families), separators=(",", ":")),
                   file=output,
               )
               print("scope=" + summary["scope"], file=output)
+              print("gpu_enabled=" + str(gpu_enabled).lower(), file=output)
               print(
                   "run_gpu="
-                  + ("true" if summary["scope"] in {"all", "families"} else "false"),
+                  + (
+                      "true"
+                      if gpu_enabled and summary["scope"] in {"all", "families"}
+                      else "false"
+                  ),
                   file=output,
               )
           PY
 
-      # Both values cross from diff metadata into the secret-bearing job.
+      # Selection and policy values cross into the secret-bearing job.
       - name: Validate the GPU selection
         env:
           FAMILIES: ${{ steps.impact.outputs.families }}
+          DIRECT_FAMILIES: ${{ steps.impact.outputs.direct_families }}
           ADDED_FAMILIES: ${{ steps.impact.outputs.added_families }}
           SCOPE: ${{ steps.impact.outputs.scope }}
+          GPU_ENABLED: ${{ steps.impact.outputs.gpu_enabled }}
+          RUN_GPU: ${{ steps.impact.outputs.run_gpu }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -387,16 +433,34 @@ jobs:
 
           pattern = re.compile(r"^[a-z][a-z0-9_]*$")
           families = json.loads(os.environ["FAMILIES"])
+          direct_families = json.loads(os.environ["DIRECT_FAMILIES"])
           added_families = json.loads(os.environ["ADDED_FAMILIES"])
           scope = os.environ["SCOPE"]
+          gpu_enabled = os.environ["GPU_ENABLED"]
+          run_gpu = os.environ["RUN_GPU"]
           if scope not in {"all", "families", "docs", "none"}:
               raise SystemExit(f"invalid impact scope: {scope!r}")
+          if gpu_enabled not in {"true", "false"}:
+              raise SystemExit(f"invalid GPU execution policy: {gpu_enabled!r}")
+          if run_gpu not in {"true", "false"}:
+              raise SystemExit(f"invalid GPU run decision: {run_gpu!r}")
+          expected_run_gpu = gpu_enabled == "true" and scope in {"all", "families"}
+          if (run_gpu == "true") != expected_run_gpu:
+              raise SystemExit("GPU run decision does not match policy and impact")
           if not isinstance(families, list) or not all(
               isinstance(name, str) and pattern.fullmatch(name) for name in families
           ):
               raise SystemExit("invalid family selection")
           if families != sorted(set(families)):
               raise SystemExit("family selection must be sorted and unique")
+          if not isinstance(direct_families, list) or not all(
+              isinstance(name, str) and pattern.fullmatch(name) for name in direct_families
+          ):
+              raise SystemExit("invalid direct-family selection")
+          if direct_families != sorted(set(direct_families)):
+              raise SystemExit("direct-family selection must be sorted and unique")
+          if not set(direct_families) <= set(families):
+              raise SystemExit("direct families must belong to the trusted family inventory")
           if not isinstance(added_families, list) or not all(
               isinstance(name, str) and pattern.fullmatch(name) for name in added_families
           ):
@@ -407,11 +471,32 @@ jobs:
               raise SystemExit("added families must not be in the trusted family inventory")
           if scope != "all" and added_families:
               raise SystemExit("only all scope may select added families")
-          if scope == "families" and not families:
-              raise SystemExit("family scope requires at least one family")
-          if scope in {"docs", "none"} and families:
+          if scope == "families" and (not families or direct_families != families):
+              raise SystemExit("family scope requires its directly changed families")
+          if scope in {"docs", "none"} and (families or direct_families):
               raise SystemExit(f"{scope} scope must not select families")
           PY
+
+      - name: Report the GPU execution policy
+        env:
+          GPU_ENABLED: ${{ steps.impact.outputs.gpu_enabled }}
+          RUN_GPU: ${{ steps.impact.outputs.run_gpu }}
+          SCOPE: ${{ steps.impact.outputs.scope }}
+          FAMILIES: ${{ steps.impact.outputs.families }}
+          DIRECT_FAMILIES: ${{ steps.impact.outputs.direct_families }}
+        run: |
+          set -euo pipefail
+          if [ "$GPU_ENABLED" = "false" ]; then
+            message="Automatic Community GPU execution is disabled and is not a merge gate."
+            echo "::notice::$message"
+            printf '## Community GPU\n\n%s\n\nImpact scope: `%s`; directly changed families: `%s`.\n' \
+              "$message" "$SCOPE" "$DIRECT_FAMILIES" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          message="Experimental Community GPU smoke was manually enabled; it is not a merge gate."
+          echo "::notice::$message"
+          printf '## Community GPU\n\n%s\n\nRun decision: `%s`.\n' \
+            "$message" "$RUN_GPU" >> "$GITHUB_STEP_SUMMARY"
 
   announce:
     name: Community GPU / Publish pending result
@@ -453,11 +538,18 @@ jobs:
     concurrency:
       group: trtmc-community-gpu
       cancel-in-progress: false
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
 
     steps:
+      - name: Check out trusted GPU orchestration
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.gpu-authorize.outputs.base_sha }}
+          persist-credentials: false
+
       - name: Install the Brev CLI
         env:
           BREV_VERSION: 0.6.335
@@ -496,8 +588,10 @@ jobs:
           MERGE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
           PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
           FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
+          DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
           ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
           SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin refs/pull/$PR_NUMBER/merge && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
@@ -510,9 +604,26 @@ jobs:
           # selected family DSOs, and configured CTest tree. It then stages
           # checkpoint revisions and uses E2ERunner's explicit premerge case
           # selection plus JUnit validation, which rejects skips and omissions.
-          echo "Changed families: $FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
-          brev exec "$INSTANCE_NAME" "sudo docker run --rm --gpus all --shm-size 16g -v /tmp/model_connect:/src -w /src -e TRTMC_GPU_SCOPE='$SCOPE' -e TRTMC_GPU_FAMILIES='$FAMILIES' -e TRTMC_GPU_ADDED_FAMILIES='$ADDED_FAMILIES' -e CMAKE_CUDA_ARCHITECTURES=89 trtmc-quickstart-gpu python3.12 -m tools.community_gpu_ci" \
-            | tee /tmp/gpu-ci-output.log
+          # HF_TOKEN: some premerge checkpoints (e.g. sam3) are gated and
+          # fail to download without authorization. huggingface_hub reads
+          # HF_TOKEN from the environment automatically (verified directly
+          # against huggingface_hub.get_token()); no code change is needed
+          # in tools.community_gpu_ci to consume it. GitHub Actions masks
+          # the secret value everywhere it appears, including here.
+          echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
+          python3 -m tools.brev_exec \
+            --instance "$INSTANCE_NAME" \
+            --log /tmp/gpu-ci-output.log \
+            --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -- sudo docker run --rm --gpus all --shm-size 16g \
+            -v /tmp/model_connect:/src -w /src \
+            -e "TRTMC_GPU_SCOPE=$SCOPE" \
+            -e "TRTMC_GPU_FAMILIES=$FAMILIES" \
+            -e "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
+            -e "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            -e "HF_TOKEN=$HF_TOKEN" \
+            -e CMAKE_CUDA_ARCHITECTURES=89 \
+            trtmc-quickstart-gpu python3.12 -m tools.community_gpu_ci
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
@@ -589,9 +700,12 @@ jobs:
         run: brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
 
   publish:
-    name: Community GPU / Required
+    name: Community GPU / Result
     needs: [authorize, gpu-authorize, announce, provision-and-test, cleanup]
-    if: ${{ always() && needs.authorize.result == 'success' && needs.gpu-authorize.result == 'success' }}
+    if: >-
+      ${{ always() && needs.authorize.result == 'success' &&
+      needs.gpu-authorize.result == 'success' &&
+      needs.gpu-authorize.outputs.gpu_enabled == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -628,3 +742,4 @@ jobs:
             -f context="TRTMC Community GPU CI / Smoke test" \
             -f description="$description" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          test "$state" = success

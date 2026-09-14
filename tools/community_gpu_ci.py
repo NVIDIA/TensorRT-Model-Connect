@@ -22,7 +22,7 @@ from tools.ci.process import CiError
 
 
 FAMILY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
-SHARED_SMOKE_FAMILIES = ("bert", "gpt2", "qwen3_8", "timm_vit", "whisper")
+SHARED_SMOKE_FAMILIES = ("bert", "gpt2", "qwen", "timm_vit", "whisper")
 
 
 @dataclass(frozen=True)
@@ -49,16 +49,24 @@ def _family_list(raw: str, label: str) -> tuple[str, ...]:
     return tuple(values)
 
 
-def selected_families(scope: str, families: str, added_families: str) -> tuple[str, ...]:
+def selected_families(
+    scope: str,
+    families: str,
+    direct_families: str,
+    added_families: str,
+) -> tuple[str, ...]:
     """Resolve the family jobs without reading contributor-controlled shell text."""
     selected = _family_list(families, "TRTMC_GPU_FAMILIES")
+    direct = _family_list(direct_families, "TRTMC_GPU_DIRECT_FAMILIES")
     added = _family_list(added_families, "TRTMC_GPU_ADDED_FAMILIES")
     if set(selected) & set(added):
         raise CiError("added families overlap the trusted family inventory")
+    if not set(direct) <= set(selected):
+        raise CiError("direct families must belong to the trusted family inventory")
     if scope == "all":
-        return tuple(sorted(set(SHARED_SMOKE_FAMILIES) | set(added)))
+        return tuple(sorted(set(SHARED_SMOKE_FAMILIES) | set(direct) | set(added)))
     if scope == "families":
-        if not selected or added:
+        if not selected or direct != selected or added:
             raise CiError("family scope requires existing families only")
         return selected
     raise CiError(f"GPU execution received non-GPU scope: {scope!r}")
@@ -168,14 +176,14 @@ def _install_family_requirements(context: CiContext, plans: tuple[FamilyPlan, ..
             )
 
 
-def _runtime_root(build: Path, plans: tuple[FamilyPlan, ...]) -> Path:
-    """Create the installed-wheel-shaped runtime tree expected by E2ERunner."""
-    runtime = build.parent / "trtmc-community-runtime/tensorrt_model_connect/bin"
+def _runtime_root(build: Path, plan: FamilyPlan) -> Path:
+    """Create one family-local runtime tree expected by E2ERunner."""
+    runtime = build.parent / f"trtmc-community-runtime-{plan.family}/tensorrt_model_connect/bin"
     runtime.mkdir(parents=True)
     names = (
         "libtrtmc_core.so",
         "libtrtmc_backend_trt.so",
-        *(f"libtrtmc_model_{plan.family}.so" for plan in plans),
+        f"libtrtmc_model_{plan.family}.so",
     )
     for name in names:
         source = build / name
@@ -199,9 +207,23 @@ def run(repository: Path, env: dict[str, str]) -> None:
     selected = selected_families(
         env.get("TRTMC_GPU_SCOPE", ""),
         env.get("TRTMC_GPU_FAMILIES", ""),
+        env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
         env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
     )
-    plans = tuple(family_plan(repository, family) for family in selected)
+    failures: list[tuple[str, str]] = []
+    plans: list[FamilyPlan] = []
+    for family in selected:
+        try:
+            plans.append(family_plan(repository, family))
+        except (CiError, OSError, ValueError) as error:
+            failures.append((family, str(error)))
+            print(
+                f"Community GPU family failed during planning: {family}: {error}", file=sys.stderr
+            )
+    if not plans:
+        details = "; ".join(f"{family}: {error}" for family, error in failures)
+        raise CiError(f"Community GPU family failures: {details}")
+
     build_env = {
         **env,
         "CMAKE_CUDA_ARCHITECTURES": env.get("CMAKE_CUDA_ARCHITECTURES", "89"),
@@ -215,7 +237,6 @@ def run(repository: Path, env: dict[str, str]) -> None:
             "print(f'GPU count: {torch.cuda.device_count()}')",
         ]
     )
-    _install_family_requirements(context, plans)
 
     build = Path(env.get("TRTMC_NATIVE_BUILD_DIR", "/tmp/trtmc-community-gpu-build"))
     if not build.is_absolute() or Path("/tmp") not in build.parents:
@@ -246,41 +267,60 @@ def run(repository: Path, env: dict[str, str]) -> None:
             "--target",
             "trtmc",
             "trtmc_backend_trt",
-            *(f"trtmc_model_{plan.family}" for plan in plans),
         ],
         limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
     )
-    runtime_root = _runtime_root(build, plans)
 
     checkpoint_env = {
         **env,
         "HF_HOME": env.get("HF_HOME", "/tmp/trtmc-community-huggingface"),
     }
-    _stage_checkpoints(plans, Path(checkpoint_env["HF_HOME"]) / "hub")
-
-    runtime_env = {
-        **checkpoint_env,
-        "CMAKE_CUDA_ARCHITECTURES": build_env["CMAKE_CUDA_ARCHITECTURES"],
-        "HF_HUB_OFFLINE": "1",
-        "TRANSFORMERS_OFFLINE": "1",
-        "PYTHONPATH": ":".join(
-            (
-                str(repository / "core/builder"),
-                str(repository / "apps/benchmark"),
-                str(repository),
-            )
-        ),
-        "TRTMC_BINARY": str(build / "trtmc"),
-        "TRTMC_RUNTIME_ROOT": str(runtime_root),
-        "TRTMC_NATIVE_BUILD_DIR": str(build),
-        "TRTMC_E2E_TIMEOUT": env.get("TRTMC_E2E_TIMEOUT", "40m"),
-    }
     for plan in plans:
         print(f"Running Community GPU E2E: {plan.family} ({', '.join(plan.testcases)})")
-        E2ERunner(CiContext(repository, runtime_env))._run(
-            (plan.family,),
-            plan.testcases,
-        )
+        try:
+            _install_family_requirements(context, (plan,))
+            context.run(
+                [
+                    "cmake",
+                    "--build",
+                    build,
+                    "--parallel",
+                    "8",
+                    "--target",
+                    f"trtmc_model_{plan.family}",
+                ],
+                limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
+            )
+            runtime_root = _runtime_root(build, plan)
+            _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
+            runtime_env = {
+                **checkpoint_env,
+                "CMAKE_CUDA_ARCHITECTURES": build_env["CMAKE_CUDA_ARCHITECTURES"],
+                "HF_HUB_OFFLINE": "1",
+                "TRANSFORMERS_OFFLINE": "1",
+                "PYTHONPATH": ":".join(
+                    (
+                        str(repository / "core/builder"),
+                        str(repository / "apps/benchmark"),
+                        str(repository),
+                    )
+                ),
+                "TRTMC_BINARY": str(build / "trtmc"),
+                "TRTMC_RUNTIME_ROOT": str(runtime_root),
+                "TRTMC_NATIVE_BUILD_DIR": str(build),
+                "TRTMC_E2E_TIMEOUT": env.get("TRTMC_E2E_TIMEOUT", "40m"),
+            }
+            E2ERunner(CiContext(repository, runtime_env))._run(
+                (plan.family,),
+                plan.testcases,
+            )
+            print(f"Community GPU family passed: {plan.family}")
+        except (CiError, OSError, ValueError) as error:
+            failures.append((plan.family, str(error)))
+            print(f"Community GPU family failed: {plan.family}: {error}", file=sys.stderr)
+    if failures:
+        details = "; ".join(f"{family}: {error}" for family, error in failures)
+        raise CiError(f"Community GPU family failures: {details}")
 
 
 def main() -> int:

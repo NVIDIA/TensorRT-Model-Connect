@@ -214,21 +214,24 @@ the target branch and installing `requirements/community-ci.txt`.
 The CPU jobs run on fresh GitHub-hosted `ubuntu-24.04` runners with
 read-only repository permission and no access to private runners, secrets, or
 GPUs.
-Only after `Community CPU / Required` passes does the workflow classify GPU
-impact with trusted base-branch code and, when needed, reserve an isolated
-external GPU instance. The Brev credential remains in the hosted orchestration
-job; pull-request code executes only on the isolated GPU instance and cannot
-read that credential. GPU reservations are serialized across the repository;
-GitHub may cancel an older queued GPU job when newer work enters the shared
-queue, in which case rerun Community CI for the affected head.
+Only after `Community CPU / Required` passes does the workflow authorize and
+classify Community GPU impact with trusted base-branch code. Automatic
+Community GPU execution is disabled by repository policy, so the provision,
+test, cleanup, and result jobs are skipped and Community GPU is not a merge
+gate. A maintainer with `maintain` or `admin` permission may dispatch the
+workflow with **Run the experimental, non-gating Community GPU smoke test**
+enabled after the CPU stage has passed. This manual result is diagnostic and
+does not replace the required Internal CI status. The Brev credential remains
+in the hosted orchestration job; pull-request code executes only on the
+isolated GPU instance and cannot read that credential.
 
 GitHub publishes native pull-request checks and public Actions logs, including
-the complete output for every failed command. Wait for the complete `Community
-CI` workflow, including `Community GPU / Required` when GPU-impacting tests are
-selected, to pass on the current pull-request head. A new commit automatically
-validates a fresh merge revision and cancels an older in-progress run for the
-same pull request. If `main` advances and GitHub asks for an update, rebase or
-update the branch so the new exact merge is validated.
+the complete output for every failed command. Wait for `Community CPU /
+Required` to pass on the current pull-request head before requesting Internal
+CI with the maintainer-only label. A new commit automatically validates a
+fresh merge revision and cancels an older in-progress run for the same pull
+request. If `main` advances and GitHub asks for an update, rebase or update the
+branch so the new exact merge is validated.
 
 ### 10. Ask a maintainer to trigger protected CI
 
