@@ -82,7 +82,7 @@ excluded_profiles:
   - model: res2net50d-in1k
     reason: &res2net_performance_exclusion >-
       Functional and timm reference-parity qualification is present for every
-      published Res2Net checkpoint, but the release-pwherformance workload and
+      published Res2Net checkpoint, but the release-performance workload and
       receipt were collected only for res2net50_26w_4s.
   - model: res2next50-in1k
     reason: *res2net_performance_exclusion
