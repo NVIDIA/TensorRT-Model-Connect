@@ -85,29 +85,42 @@ jobs:
           state="$(jq -er '.state' <<<"$pull")"
           base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
-          base_sha="$(jq -er '.base.sha' <<<"$pull")"
           head_sha="$(jq -er '.head.sha' <<<"$pull")"
+          merge_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pull")"
 
           test "$state" = "open"
           test "$base_repo" = "$GITHUB_REPOSITORY"
           test "$base_ref" = "main"
-          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Pull request #$PR_NUMBER has no testable merge commit."
+            exit 1
+          }
           if [ "$EVENT_NAME" = "pull_request_target" ] \
             && [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
             echo "::error::The CI trigger was superseded by a newer PR head."
             exit 1
           fi
 
+          merge="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/git/commits/$merge_sha")"
+          resolved_merge="$(jq -er '.sha' <<<"$merge")"
+          parent_count="$(jq -er '.parents | length' <<<"$merge")"
+          base_sha="$(jq -er '.parents[0].sha' <<<"$merge")"
+          merge_head="$(jq -er '.parents[1].sha' <<<"$merge")"
+          test "$resolved_merge" = "$merge_sha"
+          test "$parent_count" = "2"
+          test "$merge_head" = "$head_sha"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+
           # Keep the label path CPU-gated without waiting for the later GPU
           # stage. Match the exact Community CI run identity and then require
           # its aggregate CPU job to have succeeded.
           community_ci_runs="$(
             gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request_target&head_sha=$head_sha&per_page=100" \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
               2>/dev/null || true
           )"
-          community_ci_title="PR #$PR_NUMBER · community CI · head $head_sha · base $base_sha"
+          community_ci_title="PR #$PR_NUMBER · community CI · head $head_sha · merge $merge_sha"
           community_ci_run=""
           if [ -n "$community_ci_runs" ]; then
             community_ci_run="$(

@@ -31,7 +31,7 @@ jobs:
   notify-ready-pr:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
-      github.event.workflow_run.event == 'pull_request_target' &&
+      github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 7
@@ -54,14 +54,14 @@ jobs:
             exit 1
           fi
 
-          run_name_pattern='^PR #([1-9][0-9]*) · community CI · head ([0-9a-f]{40}) · base ([0-9a-f]{40})$'
+          run_name_pattern='^PR #([1-9][0-9]*) · community CI · head ([0-9a-f]{40}) · merge ([0-9a-f]{40})$'
           if [[ ! "$WORKFLOW_RUN_NAME" =~ $run_name_pattern ]]; then
             echo "::error::Unexpected Community CI run name: $WORKFLOW_RUN_NAME"
             exit 1
           fi
           pr_number="${BASH_REMATCH[1]}"
           HEAD_SHA="${BASH_REMATCH[2]}"
-          BASE_SHA="${BASH_REMATCH[3]}"
+          MERGE_SHA="${BASH_REMATCH[3]}"
 
           pr_json="$(gh api "repos/$REPOSITORY/pulls/$pr_number")"
           current_head_sha="$(jq -r ".head.sha" <<<"$pr_json")"
@@ -69,9 +69,9 @@ jobs:
             echo "::notice::PR #$pr_number advanced beyond $HEAD_SHA; skipping the stale readiness alert."
             exit 0
           fi
-          current_base_sha="$(jq -r ".base.sha" <<<"$pr_json")"
-          if [ "$current_base_sha" != "$BASE_SHA" ]; then
-            echo "::notice::PR #$pr_number has a newer base revision; skipping the stale readiness alert."
+          current_merge_sha="$(jq -r ".merge_commit_sha // empty" <<<"$pr_json")"
+          if [ "$current_merge_sha" != "$MERGE_SHA" ]; then
+            echo "::notice::PR #$pr_number has a newer merge revision; skipping the stale readiness alert."
             exit 0
           fi
           if [ "$(jq -r ".state" <<<"$pr_json")" != "open" ]; then
@@ -108,9 +108,9 @@ jobs:
               echo "::notice::PR #$pr_number advanced while checking readiness; skipping the stale alert."
               exit 0
             fi
-            current_base_sha="$(jq -r ".base.sha" <<<"$pr_json")"
-            if [ "$current_base_sha" != "$BASE_SHA" ]; then
-              echo "::notice::PR #$pr_number base advanced while checking readiness; skipping the stale alert."
+            current_merge_sha="$(jq -r ".merge_commit_sha // empty" <<<"$pr_json")"
+            if [ "$current_merge_sha" != "$MERGE_SHA" ]; then
+              echo "::notice::PR #$pr_number merge advanced while checking readiness; skipping the stale alert."
               exit 0
             fi
 

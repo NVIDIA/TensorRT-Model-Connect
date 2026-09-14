@@ -204,11 +204,11 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
 
     assert workflow["name"] == "Community CI"
     assert "Manual PR #{0} · community CI" in workflow["run-name"]
-    assert "PR #{0} · community CI · head {1} · base {2}" in workflow["run-name"]
-    assert "github.sha" not in workflow["run-name"]
+    assert "PR #{0} · community CI · head {1} · merge {2}" in workflow["run-name"]
+    assert "github.sha" in workflow["run-name"]
     assert workflow["permissions"] == {}
     assert workflow["env"] == {"COMMUNITY_GPU_EXECUTION_ENABLED": "false"}
-    assert "pull_request_target:" in source
+    assert "\n  pull_request:\n" in source
     assert "branches: [main]" in source
     assert "types: [opened, synchronize, reopened, ready_for_review]" in source
     assert "workflow_dispatch:" in source
@@ -219,7 +219,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
         "default": False,
         "type": "boolean",
     }
-    assert "\n  pull_request:\n" not in source
+    assert "pull_request_target:" not in source
     assert "workflow_run:" not in source
     assert "issue_comment:" not in source
     assert "/run-ci" not in source
@@ -229,6 +229,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     assert source.count("secrets.BREV_API_KEY") == 2
     assert source.count("CI_BASE_REF: ${{ needs.authorize.outputs.merge_sha }}^1") == 2
     assert "persist-credentials: false" in source
+    assert "allow-unsafe-pr-checkout" not in source
     assert "cancel-in-progress: true" in source
     assert "check-runs" not in source
     assert "issues/comments" not in source
@@ -248,6 +249,8 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
         "base_sha",
         "merge_sha",
     }
+    snapshot = jobs["authorize"]["steps"][0]
+    assert snapshot["env"]["EVENT_MERGE_SHA"] == "${{ github.sha }}"
     for job_name in ("source-quality", "docs", "ownership-impact", "unit"):
         assert jobs[job_name]["permissions"] == {"contents": "read"}
         assert jobs[job_name]["needs"] == "authorize"
@@ -361,12 +364,12 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     internal_bridge = (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
         encoding="utf-8"
     )
-    assert "community-ci.yml/runs?event=pull_request_target&head_sha=$head_sha" in (internal_bridge)
+    assert "community-ci.yml/runs?event=pull_request&head_sha=$head_sha" in internal_bridge
     assert "community-cpu.yml" not in internal_bridge
     assert "/actions/runs/$community_ci_run/jobs?filter=latest&per_page=100" in internal_bridge
     assert 'name == "Community CPU / Required" and .conclusion == "success"' in internal_bridge
     assert ".display_title == $title" in internal_bridge
-    assert "· base $base_sha" in internal_bridge
+    assert "· merge $merge_sha" in internal_bridge
 
     docs = jobs["docs"]
     assert "if" not in docs
@@ -403,6 +406,84 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
         },
         "run": "npm run build",
     }
+
+
+@pytest.mark.parametrize(
+    ("event_name", "expected_merge_source"),
+    (("pull_request", "event"), ("workflow_dispatch", "live")),
+)
+def test_community_authorize_pins_the_exact_merge_and_uses_its_base_parent(
+    tmp_path: Path,
+    event_name: str,
+    expected_merge_source: str,
+) -> None:
+    head_sha = "a" * 40
+    stale_rest_base_sha = "b" * 40
+    merge_base_sha = "c" * 40
+    event_merge_sha = "d" * 40
+    live_merge_sha = "e" * 40
+    expected_merge_sha = {
+        "event": event_merge_sha,
+        "live": live_merge_sha,
+    }[expected_merge_source]
+    github_output = tmp_path / "github-output"
+    gh = tmp_path / "gh"
+    gh.write_text(
+        """#!/bin/bash
+set -euo pipefail
+arguments="$*"
+case "$arguments" in
+  *collaborators/tester/permission*) printf '%s\n' maintain ;;
+  *pulls/17*)
+    printf '{"state":"open","base":{"repo":{"full_name":"example/repo"},"ref":"main","sha":"%s"},"head":{"sha":"%s"},"merge_commit_sha":"%s"}\n' "$STALE_REST_BASE_SHA" "$HEAD_SHA" "$LIVE_MERGE_SHA"
+    ;;
+  *git/commits/$EVENT_MERGE_SHA*|*git/commits/$LIVE_MERGE_SHA*)
+    requested_sha="${arguments##*/}"
+    printf '{"sha":"%s","parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$requested_sha" "$MERGE_BASE_SHA" "$HEAD_SHA"
+    ;;
+  *) printf 'unexpected gh call: %s\n' "$arguments" >&2; exit 99 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml",
+                "authorize",
+                "Capture the exact pull-request snapshot",
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "ACTOR": "tester",
+            "PR_NUMBER": "17",
+            "EVENT_NAME": event_name,
+            "EVENT_HEAD_SHA": head_sha,
+            "EVENT_BASE_SHA": stale_rest_base_sha,
+            "EVENT_MERGE_SHA": event_merge_sha,
+            "GITHUB_REPOSITORY": "example/repo",
+            "GITHUB_OUTPUT": str(github_output),
+            "HEAD_SHA": head_sha,
+            "STALE_REST_BASE_SHA": stale_rest_base_sha,
+            "MERGE_BASE_SHA": merge_base_sha,
+            "LIVE_MERGE_SHA": live_merge_sha,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert github_output.read_text(encoding="utf-8") == (
+        f"pr_number=17\nhead_sha={head_sha}\nbase_sha={merge_base_sha}\n"
+        f"merge_sha={expected_merge_sha}\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -469,7 +550,8 @@ def test_internal_label_bridge_accepts_only_the_exact_combined_cpu_gate(
 ) -> None:
     head_sha = "a" * 40
     base_sha = "b" * 40
-    expected_title = f"PR #17 · community CI · head {head_sha} · base {base_sha}"
+    merge_sha = "c" * 40
+    expected_title = f"PR #17 · community CI · head {head_sha} · merge {merge_sha}"
     run_title = expected_title if combined_title_matches else "PR #17 · stale Community CI"
     github_output = tmp_path / "github-output"
     gh = tmp_path / "gh"
@@ -480,7 +562,10 @@ arguments="$*"
 case "$arguments" in
   *collaborators/tester/permission*) printf '%s\n' maintain ;;
   *pulls/17*)
-    printf '{"state":"open","base":{"repo":{"full_name":"example/repo"},"ref":"main","sha":"%s"},"head":{"sha":"%s"}}\n' "$BASE_SHA" "$HEAD_SHA"
+    printf '{"state":"open","base":{"repo":{"full_name":"example/repo"},"ref":"main","sha":"%s"},"head":{"sha":"%s"},"merge_commit_sha":"%s"}\n' "$BASE_SHA" "$HEAD_SHA" "$MERGE_SHA"
+    ;;
+  *git/commits/$MERGE_SHA*)
+    printf '{"sha":"%s","parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$MERGE_SHA" "$BASE_SHA" "$HEAD_SHA"
     ;;
   *community-ci.yml*)
     printf '{"workflow_runs":[{"id":22,"display_title":"%s","updated_at":"2026-01-01T00:00:00Z"}]}\n' "$RUN_TITLE"
@@ -513,6 +598,7 @@ esac
             "GITHUB_OUTPUT": str(github_output),
             "HEAD_SHA": head_sha,
             "BASE_SHA": base_sha,
+            "MERGE_SHA": merge_sha,
             "COMBINED_CPU_JOB_ID": combined_cpu_job_id,
             "RUN_TITLE": run_title,
         },

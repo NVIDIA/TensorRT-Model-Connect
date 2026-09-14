@@ -534,7 +534,7 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
 
     assert 'workflows: ["Community CI"]' in source
     assert workflow["permissions"] == {}
-    assert "github.event.workflow_run.event == 'pull_request_target'" in ready["if"]
+    assert "github.event.workflow_run.event == 'pull_request'" in ready["if"]
     assert ready["permissions"] == {
         "actions": "read",
         "checks": "read",
@@ -574,11 +574,11 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
 
     ready_script = ready["steps"][0]["run"]
     assert "· community CI · head" in ready_script
-    assert "· base" in ready_script
+    assert "· merge" in ready_script
     assert "Unexpected Community CI run name" in ready_script
     assert "for attempt in {1..30}; do" in ready_script
     assert "sleep 10" in ready_script
-    assert ready_script.count('current_base_sha="$(jq -r ".base.sha" <<<"$pr_json")"') == 2
+    assert ready_script.count('current_merge_sha="$(jq -r ".merge_commit_sha // empty" <<<"$pr_json")"') == 2
     for check in ("Community CPU / Required", "PR Metadata / Required", "DCO"):
         assert check in ready_script
     assert "sort_by(.started_at) | last" in ready_script

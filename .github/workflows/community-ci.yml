@@ -4,7 +4,7 @@
 name: Community CI
 
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && format('Manual PR #{0} · community CI', inputs.pr_number) || format('PR #{0} · community CI · head {1} · base {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.event.pull_request.base.sha) }}
+  ${{ github.event_name == 'workflow_dispatch' && format('Manual PR #{0} · community CI', inputs.pr_number) || format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) }}
 
 # Community CI is one ordered pull-request pipeline: the public CPU gate runs
 # first, followed by trusted GPU authorization and impact classification.
@@ -15,7 +15,7 @@ run-name: >-
 # while secret-bearing GPU orchestration executes PR code only on an isolated
 # Brev instance.
 on:
-  pull_request_target:
+  pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
@@ -47,10 +47,15 @@ jobs:
     name: Community CI / Authorize
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
-      github.ref == 'refs/heads/main' &&
       (
-        github.event_name == 'pull_request_target' ||
-        github.event_name == 'workflow_dispatch'
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.base.ref == 'main'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main'
+        )
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -75,6 +80,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_MERGE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
@@ -98,31 +104,34 @@ jobs:
           state="$(jq -er '.state' <<<"$pull")"
           base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
-          base_sha="$(jq -er '.base.sha' <<<"$pull")"
-          head_sha="$(jq -er '.head.sha' <<<"$pull")"
-          merge_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pull")"
+          live_head_sha="$(jq -er '.head.sha' <<<"$pull")"
+          live_merge_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pull")"
 
           test "$state" = "open"
           test "$base_repo" = "$GITHUB_REPOSITORY"
           test "$base_ref" = "main"
-          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$live_head_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$EVENT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$EVENT_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::The Community CI event has no testable merge commit."
+              exit 1
+            }
+            if [ "$live_head_sha" != "$EVENT_HEAD_SHA" ]; then
+              echo "::error::The Community CI trigger was superseded by a newer PR head."
+              exit 1
+            fi
+            head_sha="$EVENT_HEAD_SHA"
+            merge_sha="$EVENT_MERGE_SHA"
+          else
+            head_sha="$live_head_sha"
+            merge_sha="$live_merge_sha"
+          fi
           [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]] || {
             echo "::error::Pull request #$PR_NUMBER has no testable merge commit."
             exit 1
           }
-          if [ "$EVENT_NAME" = "pull_request_target" ]; then
-            [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-            [[ "$EVENT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-            if [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
-              echo "::error::The Community CI trigger was superseded by a newer PR head."
-              exit 1
-            fi
-            if [ "$base_sha" != "$EVENT_BASE_SHA" ]; then
-              echo "::error::The Community CI trigger was superseded by a newer base."
-              exit 1
-            fi
-          fi
 
           merge="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/git/commits/$merge_sha")"
           resolved_merge="$(jq -er '.sha' <<<"$merge")"
@@ -131,8 +140,9 @@ jobs:
           merge_head="$(jq -er '.parents[1].sha' <<<"$merge")"
           test "$resolved_merge" = "$merge_sha"
           test "$parent_count" = "2"
-          test "$merge_base" = "$base_sha"
           test "$merge_head" = "$head_sha"
+          base_sha="$merge_base"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
 
           {
             echo "pr_number=$PR_NUMBER"
