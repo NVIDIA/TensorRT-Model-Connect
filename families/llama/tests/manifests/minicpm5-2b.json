@@ -1,0 +1,23 @@
+{
+  "name": "minicpm5-2b",
+  "hf_id": "openbmb/MiniCPM5-2B",
+  "hf_revision": "12a3808a956f869c767195e9266b59c4d21d92e2",
+  "bundle": "minicpm5-2b.bundle",
+  "family": "llama",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "minicpm5-2b",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "reference_precision": "fp32",
+      "enable_thinking": false
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

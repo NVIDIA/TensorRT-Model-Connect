@@ -89,6 +89,24 @@ def _build_engine(
     )
 
 
+def _eos_token_ids(value: object) -> list[int]:
+    """Normalise the stop tokens into a list.
+
+    A checkpoint may name one stop token or several. Llama 3 and MiniCPM5 both
+    ship a list, so a scalar cannot be assumed; booleans are rejected because
+    `bool` is an `int` subclass and would otherwise pass as a token id.
+    """
+    values = value if isinstance(value, list) else [value]
+    ids: list[int] = []
+    for item in values:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError("llama eos_token_id must be an integer or a list of integers")
+        ids.append(int(item))
+    if not ids:
+        raise ValueError("llama eos_token_id must name at least one token")
+    return ids
+
+
 def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
     runtime = {
         "vocab_size": config.vocab_size,
@@ -102,13 +120,21 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
         "pad_token_id": config.pad_token_id,
     }
     runtime.update(config.raw.get("_native_kv_cache_metadata", {}))
+    eos = config.eos_token_id
     generation_path = model_dir / "generation_config.json"
     if generation_path.is_file():
         generation = json.loads(generation_path.read_text(encoding="utf-8"))
         if not isinstance(generation, dict):
             raise ValueError("generation_config.json must contain one JSON object")
         if "eos_token_id" in generation:
-            runtime["eos_token_id"] = generation["eos_token_id"]
+            eos = generation["eos_token_id"]
+    eos_token_ids = _eos_token_ids(eos)
+    # The scalar stays the first id so a bundle stays readable by a runtime that
+    # predates multiple stop tokens; the list is written only when it adds
+    # something, which keeps single-stop bundles byte-identical to before.
+    runtime["eos_token_id"] = eos_token_ids[0]
+    if len(eos_token_ids) > 1:
+        runtime["eos_token_ids"] = eos_token_ids
     runtime.update(updates)
     return runtime
 

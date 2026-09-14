@@ -1534,6 +1534,8 @@ additional_profiles:
     inherit: gpt2.generate
   - model: internvl3-8b
     inherit: internvl.generate
+  - model: minicpm5-2b
+    inherit: llama.generate
   - model: minitron-4b-depth
     inherit: llama.generate
   - model: minitron-4b-width
