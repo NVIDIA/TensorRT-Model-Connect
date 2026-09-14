@@ -58,7 +58,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
            "--suffix",
            "--context",
            "--source-language",
-            "--target-language",
+           "--target-language",
            "--image",
            "--images",
            "--max-new-tokens",

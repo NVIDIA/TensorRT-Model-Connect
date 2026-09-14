@@ -168,6 +168,127 @@ def _resolved(repository):
     return entry
 
 
+@pytest.mark.parametrize("prepare_only", [False, True])
+@pytest.mark.parametrize("overrides", [
+    {},
+    {"prompt": "false\nquoted: 'yes' # text = retained", "config": {
+        "seed": 2**60 + 3, "temperature": 1e-12, "enabled": False, "suffix": "",
+        "ids": [0, -1, 2], "weights": [1e-15, -1e20], "labels": ["yes", "null", "a=b"],
+    }},
+    {"prompt": "new input", "config": {}},
+    {"prompt": "null", "config": {"empty": [], "optional": None}},
+])
+def test_candidate_workload_overrides_round_trip_through_original_cli(
+    repository, tmp_path, prepare_only, overrides
+):
+    from trtmc_benchmark import cli as benchmark_cli
+
+    original = _resolved(repository)
+    expected_native = deepcopy({**original.case.request, **overrides})
+    expected_reference = {
+        name: value for name, value in expected_native.items() if name != "config"
+    }
+    expected_reference.update(expected_native.get("config", {}))
+    spec = {**original.spec, "workload": {
+        **original.spec["workload"], "request": overrides,
+    }}
+    environment = SimpleNamespace(
+        **vars(repository.environment), trtmc_bench=tmp_path / "bench",
+        worker=tmp_path / "worker", bundle_roots=(),
+    )
+    entry, = perf.resolve_entries([spec], environment)
+    command = perf.candidate_command(
+        entry, environment, None if prepare_only else tmp_path / "candidate",
+        prepare_only=prepare_only,
+    )
+    arguments = benchmark_cli.build_parser().parse_args(command[1:])
+    actual, = benchmark_cli._resolve_cases(
+        arguments, {}, perf.ManifestCatalog(perf.MANIFEST_ROOT),
+        SimpleNamespace(provisional_path=lambda model: entry.case.bundle_path),
+        environment.runtime_root,
+    )
+    reference = perf.baseline_command(entry, environment, tmp_path / "reference.json")
+    reference_request = json.loads(reference[reference.index("--request-json") + 1])
+    # Native keeps Config nested; references use the same explicit values flat.
+    assert json.dumps(actual.worker_request()["request"], sort_keys=True) == json.dumps(
+        expected_native, sort_keys=True
+    )
+    assert json.dumps(reference_request, sort_keys=True) == json.dumps(
+        expected_reference, sort_keys=True
+    )
+    assert actual.request == entry.case.request
+    assert actual.operation == entry.case.operation
+    assert actual.measurement == entry.case.measurement
+    assert actual.effective_task == entry.case.effective_task
+    request_sets = [value for value in arguments.sets if value.startswith("request.")]
+    assert len(request_sets) == len(overrides)
+    assert spec["workload"]["request"] == overrides
+
+
+@pytest.mark.parametrize("prepare_only", [False, True])
+def test_candidate_and_reference_select_the_same_prepared_document(
+    repository, tmp_path, prepare_only
+):
+    from trtmc_benchmark import cli as benchmark_cli
+
+    original = tmp_path / "original.yaml"
+    original.write_text("version: 1\n", encoding="utf-8")
+    prepared = tmp_path / "prepared request.b2rq"
+    prepared.write_bytes(b"B2RQ\x00prepared fixture")
+    source = tmp_path / "source request.json"
+    source.write_text("{}", encoding="utf-8")
+    manifest_path = repository.families / "sample/tests/manifests/sample.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["task"] = "molecular_document_to_structure"
+    manifest["testcases"] = [{
+        "name": "sample-model", "document_path": str(original),
+        "config": {"seed": 9, "include_confidence": False},
+    }]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_bytes = manifest_path.read_bytes()
+    _, specs, _ = perf.load_suite(repository.canonical)
+    spec = {**specs[-1], "operation": "predict_structure", "workload": {
+        "testcase": "sample-model", "request": {
+            "document_path": str(prepared), "input_encoding": "b2rq",
+            "source_path": str(source), "config": {"seed": 0, "include_confidence": True},
+        },
+    }}
+    expected_native = deepcopy(spec["workload"]["request"])
+    expected_reference = {
+        "document_path": str(prepared), "input_encoding": "b2rq", "source_path": str(source),
+        "seed": 0, "include_confidence": True,
+    }
+    environment = SimpleNamespace(
+        **vars(repository.environment), trtmc_bench=tmp_path / "bench",
+        worker=tmp_path / "worker", bundle_roots=(),
+    )
+    entry, = perf.resolve_entries([spec], environment)
+    command = perf.candidate_command(
+        entry, environment, None if prepare_only else tmp_path / "candidate",
+        prepare_only=prepare_only,
+    )
+    arguments = benchmark_cli.build_parser().parse_args(command[1:])
+    actual, = benchmark_cli._resolve_cases(
+        arguments, {}, perf.ManifestCatalog(perf.MANIFEST_ROOT),
+        SimpleNamespace(provisional_path=lambda model: entry.case.bundle_path),
+        environment.runtime_root,
+    )
+    reference = perf.baseline_command(entry, environment, tmp_path / "reference.json")
+    reference_request = json.loads(reference[reference.index("--request-json") + 1])
+    assert json.dumps(actual.worker_request()["request"], sort_keys=True) == json.dumps(
+        expected_native, sort_keys=True
+    )
+    assert json.dumps(reference_request, sort_keys=True) == json.dumps(
+        expected_reference, sort_keys=True
+    )
+    assert actual.request == spec["workload"]["request"] == expected_native
+    assert actual.request["document_path"] != str(original)
+    assert Path(actual.request["document_path"]).read_bytes() == prepared.read_bytes()
+    assert actual.effective_task == "molecular_document_to_structure"
+    assert actual.measurement == entry.case.measurement
+    assert manifest_path.read_bytes() == manifest_bytes
+
+
 def _result(entry):
     return {
         "schema_version": "trtmc.perf-baseline/v1", "status": "completed",

@@ -187,6 +187,46 @@ void test_table_driven_config() {
         "accessor never chooses between duplicate overrides");
 }
 
+void check_list_default_presence(Span<const ConfigField> fields, const double* default_steps) {
+    const auto defaults = config_get<Span<const double>>({}, fields, "sampling_steps");
+    check(defaults && defaults->data() == default_steps && defaults->size() == 2,
+          "list getter borrows fixed-default payload");
+    check(!config_get<Span<const double>>({}, fields, "context_steps"),
+          "list without an override or fixed default remains absent");
+    const ConfigEntry empty[] = {{"sampling_steps", Span<const double>{}}};
+    const auto explicit_empty = config_get<Span<const double>>(empty, fields, "sampling_steps");
+    check(explicit_empty && explicit_empty->empty() && config_provided(empty, "sampling_steps"),
+          "an explicit empty list overrides the fixed default without becoming absent");
+}
+
+void test_table_driven_list_lifetime() {
+    const double default_steps[] = {1.0, 0.5};
+    const ConfigField fields[] = {
+        {"sampling_steps", ConfigKind::F64List, ConfigValue{Span<const double>{default_steps}}, ""},
+        {"context_steps", ConfigKind::F64List, std::nullopt, ""},
+    };
+    check_list_default_presence(fields, default_steps);
+    std::vector<double> owned_steps;
+    {
+        double supplied_steps[] = {1.0, 0.25, 0.0};
+        const ConfigEntry config[] = {{"sampling_steps", Span<const double>{supplied_steps}}};
+        const auto steps = config_get<Span<const double>>(config, fields, "sampling_steps");
+        check(steps && steps->data() == supplied_steps && steps->size() == 3,
+              "list override borrows caller payload instead of fixed default");
+        // Keep the optional descriptor alive throughout iteration.
+        if (steps) {
+            for (const double value : *steps)
+                owned_steps.push_back(value);
+        }
+        supplied_steps[0] = 0.75;
+        check(steps && steps->size() == 3 && owned_steps.size() == 3 && (*steps)[0] == 0.75 &&
+                  owned_steps[0] == 1.0,
+              "holding the descriptor does not turn its payload into owned storage");
+    }
+    check(owned_steps == std::vector<double>({1.0, 0.25, 0.0}),
+          "copied list survives both the getter descriptor and caller payload");
+}
+
 struct FirstTask {
     using TaskInterface = FirstTask;
     static constexpr std::string_view kTask = "first_test";
@@ -273,6 +313,7 @@ int main() {
     test_order_and_borrowing();
     test_lists_and_owned_snapshot();
     test_table_driven_config();
+    test_table_driven_list_lifetime();
     test_interface_binding();
     std::cerr << (failures == 0 ? "ALL PASSED\n" : "SOME FAILED\n");
     return failures;

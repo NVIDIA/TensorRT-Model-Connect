@@ -51,6 +51,94 @@ Run run(std::vector<std::string> arguments) {
     const auto status = trtmc::cli::run(static_cast<int>(argv.size()), argv.data(), output, error);
     return {status, output.str(), error.str()};
 }
+void empty_wav(const std::filesystem::path& path) {
+    // Complete PCM16 WAV: one channel at 16000 Hz, with an empty data chunk.
+    const unsigned char header[] = {'R', 'I', 'F',  'F',  36,  0,   0,    0,    'W', 'A', 'V',
+                                    'E', 'f', 'm',  't',  ' ', 16,  0,    0,    0,   1,   0,
+                                    1,   0,   0x80, 0x3e, 0,   0,   0x00, 0x7d, 0,   0,   2,
+                                    0,   16,  0,    'd',  'a', 't', 'a',  0,    0,   0,   0};
+    std::ofstream out(path, std::ios::binary);
+    out.exceptions(std::ios::badbit | std::ios::failbit);
+    out.write(reinterpret_cast<const char*>(header), sizeof(header));
+    out.close();
+    const auto decoded = trtmc::cli::io::read_wav_interleaved(path.string());
+    check(std::filesystem::file_size(path) == 44 && decoded.sample_rate == 16000 &&
+              decoded.channels == 1 && decoded.samples.empty(),
+          "empty input fixture decodes as a complete PCM16 WAV with zero frames");
+}
+void empty_audio_inputs(const std::filesystem::path& root, const std::filesystem::path& model,
+                        const std::filesystem::path& input, const std::filesystem::path& empty) {
+    const auto mixed = root / "audio_cli_empty_mixed.bundle",
+               live = root / "audio_cli_empty_live.bundle",
+               offline = root / "audio_cli_empty_offline.bundle",
+               silence = root / "audio_cli_silence.wav",
+               output = root / "audio_cli_silence_output.wav";
+    bundle(mixed, "mixed_batch_speech_to_text");
+    bundle(live, "duplex_speech_dialogue", "speech_fixture");
+    bundle(offline, "offline_speech_dialogue", "speech_fixture");
+    const float frame[] = {0.0F, 0.0F};
+    trtmc::cli::io::write_wav_interleaved({frame, 2}, 8000, 2, silence.string());
+    const auto decoded = trtmc::cli::io::read_wav_interleaved(silence.string());
+    check(decoded.sample_rate == 8000 && decoded.channels == 2 &&
+              decoded.samples == std::vector<float>({0.0F, 0.0F}),
+          "silence positive control contains exactly one complete stereo frame");
+    struct Case {
+        const char* label;
+        const char* command;
+        std::filesystem::path model;
+        std::vector<std::string> options;
+    };
+    const Case cases[] = {
+        {"transcription", "transcribe", model, {"--task", "speech_transcription"}},
+        {"translation",
+         "transcribe",
+         model,
+         {"--task", "speech_translation", "--target-language", "en"}},
+        {"batch transcription",
+         "transcribe-batch",
+         model,
+         {"--task", "batch_speech_transcription"}},
+        {"batch translation",
+         "transcribe-batch",
+         model,
+         {"--task", "batch_speech_translation", "--target-language", "en"}},
+        {"mixed batch transcription", "transcribe-batch", mixed, {"--translate", "false"}},
+        {"mixed batch translation",
+         "transcribe-batch",
+         mixed,
+         {"--translate", "true", "--target-language", "en"}},
+        {"streaming transcription", "transcribe-streaming", live, {"--chunk-samples", "1"}},
+        {"speech response", "speak", model, {"--output", output.string()}},
+        {"duplex dialogue", "speech-session", live, {"--output", output.string()}},
+        {"offline dialogue", "speech-session", offline, {"--output", output.string()}}};
+    for (const auto& item : cases) {
+        auto invoke = [&](const std::filesystem::path& last_input) {
+            std::vector<std::string> args{"trtmc", item.command, item.model.string(),
+                                          "--runtime-root", root.string()};
+            if (std::string(item.command) == "transcribe-batch")
+                args.insert(args.end(), {"--input", input.string()});
+            args.insert(args.end(), {"--input", last_input.string()});
+            args.insert(args.end(), item.options.begin(), item.options.end());
+            return run(std::move(args));
+        };
+        const auto rejected = invoke(empty);
+        check(rejected.status != 0 && rejected.output.empty() &&
+                  rejected.error == "Error: WAV contains no audio: " + empty.string() + "\n",
+              (std::string(item.label) + " rejects empty WAV with the existing CLI error").c_str());
+        const auto accepted = invoke(silence);
+        check(accepted.status == 0 && accepted.error.empty() && !accepted.output.empty() &&
+                  json::parse(accepted.output).is_object(),
+              (std::string(item.label) + " accepts one complete stereo frame of silence").c_str());
+        if (accepted.status == 0 && (std::string(item.command) == "speak" ||
+                                     std::string(item.command) == "speech-session")) {
+            const auto saved = trtmc::cli::io::read_wav_interleaved(output.string());
+            check(saved.channels == 2 && saved.samples == std::vector<float>({0.0F, 0.0F}),
+                  "speech output preserves the complete silent stereo frame");
+        }
+    }
+    for (const auto& path : {mixed, live, offline, silence, output})
+        std::filesystem::remove(path);
+}
 void generated_and_batch(const std::filesystem::path& root, const std::filesystem::path& model,
                          const std::filesystem::path& input) {
     const auto tts = root / "audio_cli_tts.bundle", mixed = root / "audio_cli_mixed.bundle",
@@ -226,7 +314,8 @@ void streamed_and_session(const std::filesystem::path& root, const std::filesyst
 void exercise(const std::filesystem::path& root) {
     const auto all = root / "audio_cli.bundle", restricted = root / "audio_cli_asr.bundle",
                translation_default = root / "audio_cli_translation.bundle",
-               input = root / "audio_cli_stereo.wav";
+               input = root / "audio_cli_stereo.wav", empty = root / "audio_cli_empty.wav";
+    empty_wav(empty);
     bundle(all, "speech_transcription");
     bundle(restricted, "asr_only");
     bundle(translation_default, "speech_translation");
@@ -294,7 +383,8 @@ void exercise(const std::filesystem::path& root) {
           "missing translation Task does not retry transcription");
     generated_and_batch(root, all, input);
     streamed_and_session(root, input);
-    for (const auto& path : {all, restricted, translation_default, input})
+    empty_audio_inputs(root, all, input, empty);
+    for (const auto& path : {all, restricted, translation_default, input, empty})
         std::filesystem::remove(path);
 }
 } // namespace

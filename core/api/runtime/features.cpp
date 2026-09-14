@@ -25,8 +25,9 @@ void require_class_identity(const internal::LabelScoresResult& result) {
     bool named = result.labels.size() == result.scores.size();
     for (const auto& label : result.labels)
         named = named && !label.empty();
-    result_require(named || !result.vocabulary_id.empty(),
-                   "image class scores require labels or an explicit vocabulary identity");
+    result_require(
+        result.labels.empty() || named || !result.vocabulary_id.empty(),
+        "supplied class labels require nonempty names or an explicit vocabulary identity");
 }
 
 trtmc_f32_matrix_view_v1 matrix_view(const internal::FloatMatrix& matrix) {

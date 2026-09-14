@@ -12,6 +12,7 @@
 #include <iostream>
 #include <limits>
 #include <nlohmann/json.hpp>
+#include <set>
 
 namespace {
 using Json = nlohmann::json;
@@ -44,6 +45,221 @@ void bundle(const std::filesystem::path& path, const std::string& task,
         output.put(static_cast<char>((static_cast<std::uint64_t>(header.size()) >> shift) & 255U));
     output << header;
 }
+
+void audio_artifacts(const std::string& worker, const std::filesystem::path& root) {
+    const auto directory = root / "benchmark_audio_artifacts";
+    std::filesystem::create_directories(directory);
+    const auto wav = directory / "input.wav";
+    const std::vector<float> input_samples{0.25F, -0.25F, 0.5F, -0.5F};
+    trtmc::cli::io::write_wav_interleaved({input_samples.data(), input_samples.size()}, 8000, 2,
+                                          wav.string());
+    for (const std::string name :
+         {"text_to_audio", "text_to_speech", "empty_last", "speech_to_speech_response",
+          "streaming_text_to_speech", "empty_stream"}) {
+        const bool response = name == "speech_to_speech_response";
+        const bool streaming = name == "streaming_text_to_speech" || name == "empty_stream";
+        const bool empty_last = name == "empty_last", empty_stream = name == "empty_stream";
+        const auto selected = streaming    ? std::string("streaming_text_to_speech")
+                              : empty_last ? std::string("text_to_audio")
+                                           : name;
+        const auto mode = streaming || response ? selected
+                          : empty_last          ? "artifact_audio_empty_last"
+                                                : "artifact_audio";
+        const auto model = directory / (name + ".bundle");
+        const auto request_path = directory / (name + ".request.json");
+        const auto output = directory / (name + ".json");
+        bundle(model, mode, streaming ? "speech_fixture" : "audio_fixture");
+        const Json request{
+            {"schema_version", 2},
+            {"case_name", name},
+            {"bundle", model.string()},
+            {"runtime_root", root.string()},
+            {"selected_task", selected},
+            {"operation", response ? "speak" : "generate_audio"},
+            {"request", response ? Json{{"audio_path", wav.string()}}
+                                 : Json{{"prompt", empty_stream ? "benchmark-empty" : "Hello"}}},
+            {"measurement", {{"warmup", 1}, {"iterations", 2}}}};
+        {
+            std::ofstream file(request_path);
+            file << request;
+        }
+        const auto command = quote(worker) + " --request " + quote(request_path.string()) +
+                             " --output " + quote(output.string());
+        check(std::system(command.c_str()) == 0, "audio artifact worker completes");
+        std::ifstream file(output);
+        Json result;
+        file >> result;
+        check(result.at("status") == "completed" && result.at("observations").size() == 2 &&
+                  result.at("observation_serialization_included") == false,
+              "audio artifacts preserve the number of measured calls and timing boundary");
+        check(!result.at("output_summary").contains("runtime_e2e_wall_ms"),
+              "cached summary retains the original summary fields without per-call wall time");
+        std::vector<std::string> artifacts;
+        for (std::size_t i = 0; i < 2; ++i) {
+            const auto& observation = result.at("observations").at(i);
+            check(observation.contains("audio_artifact"),
+                  "measured audio has explicit artifact state");
+            if (!observation.contains("audio_artifact"))
+                continue;
+            if (empty_stream || (empty_last && i == 1)) {
+                check(observation.at("audio_artifact").is_null() &&
+                          observation.at("output_samples") == 0,
+                      "valid empty output has no fabricated or stale waveform");
+                continue;
+            }
+            const auto path = observation.at("audio_artifact").get<std::string>();
+            const auto artifact = directory / path;
+            artifacts.push_back(artifact.string());
+            check(path == name + ".audio." + std::to_string(i + 1) + ".wav",
+                  "each measured waveform has its own portable case-relative artifact path");
+            const auto audio = trtmc::cli::io::read_wav_interleaved(artifact.string());
+            const float first = static_cast<float>(i + 2) / 8;
+            const auto expected =
+                response    ? std::vector<float>{-0.5F, 0.5F, -0.25F, 0.25F}
+                : streaming ? std::vector<float>{0,    0.25F, 0.5F, 0.75F, 1,    0.25F,
+                                                 0.5F, 0.75F, 2,    0.25F, 0.5F, 0.75F}
+                : name == "text_to_speech" ? std::vector<float>{first, 0, 0.1F, 0.25F}
+                                           : std::vector<float>{first, 0, 0.25F, -0.25F};
+            check(audio.channels == 2 && audio.sample_rate == (response ? 8000 : 24000) &&
+                      audio.samples == expected,
+                  "FLOAT32 WAV preserves every interleaved sample including unclipped values");
+            check(observation.at("output_samples") == expected.size(),
+                  "waveform length equals the actual measured result");
+            if (streaming)
+                check(observation.at("streaming_pcm_copy_included") == true,
+                      "streaming receipt explicitly includes borrowed-PCM copying in the call");
+        }
+        const auto& summary = result.at("output_summary");
+        check(summary.contains("audio_artifact"), "summary identifies its actual audio output");
+        if (summary.contains("audio_artifact"))
+            check(summary.at("audio_artifact") ==
+                      result.at("observations").back().at("audio_artifact"),
+                  "summary references the final measurement without another observer write");
+        std::size_t written = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+            const auto filename = entry.path().filename().string();
+            if (filename.rfind(name + ".audio.", 0) == 0 && entry.path().extension() == ".wav")
+                ++written;
+        }
+        check(written == (empty_stream ? 0U
+                          : empty_last ? 1U
+                                       : 2U),
+              "warmup and summary do not create extra waveform artifacts");
+        for (const auto& path : artifacts)
+            std::filesystem::remove(path);
+        for (const auto& path : {model, request_path, output})
+            std::filesystem::remove(path);
+    }
+    std::filesystem::remove(wav);
+    std::filesystem::remove(directory);
+}
+void dialogue_artifacts(const std::string& worker, const std::filesystem::path& root) {
+    const auto directory = root / "benchmark_dialogue_artifacts";
+    std::filesystem::create_directories(directory);
+    const auto input_audio = directory / "input.wav";
+    const std::vector<float> input_samples{2.0F, -0.25F, 0.5F, -0.5F, 0.75F, -0.75F};
+    trtmc::cli::io::write_wav_interleaved({input_samples.data(), input_samples.size()}, 8000, 2,
+                                          input_audio.string());
+    for (const std::string task :
+         {"duplex_speech_dialogue", "offline_speech_dialogue", "tool_speech_dialogue"}) {
+        for (const bool assets : {false, true}) {
+            const auto name = task + (assets ? "-loaded" : "-cached");
+            const auto model = directory / (name + ".bundle");
+            const auto request_path = directory / (name + ".request.json");
+            const auto output = directory / (name + ".json");
+            bundle(model, task, "speech_fixture");
+            Json values{{"audio_path", input_audio.string()}, {"chunk_frames", 1}};
+            if (task == "tool_speech_dialogue") {
+                values["tools"] = {{{"name", "lookup"}, {"parameters_schema_json", "{}"}},
+                                   {{"name", "other"}, {"parameters_schema_json", "{}"}}};
+                values["tool_replies"] = {{{"name", "lookup"}, {"content_text", "first"}},
+                                          {{"name", "other"}, {"content_text", "second"}}};
+            }
+            const Json request{
+                {"schema_version", 2},
+                {"case_name", name},
+                {"bundle", model.string()},
+                {"runtime_root", root.string()},
+                {"operation", "speech_dialogue"},
+                {"request", values},
+                {"measurement",
+                 {{"warmup", 1}, {"iterations", 2}, {"asset_loading_included", assets}}}};
+            {
+                std::ofstream file(request_path);
+                file << request;
+            }
+            const auto command = quote(worker) + " --request " + quote(request_path.string()) +
+                                 " --output " + quote(output.string());
+            const int status = std::system(command.c_str());
+            check(status == 0, "dialogue media worker completes");
+            if (status != 0)
+                continue;
+            Json result;
+            std::ifstream(output) >> result;
+            check(result.at("observations").size() == 2, "dialogue keeps two measured calls");
+            std::set<std::string> paths;
+            for (const auto& observation : result.at("observations")) {
+                check(observation.contains("input_audio_artifact") &&
+                          observation.contains("event_audio_artifacts"),
+                      "dialogue retains actual input and per-event audio artifacts");
+                if (!observation.contains("input_audio_artifact") ||
+                    !observation.contains("event_audio_artifacts"))
+                    continue;
+                const auto source = observation.at("input_audio_artifact").get<std::string>();
+                check(std::filesystem::path(source).filename() == source &&
+                          paths.insert(source).second,
+                      "each measurement owns a portable input-audio artifact");
+                const auto input =
+                    trtmc::cli::io::read_wav_interleaved((directory / source).string());
+                check(
+                    input.samples == input_samples && input.channels == 2 &&
+                        input.sample_rate == 8000,
+                    "input artifact preserves every consumed sample, rate and interleaved channel");
+                const auto& events = observation.at("events");
+                const auto& audio = observation.at("event_audio_artifacts");
+                check(audio.size() == events.size(), "event audio references retain event order");
+                for (std::size_t index = 0; index < std::min(events.size(), audio.size());
+                     ++index) {
+                    const auto& event = events[index];
+                    if (event.at("audio").empty()) {
+                        check(audio[index].is_null(), "non-audio events have no fabricated WAV");
+                        continue;
+                    }
+                    const auto path = audio[index].get<std::string>();
+                    check(std::filesystem::path(path).filename() == path &&
+                              paths.insert(path).second,
+                          "each measured audio event owns a separate portable WAV");
+                    const auto actual =
+                        trtmc::cli::io::read_wav_interleaved((directory / path).string());
+                    check(actual.samples == event.at("audio").get<std::vector<float>>() &&
+                              actual.channels == event.at("channels") &&
+                              actual.sample_rate == event.at("sample_rate"),
+                          "event WAV preserves all PCM and its own format without merging epochs");
+                }
+            }
+            const auto& summary = result.at("output_summary");
+            if (summary.contains("input_audio_artifact") &&
+                summary.contains("event_audio_artifacts"))
+                check(summary.at("input_audio_artifact") ==
+                              result.at("observations").back().at("input_audio_artifact") &&
+                          summary.at("event_audio_artifacts") ==
+                              result.at("observations").back().at("event_audio_artifacts"),
+                      "dialogue summary references the last measurement without extra files");
+            std::size_t written = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(directory))
+                if (entry.path().filename().string().rfind(name + ".audio.", 0) == 0 &&
+                    entry.path().extension() == ".wav")
+                    ++written;
+            check(written == paths.size(), "dialogue warmup and summary write no extra media");
+            for (const auto& path : paths)
+                std::filesystem::remove(directory / path);
+            for (const auto& path : {model, request_path, output})
+                std::filesystem::remove(path);
+        }
+    }
+    std::filesystem::remove(input_audio);
+    std::filesystem::remove(directory);
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -53,6 +269,7 @@ int main(int argc, char** argv) {
     }
     try {
         const std::filesystem::path root(argv[2]);
+        audio_artifacts(argv[1], root);
         const auto model = root / "benchmark_audio.bundle";
         const auto wav = root / "benchmark_audio_stereo.wav";
         const auto input = root / "benchmark_audio_request.json";
@@ -420,7 +637,7 @@ int main(int argc, char** argv) {
                   result.at("output_summary").at("output_frames") == 6 &&
                   result.at("output_summary").at("channels") == 2 &&
                   result.at("output_summary").at("output_audio_seconds") == 6.0 / 24000,
-              "direct synchronous callbacks count real PCM without accumulating or writing audio");
+              "direct synchronous callbacks retain the actual PCM frame and sample counts");
         request["request"]["streaming"] = true;
         run();
         request["request"]["streaming"] = false;
@@ -444,6 +661,7 @@ int main(int argc, char** argv) {
             truncated << "RIFF";
         }
         run(false);
+        dialogue_artifacts(argv[1], root);
         std::cout << (failures ? "FAILED\n" : "ALL PASSED\n");
         return failures ? 1 : 0;
     } catch (const std::exception& error) {

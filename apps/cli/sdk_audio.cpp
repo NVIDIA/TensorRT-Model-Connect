@@ -21,6 +21,12 @@ std::optional<std::string> option(const Command& command, const char* key) {
     return has_option(command, key) ? std::optional<std::string>{command.options.at(key)}
                                     : std::nullopt;
 }
+io::LoadedAudio read_audio(const std::string& path) {
+    auto audio = io::read_wav_interleaved(path);
+    if (audio.samples.empty())
+        throw std::runtime_error("WAV contains no audio: " + path);
+    return audio;
+}
 AudioView audio_view(const io::LoadedAudio& audio) {
     return {{audio.samples.data(), audio.samples.size()},
             static_cast<std::uint32_t>(audio.sample_rate),
@@ -157,7 +163,7 @@ void transcribe_batch(const Command& command, const Model& model, std::string_vi
     std::vector<io::LoadedAudio> audio;
     audio.reserve(command.inputs.size());
     for (const auto& path : command.inputs)
-        audio.push_back(io::read_wav_interleaved(path));
+        audio.push_back(read_audio(path));
     const auto source = option(command, "--source-language");
     const auto target = option(command, "--target-language");
     auto emit = [&](const auto& results) {
@@ -206,7 +212,7 @@ nlohmann::json transcript_update(const SpeechTranscriptUpdate& update) {
     return result;
 }
 void transcribe_stream(const Command& command, const Model& model, std::ostream& output) {
-    const auto audio = io::read_wav_interleaved(require_option(command, "--input"));
+    const auto audio = read_audio(require_option(command, "--input"));
     const auto task = model.task<StreamingSpeechTranscription>();
     const auto config = detail::task_config(command, task.config_fields(),
                                             {"--input", "--chunk-samples", "--language"});
@@ -260,7 +266,7 @@ const char* speech_event_name(SpeechEventKind kind) {
 }
 void speech_session(const Command& command, const Model& model, std::string_view id,
                     std::ostream& output) {
-    const auto audio = io::read_wav_interleaved(require_option(command, "--input"));
+    const auto audio = read_audio(require_option(command, "--input"));
     const SpeechDialogueRequest request{
         {static_cast<std::uint32_t>(audio.sample_rate), static_cast<std::uint32_t>(audio.channels)},
         option(command, "--system-prompt")};
@@ -446,7 +452,7 @@ bool dispatch_sdk_audio(const Command& command, const Model& model, std::string_
         return true;
     }
     if (command.kind == CommandKind::kSpeak && id == SpeechToSpeechResponse::kTask) {
-        const auto audio = io::read_wav_interleaved(require_option(command, "--input"));
+        const auto audio = read_audio(require_option(command, "--input"));
         const auto task = model.task<SpeechToSpeechResponse>();
         const auto config =
             detail::task_config(command, task.config_fields(), {"--input", "--output"});
@@ -464,7 +470,7 @@ bool dispatch_sdk_audio(const Command& command, const Model& model, std::string_
         return false;
     const bool translation = id == SpeechTranslation::kTask;
     validate_translation(command, translation);
-    const auto audio = io::read_wav_interleaved(require_option(command, "--input"));
+    const auto audio = read_audio(require_option(command, "--input"));
     if (translation) {
         const auto task = model.task<SpeechTranslation>();
         const auto config = transcription_config(command, task.config_fields());

@@ -244,15 +244,18 @@ def resolve_case(
     if explicit_task and resolution.task != task:
         raise BenchmarkError("operation cannot change an explicitly selected Task")
     request = dict(resolution.request)
-    for field, manifest_field in (
-        ("height", "image_height"),
-        ("width", "image_width"),
-        ("num_frames", "video_num_frames"),
-    ):
-        if not request.get(field) and manifest_field in model.build_settings:
-            request[field] = int(model.build_settings[manifest_field])
-    if int(request.get("num_frames", 1)) > 1:
-        request["media_type"] = "video"
+    if resolution.task in {
+        "image_generation", "image_edit", "image_generation_batch", "world_model_generation",
+    }:
+        for field, manifest_field in (
+            ("height", "image_height"),
+            ("width", "image_width"),
+            ("num_frames", "video_num_frames"),
+        ):
+            if not request.get(field) and manifest_field in model.build_settings:
+                request[field] = int(model.build_settings[manifest_field])
+        if int(request.get("num_frames", 1)) > 1:
+            request["media_type"] = "video"
     measurement = resolution.measurement
     sources = dict(resolution.sources)
     resolved = ResolvedCase(

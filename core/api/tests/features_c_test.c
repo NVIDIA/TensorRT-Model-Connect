@@ -223,8 +223,9 @@ static void padding_contracts(const trtmc_core_api_v1* core, trtmc_model* padded
 
 static void class_identity_contracts(const trtmc_core_api_v1* core, const char* root,
                                      const trtmc_load_options_v1* options) {
-    const char* modes[] = {"unnamed_classes", "blank_classes", "empty_classes", "named_classes",
-                           "ordinal_classes"};
+    const char* modes[] = {"unnamed_classes",   "blank_classes",   "empty_classes",
+                           "named_classes",     "ordinal_classes", "blank_identified_classes",
+                           "short_class_labels"};
     const float pixels[] = {0.5F, 0.25F, 0.125F};
     const trtmc_image_to_class_scores_request_v1 input = {
         {pixels, sizeof(pixels), 1, 1, 3, TRTMC_IMAGE_FLOAT32}};
@@ -258,23 +259,28 @@ static void class_identity_contracts(const trtmc_core_api_v1* core, const char* 
             (const trtmc_batch_image_to_class_scores_api_v1*)batch_header;
         trtmc_result* result = (trtmc_result*)(uintptr_t)1;
         trtmc_status status = single->run(model, &input, NULL, &result, &error);
-        if (i < 3) {
-            check(status == TRTMC_INTERNAL_ERROR && result == NULL && error,
-                  "C rejects anonymous or empty class scores and clears output");
+        if (i == 1 || i == 2 || i == 6) {
+            check(
+                status == TRTMC_INTERNAL_ERROR && result == NULL && error,
+                "C rejects empty scores, malformed or unidentified blank labels and clears output");
         } else {
             trtmc_label_scores_view_v1 view = {0};
             check(status == TRTMC_OK && result &&
                       single->result_view(result, &view, &error) == TRTMC_OK && view.count == 2 &&
-                      view.scores[0] == 18 && view.kind == TRTMC_SCORE_LOGIT &&
-                      ((i == 3 && view.labels.size == 2 && view.vocabulary_id.size == 0) ||
-                       (i == 4 && view.labels.size == 0 && view.vocabulary_id.size != 0)),
-                  "C preserves inline labels or explicit ordinal vocabulary without normalization");
+                      view.scores[0] == 18 && view.scores[1] == 0.5F &&
+                      view.kind == TRTMC_SCORE_LOGIT &&
+                      ((i == 0 && view.labels.size == 0 && view.vocabulary_id.size == 0) ||
+                       (i == 3 && view.labels.size == 2 && view.vocabulary_id.size == 0) ||
+                       (i == 4 && view.labels.size == 0 && view.vocabulary_id.size != 0) ||
+                       (i == 5 && view.labels.size == 2 && view.labels.data[0].size == 0 &&
+                        view.labels.data[1].size == 0 && view.vocabulary_id.size != 0)),
+                  "C preserves complete model-local ordinals and optional existing class metadata");
             core->result_release(result);
         }
         consume_error(core, &error);
         result = (trtmc_result*)(uintptr_t)1;
         status = batch->run(model, &batch_input, &result, &error);
-        if (i < 3) {
+        if (i == 1 || i == 2 || i == 6) {
             check(status == TRTMC_INTERNAL_ERROR && result == NULL && error &&
                       has_prefix(core->error_message(error), "batch item[1]"),
                   "C rejects incomplete second classifier result without a partial batch");
@@ -282,13 +288,74 @@ static void class_identity_contracts(const trtmc_core_api_v1* core, const char* 
             trtmc_label_scores_view_v1 view = {0};
             check(status == TRTMC_OK && result &&
                       batch->result_item_view(result, 1, &view, &error) == TRTMC_OK &&
-                      view.count == 4 && view.scores[0] == 21,
-                  "C valid class identity survives native batch result packing");
+                      view.count == 4 && view.scores[0] == 21 && view.scores[1] == 100.5F &&
+                      view.scores[2] == 1 && view.scores[3] == 1 &&
+                      view.kind == TRTMC_SCORE_LOGIT &&
+                      (i != 0 || (view.labels.size == 0 && view.vocabulary_id.size == 0)),
+                  "C preserves all native batch values and unknown ordinal identity");
             core->result_release(result);
         }
         consume_error(core, &error);
         core->model_release(model);
     }
+}
+
+static void anonymous_class_ownership(const trtmc_core_api_v1* core, const char* root,
+                                      const trtmc_load_options_v1* options) {
+    char path[4096];
+    trtmc_model* model = NULL;
+    trtmc_result *single_result = NULL, *batch_result = NULL;
+    trtmc_error* error = NULL;
+    const trtmc_api_header *single_header = NULL, *batch_header = NULL;
+    const float pixels[] = {0.5F, 0.25F, 0.125F};
+    const trtmc_image_to_class_scores_request_v1 input = {
+        {pixels, sizeof(pixels), 1, 1, 3, TRTMC_IMAGE_FLOAT32}};
+    if (snprintf(path, sizeof(path), "%s/features_c_anonymous_owned.bundle", root) >=
+            (int)sizeof(path) ||
+        !write_bundle(path, "unnamed_classes") ||
+        core->model_load(str(path), options, &model, &error) != TRTMC_OK ||
+        core->model_get_task_api(model, str(TRTMC_TASK_IMAGE_TO_CLASS_SCORES), 1, 0, &single_header,
+                                 &error) != TRTMC_OK ||
+        core->model_get_task_api(model, str(TRTMC_TASK_BATCH_IMAGE_TO_CLASS_SCORES), 1, 0,
+                                 &batch_header, &error) != TRTMC_OK) {
+        check(0, "load C anonymous class ownership fixture");
+        goto cleanup;
+    }
+    const trtmc_image_to_class_scores_api_v1* single =
+        (const trtmc_image_to_class_scores_api_v1*)single_header;
+    const trtmc_batch_image_to_class_scores_api_v1* batch =
+        (const trtmc_batch_image_to_class_scores_api_v1*)batch_header;
+    const trtmc_batch_image_to_class_scores_item_v1 items[] = {{input, {NULL, 0}},
+                                                               {input, {NULL, 0}}};
+    const trtmc_batch_image_to_class_scores_request_v1 request = {items, 2};
+    if (single->run(model, &input, NULL, &single_result, &error) != TRTMC_OK ||
+        batch->run(model, &request, &batch_result, &error) != TRTMC_OK) {
+        check(0, "anonymous scalar and native batch calls succeed before model release");
+        goto cleanup;
+    }
+    core->model_release(model);
+    model = NULL;
+    trtmc_label_scores_view_v1 view = {0};
+    check(single->result_view(single_result, &view, &error) == TRTMC_OK && view.count == 2 &&
+              view.scores[0] == 18 && view.scores[1] == 0.5F && view.kind == TRTMC_SCORE_LOGIT &&
+              view.labels.size == 0 && view.vocabulary_id.size == 0,
+          "C anonymous scalar retains every raw score and empty identity after model release");
+    uint64_t count = 0;
+    check(batch->result_count(batch_result, &count, &error) == TRTMC_OK && count == 2,
+          "C native batch retains both result owners after model release");
+    for (uint64_t index = 0; index < count; ++index) {
+        check(batch->result_item_view(batch_result, index, &view, &error) == TRTMC_OK &&
+                  view.count == 4 && view.scores[0] == 21 && view.scores[1] == 100.5F &&
+                  view.scores[2] == 1 && view.scores[3] == 1 && view.kind == TRTMC_SCORE_LOGIT &&
+                  (index == 0 ? view.labels.size == 4 && view.vocabulary_id.size != 0
+                              : view.labels.size == 0 && view.vocabulary_id.size == 0),
+              "C owned batch preserves every item and independent optional metadata");
+    }
+cleanup:
+    core->result_release(single_result);
+    core->result_release(batch_result);
+    core->model_release(model);
+    consume_error(core, &error);
 }
 
 static void unknown_embedding_space_contract(const trtmc_core_api_v1* core, const char* root,
@@ -402,6 +469,7 @@ int main(int argc, char** argv) {
     options.runtime_root = str(argv[1]);
     global_pooled_contracts(core, argv[1], &options);
     class_identity_contracts(core, argv[1], &options);
+    anonymous_class_ownership(core, argv[1], &options);
     unknown_embedding_space_contract(core, argv[1], &options);
     head_score_contracts(core, argv[1], &options);
     trtmc_model *model = NULL, *disabled = NULL;

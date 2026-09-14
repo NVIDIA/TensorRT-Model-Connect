@@ -209,6 +209,22 @@ void exercise(const std::filesystem::path& root) {
               "decode output width differs from latent width without bundle config guessing");
     }
     auto conflicting = decode;
+    const auto local_vocab = root / "numeric-cli-local-logits.bundle";
+    bundle(local_vocab, "latent_logits_unknown");
+    auto local_decode = decode;
+    local_decode[2] = local_vocab.string();
+    const auto local_result = run(local_decode);
+    check(local_result.status == 0, "CLI can decode logits with unknown vocabulary identity");
+    if (local_result.status == 0) {
+        const auto data = json::parse(local_result.output);
+        check(data.at("vocabulary_id") == "" && data.at("shape") == json::array({2, 3}) &&
+                  data.at("values") == json::array({12.25, 0, 0, 0, 0, 0}),
+              "CLI retains every model-local logit without inventing an identity");
+    }
+    bundle(local_vocab, "latent_logits_unknown_bad_shape");
+    const auto malformed_local = run(local_decode);
+    check(malformed_local.status != 0 && malformed_local.output.empty(),
+          "unknown vocabulary does not admit malformed CLI output");
     conflicting.insert(conflicting.end(),
                        {"--task", std::string(trtmc::LatentDenoisingStep::kTask)});
     const auto conflict = run(conflicting);

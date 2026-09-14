@@ -1011,17 +1011,6 @@ def _diffusion_pipeline(
     import diffusers
 
     model_id = str(options.get("model_id", arguments.model))
-    class_name = {
-        "flux": "Flux2Pipeline" if "FLUX.2" in model_id.upper() else "FluxPipeline",
-        "ltx_video": "LTXPipeline",
-        "pixart": "PixArtSigmaPipeline",
-        "qwen_image": "QwenImagePipeline",
-        "sana_wm": "SanaVideoPipeline",
-        "wan_t2v": "WanPipeline",
-        "wan2_2_ti2v": "WanPipeline",
-        "z_image": "ZImagePipeline",
-    }[arguments.family]
-    pipeline_class = getattr(diffusers, class_name)
     requested_revision = (
         str(options.get("model_revision", getattr(arguments, "revision", None) or "")) or None
     )
@@ -1060,7 +1049,7 @@ def _diffusion_pipeline(
             ),
             local_files_only=arguments.local_files_only,
         )
-    return pipeline_class.from_pretrained(
+    return diffusers.DiffusionPipeline.from_pretrained(
         model_source,
         torch_dtype=_torch_dtype(torch_module, arguments.precision),
         **load_options,
@@ -1095,30 +1084,38 @@ def _load_diffusers(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     )
-    batch_size = int(request.get("batch_size", 1))
-    prompt = str(request.get("prompt", ""))
-    raw_prompts = request.get("prompts")
-    if raw_prompts is not None:
-        if (
-            not isinstance(raw_prompts, list)
-            or len(raw_prompts) != batch_size
-            or any(not isinstance(value, str) for value in raw_prompts)
-        ):
-            raise ValueError("prompts must contain one string per batch item")
-        prompt_value: str | list[str] = list(raw_prompts)
-    elif batch_size > 1:
-        prompt_value = [prompt] * batch_size
+    if "prompt" in request and "prompts" in request:
+        raise ValueError("reference request must not provide both prompt and prompts")
+    prompt = request.get("prompts", request.get("prompt", ""))
+    if "prompts" in request and not isinstance(prompt, list):
+        raise ValueError("prompts must contain one string per batch item")
+    if isinstance(prompt, list):
+        if not prompt or any(not isinstance(value, str) for value in prompt):
+            raise ValueError("prompt list must contain one string per batch item")
+        count = len(prompt)
     else:
-        prompt_value = prompt
+        if not isinstance(prompt, str):
+            raise ValueError("prompt must be a string or a non-empty list of strings")
+        count = 1
+    batch_size = request.get("batch_size", count)
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    if isinstance(prompt, list):
+        if count != batch_size:
+            raise ValueError("prompt list must contain one string per batch item")
+        prompt_value: str | list[str] = list(prompt)
+    else:
+        prompt_value = [prompt] * batch_size if batch_size > 1 else prompt
     values: dict[str, Any] = {"prompt": prompt_value}
     negative_prompt = str(request.get("negative_prompt", ""))
-    if negative_prompt:
+    if negative_prompt or "negative_prompt" in request or arguments.family == "qwen_image":
         values["negative_prompt"] = negative_prompt
     steps = int(request.get("num_steps", -1))
     if steps > 0:
         values.update({"num_inference_steps": steps, "step": steps})
-    height = int(request.get("height", request.get("video_height", 0)))
-    width = int(request.get("width", request.get("video_width", 0)))
+    manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+    height = int(request.get("height", request.get("video_height", manifest.get("image_height", 0))))
+    width = int(request.get("width", request.get("video_width", manifest.get("image_width", 0))))
     if height > 0:
         values["height"] = height
     if width > 0:
@@ -1126,7 +1123,7 @@ def _load_diffusers(
     num_frames = int(
         request.get(
             "video_num_frames",
-            _task_value(arguments, request, "num_frames", 1),
+            _task_value(arguments, request, "num_frames", manifest.get("video_num_frames", 1)),
         )
     )
     if num_frames > 0:
@@ -1143,19 +1140,41 @@ def _load_diffusers(
         if value is not None:
             values[name] = float(value)
     cfg_scale = float(request.get("cfg_scale", -1.0))
-    if cfg_scale >= 0:
+    if cfg_scale >= 0 and arguments.family != "qwen_image":
         values["cfg_scale"] = cfg_scale
     if bool(request.get("no_refiner", False)):
         values["no_refiner"] = True
     guidance = float(request.get("guidance_scale", -1.0))
-    if guidance >= 0:
+    if arguments.family == "qwen_image":
+        # Native Qwen guidance is true CFG; cfg_scale remains a legacy fallback.
+        true_cfg_scale = guidance if guidance >= 0 else cfg_scale
+        if true_cfg_scale >= 0:
+            values["true_cfg_scale"] = true_cfg_scale
+    elif guidance >= 0:
         values["guidance_scale"] = guidance
-    if arguments.family == "qwen_image" and cfg_scale >= 0:
-        values["true_cfg_scale"] = cfg_scale
     values["output_type"] = "np"
-    image_path = str(request.get("image_path", "") or "")
-    if image_path and ("image" in accepted or accepts_extra):
-        values["image"] = Image.open(_asset_path(arguments, request, "image_path")).convert("RGB")
+    if "image_path" in request and "image_paths" in request:
+        raise ValueError("reference request must not provide both image_path and image_paths")
+    image_path = request.get("image_path", "")
+    if "image_paths" in request:
+        image_paths = request["image_paths"]
+        if (
+            not isinstance(image_paths, list)
+            or len(image_paths) != 1
+            or not isinstance(image_paths[0], str)
+            or not image_paths[0]
+        ):
+            raise ValueError("this reference supports exactly one conditioning image")
+        image_path = image_paths[0]
+    task = getattr(arguments, "selected_task", None) or manifest["task"]
+    if task in {"images_text_to_image_edit", "image_edit"} and not image_path:
+        raise ValueError("image edit reference requires one conditioning image")
+    if image_path:
+        if "image" not in accepted and not accepts_extra:
+            raise ValueError("selected reference pipeline does not accept conditioning image")
+        values["image"] = Image.open(
+            _asset_path(arguments, {"image_path": image_path}, "image_path")
+        ).convert("RGB")
     call_values = {
         name: value for name, value in values.items() if name in accepted or accepts_extra
     }
@@ -2573,6 +2592,11 @@ def _run_sana_wm(
         if not path.is_file():
             raise FileNotFoundError(f"SANA-WM {label} input does not exist: {path}")
 
+    num_frames = (
+        request["num_frames"]
+        if "num_frames" in request
+        else json.loads(arguments.manifest.read_text(encoding="utf-8"))["video_num_frames"]
+    )
     with tempfile.TemporaryDirectory(prefix="trtmc-perf-sana-wm-") as temporary:
         root = Path(temporary)
         output = root / "benchmark.json"
@@ -2594,19 +2618,19 @@ def _run_sana_wm(
             "--intrinsics",
             str(intrinsics),
             "--translation_speed",
-            str(request["translation_speed"]),
+            str(request["translation_speed"] if "translation_speed" in request else options["translation_speed"]),
             "--rotation_speed_deg",
-            str(request["rotation_speed_deg"]),
+            str(request["rotation_speed_deg"] if "rotation_speed_deg" in request else options["rotation_speed_deg"]),
             "--num_frames",
-            str(request["num_frames"]),
+            str(num_frames),
             "--fps",
-            str(request["fps"]),
+            str(request["fps"] if "fps" in request else options["fps"]),
             "--step",
             str(request["num_steps"]),
             "--cfg_scale",
             str(request["cfg_scale"]),
             "--flow_shift",
-            str(request["flow_shift"]),
+            str(request["flow_shift"] if "flow_shift" in request else options["flow_shift"]),
             "--seed",
             str(request["seed"]),
             "--refiner_seed",
@@ -2618,7 +2642,7 @@ def _run_sana_wm(
             "--output",
             str(output),
         ]
-        if request["no_action_overlay"]:
+        if request["no_action_overlay"] if "no_action_overlay" in request else options["no_action_overlay"]:
             command.append("--no_action_overlay")
         completed = subprocess.run(
             command,

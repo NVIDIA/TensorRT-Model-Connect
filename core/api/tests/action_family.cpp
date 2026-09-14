@@ -5,6 +5,7 @@
 
 #include "trtmc/internal/action.h"
 #include "trtmc/internal/model.h"
+#include "trtmc/internal/stream.h"
 #include "trtmc/runtime/family_factory.h"
 
 #include <atomic>
@@ -23,6 +24,12 @@ std::atomic<bool> block_next{false}, entered{false};
 std::mutex block_mutex;
 std::condition_variable block_condition;
 bool unblock = false;
+std::atomic<void (*)(void*)> reenter_next{nullptr};
+std::atomic<void*> reentry_context{nullptr};
+void maybe_reenter() {
+    if (const auto callback = reenter_next.exchange(nullptr))
+        callback(reentry_context.load());
+}
 void maybe_block() {
     if (!block_next.exchange(false))
         return;
@@ -79,6 +86,7 @@ class Session final : public IImageStateActionSession {
             throw ConfigError("fixture act accepts no config; tag belongs to creation");
         shape_and_state(input);
         maybe_block();
+        maybe_reenter();
         bool started = false;
         double milliseconds = 0;
         if (cursor_ >= queue_.values.rows) {
@@ -98,6 +106,8 @@ class Session final : public IImageStateActionSession {
         return {std::move(step), bounds, started, milliseconds};
     }
     void reset() override {
+        maybe_block();
+        maybe_reenter();
         queue_ = {};
         cursor_ = 0; // Family-owned queue and execution-state reset.
     }
@@ -107,17 +117,29 @@ class Session final : public IImageStateActionSession {
     ActionSequenceResult queue_;
     uint64_t cursor_{0}, refills_{0};
 };
+class OtherSession final : public ITextStream {
+  public:
+    std::optional<TextStreamEvent> next(std::int64_t) override {
+        return TextStreamEvent{StreamEventKind::Cancelled, {}, {}, std::nullopt};
+    }
+    void cancel() noexcept override {}
+};
 class ActionFixture final : public IModel,
                             public IImageStateToActionChunk,
-                            public IImageStateActionQueue {
+                            public IImageStateActionQueue,
+                            public IStreamingTextContinuation {
   public:
     explicit ActionFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
     std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "none" || mode_ == "example_recorded_unsupported")
             return {};
-        return {bind<IImageStateToActionChunk>(*this, fields_for(IImageStateToActionChunk::kTask)),
-                bind<IImageStateActionQueue>(*this, fields_for(IImageStateActionQueue::kTask))};
+        std::vector<TaskInstance> tasks{
+            bind<IImageStateToActionChunk>(*this, fields_for(IImageStateToActionChunk::kTask)),
+            bind<IImageStateActionQueue>(*this, fields_for(IImageStateActionQueue::kTask))};
+        if (mode_ == "with_stream")
+            tasks.push_back(bind<IStreamingTextContinuation>(*this));
+        return tasks;
     }
     trtmc::Span<const ConfigField> fields_for(std::string_view) const {
         if (mode_.find("example_recorded") == 0)
@@ -154,6 +176,8 @@ class ActionFixture final : public IModel,
                     result.values.values.push_back(static_cast<float>(100 * step + joint) - 700);
             return {std::move(result), false, 101.0};
         }
+        maybe_block();
+        maybe_reenter();
         auto result = predict(input.observation, tag(config));
         const bool bounds = within({result.values.values.data(), result.values.values.size()});
         if (mode_ == "bad_chunk")
@@ -164,7 +188,12 @@ class ActionFixture final : public IModel,
         const auto name = tag(config);
         if (mode_ == "null_queue")
             return nullptr;
+        if (mode_ == "throw_queue")
+            throw std::runtime_error("fixture queue creation failed");
         return std::make_unique<Session>(name, mode_);
+    }
+    std::unique_ptr<ITextStream> start(const TextContinuationRequest&, ConfigView) override {
+        return std::make_unique<OtherSession>();
     }
 
   private:
@@ -227,4 +256,8 @@ extern "C" void trtmc_action_fixture_unblock() {
         unblock = true;
     }
     block_condition.notify_all();
+}
+extern "C" void trtmc_action_fixture_reenter_next(void (*callback)(void*), void* context) {
+    reentry_context = context;
+    reenter_next = callback;
 }

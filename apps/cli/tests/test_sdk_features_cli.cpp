@@ -128,9 +128,29 @@ void global_pooled_contracts(const Fixture& fixture) {
     }
 }
 
+void anonymous_classification(const Fixture& fixture) {
+    const auto result = fixture.invoke("classify", "unnamed_classes",
+                                       {"--task", std::string(trtmc::ImageToClassScores::kTask),
+                                        "--image", fixture.image.string()});
+    check(result.status == 0, "CLI accepts complete model-local anonymous class scores");
+    if (result.status != 0) {
+        std::cerr << result.error;
+        return;
+    }
+    const auto output = json::parse(result.output);
+    check(output.at("scores") == json::array({18, 1}) &&
+              output.at("logits") == json::array({18, 1}) && output.at("score_kind") == "logit" &&
+              output.at("top_class") == 0 && output.at("top_score") == 18,
+          "CLI preserves all raw scores, their order and top ordinal without normalization");
+    check(output.at("labels") == json::array() && output.at("vocabulary_id") == "" &&
+              output.at("task") == trtmc::ImageToClassScores::kTask,
+          "CLI does not fabricate missing class names or vocabulary identity");
+}
+
 void exercise(const Fixture& f) {
     using namespace trtmc;
     global_pooled_contracts(f);
+    anonymous_classification(f);
     auto token = f.success("encode", TextToTokenFeatures::kTask, {"--text", "abc"});
     check(token.at("dim") == 2 && token.at("values") == json::array({1, 3}) &&
               token.at("shape") == json::array({1, 2}) &&

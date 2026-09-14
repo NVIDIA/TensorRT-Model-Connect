@@ -425,9 +425,11 @@ typedef struct {
 } trtmc_text_image_text_to_relevance_api_v1;
 
 #define TRTMC_TASK_IMAGE_TO_CLASS_SCORES "image_to_class_scores"
-/* Nonempty scores, indexed by vocabulary ordinal. A result provides either a
- * nonempty label per class or an explicit vocabulary_id. score_kind declares
- * interpretation; shared code does not normalize or relabel the scores.
+/* Nonempty scores, indexed by class ordinal. Empty labels and vocabulary_id mean
+ * model-local ordinal order with unknown identity, not cross-model compatibility.
+ * Supplied labels have one entry per score; without a vocabulary_id every label
+ * must be nonempty. score_kind declares interpretation; shared code does not
+ * normalize, reorder or relabel the scores.
  * The same contract applies to each native batch item below. */
 typedef struct {
     trtmc_api_header header;

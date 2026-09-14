@@ -68,6 +68,7 @@ typedef struct {
     uint32_t height, width;
     trtmc_i32_view class_ids;
     trtmc_strings_view class_names;
+    /* Empty means unknown; class IDs remain model-local, not cross-model identity. */
     trtmc_string_view vocabulary_id;
     uint32_t has_ignore_label;
     int32_t ignore_label;

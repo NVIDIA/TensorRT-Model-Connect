@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -77,9 +78,21 @@ def test_semantic_text_benchmark_keeps_family_config_and_presence(tmp_path: Path
     special = resolve_task_case(task, {"prompt": "Hello", "inputs": {
         "generation_mode": 17, "block_length": 2.75, "threshold": "0.8",
     }}, tmp_path)
-    assert special.request["text_generation_mode"] == 17
+    assert special.request["generation_mode"] == 17
     assert special.request["block_length"] == 2.75
-    assert special.request["confidence_threshold"] == "0.8"
+    assert special.request["threshold"] == "0.8"
+    assert "text_generation_mode" not in special.request
+    assert "confidence_threshold" not in special.request
+
+
+def test_legacy_text_controls_keep_original_names_and_coercion(tmp_path: Path) -> None:
+    value = resolve_task_case("text_generation", {"prompt": "Hello", "inputs": {
+        "generation_mode": 17, "block_length": 2.75, "threshold": "0.8",
+    }}, tmp_path).request
+    assert value["text_generation_mode"] == "17"
+    assert value["block_length"] == 2
+    assert value["confidence_threshold"] == 0.8
+    assert "generation_mode" not in value and "threshold" not in value
 
 
 def test_translation_uses_typed_language_inputs_and_family_defaults(tmp_path: Path) -> None:
@@ -622,8 +635,129 @@ def test_semantic_world_does_not_omit_explicit_frame_count(sdk_assets: Path) -> 
         "initial_latents_path": "latents.f32",
     }, sdk_assets).request
     assert value["num_frames"] == 0 and value["num_steps"] == "bad" and value["fps"] == 2.5
-    assert value["no_action_overlay"] is False
+    assert "translation_speed" not in value and "rotation_speed_deg" not in value
+    assert "no_action_overlay" not in value
     assert value["camera_intrinsics"] == base["camera_intrinsics"]
+    assert value["initial_latents_path"] == str(sdk_assets / "latents.f32")
+
+
+@pytest.mark.parametrize("name,value", [
+    ("translation_speed", 0.0), ("rotation_speed_deg", 0.0), ("fps", 0),
+    ("flow_shift", 0.0), ("no_action_overlay", False),
+])
+@pytest.mark.parametrize("source", ["inputs", "config", "override", "nested_override"])
+def test_semantic_world_preserves_explicit_controls_for_native_rejection(
+    tmp_path: Path, name: str, value, source: str,
+) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("sana-wm-bidirectional")
+    testcase = dict(model.testcases[0])
+    overrides = {}
+    if source in {"inputs", "config"}:
+        testcase[source] = {**testcase.get(source, {}), name: value}
+    elif source == "override":
+        overrides[f"request.{name}"] = value
+    else:
+        overrides["request.config"] = {name: value}
+    model = replace(model, testcases=(testcase,))
+    case = resolve_case(model, tmp_path / "model.bundle", selected_task="image_text_action_to_video",
+                        overrides=overrides)
+    # These names are not input exemptions; native sdk_config still rejects them.
+    request = case.request["config"] if source in {"config", "nested_override"} else case.request
+    assert request[name] == value and type(request[name]) is type(value)
+    assert name not in (case.request if source in {"config", "nested_override"} else case.request.get("config", {}))
+
+
+def test_semantic_world_still_rejects_explicit_flat_nested_duplicates(sdk_assets: Path) -> None:
+    with pytest.raises(BenchmarkError, match="duplicate flat/nested family Config"):
+        resolve_task_case("image_text_action_to_video", {
+            "prompt": "move", "image": "image.ppm", "action": "w-2", "camera_intrinsics": [],
+            "flow_shift": 9.8, "inputs": {"flow_shift": 0.0}, "config": {"flow_shift": 0.0},
+        }, sdk_assets)
+
+
+@pytest.mark.parametrize("task,inputs", [
+    ("text_to_image", {"prompt": "image"}),
+    ("images_text_to_image_edit", {"prompt": "edit", "image": "image.ppm"}),
+    ("batch_text_to_image", {"prompt": ["a", "b"]}),
+    ("text_to_video", {"prompt": "video"}),
+    ("image_text_action_to_video", {"prompt": "move", "image": "image.ppm",
+                                   "action": "w-2", "camera_intrinsics": [10, 20.5, 0, 0]}),
+    ("image_to_boxes", {"image": "image.ppm"}),
+])
+@pytest.mark.parametrize("controls", [
+    {},
+    {"height": 0, "width": 0, "num_frames": 0},
+    {"height": None, "width": False, "num_frames": "wrong"},
+    {"config": {"height": 0, "width": 0, "num_frames": 0, "family_switch": False}},
+    {"height": 16, "width": 32, "num_frames": 7},
+])
+@pytest.mark.parametrize("explicit_task", [False, True])
+def test_catalog_keeps_semantic_requests_separate_from_build_dimensions(
+    sdk_assets: Path, task: str, inputs: dict, controls: dict, explicit_task: bool,
+) -> None:
+    testcase = {"name": "semantic", **inputs, **controls}
+    model = replace(
+        ManifestCatalog(REPO / "families").resolve("pixart-sigma-1024-l0"),
+        task="image_generation" if explicit_task else task,
+        manifest_path=sdk_assets / "manifests/model.json",
+        testcases=(testcase,),
+        build_settings={"image_height": 704, "image_width": 1280, "video_num_frames": 321},
+    )
+    expected = resolve_task_case(task, testcase, sdk_assets)
+    resolved = resolve_case(
+        model, sdk_assets / "model.bundle", selected_task=task if explicit_task else None,
+    )
+    assert resolved.request == expected.request
+    assert resolved.effective_task == task
+    if "media_type" in expected.request:
+        assert resolved.request["media_type"] == expected.request["media_type"]
+    assert model.build_settings == {"image_height": 704, "image_width": 1280, "video_num_frames": 321}
+
+
+@pytest.mark.parametrize("selector", [
+    "pixart-sigma-1024-l0", "qwen-image-edit-2511", "flux-schnell-l0-batch2", "sana-wm-bidirectional",
+])
+def test_catalog_preserves_legacy_media_build_workload(tmp_path: Path, selector: str) -> None:
+    model = ManifestCatalog(REPO / "families").resolve(selector)
+    expected = dict(resolve_task_case(
+        model.task, model.testcases[0], model.manifest_path.parent.parent,
+    ).request)
+    expected.update(height=model.build_settings["image_height"], width=model.build_settings["image_width"])
+    if "video_num_frames" in model.build_settings:
+        expected.update(num_frames=model.build_settings["video_num_frames"], media_type="video")
+    assert resolve_case(model, tmp_path / "model.bundle").request == expected
+
+
+def test_catalog_detection_keeps_image_input_without_build_dimensions(tmp_path: Path) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("detr-resnet-50")
+    expected = resolve_task_case(model.task, model.testcases[0], model.manifest_path.parent.parent).request
+    resolved = resolve_case(model, tmp_path / "model.bundle")
+    assert resolved.request == expected
+    assert Path(resolved.request["image_path"]).is_file()
+    assert "height" not in resolved.request and "width" not in resolved.request
+    assert model.build_settings["image_height"] == 796
+    assert model.build_settings["image_width"] == 1333
+
+
+@pytest.mark.parametrize("controls", [{}, {"height": 0, "width": 0}, {"config": {"height": 0, "width": 0}}])
+@pytest.mark.parametrize("selector,task,height,width,frames", [
+    ("pixart-sigma-1024-l0", "text_to_image", 512, 512, None),
+    ("ltx-video-l0", "text_to_video", 256, 256, 9),
+])
+def test_semantic_build_dimensions_stay_in_builder_flags(
+    tmp_path: Path, controls: dict, selector: str, task: str, height: int, width: int, frames: int | None,
+) -> None:
+    original = ManifestCatalog(REPO / "families").resolve(selector)
+    model = replace(original, task=task, testcases=({**original.testcases[0], **controls},))
+    case = resolve_case(model, tmp_path / "model.bundle")
+    before = dict(case.request)
+    command = _build_command(model, tmp_path / "checkpoint", tmp_path / "model.bundle", (case,))
+    assert command[command.index("--image-height") + 1] == str(height)
+    assert command[command.index("--image-width") + 1] == str(width)
+    if frames is not None:
+        assert command[command.index("--video-num-frames") + 1] == str(frames)
+    assert case.request == before
+    assert "num_frames" not in case.request
 
 
 def test_semantic_image_batch_keeps_signed_seeds_and_item_config(sdk_assets: Path) -> None:

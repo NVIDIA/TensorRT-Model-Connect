@@ -37,6 +37,9 @@ typedef struct trtmc_image_state_action_session trtmc_image_state_action_session
  * Inputs borrow host storage through each call. Result views own snapshots
  * until result_release, including after reset/session/model release. */
 #define TRTMC_TASK_IMAGE_STATE_TO_ACTION_CHUNK "image_state_to_action_chunk"
+/* Independent prediction may run serially while an action queue is alive:
+ * it neither consumes nor replaces queued actions. Overlapping/reentrant
+ * chunk/queue operations return BUSY; other live sessions remain exclusive. */
 typedef struct {
     trtmc_api_header header;
     trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_image_state_to_action_chunk_request_v1*,
@@ -56,9 +59,10 @@ typedef struct {
     trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_action_step_view_v1*,
                                           trtmc_error**);
     trtmc_status(TRTMC_CALL* reset)(trtmc_image_state_action_session*, trtmc_error**);
-    /* A live queue reserves model execution. Overlapping/reentrant session
-     * calls return BUSY; the family owns recovery/reset after errors.
-     * Release must not race another call. It destroys family state before
+    /* A live queue reserves model execution except for its independent action
+     * chunk Task. Queue act/reset and chunk execution are mutually exclusive;
+     * overlapping/reentrant calls return BUSY. The family owns recovery/reset.
+     * Release must not race a queue or chunk call. It destroys family state before
      * releasing the model reservation; NULL release is accepted. */
     void(TRTMC_CALL* release)(trtmc_image_state_action_session*);
 } trtmc_image_state_action_queue_api_v1;

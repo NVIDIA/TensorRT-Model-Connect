@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build with Python; replace this process with the packaged native runtime."""
+"""Build or prepare inputs with Python; execute the packaged native runtime."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Sequence
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments and arguments[0] == "build":
+    if arguments and arguments[0] in {"build", "prepare-structure"}:
         from .build_cli import main as build_main
 
         return build_main(arguments)
@@ -22,6 +22,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not arguments or arguments in (["--help"], ["-h"], ["help"]):
         print("Build: trtmc build MODEL -o model.bundle [OPTIONS]", flush=True)
         print("Build options: trtmc build --help\n", flush=True)
+        print("Prepare: trtmc prepare-structure MODEL --input REQUEST -o prepared.request\n", flush=True)
         arguments = ["help"]
     if arguments[0] not in {"help", "version", "inspect"} and not any(
         argument == "--runtime-root" or argument.startswith("--runtime-root=")

@@ -473,6 +473,52 @@ static void regression_values_tests(const char* root) {
     core->result_release(result);
 }
 
+static void unknown_logits_identity(const char* root) {
+    char path[4096];
+    trtmc_load_options_v1 options = {0};
+    options.struct_size = sizeof(options);
+    options.runtime_root = string(root);
+    for (int bad = 0; bad < 2; ++bad) {
+        const char* mode = bad ? "latent_logits_unknown_bad_shape" : "latent_logits_unknown";
+        snprintf(path, sizeof(path), "%s/numeric-c-local-logits-%d.bundle", root, bad);
+        write_bundle(path, mode);
+        trtmc_model* model = NULL;
+        trtmc_error* error = NULL;
+        trtmc_result* result = NULL;
+        checked(core->model_load(string(path), &options, &model, &error), TRTMC_OK, &error,
+                "load C local-vocabulary logits fixture");
+        if (!model)
+            continue;
+        const trtmc_latent_to_token_logits_api_v1* task =
+            (const trtmc_latent_to_token_logits_api_v1*)get(model,
+                                                            TRTMC_TASK_LATENT_TO_TOKEN_LOGITS);
+        float values[] = {1, 2, 3, 4};
+        const trtmc_latent_step_request_v1 input = {{values, 4, 2, 2}, {0}, 0.25};
+        if (task)
+            checked(task->run(model, &input, NULL, &result, &error),
+                    bad ? TRTMC_INTERNAL_ERROR : TRTMC_OK, &error,
+                    "C local vocabulary preserves success and malformed-storage rejection");
+        memset(values, 0, sizeof(values));
+        core->model_release(model);
+        if (bad)
+            check(result == NULL, "malformed local-vocabulary output clears the result handle");
+        if (result) {
+            trtmc_latent_token_logits_view_v1 view = {0};
+            checked(task->result_view(result, &view, &error), TRTMC_OK, &error,
+                    "C local-vocabulary result survives model release");
+            check(view.vocabulary_id.size == 0 && view.logits.rows == 2 &&
+                      view.logits.columns == 3 && view.logits.count == 6,
+                  "C model-local token ordinals retain the complete logits shape");
+            if (view.logits.count == 6) {
+                for (size_t index = 0; index < 6; ++index)
+                    check(view.logits.data[index] == (index == 0 ? 1.25F : 0.0F),
+                          "C local-vocabulary result retains every value after input mutation");
+            }
+        }
+        core->result_release(result);
+    }
+}
+
 int main(int argc, char** argv) {
     char full[4096], restricted_path[4096];
     trtmc_load_options_v1 options = {0};
@@ -535,6 +581,7 @@ int main(int argc, char** argv) {
     core->result_release(retained_batch);
     flat_history_tests(argv[1]);
     regression_values_tests(argv[1]);
+    unknown_logits_identity(argv[1]);
     fprintf(stderr, "%s\n", failures ? "SOME FAILED" : "ALL PASSED");
     return failures ? 1 : 0;
 }

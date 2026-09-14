@@ -291,6 +291,10 @@ class NumericModel final : public IModel,
         LatentTokenLogitsResult result{{std::vector<float>(2 * 3, 0), 2, 3}, "fixture-vocabulary"};
         result.logits.values[0] =
             input.values[0] + input.first_self + static_cast<float>(request.timestep + scale - 1);
+        if (mode_.find("latent_logits_unknown") == 0)
+            result.vocabulary_id.clear();
+        if (mode_ == "latent_logits_unknown_bad_shape")
+            result.logits.columns = 4;
         return result;
     }
 

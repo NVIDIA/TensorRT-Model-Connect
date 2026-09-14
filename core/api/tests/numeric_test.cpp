@@ -458,6 +458,35 @@ void forecast_batches(const trtmc::Model& model, const std::filesystem::path& ro
 
 } // namespace
 
+void unknown_logits_identity(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    const auto path = root / "numeric-cpp-local-logits.bundle";
+    bundle(path, "latent_logits_unknown");
+    auto retained = [&] {
+        const float values[] = {1, 2, 3, 4};
+        auto model = trtmc::Model::load(path.string(), options);
+        return model.task<trtmc::LatentToTokenLogits>().run({{{values}, 2, 2}, {}, 0.25});
+    }();
+    const auto view = retained.view();
+    check(view.vocabulary_id.size == 0 && view.logits.rows == 2 && view.logits.columns == 3 &&
+              view.logits.count == 6,
+          "unknown vocabulary retains model-local logits and exact axes after model release");
+    if (view.logits.count == 6) {
+        for (std::size_t index = 0; index < view.logits.count; ++index)
+            check(view.logits.data[index] == (index == 0 ? 1.25F : 0.0F),
+                  "all local-vocabulary logits survive input and model scope");
+    }
+    const auto bad = root / "numeric-cpp-local-logits-bad-shape.bundle";
+    bundle(bad, "latent_logits_unknown_bad_shape");
+    const float values[] = {1, 2, 3, 4};
+    rejects(
+        [&] {
+            trtmc::Model::load(bad.string(), options)
+                .task<trtmc::LatentToTokenLogits>()
+                .run({{{values}, 2, 2}, {}, 0.25});
+        },
+        TRTMC_INTERNAL_ERROR, "unknown vocabulary never excuses malformed logits storage");
+}
+
 int main(int argc, char** argv) {
     if (argc != 2)
         return 2;
@@ -506,6 +535,7 @@ int main(int argc, char** argv) {
         }();
         check(retained.view().quantile_levels.data[1] == 0.9 && retained.view().values[11] == 12,
               "numeric outputs survive caller model scope");
+        unknown_logits_identity(root, options);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         ++failures;

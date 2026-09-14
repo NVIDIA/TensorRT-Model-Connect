@@ -151,13 +151,18 @@ ITask& require_family(const std::shared_ptr<ModelState>& state, std::string_view
 // Call with model_mutex held. Metadata queries do not require an idle model.
 void require_model_idle(const trtmc_model* model);
 void require_model_idle(const std::shared_ptr<ModelState>& state);
+// Call with model_mutex held. Only an action queue permits its independent
+// chunk; other live sessions remain exclusive. Keep the returned mutex alive
+// until its execution lock is released.
+std::shared_ptr<std::mutex> action_chunk_operation(const std::shared_ptr<ModelState>& state);
 
 // A logical execution owner, not a thread-bound mutex lock or worker queue.
 // Construct under model_mutex; destroy only after the family session stops,
 // without holding model_mutex. It may safely be destroyed on another thread.
 class ModelSession {
   public:
-    explicit ModelSession(const trtmc_model* model);
+    explicit ModelSession(const trtmc_model* model,
+                          std::shared_ptr<std::mutex> action_queue_operation = {});
     ~ModelSession();
     ModelSession(const ModelSession&) = delete;
     ModelSession& operator=(const ModelSession&) = delete;

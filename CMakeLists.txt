@@ -844,7 +844,9 @@ if(TRTMC_BUILD_TESTS)
     set_tests_properties(benchmark_audio_e2e PROPERTIES LABELS "cpu;e2e")
 
     add_executable(test_benchmark_remaining_e2e apps/benchmark/tests/native/test_benchmark_remaining_e2e.cpp)
-    target_link_libraries(test_benchmark_remaining_e2e PRIVATE nlohmann_json::nlohmann_json)
+    target_include_directories(test_benchmark_remaining_e2e PRIVATE
+      ${PROJECT_SOURCE_DIR}/apps ${PROJECT_SOURCE_DIR}/core/runtime/include)
+    target_link_libraries(test_benchmark_remaining_e2e PRIVATE trtmc_media_io nlohmann_json::nlohmann_json)
     target_compile_options(test_benchmark_remaining_e2e PRIVATE -Wall -Wextra -Wpedantic)
     add_dependencies(test_benchmark_remaining_e2e trtmc_benchmark_worker trtmc_api_test_backend
       trtmc_api_test_perception_family trtmc_api_test_features_family trtmc_api_test_image_family

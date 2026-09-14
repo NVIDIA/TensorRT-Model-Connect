@@ -101,7 +101,7 @@ typedef struct {
 } trtmc_denoised_latents_view_v1;
 typedef struct {
     trtmc_f32_matrix_view_v1 logits; /* [position,vocabulary], unnormalized. */
-    trtmc_string_view vocabulary_id;
+    trtmc_string_view vocabulary_id; /* Empty = unknown; columns use model-local token order. */
 } trtmc_latent_token_logits_view_v1;
 
 #define TRTMC_TASK_SERIES_TO_POINT_FORECAST "series_to_point_forecast"

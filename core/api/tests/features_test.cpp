@@ -62,6 +62,37 @@ void rejects_index(Function function, trtmc_status code, size_t index, const cha
     check(matched, message);
 }
 
+void anonymous_class_ownership(const std::filesystem::path& root,
+                               const trtmc::LoadOptions& options) {
+    const auto path = root / "features_anonymous_owned.bundle";
+    bundle(path, "unnamed_classes");
+    const float pixels[] = {0.5F, 0.25F, 0.125F};
+    const trtmc::ImageInput image({pixels, 3}, 1, 1);
+    auto retained = [&] {
+        auto classifier = trtmc::Model::load(path.string(), options);
+        auto single = classifier.task<trtmc::ImageToClassScores>().run({image});
+        auto batch = classifier.task<trtmc::BatchImageToClassScores>().run(
+            {{{{image}, {{"scale", 2.0}, {"annotate", false}}}, {{image}, {{"scale", 0.5}}}}});
+        return std::make_pair(std::move(single), std::move(batch));
+    }();
+    auto moved = std::move(retained);
+    const auto& single = moved.first;
+    check(single.scores().size() == 2 && single.scores()[0] == 18 && single.scores()[1] == 0.5F &&
+              single.kind() == TRTMC_SCORE_LOGIT && single.labels().empty() &&
+              single.vocabulary_id().empty(),
+          "anonymous scalar scores remain complete model-local ordinals after owner move");
+    const auto& batch = moved.second;
+    check(batch.size() == 2 && batch[0].count == 4 && batch[1].count == 4 &&
+              batch[0].scores[0] == 42 && batch[0].scores[1] == 0.5F && batch[0].scores[2] == 1 &&
+              batch[0].scores[3] == 1 && batch[1].scores[0] == 10.5F &&
+              batch[1].scores[1] == 100.5F && batch[1].scores[2] == 1 && batch[1].scores[3] == 1,
+          "native batch preserves every ordered score without scalar fallback after model scope");
+    check(batch[0].kind == TRTMC_SCORE_LOGIT && batch[0].labels.size == 4 &&
+              batch[0].vocabulary_id.size != 0 && batch[1].kind == TRTMC_SCORE_LOGIT &&
+              batch[1].labels.size == 0 && batch[1].vocabulary_id.size == 0,
+          "one batch retains identified and model-local ordinal metadata independently");
+}
+
 void padding_contracts(const trtmc::Model& padded, const trtmc::Model& valid_only,
                        const std::filesystem::path& root, const trtmc::LoadOptions& options) {
     auto pair = padded.task<trtmc::TextPairToTokenFeatures>().run({"a", "bc"});
@@ -459,26 +490,37 @@ int main(int argc, char** argv) {
             trtmc::Model::load((root / "features_missing_pooler.bundle").string(), options);
         const float pixels[] = {0.5F, 0.25F, 0.125F};
         const trtmc::ImageInput image({pixels, 3}, 1, 1);
-        for (const std::string mode : {"unnamed_classes", "blank_classes", "empty_classes",
-                                       "named_classes", "ordinal_classes"}) {
+        for (const std::string mode :
+             {"unnamed_classes", "blank_classes", "empty_classes", "named_classes",
+              "ordinal_classes", "blank_identified_classes", "short_class_labels"}) {
             const auto path = root / ("features_" + mode + ".bundle");
             bundle(path, mode);
             auto classifier = trtmc::Model::load(path.string(), options);
-            if (mode == "named_classes" || mode == "ordinal_classes") {
+            if (mode == "unnamed_classes" || mode == "named_classes" || mode == "ordinal_classes" ||
+                mode == "blank_identified_classes") {
                 auto single = classifier.task<trtmc::ImageToClassScores>().run({image});
                 auto batch = classifier.task<trtmc::BatchImageToClassScores>().run(
                     {{{{image}, {}}, {{image}, {}}}});
-                check(single.scores()[0] == 18 && batch[1].scores[0] == 21 &&
+                check(single.scores().size() == 2 && single.scores()[0] == 18 &&
+                          single.scores()[1] == 0.5F && batch[1].count == 4 &&
+                          batch[1].scores[0] == 21 && batch[1].scores[1] == 100.5F &&
+                          batch[1].scores[2] == 1 && batch[1].scores[3] == 1 &&
                           single.kind() == TRTMC_SCORE_LOGIT,
-                      "named and externally identified class vocabularies preserve raw scores");
+                      "named, identified and model-local class ordinals preserve all raw scores");
                 check((mode == "named_classes" && single.vocabulary_id().empty() &&
                        single.labels()[1] == "right") ||
                           (mode == "ordinal_classes" && single.labels().empty() &&
+                           single.vocabulary_id() == "fixture.classes") ||
+                          (mode == "unnamed_classes" && single.labels().empty() &&
+                           single.vocabulary_id().empty()) ||
+                          (mode == "blank_identified_classes" && single.labels().size() == 2 &&
+                           single.labels()[0].empty() && single.labels()[1].empty() &&
                            single.vocabulary_id() == "fixture.classes"),
-                      "class identity is explicit without inventing missing labels");
+                      "missing class metadata is not invented and explicit identity stays valid");
             } else {
                 rejects([&] { classifier.task<trtmc::ImageToClassScores>().run({image}); },
-                        TRTMC_INTERNAL_ERROR, "anonymous or empty class scores are rejected");
+                        TRTMC_INTERNAL_ERROR,
+                        "empty scores, incomplete labels and unidentified blank labels reject");
                 rejects_index(
                     [&] {
                         classifier.task<trtmc::BatchImageToClassScores>().run(
@@ -488,6 +530,7 @@ int main(int argc, char** argv) {
                     "invalid second class result fails the batch with its item index");
             }
         }
+        anonymous_class_ownership(root, options);
         auto bad_batch =
             trtmc::Model::load((root / "features_bad_batch_count.bundle").string(), options);
         rejects(

@@ -105,6 +105,16 @@ class PerceptionModel final : public IModel,
         result.class_scores.assign(area * 2, -2);
         result.score_height = result.height;
         result.score_width = result.width;
+        if (mode_ == "semantic_unknown_named" || mode_ == "semantic_unknown_unnamed" ||
+            mode_ == "semantic_unknown_bad_names" || mode_ == "semantic_unknown_no_ids") {
+            result.vocabulary_id.clear();
+            if (mode_ == "semantic_unknown_unnamed")
+                result.class_names.clear();
+            if (mode_ == "semantic_unknown_bad_names")
+                result.class_names.pop_back();
+            if (mode_ == "semantic_unknown_no_ids")
+                result.class_ids.clear();
+        }
         if (mode_ == "broken_semantic")
             result.labels.pop_back();
         return result;

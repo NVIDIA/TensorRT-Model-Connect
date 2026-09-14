@@ -271,6 +271,7 @@ struct ModelState {
     std::vector<TaskSnapshot> tasks;
     std::mutex mutex;
     bool session_active{false};
+    std::shared_ptr<std::mutex> action_queue_operation;
 };
 
 } // namespace trtmc::api
@@ -320,13 +321,24 @@ void require_model_idle(const std::shared_ptr<ModelState>& state) {
         throw ApiFailure{TRTMC_BUSY, "model has an active session"};
 }
 
-ModelSession::ModelSession(const trtmc_model* model) : state_(model_owner(model)) {
+std::shared_ptr<std::mutex> action_chunk_operation(const std::shared_ptr<ModelState>& state) {
+    require(state != nullptr, "model state is null");
+    if (state->session_active && !state->action_queue_operation)
+        throw ApiFailure{TRTMC_BUSY, "model has an active session"};
+    return state->action_queue_operation;
+}
+
+ModelSession::ModelSession(const trtmc_model* model,
+                           std::shared_ptr<std::mutex> action_queue_operation)
+    : state_(model_owner(model)) {
     require_model_idle(model);
     state_->session_active = true;
+    state_->action_queue_operation = std::move(action_queue_operation);
 }
 
 ModelSession::~ModelSession() {
     const std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->action_queue_operation.reset();
     state_->session_active = false;
 }
 

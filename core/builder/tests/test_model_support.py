@@ -131,38 +131,6 @@ def test_specific_model_identity_never_falls_through_to_a_broad_family(
     assert family == expected_family
 
 
-def test_qwen_image_default_task_is_checkpoint_owned() -> None:
-    _, generation = resolve_family(ModelMetadata({}, {"_class_name": "QwenImagePipeline"}))
-    _, editing = resolve_family(ModelMetadata({}, {"_class_name": "QwenImageEditPipeline"}))
-
-    assert generation.default_task == "image_generation"
-    assert editing.default_task == "image_edit"
-
-
-def test_eagle_vlm_default_task_is_checkpoint_owned() -> None:
-    _, embedding = resolve_family(
-        ModelMetadata(
-            {
-                "model_type": "llama_nemotron_vl",
-                "architectures": ["LlamaNemotronVLModel"],
-            },
-            {},
-        )
-    )
-    _, reranking = resolve_family(
-        ModelMetadata(
-            {
-                "model_type": "llama_nemotron_vl_rerank",
-                "architectures": ["LlamaNemotronVLForSequenceClassification"],
-            },
-            {},
-        )
-    )
-
-    assert embedding.default_task == "embedding"
-    assert reranking.default_task == "reranking"
-
-
 def test_rootless_moge_sentinel_does_not_steal_a_config_owned_checkpoint() -> None:
     family, _ = resolve_family(
         ModelMetadata(

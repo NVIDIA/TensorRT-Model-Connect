@@ -71,6 +71,27 @@ void masks_and_grounding(const std::filesystem::path& root, const std::filesyste
               "class map, ignore/background labels and full score axes are not recomputed or "
               "collapsed");
     }
+    for (const std::string mode : {"semantic_unknown_named", "semantic_unknown_unnamed"}) {
+        const auto path = root / ("perception_cli_" + mode + ".bundle");
+        bundle(path, mode);
+        const auto unknown =
+            run({"trtmc", "segment", path.string(), "--runtime-root", root.string(), "--image",
+                 image.string(), "--task", "image_to_semantic_segmentation"});
+        check(unknown.status == 0, "CLI preserves segmentation with unknown vocabulary identity");
+        if (unknown.status == 0) {
+            const auto value = json::parse(unknown.output);
+            check(value.at("vocabulary_id") == "" &&
+                      value.at("mask") == json::array({255, 5, 5, 5, 5, 5}) &&
+                      value.at("class_ids") == json::array({0, 5}) &&
+                      value.at("class_names") == (mode == "semantic_unknown_named"
+                                                      ? json::array({"background", "object"})
+                                                      : json::array()) &&
+                      value.at("class_scores").size() == 12 && value.at("ignore_label") == 255 &&
+                      value.at("background_label") == 0,
+                  "CLI retains model-local IDs, complete scores and optional real class names");
+        }
+        std::filesystem::remove(path);
+    }
     const auto center = run({"trtmc", "segment", points.string(), "--runtime-root", root.string(),
                              "--image", image.string()});
     check(center.status == 0 && json::parse(center.output).at("point").at("x") == 1 &&

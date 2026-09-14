@@ -33,7 +33,9 @@ class IImageStateToActionChunk {
     using TaskInterface = IImageStateToActionChunk;
     static constexpr std::string_view kTask = "image_state_to_action_chunk";
     virtual ~IImageStateToActionChunk() = default;
-    // Does not create, consume or mutate the family's action queue.
+    // Does not create, consume or mutate the family's action queue. Shared
+    // execution permits serial calls alongside a live action queue, but no
+    // overlapping/reentrant queue/chunk execution or unrelated live session.
     virtual ImageStateActionChunkResult run(const ImageStateToActionChunkRequest&, ConfigView) = 0;
 };
 class IImageStateActionSession {
@@ -50,6 +52,7 @@ class IImageStateActionQueue {
     static constexpr std::string_view kTask = "image_state_action_queue";
     virtual ~IImageStateActionQueue() = default;
     // Copy or parse retained config before returning. No shared queue algorithm.
+    // The reservation permits only independent action chunks between queue calls.
     virtual std::unique_ptr<IImageStateActionSession> create_action_session(ConfigView) = 0;
 };
 } // namespace trtmc::internal

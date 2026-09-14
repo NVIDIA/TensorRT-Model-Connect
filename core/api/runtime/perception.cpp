@@ -80,9 +80,8 @@ struct SemanticStorage final : ResultStorage {
     explicit SemanticStorage(internal::SemanticSegmentationResult result)
         : value(std::move(result)), names(string_views(value.class_names)) {
         const auto area = output_area(value.height, value.width);
-        valid_output(value.labels.size() == area && !value.class_ids.empty() &&
-                         !value.vocabulary_id.empty(),
-                     "semantic labels or vocabulary are incomplete");
+        valid_output(value.labels.size() == area && !value.class_ids.empty(),
+                     "semantic labels or class IDs are incomplete");
         valid_output(names.empty() || names.size() == value.class_ids.size(),
                      "semantic class names do not match class IDs");
         if (!value.class_scores.empty()) {

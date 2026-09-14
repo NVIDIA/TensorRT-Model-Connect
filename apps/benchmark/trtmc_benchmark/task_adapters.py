@@ -774,7 +774,9 @@ def _semantic_media_request(task: str, case: Mapping[str, Any], root: Path) -> d
         ):
             raise BenchmarkError("camera_intrinsics must be a numeric array")
         request.update(action=action, camera_intrinsics=list(camera))
-        _copy_explicit(request, case, "translation_speed", "rotation_speed_deg", "fps", "flow_shift", "no_action_overlay")
+        # Top-level testcase values are reference metadata, not native per-call Config.
+        # Explicit inputs remain requests and must reach the loaded Task's validation.
+        _copy_explicit(request, {"inputs": _inputs(case)}, "translation_speed", "rotation_speed_deg", "fps", "flow_shift", "no_action_overlay")
     elif single_image is not _MISSING or images is not _MISSING:
         raise BenchmarkError("image conditioning requires an image-input Task")
     if task != "image_text_action_to_video" and any(
@@ -832,13 +834,13 @@ def _text_controls(case: Mapping[str, Any], *, include_defaults: bool) -> dict[s
         request[name] = convert(value) if include_defaults else value
     if "generation_mode" in inputs:
         value = inputs["generation_mode"]
-        request["text_generation_mode"] = str(value) if include_defaults else value
+        request["text_generation_mode" if include_defaults else "generation_mode"] = str(value) if include_defaults else value
     if "block_length" in inputs:
         value = inputs["block_length"]
         request["block_length"] = int(value) if include_defaults else value
     if "threshold" in inputs:
         value = inputs["threshold"]
-        request["confidence_threshold"] = float(value) if include_defaults else value
+        request["confidence_threshold" if include_defaults else "threshold"] = float(value) if include_defaults else value
     for source, target in (
         ("guidance_scale", "guidance_scale"),
         ("cfg_scale", "cfg_scale"),

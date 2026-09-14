@@ -112,6 +112,68 @@ def test_console_build_reuses_the_existing_builder(monkeypatch) -> None:
     assert calls == [arguments]
 
 
+def test_console_prepare_reuses_the_existing_builder(monkeypatch) -> None:
+    from tensorrt_model_connect import __main__ as launcher
+
+    calls = []
+    monkeypatch.setattr(build_cli, "main", lambda arguments: calls.append(arguments) or 7)
+    monkeypatch.setattr(launcher.os, "execv", lambda *args: pytest.fail("preparation invoked runtime"))
+    arguments = ["prepare-structure", "model", "--input", "request.yaml", "-o", "request.b2rq"]
+    original = list(arguments)
+    assert launcher.main(arguments) == 7
+    assert calls == [original]
+    assert arguments == original
+
+
+def test_console_prepare_help_uses_the_existing_parser(monkeypatch, capsys) -> None:
+    from tensorrt_model_connect import __main__ as launcher
+
+    monkeypatch.setattr(launcher.os, "execv", lambda *args: pytest.fail("preparation invoked runtime"))
+    with pytest.raises(SystemExit) as error:
+        launcher.main(["prepare-structure", "--help"])
+    assert error.value.code == 0
+    output = capsys.readouterr().out
+    assert "trtmc prepare-structure" in output
+    assert "--input" in output and "--output" in output and "--cache-dir" in output
+
+
+def test_console_prepare_calls_the_semantic_family_hook(monkeypatch, tmp_path, capsys) -> None:
+    from tensorrt_model_connect import __main__ as launcher
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
+    support = FamilySupport(("molecular_document_to_structure",), "molecular_document_to_structure")
+    monkeypatch.setattr(build_cli, "resolve_family", lambda metadata: ("example_owner", support))
+    monkeypatch.setattr(build_cli, "build", lambda request: pytest.fail("preparation invoked build"))
+    monkeypatch.setattr(launcher.os, "execv", lambda *args: pytest.fail("preparation invoked runtime"))
+    request = tmp_path / "request.yaml"
+    request.write_text("version: 1\n", encoding="utf-8")
+    output = tmp_path / "request.b2rq"
+    cache = tmp_path / "cache"
+    calls = []
+
+    def prepare(model_dir, input_path, output_path, *, cache_dir):
+        calls.append((model_dir, input_path, output_path, cache_dir))
+        output_path.write_bytes(input_path.read_bytes())
+        return {"family": "example_owner", "output": str(output_path)}
+
+    def load_family(family):
+        assert family == "example_owner"
+        return SimpleNamespace(prepare_structure_request=prepare)
+
+    monkeypatch.setattr(build_cli, "_load_family", load_family)
+    assert launcher.main([
+        "prepare-structure", str(model), "--input", str(request), "-o", str(output),
+        "--cache-dir", str(cache),
+    ]) == 0
+    assert calls == [(model, request, output, cache)]
+    assert output.read_bytes() == request.read_bytes()
+    assert json.loads(capsys.readouterr().out) == {
+        "family": "example_owner", "output": str(output),
+    }
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

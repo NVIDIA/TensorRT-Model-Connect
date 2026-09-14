@@ -140,6 +140,10 @@ Stateful contracts define their own `next`, `append`, `finish`, `cancel`, reset
 or clone operations. Do not replace their lifecycle with a generic `run` loop.
 A live session excludes conflicting execution on its model with `TRTMC_BUSY`;
 this does not add a shared scheduler or promise multi-tenant execution.
+An `ImageStateActionQueue` permits a serial `ImageStateToActionChunk` call on the
+same model without consuming or replacing its buffered actions. Overlapping or
+reentrant action calls still return `TRTMC_BUSY`; other session exclusions remain.
+Session release must not race another call.
 
 ## Versions and extension
 
@@ -161,8 +165,17 @@ an unknown version returns `TRTMC_VERSION_MISMATCH`, not an older fallback.
 
 Header-only ranking and quantile-summary helpers operate on existing results;
 they do not add another model call. A median derived from quantiles is not the
-model's independent point estimate. Class scores require interpretable labels
-or vocabulary identity, rather than anonymous ordinals.
+model's independent point estimate. Class scores may have neither labels nor a
+vocabulary identity: they then use model-local class ordinals. Complete scores,
+their original order and `score_kind` remain available without invented names or
+normalization. Empty identities do not imply matching class order across models;
+provided label arrays must still match the score count.
+
+Latent token logits may have an empty vocabulary identity when only the model's
+token order is known. All matrix values are still returned; dimensions and
+storage length remain checked. Empty identity does not establish matching token
+order across models; families must not invent an identity or hash merely to
+return their logits.
 
 ## Migration boundary
 

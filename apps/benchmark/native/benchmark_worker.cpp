@@ -197,6 +197,7 @@ Json measure(const Timing& timing, Invoke&& invoke, Observe&& observe) {
     for (int index = 0; index < timing.warmup; ++index)
         last = invoke();
     Json observations = Json::array();
+    Json summary = Json::object();
     for (int index = 0; index < timing.iterations; ++index) {
         last.reset(); // Previous-result destruction is not part of this call.
         const auto started = Clock::now();
@@ -204,11 +205,11 @@ Json measure(const Timing& timing, Invoke&& invoke, Observe&& observe) {
         const auto wall_ms = elapsed_ms(started);
         last.emplace(std::move(result));
         Json observation = observe(*last);
+        summary = observation;
         observation["runtime_e2e_wall_ms"] = wall_ms;
         observations.push_back(std::move(observation));
     }
-    return {{"observations", std::move(observations)},
-            {"output_summary", last ? observe(*last) : Json::object()}};
+    return {{"observations", std::move(observations)}, {"output_summary", std::move(summary)}};
 }
 
 Json run_generate(trtmc::ITask& task, const Json& request, const Timing& timing) {
@@ -1029,53 +1030,85 @@ Json audio_observation(const trtmc::AudioGenerationResult& result) {
         {"inference_ms", result.inference_ms()}};
 }
 
+auto audio_artifact_writer(const Json& request) {
+    return [prefix = request.at("_artifact_prefix").get<std::string>(),
+            index = std::uint64_t{0}](trtmc::Span<const float> samples, std::uint32_t rate,
+                                      std::uint32_t channels) mutable -> Json {
+        ++index;
+        if (samples.empty())
+            return nullptr;
+        const auto path = prefix + "." + std::to_string(index) + ".wav";
+        trtmc::cli::io::write_wav_interleaved(samples, rate, channels, path);
+        return std::filesystem::path(path).filename().string();
+    };
+}
+
 Json run_generate_audio(const trtmc::Model& model, const Json& request, const Timing& timing,
                         const std::string& task_id) {
     const auto primary = task_id;
     const auto prompt = request.at("prompt").get<std::string>();
     const bool streaming = primary == trtmc::StreamingTextToSpeech::kTask;
     check_streaming_input(request, streaming);
+    auto write_audio = audio_artifact_writer(request);
+    auto observe = [&](const trtmc::AudioGenerationResult& result) {
+        auto output = audio_observation(result);
+        output["audio_artifact"] =
+            write_audio(result.samples(), result.sample_rate(), result.channels());
+        return output;
+    };
     if (primary == trtmc::TextToAudio::kTask) {
         if (request.contains("language"))
             throw std::invalid_argument("typed synthesis language requires TextToSpeech");
         const auto task = task_for_operation<trtmc::TextToAudio>(model, task_id);
-        const auto config = sdk_config(request, task.config_fields(), {"prompt", "streaming"});
-        return measure(timing, [&]() { return task.run({prompt}, config); }, audio_observation);
+        const auto config =
+            sdk_config(request, task.config_fields(), {"prompt", "streaming", "_artifact_prefix"});
+        return measure(timing, [&]() { return task.run({prompt}, config); }, observe);
     }
     const auto language = language_input(request, "language");
     if (primary == trtmc::TextToSpeech::kTask) {
         const auto task = task_for_operation<trtmc::TextToSpeech>(model, task_id);
-        const auto config =
-            sdk_config(request, task.config_fields(), {"prompt", "language", "streaming"});
-        return measure(
-            timing, [&]() { return task.run({prompt, language}, config); }, audio_observation);
+        const auto config = sdk_config(request, task.config_fields(),
+                                       {"prompt", "language", "streaming", "_artifact_prefix"});
+        return measure(timing, [&]() { return task.run({prompt, language}, config); }, observe);
     }
     if (!streaming)
         throw std::invalid_argument("generate_audio requires an audio generation Task");
     const auto task = task_for_operation<trtmc::StreamingTextToSpeech>(model, task_id);
-    const auto config =
-        sdk_config(request, task.config_fields(), {"prompt", "language", "streaming"});
+    const auto config = sdk_config(request, task.config_fields(),
+                                   {"prompt", "language", "streaming", "_artifact_prefix"});
     return measure(
         timing,
         [&]() {
-            // The SDK already validates delivery counts and format against every
-            // callback. A benchmark sink need not duplicate that accounting or copy PCM.
-            const auto summary =
-                task.run({prompt, language}, [](const trtmc::AudioView&) {}, config);
+            // Callback samples are borrowed. Retaining them is part of the public call;
+            // WAV serialization happens later, in the untimed observer.
+            std::vector<float> samples;
+            const auto summary = task.run(
+                {prompt, language},
+                [&](const trtmc::AudioView& chunk) {
+                    if (!chunk.samples.empty())
+                        samples.insert(samples.end(), chunk.samples.data(),
+                                       chunk.samples.data() + chunk.samples.size());
+                },
+                config);
             if (summary.outcome != trtmc::AudioDeliveryOutcome::Complete)
                 throw std::runtime_error("streaming TTS did not complete");
-            return summary;
+            return std::make_pair(summary, std::move(samples));
         },
-        [](const trtmc::StreamingAudioSummary& result) {
-            return Json{{"output_samples", result.emitted_sample_count},
-                        {"num_samples", result.emitted_sample_count},
-                        {"output_frames", result.emitted_frame_count},
-                        {"channels", result.output.channels},
-                        {"sample_rate", result.output.sample_rate},
-                        {"output_audio_seconds", static_cast<double>(result.emitted_frame_count) /
-                                                     result.output.sample_rate},
-                        {"setup_ms", result.setup_ms},
-                        {"inference_ms", result.inference_ms}};
+        [&](const auto& value) {
+            const auto& result = value.first;
+            return Json{
+                {"output_samples", result.emitted_sample_count},
+                {"num_samples", result.emitted_sample_count},
+                {"output_frames", result.emitted_frame_count},
+                {"channels", result.output.channels},
+                {"sample_rate", result.output.sample_rate},
+                {"output_audio_seconds",
+                 static_cast<double>(result.emitted_frame_count) / result.output.sample_rate},
+                {"audio_artifact", write_audio({value.second.data(), value.second.size()},
+                                               result.output.sample_rate, result.output.channels)},
+                {"streaming_pcm_copy_included", true},
+                {"setup_ms", result.setup_ms},
+                {"inference_ms", result.inference_ms}};
         });
 }
 
@@ -1196,10 +1229,14 @@ Json run_speech_dialogue(const trtmc::Model& model, const Json& request, const T
         AudioInputSummary input;
         std::vector<trtmc::SpeechEvents> batches;
         std::size_t replies{0}, input_chunks{0}, append_attempts{0};
+        std::optional<trtmc::cli::io::LoadedAudio> loaded_audio{};
     };
     std::optional<trtmc::cli::io::LoadedAudio> cached;
     if (!timing.asset_loading_included)
         cached = trtmc::cli::io::read_wav_interleaved(path);
+    auto write_audio = audio_artifact_writer(request);
+    auto write_input = audio_artifact_writer(
+        Json{{"_artifact_prefix", request.at("_artifact_prefix").get<std::string>() + ".input"}});
     auto perform = [&](auto create) {
         return measure(
             timing,
@@ -1295,10 +1332,11 @@ Json run_speech_dialogue(const trtmc::Model& model, const Json& request, const T
                 while (!ended)
                     read();
                 session.close(); // Create, execution, completion and release are all measured.
+                result.loaded_audio = std::move(loaded);
                 return result;
             },
             [&](const Result& result) {
-                Json events = Json::array(), states = Json::array();
+                Json events = Json::array(), states = Json::array(), audio_paths = Json::array();
                 double output_seconds = 0;
                 for (const auto& batch : result.batches) {
                     states.push_back(static_cast<std::uint32_t>(batch.state()));
@@ -1314,10 +1352,14 @@ Json run_speech_dialogue(const trtmc::Model& model, const Json& request, const T
                                               event.audio.channels / *event.audio.sample_rate;
                         }
                         events.push_back(speech_event_observation(event));
+                        audio_paths.push_back(write_audio(event.audio.samples,
+                                                          event.audio.sample_rate.value_or(0),
+                                                          event.audio.channels));
                     }
                 }
                 Json output{
                     {"events", std::move(events)},
+                    {"event_audio_artifacts", std::move(audio_paths)},
                     {"read_states", std::move(states)},
                     {"output_audio_seconds", output_seconds},
                     {"submitted_tool_replies", result.replies},
@@ -1336,13 +1378,18 @@ Json run_speech_dialogue(const trtmc::Model& model, const Json& request, const T
                      tools_enabled ? "fresh_create_append_commit_preset_replies_finish_drain_close"
                                    : "fresh_create_append_finish_drain_close"}};
                 result.input.add_to(output);
+                const auto& audio = cached ? *cached : *result.loaded_audio;
+                output["input_audio_artifact"] =
+                    write_input({audio.samples.data(), audio.samples.size()}, audio.sample_rate,
+                                audio.channels);
                 return output;
             });
     };
     auto config_for = [&](const auto& task) {
         return sdk_config(request, task.config_fields(),
                           {"audio_path", "system_prompt", "chunk_frames", "timeout_ms", "tools",
-                           "tool_replies", "acknowledgements", "default_acknowledgements"});
+                           "tool_replies", "acknowledgements", "default_acknowledgements",
+                           "_artifact_prefix"});
     };
     if (tools_enabled) {
         const auto task = task_for_operation<trtmc::ToolSpeechDialogue>(model, task_id);
@@ -1367,7 +1414,9 @@ Json run_speak(const trtmc::Model& model, const Json& request, const Timing& tim
     if (task_id != trtmc::SpeechToSpeechResponse::kTask)
         throw std::invalid_argument("speak requires SpeechToSpeechResponse");
     const auto task = task_for_operation<trtmc::SpeechToSpeechResponse>(model, task_id);
-    const auto config = sdk_config(request, task.config_fields(), {"audio_path"});
+    const auto config =
+        sdk_config(request, task.config_fields(), {"audio_path", "_artifact_prefix"});
+    auto write_audio = audio_artifact_writer(request);
     const auto path = request.at("audio_path").get<std::string>();
     std::optional<trtmc::cli::io::LoadedAudio> cached;
     if (!timing.asset_loading_included)
@@ -1381,8 +1430,10 @@ Json run_speak(const trtmc::Model& model, const Json& request, const Timing& tim
             const auto& audio = cached ? *cached : *loaded;
             return std::make_pair(task.run({audio_view(audio)}, config), input_summary(audio));
         },
-        [](const auto& value) {
+        [&](const auto& value) {
             auto observation = audio_observation(value.first);
+            observation["audio_artifact"] = write_audio(
+                value.first.samples(), value.first.sample_rate(), value.first.channels());
             value.second.add_to(observation);
             return observation;
         });
@@ -2052,9 +2103,28 @@ Json generated_video_observation(const trtmc::VideoGenerationResult& video) {
             {"inference_ms", video.inference_ms()}};
 }
 
+auto image_artifact_writer(std::string prefix) {
+    return [prefix = std::move(prefix), iteration = std::uint64_t{0}](
+               const std::vector<trtmc::ImageResultView>& images) mutable {
+        ++iteration;
+        Json paths = Json::array();
+        for (std::size_t index = 0; index < images.size(); ++index) {
+            const auto path =
+                prefix + "." + std::to_string(iteration) + "." + std::to_string(index) + ".png";
+            const auto& image = images[index];
+            trtmc::cli::io::save_png(path, image.pixels, image.width, image.height, image.channels);
+            paths.push_back(std::filesystem::path(path).filename().string());
+        }
+        return paths;
+    };
+}
+
 Json run_generate_image(const trtmc::Model& model, const Json& request, const Timing& timing,
                         const std::string& task_id) {
     const auto primary = task_id;
+    auto write_images = image_artifact_writer(request.at("_artifact_prefix").get<std::string>());
+    auto write_inputs =
+        image_artifact_writer(request.at("_artifact_prefix").get<std::string>() + ".input");
     const bool video =
         primary == trtmc::TextToVideo::kTask || primary == trtmc::ImageTextActionToVideo::kTask;
     if (request.contains("media_type") &&
@@ -2071,7 +2141,8 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
         const auto task = task_for_operation<trtmc::BatchTextToImage>(model, task_id);
         const auto fields = task.config_fields();
         const auto shared = sdk_config(
-            request, fields, {"prompt", "seeds", "item_configs", "batch_size", "media_type"});
+            request, fields,
+            {"prompt", "seeds", "item_configs", "batch_size", "media_type", "_artifact_prefix"});
         const auto seeds = request.value("seeds", Json::array());
         if (!seeds.is_array() || (request.contains("seeds") && seeds.size() != prompts.size()))
             throw std::invalid_argument("seeds must contain one integer per prompt");
@@ -2093,12 +2164,14 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
         }
         return measure(
             timing, [&]() { return task.run(items); },
-            [](const trtmc::ImageBatchResult& result) {
+            [&](const trtmc::ImageBatchResult& result) {
                 auto images = Json::array();
+                std::vector<trtmc::ImageResultView> views;
                 std::uint64_t elements = 0;
                 for (std::uint64_t i = 0; i < result.size(); ++i) {
                     const auto image = result[i];
                     images.push_back(generated_image_observation(image));
+                    views.push_back(image);
                     elements += image.pixels.size();
                 }
                 Json output{{"generated_images", result.size()},
@@ -2106,6 +2179,7 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
                             {"generated_frames", result.size()},
                             {"output_elements", elements},
                             {"media_type", "image"},
+                            {"image_artifacts", write_images(views)},
                             {"images", std::move(images)}};
                 if (result.size()) {
                     const auto first = result[0];
@@ -2153,18 +2227,46 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
                 std::optional<Assets> loaded;
                 if (!cached)
                     loaded = read();
-                return task.run(make_input(cached ? *cached : *loaded), config);
+                auto result = task.run(make_input(cached ? *cached : *loaded), config);
+                return std::make_pair(std::move(result), std::move(loaded));
             },
-            observe);
+            [&](const auto& result) {
+                auto output = observe(result.first);
+                const auto& assets = cached ? *cached : *result.second;
+                if (!assets.first.empty()) {
+                    std::vector<trtmc::ImageResultView> inputs;
+                    for (const auto& image : assets.first)
+                        inputs.push_back({{image.pixels.data(), image.pixels.size()},
+                                          static_cast<std::uint32_t>(image.height),
+                                          static_cast<std::uint32_t>(image.width),
+                                          3});
+                    output["input_image_artifacts"] = write_inputs(inputs);
+                }
+                return output;
+            });
     };
-    auto observe_image = [](const trtmc::ImageGenerationResult& result) {
-        return generated_image_observation(result);
+    auto observe_image = [&](const trtmc::ImageGenerationResult& result) {
+        auto output = generated_image_observation(result);
+        output["image_artifacts"] =
+            write_images({{result.pixels(), result.height(), result.width(), result.channels()}});
+        return output;
+    };
+    auto observe_video = [&](const trtmc::VideoGenerationResult& result) {
+        auto output = generated_video_observation(result);
+        std::vector<trtmc::ImageResultView> frames;
+        for (const auto& frame : result.frames())
+            frames.push_back({{frame.pixels, static_cast<std::size_t>(frame.pixel_count)},
+                              frame.height,
+                              frame.width,
+                              frame.channels});
+        output["frame_artifacts"] = write_images(frames);
+        return output;
     };
     if (primary == trtmc::TextToImage::kTask) {
         const auto task = task_for_operation<trtmc::TextToImage>(model, task_id);
-        const auto config =
-            sdk_config(request, task.config_fields(),
-                       {"prompt", "batch_size", "media_type", "initial_latents_path"});
+        const auto config = sdk_config(
+            request, task.config_fields(),
+            {"prompt", "batch_size", "media_type", "initial_latents_path", "_artifact_prefix"});
         return run(
             task, config,
             [&](const auto& assets) {
@@ -2177,7 +2279,7 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
         const auto task = task_for_operation<trtmc::ImagesTextToImageEdit>(model, task_id);
         const auto config = sdk_config(request, task.config_fields(),
                                        {"prompt", "image_path", "image_paths", "batch_size",
-                                        "media_type", "initial_latents_path"});
+                                        "media_type", "initial_latents_path", "_artifact_prefix"});
         return run(
             task, config,
             [&](const auto& assets) {
@@ -2191,16 +2293,16 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
     }
     if (primary == trtmc::TextToVideo::kTask) {
         const auto task = task_for_operation<trtmc::TextToVideo>(model, task_id);
-        const auto config =
-            sdk_config(request, task.config_fields(),
-                       {"prompt", "batch_size", "media_type", "initial_latents_path"});
+        const auto config = sdk_config(
+            request, task.config_fields(),
+            {"prompt", "batch_size", "media_type", "initial_latents_path", "_artifact_prefix"});
         return run(
             task, config,
             [&](const auto& assets) {
                 return trtmc::TextToVideoRequest{prompt,
                                                  {assets.second.data(), assets.second.size()}};
             },
-            generated_video_observation);
+            observe_video);
     }
     if (!world)
         throw std::invalid_argument(
@@ -2223,7 +2325,7 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
     const auto config =
         sdk_config(request, task.config_fields(),
                    {"prompt", "image_path", "image_paths", "action", "camera_intrinsics",
-                    "batch_size", "media_type", "initial_latents_path"});
+                    "batch_size", "media_type", "initial_latents_path", "_artifact_prefix"});
     return run(
         task, config,
         [&](const auto& assets) {
@@ -2235,7 +2337,7 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
                 {},
                 {assets.second.data(), assets.second.size()}};
         },
-        generated_video_observation);
+        observe_video);
 }
 
 Json run_disparity(const trtmc::Model& model, const Json& request, const Timing& timing,
@@ -2465,6 +2567,40 @@ Json run_track_masks(const trtmc::Model& model, const Json& request, const Timin
         cached = read();
         cached_clip = video(*cached);
     }
+    if (detected) {
+        const auto task = task_for_operation<trtmc::FramesToDetectedMaskTracks>(model, task_id);
+        const auto fields = task.config_fields();
+        const auto config = sdk_config(
+            request, fields,
+            {"frame_paths", "timestamps_seconds", "prompt", "device_masks", "segment_config"});
+        const auto segment =
+            request.contains("segment_config")
+                ? sdk_config({{"config", request.at("segment_config")}}, fields, {})
+                : trtmc::Config{};
+        auto session = task.create(config);
+        auto measured = measure(
+            timing,
+            [&]() {
+                std::optional<std::vector<Image>> loaded;
+                trtmc::VideoInput clip;
+                if (!cached) {
+                    loaded = read();
+                    clip = video(*loaded);
+                }
+                const auto& input = cached ? cached_clip : clip;
+                auto result = device ? session.device_masks().segment_device(input, segment)
+                                     : session.segment(input, segment);
+                // Copy every mask before the next call invalidates borrowed device storage.
+                return snapshot_tracks(std::move(result));
+            },
+            [&](const TrackSnapshot& result) {
+                auto output = track_observation(result, timestamps);
+                output["lifecycle_scope"] = "reused_session_segment_snapshot_create_close_excluded";
+                return output;
+            });
+        session.close();
+        return measured;
+    }
     struct Result {
         TrackSnapshot final;
         std::optional<TrackSnapshot> prompt;
@@ -2500,17 +2636,6 @@ Json run_track_masks(const trtmc::Model& model, const Json& request, const Timin
                 return output;
             });
     };
-    if (detected)
-        return run(
-            task_for_operation<trtmc::FramesToDetectedMaskTracks>(model, task_id),
-            [&](const auto& task, const auto& config, const auto& segment, const auto& clip) {
-                auto session = task.create(config);
-                auto result = device ? session.device_masks().segment_device(clip, segment)
-                                     : session.segment(clip, segment);
-                auto snapshot = snapshot_tracks(std::move(result));
-                session.close();
-                return Result{std::move(snapshot), {}};
-            });
     if (prompt_frame)
         return run(task_for_operation<trtmc::PromptFrameTextToMaskTracks>(model, task_id),
                    [&](const auto& task, const auto& config, const auto&, const auto& clip) {
@@ -3471,6 +3596,12 @@ Json execute(const Json& request, const std::string& output_path) {
     const std::string runtime_root = request.value("runtime_root", std::string{});
     const std::string operation = request.at("operation").get<std::string>();
     Json operation_request = request.at("request");
+    if (operation == "generate_audio" || operation == "speak" || operation == "generate_image" ||
+        operation == "speech_dialogue") {
+        std::filesystem::path artifact(output_path);
+        artifact.replace_extension(operation == "generate_image" ? ".image" : ".audio");
+        operation_request["_artifact_prefix"] = artifact.string();
+    }
     if (operation == "disparity") {
         std::filesystem::path artifact(output_path);
         artifact.replace_extension(".disparity.f32");

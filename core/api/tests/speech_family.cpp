@@ -638,6 +638,8 @@ class Family final : public IModel,
             throw std::runtime_error("benchmark TTS provider failed");
         summary.output = {24000, 2};
         summary.inference_ms = 1.5;
+        if (input.text == "benchmark-empty")
+            return summary;
         for (int i = 0; i < 3; ++i) {
             const float values[]{static_cast<float>(i), 0.25F, 0.5F, 0.75F};
             const bool keep_going = sink({{values, 4}, std::uint32_t{24000}, 2});

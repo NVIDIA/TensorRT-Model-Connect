@@ -42,6 +42,43 @@ void bundle(const std::filesystem::path& path, const std::string& mode) {
         file.put(static_cast<char>((static_cast<std::uint64_t>(header.size()) >> shift) & 255));
     file.write(header.data(), static_cast<std::streamsize>(header.size()));
 }
+void unknown_semantic_identity(const std::filesystem::path& root,
+                               const trtmc::LoadOptions& options) {
+    float pixels[18]{};
+    const trtmc::ImageInput image({pixels}, 2, 3);
+    for (const std::string mode : {"semantic_unknown_named", "semantic_unknown_unnamed"}) {
+        const auto path = root / ("perception-cpp-" + mode + ".bundle");
+        bundle(path, mode);
+        auto retained = [&] {
+            auto model = trtmc::Model::load(path.string(), options);
+            return model.task<trtmc::ImageToSemanticSegmentation>().run({image});
+        }();
+        const auto view = retained.view();
+        check(view.vocabulary_id.size == 0 && view.class_ids.size == 2 &&
+                  view.class_ids.data[0] == 0 && view.class_ids.data[1] == 5 && view.height == 2 &&
+                  view.width == 3 && view.pixel_count == 6 && view.labels[0] == 255 &&
+                  view.labels[1] == 5 && view.labels[5] == 5,
+              "unknown vocabulary preserves complete model-local semantic labels and class IDs");
+        check(view.has_ignore_label && view.ignore_label == 255 && view.has_background_label &&
+                  view.background_label == 0 && view.score_count == 12 &&
+                  view.score_kind == TRTMC_SCORE_LOGIT && view.class_scores[0] == -2 &&
+                  view.class_scores[11] == -2,
+              "unknown identity preserves original score maps and ignore/background semantics");
+        check(mode == "semantic_unknown_named"
+                  ? view.class_names.size == 2 && text(view.class_names.data[0]) == "background" &&
+                        text(view.class_names.data[1]) == "object"
+                  : view.class_names.size == 0,
+              "optional real names remain owned after model release without a fabricated ID");
+    }
+    for (const char* mode : {"semantic_unknown_bad_names", "semantic_unknown_no_ids"}) {
+        const auto path = root / (std::string("perception-cpp-") + mode + ".bundle");
+        bundle(path, mode);
+        auto model = trtmc::Model::load(path.string(), options);
+        rejects([&] { model.task<trtmc::ImageToSemanticSegmentation>().run({image}); },
+                TRTMC_INTERNAL_ERROR,
+                "unknown vocabulary does not bypass class-ID or name-cardinality checks");
+    }
+}
 void batch_boxes(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
     for (const char* mode : {"batch", "batch_fail", "batch_bad_count"})
         bundle(root / (std::string("perception-cpp-") + mode + ".bundle"), mode);
@@ -372,6 +409,7 @@ int main(int argc, char** argv) {
         bundle(broken, "broken_masks");
         trtmc::LoadOptions options;
         options.runtime_root = root.string();
+        unknown_semantic_identity(root, options);
         batch_boxes(root, options);
         auto model = trtmc::Model::load(full.string(), options);
         float pixels[18];

@@ -493,6 +493,237 @@ def test_report_does_not_link_artifacts_outside_the_case_root(tmp_path):
     assert "../outside" not in (tmp_path / "run/report.html").read_text()
 
 
+@pytest.mark.parametrize("collection", [False, True])
+def test_report_audio_is_playable_and_portable_with_visible_input(tmp_path, collection):
+    from html.parser import HTMLParser
+    import wave
+
+    payload = _run(tmp_path / "run", "1")
+    case = tmp_path / "run/case"
+    audio = case / 'spoken <answer>.wav'
+    with wave.open(str(audio), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(16000)
+        stream.writeframes(b"\x00\x00\x00\x40")
+    resolved_path = case / "resolved-case.json"
+    resolved = json.loads(resolved_path.read_text())
+    resolved["request"] = {"prompt": "Read <script>alert('input')</script> aloud."}
+    resolved_path.write_text(json.dumps(resolved))
+    payload["cells"][0]["output_summary"] = {"audio_artifact": audio.name, "output_samples": 2}
+    (tmp_path / "run/result.json").write_text(json.dumps(payload))
+    # Move the run before rendering: no original machine path may be required.
+    moved = tmp_path / "archived"
+    (tmp_path / "run").rename(moved)
+    if collection:
+        generate_collection_report([moved], tmp_path / "collection")
+        report_path = tmp_path / "collection/report.html"
+    else:
+        report_path = moved / "report.html"
+        write_html_report(payload, report_path)
+
+    class Media(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.audio = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "audio":
+                self.audio.append(dict(attrs))
+
+    document = report_path.read_text()
+    parser = Media()
+    parser.feed(document)
+    assert len(parser.audio) == 1
+    player = parser.audio[0]
+    assert "controls" in player and player["preload"] == "none"
+    expected = ("../archived/" if collection else "") + "case/spoken%20%3Canswer%3E.wav"
+    assert player["src"] == expected
+    assert "Input text" in document and "Output audio" in document
+    assert "&lt;script&gt;alert(&#x27;input&#x27;)&lt;/script&gt;" in document
+    assert "<script>alert('input')</script>" not in document
+    assert str(tmp_path) not in document
+    assert document.index("<audio ") < document.index("<details><summary>Evidence and reproduction")
+
+
+@pytest.mark.parametrize("collection", [False, True])
+def test_dialogue_report_shows_actual_input_and_ordered_output_events(tmp_path, collection):
+    from html.parser import HTMLParser
+    import wave
+
+    payload = _run(tmp_path / "run", "1")
+    case = tmp_path / "run/case"
+    for name in ("input.wav", "reply-one.wav", "reply-two.wav"):
+        with wave.open(str(case / name), "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(16000)
+            stream.writeframes(b"\x00\x00\x00\x40")
+    payload["cells"][0]["output_summary"] = {
+        "input_audio_artifact": "input.wav",
+        "system_prompt": "Say <hello>",
+        "events": [
+            {"kind": "user_transcript", "epoch": 1, "sequence": 0, "text": "Question <input>"},
+            {"kind": "agent_text", "epoch": 1, "sequence": 1, "text": "First <answer>"},
+            {"kind": "agent_audio", "epoch": 1, "sequence": 2, "audio_samples": 2},
+            {"kind": "function_call", "epoch": 2, "sequence": 0,
+             "tool_call": {"call_id": "call<1>", "name": "lookup", "arguments_json": '{"q":"<x>"}', "state": "complete"}},
+            {"kind": "agent_audio", "epoch": 2, "sequence": 1, "audio_samples": 2},
+            {"kind": "error", "epoch": 2, "sequence": 2, "text": "Tool <failed>"},
+        ],
+        "event_audio_artifacts": [None, None, "reply-one.wav", None, "reply-two.wav", None],
+    }
+    (tmp_path / "run/result.json").write_text(json.dumps(payload))
+    moved = tmp_path / "archived"
+    (tmp_path / "run").rename(moved)
+    if collection:
+        generate_collection_report([moved], tmp_path / "collection")
+        report_path = tmp_path / "collection/report.html"
+    else:
+        report_path = moved / "report.html"
+        write_html_report(payload, report_path)
+
+    class Players(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.sources = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "audio":
+                self.sources.append(dict(attrs)["src"])
+
+    document = report_path.read_text()
+    players = Players()
+    players.feed(document)
+    prefix = "../archived/" if collection else ""
+    assert players.sources == [prefix + "case/" + name for name in ("input.wav", "reply-one.wav", "reply-two.wav")]
+    assert "Input audio" in document and "Speech events" in document
+    assert "Question &lt;input&gt;" in document and "First &lt;answer&gt;" in document
+    assert "Tool &lt;failed&gt;" in document and "Say &lt;hello&gt;" in document
+    assert "lookup" in document and "call&lt;1&gt;" in document and "&lt;x&gt;" in document
+    assert "epoch 1" in document and "epoch 2" in document
+    assert document.index("Question &lt;input&gt;") < document.index("First &lt;answer&gt;") < document.index("reply-one.wav") < document.index("lookup") < document.index("reply-two.wav") < document.index("Tool &lt;failed&gt;")
+    assert str(tmp_path) not in document
+
+
+def test_dialogue_report_never_plays_uncontained_or_missing_event_audio(tmp_path):
+    payload = _run(tmp_path / "run", "1")
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"not an audio fixture")
+    payload["cells"][0]["output_summary"] = {
+        "input_audio_artifact": str(outside),
+        "events": [
+            {"kind": "agent_text", "epoch": 1, "sequence": 0, "text": "Still readable"},
+            {"kind": "agent_audio", "epoch": 1, "sequence": 1, "audio_samples": 2},
+            {"kind": "agent_audio", "epoch": 1, "sequence": 2, "audio_samples": 2},
+        ],
+        "event_audio_artifacts": [None, str(outside), "missing.wav"],
+    }
+    path = tmp_path / "run/report.html"
+    write_html_report(payload, path)
+    document = path.read_text()
+    assert "Still readable" in document
+    assert "<audio " not in document and "outside.wav" not in document
+    assert "Input audio: artifact unavailable" in document
+    assert "Audio event: artifact unavailable" in document
+
+
+@pytest.mark.parametrize("kind", ["outside", "symlink", "missing", "remote", "failed", "wrong_format"])
+def test_report_audio_never_embeds_uncontained_or_unproduced_files(tmp_path, kind):
+    payload = _run(tmp_path / "run", "1")
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"not a case artifact")
+    case = tmp_path / "run/case"
+    path = case / "output.wav"
+    if kind == "symlink":
+        path.symlink_to(outside)
+    elif kind == "failed":
+        path.write_bytes(b"stale output")
+        payload["cells"][0]["status"] = "failed"
+    raw = str(outside) if kind == "outside" else path.name
+    if kind == "remote":
+        raw = "https://example.invalid/private.wav"
+    if kind == "wrong_format":
+        raw = "not-audio.html"
+        (case / raw).write_text("<script>not audio</script>")
+    payload["cells"][0]["output_summary"] = {"audio_artifact": raw, "output_samples": 2}
+    write_html_report(payload, tmp_path / "run/report.html")
+    document = (tmp_path / "run/report.html").read_text()
+    assert "<audio " not in document
+    assert str(outside) not in document and "example.invalid" not in document
+
+
+def test_report_explicit_empty_audio_has_no_broken_player(tmp_path):
+    payload = _run(tmp_path / "run", "1")
+    payload["cells"][0]["output_summary"] = {"audio_artifact": None, "output_samples": 0}
+    write_html_report(payload, tmp_path / "run/report.html")
+    document = (tmp_path / "run/report.html").read_text()
+    assert "Output audio: empty (0 samples)" in document
+    assert "<audio " not in document
+
+
+def test_report_shows_text_and_ordered_image_video_outputs(tmp_path):
+    from html.parser import HTMLParser
+
+    payload = _run(tmp_path / "run", "1")
+    case = tmp_path / "run/case"
+    names = ["source.png", "first.png", "second.png", "third.png"]
+    for name in names:
+        (case / name).write_bytes(b"PNG reference fixture; decoding is tested by the native writer")
+    resolved_path = case / "resolved-case.json"
+    resolved = json.loads(resolved_path.read_text())
+    resolved["request"] = {"prompt": ["first <input>", "second & input"]}
+    resolved_path.write_text(json.dumps(resolved))
+    payload["cells"][0]["output_summary"] = {
+        "text": "result <tag>", "input_image_artifacts": [names[0]],
+        "image_artifacts": [names[1]], "frame_artifacts": names[1:],
+        "timestamps_seconds": [0.0, 0.1, 0.3],
+    }
+    write_html_report(payload, tmp_path / "run/report.html")
+    document = (tmp_path / "run/report.html").read_text()
+
+    class Images(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.sources = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "img":
+                attributes = dict(attrs)
+                assert attributes["loading"] == "lazy"
+                self.sources.append(attributes["src"])
+
+    images = Images()
+    images.feed(document)
+    assert images.sources == ["case/source.png", "case/first.png", "case/first.png",
+                              "case/second.png", "case/third.png"]
+    assert "Input images" in document and "Output images" in document and "Output video frames" in document
+    assert "Output text" in document and "result &lt;tag&gt;" in document
+    assert "first &lt;input&gt;" in document and "second &amp; input" in document
+    assert "Frame 2 · 0.300 s" in document
+    assert "FPS" not in document
+
+
+def test_report_image_artifacts_obey_case_boundary_and_do_not_invent_time(tmp_path):
+    payload = _run(tmp_path / "run", "1")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside")
+    (tmp_path / "run/case/link.png").symlink_to(outside)
+    (tmp_path / "run/case/last.png").write_bytes(b"inside")
+    (tmp_path / "run/case/not-image.svg").write_text("<svg/>")
+    payload["cells"][0]["output_summary"] = {
+        "image_artifacts": [str(outside), "link.png", "missing.png", "not-image.svg"],
+        "frame_artifacts": ["last.png"], "timestamps_seconds": [],
+    }
+    write_html_report(payload, tmp_path / "run/report.html")
+    document = (tmp_path / "run/report.html").read_text()
+    assert document.count("<img ") == 1
+    assert 'src="case/last.png"' in document
+    assert "outside.png" not in document and "link.png" not in document
+    assert "Output images: 4 artifact(s) unavailable" in document
+    assert "Frame 0</figcaption>" in document and "Frame 0 ·" not in document
+
+
 @pytest.mark.parametrize(
     "schema, row_key, reference_key", [("v1", "cases", "baseline"), ("v2", "rows", "reference")]
 )

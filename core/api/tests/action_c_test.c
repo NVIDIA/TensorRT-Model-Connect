@@ -122,9 +122,11 @@ int main(int argc, char** argv) {
     check(queue->create(model, &config, &session, &error) == TRTMC_OK && session != NULL,
           "C queue creation succeeds");
     tag[0] = 'X';
-    check(chunks->run(model, &request, NULL, &rejected, &error) == TRTMC_BUSY && rejected == NULL,
-          "stateless calls cannot consume a live queue's execution");
-    clear_error(core, &error);
+    trtmc_result* independent = NULL;
+    check(chunks->run(model, &request, NULL, &independent, &error) == TRTMC_OK &&
+              chunks->result_view(independent, &chunk_view, &error) == TRTMC_OK &&
+              chunk_view.actions.values.data[0] == 2.5F && chunk_view.inference_ms == 102,
+          "C live idle queue permits an independent chunk without consuming queue state");
     trtmc_image_state_action_session* second = NULL;
     check(queue->create(model, NULL, &second, &error) == TRTMC_BUSY && second == NULL,
           "model reservation prevents a second session");
@@ -156,6 +158,12 @@ int main(int argc, char** argv) {
     clear_error(core, &error);
     state[0] = 20;
     state[1] = 40;
+    trtmc_result* interleaved = NULL;
+    check(chunks->run(model, &request, NULL, &interleaved, &error) == TRTMC_OK &&
+              chunks->result_view(interleaved, &chunk_view, &error) == TRTMC_OK &&
+              chunk_view.actions.values.data[0] == 20.5F &&
+              chunk_view.actions.values.data[2] == 40 && chunk_view.inference_ms == 103,
+          "C independent chunk uses new input between two acts on the same queue");
     trtmc_result* queued = NULL;
     check(queue->act(session, &observation, NULL, &queued, &error) == TRTMC_OK,
           "queued action survives prior argument rejection");
@@ -191,6 +199,8 @@ int main(int argc, char** argv) {
           "null session fails without touching an implementation");
     clear_error(core, &error);
     core->result_release(chunk);
+    core->result_release(independent);
+    core->result_release(interleaved);
     core->result_release(first);
     core->result_release(queued);
     core->result_release(fresh);

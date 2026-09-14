@@ -4,11 +4,13 @@
  */
 
 #include "trtmc/action.hpp"
+#include "trtmc/stream.hpp"
 
 #include <chrono>
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -135,8 +137,9 @@ void exercise(const std::filesystem::path& root) {
     Config config{{"tag", "copied"}};
     auto session = factory.create(config);
     config = Config{{"tag", "changed"}};
-    rejects([&] { predictor.run({observation}); }, TRTMC_BUSY,
-            "live queue reservation prevents a stateless call from touching its state");
+    auto independent = predictor.run({observation});
+    check(independent.actions().values[0] == 2.5F && independent.inference_ms() == 103,
+          "a live idle action queue permits an independent stateless chunk");
     rejects([&] { factory.create(); }, TRTMC_BUSY, "second live execution reservation is rejected");
     check(model.supports<ImageStateToActionChunk>(),
           "metadata remains queryable during session lifetime");
@@ -152,6 +155,10 @@ void exercise(const std::filesystem::path& root) {
             "family checks state even while an action is already queued");
     state[0] = 20;
     state[1] = 40;
+    auto interleaved = predictor.run({observation});
+    check(interleaved.actions().values[0] == 20.5F && interleaved.actions().values[2] == 40 &&
+              interleaved.inference_ms() == 104,
+          "independent chunk uses current observation without consuming the queued next step");
     auto queued = session.act(observation);
     check(queued.values()[0] == 4 && queued.values()[1] == 8 && !queued.started_new_chunk() &&
               !queued.within_training_bounds() && queued.inference_ms() == 0,
@@ -175,8 +182,8 @@ void exercise(const std::filesystem::path& root) {
     rejects([&] { session.act(observation); }, TRTMC_INVALID_ARGUMENT,
             "closed C++ session fails explicitly");
     auto after_session = predictor.run({observation});
-    check(after_session.inference_ms() == 103,
-          "BUSY stateless call never entered the family or consumed queue work");
+    check(after_session.inference_ms() == 105,
+          "independent stateless calls are counted without consuming queue work");
 
     const auto library = root / "libtrtmc_model_action_fixture.so";
     void* handle = dlopen(library.c_str(), RTLD_NOW | RTLD_NOLOAD);
@@ -200,6 +207,10 @@ void exercise(const std::filesystem::path& root) {
             "overlapping reset is BUSY, not queued behind active execution");
     rejects([&] { concurrent.act(observation); }, TRTMC_BUSY,
             "competing act is BUSY without a second family call");
+    rejects([&] { predictor.run({observation}); }, TRTMC_BUSY,
+            "a chunk overlapping act is BUSY without touching the model");
+    rejects([&] { factory.create(); }, TRTMC_BUSY,
+            "a blocked act retains its exclusive session reservation");
     unblock();
     auto completed = pending.get();
     check(completed.started_new_chunk() && completed.inference_ms() == 1,
@@ -235,6 +246,185 @@ void exercise(const std::filesystem::path& root) {
     }();
     check(retained.values()[0] == 3.5F, "owned step survives all local model/session wrappers");
 }
+
+struct Synchronization {
+    explicit Synchronization(const std::filesystem::path& root) {
+        handle =
+            dlopen((root / "libtrtmc_model_action_fixture.so").c_str(), RTLD_NOW | RTLD_NOLOAD);
+        if (!handle)
+            throw std::runtime_error("missing loaded action fixture");
+        block = reinterpret_cast<void (*)()>(dlsym(handle, "trtmc_action_fixture_block_next"));
+        entered = reinterpret_cast<int (*)()>(dlsym(handle, "trtmc_action_fixture_entered"));
+        unblock = reinterpret_cast<void (*)()>(dlsym(handle, "trtmc_action_fixture_unblock"));
+        reenter = reinterpret_cast<void (*)(void (*)(void*), void*)>(
+            dlsym(handle, "trtmc_action_fixture_reenter_next"));
+        if (!block || !entered || !unblock || !reenter)
+            throw std::runtime_error("missing action fixture operation hooks");
+    }
+    ~Synchronization() { dlclose(handle); }
+    void await_entry() const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!entered() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        check(entered(), "the selected family operation reached its deterministic gate");
+    }
+    void* handle{};
+    void (*block)(){};
+    int (*entered)(){};
+    void (*unblock)(){};
+    void (*reenter)(void (*)(void*), void*){};
+};
+
+void exercise_chunk_exclusion(const std::filesystem::path& root) {
+    using namespace trtmc;
+    auto model = load(root, "all");
+    const auto predictor = model.task<ImageStateToActionChunk>();
+    const auto factory = model.task<ImageStateActionQueue>();
+    const float pixels[]{0.5F, 0.25F, 0.125F}, state[]{2, 4};
+    const ImageStateObservation input{ImageInput({pixels, 3}, 1, 1), {state, 2}};
+    auto queue = factory.create();
+    check(queue.act(input).values()[0] == 2.5F, "queue has one original step remaining");
+    Synchronization hooks(root);
+    hooks.block();
+    auto pending = std::async(std::launch::async, [&] { return predictor.run({input}); });
+    hooks.await_entry();
+    rejects([&] { queue.act(input); }, TRTMC_BUSY, "act cannot overlap an independent chunk");
+    rejects([&] { queue.reset(); }, TRTMC_BUSY, "reset cannot overlap an independent chunk");
+    rejects([&] { predictor.run({input}); }, TRTMC_BUSY, "two independent chunks cannot overlap");
+    rejects([&] { factory.create(); }, TRTMC_BUSY, "chunk does not release the queue reservation");
+    check(model.supports<ImageStateActionQueue>(), "metadata stays queryable during chunk work");
+    hooks.unblock();
+    auto chunk = pending.get();
+    check(chunk.inference_ms() == 101 && chunk.actions().values[2] == 4,
+          "only one independent chunk entered the family");
+    auto cached = queue.act(input);
+    check(cached.values()[0] == 4 && cached.values()[1] == 8 && !cached.started_new_chunk() &&
+              cached.inference_ms() == 0,
+          "overlap rejections and independent prediction retain the queued cursor and values");
+    queue.close();
+    check(predictor.run({input}).inference_ms() == 102,
+          "closing the queue after its chunk releases the reservation");
+}
+
+void exercise_reset_exclusion(const std::filesystem::path& root) {
+    using namespace trtmc;
+    auto model = load(root, "all");
+    const auto predictor = model.task<ImageStateToActionChunk>();
+    auto queue = model.task<ImageStateActionQueue>().create();
+    const float pixels[]{0.5F, 0.25F, 0.125F}, state[]{2, 4};
+    const ImageStateObservation input{ImageInput({pixels, 3}, 1, 1), {state, 2}};
+    check(queue.act(input).inference_ms() == 1, "reset case begins with its first original chunk");
+    Synchronization hooks(root);
+    hooks.block();
+    auto pending = std::async(std::launch::async, [&] { queue.reset(); });
+    hooks.await_entry();
+    rejects([&] { predictor.run({input}); }, TRTMC_BUSY, "chunk cannot overlap queue reset");
+    rejects([&] { queue.act(input); }, TRTMC_BUSY, "act cannot overlap queue reset");
+    rejects([&] { queue.reset(); }, TRTMC_BUSY, "two queue resets cannot overlap");
+    hooks.unblock();
+    pending.get();
+    auto next = queue.act(input);
+    check(next.values()[0] == 2.5F && next.started_new_chunk() && next.inference_ms() == 2,
+          "completed reset still delegates the original refill policy");
+}
+
+void exercise_reentry_and_other_sessions(const std::filesystem::path& root) {
+    using namespace trtmc;
+    auto model = load(root, "with_stream");
+    const auto predictor = model.task<ImageStateToActionChunk>();
+    const auto factory = model.task<ImageStateActionQueue>();
+    const auto streaming = model.task<StreamingTextContinuation>();
+    const float pixels[]{0.5F, 0.25F, 0.125F}, state[]{2, 4};
+    const ImageStateObservation input{ImageInput({pixels, 3}, 1, 1), {state, 2}};
+    auto queue = factory.create();
+    Synchronization hooks(root);
+    std::function<void()> attempts = [&] {
+        rejects([&] { predictor.run({input}); }, TRTMC_BUSY, "reentrant chunk remains BUSY");
+        rejects([&] { queue.act(input); }, TRTMC_BUSY, "reentrant act remains BUSY");
+        rejects([&] { queue.reset(); }, TRTMC_BUSY, "reentrant reset remains BUSY");
+        rejects([&] { factory.create(); }, TRTMC_BUSY, "reentrant second queue remains BUSY");
+        rejects([&] { streaming.start({"held"}); }, TRTMC_BUSY,
+                "another session cannot enter the live queue reservation");
+        check(model.supports<StreamingTextContinuation>(), "reentrant metadata query is safe");
+    };
+    const auto callback = [](void* context) { (*static_cast<std::function<void()>*>(context))(); };
+    hooks.reenter(callback, &attempts);
+    check(queue.act(input).inference_ms() == 1, "reentrant refusals do not consume a refill");
+    hooks.reenter(callback, &attempts);
+    check(predictor.run({input}).inference_ms() == 101,
+          "a serial chunk still excludes all nested execution");
+    hooks.reenter(callback, &attempts);
+    queue.reset();
+    queue.close();
+    auto other = streaming.start({"held"});
+    rejects([&] { predictor.run({input}); }, TRTMC_BUSY,
+            "independent chunks do not bypass a non-action session");
+    rejects([&] { factory.create(); }, TRTMC_BUSY, "action queue cannot replace another session");
+    rejects([&] { streaming.start({"second"}); }, TRTMC_BUSY,
+            "another session still prevents a second session");
+    other.close();
+    check(predictor.run({input}).inference_ms() == 102,
+          "other-session close restores normal prediction without hidden family calls");
+}
+
+void exercise_throwing_creation_cleanup(const std::filesystem::path& root) {
+    using namespace trtmc;
+    auto model = load(root, "throw_queue");
+    const float pixels[]{0.5F, 0.25F, 0.125F}, state[]{2, 4};
+    const ImageStateObservation input{ImageInput({pixels, 3}, 1, 1), {state, 2}};
+    rejects([&] { model.task<ImageStateActionQueue>().create(); }, TRTMC_INTERNAL_ERROR,
+            "a throwing family queue factory keeps its original error category");
+    check(model.task<ImageStateToActionChunk>().run({input}).inference_ms() == 101,
+          "throwing creation releases both reservation and action-operation ownership");
+}
+
+void exercise_unreserved_chunk_reentry(const std::filesystem::path& root) {
+    using namespace trtmc;
+    auto model = load(root, "all");
+    const auto predictor = model.task<ImageStateToActionChunk>();
+    const auto factory = model.task<ImageStateActionQueue>();
+    const float pixels[]{0.5F, 0.25F, 0.125F}, state[]{2, 4};
+    const ImageStateObservation input{ImageInput({pixels, 3}, 1, 1), {state, 2}};
+    Synchronization hooks(root);
+    std::function<void()> attempts = [&] {
+        rejects([&] { predictor.run({input}); }, TRTMC_BUSY,
+                "ordinary chunk rejects reentrant chunk execution without a queue");
+        rejects([&] { factory.create(); }, TRTMC_BUSY,
+                "ordinary chunk rejects reentrant queue creation without a reservation");
+    };
+    hooks.reenter([](void* context) { (*static_cast<std::function<void()>*>(context))(); },
+                  &attempts);
+    check(predictor.run({input}).inference_ms() == 101,
+          "only the outer ordinary chunk entered the family");
+    auto queue = factory.create();
+    check(queue.act(input).inference_ms() == 1,
+          "failed nested creation leaves no reservation or consumed queue state");
+}
+
+void exercise_nested_models(const std::filesystem::path& root) {
+    using namespace trtmc;
+    auto first = load(root, "all");
+    auto second = load(root, "all");
+    const auto a = first.task<ImageStateToActionChunk>();
+    const auto b = second.task<ImageStateToActionChunk>();
+    const float pixels[]{0.5F, 0.25F, 0.125F}, state[]{2, 4};
+    const ImageStateObservation input{ImageInput({pixels, 3}, 1, 1), {state, 2}};
+    Synchronization hooks(root);
+    const auto callback = [](void* context) { (*static_cast<std::function<void()>*>(context))(); };
+    std::function<void()> nested = [&] {
+        rejects([&] { a.run({input}); }, TRTMC_BUSY,
+                "A to B to A rejects the earlier model even when B is the current frame");
+    };
+    std::function<void()> cross_model = [&] {
+        hooks.reenter(callback, &nested);
+        check(b.run({input}).inference_ms() == 101,
+              "A to B is legal because independent model state is not reentry");
+    };
+    hooks.reenter(callback, &cross_model);
+    check(a.run({input}).inference_ms() == 101, "nested calls preserve A's original prediction");
+    check(a.run({input}).inference_ms() == 102 && b.run({input}).inference_ms() == 102,
+          "both model stacks unwind without a lingering reentry marker");
+}
 } // namespace
 int main(int argc, char** argv) {
     if (argc != 2)
@@ -242,6 +432,12 @@ int main(int argc, char** argv) {
     try {
         exercise(argv[1]);
         exercise_released_model(argv[1]);
+        exercise_chunk_exclusion(argv[1]);
+        exercise_reset_exclusion(argv[1]);
+        exercise_reentry_and_other_sessions(argv[1]);
+        exercise_throwing_creation_cleanup(argv[1]);
+        exercise_unreserved_chunk_reentry(argv[1]);
+        exercise_nested_models(argv[1]);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 2;

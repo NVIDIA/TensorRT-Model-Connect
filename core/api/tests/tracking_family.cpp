@@ -14,17 +14,27 @@ void empty(ConfigView config) {
 }
 class DetectorSession final : public IDetectedClipSession, public IDetectedDeviceClipSession {
   public:
-    explicit DetectorSession(bool device) : device_(device) {}
+    explicit DetectorSession(bool device, bool count_calls = false)
+        : device_(device), count_calls_(count_calls) {}
     IDetectedDeviceClipSession* device_masks() noexcept override {
         return device_ ? this : nullptr;
     }
     TrackClipResult segment(VideoView clip, ConfigView config) override {
         validate(clip, config);
+        ++calls_;
         TrackClipResult result;
         for (std::size_t i = 0; i < clip.frames.size(); ++i) {
             TrackFrameResult frame;
             frame.metadata = metadata(i, clip.frames[i]);
             frame.masks = std::vector<std::uint8_t>(6, 1);
+            if (count_calls_) {
+                frame.metadata.boxes = {{0, 0, 3, 2}};
+                frame.metadata.detection_scores = {0.875F};
+                frame.metadata.tracker_scores = {static_cast<float>(calls_) / 8};
+                frame.metadata.removed_object_ids = {19};
+                frame.metadata.suppressed_object_ids = {23};
+                frame.masks = std::vector<std::uint8_t>(6, (calls_ + i) % 2);
+            }
             result.frames.push_back(std::move(frame));
         }
         result.initial_detections = {{0, 7, 2, 0.75F, {0, 0, 3, 2}}};
@@ -65,6 +75,8 @@ class DetectorSession final : public IDetectedClipSession, public IDetectedDevic
         return out;
     }
     bool device_;
+    bool count_calls_;
+    std::uint64_t calls_{0};
 };
 TrackFrameResult text_frame(std::size_t index, const ImageView& image, float mask) {
     TrackFrameResult result;
@@ -399,7 +411,10 @@ class Model final : public IModel,
 
     std::unique_ptr<IDetectedClipSession> create_detected_session(ConfigView config) override {
         empty(config);
-        return std::make_unique<DetectorSession>(mode_ != "host_only");
+        if (mode_ == "single_create" && detected_created_)
+            throw std::runtime_error("fixture detector session can only be created once");
+        detected_created_ = true;
+        return std::make_unique<DetectorSession>(mode_ != "host_only", mode_ == "single_create");
     }
     std::unique_ptr<ITextClipSession> create_text_clip_session(ConfigView config) override {
         empty(config);
@@ -444,6 +459,7 @@ class Model final : public IModel,
   private:
     std::string mode_;
     int encodings_{0};
+    bool detected_created_{false};
 };
 } // namespace
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {

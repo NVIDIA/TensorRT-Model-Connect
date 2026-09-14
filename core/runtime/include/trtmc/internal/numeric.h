@@ -106,8 +106,8 @@ struct DenoisedLatentsResult {
     FloatMatrix latents;
 };
 struct LatentTokenLogitsResult {
-    FloatMatrix logits; // [position,vocabulary], unnormalized logits.
-    std::string vocabulary_id;
+    FloatMatrix logits;        // [position,vocabulary], unnormalized logits.
+    std::string vocabulary_id; // Empty = unknown identity; columns retain model-local token order.
 };
 
 #define TRTMC_NUMERIC_INTERFACE(Name, Id, Request, Result)                                         \

@@ -437,6 +437,12 @@ class AudioFixture final : public IModel,
         return "en";
     }
     AudioResult generated(std::vector<float> samples, const Options& options) const {
+        if (mode_ == "artifact_audio" || mode_ == "artifact_audio_empty_last") {
+            const auto call = single_audio_ + single_speech_;
+            samples[0] = static_cast<float>(call) / 8;
+            if (mode_ == "artifact_audio_empty_last" && call == 3)
+                samples.clear();
+        }
         for (auto& sample : samples)
             sample *= static_cast<float>(options.gain);
         return {std::move(samples), 24000, mode_ == "bad_audio" ? 0U : 2U, 1, 2};

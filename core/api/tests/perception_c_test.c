@@ -342,6 +342,55 @@ static void required_pose_outputs(const char* root, const trtmc_load_options_v1*
     check(!result, "C invalid family Config produces no partial pose result");
 }
 
+static void unknown_semantic_identity(const char* root, const trtmc_load_options_v1* options) {
+    const char* modes[] = {"semantic_unknown_named", "semantic_unknown_unnamed",
+                           "semantic_unknown_bad_names", "semantic_unknown_no_ids"};
+    float pixels[18] = {0};
+    const trtmc_perception_image_request_v1 input = {
+        {pixels, sizeof(pixels), 2, 3, 3, TRTMC_IMAGE_FLOAT32}};
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+        trtmc_model* model = load_required_mode(root, modes[i], options);
+        if (!model)
+            continue;
+        const trtmc_image_to_semantic_segmentation_api_v1* task =
+            (const trtmc_image_to_semantic_segmentation_api_v1*)table(
+                model, TRTMC_TASK_IMAGE_TO_SEMANTIC_SEGMENTATION);
+        if (!task) {
+            api->model_release(model);
+            continue;
+        }
+        trtmc_result* result = NULL;
+        trtmc_error* error = NULL;
+        checked(task->run(model, &input, NULL, &result, &error),
+                i < 2 ? TRTMC_OK : TRTMC_INTERNAL_ERROR, &error,
+                "C unknown semantic identity preserves valid results and rejects bad metadata");
+        api->model_release(model);
+        if (i >= 2) {
+            check(result == NULL, "C malformed semantic result does not escape as a partial value");
+        } else if (result) {
+            trtmc_semantic_segmentation_view_v1 view = {0};
+            checked(task->result_view(result, &view, &error), TRTMC_OK, &error,
+                    "C unknown vocabulary result survives model release");
+            check(view.vocabulary_id.size == 0 && view.class_ids.size == 2 &&
+                      view.class_ids.data[0] == 0 && view.class_ids.data[1] == 5 &&
+                      view.height == 2 && view.width == 3 && view.pixel_count == 6 &&
+                      view.labels[0] == 255 && view.labels[1] == 5 && view.labels[5] == 5 &&
+                      view.has_ignore_label && view.ignore_label == 255 &&
+                      view.has_background_label && view.background_label == 0 &&
+                      view.score_count == 12 && view.score_kind == TRTMC_SCORE_LOGIT &&
+                      view.class_scores[0] == -2 && view.class_scores[11] == -2,
+                  "C keeps complete labels, model-local IDs and original score/ignore metadata");
+            check(i == 0 ? view.class_names.size == 2 && view.class_names.data[0].size == 10 &&
+                               memcmp(view.class_names.data[0].data, "background", 10) == 0 &&
+                               view.class_names.data[1].size == 6 &&
+                               memcmp(view.class_names.data[1].data, "object", 6) == 0
+                         : view.class_names.size == 0,
+                  "C retains optional real class names without inventing vocabulary identity");
+        }
+        api->result_release(result);
+    }
+}
+
 static void image_tasks(trtmc_model* model, trtmc_model* restricted, trtmc_result** retained) {
     const trtmc_image_to_semantic_segmentation_api_v1* semantic =
         (const trtmc_image_to_semantic_segmentation_api_v1*)table(
@@ -682,6 +731,7 @@ int main(int argc, char** argv) {
     bundle(restricted_path, "pose_only");
     options.struct_size = sizeof(options);
     options.runtime_root = str(argv[1]);
+    unknown_semantic_identity(argv[1], &options);
     checked(api->model_load(str(full), &options, &model, &error), TRTMC_OK, &error,
             "C perception model load");
     checked(api->model_load(str(restricted_path), &options, &restricted, &error), TRTMC_OK, &error,

@@ -481,8 +481,10 @@ class FeaturesFixture final : public IModel,
             result.labels.clear();
         if (mode_ == "unnamed_classes" || mode_ == "named_classes" || mode_ == "blank_classes")
             result.vocabulary_id.clear();
-        if (mode_ == "blank_classes")
+        if (mode_ == "blank_classes" || mode_ == "blank_identified_classes")
             result.labels.assign(result.scores.size(), "");
+        if (mode_ == "short_class_labels")
+            result.labels.pop_back();
         if (mode_ == "empty_classes")
             result.scores.clear();
         return result;

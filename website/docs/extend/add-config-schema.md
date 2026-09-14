@@ -72,6 +72,22 @@ Strings and lists in internal `ConfigView`, including values returned by
 `config_get`, are borrowed. A stream or session must copy or parse everything
 it retains before the start/create call returns.
 
+For a field declared as `F64List`, keep the returned optional in a local before
+iterating. For example, copying into a family-owned `std::vector<double>`:
+
+```cpp
+if (const auto steps = trtmc::internal::config_get<trtmc::Span<const double>>(
+        config, fields, "sampling_steps")) {
+    owned_steps.clear();
+    for (const double value : *steps)
+        owned_steps.push_back(value);
+}
+```
+
+In C++17, dereferencing a temporary optional directly in a range-for expression
+does not keep its contained Span alive. Naming it keeps the descriptor alive;
+copying the elements is still necessary if they must outlive the Config payload.
+
 ## Call through the existing SDK and CLI
 
 ```cpp

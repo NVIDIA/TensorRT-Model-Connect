@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "cli/io.h"
+
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -54,6 +56,190 @@ void image(const std::filesystem::path& path, int width, unsigned char red, int 
         output.put(0);
     }
 }
+
+void image_artifacts(const std::string& worker, const std::filesystem::path& runtime) {
+    const auto directory = runtime / "benchmark_media_artifacts";
+    std::filesystem::create_directories(directory);
+    const auto source = directory / "source.ppm";
+    const auto second_source = directory / "second-source.ppm";
+    image(source, 1, 255);
+    image(second_source, 1, 0);
+    for (const std::string task :
+         {"text_to_image", "images_text_to_image_edit", "batch_text_to_image", "text_to_video"}) {
+        const bool video = task == "text_to_video", batch = task == "batch_text_to_image";
+        const bool edit = task == "images_text_to_image_edit";
+        const auto model = directory / (task + ".bundle");
+        bundle(model, task, video ? "video_fixture" : "image_fixture");
+        Json input{{"prompt", "Hello"}};
+        if (edit)
+            input["image_paths"] = {source.string(), second_source.string()};
+        if (batch) {
+            input["prompt"] = {"first", "benchmark-wide"};
+            input["seeds"] = {0, 17};
+            input["item_configs"] = Json::array({Json::object(), Json{{"level", 0.5}}});
+        }
+        const std::vector<std::vector<float>> expected =
+            video ? std::vector<std::vector<float>>{{0.01F, 0.05F, 0},
+                                                    {0.01F, 0.05F, 0.1F},
+                                                    {0.01F, 0.05F, 0.2F}}
+            : batch
+                ? std::vector<std::vector<float>>{{0.25F, 0, 0},
+                                                  {0.5F, 1.0F / 32, 17.0F / 255, 0.5F, 0.5F, 0.5F}}
+            : edit ? std::vector<std::vector<float>>{{0.25F, 1, 0}}
+                   : std::vector<std::vector<float>>{{0.25F, 5.0F / 32, 0.125F}};
+        for (const bool include_assets : {false, true}) {
+            const auto label = task + (include_assets ? "-assets" : "-cached");
+            const auto request_path = directory / (label + ".request.json");
+            const auto output_path = directory / (label + ".json");
+            const Json request{
+                {"schema_version", 2},
+                {"case_name", label},
+                {"bundle", model.string()},
+                {"runtime_root", runtime.string()},
+                {"operation", "generate_image"},
+                {"request", input},
+                {"measurement",
+                 {{"warmup", 1}, {"iterations", 2}, {"asset_loading_included", include_assets}}}};
+            {
+                std::ofstream file(request_path);
+                file << request;
+            }
+            const auto command = quote(worker) + " --request " + quote(request_path.string()) +
+                                 " --output " + quote(output_path.string());
+            check(std::system(command.c_str()) == 0, "media artifact worker completes");
+            std::ifstream file(output_path);
+            Json result;
+            file >> result;
+            check(result.at("status") == "completed" && result.at("observations").size() == 2 &&
+                      result.at("observation_serialization_included") == false,
+                  "media artifacts preserve measured call count and untimed serialization");
+            const char* field = video ? "frame_artifacts" : "image_artifacts";
+            for (std::size_t iteration = 0; iteration < 2; ++iteration) {
+                const auto& observation = result.at("observations").at(iteration);
+                check(observation.contains(field), "measured images or frames retain actual files");
+                if (!observation.contains(field))
+                    continue;
+                check(observation.at(field).size() == expected.size(),
+                      "all output images/frames are retained");
+                for (std::size_t index = 0; index < expected.size(); ++index) {
+                    const auto relative = observation.at(field).at(index).get<std::string>();
+                    check(relative == label + ".image." + std::to_string(iteration + 1) + "." +
+                                          std::to_string(index) + ".png",
+                          "media paths are portable and distinct by iteration and image/frame");
+                    const auto golden = directory / "expected.png";
+                    trtmc::cli::io::save_png(golden.string(), expected[index],
+                                             batch && index == 1 ? 2 : 1, 1, 3);
+                    auto bytes = [](const auto& path) {
+                        std::ifstream file(path, std::ios::binary);
+                        return std::string(std::istreambuf_iterator<char>(file), {});
+                    };
+                    check(bytes(directory / relative) == bytes(golden),
+                          "every PNG byte matches encoding of the complete original output pixels");
+                    std::filesystem::remove(golden);
+                }
+                if (edit) {
+                    check(observation.contains("input_image_artifacts"),
+                          "image edit retains actual input image");
+                    if (observation.contains("input_image_artifacts")) {
+                        check(observation.at("input_image_artifacts").size() == 2,
+                              "all consumed edit images are retained in input order");
+                        for (std::size_t index = 0; index < 2; ++index) {
+                            const auto input_image = trtmc::cli::io::read_image(
+                                (directory / observation.at("input_image_artifacts")
+                                                 .at(index)
+                                                 .get<std::string>())
+                                    .string());
+                            check(input_image.width == 1 && input_image.height == 1 &&
+                                      input_image.pixels ==
+                                          std::vector<float>({index ? 0.0F : 1.0F, 0, 0}),
+                                  "input preview is the exact RGB image passed to the task");
+                        }
+                    }
+                }
+            }
+            check(result.at("output_summary").contains(field),
+                  "summary references final generated media");
+            if (result.at("output_summary").contains(field))
+                check(
+                    result.at("output_summary").at(field) ==
+                        result.at("observations").back().at(field),
+                    "summary refers to the final measurement without producing another frame set");
+            std::vector<std::filesystem::path> produced;
+            for (const auto& entry : std::filesystem::directory_iterator(directory))
+                if (entry.path().filename().string().rfind(label + ".", 0) == 0 &&
+                    entry.path().extension() == ".png")
+                    produced.push_back(entry.path());
+            check(produced.size() == 2 * (expected.size() + (edit ? 2 : 0)),
+                  "only measured outputs and consumed images create PNG files");
+            for (const auto& path : produced)
+                std::filesystem::remove(path);
+            std::filesystem::remove(request_path);
+            std::filesystem::remove(output_path);
+        }
+        std::filesystem::remove(model);
+    }
+    std::filesystem::remove(source);
+    std::filesystem::remove(second_source);
+    std::filesystem::remove(directory);
+}
+void unknown_logits_identity(const std::string& worker, const std::filesystem::path& runtime) {
+    const auto directory = runtime / "benchmark-local-vocabulary";
+    std::filesystem::create_directories(directory);
+    const auto model = directory / "model.bundle";
+    const auto latents = directory / "latents.f32";
+    const auto input = directory / "request.json";
+    const auto output = directory / "result.json";
+    {
+        const float values[] = {1, 2, 3, 4};
+        std::ofstream file(latents, std::ios::binary);
+        file.exceptions(std::ios::badbit | std::ios::failbit);
+        file.write(reinterpret_cast<const char*>(values), sizeof(values));
+    }
+    const auto command = quote(worker) + " --request " + quote(input.string()) + " --output " +
+                         quote(output.string());
+    for (const bool assets : {false, true}) {
+        bundle(model, "latent_logits_unknown", "numeric_fixture");
+        Json request{{"schema_version", 2},
+                     {"case_name", "local-vocabulary"},
+                     {"bundle", model.string()},
+                     {"runtime_root", runtime.string()},
+                     {"operation", "decode_logits"},
+                     {"selected_task", "latent_to_token_logits"},
+                     {"request",
+                      {{"latents_path", latents.string()}, {"shape", {2, 2}}, {"timestep", 0.25}}},
+                     {"measurement",
+                      {{"warmup", 1}, {"iterations", 2}, {"asset_loading_included", assets}}}};
+        {
+            std::ofstream file(input);
+            file << request;
+        }
+        const int status = std::system(command.c_str());
+        check(status == 0, "benchmark accepts actual logits with unknown vocabulary identity");
+        Json result;
+        std::ifstream(output) >> result;
+        if (status == 0) {
+            check(result.at("observations").size() == 2,
+                  "local-vocabulary benchmark preserves both measured calls");
+            auto complete = [&](const Json& value) {
+                check(value.at("vocabulary_id") == "" && value.at("shape") == Json::array({2, 3}) &&
+                          value.at("axes") == Json::array({"position", "vocabulary_id"}) &&
+                          value.at("values") == Json::array({1.25, 0, 0, 0, 0, 0}) &&
+                          value.at("logit_elements") == 6,
+                      "benchmark retains every model-local logit and its exact axes");
+            };
+            for (const auto& value : result.at("observations"))
+                complete(value);
+            complete(result.at("output_summary"));
+        }
+    }
+    bundle(model, "latent_logits_unknown_bad_shape", "numeric_fixture");
+    const int bad_status = std::system(command.c_str());
+    Json malformed;
+    std::ifstream(output) >> malformed;
+    check(bad_status != 0 && malformed.at("status") == "failed" &&
+              !malformed.contains("output_summary"),
+          "unknown vocabulary does not admit malformed benchmark logits");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -63,6 +249,7 @@ int main(int argc, char** argv) {
     }
     try {
         const std::filesystem::path runtime(argv[2]);
+        image_artifacts(argv[1], runtime);
         const auto model = runtime / "benchmark_remaining.bundle";
         const auto input = runtime / "benchmark_remaining_request.json";
         const auto output = runtime / "benchmark_remaining_result.json";
@@ -240,6 +427,63 @@ int main(int argc, char** argv) {
         request["request"]["frame_paths"].erase(4);
         request["request"].erase("timestamps_seconds");
         run(false);
+        select("single_create", "tracking_fixture", "track_masks", tracking_input);
+        request["selected_task"] = "frames_to_detected_mask_tracks";
+        for (const bool include_assets : {false, true}) {
+            request["measurement"]["asset_loading_included"] = include_assets;
+            const auto measured = run();
+            check(measured.at("asset_loading_included") == include_assets &&
+                      measured.at("observations").size() == 2 &&
+                      measured.at("observation_serialization_included") == false,
+                  "single-create detector retains both measured calls after warmup in either "
+                  "asset-loading mode");
+            for (std::size_t iteration = 0; iteration < 2; ++iteration) {
+                const auto& observation = measured.at("observations").at(iteration);
+                check(observation.at("tracked_frames") == 5 &&
+                          observation.at("mask_elements") == 30 &&
+                          observation.at("frames").size() == 5 &&
+                          observation.at("device_copy_included") == false &&
+                          observation.at("lifecycle_scope") ==
+                              "reused_session_segment_snapshot_create_close_excluded" &&
+                          observation.at("initial_detections") ==
+                              Json::array({{{"frame_index", 0},
+                                            {"object_id", 7},
+                                            {"class_id", 2},
+                                            {"score", 0.75},
+                                            {"prompt_box", {0, 0, 3, 2}}}}),
+                      "detector observations retain complete clips and detections with session "
+                      "setup and teardown outside timing");
+                for (std::size_t frame_index = 0; frame_index < 5; ++frame_index) {
+                    const auto& frame = observation.at("frames").at(frame_index);
+                    check(frame.at("frame_index") == frame_index && frame.at("height") == 2 &&
+                              frame.at("width") == 3 &&
+                              frame.at("timestamp_seconds") ==
+                                  tracking_input.at("timestamps_seconds").at(frame_index) &&
+                              frame.at("masks") ==
+                                  Json(std::vector<int>(6, (iteration + 2 + frame_index) % 2)) &&
+                              frame.at("mask_kind") == "binary" &&
+                              frame.at("mask_element_type") == "uint8" &&
+                              frame.at("source_memory") == "host" &&
+                              frame.at("device_ordinal") == -1 && frame.at("mask_byte_size") == 6 &&
+                              frame.at("object_ids") == Json::array({7}) &&
+                              frame.at("class_ids") == Json::array({2}) &&
+                              frame.at("boxes") == Json::array({{0, 0, 3, 2}}) &&
+                              frame.at("box_coordinates") == "original_image_pixels_xyxy" &&
+                              frame.at("detection_scores") == Json::array({0.875}) &&
+                              frame.at("tracking_scores") ==
+                                  Json::array({static_cast<double>(iteration + 2) / 8}) &&
+                              frame.at("removed_object_ids") == Json::array({19}) &&
+                              frame.at("suppressed_object_ids") == Json::array({23}),
+                          "each measured detector call retains every mask and metadata field "
+                          "after the warmup call");
+                }
+            }
+            auto final = measured.at("observations").back();
+            final.erase("runtime_e2e_wall_ms");
+            check(measured.at("output_summary") == final,
+                  "detector summary preserves the complete final measured snapshot");
+        }
+        request.erase("selected_task");
         for (const auto* task :
              {"frames_text_to_mask_tracks", "prompt_frame_text_to_mask_tracks"}) {
             auto input = tracking_input;
@@ -586,6 +830,22 @@ int main(int argc, char** argv) {
         request["request"]["batch_size"] = 2;
         run(false);
 
+        select("unnamed_classes", "features_fixture", "classify", {{"image_path", left.string()}});
+        request["selected_task"] = "image_to_class_scores";
+        const auto anonymous = run();
+        auto anonymous_outputs = anonymous.at("observations");
+        check(anonymous_outputs.size() == 2 &&
+                  anonymous.at("selected_task") == "image_to_class_scores",
+              "anonymous classification executes every requested measurement");
+        anonymous_outputs.push_back(anonymous.at("output_summary"));
+        for (const auto& item : anonymous_outputs) {
+            check(item.at("scores") == Json::array({18, 1}) && item.at("score_kind") == "logit" &&
+                      item.at("top_class") == 0 && item.at("top_score") == 18 &&
+                      item.at("labels") == Json::array() && item.at("vocabulary_id") == "",
+                  "every anonymous output preserves raw class order without invented identity");
+        }
+        request.erase("selected_task");
+
         select("image_to_token_and_pooled_features", "features_fixture", "extract_features",
                {{"image_path", left.string()}, {"config", {{"scale", 0.5}}}});
         for (bool include_assets : {false, true}) {
@@ -712,6 +972,28 @@ int main(int argc, char** argv) {
                   summary.at("class_ids") == Json::array({0, 5}) &&
                   summary.at("class_scores").size() == 4,
               "semantic segmentation preserves labels, vocabulary and separate class-score grid");
+        for (const std::string mode : {"semantic_unknown_named", "semantic_unknown_unnamed"}) {
+            select(mode.c_str(), "perception_fixture", "segment", {{"image_path", left.string()}});
+            request["selected_task"] = "image_to_semantic_segmentation";
+            const auto measured = run();
+            check(measured.at("observations").size() == 2,
+                  "unknown semantic vocabulary retains each measured observation");
+            for (const auto& observation : measured.at("observations")) {
+                check(
+                    observation.at("vocabulary_id") == "" &&
+                        observation.at("mask") == Json::array({255, 5}) &&
+                        observation.at("class_ids") == Json::array({0, 5}) &&
+                        observation.at("class_names") ==
+                            (mode == "semantic_unknown_named"
+                                 ? Json::array({"background", "object"})
+                                 : Json::array()) &&
+                        observation.at("class_scores") == Json::array({-2, -2, -2, -2}) &&
+                        observation.at("ignore_label") == 255 &&
+                        observation.at("background_label") == 0,
+                    "benchmark retains complete model-local labels and optional vocabulary names");
+            }
+        }
+        request.erase("selected_task");
         select("image_points_to_masks", "perception_fixture", "segment",
                {{"image_path", left.string()}, {"config", {{"benchmark_masks", "first_vs_best"}}}});
         summary = run().at("output_summary");
@@ -908,6 +1190,7 @@ int main(int argc, char** argv) {
         request["request"]["camera_intrinsics"] = Json::array({100, 100, 0.5, 0.5});
         request["request"]["action"] = "";
         run(false);
+        unknown_logits_identity(argv[1], runtime);
         std::cout << (failures ? "FAILED\n" : "ALL PASSED\n");
         return failures ? 1 : 0;
     } catch (const std::exception& error) {

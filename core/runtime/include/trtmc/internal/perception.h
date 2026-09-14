@@ -93,6 +93,8 @@ struct SemanticSegmentationResult {
     std::uint32_t height{0}, width{0};
     std::vector<std::int32_t> class_ids;
     std::vector<std::string> class_names; // Empty or one name per class ID.
+    // Empty means unknown; class IDs remain local to this model's output.
+    // Do not infer a shared vocabulary from two empty identifiers.
     std::string vocabulary_id;
     std::optional<std::int32_t> ignore_label, background_label;
     std::vector<float> class_scores; // Optional [class,score_height,score_width].

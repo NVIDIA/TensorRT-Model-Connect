@@ -57,6 +57,67 @@ def test_reference_config_preserves_explicit_values_without_defaults() -> None:
         hf_transformers.flatten_config({"config": [1]})
 
 
+@pytest.mark.parametrize("selector,task,height,width,frames", [
+    ("pixart-sigma-1024-l0", "text_to_image", 512, 512, 1),
+    ("flux-schnell-l0", "text_to_image", 384, 384, 1),
+    ("ltx-video-l0", "text_to_video", 256, 256, 9),
+    ("wan21-t2v-1.3b-l0", "text_to_video", 384, 672, 5),
+])
+@pytest.mark.parametrize("controls,expected", [
+    ({}, None),
+    ({"height": 24, "width": 40, "num_frames": 3}, (24, 40, 3)),
+    ({"height": 0, "width": 0, "num_frames": 0}, (None, None, None)),
+    ({"config": {"height": 0, "width": 0, "num_frames": 0}}, (None, None, None)),
+    ({"config": {"video_height": 24, "video_width": 40, "video_num_frames": 3}}, (24, 40, 3)),
+    ({"config": {"height": 24, "video_height": 80, "width": 40, "video_width": 96,
+                 "num_frames": 3, "video_num_frames": 7}}, (24, 40, 7)),
+    ({"config": {"height": 0, "video_height": 24, "width": 0, "video_width": 40,
+                 "num_frames": 3, "video_num_frames": 0}}, (None, None, None)),
+])
+@pytest.mark.parametrize("accepts_frames", [True, False])
+def test_diffusers_build_dimensions_fill_only_absent_reference_arguments(
+    monkeypatch, tmp_path: Path, selector: str, task: str, height: int, width: int,
+    frames: int, controls: dict, expected: tuple | None, accepts_frames: bool,
+) -> None:
+    captured = {}
+
+    class Pipeline:
+        def to(self, device):
+            assert device == "cuda"
+
+        def __call__(self, prompt, height=None, width=None, num_frames=None):
+            captured.update(height=height, width=width, num_frames=num_frames)
+            return SimpleNamespace(images=[])
+
+    class ImagePipeline(Pipeline):
+        def __call__(self, prompt, height=None, width=None):
+            captured.update(height=height, width=width)
+            return SimpleNamespace(images=[])
+
+    monkeypatch.setitem(sys.modules, "torch", ModuleType("torch"))
+    pil = ModuleType("PIL")
+    pil.Image = SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "PIL", pil)
+    monkeypatch.setattr(task_reference, "_diffusion_pipeline", lambda *_: Pipeline() if accepts_frames else ImagePipeline())
+    original = perf.ManifestCatalog(REPO / "families").resolve(selector)
+    model = replace(original, testcases=({**original.testcases[0], **controls},))
+    case = perf.resolve_case(model, tmp_path / "model.bundle", selected_task=task)
+    candidate_request = json.loads(json.dumps(case.request))
+    request = task_reference.flatten_config(case.request)
+    before = dict(request)
+    arguments = SimpleNamespace(manifest=model.manifest_path, family=model.family, precision=model.precision)
+    task_reference._load_diffusers(arguments, request, {}).invoke()
+    wanted_height, wanted_width, wanted_frames = expected if expected is not None else (height, width, frames)
+    assert captured["height"] == wanted_height
+    assert captured["width"] == wanted_width
+    if accepts_frames:
+        assert captured["num_frames"] == wanted_frames
+    else:
+        assert "num_frames" not in captured
+    assert request == before
+    assert case.request == candidate_request
+
+
 def test_translation_languages_use_tokenizer_controls_and_preserve_absence() -> None:
     class Tokenizer:
         src_lang = "default"
@@ -2232,6 +2293,52 @@ def test_sana_world_request_preserves_official_camera_controls(tmp_path: Path) -
     assert request["no_action_overlay"] is True
 
 
+def test_sana_reference_options_use_resolved_testcase_and_explicit_options(tmp_path: Path) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    selected = [entry for entry in entries if entry["id"] == "sana_wm.generate_image"]
+    entry = perf.resolve_entries(selected, environment)[0]
+    original = {"translation_speed": 0.055, "rotation_speed_deg": 1.2,
+                "fps": 16, "flow_shift": 9.8, "no_action_overlay": True}
+    assert entry.case.testcase_name != entry.spec["id"]
+    testcase = next(value for value in entry.manifest["testcases"]
+                    if value["name"] == entry.case.testcase_name)
+    other = {**testcase, "name": entry.spec["id"], **dict.fromkeys(original, "wrong testcase")}
+    entry = replace(entry, manifest={**entry.manifest, "testcases": [other, testcase]})
+    before = json.dumps(entry.manifest, sort_keys=True)
+    options = perf._adapter_options(entry, environment)
+    assert {name: options[name] for name in original} == original
+    assert "action" not in options and "prompt" not in options
+    assert options["reference_repo"] == str(Path(environment.references["sana_repo"]).resolve())
+    assert options["model_dir"] == str(Path(environment.references["sana_model"]).resolve())
+    explicit = {"translation_speed": 0.0, "rotation_speed_deg": 0.0,
+                "fps": 0, "flow_shift": 0.0, "no_action_overlay": False}
+    configured = {**entry.spec["baseline"].get("adapter_options", {}), **explicit}
+    entry = replace(entry, spec={**entry.spec, "baseline": {**entry.spec["baseline"], "adapter_options": configured}})
+    options = perf._adapter_options(entry, environment)
+    assert {name: options[name] for name in original} == explicit
+    assert options["no_action_overlay"] is False
+    assert json.dumps(entry.manifest, sort_keys=True) == before
+    assert entry.spec["baseline"]["adapter_options"] == configured
+
+
+def test_sana_semantic_request_metadata_moves_only_to_reference_options(tmp_path: Path) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    selected = [entry for entry in entries if entry["id"] == "sana_wm.generate_image"]
+    entry = perf.resolve_entries(selected, environment)[0]
+    semantic = perf.resolve_case(entry.model, tmp_path / "model.bundle", selected_task="image_text_action_to_video")
+    entry = replace(entry, case=semantic)
+    options = perf._adapter_options(entry, environment)
+    expected = {"translation_speed": 0.055, "rotation_speed_deg": 1.2,
+                "fps": 16, "flow_shift": 9.8, "no_action_overlay": True}
+    assert not expected.keys() & semantic.request.keys()
+    assert {name: options[name] for name in expected} == expected
+    assert semantic.request["action"] == entry.manifest["testcases"][0]["action"]
+    assert semantic.request["seed"] == 42 and semantic.request["num_steps"] == 60
+    assert semantic.request["cfg_scale"] == 5.0
+
+
 def test_sana_reference_calls_official_pipeline_with_exact_workload(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -2401,8 +2508,9 @@ def test_sana_reference_requires_action_from_current_request(tmp_path: Path) -> 
         )
 
 
+@pytest.mark.parametrize("frame_controls", [{"num_frames": 321}, {}])
 def test_sana_task_reference_uses_one_explicit_official_command(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, frame_controls: dict,
 ) -> None:
     checkout = tmp_path / "Sana"
     checkout.mkdir()
@@ -2446,7 +2554,7 @@ def test_sana_task_reference_uses_one_explicit_official_command(
             "action": "w-80,jw-40,w-40,lw-60,w-100",
             "translation_speed": 0.055,
             "rotation_speed_deg": 1.2,
-            "num_frames": 321,
+            **frame_controls,
             "fps": 16,
             "num_steps": 60,
             "cfg_scale": 5.0,
@@ -2475,6 +2583,127 @@ def test_sana_task_reference_uses_one_explicit_official_command(
     assert "env" not in captured["kwargs"]
     assert result[0] == [1.0, 2.0]
     assert result[1]["num_frames"] == 321
+
+
+@pytest.mark.parametrize("controls,manifest_frames,expected", [
+    ({}, 321, "321"),
+    ({"num_frames": 7}, 321, "7"),
+    ({"num_frames": 0}, 321, "0"),
+    ({"config": {"num_frames": 0}}, 321, "0"),
+    ({"num_frames": 7}, None, "7"),
+    ({}, None, None),
+])
+def test_sana_semantic_reference_uses_manifest_frames_only_when_absent(
+    monkeypatch, tmp_path: Path, controls: dict, manifest_frames: int | None, expected: str | None,
+) -> None:
+    model = perf.ManifestCatalog(REPO / "families").resolve("sana-wm-bidirectional")
+    model = replace(model, testcases=({**model.testcases[0], **controls},))
+    case = perf.resolve_case(model, tmp_path / "model.bundle", selected_task="image_text_action_to_video")
+    request = task_reference.flatten_config(case.request)
+    before = dict(request)
+    manifest = json.loads(model.manifest_path.read_text())
+    if manifest_frames is None:
+        del manifest["video_num_frames"]
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    checkout = tmp_path / "Sana"
+    checkout.mkdir()
+    options = {
+        "reference_repo": str(checkout), "model_dir": str(tmp_path / "model"),
+        "intrinsics": str(model.manifest_path.parent.parent / "assets/demo_0_intrinsics.npy"),
+    }
+    testcase = next(value for value in manifest["testcases"] if value["name"] == case.testcase_name)
+    for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift", "no_action_overlay"):
+        options[name] = testcase[name]
+        assert name not in request
+
+    def run(command, **kwargs):
+        assert command[command.index("--num_frames") + 1] == expected
+        assert command[command.index("--action") + 1] == request["action"]
+        assert command[command.index("--translation_speed") + 1] == "0.055"
+        assert command[command.index("--rotation_speed_deg") + 1] == "1.2"
+        assert command[command.index("--fps") + 1] == "16"
+        assert command[command.index("--flow_shift") + 1] == "9.8"
+        assert "--no_action_overlay" in command
+        raise RuntimeError("captured reference command")
+
+    monkeypatch.setattr(task_reference.subprocess, "run", run)
+    arguments = SimpleNamespace(manifest=manifest_path, warmup=1, iterations=2)
+    if expected is None:
+        with pytest.raises(KeyError, match="video_num_frames"):
+            task_reference._run_sana_wm(arguments, request, options)
+    else:
+        with pytest.raises(RuntimeError, match="captured reference command"):
+            task_reference._run_sana_wm(arguments, request, options)
+    assert request == before
+
+
+@pytest.mark.parametrize("source", ["request", "config", "options"])
+@pytest.mark.parametrize("controls", [
+    {"translation_speed": 0.055, "rotation_speed_deg": 1.2,
+     "fps": 16, "flow_shift": 9.8, "no_action_overlay": True},
+    {"translation_speed": 0.0, "rotation_speed_deg": 0.0,
+     "fps": 0, "flow_shift": 0.0, "no_action_overlay": False},
+])
+def test_sana_reference_control_presence_and_request_precedence(
+    monkeypatch, tmp_path: Path, source: str, controls: dict,
+) -> None:
+    checkout = tmp_path / "Sana"
+    checkout.mkdir()
+    arguments = SimpleNamespace(
+        manifest=REPO / "families/sana_wm/tests/manifests/sana-wm-bidirectional.json",
+        warmup=1, iterations=2,
+    )
+    request = {"prompt": "drive forward", "image_path": "assets/demo_0.png",
+               "action": "w-80,jw-40,w-40,lw-60,w-100", "num_frames": 321,
+               "num_steps": 60, "cfg_scale": 5.0, "seed": 42}
+    options = {"reference_repo": str(checkout), "model_dir": str(tmp_path / "model"),
+               "translation_speed": 0.055, "rotation_speed_deg": 1.2,
+               "fps": 16, "flow_shift": 9.8, "no_action_overlay": True}
+    if source == "options":
+        options.update(controls)
+    elif source == "config":
+        request = task_reference.flatten_config({**request, "config": controls})
+    else:
+        request.update(controls)
+    before = dict(request), dict(options)
+
+    def run(command, **kwargs):
+        for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift"):
+            assert command[command.index("--" + name) + 1] == str(controls[name])
+        assert ("--no_action_overlay" in command) is controls["no_action_overlay"]
+        assert command[command.index("--action") + 1] == request["action"]
+        assert command[command.index("--refiner_seed") + 1] == "42"
+        assert "env" not in kwargs
+        raise RuntimeError("captured reference controls")
+
+    monkeypatch.setattr(task_reference.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="captured reference controls"):
+        task_reference._run_sana_wm(arguments, request, options)
+    assert (request, options) == before
+
+
+@pytest.mark.parametrize("missing", [
+    "translation_speed", "rotation_speed_deg", "fps", "flow_shift", "no_action_overlay",
+])
+def test_sana_reference_control_missing_from_request_and_options_still_errors(
+    monkeypatch, tmp_path: Path, missing: str,
+) -> None:
+    checkout = tmp_path / "Sana"
+    checkout.mkdir()
+    arguments = SimpleNamespace(
+        manifest=REPO / "families/sana_wm/tests/manifests/sana-wm-bidirectional.json",
+        warmup=1, iterations=2,
+    )
+    request = {"prompt": "drive forward", "image_path": "assets/demo_0.png", "action": "w-320",
+               "num_frames": 321, "num_steps": 60, "cfg_scale": 5.0, "seed": 42}
+    options = {"reference_repo": str(checkout), "model_dir": str(tmp_path / "model"),
+               "translation_speed": 0.055, "rotation_speed_deg": 1.2,
+               "fps": 16, "flow_shift": 9.8, "no_action_overlay": True}
+    del options[missing]
+    monkeypatch.setattr(task_reference.subprocess, "run", lambda *args, **kwargs: pytest.fail("missing control must fail before reference execution"))
+    with pytest.raises(KeyError, match=missing):
+        task_reference._run_sana_wm(arguments, request, options)
 
 
 def test_output_contracts_are_closed_and_semantic(tmp_path: Path) -> None:

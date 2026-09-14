@@ -697,6 +697,9 @@ def _candidate_base(entry: ResolvedEntry, environment: Environment) -> list[str]
     ]
     if entry.case.selected_task is not None:
         arguments.extend(("--task", entry.case.selected_task))
+    for name, value in entry.spec["workload"].get("request", {}).items():
+        encoded = yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+        arguments.extend(("--set", f"request.{name}={encoded}"))
     for root in environment.bundle_roots:
         arguments.extend(("--bundle-root", str(root)))
     arguments.extend(
@@ -758,6 +761,14 @@ def _adapter_options(entry: ResolvedEntry, environment: Environment) -> dict[str
     if not isinstance(configured, Mapping):
         raise PerfMatrixError(f"entry {entry.spec['id']} adapter_options must be an object")
     options = dict(configured)
+    if entry.spec["baseline"].get("adapter") == "upstream-sana-wm":
+        testcase = next((
+            value for value in entry.manifest.get("testcases", [])
+            if isinstance(value, Mapping) and value.get("name") == entry.case.testcase_name
+        ), {})
+        for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift", "no_action_overlay"):
+            if name in testcase:
+                options.setdefault(name, testcase[name])
     inputs = REFERENCE_INPUTS.get(str(entry.spec["baseline"].get("adapter", "")), ())
     for option_name, field in inputs:
         path = _path(environment.references[field], f"references.{field}")

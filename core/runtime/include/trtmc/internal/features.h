@@ -377,9 +377,11 @@ class IImageToClassScores {
     using TaskInterface = IImageToClassScores;
     static constexpr std::string_view kTask = "image_to_class_scores";
     virtual ~IImageToClassScores() = default;
-    // Nonempty scores in vocabulary-ordinal order. Supply either a nonempty
-    // label for each class or an explicit vocabulary_id; never anonymous scores.
-    // ScoreKind declares their interpretation without shared normalization.
+    // Nonempty scores in class-ordinal order. Empty labels and vocabulary_id mean
+    // model-local ordinal order with unknown identity, not cross-model compatibility.
+    // Supplied labels have one entry per score; without a vocabulary_id every label
+    // must be nonempty. ScoreKind declares interpretation without shared normalization,
+    // reordering or invented class metadata.
     virtual LabelScoresResult run(const ImageToClassScoresRequest&, ConfigView) = 0;
 };
 

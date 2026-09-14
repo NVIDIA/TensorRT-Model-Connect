@@ -50,6 +50,38 @@ observation formatting in the measured duration; account for that boundary
 change when comparing historical measurements. No comparison threshold changes
 with this correction.
 
+Generated media is retained automatically for semantic tasks. Each measured
+audio output is an interleaved FLOAT32 WAV; images and ordered video frames use
+the existing CLI PNG encoding. Consumed conditioning images are also retained.
+The JSON observations reference these files relative to the case directory, so
+keep that directory with its report when moving or archiving results. Warmup
+does not write media, and the summary references the final measured result.
+Legal empty audio is explicitly marked empty, without a fabricated waveform.
+
+Speech-dialogue observations retain the consumed input as a FLOAT32 WAV and
+separate WAVs for audio events. `event_audio_artifacts` follows the unchanged
+`events` array: null entries have no audio file. The HTML shows input audio,
+effective system prompt, text/tool events and per-event players with epoch and
+sequence numbers. It does not splice events or epochs into a fabricated timeline.
+
+WAV and PNG serialization is outside the call timer. Streaming TTS must copy
+borrowed callback samples while they are valid; that copy is inside the public
+call and is declared by `streaming_pcm_copy_included: true`. Account for this
+receiving cost when comparing a streaming reference. PNGs are visual previews,
+not a substitute for the family's original floating-point correctness checks.
+Dialogue input buffers remain alive through observation so the retained input
+is the decoded data actually supplied, not a later reread of the source file.
+Their release, like result release, is outside the measured call; the existing
+asset-loading option still controls whether file decoding is timed.
+For older dialogue workers with timed asset loading, decoded-input release was
+inside the timer; account for this boundary change in historical comparisons.
+
+The HTML report displays recorded text, playable audio, and image/frame previews
+next to the input prompt. Image editing also shows the images actually supplied
+to the task. Video frames retain their recorded order and timestamps; no frame
+rate is inferred when a timeline is absent. Missing or unsafe media references
+are shown as unavailable rather than embedded from outside the case directory.
+
 The release suite defaults to three warmups and ten measured iterations. A
 reference within five percent of candidate p50 is considered equivalent.
 Candidate or reference execution failures are operational failures, not slow
@@ -153,7 +185,8 @@ Streaming ASR measures a fresh stream for every invocation, including creation,
 chunk submission, finalization and release. Its separate `first_partial_ms`
 clock begins after stream creation. Packetization defaults to 160 ms and never
 splits an interleaved frame. Streaming TTS measures the direct synchronous
-callback API and counts delivered PCM without file writes or an extra worker.
+callback API, including copies of borrowed PCM. Retained WAV files are written
+after that call, outside its timer; no extra worker or inference is added.
 An explicit `streaming` input must agree with the semantic Task. Failed or stopped
 calls are operational failures, never completed measurements. Native-batch
 audio and dialogue-session benchmarks are not included in these routes.
@@ -162,8 +195,11 @@ Image batches make one native batch call with ordered prompts and optional
 `seeds`/`item_configs` arrays. Their lengths must match the request count, and
 shared/item duplicate keys are rejected. Scalar replay uses
 `initial_latents_path`; this does not define a broadcast input for a batch.
-Video metrics count actual clips and frames with their returned timestamps, not
-an inferred FPS. A worker-only completion has no produced media and fails this
+Video metrics count actual clips and all returned frames, including any
+`conditioned_prefix_frames`. Thus `frames_per_s` is returned-frame throughput,
+not newly predicted-frame throughput or an inferred playback FPS. Returned
+timestamps and the conditioned prefix remain explicit in the output.
+A worker-only completion has no produced media and fails this
 single-process benchmark instead of counting as an image or video.
 
 Pooled and token features remain different workloads. The joint image feature

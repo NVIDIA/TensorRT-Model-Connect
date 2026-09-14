@@ -263,9 +263,7 @@ struct DenoisedStorage final : ResultStorage {
 struct LogitsStorage final : ResultStorage {
     explicit LogitsStorage(internal::LatentTokenLogitsResult result)
         : value(std::move(result)),
-          view{matrix_result_view(value.logits), borrowed_string(value.vocabulary_id)} {
-        output_check(!value.vocabulary_id.empty(), "latent logits require vocabulary identity");
-    }
+          view{matrix_result_view(value.logits), borrowed_string(value.vocabulary_id)} {}
     internal::LatentTokenLogitsResult value;
     trtmc_latent_token_logits_view_v1 view;
 };

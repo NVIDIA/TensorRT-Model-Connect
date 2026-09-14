@@ -536,6 +536,14 @@ int main() {
               text.seen.text_generation_mode == "auto" && text.seen.block_length == 0 &&
               text.seen.confidence_threshold == -1.0F && text.seen.temperature == 1.0F,
           "text diffusion options preserve Task API defaults");
+    for (const std::string& system_prompt :
+         {std::string("Transcribe exactly.\nKeep punctuation."), std::string()}) {
+        const auto prompted = parse({"trtmc", "run", "model.bundle", "--prompt", "hello",
+                                     "--system-prompt", system_prompt});
+        check(trtmc::cli::dispatch(prompted, text, output) == 0 &&
+                  text.seen.system_prompt == system_prompt,
+              "upstream system-prompt option reaches the legacy family unchanged");
+    }
     const std::filesystem::path unsupported_image_path = "/tmp/trtmc-cli-unsupported.ppm";
     {
         std::ofstream image_file(unsupported_image_path, std::ios::binary);
