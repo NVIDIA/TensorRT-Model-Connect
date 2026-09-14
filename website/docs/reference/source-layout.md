@@ -12,6 +12,7 @@ core/runtime/primitives/       libtrtmc_core.so device and engine primitives
 core/runtime/loader/           libtrtmc_runtime.so exact DSO loader
 core/runtime/tensorrt/         libtrtmc_backend_trt.so implementation
 apps/cli/                      native CLI and private image/audio file I/O
+apps/server/                   bounded HTTP adapter for one text-generation Task
 apps/benchmark/                benchmark application, workers, and performance policy
 tools/model_ci.py              family inventory and impact
 website/                       documentation generated from family ownership

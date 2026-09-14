@@ -25,6 +25,7 @@ RUN apt-get update && \
       build-essential \
       cmake \
       git \
+      libevent-dev \
       ninja-build \
       nlohmann-json3-dev \
       patchelf \

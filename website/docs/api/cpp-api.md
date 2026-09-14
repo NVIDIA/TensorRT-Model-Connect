@@ -9,7 +9,7 @@ to that task interface, never to a family implementation:
 #include <trtmc/runtime/family_loader.h>
 #include <trtmc/task.h>
 
-auto task = trtmc::load_task("gpt2.bundle", "/opt/trtmc/lib");
+auto task = trtmc::load_task("gpt2.bundle");
 auto* text = dynamic_cast<trtmc::ITextGeneration*>(task.get());
 if (text == nullptr) throw std::runtime_error("not a text-generation bundle");
 auto result = text->generate("Hello");

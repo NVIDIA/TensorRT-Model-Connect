@@ -135,6 +135,7 @@ cmake -S . -B "$TRTMC_BUILD_DIR" -G Ninja \
 
 cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
   trtmc \
+  trtmc-server \
   trtmc_backend_trt \
   trtmc_model_qwen
 

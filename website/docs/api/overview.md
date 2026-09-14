@@ -20,7 +20,8 @@ The build and runtime entry points are intentionally separate. The Python
 builder resolves exactly one `families/<family>/support.py`, imports only that
 family's `model.py`, and writes a bundle. The native loader reads the bundle's
 `family`, `task`, and `backend`, then loads exactly one family DSO and one
-backend DSO from the explicit runtime root.
+backend DSO from the directory containing the loaded `libtrtmc_runtime`, or
+from an explicit runtime-root override.
 
 ```text
 Hugging Face model ID or local snapshot

@@ -62,6 +62,7 @@ module.exports = {
         'user-guides/build-a-bundle',
         'user-guides/inspect-a-bundle',
         'user-guides/run-inference',
+        'user-guides/serve-text-generation',
         {
           type: 'category',
           label: 'Task Guides',

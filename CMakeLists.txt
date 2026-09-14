@@ -15,6 +15,11 @@ set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 include(GNUInstallDirs)
 find_package(CUDAToolkit REQUIRED)
 find_package(nlohmann_json 3.11 REQUIRED)
+option(TRTMC_BUILD_SERVER "Build the text-generation HTTP server" ON)
+if(TRTMC_BUILD_SERVER)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBEVENT REQUIRED IMPORTED_TARGET libevent libevent_pthreads)
+endif()
 
 set(_trtmc_dependency_roots
   /usr
@@ -295,6 +300,32 @@ set_target_properties(trtmc PROPERTIES
   INSTALL_RPATH "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
 )
 
+if(TRTMC_BUILD_SERVER)
+  add_library(trtmc_server STATIC
+    apps/server/server.cpp
+  )
+  target_include_directories(trtmc_server
+    PUBLIC ${PROJECT_SOURCE_DIR}/apps
+    PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(trtmc_server
+    PUBLIC trtmc_runtime
+    PRIVATE
+      nlohmann_json::nlohmann_json
+      PkgConfig::LIBEVENT
+  )
+  target_compile_options(trtmc_server PRIVATE -Wall -Wextra -Wpedantic)
+
+  add_executable(trtmc-server apps/server/main.cpp)
+  target_include_directories(trtmc-server PRIVATE ${PROJECT_SOURCE_DIR}/apps)
+  target_link_libraries(trtmc-server PRIVATE trtmc_server)
+  target_compile_options(trtmc-server PRIVATE -Wall -Wextra -Wpedantic)
+  set_target_properties(trtmc-server PROPERTIES
+    BUILD_RPATH "\$ORIGIN"
+    INSTALL_RPATH "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+  )
+endif()
+
 if(TRTMC_BUILD_EXAMPLES)
   add_executable(trtmc_benchmark_worker apps/benchmark/native/benchmark_worker.cpp)
   target_include_directories(trtmc_benchmark_worker PRIVATE
@@ -348,6 +379,17 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_cli PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME cli COMMAND test_cli)
 
+  if(TRTMC_BUILD_SERVER)
+    add_executable(test_server apps/server/tests/test_server.cpp)
+    target_include_directories(test_server PRIVATE
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+      ${PROJECT_SOURCE_DIR}/apps
+    )
+    target_link_libraries(test_server PRIVATE trtmc_server nlohmann_json::nlohmann_json)
+    target_compile_options(test_server PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server COMMAND test_server)
+  endif()
+
   set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
   add_library(trtmc_test_backend_fake SHARED core/runtime/tests/fake_backend.cpp)
   target_include_directories(trtmc_test_backend_fake PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
@@ -376,7 +418,7 @@ if(TRTMC_BUILD_TESTS)
   set_target_properties(trtmc_test_family_fake PROPERTIES
     OUTPUT_NAME trtmc_model_fake
     LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
-    BUILD_RPATH "\$ORIGIN/../.."
+    BUILD_RPATH "\$ORIGIN;\$ORIGIN/../.."
   )
 
   add_executable(test_family_loader core/runtime/tests/test_family_loader.cpp)
@@ -390,6 +432,15 @@ if(TRTMC_BUILD_TESTS)
     trtmc_test_backend_fake
     trtmc_test_backend_fake_rtx
     trtmc_test_family_fake
+  )
+  add_custom_command(TARGET test_family_loader POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:trtmc_test_backend_fake>
+      $<TARGET_FILE_DIR:trtmc_runtime>
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:trtmc_test_family_fake>
+      $<TARGET_FILE_DIR:trtmc_runtime>
+    COMMENT "Copying fake runtime DSOs beside libtrtmc_runtime for automatic-root testing"
   )
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
 
@@ -529,6 +580,11 @@ endif()
 install(TARGETS trtmc
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+if(TARGET trtmc-server)
+  install(TARGETS trtmc-server
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+endif()
 if(TRTMC_BUILD_EXAMPLES)
   install(TARGETS trtmc_benchmark_worker trtmc_dataset_benchmark
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

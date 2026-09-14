@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       jq \
       libgl1 \
       libglib2.0-0t64 \
+      libevent-dev \
       ninja-build \
       nlohmann-json3-dev \
       openmpi-bin \

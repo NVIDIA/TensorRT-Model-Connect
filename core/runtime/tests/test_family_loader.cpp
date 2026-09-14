@@ -143,7 +143,9 @@ int main(int argc, char** argv) {
         (void)rtx_forecast->forecast({values, mask});
     check_rtx_options(runtime_root, expected_cache_path, true);
 
-    check(load_throws(bundle_path, ""), "empty runtime root rejected");
+    auto automatic_task = trtmc::load_task(bundle_path.string());
+    check(dynamic_cast<trtmc::ITimeSeriesForecast*>(automatic_task.get()) != nullptr,
+          "empty runtime root loads DSOs beside libtrtmc_runtime");
     check(load_throws(bundle_path, (runtime_root / "missing").string()),
           "loader does not search outside explicit root");
 

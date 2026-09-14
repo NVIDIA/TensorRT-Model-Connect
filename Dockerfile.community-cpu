@@ -25,6 +25,7 @@ RUN apt-get update && \
       cuda-nvrtc-dev-13-3 \
       git \
       jq \
+      libevent-dev \
       ninja-build \
       nlohmann-json3-dev \
       pkg-config \
