@@ -3,6 +3,9 @@
 
 """Family-owned model and task support for sam3."""
 
+# Trivial comment-only change: live-fire test payload for the direct_families
+# retention fix (#1277), combined with a shared .dockerignore change.
+
 from tensorrt_model_connect.model_support import family_support
 
 
