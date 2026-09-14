@@ -406,3 +406,133 @@ def test_sandwich_prescale_epsilon_identity() -> None:
         rms_norm(alpha * values, epsilon * alpha * alpha),
         rtol=1e-12,
     )
+
+
+@pytest.mark.parametrize(
+    ("tp_size", "max_batch_size", "precision", "fp32_layers"),
+    [
+        (1, 1, "fp16", (2, 3, 4, 7, 8)),
+        (2, 1, "fp16", (2,)),
+        (1, 4, "fp32", ()),
+    ],
+)
+def test_component_weights_expire_before_the_next_component(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    max_batch_size: int,
+    precision: str,
+    fp32_layers: tuple[int, ...],
+) -> None:
+    import struct
+    import weakref
+
+    from families.z_image import model
+    from families.z_image import qwen3_encoder_builder as encoder
+    from families.z_image import vae_2d_builder as vae
+    from families.z_image import z_image_dit_tp_builder as tp_dit
+
+    references: dict[str, weakref.ReferenceType] = {}
+    phases: list[str] = []
+
+    def load_text(_directory, **_kwargs):
+        values = np.arange(8, dtype=np.float32)
+        references["text"] = weakref.ref(values)
+        return model.WeightDict(text=values)
+
+    def compile_text(weights, **kwargs):
+        assert weights["text"] is references["text"]()
+        assert kwargs["precision"] == precision
+        assert kwargs["max_batch_size"] == min(max_batch_size * 2, 8)
+        phases.append("text")
+        return b"unchanged-text-plan"
+
+    def load_dit(_directory, **_kwargs):
+        assert references["text"]() is None
+        values = {
+            "t_emb.0.weight": np.arange(6, dtype=np.float32).reshape(2, 3).copy(),
+            "cap_norm.weight": np.array([7, 8, 9], dtype=np.float32),
+            "main.0.to_q": np.ones((4, 4), dtype=np.float32),
+        }
+        references.update({name: weakref.ref(value) for name, value in values.items()})
+        return model.WeightDict(values)
+
+    def require_live_dit(weights):
+        assert references["text"]() is None
+        for name in ("t_emb.0.weight", "cap_norm.weight", "main.0.to_q"):
+            assert weights[name] is references[name]()
+
+    def compile_dit(weights, **kwargs):
+        require_live_dit(weights)
+        assert kwargs["precision"] == precision
+        assert kwargs["max_batch_size"] == max_batch_size
+        assert kwargs["fp32_layers"] == tuple(
+            selector - 3 for selector in fp32_layers if selector >= 3
+        )
+        phases.append("dit")
+        return b"unchanged-dit-plan"
+
+    def compile_rank(weights, **kwargs):
+        require_live_dit(weights)
+        rank = kwargs["parallel_config"].rank
+        phases.append(f"dit-rank-{rank}")
+        return f"unchanged-dit-rank-{rank}".encode()
+
+    original_serialize = model._serialize_preprocessor_weights
+
+    def serialize(weights):
+        require_live_dit(weights)
+        phases.append("preprocessor")
+        return original_serialize(weights)
+
+    def compile_vae(_directory, **kwargs):
+        assert all(reference() is None for reference in references.values())
+        assert phases[-1] == "preprocessor"
+        assert kwargs["precision"] == ("fp32" if 2 in fp32_layers else precision)
+        phases.append("vae")
+        return b"unchanged-vae-plan"
+
+    monkeypatch.setattr(encoder, "load_qwen3_encoder_weights", load_text)
+    monkeypatch.setattr(encoder, "build_qwen3_encoder_engine", compile_text)
+    monkeypatch.setattr(dit, "load_z_image_dit_weights", load_dit)
+    monkeypatch.setattr(dit, "build_z_image_dit_engine", compile_dit)
+    monkeypatch.setattr(tp_dit, "build_z_image_dit_engine", compile_rank)
+    monkeypatch.setattr(vae, "build_vae_2d_decoder_engine", compile_vae)
+    monkeypatch.setattr(model, "_serialize_preprocessor_weights", serialize)
+    result = model._ZImageModel().build_components(
+        "/model",
+        model.ModelConfig(
+            raw={"image_height": 512, "image_width": 512, "_fp32_layers": fp32_layers}
+        ),
+        model.WeightDict(_text_encoder_dir="/text", _transformer_dir="/dit", _vae_dir="/vae"),
+        precision=precision,
+        parallel_config=model.ParallelConfig(tp_size=tp_size),
+        max_batch_size=max_batch_size,
+    )
+
+    index = (
+        b'{"t_embedder.mlp.0.weight": {"offset": 0, "shape": [2, 3]}, '
+        b'"cap_embedder.norm.weight": {"offset": 24, "shape": [3]}}'
+    )
+    expected_bytes = (
+        struct.pack("<I", len(index)) + index + struct.pack("<9f", 0, 1, 2, 3, 4, 5, 7, 8, 9)
+    )
+    expected = {
+        "text_encoders": [("qwen3", b"unchanged-text-plan")],
+        "vae_decoder": b"unchanged-vae-plan",
+        "preprocessor_weights": expected_bytes,
+    }
+    if tp_size == 1:
+        expected["denoiser"] = b"unchanged-dit-plan"
+        assert phases == ["text", "dit", "preprocessor", "vae"]
+    else:
+        expected["denoiser_ranks"] = {
+            rank: f"unchanged-dit-rank-{rank}".encode() for rank in range(tp_size)
+        }
+        assert phases == ["text", "dit-rank-0", "dit-rank-1", "preprocessor", "vae"]
+    if max_batch_size > 1:
+        expected["max_batch_size_envelope"] = {
+            "dit": max_batch_size,
+            "text_encoder": min(max_batch_size * 2, 8),
+            "vae": 1,
+        }
+    assert result == expected

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exact NumPy safetensors access for timm YOLOv10 checkpoints."""
+"""Exact safetensors layout access for YOLOv10 builds and references."""
 
 from __future__ import annotations
 
@@ -20,10 +20,11 @@ class Checkpoint:
     tensor_map: dict[str, Any]
 
     @classmethod
-    def open(cls, model_dir: Path) -> "Checkpoint":
+    def open(cls, model_dir: Path, *, framework: str = "numpy") -> "Checkpoint":
+        """Use the same tensor mapping with NumPy by default or a requested backend."""
         single = model_dir / "model.safetensors"
         if single.is_file():
-            reader = safe_open(str(single), framework="numpy")
+            reader = safe_open(str(single), framework=framework)
             return cls((reader,), {str(name): reader for name in reader.keys()})
 
         index_path = model_dir / "model.safetensors.index.json"
@@ -44,7 +45,7 @@ class Checkpoint:
             if path.is_absolute() or len(path.parts) != 1 or path.name != name:
                 raise ValueError("YOLOv10 safetensors shard names must be direct relative files")
         readers = {
-            name: safe_open(str(model_dir / name), framework="numpy") for name in shard_names
+            name: safe_open(str(model_dir / name), framework=framework) for name in shard_names
         }
         return cls(
             tuple(readers[name] for name in shard_names),

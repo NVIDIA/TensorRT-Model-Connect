@@ -4,6 +4,11 @@
 """Direct build, native-runtime, and official-reference E2E for qwen_image."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
+from families.qwen_image.tests.reporting import (
+    native_snapshot, record_native_preview, record_report_views, reference_snapshot,
+)
 import json
 import os
 import subprocess
@@ -164,6 +169,7 @@ def _asset(raw: str) -> Path:
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence("inputs", {"asset": path})
     return path
 
 
@@ -297,6 +303,7 @@ def _native(
     assert task in TASKS
     latents_path = tmp_path / "initial-latents.raw"
     np.ascontiguousarray(initial_latents).tofile(latents_path)
+    record_evidence("inputs", {"raw_file": latents_path})
     output = tmp_path / "native.ppm"
     invocation = [
         str(_native_harness()),
@@ -322,6 +329,7 @@ def _native(
         ) / np.float32(255.0)
         image_path = tmp_path / "edit-image.raw"
         np.ascontiguousarray(image).tofile(image_path)
+        record_evidence("inputs", {"raw_file": image_path})
         invocation.extend((str(image_path), str(image.shape[0]), str(image.shape[1])))
     env = os.environ.copy()
     env["LD_LIBRARY_PATH"] = ":".join(
@@ -336,6 +344,7 @@ def _native(
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
     assert output.is_file(), f"native {task} returned no image"
+    record_native_preview(output)
     return {"artifact": str(output)}
 
 
@@ -582,20 +591,30 @@ def test_semantic_artifacts_are_paired(monkeypatch, tmp_path: Path) -> None:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     initial_latents = _initial_latents(manifest, case)
-    actual = _native(
-        binary,
-        runtime_root,
-        bundle,
-        model_dir,
-        manifest,
-        case,
-        tmp_path,
-        initial_latents,
-    )
-    expected = _official_reference(model_dir, manifest, case, tmp_path, initial_latents)
-    _assert_parity(actual, expected, manifest, case, _thresholds(case_name))
+    record_evidence("inputs", {"initial_latents": None if initial_latents is None else {"shape": list(initial_latents.shape), "dtype": str(initial_latents.dtype), "note": "The native stage records the supplied raw latent file within the evidence bound."}})
+    with evidence_stage("native"):
+        actual = _native(
+            binary,
+            runtime_root,
+            bundle,
+            model_dir,
+            manifest,
+            case,
+            tmp_path,
+            initial_latents,
+        )
+    record_evidence("native", native_snapshot(actual))
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, manifest, case, tmp_path, initial_latents)
+    record_report_views(actual, expected, tmp_path / "paired-report-views")
+    record_evidence("reference", reference_snapshot(expected))
+    with evidence_stage("compare"):
+        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))

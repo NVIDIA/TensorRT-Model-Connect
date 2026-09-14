@@ -1,0 +1,18 @@
+{
+  "name": "yolov8n",
+  "hf_id": "Ultralytics/YOLOv8",
+  "hf_revision": "27f858f2dc238503a66ce10248cf7ec71a3ded5d",
+  "bundle": "yolov8n.bundle",
+  "family": "yolov8",
+  "task": "object_detection",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "yolov8n",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

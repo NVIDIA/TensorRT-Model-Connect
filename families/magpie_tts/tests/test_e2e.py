@@ -4,6 +4,8 @@
 """Direct build, native-runtime, and official-reference E2E for magpie_tts."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
 import json
 import os
 import re
@@ -203,6 +205,8 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     payloads = []
     for line in completed.stdout.splitlines():
         if tp_size > 1:
@@ -266,6 +270,7 @@ def _asset(raw: str) -> Path:
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence("inputs", {"asset": path})
     return path
 
 
@@ -449,6 +454,7 @@ def _native(
     )
     assert output.is_file()
     payload["audio"] = str(output)
+    record_evidence("native_artifacts", {"files": sorted(output.glob("*")) if output.is_dir() else [output]})
     return payload
 
 
@@ -548,10 +554,21 @@ def test_asr_checkpoint_lookup_is_offline_and_fail_closed(monkeypatch) -> None:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
-    actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
-    expected = _official_reference(model_dir, manifest, case, tmp_path)
-    _assert_contract(actual, expected, manifest, case, _thresholds(case_name))
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
+    record_evidence("native", actual)
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, manifest, case, tmp_path)
+    from families.magpie_tts.tests.reporting import record_audio_views
+
+    record_audio_views(actual, expected, tmp_path / "report-views")
+    record_evidence("reference", expected)
+    with evidence_stage("compare"):
+        _assert_contract(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))

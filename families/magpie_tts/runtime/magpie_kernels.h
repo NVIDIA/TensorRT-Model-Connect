@@ -61,4 +61,11 @@ void magpie_cfg_interpolate_device(const float* d_cond_logits, const float* d_un
                                    float* d_out_logits, float cfg_scale, int32_t num_elements,
                                    cudaStream_t stream);
 
+// GPU-side attention mask builder.
+// d_mask:   [mask_len] float on device
+// pos:      current sequence position
+// mask_len: total mask length (max_length + 1)
+void magpie_build_attention_mask_device(float* d_mask, int32_t pos, int32_t mask_len,
+                                        cudaStream_t stream);
+
 } // namespace trtmc

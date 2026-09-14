@@ -132,6 +132,7 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         "prompted_segmentation",
         "text_prompted_segmentation",
         "classification",
+        "object_detection",
         "image_features",
     }:
         request: dict[str, Any] = {"image_path": _image_path(case, root), "batch_size": 1}

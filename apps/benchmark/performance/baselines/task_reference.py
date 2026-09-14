@@ -1366,6 +1366,35 @@ def _load_vision(
                 logits = model(inputs)
             return {"top_class": int(logits.argmax(dim=-1)[0]), **_tensor_summary(logits)}
 
+    elif arguments.family == "detr":
+        processor = transformers.AutoImageProcessor.from_pretrained(
+            arguments.model, **processor_kwargs
+        )
+        model = (
+            transformers.AutoModelForObjectDetection.from_pretrained(arguments.model, **kwargs)
+            .eval()
+            .to(device)
+        )
+        inputs = _to_device(
+            processor(images=image, return_tensors="pt"),
+            device,
+            next(model.parameters()).dtype,
+        )
+
+        def invoke() -> Mapping[str, Any]:
+            with torch.inference_mode():
+                outputs = model(**inputs)
+            target_sizes = torch.tensor([[height, width]], device=device)
+            results = processor.post_process_object_detection(
+                outputs, threshold=0.5, target_sizes=target_sizes
+            )[0]
+            return {
+                "detected_images": 1,
+                "detections": int(results["scores"].shape[0]),
+                "image_height": height,
+                "image_width": width,
+            }
+
     elif arguments.family == "dinov3":
         processor = transformers.AutoImageProcessor.from_pretrained(
             arguments.model, **processor_kwargs

@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       git \
       gnupg \
+      jq \
       libgl1 \
       libglib2.0-0t64 \
       ninja-build \

@@ -335,4 +335,24 @@ void magpie_cfg_interpolate_device(const float* d_cond_logits, const float* d_un
                                                             d_out_logits, cfg_scale, num_elements);
 }
 
+// ---------------------------------------------------------------------------
+// Kernel: Build attention mask
+// d_mask[i] = (i <= pos) ? 0.0F : -1e9F;
+// ---------------------------------------------------------------------------
+
+__global__ void build_attention_mask_kernel(float* __restrict__ d_mask, int32_t pos,
+                                            int32_t mask_len) {
+    const int32_t i = static_cast<int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= mask_len)
+        return;
+    d_mask[i] = (i <= pos) ? 0.0F : -1e9F;
+}
+
+void magpie_build_attention_mask_device(float* d_mask, int32_t pos, int32_t mask_len,
+                                        cudaStream_t stream) {
+    constexpr int32_t kBlockSize = 256;
+    const int32_t grid = (mask_len + kBlockSize - 1) / kBlockSize;
+    build_attention_mask_kernel<<<grid, kBlockSize, 0, stream>>>(d_mask, pos, mask_len);
+}
+
 } // namespace trtmc

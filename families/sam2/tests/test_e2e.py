@@ -4,6 +4,8 @@
 """Direct build, native-runtime, and official-reference E2E for sam2."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
 import json
 import os
 import subprocess
@@ -178,20 +180,34 @@ def _operational_receipt(bundle: Path, runtime_root: Path, masks_path: Path) -> 
         env=environment,
         timeout=1800,
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     return json.loads(completed.stdout)
 
 
 def test_public_core_invariant_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, _ = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
+    record_evidence("reference", {"mode": "contract_only", "oracle": "public core invariants"})
+    record_evidence("thresholds", {"oracle": "assert_bundle_contract / assert_operational_receipt"})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
-    receipt = _operational_receipt(bundle, runtime_root, tmp_path / "native-masks.u8")
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        receipt = _operational_receipt(bundle, runtime_root, tmp_path / "native-masks.u8")
+    record_evidence("native", receipt)
+    from families.sam2.tests.reporting import record_mask_views
+
+    record_mask_views(tmp_path / "native-masks.u8", tmp_path / "report-views")
     from families.sam2.tests.operational_oracle import (
         assert_bundle_contract,
         assert_operational_receipt,
     )
 
-    assert_bundle_contract(bundle)
-    assert_operational_receipt(receipt)
+    with evidence_stage("compare"):
+        assert_bundle_contract(bundle)
+    with evidence_stage("compare"):
+        assert_operational_receipt(receipt)

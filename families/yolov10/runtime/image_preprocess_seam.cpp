@@ -54,8 +54,9 @@ std::vector<float> preprocess_yolov10_image(const float* pixels, std::int32_t he
     const auto scaled_h =
         static_cast<std::int32_t>(std::lround(static_cast<float>(height) * scale));
     const auto scaled_w = static_cast<std::int32_t>(std::lround(static_cast<float>(width) * scale));
-    const float pad_y = static_cast<float>(config.input_image_h - scaled_h) / 2.0F;
-    const float pad_x = static_cast<float>(config.input_image_w - scaled_w) / 2.0F;
+    // Report the integer placement used below, including when the margin is odd.
+    const float pad_y = static_cast<float>((config.input_image_h - scaled_h) / 2);
+    const float pad_x = static_cast<float>((config.input_image_w - scaled_w) / 2);
     letterbox.scale = scale;
     letterbox.pad_x = pad_x;
     letterbox.pad_y = pad_y;

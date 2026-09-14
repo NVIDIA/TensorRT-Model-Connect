@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 
 _TEST_DIR = Path(__file__).resolve().parent
@@ -191,7 +192,12 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict, tmp_
             stderr = stderr.decode("utf-8", errors="replace")
         log = tmp_path / "native-timeout.stderr.log"
         log.write_text(str(stderr), encoding="utf-8")
+        record_evidence("native_process", {"argv": command, "stderr_log": log})
         raise RuntimeError(f"Uno native generation timed out; full stderr: {log}") from error
+    record_evidence(
+        "native_process",
+        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+    )
     payload = json.loads(completed.stdout)
     assert isinstance(payload, dict)
     return payload, completed.stderr
@@ -250,32 +256,44 @@ def _base_reference(base: Path, manifest: dict, case: dict, torch):
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
     _require_selected(case_name, manifest, request.config)
+    record_evidence("inputs", {"manifest": manifest, "case": case, "prompt": case["prompt"]})
+    record_evidence("thresholds", {"exact_token_ids": True, "exact_text": True, "case_contract": case})
     binary, runtime_root, torch = _required_environment()
     assert version("transformers") == "5.15.0"
     assert version("safetensors") == "0.8.0"
     adapter, base = _checkpoints(manifest)
+    record_evidence(
+        "checkpoint",
+        {"adapter_dir": str(adapter), "base_dir": str(base), "hf_id": manifest["hf_id"], "hf_revision": manifest["hf_revision"], "hf_dependencies": manifest["hf_dependencies"]},
+    )
     bundle = tmp_path / manifest["bundle"]
-    _build_bundle(manifest, adapter, bundle)
+    with evidence_stage("build"):
+        _build_bundle(manifest, adapter, bundle)
 
-    payload, stderr = _run_native(binary, runtime_root, bundle, case, tmp_path)
-    prompt_ids, reference_ids, reference_text = _base_reference(base, manifest, case, torch)
+    with evidence_stage("native"):
+        payload, stderr = _run_native(binary, runtime_root, bundle, case, tmp_path)
+    record_evidence("native", payload)
+    with evidence_stage("reference"):
+        prompt_ids, reference_ids, reference_text = _base_reference(base, manifest, case, torch)
+    record_evidence("reference", {"prompt_token_ids": prompt_ids, "token_ids": reference_ids, "text": reference_text})
     actual_ids = payload["token_ids"]
     actual_text = str(payload["text"]).strip()
 
-    assert prompt_ids == case["expected_prompt_token_ids"]
-    assert actual_ids == reference_ids == case["expected_continuation_token_ids"]
-    assert actual_text == reference_text == case["expected_continuation_text"]
-    assert "[trtmc.k2_horizon_uno.prompt]" not in stderr
-    assert case["prompt"] not in stderr
+    with evidence_stage("compare"):
+        assert prompt_ids == case["expected_prompt_token_ids"]
+        assert actual_ids == reference_ids == case["expected_continuation_token_ids"]
+        assert actual_text == reference_text == case["expected_continuation_text"]
+        assert "[trtmc.k2_horizon_uno.prompt]" not in stderr
+        assert case["prompt"] not in stderr
 
-    stats = parse_decode_receipt(stderr)
-    assert stats == {
-        "mode": case["expected_decode_mode"],
-        "block_length": case["block_length"],
-        "noise_mode": "deterministic_uniform",
-        "forwards": case["expected_forwards"],
-        "committed_tokens": case["expected_committed_tokens"],
-        "lookaheads": case["expected_lookaheads"],
-    }
-    if case["generation_mode"] == "linear_spec_lora":
-        assert stats["committed_tokens"] > stats["forwards"]
+        stats = parse_decode_receipt(stderr)
+        assert stats == {
+            "mode": case["expected_decode_mode"],
+            "block_length": case["block_length"],
+            "noise_mode": "deterministic_uniform",
+            "forwards": case["expected_forwards"],
+            "committed_tokens": case["expected_committed_tokens"],
+            "lookaheads": case["expected_lookaheads"],
+        }
+        if case["generation_mode"] == "linear_spec_lora":
+            assert stats["committed_tokens"] > stats["forwards"]

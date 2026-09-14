@@ -358,3 +358,23 @@ def test_implicit_cache_default_never_exceeds_a_shorter_model_limit() -> None:
     }
 
     assert validate_dense_lfm2_config(_config(raw)).default_cache_length == 4096
+
+
+def test_exact_case_selection_does_not_expand_a_same_named_recipe(monkeypatch) -> None:
+    from families.lfm2.tests import test_e2e
+
+    monkeypatch.delenv("TRTMC_E2E", raising=False)
+    manifest = {"name": "shared-recipe"}
+    options = {"--e2e-testcase": ["shared-recipe"], "--e2e-model": [], "--e2e-models-file": None}
+    config = SimpleNamespace(getoption=lambda key, default=None: options.get(key, default))
+    test_e2e._require_selected("shared-recipe", manifest, config)
+    with pytest.raises(pytest.skip.Exception):
+        test_e2e._require_selected("shared-recipe-chat", manifest, config)
+    options["--e2e-model"] = ["shared-recipe"]
+    with pytest.raises(pytest.skip.Exception):
+        test_e2e._require_selected("shared-recipe-chat", manifest, config)
+    options["--e2e-testcase"] = []
+    test_e2e._require_selected("shared-recipe", manifest, config)
+    test_e2e._require_selected("shared-recipe-chat", manifest, config)
+    with pytest.raises(pytest.skip.Exception):
+        test_e2e._require_selected("different-case", {"name": "different-recipe"}, config)

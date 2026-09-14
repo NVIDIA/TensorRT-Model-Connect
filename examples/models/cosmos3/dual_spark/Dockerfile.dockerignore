@@ -28,6 +28,11 @@ third_party/**
 !third_party/stb/
 !third_party/stb/**
 
+!apps/
+apps/**
+!apps/cli/
+!apps/cli/**
+
 # Guard against basename negations above matching similarly named directories
 # below unrelated source trees.
 examples/**

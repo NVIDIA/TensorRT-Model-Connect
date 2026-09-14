@@ -15,7 +15,7 @@ namespace trtmc::boltz2 {
 namespace {
 
 constexpr std::array<char, 4> kMagic{'B', '2', 'R', 'Q'};
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 3;
 constexpr std::size_t kHeaderSize = 4U + sizeof(uint32_t) + 4U * sizeof(uint64_t);
 
 uint32_t readU32(const std::byte*& cursor) {

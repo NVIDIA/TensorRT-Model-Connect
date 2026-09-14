@@ -6,8 +6,8 @@
 
 This host-side orchestrator uses a locally built example image to build one
 CP=2 TensorRT bundle on the primary Spark, copies the exact image and bundle to
-a peer Spark, and launches one global rank on each host. Each scene has an
-independent file rendezvous and runs only after the previous scene finishes.
+a peer Spark, and uses Open MPI to launch one Docker-owning worker per host.
+MPI broadcasts the rank-0 NCCL unique ID before rank 1 starts its container.
 """
 
 from __future__ import annotations
@@ -44,6 +44,8 @@ GUIDANCE_SCALE = 6.0
 FLOW_SHIFT = 10.0
 CP_SIZE = 2
 NCCL_ID_BYTES = 128
+NCCL_ID_ENV_TOKEN = "__TRTMC_NCCL_UNIQUE_ID_HEX__"
+NCCL_ID_LOG_PATTERN = r"\[cosmos3\.nccl\] unique_id=([0-9a-f]{256})(?:\s|$)"
 PHYSICS_NEGATIVE_PROMPT = (
     "blur, low detail, jitter, flicker, morphing, floating objects, interpenetrating "
     "objects, fused objects, teleportation, discontinuous motion, cuts, scene changes, "
@@ -118,6 +120,132 @@ for current_root, directories, filenames in os.walk(root, followlinks=False):
             raise SystemExit("remote root must not contain symbolic links")
         if child.st_uid != os.geteuid():
             raise SystemExit("remote root contents must be owned by the SSH user")
+"""
+
+MPI_FACTS_SCRIPT = """\
+import json
+from mpi4py import MPI
+
+vendor, version = MPI.get_vendor()
+print(json.dumps({"vendor": vendor, "version": list(version)}))
+"""
+
+# mpirun transports these two base64 arguments without requiring the source
+# checkout on the peer. The worker itself is the MPI application: it stays
+# alive while its node-local detached container runs and returns that
+# container's exit code to mpirun.
+MPI_WORKER_BOOTSTRAP = (
+    "import base64,sys;"
+    "exec(compile(base64.urlsafe_b64decode(sys.argv[1]),'<cosmos3-mpi-worker>','exec'))"
+)
+MPI_WORKER_SOURCE = r"""\
+import base64
+import json
+import re
+import subprocess
+import sys
+import time
+
+from mpi4py import MPI
+
+
+def abort(message):
+    print(f"cosmos3 MPI worker: {message}", file=sys.stderr, flush=True)
+    MPI.COMM_WORLD.Abort(1)
+    raise SystemExit(1)
+
+
+def run(argv):
+    return subprocess.run(
+        argv,
+        check=False,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def launch(argv, container):
+    completed = run(argv)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        abort(f"cannot launch {container}: {detail[-2000:]}")
+
+
+def rank_zero_unique_id(config, container):
+    pattern = re.compile(config["nccl_id_log_pattern"])
+    deadline = time.monotonic() + config["bootstrap_timeout"]
+    while time.monotonic() < deadline:
+        logs = run(["docker", "logs", container])
+        combined = (logs.stdout or "") + (logs.stderr or "")
+        match = pattern.search(combined)
+        if match is not None:
+            return bytearray.fromhex(match.group(1))
+        state = run(["docker", "inspect", "--format", "{{.State.Running}}", container])
+        if state.returncode != 0 or state.stdout.strip() != "true":
+            abort(f"rank 0 exited before publishing its NCCL unique ID: {combined[-2000:]}")
+        time.sleep(0.25)
+    abort("timed out waiting for rank 0 to publish its NCCL unique ID")
+
+
+def container_exit_code(container):
+    waited = run(["docker", "wait", container])
+    if waited.returncode != 0:
+        detail = (waited.stderr or waited.stdout).strip()
+        abort(f"docker wait failed for {container}: {detail[-2000:]}")
+    lines = [line.strip() for line in waited.stdout.splitlines() if line.strip()]
+    if len(lines) != 1 or not lines[0].isdigit():
+        abort(f"docker wait returned an invalid exit code for {container}")
+    return int(lines[0])
+
+
+def main():
+    config = json.loads(base64.urlsafe_b64decode(sys.argv[2]).decode("utf-8"))
+    comm = MPI.COMM_WORLD
+    if comm.Get_size() != 2:
+        abort(f"expected two MPI ranks, got {comm.Get_size()}")
+    local = comm.Split_type(MPI.COMM_TYPE_SHARED, 0)
+    try:
+        if local.Get_size() != 1:
+            abort("expected exactly one MPI rank on each Spark")
+    finally:
+        local.Free()
+
+    rank = comm.Get_rank()
+    rank_config = config["ranks"][rank]
+    container = rank_config["container"]
+    docker_argv = list(rank_config["docker_argv"])
+    unique_id = bytearray(config["nccl_id_bytes"])
+
+    if rank == 0:
+        launch(docker_argv, container)
+        unique_id = rank_zero_unique_id(config, container)
+        if len(unique_id) != config["nccl_id_bytes"]:
+            abort("rank 0 published an invalid NCCL unique ID")
+
+    comm.Bcast([unique_id, MPI.BYTE], root=0)
+
+    if rank == 1:
+        encoded = unique_id.hex()
+        token = config["nccl_id_env_token"]
+        replacements = sum(value.count(token) for value in docker_argv)
+        if replacements != 1:
+            abort("rank 1 Docker command does not contain one NCCL ID placeholder")
+        docker_argv = [value.replace(token, encoded) for value in docker_argv]
+        launch(docker_argv, container)
+
+    exit_code = container_exit_code(container)
+    exit_codes = comm.allgather(exit_code)
+    raise SystemExit(max(exit_codes))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as error:
+        abort(str(error))
 """
 
 
@@ -893,6 +1021,12 @@ def _scp_argv(settings: Settings) -> list[str]:
     return argv
 
 
+def _mpi_rsh_agent(settings: Settings) -> str:
+    argv = _ssh_argv(settings)[:-1]
+    argv.extend(["-l", settings.peer_user])
+    return shlex.join(argv)
+
+
 def _layout(settings: Settings) -> dict[str, Any]:
     models = settings.work_root / "models"
     run_root = settings.work_root / "runs" / settings.run_id
@@ -917,14 +1051,13 @@ def _scene_layout(settings: Settings, scene: Scene) -> dict[str, Any]:
     layout = _layout(settings)
     scene_root = Path(layout["run_root"]) / scene.slug
     remote_scene_root = f"{layout['remote_run_root']}/{scene.slug}"
-    rendezvous_name = f"{scene.slug}-seed{scene.seed}.nccl"
     return {
         "scene_root": scene_root,
         "rank0": scene_root / "rank0",
         "rank1_capture": scene_root / "rank1",
         "remote_rank1": f"{remote_scene_root}/rank1",
-        "rendezvous": scene_root / "rendezvous" / rendezvous_name,
-        "remote_rendezvous": f"{remote_scene_root}/rendezvous/{rendezvous_name}",
+        "mpi_stdout": scene_root / "mpi.stdout.log",
+        "mpi_stderr": scene_root / "mpi.stderr.log",
         "mp4": Path(layout["run_root"]) / f"{scene.slug}-720p.mp4",
         "rank0_container": f"cosmos3-{settings.run_id}-{scene.slug}-rank0",
         "rank1_container": f"cosmos3-{settings.run_id}-{scene.slug}-rank1",
@@ -983,12 +1116,11 @@ def _generation_argv(scene: Scene) -> list[str]:
 
 
 def _rank_environment(settings: Settings, scene: Scene, rank: int) -> dict[str, str]:
-    return {
+    environment = {
         "CUDA_VISIBLE_DEVICES": "0",
         "OMPI_COMM_WORLD_SIZE": str(CP_SIZE),
         "OMPI_COMM_WORLD_RANK": str(rank),
         "OMPI_COMM_WORLD_LOCAL_RANK": "0",
-        "TRTMC_NCCL_RENDEZVOUS": f"/rendezvous/{scene.slug}-seed{scene.seed}.nccl",
         "NCCL_NET": "IB",
         "NCCL_IB_DISABLE": "0",
         "NCCL_IB_HCA": f"={settings.ib_hca}",
@@ -1001,6 +1133,11 @@ def _rank_environment(settings: Settings, scene: Scene, rank: int) -> dict[str, 
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
     }
+    if rank == 0:
+        environment["TRTMC_NCCL_UNIQUE_ID_STDOUT"] = "1"
+    elif rank == 1:
+        environment["TRTMC_NCCL_UNIQUE_ID_HEX"] = NCCL_ID_ENV_TOKEN
+    return environment
 
 
 def _rank_docker_argv(
@@ -1015,12 +1152,10 @@ def _rank_docker_argv(
     if rank == 0:
         bundle = str(layout["bundle"])
         output_dir = str(scene_paths["rank0"])
-        rendezvous_dir = str(Path(scene_paths["rendezvous"]).parent)
         container = str(scene_paths["rank0_container"])
     elif rank == 1:
         bundle = str(layout["remote_bundle"])
         output_dir = str(scene_paths["remote_rank1"])
-        rendezvous_dir = str(Path(scene_paths["remote_rendezvous"]).parent)
         container = str(scene_paths["rank1_container"])
     else:
         raise ValueError("rank must be 0 or 1")
@@ -1065,8 +1200,6 @@ def _rank_docker_argv(
             f"type=bind,src={bundle},dst=/models/cosmos3.bundle,readonly",
             "--mount",
             f"type=bind,src={output_dir},dst=/outputs",
-            "--mount",
-            f"type=bind,src={rendezvous_dir},dst=/rendezvous",
             "--entrypoint",
             "/opt/trtmc/bin/trtmc",
             settings.image,
@@ -1074,6 +1207,95 @@ def _rank_docker_argv(
         ]
     )
     return argv
+
+
+def _mpi_worker_config(
+    settings: Settings,
+    scene: Scene,
+    *,
+    primary_uverbs: str,
+    peer_uverbs: str,
+) -> dict[str, Any]:
+    paths = _scene_layout(settings, scene)
+    return {
+        "bootstrap_timeout": min(180, settings.runtime_timeout),
+        "nccl_id_bytes": NCCL_ID_BYTES,
+        "nccl_id_env_token": NCCL_ID_ENV_TOKEN,
+        "nccl_id_log_pattern": NCCL_ID_LOG_PATTERN,
+        "ranks": [
+            {
+                "container": str(paths["rank0_container"]),
+                "docker_argv": _rank_docker_argv(
+                    settings,
+                    scene,
+                    0,
+                    uverbs_device=primary_uverbs,
+                ),
+            },
+            {
+                "container": str(paths["rank1_container"]),
+                "docker_argv": _rank_docker_argv(
+                    settings,
+                    scene,
+                    1,
+                    uverbs_device=peer_uverbs,
+                ),
+            },
+        ],
+    }
+
+
+def _mpirun_argv(
+    settings: Settings,
+    scene: Scene,
+    *,
+    primary_uverbs: str,
+    peer_uverbs: str,
+    redact_payload: bool = False,
+) -> list[str]:
+    config = _mpi_worker_config(
+        settings,
+        scene,
+        primary_uverbs=primary_uverbs,
+        peer_uverbs=peer_uverbs,
+    )
+    source = base64.urlsafe_b64encode(MPI_WORKER_SOURCE.encode("utf-8")).decode("ascii")
+    payload = base64.urlsafe_b64encode(
+        json.dumps(config, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    if redact_payload:
+        source = "<embedded-mpi-worker-source>"
+        payload = "<embedded-scene-config>"
+    return [
+        "mpirun",
+        "--host",
+        f"localhost:1,{settings.peer_host}:1",
+        "-np",
+        str(CP_SIZE),
+        "--map-by",
+        "ppr:1:node",
+        "--rank-by",
+        "slot",
+        "--mca",
+        "oob_tcp_if_include",
+        settings.net_iface,
+        "--mca",
+        "btl_tcp_if_include",
+        settings.net_iface,
+        "--mca",
+        "btl",
+        "self,tcp",
+        "--bind-to",
+        "none",
+        "--mca",
+        "plm_rsh_agent",
+        _mpi_rsh_agent(settings),
+        "python3",
+        "-c",
+        MPI_WORKER_BOOTSTRAP,
+        source,
+        payload,
+    ]
 
 
 def _checkpoint_download_argv(settings: Settings) -> list[str]:
@@ -1101,6 +1323,10 @@ def _bundle_build_argv(settings: Settings) -> list[str]:
         "docker",
         "run",
         "--rm",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "-e",
+        "HOME=/tmp",
         "--gpus",
         "all",
         "--ipc",
@@ -1156,8 +1382,20 @@ def execution_plan(settings: Settings) -> dict[str, Any]:
                 "prompt": _prompt_record(scene),
                 "rendezvous": {
                     "bytes": NCCL_ID_BYTES,
-                    "primary": str(paths["rendezvous"]),
-                    "peer": str(paths["remote_rendezvous"]),
+                    "transport": "MPI_Bcast",
+                    "root": 0,
+                    "file_transfer": False,
+                },
+                "mpi": {
+                    "processes": CP_SIZE,
+                    "mapping": "one MPI worker per Spark",
+                    "argv": _mpirun_argv(
+                        settings,
+                        scene,
+                        primary_uverbs=planned_uverbs["primary"],
+                        peer_uverbs=planned_uverbs["peer"],
+                        redact_payload=True,
+                    ),
                 },
                 "ranks": [
                     {
@@ -1245,6 +1483,23 @@ def _log(message: str) -> None:
     print(f"[cosmos3-dual-spark] {message}", file=sys.stderr, flush=True)
 
 
+def _display_argv(argv: Sequence[str]) -> str:
+    values = [str(value) for value in argv]
+    displayed: list[str] = []
+    for index, value in enumerate(values):
+        if index > 0 and values[index - 1] == "-c":
+            displayed.append("<inline-code>")
+        elif len(value) > 160:
+            displayed.append(f"<argument:{len(value)}-characters>")
+        else:
+            displayed.append(value)
+    return shlex.join(displayed)
+
+
+def _command_logging_enabled() -> bool:
+    return os.environ.get("COSMOS3_LOG_COMMANDS") == "1"
+
+
 def _run(
     argv: Sequence[str],
     *,
@@ -1252,8 +1507,12 @@ def _run(
     timeout: int | float | None = None,
     input_text: str | None = None,
     capture: bool = True,
+    log_command: bool | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    _log(f"$ {shlex.join(str(value) for value in argv)}")
+    if log_command is None:
+        log_command = _command_logging_enabled()
+    if log_command:
+        _log(f"$ {_display_argv(argv)}")
     try:
         completed = subprocess.run(
             [str(value) for value in argv],
@@ -1285,7 +1544,12 @@ def _remote_run(
     *,
     check: bool = True,
     timeout: int | float | None = None,
+    log_command: bool | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if log_command is None:
+        log_command = _command_logging_enabled()
+    if log_command:
+        _log(f"peer {settings.peer_host}: $ {_display_argv(argv)}")
     payload = base64.urlsafe_b64encode(
         json.dumps([str(value) for value in argv]).encode("utf-8")
     ).decode("ascii")
@@ -1295,6 +1559,7 @@ def _remote_run(
         check=check,
         timeout=timeout,
         input_text=REMOTE_EXEC_HELPER,
+        log_command=False,
     )
 
 
@@ -1315,10 +1580,23 @@ def _write_json(path: Path, value: Any) -> None:
     os.replace(temporary, path)
 
 
-def _image_available(settings: Settings, *, remote: bool) -> bool:
-    argv = ["docker", "image", "inspect", settings.image]
+def _image_id(settings: Settings, *, remote: bool) -> str | None:
+    argv = ["docker", "image", "inspect", "--format", "{{.Id}}", settings.image]
     completed = _remote_run(settings, argv, check=False) if remote else _run(argv, check=False)
-    return completed.returncode == 0
+    if completed.returncode == 1:
+        return None
+    if completed.returncode != 0:
+        location = "peer" if remote else "primary"
+        raise DualSparkError(f"cannot inspect the requested image on the {location}")
+    image_id = completed.stdout.strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        location = "peer" if remote else "primary"
+        raise DualSparkError(f"cannot parse the requested image ID on the {location}")
+    return image_id
+
+
+def _image_available(settings: Settings, *, remote: bool) -> bool:
+    return _image_id(settings, remote=remote) is not None
 
 
 def _gpu_facts(settings: Settings, *, remote: bool) -> dict[str, str]:
@@ -1411,8 +1689,36 @@ def _resolve_uverbs_device(
     return device
 
 
+def _mpi_facts(settings: Settings, *, remote: bool) -> dict[str, Any]:
+    location = "peer" if remote else "primary"
+    version_argv = ["mpirun", "--version"]
+    version = _remote_run(settings, version_argv) if remote else _run(version_argv)
+    version_lines = [line.strip() for line in version.stdout.splitlines() if line.strip()]
+    if not version_lines or "Open MPI" not in version_lines[0]:
+        raise DualSparkError(f"{location} must provide Open MPI")
+
+    facts_argv = ["python3", "-c", MPI_FACTS_SCRIPT]
+    completed = _remote_run(settings, facts_argv) if remote else _run(facts_argv)
+    try:
+        facts = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise DualSparkError(f"cannot parse {location} mpi4py runtime identity") from exc
+    if (
+        facts.get("vendor") != "Open MPI"
+        or not isinstance(facts.get("version"), list)
+        or not all(isinstance(value, int) for value in facts["version"])
+    ):
+        raise DualSparkError(f"{location} mpi4py must use Open MPI")
+    return {
+        "launcher": version_lines[0],
+        "vendor": facts["vendor"],
+        "version": facts["version"],
+    }
+
+
 def _preflight(settings: Settings) -> dict[str, Any]:
-    for executable in ("docker", "ssh", "scp", "nvidia-smi"):
+    _log(f"checking the primary and peer {settings.peer_host}")
+    for executable in ("docker", "ssh", "scp", "nvidia-smi", "mpirun", "python3"):
         if shutil.which(executable) is None:
             raise DualSparkError(f"required executable is unavailable: {executable}")
     for label, path in (
@@ -1425,6 +1731,13 @@ def _preflight(settings: Settings) -> dict[str, Any]:
     _run(["docker", "info"], timeout=60)
     _remote_run(settings, ["docker", "info"], timeout=60)
     _remote_run(settings, ["python3", "--version"], timeout=30)
+
+    local_mpi = _mpi_facts(settings, remote=False)
+    peer_mpi = _mpi_facts(settings, remote=True)
+    if local_mpi != peer_mpi:
+        raise DualSparkError(
+            "the two Sparks must use matching Open MPI and mpi4py runtime versions"
+        )
 
     local_gpu = _gpu_facts(settings, remote=False)
     peer_gpu = _gpu_facts(settings, remote=True)
@@ -1469,19 +1782,30 @@ def _preflight(settings: Settings) -> dict[str, Any]:
             "uverbs_device": uverbs_device,
         }
 
+    _log(
+        "preflight passed: matching GB10 GPUs and Open MPI, "
+        f"with active RoCE on {settings.net_iface}"
+    )
     return {
         "primary_gpu": _recorded_gpu_facts(local_gpu),
         "peer_gpu": _recorded_gpu_facts(peer_gpu),
         "host_identity": host_identity,
+        "mpi_hosts": {
+            "primary": local_mpi,
+            "peer": peer_mpi,
+        },
         "roce_hosts": roce,
     }
 
 
 def _sync_image(settings: Settings) -> None:
-    if _image_available(settings, remote=True):
-        _log("peer already has the requested image tag")
+    local_image_id = _image_id(settings, remote=False)
+    if local_image_id is None:
+        raise DualSparkError(f"primary image is unavailable: {settings.image}")
+    if _image_id(settings, remote=True) == local_image_id:
+        _log("peer already has the exact requested image")
         return
-    _log("copying the image to the peer Spark")
+    _log("copying the exact image to the peer Spark")
     with tempfile.TemporaryFile() as save_stderr_file:
         try:
             save = subprocess.Popen(
@@ -1520,8 +1844,8 @@ def _sync_image(settings: Settings) -> None:
     if save_returncode != 0 or load.returncode != 0:
         detail = (save_stderr + load_stdout + load_stderr).decode("utf-8", "replace")
         raise DualSparkError(f"image transfer failed: {detail[-2000:]}")
-    if not _image_available(settings, remote=True):
-        raise DualSparkError("peer image is unavailable after transfer")
+    if _image_id(settings, remote=True) != local_image_id:
+        raise DualSparkError("peer image ID does not match the primary after transfer")
 
 
 def _bundle_spec() -> dict[str, Any]:
@@ -1543,6 +1867,32 @@ def _prepare_checkpoint(settings: Settings) -> None:
         raise DualSparkError("checkpoint download completed without model_index.json")
 
 
+def _ensure_local_bundle_readable(settings: Settings, bundle: Path) -> None:
+    if os.access(bundle, os.R_OK):
+        return
+    if bundle.is_symlink() or not bundle.is_file():
+        raise DualSparkError(f"TensorRT bundle is not a readable regular file: {bundle}")
+
+    _log("repairing ownership of a bundle created by an older root-running container")
+    _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--mount",
+            f"type=bind,src={bundle.parent},dst=/models",
+            "--entrypoint",
+            "/bin/chown",
+            settings.image,
+            f"{os.getuid()}:{os.getgid()}",
+            f"/models/{bundle.name}",
+        ],
+        timeout=60,
+    )
+    if not os.access(bundle, os.R_OK):
+        raise DualSparkError(f"TensorRT bundle remains unreadable after ownership repair: {bundle}")
+
+
 def _prepare_bundle(settings: Settings) -> Path:
     layout = _layout(settings)
     bundle = Path(layout["bundle"])
@@ -1551,6 +1901,7 @@ def _prepare_bundle(settings: Settings) -> Path:
     if bundle.is_file() and bundle.stat().st_size > 0 and marker.is_file():
         try:
             if json.loads(marker.read_text(encoding="utf-8")) == expected:
+                _ensure_local_bundle_readable(settings, bundle)
                 _log("reusing the exact native 720p CP=2 TensorRT bundle")
                 return bundle
         except (OSError, json.JSONDecodeError):
@@ -1564,6 +1915,7 @@ def _prepare_bundle(settings: Settings) -> Path:
     if not pending.is_file() or pending.stat().st_size == 0:
         raise DualSparkError("bundle build completed without a nonempty CP=2 bundle")
     os.replace(pending, bundle)
+    _ensure_local_bundle_readable(settings, bundle)
     _write_json(marker, expected)
     return bundle
 
@@ -1594,6 +1946,8 @@ def _sync_bundle(settings: Settings, bundle: Path) -> None:
         _log("peer already has the requested CP=2 bundle configuration")
         return
 
+    bundle_gib = bundle.stat().st_size / (1024**3)
+    _log(f"copying the {bundle_gib:.1f} GiB CP=2 bundle to the peer")
     incoming = f"{remote_bundle}.incoming.{settings.run_id}"
     incoming_spec = f"{remote_spec}.incoming.{settings.run_id}"
     _remote_run(
@@ -1643,6 +1997,7 @@ def _sync_bundle(settings: Settings, bundle: Path) -> None:
             )
     if not _remote_bundle_matches(settings):
         raise DualSparkError("peer bundle is incomplete after transfer")
+    _log("peer CP=2 bundle synchronized")
 
 
 def prepare(settings: Settings) -> dict[str, Any]:
@@ -1668,7 +2023,10 @@ def prepare(settings: Settings) -> dict[str, Any]:
         "peer": settings.peer_target,
         "model": {"id": MODEL_ID, "revision": MODEL_REVISION, "precision": PRECISION},
         "profile": _profile(),
-        "image": {"name": settings.image},
+        "image": {
+            "name": settings.image,
+            "id": _image_id(settings, remote=False),
+        },
         "bundle": {
             "primary_path": str(bundle),
             "peer_path": str(layout["remote_bundle"]),
@@ -1697,14 +2055,13 @@ def _require_prepared(settings: Settings) -> dict[str, Any]:
         or preparation.get("model")
         != {"id": MODEL_ID, "revision": MODEL_REVISION, "precision": PRECISION}
         or preparation.get("profile") != _profile()
-        or preparation.get("image", {}).get("name") != settings.image
+        or preparation.get("image")
+        != {"name": settings.image, "id": _image_id(settings, remote=False)}
     ):
         raise DualSparkError("prepared assets do not match this invocation")
 
-    if not _image_available(settings, remote=False):
-        raise DualSparkError("the primary image is missing; run prepare again")
-    if not _image_available(settings, remote=True):
-        raise DualSparkError("the peer image is missing; run prepare again")
+    if _image_id(settings, remote=True) != preparation["image"]["id"]:
+        raise DualSparkError("the peer image differs from the prepared image; run prepare again")
 
     bundle = Path(layout["bundle"])
     if not bundle.is_file() or bundle.stat().st_size == 0:
@@ -1722,7 +2079,11 @@ def _require_prepared(settings: Settings) -> dict[str, Any]:
 
 def _container_exists(settings: Settings, name: str, *, remote: bool) -> bool:
     argv = ["docker", "inspect", name]
-    completed = _remote_run(settings, argv, check=False) if remote else _run(argv, check=False)
+    completed = (
+        _remote_run(settings, argv, check=False, log_command=False)
+        if remote
+        else _run(argv, check=False, log_command=False)
+    )
     if completed.returncode == 0:
         return True
     if completed.returncode == 1:
@@ -1734,7 +2095,9 @@ def _container_exists(settings: Settings, name: str, *, remote: bool) -> bool:
 
 def _container_state(settings: Settings, name: str, *, remote: bool) -> dict[str, Any]:
     argv = ["docker", "inspect", "--format", "{{json .State}}", name]
-    completed = _remote_run(settings, argv) if remote else _run(argv)
+    completed = (
+        _remote_run(settings, argv, log_command=False) if remote else _run(argv, log_command=False)
+    )
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
@@ -1750,7 +2113,11 @@ def _sample_memory_tracker(settings: Settings, tracker: MemoryTracker) -> None:
         f"{tracker.cgroup_path}/memory.events",
     ]
     argv = ["cat", "--", *paths]
-    completed = _remote_run(settings, argv) if tracker.remote else _run(argv)
+    completed = (
+        _remote_run(settings, argv, log_command=False)
+        if tracker.remote
+        else _run(argv, log_command=False)
+    )
     lines = [line.strip() for line in completed.stdout.splitlines()]
     values = lines[:4]
     event_lines = lines[4:]
@@ -1928,39 +2295,70 @@ def _remove_container_noexcept(settings: Settings, name: str, *, remote: bool) -
     return True
 
 
-def _wait_for_rendezvous(settings: Settings, path: Path, container: str) -> None:
+def _mpi_diagnostics(stdout_path: Path, stderr_path: Path) -> str:
+    parts = []
+    for path in (stderr_path, stdout_path):
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if content:
+            parts.append(content[-2000:])
+    return "\n".join(parts)[-4000:]
+
+
+def _wait_for_mpi_containers(
+    settings: Settings,
+    containers: Sequence[tuple[str, bool]],
+    process: subprocess.Popen[Any],
+    stdout_path: Path,
+    stderr_path: Path,
+) -> None:
     deadline = time.monotonic() + min(180, settings.runtime_timeout)
     while time.monotonic() < deadline:
-        if path.is_file() and path.stat().st_size == NCCL_ID_BYTES:
+        if all(_container_exists(settings, name, remote=remote) for name, remote in containers):
             return
-        state = _container_state(settings, container, remote=False)
-        if not state.get("Running", False):
-            raise DualSparkError("rank 0 exited before publishing the NCCL rendezvous")
+        returncode = process.poll()
+        if returncode is not None:
+            detail = _mpi_diagnostics(stdout_path, stderr_path)
+            suffix = f": {detail}" if detail else ""
+            raise DualSparkError(
+                f"mpirun exited with code {returncode} before both containers started{suffix}"
+            )
         time.sleep(1)
-    raise DualSparkError("timed out waiting for the NCCL rendezvous")
+    raise DualSparkError("timed out waiting for mpirun to start both rank containers")
 
 
-def _transfer_rendezvous(settings: Settings, local_path: Path, remote_path: str) -> None:
-    incoming = f"{remote_path}.incoming"
-    _remote_run(settings, ["rm", "-f", "--", incoming, remote_path], check=False)
-    copied = False
+def _wait_for_mpi_completion(
+    process: subprocess.Popen[Any],
+    stdout_path: Path,
+    stderr_path: Path,
+) -> None:
     try:
-        _run(
-            [*_scp_argv(settings), str(local_path), f"{settings.peer_target}:{incoming}"],
-            timeout=120,
-            capture=False,
-        )
-        size = _remote_run(
-            settings,
-            ["stat", "-c", "%s", "--", incoming],
-        ).stdout.strip()
-        if size != str(NCCL_ID_BYTES):
-            raise DualSparkError("peer received an invalid NCCL rendezvous file")
-        _remote_run(settings, ["mv", "-T", "--", incoming, remote_path])
-        copied = True
-    finally:
-        if not copied:
-            _remote_run(settings, ["rm", "-f", "--", incoming], check=False)
+        returncode = process.wait(timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        raise DualSparkError("MPI workers did not exit after both containers stopped") from exc
+    if returncode != 0:
+        detail = _mpi_diagnostics(stdout_path, stderr_path)
+        suffix = f": {detail}" if detail else ""
+        raise DualSparkError(f"mpirun failed with exit code {returncode}{suffix}")
+
+
+def _stop_mpi_noexcept(process: subprocess.Popen[Any] | None) -> None:
+    try:
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=15)
+    except Exception as exc:
+        try:
+            _log(f"WARNING: could not stop mpirun cleanly: {exc}")
+        except Exception:
+            pass
 
 
 def _wait_for_containers(
@@ -1980,7 +2378,7 @@ def _wait_for_containers(
                 continue
             try:
                 _sample_memory_tracker(settings, tracker)
-            except DualSparkError as exc:
+            except DualSparkError:
                 if tracker.samples == 0:
                     raise
                 if states[name].get("Running", False):
@@ -1991,7 +2389,9 @@ def _wait_for_containers(
                     )
                 if states[name].get("Running", False):
                     raise
-                _log(f"WARNING: final cgroup memory sample was unavailable for {name}: {exc}")
+                # Docker may remove a stopped container's cgroup between the
+                # state probe and this final sample. Earlier memory.peak
+                # samples remain authoritative for the completed rank.
                 finished_trackers.add(name)
         if all(not state.get("Running", False) for state in states.values()):
             return states
@@ -2034,6 +2434,13 @@ def _verify_rank1_has_no_frames(settings: Settings, remote_output: str) -> None:
 
 def _remove_rank1_empty_frames(settings: Settings, remote_output: str) -> None:
     frames = f"{remote_output}/frames"
+    present = _remote_run(settings, ["test", "-e", frames], check=False)
+    if present.returncode == 1:
+        return
+    if present.returncode != 0:
+        detail = (present.stderr or present.stdout or "").strip()
+        suffix = f": {detail[-500:]}" if detail else ""
+        raise DualSparkError(f"could not check rank 1's verified-empty frames directory{suffix}")
     removed = _remote_run(settings, ["rmdir", "--", frames], check=False)
     if removed.returncode != 0:
         detail = (removed.stderr or removed.stdout or "").strip()
@@ -2271,7 +2678,6 @@ def _prepare_scene_directories(settings: Settings, scene: Scene) -> None:
     paths = _scene_layout(settings, scene)
     Path(paths["rank0"]).mkdir(parents=True, exist_ok=False)
     Path(paths["rank1_capture"]).mkdir(parents=True, exist_ok=False)
-    Path(paths["rendezvous"]).parent.mkdir(parents=True, exist_ok=False)
     remote_scene_root = str(Path(paths["remote_rank1"]).parent)
     _remote_run(
         settings,
@@ -2282,7 +2688,6 @@ def _prepare_scene_directories(settings: Settings, scene: Scene) -> None:
             "0700",
             remote_scene_root,
             str(paths["remote_rank1"]),
-            str(Path(paths["remote_rendezvous"]).parent),
         ],
     )
 
@@ -2316,34 +2721,52 @@ def _run_scene(
     rank0_wall_seconds = 0.0
     trackers: dict[str, MemoryTracker] = {}
     cleanup_failures: list[str] = []
+    mpi_process: subprocess.Popen[Any] | None = None
+    mpi_stdout_path = Path(paths["mpi_stdout"])
+    mpi_stderr_path = Path(paths["mpi_stderr"])
     try:
-        _log(f"starting {scene.slug}: primary rank 0")
-        rank0_launch_attempted = True
+        _log(f"launching {scene.slug}: CP=2 across the primary and {settings.peer_host}")
+        mpi_argv = _mpirun_argv(
+            settings,
+            scene,
+            primary_uverbs=primary_uverbs,
+            peer_uverbs=peer_uverbs,
+        )
         rank0_wall_started = time.monotonic()
-        _run(_rank_docker_argv(settings, scene, 0, uverbs_device=primary_uverbs))
-        _wait_for_rendezvous(
-            settings,
-            Path(paths["rendezvous"]),
-            rank0_name,
-        )
-        _transfer_rendezvous(
-            settings,
-            Path(paths["rendezvous"]),
-            str(paths["remote_rendezvous"]),
-        )
-        _log(f"starting {scene.slug}: peer rank 1")
+        stdout_stream = mpi_stdout_path.open("w", encoding="utf-8")
+        stderr_stream = mpi_stderr_path.open("w", encoding="utf-8")
+        try:
+            mpi_process = subprocess.Popen(
+                mpi_argv,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_stream,
+                stderr=stderr_stream,
+                text=True,
+                shell=False,
+            )
+        except OSError as exc:
+            raise DualSparkError("cannot start required command: mpirun") from exc
+        finally:
+            stdout_stream.close()
+            stderr_stream.close()
+        rank0_launch_attempted = True
         rank1_launch_attempted = True
-        _remote_run(
+        containers = ((rank0_name, False), (rank1_name, True))
+        _wait_for_mpi_containers(
             settings,
-            _rank_docker_argv(settings, scene, 1, uverbs_device=peer_uverbs),
+            containers,
+            mpi_process,
+            mpi_stdout_path,
+            mpi_stderr_path,
         )
+        _log("both rank containers started; MPI rendezvous complete; NCCL/RoCE inference running")
         trackers = {
             rank0_name: _memory_tracker(settings, rank0_name, remote=False),
             rank1_name: _memory_tracker(settings, rank1_name, remote=True),
         }
         states = _wait_for_containers(
             settings,
-            ((rank0_name, False), (rank1_name, True)),
+            containers,
             trackers,
         )
         rank0_wall_seconds = time.monotonic() - rank0_wall_started
@@ -2354,7 +2777,14 @@ def _run_scene(
         }
         if failures:
             raise DualSparkError(f"Cosmos3 ranks failed for {scene.slug}: {failures}")
+        _wait_for_mpi_completion(
+            mpi_process,
+            mpi_stdout_path,
+            mpi_stderr_path,
+        )
+        _log("both ranks completed successfully; validating output and telemetry")
     finally:
+        _stop_mpi_noexcept(mpi_process)
         launched = (
             (rank0_name, False, rank0_launch_attempted, Path(paths["rank0"])),
             (rank1_name, True, rank1_launch_attempted, Path(paths["rank1_capture"])),
@@ -2420,6 +2850,7 @@ def _run_scene(
     }
     _verify_rank1_has_no_frames(settings, str(paths["remote_rank1"]))
     _remove_rank1_empty_frames(settings, str(paths["remote_rank1"]))
+    _log(f"packaging {FRAME_COUNT} frames as a native {WIDTH}x{HEIGHT} H.264 video")
     artifact = _package_video(
         settings,
         Path(paths["rank0"]) / "frames",
@@ -2431,7 +2862,13 @@ def _run_scene(
         "seed": scene.seed,
         "prompt": _prompt_record(scene),
         "rank_hosts": {"0": socket.gethostname(), "1": settings.peer_host},
-        "rendezvous_name": Path(paths["rendezvous"]).name,
+        "rendezvous": {
+            "transport": "MPI_Bcast",
+            "root": 0,
+            "bytes": NCCL_ID_BYTES,
+            "file_transfer": False,
+        },
+        "mpi_logs": {"stdout": str(mpi_stdout_path), "stderr": str(mpi_stderr_path)},
         "performance": performance,
         "memory": memory,
         "artifact": artifact,

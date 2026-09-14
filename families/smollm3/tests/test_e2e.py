@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 
 _TEST_DIR = Path(__file__).resolve().parent
@@ -169,6 +170,14 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
         text=True,
         timeout=30,
     )
+    record_evidence("commands", {"argv": getattr(inspected, "args", None)})
+    record_evidence(
+        "inspection",
+        {
+            "stdout": getattr(inspected, "stdout", None),
+            "stderr": getattr(inspected, "stderr", None),
+        },
+    )
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
     assert payload["task"] == "text_generation"
@@ -240,6 +249,14 @@ def _run_native(
         text=True,
         timeout=600,
         env=environment,
+    )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence(
+        "native_process",
+        {
+            "stdout": getattr(completed, "stdout", None),
+            "stderr": getattr(completed, "stderr", None),
+        },
     )
     if tp_size == 1:
         payload = json.loads(completed.stdout)
@@ -450,7 +467,9 @@ def _normalized_edit_distance(left: str, right: str) -> float:
 
 def _text_threshold(case: dict, thresholds: dict[str, float]) -> float:
     default = 0.15 if case.get("use_chat_template") else 0.25
-    return float(thresholds.get("contract_ned_threshold", default))
+    _evidence_threshold = float(thresholds.get("contract_ned_threshold", default))
+    record_evidence("thresholds", {**thresholds, "contract_ned_threshold": _evidence_threshold})
+    return _evidence_threshold
 
 
 def _assert_correctness(
@@ -502,26 +521,28 @@ def test_sampling_correctness_uses_support_instead_of_empty_reference() -> None:
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
     _require_selected(case_name, manifest, request.config)
+    record_evidence("inputs", {"manifest": manifest, "case": case})
     tp_size = manifest["tensor_parallel_size"]
     binary, runtime_root, torch = _required_environment(tp_size)
     model_dir = _checkpoint(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     prompt = _prompt(case)
+    record_evidence("inputs", {"prompt": prompt})
     bundle = tmp_path / manifest["bundle"]
 
-    _build_bundle(manifest, model_dir, bundle)
-    _assert_rank_sections(binary, bundle, tp_size)
-    payload = _run_native(
-        binary,
-        runtime_root,
-        bundle,
-        prompt,
-        case,
-        tp_size,
-        tmp_path,
-    )
-    reruns = int(case.get("determinism_reruns", 0))
-    for _ in range(reruns):
-        repeated = _run_native(
+    with evidence_stage("build"):
+        _build_bundle(manifest, model_dir, bundle)
+    with evidence_stage("compare"):
+        _assert_rank_sections(binary, bundle, tp_size)
+    with evidence_stage("native"):
+        payload = _run_native(
             binary,
             runtime_root,
             bundle,
@@ -530,14 +551,31 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             tp_size,
             tmp_path,
         )
-        assert repeated["token_ids"] == payload["token_ids"]
-        assert repeated["text"] == payload["text"]
+    record_evidence("native", payload)
+    reruns = int(case.get("determinism_reruns", 0))
+    for _ in range(reruns):
+        with evidence_stage("native"):
+            repeated = _run_native(
+                binary,
+                runtime_root,
+                bundle,
+                prompt,
+                case,
+                tp_size,
+                tmp_path,
+            )
+        record_evidence("native", repeated)
+        with evidence_stage("compare"):
+            assert repeated["token_ids"] == payload["token_ids"]
+        with evidence_stage("compare"):
+            assert repeated["text"] == payload["text"]
 
     if "expected_kv_cache_rows" in case:
-        assert (
-            f"[trtmc] KV cache rows={case['expected_kv_cache_rows']} "
-            f"(bundle max={manifest['max_sequence_length']})" in payload["runtime_stderr"]
-        )
+        with evidence_stage("compare"):
+            assert (
+                f"[trtmc] KV cache rows={case['expected_kv_cache_rows']} "
+                f"(bundle max={manifest['max_sequence_length']})" in payload["runtime_stderr"]
+            )
 
     if _NATIVE_KV_FIELDS <= case.keys():
         from transformers import GenerationConfig
@@ -547,14 +585,31 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         prompt_tokens = _raw_prompt_token_count(model_dir, manifest, prompt)
         eos = GenerationConfig.from_pretrained(model_dir, local_files_only=True).eos_token_id
         eos_token_ids = () if eos is None else tuple(eos if isinstance(eos, list) else [eos])
-        assert_native_kv_receipt(payload, case, prompt_tokens, eos_token_ids=eos_token_ids)
+        record_evidence(
+            "diagnostics", {"prompt_token_count": prompt_tokens, "eos_token_ids": eos_token_ids}
+        )
+        with evidence_stage("compare"):
+            assert_native_kv_receipt(payload, case, prompt_tokens, eos_token_ids=eos_token_ids)
 
-    reference = _hf_reference(
-        model_dir,
-        manifest,
-        case,
-        prompt,
-        payload["token_ids"],
-        torch,
+    with evidence_stage("reference"):
+        reference = _hf_reference(
+            model_dir,
+            manifest,
+            case,
+            prompt,
+            payload["token_ids"],
+            torch,
+        )
+    record_evidence(
+        "reference",
+        {
+            "reference_ids": reference[0],
+            "reference_text": reference[1],
+            "sampling_support": reference[2],
+            "actual_decoded": reference[3],
+        },
     )
-    _assert_correctness(payload, case, _thresholds(case_name), *reference)
+    with evidence_stage("compare"):
+        _assert_correctness(
+            payload, case, record_evidence("thresholds", _thresholds(case_name)), *reference
+        )

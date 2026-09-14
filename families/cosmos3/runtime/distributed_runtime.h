@@ -21,8 +21,11 @@ struct DistributedRuntimeGroup {
 //
 // This intentionally avoids compile-time MPI/NCCL dependencies: ranks are
 // discovered from exact OpenMPI environment variables, and NCCL is loaded with
-// dlopen at runtime. TRTMC_NCCL_RENDEZVOUS must name the file shared or
-// transferred between ranks.
+// dlopen at runtime. Rank 0 can publish its unique ID to stdout for an external
+// MPI launcher by setting TRTMC_NCCL_UNIQUE_ID_STDOUT=1; rank 1 then consumes
+// the MPI-broadcast value from TRTMC_NCCL_UNIQUE_ID_HEX. The original
+// TRTMC_NCCL_RENDEZVOUS file contract remains available for callers that do not
+// use the MPI launcher.
 DistributedRuntimeGroup initialize_context_parallel_group(int cp_size);
 
 } // namespace trtmc::cosmos3

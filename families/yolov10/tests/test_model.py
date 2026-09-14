@@ -160,3 +160,169 @@ def test_anchors_cover_every_cell_at_each_stride() -> None:
     # Centres sit at the middle of their cell, and each level carries its stride.
     assert points[0].tolist() == [0.5, 0.5]
     assert set(np.unique(strides).tolist()) == {float(s) for s in model._STRIDES}
+
+
+@pytest.mark.parametrize("layout", ["single", "indexed"])
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32", "int64"])
+def test_reference_checkpoint_preserves_torch_values_and_dtypes(
+    tmp_path: Path, layout: str, dtype_name: str
+) -> None:
+    import torch
+    from safetensors.torch import save_file as save_torch_file
+
+    from families.yolov10.tests.test_e2e import _reference_tensors
+
+    dtype = getattr(torch, dtype_name)
+    values = {
+        "model.weight": torch.tensor([[1, 2], [3, 4]], dtype=dtype),
+        "model.bias": torch.tensor([5, 6], dtype=dtype),
+    }
+    if dtype_name == "int64":
+        values["model.weight"][0, 0] = 2**40 + 3
+    if layout == "single":
+        save_torch_file(values, str(tmp_path / "model.safetensors"))
+    else:
+        save_torch_file(
+            {"model.weight": values["model.weight"]}, str(tmp_path / "part-1.safetensors")
+        )
+        save_torch_file({"model.bias": values["model.bias"]}, str(tmp_path / "part-2.safetensors"))
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "weight_map": {
+                        "model.weight": "part-1.safetensors",
+                        "model.bias": "part-2.safetensors",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+    actual = _reference_tensors(tmp_path)
+    assert set(actual) == set(values)
+    for name, expected in values.items():
+        assert actual[name].dtype == dtype
+        assert torch.equal(actual[name], expected)
+    assert actual["model.weight"].device.type == "cpu"
+
+
+def test_checkpoint_default_keeps_numpy_build_behavior(tmp_path: Path) -> None:
+    value = np.array([1.25, 2.5], dtype=np.float16)
+    save_file({"model.weight": value}, str(tmp_path / "model.safetensors"))
+    checkpoint = Checkpoint.open(tmp_path)
+    raw = checkpoint.tensor_map["model.weight"].get_tensor("model.weight")
+    assert isinstance(raw, np.ndarray) and raw.dtype == np.float16
+    assert checkpoint.tensor("model.weight").dtype == np.float32
+    assert np.array_equal(checkpoint.tensor("model.weight"), value)
+
+
+def test_reference_checkpoint_prefers_single_file_over_an_index(tmp_path: Path) -> None:
+    import torch
+    from safetensors.torch import save_file as save_torch_file
+
+    from families.yolov10.tests.test_e2e import _reference_tensors
+
+    value = torch.tensor([3.0], dtype=torch.float16)
+    save_torch_file({"model.weight": value}, str(tmp_path / "model.safetensors"))
+    (tmp_path / "model.safetensors.index.json").write_text("malformed index", encoding="utf-8")
+    assert torch.equal(_reference_tensors(tmp_path)["model.weight"], value)
+    assert Checkpoint.open(tmp_path).names == {"model.weight"}
+
+
+def test_reference_checkpoint_uses_declared_mapping_not_all_shard_keys(tmp_path: Path) -> None:
+    import torch
+    from safetensors.torch import save_file as save_torch_file
+
+    from families.yolov10.tests.test_e2e import _reference_tensors
+
+    save_torch_file(
+        {"model.weight": torch.tensor([1.0]), "off_index": torch.tensor([99.0])},
+        str(tmp_path / "part-1.safetensors"),
+    )
+    save_torch_file(
+        {"model.weight": torch.tensor([7.0]), "model.bias": torch.tensor([2.0])},
+        str(tmp_path / "part-2.safetensors"),
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.weight": "part-1.safetensors",
+                    "model.bias": "part-2.safetensors",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint = Checkpoint.open(tmp_path)
+    actual = _reference_tensors(tmp_path)
+    assert set(actual) == checkpoint.names == {"model.weight", "model.bias"}
+    assert actual["model.weight"].item() == 1.0
+    assert actual["model.bias"].item() == 2.0
+    assert np.array_equal(actual["model.weight"].numpy(), checkpoint.tensor("model.weight"))
+
+
+def test_reference_checkpoint_rejects_a_missing_declared_tensor(tmp_path: Path) -> None:
+    import torch
+    from safetensors import SafetensorError
+    from safetensors.torch import save_file as save_torch_file
+
+    from families.yolov10.tests.test_e2e import _reference_tensors
+
+    save_torch_file({"other": torch.tensor([1.0])}, str(tmp_path / "part.safetensors"))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"model.missing": "part.safetensors"}}), encoding="utf-8"
+    )
+    with pytest.raises(SafetensorError):
+        _reference_tensors(tmp_path)
+    with pytest.raises(SafetensorError):
+        Checkpoint.open(tmp_path).tensor("model.missing")
+
+
+@pytest.mark.parametrize("framework", ["numpy", "pt"])
+def test_checkpoint_rejects_a_missing_indexed_shard(tmp_path: Path, framework: str) -> None:
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"model.weight": "missing.safetensors"}}), encoding="utf-8"
+    )
+    with pytest.raises(FileNotFoundError):
+        Checkpoint.open(tmp_path, framework=framework)
+
+
+@pytest.mark.parametrize("framework", ["numpy", "pt"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"weight_map": {}},
+        {"weight_map": []},
+        {"weight_map": {"": "part.safetensors"}},
+        {"weight_map": {"model.weight": 7}},
+    ],
+)
+def test_checkpoint_rejects_malformed_index_mapping(
+    tmp_path: Path, framework: str, payload
+) -> None:
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError):
+        Checkpoint.open(tmp_path, framework=framework)
+
+
+@pytest.mark.parametrize("framework", ["numpy", "pt"])
+@pytest.mark.parametrize(
+    "shard", ["../outside.safetensors", "/outside.safetensors", "nested/part.safetensors"]
+)
+def test_checkpoint_rejects_unsafe_indexed_shard_paths(
+    tmp_path: Path, framework: str, shard: str
+) -> None:
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"model.weight": shard}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="direct relative files"):
+        Checkpoint.open(tmp_path, framework=framework)
+
+
+@pytest.mark.parametrize("framework", ["numpy", "pt"])
+def test_checkpoint_rejects_invalid_index_json(tmp_path: Path, framework: str) -> None:
+    (tmp_path / "model.safetensors.index.json").write_text("{invalid json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        Checkpoint.open(tmp_path, framework=framework)

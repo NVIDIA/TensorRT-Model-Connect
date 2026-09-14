@@ -69,8 +69,34 @@ def _relative_position_encoding(
         columns(features["entity_id"]),
     )
 
-    def clipped_difference(lhs, rhs, offset: int, maximum: int):
-        difference = graph.sub(rows(lhs), columns(rhs))
+    residue_difference = graph.sub(
+        rows(features["residue_index"]), columns(features["residue_index"])
+    )
+    cyclic_period = features["cyclic_period"]
+    has_period = graph.elementwise(
+        cyclic_period,
+        graph.integer_scalar_like(0, cyclic_period),
+        graph.trt.ElementWiseOperation.GREATER,
+    )
+    period = graph.select(
+        has_period,
+        cyclic_period,
+        graph.integer_scalar_like(10000, cyclic_period),
+    )
+    period = columns(period)
+    quotient = graph.div(
+        graph.cast(residue_difference, graph.trt.float32),
+        graph.cast(period, graph.trt.float32),
+    )
+    wrapped = graph.unary(quotient, graph.trt.UnaryOperation.ROUND)
+    residue_difference = graph.sub(
+        residue_difference,
+        graph.cast(graph.mul(period, wrapped), residue_difference.dtype),
+    )
+
+    def clipped_difference(lhs, rhs, offset: int, maximum: int, *, difference=None):
+        if difference is None:
+            difference = graph.sub(rows(lhs), columns(rhs))
         difference = graph.add(
             difference,
             graph.integer_scalar_like(offset, difference),
@@ -89,6 +115,7 @@ def _relative_position_encoding(
         features["residue_index"],
         r_max,
         2 * r_max,
+        difference=residue_difference,
     )
     residue = graph.select(
         same_chain,
@@ -230,6 +257,9 @@ def define_trunk_init_network(
         name: network.add_input(name, trt.int32, (1, token_count))
         for name in ("asym_id", "residue_index", "entity_id", "token_index", "sym_id")
     }
+    features["cyclic_period"] = network.add_input(
+        "cyclic_period", trt.float32, (1, token_count)
+    )
     token_bonds = network.add_input(
         "token_bonds",
         trt.float32,

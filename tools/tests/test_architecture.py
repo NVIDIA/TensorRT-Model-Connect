@@ -316,8 +316,12 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     }
     expected_tools = {
         "tools/__init__.py",
+        "tools/brev_exec.py",
         "tools/check_cyclomatic_complexity.py",
         "tools/community_ci.py",
+        "tools/community_gpu_ci.py",
+        "tools/e2e_evidence.py",
+        "tools/e2e_report.py",
         "tools/legal_header_exceptions.toml",
         "tools/legal_headers.py",
         "tools/model_ci.py",
@@ -342,8 +346,10 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_architecture.py",
         "tools/tests/test_coderabbit_config.py",
         "tools/tests/test_community_ci.py",
+        "tools/tests/test_community_gpu_ci.py",
         "tools/tests/test_devtoolkit.py",
         "tools/tests/test_devtoolkit_capabilities.py",
+        "tools/tests/test_e2e_evidence.py",
         "tools/tests/test_family_impact.py",
         "tools/tests/test_new_ci.py",
         "tools/tests/test_pr_metadata.py",

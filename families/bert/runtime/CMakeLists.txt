@@ -36,3 +36,22 @@ set_target_properties(trtmc_model_bert PROPERTIES
 install(TARGETS trtmc_model_bert
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_bert_wordpiece_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/bert/tests/cpp/test_wordpiece_tokenizer.cpp
+    wordpiece_tokenizer.cpp
+  )
+  target_include_directories(test_bert_wordpiece_tokenizer PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(test_bert_wordpiece_tokenizer PRIVATE
+    nlohmann_json::nlohmann_json
+  )
+  target_compile_options(test_bert_wordpiece_tokenizer PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME test_bert_wordpiece_tokenizer COMMAND test_bert_wordpiece_tokenizer)
+  set_tests_properties(test_bert_wordpiece_tokenizer PROPERTIES LABELS cpu)
+endif()

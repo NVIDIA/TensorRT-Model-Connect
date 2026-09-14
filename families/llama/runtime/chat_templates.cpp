@@ -25,6 +25,11 @@ std::string apply_phi(const std::string& prompt, bool /*enable_thinking*/) {
     return "<|user|>\n" + prompt + "<|end|>\n<|assistant|>\n";
 }
 
+// Zephyr / TinyLlama share role tags with Phi but end turns with eos (</s>), not <|end|>.
+std::string apply_zephyr(const std::string& prompt, bool /*enable_thinking*/) {
+    return "<|user|>\n" + prompt + "</s>\n<|assistant|>\n";
+}
+
 std::string apply_gemma(const std::string& prompt, bool /*enable_thinking*/) {
     return "<start_of_turn>user\n" + prompt + "<end_of_turn>\n<start_of_turn>model\n";
 }
@@ -58,9 +63,14 @@ std::string llama_detect_chat_template_format(const std::string& jinja_template)
         return "chatml";
     if (jinja_template.find("[INST]") != std::string::npos)
         return "mistral";
+    // Phi and Zephyr/TinyLlama both use <|user|>/<|assistant|>. Phi is distinguished by
+    // literal <|end|> turn separators; Zephyr/TinyLlama concatenate eos_token (</s>) instead.
     if (jinja_template.find("<|user|>") != std::string::npos ||
-        jinja_template.find("<|assistant|>") != std::string::npos)
-        return "phi";
+        jinja_template.find("<|assistant|>") != std::string::npos) {
+        if (jinja_template.find("<|end|>") != std::string::npos)
+            return "phi";
+        return "zephyr";
+    }
     if (jinja_template.find("<start_of_turn>") != std::string::npos)
         return "gemma";
     if (jinja_template.find("<|start_header_id|>") != std::string::npos)
@@ -82,6 +92,8 @@ std::string llama_apply_chat_template(const std::string& format, const std::stri
         return apply_mistral(prompt, enable_thinking);
     if (format == "phi")
         return apply_phi(prompt, enable_thinking);
+    if (format == "zephyr")
+        return apply_zephyr(prompt, enable_thinking);
     if (format == "gemma")
         return apply_gemma(prompt, enable_thinking);
     if (format == "llama3")

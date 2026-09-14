@@ -4,6 +4,11 @@
 """Direct build, native-runtime, and official-reference E2E for wan_t2v."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
+from families.wan_t2v.tests.reporting import (
+    native_snapshot, record_native_preview, record_report_views, reference_snapshot,
+)
 import json
 import os
 import re
@@ -205,6 +210,8 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     if parallel_size == 1:
         payloads = [
             json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{")
@@ -231,6 +238,7 @@ def _asset(raw: str) -> Path:
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence("inputs", {"asset": path})
     return path
 
 
@@ -263,6 +271,14 @@ def _tie_wan_text_encoder(pipeline) -> None:
         raise RuntimeError("Wan reference text encoder has no shared embedding binding")
     if shared.weight.shape != embedded.weight.shape:
         raise RuntimeError("Wan reference text encoder embedding shapes do not match")
+    if shared.weight.data_ptr() != embedded.weight.data_ptr():
+        # UMT5's encoder shares the checkpoint embedding even when the config
+        # disables output-word-embedding tying. Restore that input alias through
+        # the official setter when tie_weights() leaves it separate.
+        set_input_embeddings = getattr(text_encoder, "set_input_embeddings", None)
+        if callable(set_input_embeddings):
+            set_input_embeddings(shared)
+            embedded = text_encoder.encoder.embed_tokens
     if shared.weight.data_ptr() != embedded.weight.data_ptr():
         raise RuntimeError("Wan reference text encoder tie_weights() did not bind embeddings")
 
@@ -303,9 +319,11 @@ def _native(
             arguments.extend((option, str(float(case[key]))))
     latents_path = tmp_path / "initial-latents.raw"
     np.ascontiguousarray(initial_latents).tofile(latents_path)
+    record_evidence("inputs", {"raw_file": latents_path})
     arguments.extend(("--initial-latents-raw", str(latents_path)))
     payload = _run_json(binary, runtime_root, bundle, manifest, case, command, *arguments)
     payload["artifact"] = str(output)
+    record_native_preview(output)
     return payload
 
 
@@ -344,6 +362,7 @@ def _official_reference(
         "guidance_scale": float(case.get("guidance_scale", 5.0)),
         "latents": reference_latents,
         "generator": generator,
+        "output_type": "pil",
     }
     if int(manifest.get("video_num_frames", 1)) > 1:
         kwargs["num_frames"] = int(manifest["video_num_frames"])
@@ -463,13 +482,23 @@ def test_semantic_artifacts_are_paired(monkeypatch, tmp_path: Path) -> None:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     initial_latents = _initial_latents(manifest, case)
-    actual = _native(
-        binary, runtime_root, bundle, model_dir, manifest, case, tmp_path, initial_latents
-    )
-    expected = _official_reference(model_dir, manifest, case, tmp_path, initial_latents)
-    _assert_contract(actual, expected, manifest, case, _thresholds(case_name))
+    record_evidence("inputs", {"initial_latents": None if initial_latents is None else {"shape": list(initial_latents.shape), "dtype": str(initial_latents.dtype), "note": "The native stage records the supplied raw latent file within the evidence bound."}})
+    with evidence_stage("native"):
+        actual = _native(
+            binary, runtime_root, bundle, model_dir, manifest, case, tmp_path, initial_latents
+        )
+    record_evidence("native", native_snapshot(actual))
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, manifest, case, tmp_path, initial_latents)
+    record_report_views(actual, expected, tmp_path / "paired-report-views")
+    record_evidence("reference", reference_snapshot(expected))
+    with evidence_stage("compare"):
+        _assert_contract(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))

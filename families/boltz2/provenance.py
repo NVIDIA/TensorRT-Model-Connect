@@ -64,7 +64,7 @@ PINNED_BOLTZ2 = Boltz2Provenance(
         recycling_steps=3,
         sampling_steps=200,
         diffusion_samples=1,
-        max_msa_sequences=1024,
+        max_msa_sequences=8,
         seed=42,
         output_format="mmcif",
     ),

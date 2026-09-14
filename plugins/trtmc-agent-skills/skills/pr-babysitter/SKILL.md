@@ -59,7 +59,8 @@ gh pr edit "$PR_NUMBER" \
 ```
 
 If a label event was created for an older SHA, let the bridge report the
-superseded trigger, wait for Community CPU on the current PR head, and retry.
+superseded trigger, wait for `Community CPU / Required` on the current PR head,
+and retry.
 When authorization fails and leaves `run-internal-ci` attached, remove it before
 adding it again; adding an existing label does not emit another label event.
 
@@ -68,8 +69,9 @@ may add the one-shot trigger.
 
 Never use the legacy `run-ci` label. The bridge consumes `run-internal-ci`,
 verifies the open PR targets `main`, and rechecks the event SHA, PR metadata
-SHA, and successful Community CPU run for that head before dispatching only
-`pr_number` and `head_sha`.
+SHA, and a successful `Community CPU / Required` job for that head before
+dispatching only `pr_number` and `head_sha`. The label path does not wait for
+the later Community GPU stage.
 
 Internal CI resolves and tests the exact pull-request merge whose first parent
 is the current `main` revision and whose second parent is the authorized PR

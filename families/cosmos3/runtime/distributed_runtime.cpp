@@ -12,6 +12,7 @@
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -55,6 +56,45 @@ std::filesystem::path rendezvous_path() {
     if (path == nullptr || *path == '\0')
         throw std::runtime_error("cosmos3 context parallel requires TRTMC_NCCL_RENDEZVOUS");
     return path;
+}
+
+bool env_is_one(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+std::string encode_unique_id(const NcclUniqueId& id) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string encoded(sizeof(id.internal) * 2, '0');
+    for (std::size_t index = 0; index < sizeof(id.internal); ++index) {
+        const auto value = static_cast<unsigned char>(id.internal[index]);
+        encoded[index * 2] = digits[value >> 4];
+        encoded[index * 2 + 1] = digits[value & 0x0f];
+    }
+    return encoded;
+}
+
+unsigned char decode_hex_digit(char value) {
+    if (value >= '0' && value <= '9')
+        return static_cast<unsigned char>(value - '0');
+    if (value >= 'a' && value <= 'f')
+        return static_cast<unsigned char>(value - 'a' + 10);
+    if (value >= 'A' && value <= 'F')
+        return static_cast<unsigned char>(value - 'A' + 10);
+    throw std::runtime_error("TRTMC_NCCL_UNIQUE_ID_HEX contains a non-hex character");
+}
+
+NcclUniqueId decode_unique_id(const char* encoded) {
+    if (encoded == nullptr || std::strlen(encoded) != sizeof(NcclUniqueId::internal) * 2) {
+        throw std::runtime_error(
+            "cosmos3 context parallel requires a 256-character TRTMC_NCCL_UNIQUE_ID_HEX");
+    }
+    NcclUniqueId id{};
+    for (std::size_t index = 0; index < sizeof(id.internal); ++index) {
+        id.internal[index] = static_cast<char>((decode_hex_digit(encoded[index * 2]) << 4) |
+                                               decode_hex_digit(encoded[index * 2 + 1]));
+    }
+    return id;
 }
 
 class NcclRuntime {
@@ -186,13 +226,17 @@ DistributedRuntimeGroup initialize_context_parallel_group(int cp_size) {
 
     bind_cuda_device_for_local_rank();
     auto runtime = std::make_shared<NcclRuntime>();
-    const auto path = rendezvous_path();
     NcclUniqueId id{};
     if (group.rank == 0) {
         id = runtime->unique_id();
-        write_unique_id(path, id);
+        if (env_is_one("TRTMC_NCCL_UNIQUE_ID_STDOUT")) {
+            std::cout << "[cosmos3.nccl] unique_id=" << encode_unique_id(id) << std::endl;
+        } else {
+            write_unique_id(rendezvous_path(), id);
+        }
     } else {
-        id = read_unique_id(path);
+        const char* encoded = std::getenv("TRTMC_NCCL_UNIQUE_ID_HEX");
+        id = encoded != nullptr ? decode_unique_id(encoded) : read_unique_id(rendezvous_path());
     }
     runtime->init(cp_size, group.rank, id);
     group.communicator = runtime->communicator();

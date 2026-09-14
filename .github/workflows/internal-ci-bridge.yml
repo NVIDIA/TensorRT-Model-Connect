@@ -85,26 +85,105 @@ jobs:
           state="$(jq -er '.state' <<<"$pull")"
           base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
-          base_sha="$(jq -er '.base.sha' <<<"$pull")"
           head_sha="$(jq -er '.head.sha' <<<"$pull")"
+          merge_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pull")"
 
           test "$state" = "open"
           test "$base_repo" = "$GITHUB_REPOSITORY"
           test "$base_ref" = "main"
-          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Pull request #$PR_NUMBER has no testable merge commit."
+            exit 1
+          }
           if [ "$EVENT_NAME" = "pull_request_target" ] \
             && [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
             echo "::error::The CI trigger was superseded by a newer PR head."
             exit 1
           fi
 
-          community_cpu_run="$(
+          merge="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/git/commits/$merge_sha")"
+          resolved_merge="$(jq -er '.sha' <<<"$merge")"
+          parent_count="$(jq -er '.parents | length' <<<"$merge")"
+          base_sha="$(jq -er '.parents[0].sha' <<<"$merge")"
+          merge_head="$(jq -er '.parents[1].sha' <<<"$merge")"
+          merge_tree="$(jq -er '.tree.sha' <<<"$merge")"
+          test "$resolved_merge" = "$merge_sha"
+          test "$parent_count" = "2"
+          test "$merge_head" = "$head_sha"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$merge_tree" =~ ^[0-9a-f]{40}$ ]]
+
+          # Keep the label path CPU-gated without waiting for the later GPU
+          # stage. GitHub may regenerate a synthetic merge commit with the
+          # same parents and tree, so match its content identity rather than
+          # requiring the ephemeral merge object SHA to remain stable.
+          community_ci_runs="$(
             gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
-              --jq '.workflow_runs | map(select(.conclusion == "success")) | sort_by(.updated_at) | last | .id // empty'
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
+              2>/dev/null || true
           )"
-          if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then
+          community_ci_title_prefix="PR #$PR_NUMBER · community CI · head $head_sha · merge "
+          community_ci_run=""
+          community_cpu_job=""
+          if [ -n "$community_ci_runs" ]; then
+            community_ci_candidates="$(
+              jq -r \
+                --arg title_prefix "$community_ci_title_prefix" \
+                --arg head_sha "$head_sha" \
+                '.workflow_runs
+                 | map(
+                     select(.event == "pull_request" and .head_sha == $head_sha)
+                     | select(.display_title | startswith($title_prefix))
+                     | {
+                         id,
+                         updated_at,
+                         merge_sha: (.display_title | ltrimstr($title_prefix))
+                       }
+                   )
+                 | sort_by(.updated_at)
+                 | reverse
+                 | .[]
+                 | [.id, .merge_sha]
+                 | @tsv' \
+                <<<"$community_ci_runs"
+            )"
+            while IFS=$'\t' read -r candidate_run candidate_merge_sha; do
+              [[ "$candidate_run" =~ ^[1-9][0-9]*$ ]] || continue
+              [[ "$candidate_merge_sha" =~ ^[0-9a-f]{40}$ ]] || continue
+
+              candidate_merge="$(
+                gh api --method GET \
+                  "/repos/$GITHUB_REPOSITORY/git/commits/$candidate_merge_sha" \
+                  2>/dev/null || true
+              )"
+              [ -n "$candidate_merge" ] || continue
+              candidate_resolved="$(jq -r '.sha // empty' <<<"$candidate_merge")"
+              candidate_parent_count="$(jq -r '.parents | length' <<<"$candidate_merge")"
+              candidate_base="$(jq -r '.parents[0].sha // empty' <<<"$candidate_merge")"
+              candidate_head="$(jq -r '.parents[1].sha // empty' <<<"$candidate_merge")"
+              candidate_tree="$(jq -r '.tree.sha // empty' <<<"$candidate_merge")"
+              if [ "$candidate_resolved" != "$candidate_merge_sha" ] \
+                || [ "$candidate_parent_count" != "2" ] \
+                || [ "$candidate_base" != "$base_sha" ] \
+                || [ "$candidate_head" != "$head_sha" ] \
+                || [ "$candidate_tree" != "$merge_tree" ]; then
+                continue
+              fi
+
+              candidate_cpu_job="$(
+                gh api --method GET \
+                  "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run/jobs?filter=latest&per_page=100" \
+                  --jq '.jobs | map(select(.name == "Community CPU / Required" and .conclusion == "success")) | last | .id // empty'
+              )"
+              if [[ "$candidate_cpu_job" =~ ^[1-9][0-9]*$ ]]; then
+                community_ci_run="$candidate_run"
+                community_cpu_job="$candidate_cpu_job"
+                break
+              fi
+            done <<<"$community_ci_candidates"
+          fi
+          if ! [[ "$community_cpu_job" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::Community CPU / Required must pass on the current PR head before internal CI can run."
             exit 1
           fi

@@ -74,6 +74,9 @@ def define_confidence_network(
         name: network.add_input(name, trt.int32, (1, token_count))
         for name in ("asym_id", "residue_index", "entity_id", "token_index", "sym_id")
     }
+    features["cyclic_period"] = network.add_input(
+        "cyclic_period", trt.float32, (1, token_count)
+    )
     token_bonds = network.add_input("token_bonds", trt.float32, (1, token_count, token_count, 1))
     type_bonds = network.add_input("type_bonds", trt.int32, (1, token_count, token_count))
     contact_conditioning = network.add_input(

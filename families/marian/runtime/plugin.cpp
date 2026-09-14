@@ -12,6 +12,7 @@
 //   3. Run decoder autoregressively with cross-attention to encoder output
 //   4. Detokenize output
 
+#include "families/marian/runtime/device_buffer.h"
 #include "families/marian/runtime/distributed_runtime.h"
 #include "families/marian/runtime/kv_cache.h"
 #include "families/marian/runtime/plugin_helpers.h"
@@ -187,23 +188,8 @@ class MarianPipeline final : public ITextGeneration {
           model_id_(std::move(model_id_str)) {
         cross_kv_bytes_ = static_cast<size_t>(max_enc_seq_len_) *
                           static_cast<size_t>(hidden_size_) * sizeof(float);
-        for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-            void* dk = nullptr;
-            void* dv = nullptr;
-            cudaMalloc(&dk, cross_kv_bytes_);
-            cudaMalloc(&dv, cross_kv_bytes_);
-            cross_k_ptrs_.push_back(dk);
-            cross_v_ptrs_.push_back(dv);
-        }
-    }
-
-    ~MarianPipeline() override {
-        for (auto* p : cross_k_ptrs_)
-            cudaFree(p);
-        for (auto* p : cross_v_ptrs_)
-            cudaFree(p);
-        if (enc_mask_device_)
-            cudaFree(enc_mask_device_);
+        marian::allocate_cross_kv(cross_k_ptrs_, cross_v_ptrs_, num_decoder_layers_,
+                                  cross_kv_bytes_);
     }
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg) override {
@@ -267,10 +253,12 @@ class MarianPipeline final : public ITextGeneration {
 
     void setup_cross_attention() {
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-            cudaMemcpyAsync(cross_k_ptrs_[static_cast<size_t>(i)], encoder_output_host_.data(),
-                            cross_kv_bytes_, cudaMemcpyHostToDevice, stream_);
-            cudaMemcpyAsync(cross_v_ptrs_[static_cast<size_t>(i)], encoder_output_host_.data(),
-                            cross_kv_bytes_, cudaMemcpyHostToDevice, stream_);
+            cudaMemcpyAsync(cross_k_ptrs_[static_cast<size_t>(i)].get(),
+                            encoder_output_host_.data(), cross_kv_bytes_, cudaMemcpyHostToDevice,
+                            stream_);
+            cudaMemcpyAsync(cross_v_ptrs_[static_cast<size_t>(i)].get(),
+                            encoder_output_host_.data(), cross_kv_bytes_, cudaMemcpyHostToDevice,
+                            stream_);
         }
         cudaStreamSynchronize(stream_);
 
@@ -278,19 +266,18 @@ class MarianPipeline final : public ITextGeneration {
         for (int32_t i = 0; i < actual_enc_len_; ++i)
             enc_mask_host[static_cast<size_t>(i)] = 0.0f;
         size_t mask_bytes = static_cast<size_t>(max_enc_seq_len_) * sizeof(float);
-        if (!enc_mask_device_)
-            cudaMalloc(&enc_mask_device_, mask_bytes);
-        cudaMemcpyAsync(enc_mask_device_, enc_mask_host.data(), mask_bytes, cudaMemcpyHostToDevice,
-                        stream_);
+        marian::ensure_encoder_mask(enc_mask_device_, mask_bytes);
+        cudaMemcpyAsync(enc_mask_device_.get(), enc_mask_host.data(), mask_bytes,
+                        cudaMemcpyHostToDevice, stream_);
         cudaStreamSynchronize(stream_);
 
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
             std::string ck_name = "cross_k_" + std::to_string(i);
             std::string cv_name = "cross_v_" + std::to_string(i);
-            decoder_->bind_external(ck_name, cross_k_ptrs_[static_cast<size_t>(i)]);
-            decoder_->bind_external(cv_name, cross_v_ptrs_[static_cast<size_t>(i)]);
+            decoder_->bind_external(ck_name, cross_k_ptrs_[static_cast<size_t>(i)].get());
+            decoder_->bind_external(cv_name, cross_v_ptrs_[static_cast<size_t>(i)].get());
         }
-        decoder_->bind_external("encoder_mask", enc_mask_device_);
+        decoder_->bind_external("encoder_mask", enc_mask_device_.get());
     }
 
     std::vector<int32_t> run_decoder(int32_t max_new_tokens, int32_t eos_id) {
@@ -362,13 +349,13 @@ class MarianPipeline final : public ITextGeneration {
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
 
-    std::vector<void*> cross_k_ptrs_;
-    std::vector<void*> cross_v_ptrs_;
+    std::vector<marian::DeviceBuffer> cross_k_ptrs_;
+    std::vector<marian::DeviceBuffer> cross_v_ptrs_;
     size_t cross_kv_bytes_{0};
 
     std::vector<float> encoder_output_host_;
     int32_t actual_enc_len_{0};
-    void* enc_mask_device_{nullptr};
+    marian::DeviceBuffer enc_mask_device_;
 };
 
 ITask* create_marian(const FamilyContext& context) {

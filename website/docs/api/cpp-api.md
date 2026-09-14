@@ -19,6 +19,24 @@ Each family DSO directly implements one or more interfaces from
 `trtmc/task.h`. The loader verifies that `ITask::task()` exactly matches the
 bundle header.
 
+### Object detection
+
+Bundles whose header task is `object_detection` expose `IObjectDetection`.
+The family owns its score calibration and returns only the boxes it keeps.
+
+```cpp
+auto task = trtmc::load_task("detr-resnet-50.bundle", "/opt/trtmc/lib");
+auto* detector = dynamic_cast<trtmc::IObjectDetection*>(task.get());
+if (detector == nullptr) throw std::runtime_error("not an object-detection bundle");
+auto result = detector->detect(pixels.data(), height, width);
+```
+
+The command-line equivalent is:
+
+```text
+trtmc detect detr-resnet-50.bundle --runtime-root /opt/trtmc/lib --image input.jpg
+```
+
 `load_task()` lives in `libtrtmc_runtime.so`; bundle reading and engine
 primitives live in `libtrtmc_core.so`. A family factory receives a
 `FamilyContext` containing a `const BundleReader&` and an abstract `IBackend&`.

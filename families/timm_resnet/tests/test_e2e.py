@@ -4,6 +4,8 @@
 """Direct build, native-runtime, and official-reference E2E for timm_resnet."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import evidence_stage, record_evidence
 import json
 import os
 import shutil
@@ -184,6 +186,10 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence(
+        "native_process",
+        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -202,6 +208,7 @@ def _asset(raw: str) -> Path:
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence("inputs", {"asset": path})
     return path
 
 
@@ -258,10 +265,19 @@ def _assert_parity(actual, expected) -> None:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
+    record_evidence("thresholds", {"top1_match": True})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
-    actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
-    expected = _official_reference(model_dir, manifest, case, tmp_path)
-    _assert_parity(actual, expected)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
+    record_evidence("native", actual)
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, manifest, case, tmp_path)
+    record_evidence("reference", {**expected, "top_class": int(np.argmax(expected["logits"]))})
+    with evidence_stage("compare"):
+        _assert_parity(actual, expected)

@@ -24,6 +24,7 @@ namespace trtmc::boltz2 {
 struct EngineSet {
     std::unique_ptr<ITrtModule> input;
     std::unique_ptr<ITrtModule> trunk_init;
+    std::unique_ptr<ITrtModule> template_engine;
     std::unique_ptr<ITrtModule> msa;
     std::array<std::unique_ptr<ITrtModule>, kPairformerSegments> pairformer;
     std::unique_ptr<ITrtModule> conditioning;
@@ -54,6 +55,7 @@ class Boltz2Pipeline final : public IStructurePrediction {
     void uploadFeatures();
     void allocateRuntimeTensors();
     void bindTrunkEngines();
+    void bindTemplatePath();
     ITrtModule* bindPairformerEngines();
     void bindDiffusionEngines(ITrtModule& trunk_output);
     void bindConfidenceEngine(ITrtModule& trunk_output);
@@ -76,6 +78,7 @@ class Boltz2Pipeline final : public IStructurePrediction {
     int atom_count_{0};
     int active_token_count_{0};
     int active_atom_count_{0};
+    bool use_templates_{false};
     std::vector<int32_t> confidence_chain_ids_;
     std::vector<std::vector<float>> confidence_chain_pairs_;
     cudaStream_t stream_{nullptr};

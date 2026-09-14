@@ -15,12 +15,13 @@ trt = pytest.importorskip("tensorrt")
 from .. import graph_ops  # noqa: E402
 
 
-def test_fp32_input_with_bf16_target_uses_exact_fp32_carrier() -> None:
+def test_fp32_input_with_bf16_target_preserves_exact_rounding() -> None:
     values = np.array([1.001, -0.3333, 17.0625], dtype=np.float32)
     carrier = graph_ops._constant_carrier(values, ml_dtypes.bfloat16)
-    expected = values.astype(ml_dtypes.bfloat16).astype(np.float32)
+    expected = values.astype(ml_dtypes.bfloat16)
 
-    assert carrier.dtype == np.float32
+    assert carrier.dtype == np.dtype(ml_dtypes.bfloat16)
+    assert carrier.nbytes == values.size * 2
     assert carrier.flags.c_contiguous
     np.testing.assert_array_equal(carrier, expected)
     assert not np.array_equal(carrier, values)
@@ -51,7 +52,7 @@ def test_bf16_target_serializes_in_strongly_typed_network(values_dtype) -> None:
         np.array([1.001, -0.3333, 17.0625], dtype=values_dtype),
         dtype=ml_dtypes.bfloat16,
     )
-    assert constant.dtype == trt.float32
+    assert constant.dtype == trt.bfloat16
     constant_bf16 = network.add_cast(constant, trt.bfloat16).get_output(0)
     output = network.add_elementwise(
         input_tensor, constant_bf16, trt.ElementWiseOperation.SUM

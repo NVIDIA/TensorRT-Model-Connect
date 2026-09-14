@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -211,7 +212,22 @@ int run_qualification(int argc, char** argv) {
               << ",\"startup_ms\":" << startup_ms << ",\"gpu_memory_delta_mib\":" << gpu_delta_mib
               << ",\"gpu_memory_total_mib\":" << static_cast<double>(total_memory) / (1 << 20)
               << ",\"refinement_ms\":" << result.refinement_ms
-              << ",\"scoring_ms\":" << result.scoring_ms << "}\n";
+              << ",\"scoring_ms\":" << result.scoring_ms
+              << std::setprecision(std::numeric_limits<double>::max_digits10)
+              << ",\"tracking_latency_min_ms\":" << minimum
+              << ",\"tracking_latency_max_ms\":" << maximum
+              << ",\"tracking_warmup_runs\":" << warmup_runs
+              << ",\"tracking_benchmark_runs\":" << benchmark_runs
+              << ",\"tracking_num_hypotheses\":" << tracking.num_hypotheses
+              << ",\"tracking_refinement_iterations\":" << tracking.refinement_iterations
+              << ",\"tracking_score_hypotheses\":" << (tracking.score_hypotheses ? "true" : "false")
+              << ",\"tracking_latency_samples_ms\":[";
+    for (std::size_t index = 0; index < timings.size(); ++index) {
+        if (index != 0)
+            std::cout << ',';
+        std::cout << timings[index];
+    }
+    std::cout << "]}\n";
     return 0;
 }
 

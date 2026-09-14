@@ -126,27 +126,20 @@ class _Qwen3OmniModel:
             expert_down = np.empty((num_experts, moe_intermediate, hidden), dtype=target_dtype)
             for expert in range(num_experts):
                 expert_source = f"{source}.mlp.experts.{expert}"
-                expected = {
-                    "gate_proj": (moe_intermediate, hidden),
-                    "up_proj": (moe_intermediate, hidden),
-                    "down_proj": (hidden, moe_intermediate),
-                }
-                mapped = {}
-                for projection in ("gate_proj", "up_proj", "down_proj"):
+                for projection, destination, expected_shape in (
+                    ("gate_proj", expert_gate, (moe_intermediate, hidden)),
+                    ("up_proj", expert_up, (moe_intermediate, hidden)),
+                    ("down_proj", expert_down, (hidden, moe_intermediate)),
+                ):
                     tensor = _load_tensor(readers, f"{expert_source}.{projection}.weight")
-                    if tensor.shape != expected[projection]:
+                    if tensor.shape != expected_shape:
                         raise ValueError(
                             f"Qwen3-Omni Thinker layer {layer} expert {expert} "
                             f"{projection} shape is invalid"
                         )
-                    mapped[projection] = _transpose_2d(
-                        tensor,
-                        f"thinker.layer.{layer}.expert.{expert}.{projection}",
-                        precision,
-                    )
-                expert_gate[expert] = mapped["gate_proj"]
-                expert_up[expert] = mapped["up_proj"]
-                expert_down[expert] = mapped["down_proj"]
+                    # Copy the transposed view directly into the packed BF16
+                    # destination, without an intermediate expert allocation.
+                    destination[expert] = tensor.T
             weights[f"{target}.experts.w_gate"] = expert_gate
             weights[f"{target}.experts.w_up"] = expert_up
             weights[f"{target}.experts.w_down"] = expert_down

@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -242,6 +243,20 @@ class FakeControl final : public trtmc::IRobotControl {
     void reset() override {}
 };
 
+class FakeDetection final : public trtmc::IObjectDetection {
+  public:
+    const char* task() const noexcept override { return trtmc::IObjectDetection::kTask; }
+
+    trtmc::ObjectDetectionResult detect(const float*, std::int32_t, std::int32_t) override {
+        trtmc::ObjectDetectionResult result;
+        result.boxes.push_back(trtmc::DetectionBox{10.0F, 20.0F, 30.0F, 40.0F, 0.95F, 2});
+        result.boxes.push_back(trtmc::DetectionBox{50.0F, 60.0F, 70.0F, 80.0F, 0.85F, 7});
+        result.image_height = 1;
+        result.image_width = 1;
+        return result;
+    }
+};
+
 bool dispatch_throws(const trtmc::cli::Command& command, trtmc::ITask& task) {
     try {
         std::ostringstream output;
@@ -261,6 +276,7 @@ int main() {
         "embed",
         "rerank",
         "classify",
+        "detect",
         "extract-features",
         "disparity",
         "geometry",
@@ -792,6 +808,29 @@ int main() {
     std::filesystem::remove(control_image_path);
     std::filesystem::remove(control_state_path);
     std::filesystem::remove(control_output_path);
+
+    const std::filesystem::path detect_image_path = "/tmp/trtmc-cli-detect.png";
+    trtmc::cli::io::save_png(detect_image_path.string(), std::vector<float>{0.25F, 0.5F, 0.75F}, 1,
+                             1);
+    FakeDetection detection_task;
+    trtmc::cli::Command detect_command;
+    detect_command.kind = trtmc::cli::CommandKind::kDetect;
+    detect_command.name = "detect";
+    detect_command.options.emplace("--image", detect_image_path.string());
+    std::ostringstream detection_output;
+    check(trtmc::cli::dispatch(detect_command, detection_task, detection_output) == 0,
+          "object detection CLI dispatch succeeds");
+    const auto detection_json = nlohmann::json::parse(detection_output.str());
+    check(detection_json.at("boxes").get<std::vector<float>>() ==
+                  std::vector<float>({10.0F, 20.0F, 30.0F, 40.0F, 50.0F, 60.0F, 70.0F, 80.0F}) &&
+              detection_json.at("scores").get<std::vector<float>>() ==
+                  std::vector<float>({0.95F, 0.85F}) &&
+              detection_json.at("classes").get<std::vector<std::int32_t>>() ==
+                  std::vector<std::int32_t>({2, 7}) &&
+              detection_json.at("image_height").get<std::int32_t>() == 1 &&
+              detection_json.at("image_width").get<std::int32_t>() == 1,
+          "object detection CLI emits the complete detection result");
+    std::filesystem::remove(detect_image_path);
 
     const auto throws_runtime = [](const auto& operation) {
         try {
