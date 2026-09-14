@@ -425,6 +425,16 @@ if(TRTMC_BUILD_TESTS)
   set_tests_properties(trt_module_dynamic_input PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
 
   if(TRTMC_BUILD_EXAMPLES)
+    add_executable(test_audio_observation apps/benchmark/tests/native/test_audio_observation.cpp)
+    target_include_directories(test_audio_observation PRIVATE
+      ${PROJECT_SOURCE_DIR}/apps/benchmark/native
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_link_libraries(test_audio_observation PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_options(test_audio_observation PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME audio_observation COMMAND test_audio_observation)
+    set_tests_properties(audio_observation PROPERTIES LABELS "cpu")
+
     add_executable(test_dataset_answer apps/benchmark/tests/native/test_dataset_answer.cpp)
     target_include_directories(test_dataset_answer PRIVATE
       ${PROJECT_SOURCE_DIR}/apps/benchmark/native
