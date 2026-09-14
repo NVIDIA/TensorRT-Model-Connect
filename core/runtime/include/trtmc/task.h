@@ -404,7 +404,7 @@ struct AudioGenerationConfig {
     std::int32_t seed{-1};
 };
 
-// Legacy mono streaming callback; multichannel output is represented by AudioResult.
+// Legacy mono streaming callback; multichannel streaming uses AudioChunkView.
 using AudioChunkCallback =
     std::function<void(const float* samples, std::int32_t num_samples, std::int32_t sample_rate)>;
 

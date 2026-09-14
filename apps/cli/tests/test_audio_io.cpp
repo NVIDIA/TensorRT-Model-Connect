@@ -103,7 +103,8 @@ int main() {
         rejects({{1.0F, 2.0F}, 1, 48000, 2});
         rejects({{1.0F, 2.0F}, -1, 48000, 2});
         rejects({{1.0F, 2.0F}, 2, std::numeric_limits<std::int32_t>::max(), 2});
-        rejects({std::vector<float>(8192), 8192, 48000, 8192});
+        // A 16384-channel float32 frame exceeds uint16 block alignment.
+        rejects({std::vector<float>(16384), 16384, 48000, 16384});
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         ++failures;

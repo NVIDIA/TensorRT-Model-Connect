@@ -33,9 +33,9 @@ contract. The backend owns TensorRT runtime objects, not model policy.
 returning or copy the lightweight `BundleReader` into the pipeline for deferred
 reads; it must not retain a reference to the temporary factory context.
 
-## Audio output contract
+## Legacy audio output contract
 
-`AudioResult` carries interleaved float PCM. `num_channels` defaults to one;
+The legacy `AudioResult` carries interleaved float PCM. `num_channels` defaults to one;
 for stereo the buffer order is `L0, R0, L1, R1, ...`. `num_samples` counts total
 scalar samples, not frames per channel; zero leaves the count unspecified and
 consumers use `samples.size()`. A nonzero count must match the buffer size.
