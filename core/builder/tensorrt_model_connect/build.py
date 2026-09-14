@@ -40,6 +40,12 @@ class BuildRequest:
     quantization: str | None = None
     fp32_layers: tuple[int, ...] = ()
     dynamic_kv_cache: bool = False
+    # Build a stripped plan: large weights become null placeholders and are
+    # supplied by refit at load time. Supported families only.
+    strip_weights: bool = False
+    # Keep checkpoint weight layout/dtype and let TensorRT transpose in the
+    # matmul, so refit can be fed the checkpoint bytes with no conversion.
+    native_layout: bool = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
 

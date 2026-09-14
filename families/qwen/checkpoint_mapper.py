@@ -24,8 +24,19 @@ from safetensors import safe_open
 from .config import ModelConfig
 
 
+_NATIVE_LAYOUT = False
+
+
 def _target_np_dtype(precision: str) -> np.dtype:
-    """Map precision string to numpy dtype for weight storage."""
+    """Map precision string to numpy dtype for weight storage.
+
+    Note bf16 normally stores as fp16 and is cast to bfloat16 inside the
+    graph. Under native layout a bf16 build keeps genuine bfloat16, so the
+    checkpoint's own bytes are already what the engine wants and refit can
+    be fed from the checkpoint with no conversion at all.
+    """
+    if precision == "bf16" and _NATIVE_LAYOUT:
+        return np.dtype(ml_dtypes.bfloat16)
     if precision in ("fp16", "bf16"):
         return np.float16
     return np.float32
@@ -155,7 +166,7 @@ def load_standard_weights(
             target_dtype,
         )
 
-        q_hidden = q_t.shape[1]
+        q_hidden = q_t.shape[0 if _NATIVE_LAYOUT else 1]
 
         layer[f"{prefix}.w_q"] = q_t
         layer[f"{prefix}.w_k"] = k_t
@@ -204,7 +215,7 @@ def load_standard_weights(
             "down_proj",
             target_dtype,
         )
-        layer_mlp_size = layer[f"{prefix}.w_gate"].shape[1]
+        layer_mlp_size = layer[f"{prefix}.w_gate"].shape[0 if _NATIVE_LAYOUT else 1]
 
         return layer_idx, layer, q_hidden, layer_mlp_size
 
@@ -227,7 +238,7 @@ def load_standard_weights(
         if attention_size == 0:
             attention_size = layer_attention_size
             first_k = layer[f"layer.{_layer_idx}.w_k"]
-            kv_attention_size = int(first_k.shape[1])
+            kv_attention_size = int(first_k.shape[0 if _NATIVE_LAYOUT else 1])
         if mlp_size == 0:
             mlp_size = layer_mlp_size
 
@@ -335,12 +346,29 @@ def _load_tensor_as_dtype(readers: list, name: str, dtype: np.dtype) -> np.ndarr
     return _copy_to_numpy(_get_tensor(readers, name), dtype)
 
 
+# Native layout: projection weights keep the checkpoint's [out, in] layout and
+# the graph asks TensorRT to transpose them in the matmul instead (see
+# graph_ops.add_matmul_rhs_constant(hf_layout=True)). Removes the host-side
+# transpose and the array copy it forces.
+
+
+def set_native_layout(enabled: bool) -> None:
+    global _NATIVE_LAYOUT
+    _NATIVE_LAYOUT = bool(enabled)
+
+
+def native_layout() -> bool:
+    return _NATIVE_LAYOUT
+
+
 def _load_transposed_tensor(
     readers: list,
     name: str,
     transpose_name: str,
     dtype: np.dtype,
 ) -> np.ndarray:
+    if _NATIVE_LAYOUT:
+        return _copy_to_numpy(_get_tensor(readers, name), dtype)
     return _copy_to_numpy(_get_tensor(readers, name), dtype, transpose_name=transpose_name)
 
 

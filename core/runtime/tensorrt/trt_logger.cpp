@@ -53,9 +53,13 @@ void TrtLogger::clear_error() {
     mLastError.clear();
 }
 
-TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime() {
+TrtLogger& trt_shared_logger() {
     static TrtLogger logger;
-    return TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
+    return logger;
+}
+
+TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime() {
+    return TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(trt_shared_logger()));
 }
 
 } // namespace trtmc

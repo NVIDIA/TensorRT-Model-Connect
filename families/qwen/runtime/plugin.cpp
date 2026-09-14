@@ -8,6 +8,7 @@
 #include "families/qwen/runtime/kv_cache.h"
 #include "families/qwen/runtime/pipeline.h"
 #include "families/qwen/runtime/plugin_helpers.h"
+#include "families/qwen/runtime/refit_weights.h"
 #include "families/qwen/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
 
@@ -173,15 +174,43 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
     DistributedRuntimeGroup group = initialize_tensor_parallel_group(config.tensor_parallel_size);
     DecoderModules modules;
     modules.distributed_owner = group.owner;
+
+    // A bundle built with --strip-weights carries no weight values in its
+    // plans; they live in a side section and must be refit into the engine
+    // before any execution context exists. `storage` backs the views, so it
+    // must outlive every create_module call below.
+    std::vector<char> refit_storage;
+    QwenRefitSource refit_source;
+    if (context.reader.find_section(kQwenRefitManifestSection) != nullptr) {
+        // Weights were left in the checkpoint; map it instead of copying.
+        const auto manifest = context.reader.read_section(kQwenRefitManifestSection);
+        refit_source = load_qwen_refit_from_manifest(
+            std::string(manifest.begin(), manifest.end()));
+        std::cerr << "[trtmc] Refit weights: " << refit_source.weights().size()
+                  << " tensors mapped from the checkpoint ("
+                  << (refit_source.mapped_bytes() >> 20) << " MiB mapped)\n";
+    } else if (context.reader.find_section(kQwenRefitWeightsSection) != nullptr) {
+        refit_storage = context.reader.read_section(kQwenRefitWeightsSection);
+        refit_source = parse_qwen_refit_weights(refit_storage);
+        std::cerr << "[trtmc] Refit weights: " << refit_source.weights().size()
+                  << " tensors (" << (refit_storage.size() >> 20) << " MiB)\n";
+    }
+
+    ModuleCreateOptions refit_options;
+    if (!refit_source.empty())
+        refit_options.refit_weights = &refit_source.weights();
+
     if (config.decoder_engine_layout == "split") {
         modules.decode = load_engine(
-            context.backend, require_section(context.reader, "engine.plan"), "qwen decoder");
+            context.backend, require_section(context.reader, "engine.plan"), "qwen decoder",
+            refit_options);
         modules.prefill = load_engine(
-            context.backend, require_section(context.reader, "prefill.plan"), "qwen prefill");
+            context.backend, require_section(context.reader, "prefill.plan"), "qwen prefill",
+            refit_options);
         return modules;
     }
 
-    ModuleCreateOptions options;
+    ModuleCreateOptions options = refit_options;
     if (config.tensor_parallel_size > 1) {
         options.distributed_communicator = group.communicator;
         options.distributed_owner = group.owner;

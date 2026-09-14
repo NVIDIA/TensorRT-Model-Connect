@@ -10,6 +10,8 @@ Qwen3 modes fail closed. Other Qwen variants retain their explicit graph routes.
 
 from __future__ import annotations
 
+import sys
+
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,6 +25,8 @@ from .build_routing import (
     native_kv_build_capability,
     native_kv_cache_geometry,
 )
+from . import checkpoint_mapper
+from . import weight_stripping
 from .native_kv_contract import validate_native_kv_weights
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine
@@ -70,6 +74,25 @@ def _uses_qualified_qwen3_fp8_path(
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
+
+
+
+# Bundle section carrying the omitted weight values; the C++ runtime
+# looks for this exact name.
+REFIT_WEIGHTS_SECTION = "refit_weights"
+# Emitted instead when the checkpoint already holds the exact bytes.
+REFIT_MANIFEST_SECTION = "refit_manifest.json"
+
+
+def _strip_weights_requested(config: ModelConfig) -> bool:
+    """Read the family-owned weight-stripping build flag."""
+    if not config.raw.get("_strip_weights"):
+        return False
+    if config.raw.get("_quantized_build_requested"):
+        raise ValueError("strip_weights is not supported for quantized builds")
+    if config.raw.get("_parallel_build_enabled"):
+        raise ValueError("strip_weights is not supported for tensor-parallel builds")
+    return True
 
 
 class _QwenModel:
@@ -133,16 +156,30 @@ class _QwenModel:
                     "native Qwen3 requires explicit split engine role "
                     f"'prefill' or 'decode', got {role!r}"
                 )
-            return build_dual_profile_decoder_engine(
-                config,
-                weights,
-                max_cache_length,
-                precision=precision,
-                quant_ctx=None,
-                verbose=verbose,
-                profile_mode=role,
-                native_kv_cache=True,
-            )
+            def _build_native() -> bytes:
+                return build_dual_profile_decoder_engine(
+                    config,
+                    weights,
+                    max_cache_length,
+                    precision=precision,
+                    quant_ctx=None,
+                    verbose=verbose,
+                    profile_mode=role,
+                    native_kv_cache=True,
+                )
+
+            if not _strip_weights_requested(config):
+                return _build_native()
+            # Stripped build: GEMM operands become null placeholders and their
+            # values are collected for a refit sidecar instead of being baked.
+            session = weight_stripping.StripSession()
+            with weight_stripping.stripping(session):
+                plan = _build_native()
+            config.raw.setdefault("_strip_sessions", {})[role] = session
+            print(f"[trtmc build] Stripped {len(session.entries)} weights "
+                  f"({session.total_bytes / (1 << 20):.1f} MiB) from the "
+                  f"{role} engine", file=sys.stderr)
+            return plan
 
         if capability.applicable and not qualified_fp8:
             raise ValueError(
@@ -228,6 +265,146 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _QwenModel, **u
     return runtime
 
 
+
+def _add_refit_weights_section(config: ModelConfig, writer: "BundleWriter") -> None:
+    """Carry the refit weights for a stripped plan inside the bundle.
+
+    A stripped engine holds no weight values, so the bundle ships them in a
+    safetensors section and the runtime feeds them to ``IRefitter`` before
+    creating any execution context. Both the prefill and decode engines want
+    the identical set, so one section serves both and the weights are stored
+    once rather than baked twice.
+    """
+    sessions = config.raw.get("_strip_sessions") or {}
+    if not sessions:
+        return
+    from safetensors.numpy import save
+
+    merged: dict = {}
+    for role, session in sorted(sessions.items()):
+        for name, array in session.entries.items():
+            existing = merged.get(name)
+            if existing is None:
+                merged[name] = array
+            elif existing.shape != array.shape or existing.dtype != array.dtype:
+                raise ValueError(
+                    f"engine role {role!r} disagrees on weight {name!r}: "
+                    f"{existing.shape}/{existing.dtype} vs {array.shape}/{array.dtype}")
+    # Under native layout every stripped weight is byte-identical to a tensor
+    # already in the checkpoint, so the bundle can point at it instead of
+    # carrying a second copy. Verified byte-for-byte below; any mismatch falls
+    # back to embedding the weights.
+    manifest = _refit_manifest(config, merged)
+    if manifest is not None:
+        writer.add_json(REFIT_MANIFEST_SECTION, manifest)
+        total = sum(e["nbytes"] for e in manifest["weights"].values())
+        print(f"[trtmc build] Refit manifest: {len(manifest['weights'])} weights "
+              f"({total / (1 << 20):.1f} MiB) referenced in place from the checkpoint "
+              f"-- no weights copied into the bundle", file=sys.stderr)
+        return
+
+    payload = save(merged)
+    writer.add_bytes(REFIT_WEIGHTS_SECTION, payload)
+    print(f"[trtmc build] Refit weights section: {len(merged)} weights "
+          f"({len(payload) / (1 << 20):.1f} MiB)", file=sys.stderr)
+
+
+# HF checkpoint tensor for each stripped weight. Only meaningful under native
+# layout, where no transform is applied; every entry is verified byte-for-byte
+# against the loaded array before the manifest is emitted, so a wrong or stale
+# mapping downgrades to embedding the weights rather than shipping bad offsets.
+_HF_PROJECTION = {
+    "w_q": "self_attn.q_proj", "w_k": "self_attn.k_proj", "w_v": "self_attn.v_proj",
+    "w_o": "self_attn.o_proj", "w_gate": "mlp.gate_proj", "w_up": "mlp.up_proj",
+    "w_down": "mlp.down_proj",
+}
+
+
+def _hf_tensor_name(name: str, tied_embeddings: bool) -> str | None:
+    if name == "embedding":
+        return "model.embed_tokens.weight"
+    if name == "w_out":
+        return "model.embed_tokens.weight" if tied_embeddings else "lm_head.weight"
+    if not name.startswith("layer."):
+        return None
+    _, index, short = name.split(".", 2)
+    hf = _HF_PROJECTION.get(short)
+    return f"model.layers.{index}.{hf}.weight" if hf else None
+
+
+def _safetensors_index(model_dir: Path) -> dict:
+    """Map tensor name -> (file, absolute byte offset, nbytes, dtype)."""
+    import struct
+
+    index: dict[str, tuple[str, int, int, str]] = {}
+    shards = sorted(model_dir.glob("*.safetensors"))
+    for shard in shards:
+        with shard.open("rb") as handle:
+            header_len = struct.unpack("<Q", handle.read(8))[0]
+            header = json.loads(handle.read(header_len))
+        data_start = 8 + header_len
+        for tensor, meta in header.items():
+            if tensor == "__metadata__":
+                continue
+            begin, end = meta["data_offsets"]
+            index[tensor] = (shard.name, data_start + begin, end - begin, meta["dtype"])
+    return index
+
+
+def _refit_manifest(config: ModelConfig, merged: dict) -> dict | None:
+    """Describe where each stripped weight already lives in the checkpoint.
+
+    Returns None when any weight is not byte-identical to a checkpoint tensor,
+    in which case the caller embeds the weights instead.
+    """
+    if not checkpoint_mapper.native_layout():
+        return None
+    model_dir = Path(str(config.raw.get("_model_dir") or ""))
+    if not model_dir.is_dir():
+        return None
+    try:
+        index = _safetensors_index(model_dir)
+    except (OSError, ValueError, KeyError):
+        return None
+
+    tied = "lm_head.weight" not in index
+    entries: dict[str, dict] = {}
+    handles: dict[str, object] = {}
+    try:
+        for name, array in merged.items():
+            key = _hf_tensor_name(name, tied)
+            if key is None or key not in index:
+                return None
+            shard, offset, nbytes, dtype = index[key]
+            if nbytes != int(array.nbytes):
+                return None
+            handle = handles.get(shard)
+            if handle is None:
+                handle = handles[shard] = (model_dir / shard).open("rb")
+            handle.seek(offset)
+            # Byte-for-byte proof that pointing at the checkpoint is safe.
+            if handle.read(nbytes) != array.tobytes():
+                return None
+            entries[name] = {
+                "file": shard, "offset": offset, "nbytes": nbytes,
+                "dtype": dtype, "shape": [int(d) for d in array.shape],
+            }
+    finally:
+        for handle in handles.values():
+            handle.close()
+
+    files = {
+        shard: {"nbytes": (model_dir / shard).stat().st_size}
+        for shard in sorted({e["file"] for e in entries.values()})
+    }
+    return {
+        "schema_version": 1,
+        "checkpoint_dir": str(model_dir),
+        "files": files,
+        "weights": entries,
+    }
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen bundle through family-owned code."""
     if request.dynamic_kv_cache:
@@ -292,6 +469,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
     config.raw["_quantized_build_requested"] = quantized
+    config.raw["_strip_weights"] = bool(getattr(request, "strip_weights", False))
     quant_ctx = None
     if quantized:
         from . import graph_ops
@@ -299,10 +477,31 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
         config.raw["_decoder_engine_layout"] = "dual_profile"
         quant_ctx = calibrate_qwen_fp8(model_dir, config, graph_ops)
-    weights = model.load_weights(str(model_dir), config, precision=precision)
-    writer.set_header(family="qwen", task=request.task, backend=request.backend)
-    if quantized and parallel.enabled:
-        for rank in range(parallel.tp_size):
+    native_layout = bool(getattr(request, "native_layout", False))
+    if native_layout and precision != "bf16":
+        raise ValueError("--native-layout requires --precision bf16 "
+                         "(the checkpoint dtype must match the engine dtype)")
+    if native_layout and quantized:
+        raise ValueError("--native-layout is not supported for quantized builds")
+    checkpoint_mapper.set_native_layout(native_layout)
+    try:
+        weights = model.load_weights(str(model_dir), config, precision=precision)
+        writer.set_header(family="qwen", task=request.task, backend=request.backend)
+        if quantized and parallel.enabled:
+            for rank in range(parallel.tp_size):
+                plan = model.build_engine(
+                    config,
+                    weights,
+                    max_sequence_length,
+                    precision=precision,
+                    quant_ctx=quant_ctx,
+                    verbose=bool(request.verbose),
+                    debug_layer_outputs=False,
+                    parallel_config=parallel.for_rank(rank),
+                )
+                writer.add_bytes(f"engine.rank{rank}.plan", plan)
+            layout = "dual_profile"
+        elif quantized:
             plan = model.build_engine(
                 config,
                 weights,
@@ -311,26 +510,27 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 quant_ctx=quant_ctx,
                 verbose=bool(request.verbose),
                 debug_layer_outputs=False,
-                parallel_config=parallel.for_rank(rank),
+                parallel_config=parallel,
             )
-            writer.add_bytes(f"engine.rank{rank}.plan", plan)
-        layout = "dual_profile"
-    elif quantized:
-        plan = model.build_engine(
-            config,
-            weights,
-            max_sequence_length,
-            precision=precision,
-            quant_ctx=quant_ctx,
-            verbose=bool(request.verbose),
-            debug_layer_outputs=False,
-            parallel_config=parallel,
-        )
-        writer.add_bytes("engine.plan", plan)
-        layout = "dual_profile"
-    elif parallel.enabled:
-        for rank in range(parallel.tp_size):
-            plan = model.build_engine(
+            writer.add_bytes("engine.plan", plan)
+            layout = "dual_profile"
+        elif parallel.enabled:
+            for rank in range(parallel.tp_size):
+                plan = model.build_engine(
+                    config,
+                    weights,
+                    max_sequence_length,
+                    precision=precision,
+                    quant_ctx=None,
+                    verbose=bool(request.verbose),
+                    debug_layer_outputs=False,
+                    parallel_config=parallel.for_rank(rank),
+                )
+                writer.add_bytes(f"engine.rank{rank}.plan", plan)
+            layout = "dual_profile"
+        else:
+            config.raw["_decoder_engine_role"] = "prefill"
+            prefill = model.build_engine(
                 config,
                 weights,
                 max_sequence_length,
@@ -338,37 +538,26 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 quant_ctx=None,
                 verbose=bool(request.verbose),
                 debug_layer_outputs=False,
-                parallel_config=parallel.for_rank(rank),
+                parallel_config=parallel,
             )
-            writer.add_bytes(f"engine.rank{rank}.plan", plan)
-        layout = "dual_profile"
-    else:
-        config.raw["_decoder_engine_role"] = "prefill"
-        prefill = model.build_engine(
-            config,
-            weights,
-            max_sequence_length,
-            precision=precision,
-            quant_ctx=None,
-            verbose=bool(request.verbose),
-            debug_layer_outputs=False,
-            parallel_config=parallel,
-        )
-        config.raw["_decoder_engine_role"] = "decode"
-        decode = model.build_engine(
-            config,
-            weights,
-            max_sequence_length,
-            precision=precision,
-            quant_ctx=None,
-            verbose=bool(request.verbose),
-            debug_layer_outputs=False,
-            parallel_config=parallel,
-        )
-        config.raw.pop("_decoder_engine_role", None)
-        writer.add_bytes("engine.plan", decode)
-        writer.add_bytes("prefill.plan", prefill)
-        layout = "split"
+            config.raw["_decoder_engine_role"] = "decode"
+            decode = model.build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                quant_ctx=None,
+                verbose=bool(request.verbose),
+                debug_layer_outputs=False,
+                parallel_config=parallel,
+            )
+            config.raw.pop("_decoder_engine_role", None)
+            writer.add_bytes("engine.plan", decode)
+            writer.add_bytes("prefill.plan", prefill)
+            _add_refit_weights_section(config, writer)
+            layout = "split"
+    finally:
+        checkpoint_mapper.set_native_layout(False)
     writer.add_json(
         "runtime.json",
         _runtime_config(
