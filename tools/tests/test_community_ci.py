@@ -366,10 +366,13 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     )
     assert "community-ci.yml/runs?event=pull_request&head_sha=$head_sha" in internal_bridge
     assert "community-cpu.yml" not in internal_bridge
-    assert "/actions/runs/$community_ci_run/jobs?filter=latest&per_page=100" in internal_bridge
+    assert "/actions/runs/$candidate_run/jobs?filter=latest&per_page=100" in internal_bridge
     assert 'name == "Community CPU / Required" and .conclusion == "success"' in internal_bridge
-    assert ".display_title == $title" in internal_bridge
-    assert "· merge $merge_sha" in internal_bridge
+    assert "select(.display_title | startswith($title_prefix))" in internal_bridge
+    assert '[.id, .merge_sha]' in internal_bridge
+    assert '[ "$candidate_base" != "$base_sha" ]' in internal_bridge
+    assert '[ "$candidate_head" != "$head_sha" ]' in internal_bridge
+    assert '[ "$candidate_tree" != "$merge_tree" ]' in internal_bridge
 
     docs = jobs["docs"]
     assert "if" not in docs
@@ -535,24 +538,36 @@ def test_public_required_job_fails_closed(
 
 
 @pytest.mark.parametrize(
-    ("combined_cpu_job_id", "combined_title_matches", "expected_returncode"),
+    ("combined_cpu_job_id", "candidate_identity", "expected_returncode"),
     [
-        ("33", True, 0),
-        ("", True, 1),
-        ("33", False, 1),
+        ("33", "exact", 0),
+        ("33", "regenerated", 0),
+        ("", "regenerated", 1),
+        ("33", "stale-base", 1),
+        ("33", "stale-head", 1),
+        ("33", "different-tree", 1),
+        ("33", "invalid-title", 1),
     ],
 )
-def test_internal_label_bridge_accepts_only_the_exact_combined_cpu_gate(
+def test_internal_label_bridge_accepts_only_the_equivalent_combined_cpu_gate(
     tmp_path: Path,
     combined_cpu_job_id: str,
-    combined_title_matches: bool,
+    candidate_identity: str,
     expected_returncode: int,
 ) -> None:
     head_sha = "a" * 40
     base_sha = "b" * 40
-    merge_sha = "c" * 40
-    expected_title = f"PR #17 · community CI · head {head_sha} · merge {merge_sha}"
-    run_title = expected_title if combined_title_matches else "PR #17 · stale Community CI"
+    live_merge_sha = "c" * 40
+    candidate_merge_sha = live_merge_sha if candidate_identity == "exact" else "d" * 40
+    merge_tree_sha = "e" * 40
+    candidate_base_sha = "f" * 40 if candidate_identity == "stale-base" else base_sha
+    candidate_head_sha = "f" * 40 if candidate_identity == "stale-head" else head_sha
+    candidate_tree_sha = "f" * 40 if candidate_identity == "different-tree" else merge_tree_sha
+    run_title = (
+        "PR #17 · stale Community CI"
+        if candidate_identity == "invalid-title"
+        else f"PR #17 · community CI · head {head_sha} · merge {candidate_merge_sha}"
+    )
     github_output = tmp_path / "github-output"
     gh = tmp_path / "gh"
     gh.write_text(
@@ -564,11 +579,19 @@ case "$arguments" in
   *pulls/17*)
     printf '{"state":"open","base":{"repo":{"full_name":"example/repo"},"ref":"main","sha":"%s"},"head":{"sha":"%s"},"merge_commit_sha":"%s"}\n' "$BASE_SHA" "$HEAD_SHA" "$MERGE_SHA"
     ;;
-  *git/commits/$MERGE_SHA*)
-    printf '{"sha":"%s","parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$MERGE_SHA" "$BASE_SHA" "$HEAD_SHA"
+  *git/commits/*)
+    requested_sha="${arguments##*/}"
+    if [ "$requested_sha" = "$MERGE_SHA" ]; then
+      printf '{"sha":"%s","tree":{"sha":"%s"},"parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$MERGE_SHA" "$MERGE_TREE_SHA" "$BASE_SHA" "$HEAD_SHA"
+    elif [ "$requested_sha" = "$CANDIDATE_MERGE_SHA" ]; then
+      printf '{"sha":"%s","tree":{"sha":"%s"},"parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$CANDIDATE_MERGE_SHA" "$CANDIDATE_TREE_SHA" "$CANDIDATE_BASE_SHA" "$CANDIDATE_HEAD_SHA"
+    else
+      printf 'unexpected merge commit: %s\n' "$requested_sha" >&2
+      exit 99
+    fi
     ;;
   *community-ci.yml*)
-    printf '{"workflow_runs":[{"id":22,"display_title":"%s","updated_at":"2026-01-01T00:00:00Z"}]}\n' "$RUN_TITLE"
+    printf '{"workflow_runs":[{"id":22,"event":"pull_request","head_sha":"%s","display_title":"%s","updated_at":"2026-01-01T00:00:00Z"}]}\n' "$HEAD_SHA" "$RUN_TITLE"
     ;;
   *actions/runs/22/jobs*) printf '%s\n' "$COMBINED_CPU_JOB_ID" ;;
   *) printf 'unexpected gh call: %s\n' "$arguments" >&2; exit 99 ;;
@@ -598,7 +621,12 @@ esac
             "GITHUB_OUTPUT": str(github_output),
             "HEAD_SHA": head_sha,
             "BASE_SHA": base_sha,
-            "MERGE_SHA": merge_sha,
+            "MERGE_SHA": live_merge_sha,
+            "MERGE_TREE_SHA": merge_tree_sha,
+            "CANDIDATE_MERGE_SHA": candidate_merge_sha,
+            "CANDIDATE_BASE_SHA": candidate_base_sha,
+            "CANDIDATE_HEAD_SHA": candidate_head_sha,
+            "CANDIDATE_TREE_SHA": candidate_tree_sha,
             "COMBINED_CPU_JOB_ID": combined_cpu_job_id,
             "RUN_TITLE": run_title,
         },

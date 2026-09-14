@@ -518,8 +518,11 @@ def test_internal_bridge_remains_a_one_shot_maintainer_label_trigger() -> None:
     assert "issues/$PR_NUMBER/labels/run-internal-ci" in source
     assert "workflow_run:" not in source
     assert "Community CPU / Required must pass" in source
-    assert "/actions/runs/$community_ci_run/jobs?filter=latest&per_page=100" in source
+    assert "/actions/runs/$candidate_run/jobs?filter=latest&per_page=100" in source
     assert 'name == "Community CPU / Required" and .conclusion == "success"' in source
+    assert '[ "$candidate_base" != "$base_sha" ]' in source
+    assert '[ "$candidate_head" != "$head_sha" ]' in source
+    assert '[ "$candidate_tree" != "$merge_tree" ]' in source
     assert "Community CI must pass" not in source
 
 
@@ -535,9 +538,15 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     assert 'workflows: ["Community CI"]' in source
     assert workflow["permissions"] == {}
     assert "github.event.workflow_run.event == 'pull_request'" in ready["if"]
+    assert "merge_revision_matches_tested" in source
+    assert '[ "$current_base_sha" = "$tested_base_sha" ]' in source
+    assert '[ "$current_head_sha" = "$HEAD_SHA" ]' in source
+    assert '[ "$current_tree_sha" = "$tested_tree_sha" ]' in source
+    assert '[ "$current_merge_sha" != "$MERGE_SHA" ]' not in source
     assert ready["permissions"] == {
         "actions": "read",
         "checks": "read",
+        "contents": "read",
         "pull-requests": "read",
     }
     assert activity["permissions"] == {}

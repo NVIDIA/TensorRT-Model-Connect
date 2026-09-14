@@ -38,6 +38,7 @@ jobs:
     permissions:
       actions: read
       checks: read
+      contents: read
       pull-requests: read
     steps:
       - name: Post ready external PR alert
@@ -63,6 +64,52 @@ jobs:
           HEAD_SHA="${BASH_REMATCH[2]}"
           MERGE_SHA="${BASH_REMATCH[3]}"
 
+          tested_merge_json="$(
+            gh api "repos/$REPOSITORY/git/commits/$MERGE_SHA" \
+              2>/dev/null || true
+          )"
+          if [ -z "$tested_merge_json" ]; then
+            echo "::notice::The tested merge revision $MERGE_SHA is unavailable; skipping the readiness alert."
+            exit 0
+          fi
+          tested_merge_sha="$(jq -r '.sha // empty' <<<"$tested_merge_json")"
+          tested_parent_count="$(jq -r '.parents | length' <<<"$tested_merge_json")"
+          tested_base_sha="$(jq -r '.parents[0].sha // empty' <<<"$tested_merge_json")"
+          tested_head_sha="$(jq -r '.parents[1].sha // empty' <<<"$tested_merge_json")"
+          tested_tree_sha="$(jq -r '.tree.sha // empty' <<<"$tested_merge_json")"
+          if [ "$tested_merge_sha" != "$MERGE_SHA" ] \
+            || [ "$tested_parent_count" != "2" ] \
+            || [ "$tested_head_sha" != "$HEAD_SHA" ] \
+            || ! [[ "$tested_base_sha" =~ ^[0-9a-f]{40}$ ]] \
+            || ! [[ "$tested_tree_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The Community CI run does not identify a valid pull-request merge revision."
+            exit 1
+          fi
+
+          merge_revision_matches_tested() {
+            local current_merge_sha="$1"
+            [[ "$current_merge_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+
+            local current_merge_json
+            current_merge_json="$(
+              gh api "repos/$REPOSITORY/git/commits/$current_merge_sha" \
+                2>/dev/null
+            )" || return 1
+
+            local current_parent_count
+            local current_base_sha
+            local current_head_sha
+            local current_tree_sha
+            current_parent_count="$(jq -r '.parents | length' <<<"$current_merge_json")"
+            current_base_sha="$(jq -r '.parents[0].sha // empty' <<<"$current_merge_json")"
+            current_head_sha="$(jq -r '.parents[1].sha // empty' <<<"$current_merge_json")"
+            current_tree_sha="$(jq -r '.tree.sha // empty' <<<"$current_merge_json")"
+            [ "$current_parent_count" = "2" ] \
+              && [ "$current_base_sha" = "$tested_base_sha" ] \
+              && [ "$current_head_sha" = "$HEAD_SHA" ] \
+              && [ "$current_tree_sha" = "$tested_tree_sha" ]
+          }
+
           pr_json="$(gh api "repos/$REPOSITORY/pulls/$pr_number")"
           current_head_sha="$(jq -r ".head.sha" <<<"$pr_json")"
           if [ "$current_head_sha" != "$HEAD_SHA" ]; then
@@ -70,7 +117,7 @@ jobs:
             exit 0
           fi
           current_merge_sha="$(jq -r ".merge_commit_sha // empty" <<<"$pr_json")"
-          if [ "$current_merge_sha" != "$MERGE_SHA" ]; then
+          if ! merge_revision_matches_tested "$current_merge_sha"; then
             echo "::notice::PR #$pr_number has a newer merge revision; skipping the stale readiness alert."
             exit 0
           fi
@@ -109,7 +156,7 @@ jobs:
               exit 0
             fi
             current_merge_sha="$(jq -r ".merge_commit_sha // empty" <<<"$pr_json")"
-            if [ "$current_merge_sha" != "$MERGE_SHA" ]; then
+            if ! merge_revision_matches_tested "$current_merge_sha"; then
               echo "::notice::PR #$pr_number merge advanced while checking readiness; skipping the stale alert."
               exit 0
             fi
