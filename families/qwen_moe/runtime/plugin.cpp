@@ -134,10 +134,22 @@ QwenMoeKvCacheNames make_kv_names(std::int32_t num_layers) {
 
 std::string chat_template(const BundleReader& bundle) {
     const auto* section = bundle.find_section("chat_template.jinja");
+    if (section != nullptr && section->length > 0) {
+        const auto data = bundle.read_section("chat_template.jinja");
+        return {data.begin(), data.end()};
+    }
+    section = bundle.find_section("tokenizer_config.json");
     if (section == nullptr || section->length == 0)
         return {};
-    const auto data = bundle.read_section("chat_template.jinja");
-    return {data.begin(), data.end()};
+    const auto data = bundle.read_section("tokenizer_config.json");
+    const auto config = nlohmann::json::parse(data.begin(), data.end());
+    if (!config.is_object())
+        throw std::runtime_error("qwen_moe tokenizer_config.json must contain a JSON object");
+    if (!config.contains("chat_template") || config.at("chat_template").is_null())
+        return {};
+    if (!config.at("chat_template").is_string())
+        throw std::runtime_error("qwen_moe tokenizer_config.json chat_template must be a string");
+    return config.at("chat_template").get<std::string>();
 }
 
 struct DecoderModules {
