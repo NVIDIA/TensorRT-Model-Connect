@@ -233,6 +233,8 @@ ITask* create(const FamilyContext& context) {
 
 } // namespace trtmc::s1_mini
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("s1_mini")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("s1_mini does not support --kv-cache-size");
