@@ -52,17 +52,21 @@ std::vector<std::byte> featureSection() {
     return result;
 }
 
-std::vector<std::byte> randomSection(uint32_t atom_count = 928) {
+std::vector<std::byte> randomSection(uint32_t atom_count = 928, uint32_t seed = 42,
+                                     uint32_t steps = 200, uint32_t samples = 1) {
     std::vector<std::byte> result;
     appendBytes(result, "B2RN", 4);
-    appendLittleEndian<uint32_t>(result, 2);
-    appendLittleEndian<uint32_t>(result, 42);
-    appendLittleEndian<uint32_t>(result, 200);
+    appendLittleEndian<uint32_t>(result, 3);
+    appendLittleEndian<uint32_t>(result, seed);
     appendLittleEndian<uint32_t>(result, atom_count);
-    appendLittleEndian<uint32_t>(result, 6);
-    const std::size_t floats = static_cast<std::size_t>(atom_count) * 3U + 200U * 9U + 200U * 3U +
-                               200U * static_cast<std::size_t>(atom_count) * 3U;
-    result.resize(result.size() + 6U * floats * sizeof(float));
+    appendLittleEndian<uint32_t>(result, steps);
+    appendLittleEndian<uint32_t>(result, samples);
+    appendLittleEndian<uint32_t>(result, 0);
+    appendLittleEndian<uint32_t>(result, 0);
+    const std::size_t floats = static_cast<std::size_t>(samples) *
+                               (static_cast<std::size_t>(atom_count) * 3U + steps * 9U +
+                                steps * 3U + steps * static_cast<std::size_t>(atom_count) * 3U);
+    result.resize(result.size() + floats * sizeof(float));
     return result;
 }
 
@@ -126,21 +130,27 @@ int main() {
         auto random = randomSection();
         const auto parsed_random =
             trtmc::boltz2::RandomSamples::parse(random.data(), random.size());
-        check(parsed_random.seed == 42 && parsed_random.sampling_steps == 200 &&
-                  parsed_random.atom_count == 928,
+        check(parsed_random.seed == 42 && parsed_random.structure.sampling_steps == 200 &&
+                  parsed_random.structure.sample_count == 1 && parsed_random.atom_count == 928,
               "random profile");
-        const auto variable_random = randomSection(576);
+        const auto variable_random = randomSection(576, 1234, 300, 2);
         const auto parsed_variable =
             trtmc::boltz2::RandomSamples::parse(variable_random.data(), variable_random.size());
-        check(parsed_variable.atom_count == 576, "variable-length random profile");
-        random[8] = std::byte{41};
+        check(parsed_variable.atom_count == 576 && parsed_variable.seed == 1234 &&
+                  parsed_variable.structure.sampling_steps == 300 &&
+                  parsed_variable.structure.sample_count == 2,
+              "request-owned random profile");
+        random[8] = std::byte{0xff};
+        random[9] = std::byte{0xff};
+        random[10] = std::byte{0xff};
+        random[11] = std::byte{0xff};
         bool random_threw = false;
         try {
             (void)trtmc::boltz2::RandomSamples::parse(random.data(), random.size());
         } catch (const std::invalid_argument&) {
             random_threw = true;
         }
-        check(random_threw, "wrong random seed fails closed");
+        check(random_threw, "negative random seed fails closed");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Boltz-2 section test failed: " << error.what() << '\n';

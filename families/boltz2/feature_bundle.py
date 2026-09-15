@@ -227,7 +227,7 @@ def deserialize_features(data: bytes) -> dict[str, np.ndarray]:
     return result
 
 
-def structure_metadata_json(structure_path: Path) -> bytes:
+def structure_metadata_json(structure_path: Path, affinity_mw: Any | None = None) -> bytes:
     """Serialize atom/residue rows needed for native mmCIF/PDB writing."""
 
     with np.load(structure_path, allow_pickle=False) as archive:
@@ -257,4 +257,11 @@ def structure_metadata_json(structure_path: Path) -> bytes:
             for row in chains
         ],
     }
+    if affinity_mw is not None:
+        if hasattr(affinity_mw, "detach"):
+            affinity_mw = affinity_mw.detach().cpu().numpy()
+        values = np.asarray(affinity_mw, dtype=np.float32).reshape(-1)
+        if values.size != 1 or not np.isfinite(values[0]) or values[0] <= 0:
+            raise ValueError("Boltz-2 affinity molecular weight must be one positive finite value")
+        document["affinity_mw"] = float(values[0])
     return json.dumps(document, indent=2, sort_keys=True).encode("utf-8") + b"\n"

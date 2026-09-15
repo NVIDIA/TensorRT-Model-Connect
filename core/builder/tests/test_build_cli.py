@@ -163,11 +163,33 @@ def test_prepare_structure_dispatches_to_the_resolved_family(
                 str(output),
                 "--cache-dir",
                 str(cache),
+                "--num-steps",
+                "300",
+                "--num-samples",
+                "4",
+                "--seed",
+                "7",
+                "--affinity-num-steps",
+                "400",
+                "--affinity-num-samples",
+                "3",
             ]
         )
         == 0
     )
-    assert calls == [((model, request, output), {"cache_dir": cache})]
+    assert calls == [
+        (
+            (model, request, output),
+            {
+                "cache_dir": cache,
+                "sampling_steps": 300,
+                "diffusion_samples": 4,
+                "seed": 7,
+                "affinity_sampling_steps": 400,
+                "affinity_diffusion_samples": 3,
+            },
+        )
+    ]
     assert json.loads(capsys.readouterr().out) == {
         "cache_hit": False,
         "family": "boltz2",

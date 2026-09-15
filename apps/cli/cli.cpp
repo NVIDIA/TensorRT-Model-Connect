@@ -81,7 +81,9 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"predict-structure",
          {CommandKind::kPredictStructure,
-          {"--input", "--output", "--output-json", "--num-steps", "--seed"}}},
+          {"--input", "--output", "--output-json", "--recycling-steps", "--num-steps", "--seed",
+           "--num-samples", "--step-scale", "--affinity-num-steps", "--affinity-num-samples",
+           "--affinity-mw-correction"}}},
         {"disparity", {CommandKind::kDisparity, {"--left", "--right"}}},
         {"geometry", {CommandKind::kGeometry, {"--image", "--output"}}},
         {"segment", {CommandKind::kSegment, {"--image"}}},
@@ -823,36 +825,66 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         if (request.document.empty())
             throw std::invalid_argument("structure request must not be empty");
         request.source_path = input_path;
+        request.config.recycling_steps =
+            int_option(command, "--recycling-steps", request.config.recycling_steps, 1);
         request.config.sampling_steps =
             int_option(command, "--num-steps", request.config.sampling_steps, 1);
+        request.config.diffusion_samples =
+            int_option(command, "--num-samples", request.config.diffusion_samples, 1);
         request.config.seed = int_option(command, "--seed", request.config.seed);
-
+        request.config.step_scale =
+            float_option(command, "--step-scale", request.config.step_scale);
+        request.config.affinity_sampling_steps =
+            int_option(command, "--affinity-num-steps", request.config.affinity_sampling_steps, 1);
+        request.config.affinity_diffusion_samples = int_option(
+            command, "--affinity-num-samples", request.config.affinity_diffusion_samples, 1);
+        if (has_option(command, "--affinity-mw-correction")) {
+            request.config.affinity_mw_correction = parse_bool(
+                command.options.at("--affinity-mw-correction"), "--affinity-mw-correction");
+        }
         auto& predictor = require_interface<IStructurePrediction>(task);
         const auto result = predictor.predict_structure(request);
 
         const fs::path structure_path = require_option(command, "--output");
-        if (!structure_path.parent_path().empty())
-            fs::create_directories(structure_path.parent_path());
-        std::ofstream structure(structure_path, std::ios::binary);
-        structure.write(result.structure.data(),
-                        static_cast<std::streamsize>(result.structure.size()));
-        if (!structure)
-            throw std::runtime_error("failed to write structure output: " +
-                                     structure_path.string());
         const fs::path metadata_path = has_option(command, "--output-json")
                                            ? command.options.at("--output-json")
                                            : structure_path.string() + ".metadata.json";
-        std::ofstream metadata(metadata_path, std::ios::binary);
-        metadata.write(result.metadata_json.data(),
-                       static_cast<std::streamsize>(result.metadata_json.size()));
-        if (!metadata)
-            throw std::runtime_error("failed to write structure metadata: " +
-                                     metadata_path.string());
-        write_json(output, {{"structure_path", structure_path.string()},
-                            {"metadata_path", metadata_path.string()},
-                            {"confidence_score", result.confidence.confidence_score},
-                            {"complex_plddt", result.confidence.complex_plddt},
-                            {"ptm", result.confidence.ptm}});
+        auto indexed_path = [](const fs::path& path, std::size_t index) {
+            if (index == 0)
+                return path;
+            return path.parent_path() / (path.stem().string() + "_sample_" + std::to_string(index) +
+                                         path.extension().string());
+        };
+        auto write_output = [](const fs::path& path, const std::string& payload,
+                               const char* label) {
+            if (!path.parent_path().empty())
+                fs::create_directories(path.parent_path());
+            std::ofstream stream(path, std::ios::binary);
+            stream.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+            if (!stream)
+                throw std::runtime_error(std::string("failed to write ") + label + ": " +
+                                         path.string());
+        };
+        nlohmann::json sample_outputs = nlohmann::json::array();
+        for (std::size_t index = 0; index < result.samples.size(); ++index) {
+            const auto current_structure = indexed_path(structure_path, index);
+            const auto current_metadata =
+                has_option(command, "--output-json")
+                    ? indexed_path(metadata_path, index)
+                    : fs::path(current_structure.string() + ".metadata.json");
+            const auto& sample = result.samples[index];
+            write_output(current_structure, sample.structure, "structure output");
+            write_output(current_metadata, sample.metadata_json, "structure metadata");
+            sample_outputs.push_back({{"structure_path", current_structure.string()},
+                                      {"metadata_path", current_metadata.string()},
+                                      {"confidence_score", sample.confidence.confidence_score},
+                                      {"complex_plddt", sample.confidence.complex_plddt},
+                                      {"ptm", sample.confidence.ptm}});
+        }
+        if (sample_outputs.size() == 1)
+            write_json(output, sample_outputs.front());
+        else
+            write_json(output, {{"samples", std::move(sample_outputs)}});
         return EXIT_SUCCESS;
     }
     case CommandKind::kDisparity: {
@@ -1297,6 +1329,10 @@ void print_usage(std::ostream& output) {
               "  [--cfg-scale S] [--sde-gamma S]\n\n"
               "Text generation options:\n"
               "  [--source-language-token-id N] [--forced-bos-token-id N]\n\n"
+              "Structure prediction options:\n"
+              "  [--recycling-steps N] [--num-steps N] [--num-samples N] [--step-scale F]\n"
+              "  [--affinity-num-steps N] [--affinity-num-samples N]\n"
+              "  [--affinity-mw-correction true|false]\n\n"
               "Offline transcription options:\n"
               "  [--beam-size N] [--length-penalty F] [--punctuation true|false]\n"
               "  [--max-input-seconds F] [--segment-length-seconds F]\n"

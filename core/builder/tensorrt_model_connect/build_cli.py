@@ -44,6 +44,11 @@ def _parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("-o", "--output", type=Path, required=True)
     prepare_parser.add_argument("--revision", help="Hugging Face model revision")
     prepare_parser.add_argument("--cache-dir", type=Path)
+    prepare_parser.add_argument("--num-steps", type=int, default=200)
+    prepare_parser.add_argument("--num-samples", type=int, default=1)
+    prepare_parser.add_argument("--seed", type=int, default=42)
+    prepare_parser.add_argument("--affinity-num-steps", type=int, default=200)
+    prepare_parser.add_argument("--affinity-num-samples", type=int, default=5)
     return parser
 
 
@@ -63,6 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.input,
             args.output,
             cache_dir=args.cache_dir,
+            sampling_steps=args.num_steps,
+            diffusion_samples=args.num_samples,
+            seed=args.seed,
+            affinity_sampling_steps=args.affinity_num_steps,
+            affinity_diffusion_samples=args.affinity_num_samples,
         )
         print(json.dumps(result, sort_keys=True))
         return 0
