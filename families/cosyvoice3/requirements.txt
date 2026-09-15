@@ -1,0 +1,12 @@
+# Checkpoint loading and family-owned reference signal processing.
+torch>=2.6
+torchaudio>=2.6
+soundfile>=0.12
+librosa>=0.10
+openai-whisper>=20231117
+# Independent reference validation; no ONNX Runtime production inference.
+onnxruntime>=1.18
+x-transformers==2.11.24
+diffusers>=0.29
+hydra-core>=1.3
+lightning>=2.2

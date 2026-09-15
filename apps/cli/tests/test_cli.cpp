@@ -103,6 +103,30 @@ class EmptyImageWorker final : public trtmc::IImageGeneration {
     }
 };
 
+class FakeReferenceAudio final : public trtmc::IAudioGeneration,
+                                 public trtmc::IReferenceAudioGeneration {
+  public:
+    trtmc::AudioReference seen;
+    trtmc::AudioGenerationConfig config;
+    std::string prompt;
+    trtmc::AudioResult generate_audio(const std::string&,
+                                      const trtmc::AudioGenerationConfig&) override {
+        throw std::logic_error("reference request was silently ignored");
+    }
+    trtmc::AudioResult
+    generate_audio_with_reference(const std::string& text, const trtmc::AudioReference& reference,
+                                  const trtmc::AudioGenerationConfig& options) override {
+        seen = reference;
+        config = options;
+        prompt = text;
+        trtmc::AudioResult result;
+        result.samples = reference.samples;
+        result.num_samples = static_cast<int32_t>(result.samples.size());
+        result.sample_rate = reference.sample_rate;
+        return result;
+    }
+};
+
 class FakeStreamingAudio final : public trtmc::IAudioGeneration,
                                  public trtmc::IStreamingAudioGeneration {
   public:
@@ -609,6 +633,42 @@ int main() {
     transcription_audio.num_samples = 3;
     transcription_audio.sample_rate = 16000;
     trtmc::cli::io::write_wav(transcription_audio, transcription_path.string());
+
+    auto reference_command =
+        parse({"trtmc", "generate-audio", "model.bundle", "--runtime-root", "lib", "--prompt",
+               "new speech", "--reference-audio", transcription_path.string(), "--reference-text",
+               "reference speech", "--max-new-tokens", "20", "--seed", "7", "--output",
+               audio_path.string()});
+    FakeReferenceAudio reference_task;
+    std::ostringstream reference_output;
+    check(trtmc::cli::dispatch(reference_command, reference_task, reference_output) == 0,
+          "reference audio dispatch succeeds");
+    check(reference_task.seen.sample_rate == 16000 && reference_task.seen.samples.size() == 3 &&
+              reference_task.seen.transcript == "reference speech" &&
+              reference_task.prompt == "new speech" && reference_task.config.seed == 7 &&
+              reference_task.config.max_new_tokens == 20,
+          "reference request reaches the optional Task API");
+    std::filesystem::remove(audio_path);
+    auto dispatch_rejected = [&](const trtmc::cli::Command& command, trtmc::ITask& task) {
+        try {
+            std::ostringstream ignored;
+            trtmc::cli::dispatch(command, task, ignored);
+            return false;
+        } catch (const std::exception&) {
+            return true;
+        }
+    };
+    check(dispatch_rejected(reference_command, audio),
+          "family without reference capability rejects reference input");
+    auto invalid_reference = reference_command;
+    invalid_reference.options.erase("--reference-audio");
+    check(dispatch_rejected(invalid_reference, reference_task),
+          "reference transcript without audio is rejected");
+    invalid_reference = reference_command;
+    invalid_reference.options["--stream"] = "true";
+    check(dispatch_rejected(invalid_reference, reference_task),
+          "reference streaming is explicitly rejected");
+    check(!std::filesystem::exists(audio_path), "invalid reference requests do not create output");
 
     const auto offline_transcription_command = parse({"trtmc",
                                                       "transcribe",
