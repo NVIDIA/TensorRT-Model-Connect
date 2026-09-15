@@ -15,11 +15,7 @@ set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 include(GNUInstallDirs)
 find_package(CUDAToolkit REQUIRED)
 find_package(nlohmann_json 3.11 REQUIRED)
-option(TRTMC_BUILD_SERVER "Build the text-generation HTTP server" ON)
-if(TRTMC_BUILD_SERVER)
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(LIBEVENT REQUIRED IMPORTED_TARGET libevent libevent_pthreads)
-endif()
+option(TRTMC_BUILD_SERVER "Build the optional text-generation server application" ON)
 
 set(_trtmc_dependency_roots
   /usr
@@ -302,7 +298,7 @@ set_target_properties(trtmc PROPERTIES
 
 if(TRTMC_BUILD_SERVER)
   add_library(trtmc_server STATIC
-    apps/server/server.cpp
+    apps/server/native_worker.cpp
   )
   target_include_directories(trtmc_server
     PUBLIC ${PROJECT_SOURCE_DIR}/apps
@@ -312,7 +308,6 @@ if(TRTMC_BUILD_SERVER)
     PUBLIC trtmc_runtime
     PRIVATE
       nlohmann_json::nlohmann_json
-      PkgConfig::LIBEVENT
   )
   target_compile_options(trtmc_server PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -324,6 +319,16 @@ if(TRTMC_BUILD_SERVER)
     BUILD_RPATH "\$ORIGIN"
     INSTALL_RPATH "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
   )
+
+  add_custom_target(trtmc_server_python ALL
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+      "${PROJECT_BINARY_DIR}/server/python/trtmc_server"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${PROJECT_SOURCE_DIR}/apps/server/python/trtmc_server"
+      "${PROJECT_BINARY_DIR}/server/python/trtmc_server"
+    COMMENT "Copying the text server Python control plane"
+  )
+  add_dependencies(trtmc-server trtmc_server_python)
 endif()
 
 if(TRTMC_BUILD_EXAMPLES)
@@ -380,14 +385,14 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME cli COMMAND test_cli)
 
   if(TRTMC_BUILD_SERVER)
-    add_executable(test_server apps/server/tests/test_server.cpp)
-    target_include_directories(test_server PRIVATE
+    add_executable(test_server_worker apps/server/tests/test_native_worker.cpp)
+    target_include_directories(test_server_worker PRIVATE
       ${PROJECT_SOURCE_DIR}/core/runtime/include
       ${PROJECT_SOURCE_DIR}/apps
     )
-    target_link_libraries(test_server PRIVATE trtmc_server nlohmann_json::nlohmann_json)
-    target_compile_options(test_server PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME server COMMAND test_server)
+    target_link_libraries(test_server_worker PRIVATE trtmc_server nlohmann_json::nlohmann_json)
+    target_compile_options(test_server_worker PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server_worker COMMAND test_server_worker)
   endif()
 
   set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")

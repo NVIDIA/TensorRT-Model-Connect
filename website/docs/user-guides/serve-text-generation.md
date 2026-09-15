@@ -1,17 +1,27 @@
 ---
 title: Serve Text Generation
-description: Expose one text-generation bundle through the MVP HTTP server.
+description: Expose text-generation bundles through the local hybrid server.
 ---
 
-`trtmc-server` loads one bundle into one process and exposes a deliberately
-small, non-streaming subset of the OpenAI Completions and Chat Completions
-protocols. The server is an evaluation path, not a production serving system.
-It does not depend on Triton or Dynamo.
+`trtmc-server` exposes a deliberately small, non-streaming subset of the
+OpenAI Completions and Chat Completions protocols. It is a local evaluation
+server, not a production or distributed serving system.
+
+The public HTTP control plane uses FastAPI and Uvicorn. Each configured model
+replica runs in a persistent C++ worker process that loads one bundle through
+the public Model Connect Task API. This keeps model execution native and
+isolates worker failures without making Model Connect depend on the server.
+
+Install the optional control-plane dependencies:
+
+```bash
+pip install 'tensorrt-model-connect[serve]'
+```
 
 ## Start one endpoint
 
-Build the native `trtmc-server` target alongside the runtime, backend, and
-selected family DSO. Then start the endpoint with one command:
+Build `trtmc-server` alongside the runtime, backend, and selected family DSO,
+then start a model with one command:
 
 ```bash
 trtmc-server ./qwen3-0.6b.bundle \
@@ -20,14 +30,13 @@ trtmc-server ./qwen3-0.6b.bundle \
   --port 8000
 ```
 
-By default, the loader finds family and backend DSOs beside the already-loaded
-`libtrtmc_runtime` shared library. This works for the standard build tree and
-the relocatable installed layout. Use `--runtime-root DIR` only to override
-that directory for development, multi-version testing, or a custom deployment.
+The worker normally finds family and backend DSOs beside the loaded
+`libtrtmc_runtime`. Use `--runtime-root DIR` only for development,
+multi-version testing, or custom deployment layouts.
 
-Startup is synchronous: the bundle and its family/backend DSOs must load before
-the server reports `server_ready`. A load or bind failure exits nonzero and the
-readiness endpoint never reports ready.
+Startup is synchronous. All configured workers must load and complete their
+private readiness handshake before the HTTP readiness endpoint succeeds. A
+partial startup failure closes workers that already started and exits nonzero.
 
 Send a completion:
 
@@ -42,7 +51,7 @@ curl http://127.0.0.1:8000/v1/completions \
   }'
 ```
 
-Or use the OpenAI Python client for the initial chat shape:
+Or use the OpenAI Python client:
 
 ```python
 from openai import OpenAI
@@ -57,9 +66,27 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-The server does not authenticate requests. Keep the default loopback bind for
-local evaluation; putting it on an untrusted network requires a separate
-authentication and TLS proxy.
+The server accepts only loopback IP bind addresses. Authentication is optional
+for local evaluation; pass `--api-key TOKEN` or set `TRTMC_SERVE_TOKEN` to
+require a bearer token.
+
+## Serve several text models
+
+Register multiple independently owned bundles with repeatable `--model`
+arguments:
+
+```bash
+trtmc-server \
+  --model Qwen/Qwen3-0.6B=qwen3.bundle \
+  --model TinyLlama/TinyLlama-1.1B-Chat-v1.0=tinyllama.bundle \
+  --replicas 1
+```
+
+Each replica is a persistent process and a serialized execution lane. Different
+models or replicas can execute concurrently. If every replica for a model is
+busy, the server immediately returns `429 server_busy`; the MVP has no hidden
+waiting queue. Add replicas only when the model and available device memory
+support that placement.
 
 ## Supported protocol
 
@@ -67,78 +94,51 @@ authentication and TLS proxy.
 | --- | --- |
 | `POST /v1/completions` | One string `prompt`; `model` is required. |
 | `POST /v1/chat/completions` | One text `user` message and optional preceding `system` message. |
-| `GET /v1/models` | The single configured model. |
-| `GET /health/live` | Process liveness. |
-| `GET /health/ready` | `200` while accepting work; `503` while draining. |
-| `GET /metrics` | Prometheus text metrics for admission, queueing, and inference. |
+| `GET /v1/models` | Configured text models. |
+| `GET /health/live` | Control-plane process liveness. |
+| `GET /health/ready` | Worker readiness and admission state. |
+| `GET /metrics` | Prometheus text metrics for admission and inference. |
 
-Both generation routes accept `temperature`, `top_p`, `seed`, `n`, and
-`stream`. Completions accept `max_tokens`; chat accepts either `max_tokens` or
-`max_completion_tokens`. The MVP requires `n=1` and `stream=false`. It rejects
-unknown fields, prompt arrays, multi-turn chat, structured message content,
-tools, log probabilities, stop strings, and streaming instead of silently
-ignoring them. Responses omit token usage because the generic Task result does
-not report prompt token counts, and `finish_reason` is `null` because the Task
-contract does not yet distinguish stop causes.
-
-Sampling uses the Task contract's unlimited `top_k` mode so `temperature` and
-`top_p` retain their expected effect. When `seed` is omitted, the server
-supplies a non-negative per-request seed; provide an explicit seed for
-repeatable output. Negative seeds are rejected because the Task contract uses
-them as internal sentinel values.
+Generation accepts `temperature`, `top_p`, `min_p`, `top_k`, `seed`,
+`enable_thinking`, `n`, and `stream`. Completions accept `max_tokens`;
+chat accepts either `max_tokens` or `max_completion_tokens`. The MVP
+requires `n=1` and `stream=false`. It rejects unknown fields, prompt arrays,
+multi-turn chat, structured content, stop sequences, tools, log probabilities,
+and streaming instead of silently ignoring them.
 
 Model-specific chat templates, tokenization, sampling, stopping, engine
 composition, and validation remain inside the family selected by the bundle.
-The server only validates and maps the public request into
-`ITextGeneration::generate`.
+The server only validates the transport envelope and asks the native worker to
+call `ITextGeneration::generate`.
 
-## Capacity and shutdown
+Responses report completion token counts supplied by the family result. Prompt
+token counts remain zero because the generic Task result does not expose them.
+The server leaves `finish_reason` null because the Task contract does not yet
+distinguish stop causes.
 
-The server owns one Task and invokes it from one worker thread. The defaults
-allow 16 waiting requests and 1 MiB of queued request bodies; the active request
-does not count against the waiting-request limit. A full queue returns `429`
-with error code `queue_full`. Requests arriving after shutdown begins return
-`503` with `server_draining`.
+## Capacity, failure, and shutdown
 
-Use these controls when exploring capacity:
+The MVP uses zero queued requests. Saturated replicas return `429` with a
+`Retry-After` header. Worker request timeouts terminate that worker rather
+than risking protocol desynchronization. A failed lane makes its model
+degraded or unavailable; the MVP does not automatically restart workers.
 
-```text
---queue-capacity COUNT
---max-queued-bytes BYTES
---max-body-bytes BYTES
---max-prompt-bytes BYTES
---max-new-tokens COUNT
---shutdown-grace-ms MS
-```
+Uvicorn stops new HTTP admission during shutdown and lets active requests
+finish before application lifespan cleanup closes each worker. The worker first
+receives a protocol shutdown request, followed by deterministic process
+termination if it does not exit within the grace period.
 
-`SIGINT` and `SIGTERM` first make readiness fail and stop new admission. Work
-already waiting may start until the grace deadline; work not started by then
-receives `503`. The currently executing family call is allowed to finish
-because the Task API has no cancellation contract.
+Logs do not contain prompts or generated text. `/metrics` exposes readiness,
+active and busy replicas, request totals, admission duration, inference
+duration, and family-reported setup, prefill, and decode durations.
 
-Errors use an OpenAI-style `error` object and successful inference responses
-include an `X-Request-ID` header. Logs are JSON lines and do not include prompt
-or generated text. `/metrics` exposes queue depth/bytes, active requests,
-generation request totals by route/status, wall-clock queue/inference duration,
-and family-reported setup/prefill/decode duration sums and counts.
+## Qualification boundary
 
-## Qualify several text families
+Serving is family-agnostic, but every family owns its correctness claim. For an
+initial cross-family check, start fresh workers for several declared text model
+recipes and record startup, deterministic completion and chat responses,
+overload behavior, metrics, and shutdown.
 
-Serving is family-agnostic, but every family still owns its correctness claim.
-For an initial cross-family check, build one bundle at a time from declared
-recipes such as Qwen3 0.6B, Gemma 2 2B, Phi-3 Mini, and a Llama-family recipe
-listed in [Supported Models](../models-recipes/overview.md). Start a fresh
-server process for each bundle and record:
-
-1. startup and readiness;
-2. one deterministic completion request;
-3. one deterministic single-turn chat request where the family supports a chat
-   template;
-4. an invalid request (`stream=true`) returning `400`;
-5. an overload run returning `429` without concurrent Task calls;
-6. queue and inference metrics after the run;
-7. `SIGTERM` drain and exit behavior.
-
-Compare generated text through that family's existing validation recipe. A
-successful HTTP exchange proves transport integration only; it does not replace
+Compare generated text through each family's validation recipe. A successful
+HTTP exchange proves transport integration only; it does not replace
 family-owned numerical or semantic validation.
