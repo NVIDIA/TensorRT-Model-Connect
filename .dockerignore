@@ -7,3 +7,6 @@
 !requirements/
 requirements/*
 !requirements/base.txt
+
+# Trivial comment-only change: live-fire test payload for the direct_families
+# retention fix (#1277), combined with a families/sam3 change in the same PR.
