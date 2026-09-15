@@ -105,6 +105,47 @@ The expected diff boundary for a normal family contribution is
 `families/my_family/**`. Examples, benchmarks, and BYOK are optional consumers
 of public APIs; neither a family nor core may import their implementation.
 
+## Reproduce the pre-merge gates before you push
+
+`.github/workflows/community-cpu.yml` runs four jobs on every pull request, and
+`Community CPU / Required` fails unless all four pass. Each has a local
+equivalent, so a failure does not have to cost a push and a CI round trip.
+
+The source-quality gate invokes `python`, `lizard`, `ruff`, and `clang-format`
+by name. Create and activate its environment before running the commands:
+
+```bash
+python3 -m venv .venv-ci
+source .venv-ci/bin/activate
+python3 -m pip install --requirement requirements/community-ci.txt
+export RUNNER_TEMP="${RUNNER_TEMP:-$(mktemp -d)}"
+```
+
+Then run from the repository root, with `<base-ref>` as the commit you branched
+from (`upstream/main` or `github/main`):
+
+| Pre-merge job | Run locally | Covers |
+| --- | --- | --- |
+| `Community CPU / Source quality` | `python3 -m tools.community_ci source-quality --base <base-ref>` | the `core/runtime` complexity ceiling across the whole tree; `ruff` and `clang-format` on changed files; model architecture contracts |
+| `Community CPU / Ownership and impact` | `python3 -m tools.community_ci impact --base <base-ref>` | ownership resolution and the CPU test scope your change selects |
+| `Community CPU / Unit / C++ and Python` | `python3 -m tools.community_ci unit` | compiles the shared runtime and runs the source-only C++ and Python unit tests in the CI container |
+| `Community CPU / Docs` | `cd website && npm ci && npm run test:model-support && npm run build` | the generated model support inventory and the production documentation build |
+
+The unit command builds and runs the CI container, so it needs a working Docker
+daemon. Its image follows the Docker host architecture unless
+`DOCKER_DEFAULT_PLATFORM` overrides it; pre-merge runs on `linux/amd64`. Before
+chasing a platform-specific failure, check whether it also fails on the base
+branch.
+
+Two failure modes worth knowing, because both look like success:
+
+- A **skipped** test is not a passing test. `pytest` skips whatever its
+  `importorskip` guards cannot import, so a virtual environment without
+  `numpy`, `torch`, or `safetensors` silently drops that coverage. Run with
+  `-rs` and read which tests skipped, not only the count.
+- The **complexity ceiling for `core/runtime` is 10**, and it is checked against
+  the whole tree rather than only your diff.
+
 An E2E manifest may declare an exact `hf_id` (and, when available,
 `hf_revision`) or omit `hf_id` for a prepared local checkpoint supplied through
 the family-specific model-directory environment variable. Do not invent an HF
