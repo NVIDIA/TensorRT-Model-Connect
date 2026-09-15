@@ -10,12 +10,28 @@
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace trtmc {
+
+// One weight value supplied to a stripped engine at load time. The buffer is
+// borrowed: it must outlive module creation, and is not referenced afterwards.
+struct RefitWeightView {
+    DType dtype{DType::kFloat16};
+    const void* data{nullptr};
+    std::int64_t count{0}; // elements, not bytes
+};
+
+// Weight name (as set by INetworkDefinition::setWeightsName at build time)
+// -> value. Model-agnostic mechanics: the backend only iterates and calls
+// setNamedWeights. Which names exist, and where the bytes come from, is owned
+// by the model family that produced the bundle.
+using RefitWeightMap = std::map<std::string, RefitWeightView>;
 
 struct ModuleCreateOptions {
     cudaStream_t stream{nullptr};            // nullptr = backend creates one
@@ -23,6 +39,12 @@ struct ModuleCreateOptions {
     std::shared_ptr<void> distributed_owner; // keeps communicator alive
     const char* runtime_cache_path{""};      // TensorRT-RTX JIT cache, optional
     bool cuda_graphs{false};                 // TensorRT-RTX whole-graph capture
+    // Weights for an engine built with kSTRIP_PLAN. When non-null and
+    // non-empty the backend refits the deserialized engine BEFORE creating
+    // any execution context: a placeholder engine produces garbage until
+    // refit, and TensorRT's ensureSessionWeightsFullyBacked check fires
+    // inside CUDA-graph capture if weights are still unbacked.
+    const RefitWeightMap* refit_weights{nullptr};
 };
 
 struct ModuleExternalBinding {
