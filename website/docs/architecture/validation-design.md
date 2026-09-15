@@ -14,6 +14,7 @@ and official-reference adapters below `families/<family>/tests/`.
 | Family native tests | `families/<family>/tests/cpp/` | The owning DSO's C++ contracts. |
 | Family E2E | `families/<family>/tests/test_e2e.py` | Checkpoint-to-bundle-to-Task behavior and model-owned oracle. |
 | Application tests | `apps/*/tests/`, `examples/**/test_*.py` | Public API consumers without reverse dependencies. |
+| Local server | `server/tests/` | HTTP/Realtime contracts, bounded worker lifecycle, native JSONL protocol, and one-way dependency checks. |
 
 Each family manifest declares its exact checkpoint inputs, task, precision,
 topology, premerge selection, and case-specific contract. Optional threshold
@@ -31,13 +32,19 @@ family's owner-selected cases; nightly runs the complete declared inventory.
   checkpoint evidence without importing unrelated families.
 - Package validation finds every family dependency file and DSO while avoiding
   unselected family imports.
+- Server-only changes run the complete CPU server suite and package checks
+  without selecting unrelated family E2E. A mixed server/family or server/core
+  change retains the broader owner or shared-contract scope.
+- The installed-wheel gate imports `trtmc_server` and runs `trtmc serve --help`
+  outside the source checkout; a source-only import is not packaging evidence.
 
 ## Local checks
 
 ```bash
 python3 -m tools.model_ci validate
 python3 tools/test_impact.py --validate
-python3 -m pytest core/builder/tests tools/tests
+PYTHONPATH=server/python:core/builder:. python3 -m pytest \
+  core/builder/tests server/tests tools/tests
 python3 -m pytest families/qwen/tests
 ```
 

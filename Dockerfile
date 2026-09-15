@@ -78,6 +78,16 @@ RUN python3.12 -m venv "$VIRTUAL_ENV" \
       --index-url https://download.pytorch.org/whl/cu130 \
     && pip install "setuptools>=80,<82"
 
+# Server control-plane and CPU contract-test dependencies. Keep these bounds
+# aligned with the serve and test extras in pyproject.toml.
+RUN pip install --target /opt/trtmc-server-test-deps \
+      "fastapi>=0.115,<0.142" \
+      "httpx>=0.27,<0.29" \
+      "pydantic>=2.11,<3" \
+      "python-multipart>=0.0.9,<1" \
+      "uvicorn>=0.30,<0.53" \
+      "websockets>=13,<17"
+
 ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
 ENV NCCL_LIB_DIR=/opt/venv/lib/python3.12/site-packages/nvidia/nccl/lib
 ENV TVM_FFI_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tvm_ffi/lib

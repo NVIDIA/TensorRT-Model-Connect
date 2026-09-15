@@ -2,9 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Keep local source checks and the public Community CPU workflow on the same
-# tool versions. The development images consume this file as well.
+# tool and server-test dependencies. The development images consume this file
+# as well.
 pre-commit==4.6.2
 apache-tvm-ffi==0.1.12
+fastapi>=0.115,<0.142
+httpx>=0.27,<0.29
+pydantic>=2.11,<3
+python-multipart>=0.0.9,<1
 ruff==0.16.4
 clang-format==22.1.8
 lizard==1.21.2
@@ -13,3 +18,5 @@ pytest-xdist==3.8.0
 jsonschema==4.26.0
 Pillow==12.2.0
 PyYAML==6.0.2
+uvicorn>=0.30,<0.53
+websockets>=13,<17

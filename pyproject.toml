@@ -35,7 +35,24 @@ dependencies = [
 trtmc-bench = "trtmc_benchmark.cli:main"
 
 [project.optional-dependencies]
-test = ["pytest>=7.0", "torch>=2.0", "jsonschema>=4.23,<5"]
+serve = [
+    "fastapi>=0.115,<0.142",
+    "pydantic>=2.11,<3",
+    "python-multipart>=0.0.9,<1",
+    "uvicorn>=0.30,<0.53",
+    "websockets>=13,<17",
+]
+test = [
+    "pytest>=7.0",
+    "torch>=2.0",
+    "jsonschema>=4.23,<5",
+    "fastapi>=0.115,<0.142",
+    "httpx>=0.27,<0.29",
+    "pydantic>=2.11,<3",
+    "python-multipart>=0.0.9,<1",
+    "uvicorn>=0.30,<0.53",
+    "websockets>=13,<17",
+]
 cutedsl = ["nvidia-cutlass-dsl==4.7.1"]
 
 [tool.conan-py-build.wheel]
@@ -43,6 +60,7 @@ packages = [
     "core/builder/tensorrt_model_connect",
     "apps/benchmark/trtmc_benchmark",
     "families",
+    "server/python/trtmc_server",
 ]
 
 [tool.conan-py-build.sdist]
@@ -57,6 +75,7 @@ include = [
     "apps",
     "families",
     "requirements",
+    "server",
     "third_party",
     "examples",
     "tools/perf_matrix.py",
@@ -66,11 +85,13 @@ exclude = [
     "*.pyc",
     "core/builder/tensorrt_model_connect/build",
     "core/builder/tensorrt_model_connect/*.egg-info",
+    "server/python/trtmc_server/*.egg-info",
 ]
 
 [tool.pytest.ini_options]
 enable_assertion_pass_hook = true
 testpaths = [
+    "server/tests",
     "families",
     "core/builder/tests",
     "apps/benchmark/trtmc_benchmark/tests",

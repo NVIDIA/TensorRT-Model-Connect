@@ -30,6 +30,20 @@ def family_ids(repository: Path) -> tuple[str, ...]:
     return families
 
 
+def server_python_files(repository: Path) -> dict[str, Path]:
+    """Return the exact optional server package payload by wheel path."""
+
+    root = repository / "server/python"
+    files = {
+        path.relative_to(root).as_posix(): path
+        for path in root.rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+    if "trtmc_server/__init__.py" not in files:
+        raise CiError("repository has no trtmc_server Python package")
+    return dict(sorted(files.items()))
+
+
 class SourceArchiveValidator:
     """Require the source archive to carry the physical dependency declarations."""
 
@@ -48,14 +62,29 @@ class SourceArchiveValidator:
         if len(roots) != 1:
             raise CiError(f"{archive}: source archive must have one root directory")
         packaged = {Path(*path.parts[1:]).as_posix() for path in members if len(path.parts) > 1}
-        expected = {"requirements/base.txt"} | {
+        expected_dependencies = {"requirements/base.txt"} | {
             path.relative_to(self.context.repository).as_posix()
             for path in (self.context.repository / "families").glob("*/requirements.txt")
         }
-        missing = sorted(expected - packaged)
-        if missing:
-            raise CiError(f"{archive}: dependency declarations are missing: {missing}")
-        print(f"validated source archive={archive} family_requirements={len(expected) - 1}")
+        missing_dependencies = sorted(expected_dependencies - packaged)
+        if missing_dependencies:
+            raise CiError(
+                f"{archive}: dependency declarations are missing: {missing_dependencies}"
+            )
+        expected_server = {
+            path.relative_to(self.context.repository).as_posix()
+            for path in (self.context.repository / "server").rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix != ".pyc"
+        }
+        missing_server = sorted(expected_server - packaged)
+        if missing_server:
+            raise CiError(f"{archive}: server files are missing: {missing_server}")
+        print(
+            f"validated source archive={archive} "
+            f"family_requirements={len(expected_dependencies) - 1}"
+        )
 
 
 def load_native_libraries(bin_dir: Path, families: tuple[str, ...]) -> None:
@@ -119,6 +148,33 @@ class WheelArchiveValidator:
                 raise CiError(f"{wheel}: Python core package is missing")
             if "trtmc_benchmark/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python benchmark application is missing")
+            expected_server = server_python_files(self.context.repository)
+            missing_server = sorted(set(expected_server) - set(names))
+            if missing_server:
+                raise CiError(f"{wheel}: Python server package is missing: {missing_server}")
+            mismatched_server = sorted(
+                name
+                for name, source in expected_server.items()
+                if archive.read(name) != source.read_bytes()
+            )
+            if mismatched_server:
+                raise CiError(f"{wheel}: Python server files differ from Source: {mismatched_server}")
+            invalid_server = []
+            for name in expected_server:
+                try:
+                    compile(archive.read(name), name, "exec")
+                except (SyntaxError, UnicodeError):
+                    invalid_server.append(name)
+            if invalid_server:
+                raise CiError(f"{wheel}: Python server files do not compile: {invalid_server}")
+            legacy_server = sorted(
+                name
+                for name in names
+                if name == "tensorrt_model_connect/serve.py"
+                or name.startswith("tensorrt_model_connect/serve/")
+            )
+            if legacy_server:
+                raise CiError(f"{wheel}: legacy in-package server namespace is present")
             source_suffixes = {
                 ".c",
                 ".cc",
@@ -152,7 +208,7 @@ class WheelArchiveValidator:
                 for line in metadata.splitlines()
                 if line.startswith("Provides-Extra:")
             )
-            if extras != ["cutedsl", "test"]:
+            if extras != ["cutedsl", "serve", "test"]:
                 raise CiError(f"{wheel}: expected only application extras, found {extras}")
             packaged_python = tuple(
                 sorted(
@@ -294,9 +350,11 @@ import sysconfig
 
 core = importlib.import_module("tensorrt_model_connect")
 families = importlib.import_module("families")
+server = importlib.import_module("trtmc_server")
 print(json.dumps({
     "core": str(Path(core.__file__).resolve()),
     "families": str(Path(families.__file__).resolve()),
+    "server": str(Path(server.__file__).resolve()),
     "family_requirements": sorted(
         path.parent.name for path in Path(families.__file__).resolve().parent.glob("*/requirements.txt")
     ),
@@ -315,7 +373,7 @@ print(json.dumps({
             env=environment,
         )
         payload = json.loads(completed.stdout)
-        imported = (Path(payload["core"]), Path(payload["families"]))
+        imported = (Path(payload["core"]), Path(payload["families"]), Path(payload["server"]))
         if any(path.is_relative_to(self.repository.resolve()) for path in imported):
             raise CiError("installed wheel validation imported the source checkout")
         bin_dir = Path(payload["bin"])
@@ -369,6 +427,16 @@ print(json.dumps({
         )
         if not version.stdout.startswith("trtmc "):
             raise CiError("installed trtmc CLI returned an invalid version")
+        serve_help = subprocess.run(
+            [executable, "serve", "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=Path("/tmp"),
+            env=environment,
+        )
+        if "Serve TensorRT-Model-Connect bundles" not in serve_help.stdout:
+            raise CiError("installed trtmc serve CLI returned invalid help")
         with tempfile.TemporaryDirectory(prefix="trtmc-installed-wheel-") as directory:
             bundle = Path(directory) / "inspect.bundle"
             subprocess.run(

@@ -263,6 +263,8 @@ foreach(_trtmc_runtime_cmake IN LISTS _trtmc_family_runtime_cmake)
   )
 endforeach()
 
+add_subdirectory(server)
+
 add_library(trtmc_cli STATIC
   apps/cli/cli.cpp
   apps/cli/io.cpp
@@ -288,7 +290,8 @@ set_source_files_properties(apps/cli/io.cpp PROPERTIES
 
 add_executable(trtmc apps/cli/main.cpp)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/apps)
-target_link_libraries(trtmc PRIVATE trtmc_cli)
+target_link_libraries(trtmc PRIVATE trtmc_cli trtmc_server_native)
+add_dependencies(trtmc trtmc_server_python)
 target_compile_options(trtmc PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(trtmc PROPERTIES
   BUILD_RPATH "\$ORIGIN"

@@ -82,6 +82,7 @@ class SourceQualityChecks:
                 "python",
                 "tools/check_cyclomatic_complexity.py",
                 "core/runtime",
+                "server/native",
                 "--max-ccn",
                 "10",
                 "--top",
@@ -124,12 +125,14 @@ class SourceQualityChecks:
                 "tools/tests/test_public_source_hygiene.py",
                 "tools/tests/test_new_ci.py",
                 "tools/tests/test_pr_metadata.py",
+                "server/tests/test_dependency_direction.py",
                 "-q",
                 "-p",
                 "no:cacheprovider",
             ],
             updates={
                 "PYTHONPATH": (
+                    f"{self.context.repository / 'server/python'}:"
                     f"{self.context.repository / 'core/builder'}:"
                     f"{self.context.repository / 'apps/benchmark'}:"
                     f"{self.context.repository}"
@@ -165,6 +168,15 @@ class UnitTestRunner:
 
     def premerge(self) -> None:
         EnvironmentVerifier(self.context).verify()
+        pytest_options = [
+            "-q",
+            "-x",
+            "-m",
+            "not gpu and not trt",
+            "-p",
+            "no:cacheprovider",
+        ]
+        python_timeout = self.context.env.get("PYTHON_UNIT_TIMEOUT", "20m")
         self.context.run(
             [
                 "python",
@@ -179,12 +191,7 @@ class UnitTestRunner:
                     "test_voicechat_full_duplex_source.py"
                 ),
                 "tools/tests",
-                "-q",
-                "-x",
-                "-m",
-                "not gpu and not trt",
-                "-p",
-                "no:cacheprovider",
+                *pytest_options,
             ],
             updates={
                 "PYTHONPATH": (
@@ -194,7 +201,19 @@ class UnitTestRunner:
                 ),
                 "PYTHONDONTWRITEBYTECODE": "1",
             },
-            limit=self.context.env.get("PYTHON_UNIT_TIMEOUT", "20m"),
+            limit=python_timeout,
+        )
+        self.context.run(
+            ["python", "-m", "pytest", "server/tests", *pytest_options],
+            updates={
+                "PYTHONPATH": (
+                    "/opt/trtmc-server-test-deps:"
+                    f"{self.context.repository / 'server/python'}:"
+                    f"{self.context.repository}"
+                ),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            limit=python_timeout,
         )
         build = Path(
             self.context.env.get(
