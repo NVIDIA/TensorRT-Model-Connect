@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Executed only by the explicit CMake dependency build, never by model dispatch.
+function(run)
+  execute_process(COMMAND ${ARGV} COMMAND_ERROR_IS_FATAL ANY)
+endfunction()
+execute_process(COMMAND "@Python3_EXECUTABLE@" -I -c "import ensurepip"
+  RESULT_VARIABLE _has_ensurepip OUTPUT_QUIET ERROR_QUIET)
+if(_has_ensurepip EQUAL 0)
+  run("@Python3_EXECUTABLE@" -I -m venv --copies "@_edge_prefix@/libexec/trtmc-edge-llm")
+else()
+  # Debian minimal Python may omit ensurepip; use an already installed bootstrapper.
+  run("@Python3_EXECUTABLE@" -I -m virtualenv --copies --no-download --no-periodic-update
+    "@_edge_prefix@/libexec/trtmc-edge-llm")
+endif()
+set(_pip_options --isolated install --no-user)
+if(NOT "@TRTMC_EDGELLM_WHEELHOUSE@" STREQUAL "")
+  list(APPEND _pip_options --no-index --find-links "@TRTMC_EDGELLM_WHEELHOUSE@")
+endif()
+file(GLOB _trt_wheels "@TRTMC_EDGELLM_TRT_ROOT@/python/tensorrt-*-cp@Python3_VERSION_MAJOR@@Python3_VERSION_MINOR@-none-linux_@CMAKE_SYSTEM_PROCESSOR@.whl")
+list(LENGTH _trt_wheels _wheel_count)
+if(NOT _wheel_count EQUAL 1)
+  message(FATAL_ERROR "Expected exactly one TensorRT SDK wheel matching the native Python ABI")
+endif()
+run("@_edge_python@" -I -m pip ${_pip_options} --report "@_edge_prefix@/pip-report.json"
+  ${_trt_wheels} numpy==2.2.6 transformers==5.14.1 jinja2==3.1.6
+  scikit-build-core==0.11.6 wheel==0.45.1 cmake==3.31.10 ninja==1.13.0
+  "cuda-python>=@CUDAToolkit_VERSION_MAJOR@.@CUDAToolkit_VERSION_MINOR@,<@CUDAToolkit_VERSION_MAJOR@.@CUDAToolkit_VERSION_MINOR@.999"
+  "nvidia-cutlass-dsl[cu@CUDAToolkit_VERSION_MAJOR@]==4.7.0" "cupy-cuda@CUDAToolkit_VERSION_MAJOR@x==13.6.0")
+run("@_edge_python@" -I -m pip ${_pip_options} --no-deps --no-build-isolation "@_edge_source@")
+run("@_edge_python@" -I -m pip --isolated check)
+run("@_edge_python@" -I -c "print(__import__('tensorrt').__version__)")
+set(ENV{PATH} "@CUDAToolkit_BIN_DIR@:$ENV{PATH}")
+run("@_edge_python@" -I "@_edge_source@/kernelSrcs/build_cutedsl.py"
+  --gpu_arch "sm_@TRTMC_EDGELLM_CUDA_ARCHITECTURE@" --arch "@CMAKE_SYSTEM_PROCESSOR@"
+  --kernels fmha,gdn --cuda-version "@CUDAToolkit_VERSION_MAJOR@.@CUDAToolkit_VERSION_MINOR@" --jobs "@TRTMC_EDGELLM_JOBS@")

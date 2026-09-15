@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+file(INSTALL "@_edge_build@/cpp/libedgellmCore.a" DESTINATION "@_edge_prefix@/lib")
+file(INSTALL "@_edge_build@/libNvInfer_edgellm_plugin.so" DESTINATION "@_edge_prefix@/lib" FOLLOW_SYMLINK_CHAIN)
+file(INSTALL "@_edge_source@/cpp/kernels/cuteDSLArtifact/@CMAKE_SYSTEM_PROCESSOR@/sm_@TRTMC_EDGELLM_CUDA_ARCHITECTURE@/libcutedsl_@CMAKE_SYSTEM_PROCESSOR@.a"
+  DESTINATION "@_edge_prefix@/lib" RENAME libcutedsl.a)
+file(INSTALL "@_edge_source@/cpp" DESTINATION "@_edge_prefix@/include/edgellm" FILES_MATCHING PATTERN "*.h" PATTERN "*.cuh")
+foreach(_third_party IN ITEMS nlohmannJson stb miniaudio)
+  file(INSTALL "@_edge_source@/3rdParty/${_third_party}" DESTINATION "@_edge_prefix@/include/edgellm/3rdParty"
+    FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
+endforeach()
+file(MAKE_DIRECTORY "@_edge_prefix@/bin" "@_edge_prefix@/share/trtmc")
+file(WRITE "@_edge_prefix@/bin/edgellm-builder" [=[#!/bin/sh
+set -eu
+prefix=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec "$prefix/libexec/trtmc-edge-llm/bin/python" -I -c 'from experimental.builder.cli import main; main()' "$@"
+]=])
+file(CHMOD "@_edge_prefix@/bin/edgellm-builder" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+execute_process(COMMAND "@_edge_python@" -I -c "import tensorrt; print(tensorrt.__version__)"
+  OUTPUT_VARIABLE _trt_version OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+# Paths are relative to the installation prefix, preserving relocatability.
+file(WRITE "@_edge_prefix@/share/trtmc/edge-llm.json" "{\n  \"schema_version\": 1,\n  \"version\": \"@_edge_version@\",\n  \"revision\": \"@_edge_revision@\",\n  \"arch\": \"@CMAKE_SYSTEM_PROCESSOR@\",\n  \"architectures\": [@TRTMC_EDGELLM_CUDA_ARCHITECTURE@],\n  \"cuda_version\": \"@CUDAToolkit_VERSION_MAJOR@.@CUDAToolkit_VERSION_MINOR@\",\n  \"tensorrt_version\": \"${_trt_version}\",\n  \"python\": \"libexec/trtmc-edge-llm/bin/python\",\n  \"builder\": \"bin/edgellm-builder\",\n  \"plugin\": \"lib/libNvInfer_edgellm_plugin.so\"\n}\n")
