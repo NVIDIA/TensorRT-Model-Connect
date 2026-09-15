@@ -33,6 +33,7 @@ dependencies = [
 
 [project.scripts]
 trtmc-bench = "trtmc_benchmark.cli:main"
+trtmc-qualify = "trtmc_benchmark.qualification_cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7.0", "torch>=2.0", "jsonschema>=4.23,<5"]

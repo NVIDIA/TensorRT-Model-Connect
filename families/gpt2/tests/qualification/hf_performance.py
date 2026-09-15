@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Benchmark one Transformers model at the same public task boundary as trtmc-bench."""
+"""GPT-2 HF performance reference; imports no TRTMC builder dependencies."""
 
 from __future__ import annotations
 
@@ -22,47 +22,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--revision")
-    parser.add_argument(
-        "--task",
-        required=True,
-        choices=("encoder", "causal-lm", "seq2seq-lm"),
-    )
+    parser.add_argument("--task", required=True, choices=("causal-lm",))
     parser.add_argument("--request-json", required=True)
     parser.add_argument("--precision", required=True, choices=("fp16", "fp32", "bf16"))
     parser.add_argument("--max-length", required=True, type=int)
-    parser.add_argument("--padding", default="longest", choices=("longest", "max-length"))
-    parser.add_argument("--mode", required=True, choices=("torch-compile", "hf-eager"))
-    parser.add_argument(
-        "--model-class",
-        default="task",
-        choices=("task", "auto"),
-        help="Use the task AutoClass or the model repository's generic AutoModel registration.",
-    )
-    parser.add_argument(
-        "--generation-method",
-        default="generate",
-        choices=("generate", "ar-generate"),
-        help="Public generation method to time after loading the model.",
-    )
-    parser.add_argument("--compile-mode", default="default")
+    parser.add_argument("--padding", default="longest", choices=("longest",))
+    parser.add_argument("--mode", required=True, choices=("torch-compile",))
+    parser.add_argument("--compile-mode", default="default", choices=("default",))
     parser.add_argument("--compile-fullgraph", action="store_true")
     parser.add_argument("--compile-dynamic", action="store_true")
-    parser.add_argument(
-        "--experts-implementation",
-        choices=("eager", "batched_mm", "grouped_mm"),
-    )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--warmup", required=True, type=int)
     parser.add_argument("--iterations", required=True, type=int)
     parser.add_argument("--case-name", required=True)
-    parser.add_argument(
-        "--output-token-policy",
-        default="new-tokens",
-        choices=("new-tokens", "strip-start", "strip-start-and-eos"),
-    )
+    parser.add_argument("--output-token-policy", default="new-tokens", choices=("new-tokens",))
     parser.add_argument("--output", required=True, type=Path)
+    parser.set_defaults(
+        model_class="task", generation_method="generate", experts_implementation=None
+    )
     return parser
+
+
+def _load(arguments: argparse.Namespace) -> tuple[Any, Any]:
+    import torch
+    from transformers import AutoTokenizer, GPT2LMHeadModel
+
+    common = {"local_files_only": arguments.local_files_only}
+    if arguments.revision:
+        common["revision"] = arguments.revision
+    tokenizer = AutoTokenizer.from_pretrained(arguments.model, **common)
+    tokenizer.pad_token = tokenizer.eos_token
+    model = (
+        GPT2LMHeadModel.from_pretrained(
+            arguments.model, torch_dtype=_dtype(torch, arguments.precision), **common
+        )
+        .eval()
+        .to("cuda")
+    )
+    return tokenizer, model
 
 
 def _request(raw: str) -> dict[str, Any]:
@@ -83,73 +81,40 @@ def _dtype(torch_module: Any, precision: str) -> Any:
     }[precision]
 
 
-def _load_model(
-    model_class: Any,
-    arguments: argparse.Namespace,
-    torch_module: Any,
-    common: Mapping[str, Any],
-) -> Any:
-    model_options = {
-        "torch_dtype": _dtype(torch_module, arguments.precision),
-        "low_cpu_mem_usage": True,
-        "device_map": "cuda",
-        **common,
-    }
-    if arguments.experts_implementation:
-        model_options["experts_implementation"] = arguments.experts_implementation
-    return model_class.from_pretrained(arguments.model, **model_options).eval()
-
-
-def _load(arguments: argparse.Namespace) -> tuple[Any, Any]:
-    import torch
-    from transformers import (
-        AutoModel,
-        AutoModelForCausalLM,
-        AutoModelForSeq2SeqLM,
-        AutoTokenizer,
-    )
-    common: dict[str, Any] = {
-        "trust_remote_code": arguments.trust_remote_code,
-        "local_files_only": arguments.local_files_only,
-    }
-    if arguments.revision:
-        common["revision"] = arguments.revision
-    tokenizer = AutoTokenizer.from_pretrained(arguments.model, **common)
-    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model_class = AutoModel
-    if arguments.model_class == "task":
-        model_class = {
-            "encoder": AutoModel,
-            "causal-lm": AutoModelForCausalLM,
-            "seq2seq-lm": AutoModelForSeq2SeqLM,
-        }[arguments.task]
-    model = _load_model(model_class, arguments, torch, common)
-    return tokenizer, model
-
-
 def _compile(model: Any, arguments: argparse.Namespace) -> dict[str, Any] | None:
     if arguments.mode != "torch-compile":
         return None
     import torch
+    from torch._dynamo.backends.registry import lookup_backend
 
     original_forward = model.forward
+    evidence = {"compiled_graph_count": 0}
+    inductor = lookup_backend("inductor")
+
+    def compile_graph(graph, inputs, **options):
+        compiled = inductor(graph, inputs, **options)
+        evidence["compiled_graph_count"] += 1
+        return compiled
+
     compiled_forward = torch.compile(
         original_forward,
-        mode=arguments.compile_mode,
+        backend=compile_graph,
         fullgraph=arguments.compile_fullgraph,
         dynamic=arguments.compile_dynamic,
     )
     model.forward = compiled_forward
-    return {
-        "api": "torch.compile",
-        "target": "model.forward",
-        "backend": "inductor",
-        "mode": arguments.compile_mode,
-        "fullgraph": arguments.compile_fullgraph,
-        "dynamic": arguments.compile_dynamic,
-        "applied": True,
-    }
+    evidence.update(
+        {
+            "api": "torch.compile",
+            "target": "model.forward",
+            "backend": "inductor",
+            "mode": arguments.compile_mode,
+            "fullgraph": arguments.compile_fullgraph,
+            "dynamic": arguments.compile_dynamic,
+            "applied": True,
+        }
+    )
+    return evidence
 
 
 def _batch_prompt(request: Mapping[str, Any]) -> list[str]:
@@ -160,60 +125,6 @@ def _batch_prompt(request: Mapping[str, Any]) -> list[str]:
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
         raise ValueError("request.batch_size must be a positive integer")
     return [prompt] * batch_size
-
-
-def _encoder_call(
-    tokenizer: Any,
-    model: Any,
-    request: Mapping[str, Any],
-    max_length: int,
-    padding: str,
-    precision: str,
-) -> tuple[Callable[[], Any], Callable[[Any], dict[str, Any]]]:
-    import torch
-
-    prompts = _batch_prompt(request)
-
-    def invoke() -> Any:
-        encoded = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding="max_length" if padding == "max-length" else True,
-            truncation=True,
-            max_length=max_length,
-        )
-        gpu_inputs = {name: value.to("cuda") for name, value in encoded.items()}
-        with (
-            torch.inference_mode(),
-            torch.autocast(
-                device_type="cuda",
-                dtype=_dtype(torch, precision),
-                enabled=precision != "fp32",
-            ),
-        ):
-            outputs = model(**gpu_inputs)
-        hidden = getattr(outputs, "last_hidden_state", None)
-        if hidden is None:
-            hidden = getattr(outputs, "pooler_output", None)
-        if hidden is None:
-            hidden = outputs[0]
-        if hidden.ndim == 3:
-            hidden = hidden[:, 0, :]
-        if hidden.ndim != 2:
-            raise RuntimeError(f"encoder returned unsupported shape {tuple(hidden.shape)}")
-        return hidden.detach().to("cpu", dtype=torch.float32)
-
-    def summarize(hidden: Any) -> dict[str, Any]:
-        shape = [int(value) for value in hidden.shape]
-        return {
-            "shape": shape,
-            "embedding_vectors": len(prompts),
-            "embedding_elements": int(hidden.numel()),
-            "dim": int(shape[-1]),
-            "finite": bool(torch.isfinite(hidden).all().item()),
-        }
-
-    return invoke, summarize
 
 
 def _generation_call(
@@ -281,26 +192,9 @@ def _generation_call(
                 enabled=precision != "fp32",
             ),
         ):
-            if generation_method == "ar-generate":
-                generated = model.ar_generate(
-                    gpu_inputs["input_ids"],
-                    max_new_tokens=max_new_tokens,
-                    temperature=float(request.get("temperature", 0.0)),
-                    eos_token_id=tokenizer.eos_token_id,
-                )
-                if isinstance(generated, tuple):
-                    generated = generated[0]
-            else:
-                generated = model.generate(**gpu_inputs, **generation)
-        input_length = 0 if task == "seq2seq-lm" else int(gpu_inputs["input_ids"].shape[-1])
+            generated = model.generate(**gpu_inputs, **generation)
+        input_length = int(gpu_inputs["input_ids"].shape[-1])
         token_ids = generated[0, input_length:].detach().to("cpu", dtype=torch.int64).tolist()
-        if task == "seq2seq-lm":
-            token_ids = _normalize_seq2seq_tokens(
-                token_ids,
-                getattr(model.config, "decoder_start_token_id", None),
-                getattr(model.config, "eos_token_id", None),
-                output_token_policy,
-            )
         text = tokenizer.decode(token_ids, skip_special_tokens=True)
         return {"token_ids": token_ids, "text": text}
 
@@ -336,50 +230,24 @@ def _chat_prompt_inputs(tokenizer: Any, prompt: str, *, enable_thinking: bool) -
     return tokenizer(rendered, return_tensors="pt", add_special_tokens=False)
 
 
-def _normalize_seq2seq_tokens(
-    token_ids: Sequence[int],
-    decoder_start_token_id: int | None,
-    eos_token_id: int | Sequence[int] | None,
-    policy: str,
-) -> list[int]:
-    normalized = [int(value) for value in token_ids]
-    if policy == "new-tokens":
-        return normalized
-    normalized = _strip_first_token(normalized, decoder_start_token_id)
-    if policy != "strip-start-and-eos" or not normalized or eos_token_id is None:
-        return normalized
-    eos_ids = _token_id_set(eos_token_id)
-    if normalized[-1] in eos_ids:
-        normalized.pop()
-    return normalized
-
-
-def _strip_first_token(token_ids: list[int], expected: int | None) -> list[int]:
-    if token_ids and expected is not None and token_ids[0] == int(expected):
-        return token_ids[1:]
-    return token_ids
-
-
-def _token_id_set(value: int | Sequence[int]) -> set[int]:
-    if isinstance(value, int):
-        return {int(value)}
-    return {int(item) for item in value}
-
-
 def _measure(
     invoke: Callable[[], Any],
     summarize: Callable[[Any], dict[str, Any]],
     warmup: int,
     iterations: int,
+    compile_evidence: Mapping[str, Any],
 ) -> tuple[list[float], dict[str, Any]]:
     import torch
 
-    if warmup < 0 or iterations <= 0:
-        raise ValueError("warmup must be non-negative and iterations must be positive")
+    if warmup <= 0 or iterations <= 0:
+        raise ValueError("warmup and iterations must be positive")
     last = None
     for _ in range(warmup):
         last = invoke()
     torch.cuda.synchronize()
+    compiled_graphs = compile_evidence["compiled_graph_count"]
+    if compiled_graphs < 1:
+        raise RuntimeError("warmup did not execute any compiled graphs")
     samples: list[float] = []
     for _ in range(iterations):
         torch.cuda.synchronize()
@@ -389,6 +257,8 @@ def _measure(
         samples.append((time.perf_counter() - started) * 1000.0)
     if last is None or not all(math.isfinite(value) and value > 0 for value in samples):
         raise RuntimeError("baseline produced no finite positive timing observations")
+    if compile_evidence["compiled_graph_count"] != compiled_graphs:
+        raise RuntimeError("model compilation occurred inside timed samples")
     return samples, summarize(last)
 
 
@@ -417,7 +287,8 @@ def _environment(torch_module: Any, transformers_module: Any) -> dict[str, Any]:
     return {
         "hostname": platform.node(),
         "python": platform.python_version(),
-        "python_executable": os.path.realpath(os.sys.executable),
+        "python_executable": os.sys.executable,
+        "gpu_uuid": str(torch_module.cuda.get_device_properties(device).uuid),
         "torch": torch_module.__version__,
         "transformers": transformers_module.__version__,
         "cuda": torch_module.version.cuda,
@@ -443,26 +314,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     request = _request(arguments.request_json)
     tokenizer, model = _load(arguments)
     compile_evidence = _compile(model, arguments)
-    if arguments.task == "encoder":
-        invoke, summarize = _encoder_call(
-            tokenizer,
-            model,
-            request,
-            arguments.max_length,
-            arguments.padding,
-            arguments.precision,
-        )
-    else:
-        invoke, summarize = _generation_call(
-            tokenizer,
-            model,
-            request,
-            arguments.task,
-            arguments.output_token_policy,
-            arguments.precision,
-            arguments.generation_method,
-        )
-    samples, output_summary = _measure(invoke, summarize, arguments.warmup, arguments.iterations)
+    invoke, summarize = _generation_call(
+        tokenizer,
+        model,
+        request,
+        arguments.task,
+        arguments.output_token_policy,
+        arguments.precision,
+        arguments.generation_method,
+    )
+    samples, output_summary = _measure(
+        invoke, summarize, arguments.warmup, arguments.iterations, compile_evidence
+    )
     if compile_evidence is not None:
         compile_evidence["warmup_completed"] = True
         compile_evidence["timed_callable_uses_compiled_target"] = True
@@ -477,8 +340,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "compile_evidence": compile_evidence,
         "model": arguments.model,
         "revision": (
-            getattr(getattr(model, "config", None), "_commit_hash", None)
-            or arguments.revision
+            getattr(getattr(model, "config", None), "_commit_hash", None) or arguments.revision
         ),
         "case_name": arguments.case_name,
         "task": arguments.task,

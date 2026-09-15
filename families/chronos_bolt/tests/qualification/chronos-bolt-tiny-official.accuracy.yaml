@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: chronos-bolt-tiny-official
+kind: accuracy
+
+suites:
+  - benchmark: etth1_time_series_parity
+    gate_policy: blocking
+    cases:
+      - id: smoke
+        sample_limit: 10
+        reference:
+          implementation: chronos_bolt
+          precision: fp32
+        window:
+          input_columns: [OT]
+          context_length: 512
+          prediction_length: 64
+          stride: 24
+          test_target_start: 11520
+          test_end: 14400
+          frequency: 0
+        gate:
+          max_relative_l2: 1.0e-6
+          max_absolute_error: 8.0e-6
+        candidate:
+          testcase: chronos-bolt-tiny-official

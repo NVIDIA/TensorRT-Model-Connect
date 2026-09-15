@@ -135,12 +135,31 @@ class WheelArchiveValidator:
                 + path.relative_to(self.context.repository / "families").as_posix()
                 for path in (self.context.repository / "families").glob("*/tests/**/*")
                 if path.is_file()
-                and path.suffix not in source_suffixes
+                and (
+                    path.suffix not in source_suffixes
+                    or (
+                        path.suffix == ".py"
+                        and "qualification"
+                        in path.relative_to(self.context.repository / "families").parts
+                        and not path.name.startswith("test_")
+                    )
+                )
                 and "__pycache__" not in path.parts
             }
             missing_catalog = sorted(expected_catalog - set(names))
             if missing_catalog:
                 raise CiError(f"{wheel}: benchmark catalog is missing: {missing_catalog}")
+            expected_suites = {
+                "trtmc_benchmark/_suites/" + path.name
+                for path in (self.context.repository / "apps/benchmark/qualification/suites").glob(
+                    "*.yaml"
+                )
+            }
+            missing_suites = sorted(expected_suites - set(names))
+            if missing_suites:
+                raise CiError(
+                    f"{wheel}: shared benchmark definitions are missing: {missing_suites}"
+                )
             if "families/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python families package is missing")
             metadata_files = [name for name in names if name.endswith(".dist-info/METADATA")]
@@ -272,10 +291,18 @@ class WheelArchiveValidator:
             if len(scripts) != 1 or len(script_cores) != 1 or len(script_runtimes) != 1:
                 raise CiError(f"{wheel}: installed CLI payload is incomplete")
             entry_points = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
-            if len(entry_points) != 1 or "trtmc-bench" not in archive.read(entry_points[0]).decode(
-                "utf-8"
-            ):
-                raise CiError(f"{wheel}: trtmc-bench console entrypoint is missing")
+            expected_entry_points = {
+                "trtmc-bench = trtmc_benchmark.cli:main",
+                "trtmc-qualify = trtmc_benchmark.qualification_cli:main",
+            }
+            if len(entry_points) != 1:
+                raise CiError(f"{wheel}: benchmark console entrypoints are missing")
+            actual_entry_points = set(archive.read(entry_points[0]).decode("utf-8").splitlines())
+            missing_entry_points = sorted(expected_entry_points - actual_entry_points)
+            if missing_entry_points:
+                raise CiError(
+                    f"{wheel}: benchmark console entrypoints are missing: {missing_entry_points}"
+                )
         print(f"validated wheel={wheel} families={len(expected_families)}")
 
 
@@ -359,6 +386,19 @@ print(json.dumps({
         )
         if "Task API benchmarks" not in benchmark_help.stdout:
             raise CiError("installed trtmc-bench CLI returned invalid help")
+        qualification_cli = Path(payload["scripts"]) / "trtmc-qualify"
+        if not qualification_cli.is_file() or not os.access(qualification_cli, os.X_OK):
+            raise CiError(f"installed trtmc-qualify CLI is missing: {qualification_cli}")
+        qualification_help = subprocess.run(
+            [qualification_cli, "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=Path("/tmp"),
+            env=environment,
+        )
+        if "family-owned Accuracy and Performance suites" not in qualification_help.stdout:
+            raise CiError("installed trtmc-qualify CLI returned invalid help")
         version = subprocess.run(
             [executable, "version"],
             check=True,

@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+implementation: etth1_time_series_parity
+
+dataset:
+  relative_path: ETTh1/ETTh1.csv
+  version: etdataset-1d16c8f4f943005d613b5bc962e9eeb06058cf07
+  sha256: f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066
+
+selection:
+  method: seeded_windows
+  seed: 20260715
+
+scoring:
+  implementation: time_series_tensor_parity
