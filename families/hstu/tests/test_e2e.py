@@ -233,7 +233,8 @@ def _assert_parity(
 
 
 def _metamorphic_checks(
-    binary, runtime_root, bundle, request, config, actual, thresholds, tmp_path
+    binary, runtime_root, bundle, request, config, actual, thresholds, tmp_path,
+    model_dir, upstream, precision,
 ):
     """Observe native masks, temporal causality and variable-length batch behavior."""
     first = request["sequences"][0]
@@ -250,16 +251,40 @@ def _metamorphic_checks(
             _array(result["sequences"][0], "embeddings", width)[:untouched],
             thresholds,
         )
-        # Changing the final history item cannot affect earlier history queries.
+        from families.hstu.tests.reference import run_reference
+
+        # Upstream context tokens attend all history. In a second layer they
+        # carry later-history information into earlier history queries. Retain
+        # this contextual probe and require full parity after perturbation.
         changed = deepcopy(request)
         changed["sequences"][0]["history_item_ids"][-1] = ITEM_IDS[-2]
         result = _native(binary, runtime_root, bundle, changed, tmp_path / "history-change")
-        start = context_length(first)
+        reference = run_reference(model_dir, changed, upstream_root=upstream, precision=precision)
+        record_evidence("reference", reference)
+        _assert_parity(result, reference, changed, config, thresholds)
+
+        # Strict causal history isolation applies to a context-free sequence.
+        # Keep the same checkpoint, history, candidates, and numerical gates.
+        causal = deepcopy(request)
+        for sequence in causal["sequences"]:
+            prefix = context_length(sequence)
+            sequence.pop("contextual_features", None)
+            if "token_timestamps" in sequence:
+                sequence["token_timestamps"] = sequence["token_timestamps"][prefix:]
+        baseline = _native(binary, runtime_root, bundle, causal, tmp_path / "causal-baseline")
+        reference = run_reference(model_dir, causal, upstream_root=upstream, precision=precision)
+        record_evidence("reference", reference)
+        _assert_parity(baseline, reference, causal, config, thresholds)
+        causal["sequences"][0]["history_item_ids"][-1] = ITEM_IDS[-2]
+        result = _native(binary, runtime_root, bundle, causal, tmp_path / "causal-history-change")
+        reference = run_reference(model_dir, causal, upstream_root=upstream, precision=precision)
+        record_evidence("reference", reference)
+        _assert_parity(result, reference, causal, config, thresholds)
         stride = 2 if "history_action_ids" in first else 1
-        stop = start + stride * (len(first["history_item_ids"]) - 1)
+        stop = stride * (len(first["history_item_ids"]) - 1)
         _assert_close(
-            _array(actual["sequences"][0], "sequence_embeddings", width)[start:stop],
-            _array(result["sequences"][0], "sequence_embeddings", width)[start:stop],
+            _array(baseline["sequences"][0], "sequence_embeddings", width)[:stop],
+            _array(result["sequences"][0], "sequence_embeddings", width)[:stop],
             thresholds,
         )
     if config["scaling_seqlen"] > 0:
@@ -325,5 +350,6 @@ def test_seeded_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     with evidence_stage("compare"):
         _assert_parity(actual, expected, request, config, thresholds)
         _metamorphic_checks(
-            binary, runtime_root, bundle, request, config, actual, thresholds, tmp_path
+            binary, runtime_root, bundle, request, config, actual, thresholds, tmp_path,
+            model_dir, upstream, manifest["precision"],
         )
