@@ -161,6 +161,11 @@ std::vector<float> build_center_padded_audio(const float* samples, int32_t n_sam
     const int32_t padded_length = pad_size + audio_length + pad_size;
     std::vector<float> padded(padded_length, 0.0F);
     std::memcpy(padded.data() + pad_size, audio_padded.data(), audio_length * sizeof(float));
+    // STFT centers the fixed-length waveform with reflection, excluding each edge sample.
+    for (int32_t i = 0; i < pad_size; ++i) {
+        padded[i] = audio_padded[pad_size - i];
+        padded[pad_size + audio_length + i] = audio_padded[audio_length - 2 - i];
+    }
     return padded;
 }
 
@@ -274,10 +279,9 @@ MelResult extract_mel_spectrogram(const float* samples, int32_t n_samples, const
     std::vector<float> mel_spec =
         compute_mel_spectrogram(padded, make_hann_window(n_fft), mel_filters, n_fft, hop_length,
                                 freq_bins, n_mel_bins, frames_to_compute, n_frames_raw);
-    normalize_log_mel_inplace(mel_spec);
-
     int32_t n_frames_out = 0;
     mel_spec = trim_last_frame(std::move(mel_spec), n_mel_bins, n_frames_raw, n_frames_out);
+    normalize_log_mel_inplace(mel_spec);
 
     MelResult result;
     result.data = std::move(mel_spec);
