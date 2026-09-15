@@ -119,6 +119,8 @@ class WheelArchiveValidator:
                 raise CiError(f"{wheel}: Python core package is missing")
             if "trtmc_benchmark/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python benchmark application is missing")
+            if "trtmc_server/__init__.py" not in names:
+                raise CiError(f"{wheel}: Python server application is missing")
             source_suffixes = {
                 ".c",
                 ".cc",
@@ -152,8 +154,35 @@ class WheelArchiveValidator:
                 for line in metadata.splitlines()
                 if line.startswith("Provides-Extra:")
             )
-            if extras != ["cutedsl", "test"]:
+            if extras != ["cutedsl", "serve", "test"]:
                 raise CiError(f"{wheel}: expected only application extras, found {extras}")
+            expected_server_python = {
+                path.relative_to(
+                    self.context.repository / "apps" / "server" / "python"
+                ).as_posix()
+                for path in (
+                    self.context.repository / "apps" / "server" / "python" / "trtmc_server"
+                ).rglob("*.py")
+                if "__pycache__" not in path.parts
+            }
+            missing_server_python = sorted(expected_server_python - set(names))
+            if missing_server_python:
+                raise CiError(
+                    f"{wheel}: server Python files are missing: {missing_server_python}"
+                )
+            mismatched_server_python = sorted(
+                name
+                for name in expected_server_python
+                if archive.read(name)
+                != (
+                    self.context.repository / "apps" / "server" / "python" / name
+                ).read_bytes()
+            )
+            if mismatched_server_python:
+                raise CiError(
+                    f"{wheel}: server Python files differ from Source: "
+                    f"{mismatched_server_python}"
+                )
             packaged_python = tuple(
                 sorted(
                     Path(name).parts[1]
@@ -232,6 +261,7 @@ class WheelArchiveValidator:
             }
             required = {
                 "trtmc",
+                "trtmc-server",
                 "libtrtmc_core.so",
                 "libtrtmc_runtime.so",
                 "libtrtmc_backend_trt.so",
@@ -263,13 +293,21 @@ class WheelArchiveValidator:
                     f"{wheel}: expected only unaliased TensorRT backend DSOs, found {backend_dsos}"
                 )
             scripts = [name for name in names if name.endswith(".data/scripts/trtmc")]
+            server_scripts = [
+                name for name in names if name.endswith(".data/scripts/trtmc-server")
+            ]
             script_cores = [
                 name for name in names if name.endswith(".data/scripts/libtrtmc_core.so")
             ]
             script_runtimes = [
                 name for name in names if name.endswith(".data/scripts/libtrtmc_runtime.so")
             ]
-            if len(scripts) != 1 or len(script_cores) != 1 or len(script_runtimes) != 1:
+            if (
+                len(scripts) != 1
+                or len(server_scripts) != 1
+                or len(script_cores) != 1
+                or len(script_runtimes) != 1
+            ):
                 raise CiError(f"{wheel}: installed CLI payload is incomplete")
             entry_points = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
             if len(entry_points) != 1 or "trtmc-bench" not in archive.read(entry_points[0]).decode(
@@ -294,9 +332,11 @@ import sysconfig
 
 core = importlib.import_module("tensorrt_model_connect")
 families = importlib.import_module("families")
+server = importlib.import_module("trtmc_server")
 print(json.dumps({
     "core": str(Path(core.__file__).resolve()),
     "families": str(Path(families.__file__).resolve()),
+    "server": str(Path(server.__file__).resolve()),
     "family_requirements": sorted(
         path.parent.name for path in Path(families.__file__).resolve().parent.glob("*/requirements.txt")
     ),
@@ -315,7 +355,7 @@ print(json.dumps({
             env=environment,
         )
         payload = json.loads(completed.stdout)
-        imported = (Path(payload["core"]), Path(payload["families"]))
+        imported = (Path(payload["core"]), Path(payload["families"]), Path(payload["server"]))
         if any(path.is_relative_to(self.repository.resolve()) for path in imported):
             raise CiError("installed wheel validation imported the source checkout")
         bin_dir = Path(payload["bin"])
@@ -331,6 +371,7 @@ print(json.dumps({
         }
         required = (
             bin_dir / "trtmc",
+            bin_dir / "trtmc-server",
             bin_dir / "libtrtmc_core.so",
             bin_dir / "libtrtmc_runtime.so",
             bin_dir / "libtrtmc_backend_trt.so",
@@ -346,6 +387,11 @@ print(json.dumps({
             raise CiError(f"installed trtmc CLI is missing: {executable}")
         if executable.resolve().is_relative_to(self.repository.resolve()):
             raise CiError("installed trtmc CLI resolves into the source checkout")
+        server_executable = Path(payload["scripts"]) / "trtmc-server"
+        if not server_executable.is_file() or not os.access(server_executable, os.X_OK):
+            raise CiError(f"installed trtmc-server CLI is missing: {server_executable}")
+        if server_executable.resolve().is_relative_to(self.repository.resolve()):
+            raise CiError("installed trtmc-server CLI resolves into the source checkout")
         benchmark_cli = Path(payload["scripts"]) / "trtmc-bench"
         if not benchmark_cli.is_file() or not os.access(benchmark_cli, os.X_OK):
             raise CiError(f"installed trtmc-bench CLI is missing: {benchmark_cli}")

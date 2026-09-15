@@ -96,7 +96,14 @@ int frontend_main(int argc, char** argv) {
             throw std::runtime_error("cannot configure the source-build Python module path");
     }
 
-    std::vector<std::string> command{"python3", source_build ? "-P" : "-I", "-m", "trtmc_server"};
+    std::string python = "python3";
+    if (!source_build) {
+        const auto installed_python = executable.parent_path() / "python3";
+        std::error_code error;
+        if (std::filesystem::exists(installed_python, error) && !error)
+            python = installed_python.string();
+    }
+    std::vector<std::string> command{python, source_build ? "-P" : "-I", "-m", "trtmc_server"};
     for (int index = 1; index < argc; ++index)
         command.emplace_back(argv[index]);
     command.emplace_back("--worker-binary");

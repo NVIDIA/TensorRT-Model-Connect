@@ -15,6 +15,18 @@ from .registry import ModelRegistry, ModelSpec
 from .worker import WorkerLoadOptions
 
 
+def packaged_runtime_root(control_plane_file: Path = Path(__file__)) -> Path | None:
+    """Locate native DSOs installed beside the wheel's builder package."""
+
+    candidate = control_plane_file.resolve().parent.parent / "tensorrt_model_connect" / "bin"
+    required = (
+        candidate / "trtmc-server",
+        candidate / "libtrtmc_runtime.so",
+        candidate / "libtrtmc_backend_trt.so",
+    )
+    return candidate if all(path.is_file() for path in required) else None
+
+
 def positive(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -94,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
             if not root.is_dir():
                 raise ValueError("--runtime-root must be a directory")
             runtime_root = str(root)
+        else:
+            packaged_root = packaged_runtime_root()
+            if packaged_root is not None:
+                runtime_root = str(packaged_root)
         api_key = args.api_key or os.environ.get("TRTMC_SERVE_TOKEN")
         registry = ModelRegistry(
             specs,
