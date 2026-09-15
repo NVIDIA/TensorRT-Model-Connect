@@ -33,6 +33,32 @@ contract. The backend owns TensorRT runtime objects, not model policy.
 returning or copy the lightweight `BundleReader` into the pipeline for deferred
 reads; it must not retain a reference to the temporary factory context.
 
+## Multichannel streaming audio
+
+Families can opt into `IMultichannelStreamingAudioGeneration` without changing
+the existing mono `IStreamingAudioGeneration` interface. A family implementing
+both is dispatched through the multichannel capability by the CLI.
+
+Each `AudioChunkView` borrows interleaved float PCM (`L0, R0, L1, R1, ...` for
+stereo), with an explicit channel count and sample rate. `num_samples` counts
+scalar samples, not frames per channel. Chunks must be nonempty whole frames;
+the sample rate and channel count stay constant within a call. Callbacks are
+synchronous, ordered, and non-concurrent. Their pointers are valid only during
+the callback. Normal return ends the stream and reports the sum of delivered
+scalar samples; callback exceptions must stop generation and propagate.
+
+`trtmc generate-audio ... --stream true --output audio.raw` writes interleaved
+float32 samples and reports `format`, `sample_rate`, `num_channels`, and
+`num_samples` in its success JSON. Playback duration is
+`num_samples / num_channels / sample_rate`. This is raw PCM, not a WAV file.
+Invalid chunks, format changes, inconsistent totals, and file-write errors fail
+the command without success JSON. A failed stream can leave a partial output
+file; callers must not treat file existence alone as success.
+
+This capability does not add HTTP transport, encoded formats, or streaming
+support to models that do not already produce incremental audio. Existing mono
+families remain unchanged and report `num_channels: 1`.
+
 ## Optional load settings
 
 Runtime-sized KV capacity is passed directly to compatible families.
