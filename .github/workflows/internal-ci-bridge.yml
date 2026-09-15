@@ -382,7 +382,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
-          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
           DISPATCH_RESULT: ${{ needs.dispatch.result }}
           PRIVATE_CONCLUSION: ${{ needs.dispatch.outputs.private_conclusion }}
         run: |
@@ -391,24 +390,25 @@ jobs:
           description="Automated internal CI did not complete; details withheld"
           publish_comment=true
 
+          # Main may advance while this exact PR head is in CI. pull.base.sha
+          # and the synthetic merge's first parent refresh independently and
+          # are not comparable snapshot identities. Authorization already
+          # binds the downstream run to the tested merge, so publication is
+          # invalidated only when the PR itself is superseded.
           snapshot_current=false
           if pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
             current_state="$(jq -r '.state // ""' <<<"$pull")"
             current_repo="$(jq -r '.base.repo.full_name // ""' <<<"$pull")"
             current_ref="$(jq -r '.base.ref // ""' <<<"$pull")"
             current_head="$(jq -r '.head.sha // ""' <<<"$pull")"
-            current_base="$(jq -r '.base.sha // ""' <<<"$pull")"
             if [ "$current_state" = "open" ] \
               && [ "$current_repo" = "$GITHUB_REPOSITORY" ] \
               && [ "$current_ref" = "main" ] \
-              && [ "$current_head" = "$HEAD_SHA" ] \
-              && [ "$current_base" = "$BASE_SHA" ]; then
+              && [ "$current_head" = "$HEAD_SHA" ]; then
               snapshot_current=true
             elif [ "$current_head" != "$HEAD_SHA" ]; then
               description="Automated internal CI result was superseded by a newer PR head"
               publish_comment=false
-            elif [ "$current_base" != "$BASE_SHA" ]; then
-              description="The PR base changed during internal CI; rerun is required"
             fi
           fi
 

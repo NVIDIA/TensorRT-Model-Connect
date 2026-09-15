@@ -644,6 +644,91 @@ esac
         assert "Community CPU / Required must pass" in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize(
+    ("private_conclusion", "current_head_matches", "expected_output"),
+    [
+        (
+            "success",
+            True,
+            "state=success\n"
+            "description=Automated internal CI passed\n"
+            "publish_comment=false\n",
+        ),
+        (
+            "failure",
+            True,
+            "state=failure\n"
+            "description=Automated internal CI failed; details withheld\n"
+            "publish_comment=true\n",
+        ),
+        (
+            "success",
+            False,
+            "state=failure\n"
+            "description=Automated internal CI result was superseded by a newer PR head\n"
+            "publish_comment=false\n",
+        ),
+    ],
+)
+def test_internal_bridge_publishes_downstream_result_when_rest_base_differs(
+    tmp_path: Path,
+    private_conclusion: str,
+    current_head_matches: bool,
+    expected_output: str,
+) -> None:
+    head_sha = "a" * 40
+    current_head_sha = head_sha if current_head_matches else "d" * 40
+    tested_base_sha = "b" * 40
+    stale_rest_base_sha = "c" * 40
+    github_output = tmp_path / "github-output"
+    gh = tmp_path / "gh"
+    gh.write_text(
+        """#!/bin/bash
+set -euo pipefail
+arguments="$*"
+case "$arguments" in
+  *pulls/17*)
+    printf '{"state":"open","base":{"repo":{"full_name":"example/repo"},"ref":"main","sha":"%s"},"head":{"sha":"%s"}}\n' "$STALE_REST_BASE_SHA" "$CURRENT_HEAD_SHA"
+    ;;
+  *) printf 'unexpected gh call: %s\n' "$arguments" >&2; exit 99 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "internal-ci-bridge.yml",
+                "publish",
+                "Resolve the contributor-visible result",
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "PR_NUMBER": "17",
+            "HEAD_SHA": head_sha,
+            "BASE_SHA": tested_base_sha,
+            "DISPATCH_RESULT": "success",
+            "PRIVATE_CONCLUSION": private_conclusion,
+            "GITHUB_REPOSITORY": "example/repo",
+            "GITHUB_OUTPUT": str(github_output),
+            "STALE_REST_BASE_SHA": stale_rest_base_sha,
+            "CURRENT_HEAD_SHA": current_head_sha,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert github_output.read_text(encoding="utf-8") == expected_output
+
+
 def test_cpu_image_installs_the_same_pinned_community_requirements() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile.community-cpu").read_text(encoding="utf-8")
     dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
