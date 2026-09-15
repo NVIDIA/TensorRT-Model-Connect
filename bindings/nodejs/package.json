@@ -1,0 +1,17 @@
+{
+  "name": "tensorrt-model-connect-node",
+  "version": "0.1.0",
+  "description": "Node.js bindings for TensorRT-Model-Connect",
+  "main": "example.js",
+  "gypfile": true,
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "test": "node --test test.js"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

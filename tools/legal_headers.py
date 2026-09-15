@@ -75,6 +75,8 @@ STYLE_BY_SUFFIX: Mapping[str, HeaderStyle] = {
     ".yaml": HASH_STYLE,
     ".yml": HASH_STYLE,
     ".toml": HASH_STYLE,
+    ".gyp": HASH_STYLE,
+    ".gypi": HASH_STYLE,
     # C, C++, CUDA, and compatible native formats.
     ".c": NATIVE_STYLE,
     ".cc": NATIVE_STYLE,
