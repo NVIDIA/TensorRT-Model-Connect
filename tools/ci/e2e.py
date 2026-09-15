@@ -302,6 +302,8 @@ class E2ERunner:
                         "-x",
                         "-p",
                         "no:cacheprovider",
+                        "-o",
+                        "tmp_path_retention_policy=failed",
                         "--junitxml",
                         e2e_junit,
                     )

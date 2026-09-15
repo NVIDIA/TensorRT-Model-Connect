@@ -51,10 +51,16 @@ def _transition(
     return graph.linear(graph.mul(first, second), f"{prefix}.fc3")
 
 
-def add_transition(graph: Graph, tensor: Any, prefix: str):
+def add_transition(
+    graph: Graph,
+    tensor: Any,
+    prefix: str,
+    *,
+    low_precision: bool = True,
+):
     """Add the transition topology reused by Boltz-2 trunk submodules."""
 
-    return _transition(graph, tensor, prefix)
+    return _transition(graph, tensor, prefix, low_precision=low_precision)
 
 
 def _triangle_multiplication(
@@ -64,9 +70,10 @@ def _triangle_multiplication(
     prefix: str,
     *,
     outgoing: bool,
+    low_precision: bool = True,
 ):
     normalized = graph.layer_norm(z, f"{prefix}.norm_in")
-    normalized_lowp = graph.cast(normalized, graph.trt.bfloat16)
+    normalized_lowp = graph.cast(normalized, graph.trt.bfloat16) if low_precision else normalized
     projected = graph.linear(normalized_lowp, f"{prefix}.p_in")
     gate = graph.sigmoid(graph.linear(normalized_lowp, f"{prefix}.g_in"))
     projected = graph.mul(projected, gate)
@@ -87,7 +94,8 @@ def _triangle_multiplication(
     contracted = graph.einsum((first, second), equation)
 
     contracted = graph.layer_norm(contracted, f"{prefix}.norm_out")
-    contracted = graph.cast(contracted, graph.trt.bfloat16)
+    if low_precision:
+        contracted = graph.cast(contracted, graph.trt.bfloat16)
     projected_out = graph.linear(contracted, f"{prefix}.p_out")
     output_gate = graph.sigmoid(graph.linear(normalized_lowp, f"{prefix}.g_out"))
     return graph.mul(projected_out, output_gate)
@@ -102,6 +110,7 @@ def _triangle_attention(
     starting: bool,
     heads: int,
     head_width: int,
+    low_precision: bool = True,
 ):
     if not starting:
         z = graph.transpose(z, (0, 2, 1, 3))
@@ -109,7 +118,7 @@ def _triangle_attention(
 
     batch, tokens, _, channels = (int(dim) for dim in z.shape)
     normalized = graph.layer_norm(z, f"{prefix}.layer_norm")
-    normalized_lowp = graph.cast(normalized, graph.trt.bfloat16)
+    normalized_lowp = graph.cast(normalized, graph.trt.bfloat16) if low_precision else normalized
     triangle_bias = graph.linear(normalized_lowp, f"{prefix}.linear")
     triangle_bias = graph.transpose(triangle_bias, (0, 3, 1, 2))
     triangle_bias = graph.reshape(triangle_bias, (batch, 1, heads, tokens, tokens))
@@ -261,6 +270,7 @@ def add_pairformer_no_seq_block(
     *,
     pairwise_num_heads: int,
     pairwise_head_width: int,
+    low_precision: bool = True,
 ):
     """Add the family-owned pair-only stack shared by Boltz-2 modules."""
 
@@ -270,6 +280,7 @@ def add_pairformer_no_seq_block(
         pair_mask,
         f"{prefix}.tri_mul_out",
         outgoing=True,
+        low_precision=low_precision,
     )
     z = graph.add(z, graph.cast(update, z.dtype))
     update = _triangle_multiplication(
@@ -278,6 +289,7 @@ def add_pairformer_no_seq_block(
         pair_mask,
         f"{prefix}.tri_mul_in",
         outgoing=False,
+        low_precision=low_precision,
     )
     z = graph.add(z, graph.cast(update, z.dtype))
     update = _triangle_attention(
@@ -288,6 +300,7 @@ def add_pairformer_no_seq_block(
         starting=True,
         heads=pairwise_num_heads,
         head_width=pairwise_head_width,
+        low_precision=low_precision,
     )
     z = graph.add(z, graph.cast(update, z.dtype))
     update = _triangle_attention(
@@ -298,9 +311,15 @@ def add_pairformer_no_seq_block(
         starting=False,
         heads=pairwise_num_heads,
         head_width=pairwise_head_width,
+        low_precision=low_precision,
     )
     z = graph.add(z, graph.cast(update, z.dtype))
-    transition = _transition(graph, z, f"{prefix}.transition_z")
+    transition = _transition(
+        graph,
+        z,
+        f"{prefix}.transition_z",
+        low_precision=low_precision,
+    )
     z = graph.add(z, graph.cast(transition, z.dtype))
     return z
 

@@ -519,10 +519,13 @@ def test_internal_bridge_remains_a_one_shot_maintainer_label_trigger() -> None:
     assert "workflow_run:" not in source
     assert "Community CPU / Required must pass" in source
     assert "/actions/runs/$candidate_run/jobs?filter=latest&per_page=100" in source
-    assert 'name == "Community CPU / Required" and .conclusion == "success"' in source
-    assert '[ "$candidate_base" != "$base_sha" ]' in source
+    assert 'name == "Community CPU / Required"' in source
+    assert '[ "$cpu_status" = "completed" ] && [ "$cpu_conclusion" = "success" ]' in source
+    assert "/compare/$candidate_base...$base_sha?per_page=1" in source
+    assert '.status == "ahead" and .merge_base_commit.sha == $base' in source
+    assert '[ "$candidate_base" = "$base_sha" ]' in source
     assert '[ "$candidate_head" != "$head_sha" ]' in source
-    assert '[ "$candidate_tree" != "$merge_tree" ]' in source
+    assert '[ "$candidate_tree" = "$merge_tree" ] || continue' in source
     assert "Community CI must pass" not in source
 
 
@@ -587,7 +590,12 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     assert "Unexpected Community CI run name" in ready_script
     assert "for attempt in {1..30}; do" in ready_script
     assert "sleep 10" in ready_script
-    assert ready_script.count('current_merge_sha="$(jq -r ".merge_commit_sha // empty" <<<"$pr_json")"') == 2
+    assert (
+        ready_script.count(
+            'current_merge_sha="$(jq -r ".merge_commit_sha // empty" <<<"$pr_json")"'
+        )
+        == 2
+    )
     for check in ("Community CPU / Required", "PR Metadata / Required", "DCO"):
         assert check in ready_script
     assert "sort_by(.started_at) | last" in ready_script

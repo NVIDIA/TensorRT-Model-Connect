@@ -16,6 +16,7 @@ decoding without a Python subprocess.
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import sys
@@ -1412,6 +1413,20 @@ def _tokenizer_bundle_artifacts(
             if source.is_file():
                 shutil.copyfile(source, staged / filename)
         _extract_tokenizer_from_nemo(str(model_dir), staged)
+        config_path = staged / "tokenizer_config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        extra_tokens = config.get("extra_special_tokens")
+        if isinstance(extra_tokens, list):
+            # The multilingual checkpoint uses a token list; the build-time
+            # loader reserves extra_special_tokens for named token mappings.
+            # Normalize only the staged config, preserving token IDs and framing.
+            additional_tokens = list(config.get("additional_special_tokens", []))
+            for token in extra_tokens:
+                if token not in additional_tokens:
+                    additional_tokens.append(token)
+            config["additional_special_tokens"] = additional_tokens
+            del config["extra_special_tokens"]
+            config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         runtime = _tokenizer_runtime_contract(staged)
         artifacts = {
             filename: (staged / filename).read_bytes()

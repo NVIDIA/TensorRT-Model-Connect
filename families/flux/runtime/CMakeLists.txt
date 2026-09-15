@@ -58,4 +58,22 @@ if(TRTMC_BUILD_TESTS)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+
+  # CPU CUDA stubs live in the test, so allocation failures can be injected
+  # without a GPU. Not linked against trtmc_model_flux: that would pull in
+  # the real cudart/cublas symbols the stubs below need to shadow.
+  add_executable(test_flux_device_buffer_alloc
+    ${PROJECT_SOURCE_DIR}/families/flux/tests/cpp/test_flux_device_buffer_alloc.cpp
+  )
+  target_include_directories(test_flux_device_buffer_alloc PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_flux_device_buffer_alloc SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_compile_options(test_flux_device_buffer_alloc PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME flux_device_buffer_alloc COMMAND test_flux_device_buffer_alloc)
 endif()

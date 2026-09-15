@@ -486,8 +486,8 @@ def _add_conv_layer(
         work_dtype=work_dtype,
     )
     weighted = network.add_elementwise(
-        present_conv,
-        conv_weights,
+        _cast(network, present_conv, trt.float32),
+        _cast(network, conv_weights, trt.float32),
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
     convolved = network.add_reduce(
@@ -496,7 +496,9 @@ def _add_conv_layer(
         1 << 1,
         True,
     ).get_output(0)
-    conv_row = network.add_shuffle(convolved)
+    # A depthwise convolution accumulates products before rounding the output
+    # to the model dtype; retaining half-rounded products changes the prefix.
+    conv_row = network.add_shuffle(_cast(network, convolved, work_dtype))
     conv_row.reshape_dims = (1, hidden)
     conv_row_tensor = _bias(
         network,

@@ -51,6 +51,27 @@ def test_audio_compat_reads_the_checked_in_float_wav() -> None:
         sphn.resample(audio, src_sample_rate=24_000, dst_sample_rate=16_000)
 
 
+def test_official_reference_imports_before_checkpoint_validation(tmp_path: Path) -> None:
+    if not os.environ.get(official_reference.SOURCE_ENVIRONMENT):
+        pytest.skip("official source checkout is required for the reference import smoke test")
+    model_dir = tmp_path / "empty_model"
+    model_dir.mkdir()
+    input_wav = tmp_path / "input.wav"
+    _write_wav(input_wav)
+
+    # Exercise the real subprocess imports without downloading weights or using a GPU.
+    # Missing dependencies must fail here instead of being mistaken for a model error.
+    with pytest.raises(RuntimeError, match="checkpoint is missing official weights"):
+        official_reference.generate(
+            model_dir,
+            input_wav,
+            tmp_path / "output",
+            max_frames=1,
+            precision="bf16",
+            timeout_s=60,
+        )
+
+
 def test_generate_runs_the_official_source_and_requires_live_outputs(
     monkeypatch, tmp_path: Path
 ) -> None:

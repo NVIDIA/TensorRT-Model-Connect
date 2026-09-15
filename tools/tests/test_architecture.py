@@ -271,6 +271,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/builder/tests/__init__.py",
         "core/builder/tests/test_build.py",
         "core/builder/tests/test_build_cli.py",
+        "core/builder/tests/test_bundle_reader.py",
         "core/builder/tests/test_bundle_writer.py",
         "core/builder/tests/test_byok.py",
         "core/builder/tests/test_graph_transform.py",

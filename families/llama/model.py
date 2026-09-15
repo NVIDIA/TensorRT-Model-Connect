@@ -25,12 +25,29 @@ if TYPE_CHECKING:
 _BUNDLE_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
-    "chat_template.jinja",
     "vocab.json",
     "merges.txt",
     "special_tokens_map.json",
     "tokenizer.model",
 )
+
+
+def _chat_template(model_dir: Path) -> bytes | None:
+    template_path = model_dir / "chat_template.jinja"
+    if template_path.is_file():
+        return template_path.read_bytes()
+    config_path = model_dir / "tokenizer_config.json"
+    if config_path.is_file():
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError("tokenizer_config.json must contain one JSON object")
+        template = document.get("chat_template")
+        if template is None:
+            return None
+        if not isinstance(template, str):
+            raise ValueError("tokenizer_config.json chat_template must be a string")
+        return template.encode("utf-8")
+    return None
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -257,3 +274,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         path = model_dir / filename
         if path.is_file():
             writer.add_bytes(filename, path.read_bytes())
+    template = _chat_template(model_dir)
+    if template is not None:
+        writer.add_bytes("chat_template.jinja", template)

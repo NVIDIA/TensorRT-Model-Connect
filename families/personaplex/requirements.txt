@@ -1,4 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Match the tensor rearrangement dependency in the pinned official Moshi source.
+einops==0.7.0
 soundfile
