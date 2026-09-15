@@ -283,8 +283,9 @@ Json measure(const Timing& timing, Invoke&& invoke, Observe&& observe) {
     for (int index = 0; index < timing.iterations; ++index) {
         const auto started = Clock::now();
         last = invoke();
+        const double runtime_e2e_wall_ms = elapsed_ms(started);
         Json observation = observe(*last);
-        observation["runtime_e2e_wall_ms"] = elapsed_ms(started);
+        observation["runtime_e2e_wall_ms"] = runtime_e2e_wall_ms;
         observations.push_back(std::move(observation));
     }
     return {{"observations", std::move(observations)},
