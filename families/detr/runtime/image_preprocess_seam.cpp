@@ -38,7 +38,10 @@ void validate_detr_preprocess_config(const DetrPreprocessConfig& config) {
 }
 
 int32_t hf_round(double value) {
-    return static_cast<int32_t>(std::round(value));
+    // Python's round() chooses the even integer at a half tie.
+    const auto lower = static_cast<int32_t>(std::floor(value));
+    const double fraction = value - lower;
+    return lower + (fraction > 0.5 || (fraction == 0.5 && lower % 2 != 0));
 }
 
 struct DetrResizePlan {
