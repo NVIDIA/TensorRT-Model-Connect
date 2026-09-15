@@ -129,6 +129,14 @@ _BUNDLE_FILES = (
 )
 
 
+# The model types this family builds, matching families/gemma/support.py. The
+# check used to be a "gemma" prefix, which also accepted gemma3 and gemma4:
+# those add sliding-window attention and a second rope table, neither of which
+# this family has, so the prefix let them build a full-attention graph and
+# generate quietly wrong text rather than being refused.
+_SUPPORTED_MODEL_TYPES = frozenset({"gemma", "gemma2"})
+
+
 def _positive_int(value: object, name: str) -> int:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a positive integer")
@@ -189,7 +197,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
-    if not str(config.model_type).lower().startswith("gemma"):
+    if str(config.model_type).lower() not in _SUPPORTED_MODEL_TYPES:
         raise ValueError(f"Gemma does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
     if precision not in {"fp32", "fp16", "bf16"}:
