@@ -644,6 +644,53 @@ class IEncoding : public virtual ITask {
     virtual EmbeddingResult encode(const std::string& text) = 0;
 };
 
+struct RecommendationFeature {
+    std::string name;
+    std::vector<std::int64_t> ids;
+};
+
+struct RecommendationSequence {
+    std::vector<std::int64_t> history_item_ids;
+    std::vector<std::int64_t> history_action_ids;
+    std::vector<RecommendationFeature> contextual_features;
+    std::vector<std::int64_t> candidate_item_ids;
+    // Seconds, one timestamp for each token in the family's encoded sequence order.
+    std::vector<std::int64_t> token_timestamps;
+};
+
+struct RecommendationRequest {
+    std::vector<RecommendationSequence> sequences;
+};
+
+struct RecommendationSequenceResult {
+    std::vector<std::int64_t> candidate_item_ids;
+    // Row-major [num_candidates, output_dim] ranking logits, in input candidate order.
+    std::vector<float> logits;
+    // One retrieval similarity per candidate; empty for ranking tasks.
+    std::vector<float> scores;
+    // Row-major [num_candidates, embedding_dim] normalized candidate embeddings.
+    // A family may return item features or contextualized sequence outputs.
+    std::vector<float> embeddings;
+    // Row-major [sequence_length, embedding_dim] unpadded encoded token representations.
+    // Retrieval sequences contain context and history; ranking also encodes candidates.
+    std::vector<float> sequence_embeddings;
+    std::int32_t sequence_length{0};
+    std::int32_t num_candidates{0};
+    std::int32_t embedding_dim{0};
+    std::int32_t output_dim{0};
+};
+
+struct RecommendationResult {
+    std::vector<RecommendationSequenceResult> sequences;
+};
+
+class IRecommendation : public virtual ITask {
+  public:
+    static constexpr const char* kTask = "recommendation";
+    const char* task() const noexcept override { return kTask; }
+    virtual RecommendationResult recommend(const RecommendationRequest& request) = 0;
+};
+
 class IReranking : public virtual ITask {
   public:
     static constexpr const char* kTask = "reranking";
