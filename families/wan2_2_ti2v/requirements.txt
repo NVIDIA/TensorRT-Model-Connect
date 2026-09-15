@@ -4,6 +4,9 @@
 Pillow
 accelerate>=1.1.1
 dashscope
+# The official Wan package eagerly imports S2V/Animate's decord.VideoReader.
+# decord2 provides that module with Linux aarch64 and x86_64 wheels.
+decord2==3.4.0
 diffusers>=0.31.0
 easydict
 einops==0.8.1

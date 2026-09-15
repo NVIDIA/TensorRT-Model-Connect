@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 import subprocess
+import sys
 import zlib
 from pathlib import Path
 
@@ -142,6 +144,7 @@ def test_official_reference_declares_its_real_import_dependencies() -> None:
     assert {
         "accelerate>=1.1.1",
         "dashscope",
+        "decord2==3.4.0",
         "diffusers>=0.31.0",
         "easydict",
         "flash-attn",
@@ -153,6 +156,43 @@ def test_official_reference_declares_its_real_import_dependencies() -> None:
         "tqdm",
         "transformers>=4.49.0,<=4.51.3",
     } <= requirements
+
+
+def test_pinned_official_reference_imports_without_loading_a_checkpoint() -> None:
+    if not os.environ.get(official_reference.SOURCE_ENVIRONMENT):
+        pytest.skip("the pinned official Wan source is not staged")
+    source = official_reference._source().resolve()
+    script = """
+import inspect
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import torch
+
+sys.path.insert(0, sys.argv[1])
+# Official T5 evaluates this default argument at import time. No model is
+# constructed here; keep all module imports real while avoiding CUDA setup.
+with patch.object(torch.cuda, "current_device", return_value=0):
+    from wan.configs.wan_ti2v_5B import ti2v_5B
+    from wan.textimage2video import WanTI2V
+    from wan.modules.attention import FLASH_ATTN_2_AVAILABLE, FLASH_ATTN_3_AVAILABLE
+
+assert int(ti2v_5B.text_len) == 512
+assert Path(inspect.getfile(WanTI2V)).resolve() == Path(sys.argv[1]) / "wan/textimage2video.py"
+"""
+    environment = official_reference._environment()
+    environment["CUDA_VISIBLE_DEVICES"] = ""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_official_reference_requires_the_declared_source(
