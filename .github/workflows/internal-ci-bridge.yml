@@ -31,7 +31,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (
-        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
         (
           github.event_name == 'pull_request_target' &&
           github.ref == 'refs/heads/main' &&
@@ -48,6 +48,8 @@ jobs:
       pr_number: ${{ steps.snapshot.outputs.pr_number }}
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
       base_sha: ${{ steps.snapshot.outputs.base_sha }}
+      tested_sha: ${{ steps.snapshot.outputs.tested_sha }}
+      source_tree: ${{ steps.snapshot.outputs.source_tree }}
 
     steps:
       # This trusted workflow reads PR metadata only. It never checks out or
@@ -117,7 +119,7 @@ jobs:
 
           # CPU success belongs to the exact PR head. Main may advance after
           # CPU finishes; accept an older tested base in the authorized base's
-          # history. Internal CI resolves and pins its own merge snapshot.
+          # history. Both Internal CI lanes test the merge captured above.
           if ! community_ci_runs="$(
             gh api --method GET \
               "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100"
@@ -221,6 +223,8 @@ jobs:
             echo "pr_number=$PR_NUMBER"
             echo "head_sha=$head_sha"
             echo "base_sha=$base_sha"
+            echo "tested_sha=$merge_sha"
+            echo "source_tree=$merge_tree"
           } >> "$GITHUB_OUTPUT"
 
       - name: Consume the trusted trigger label
@@ -272,8 +276,57 @@ jobs:
                   "/repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" || true
               done
 
+  launch-dev:
+    name: Start independent dev premerge
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Write the authorized dev snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          TESTED_SHA: ${{ needs.authorize.outputs.tested_sha }}
+          SOURCE_TREE: ${{ needs.authorize.outputs.source_tree }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg pr_number "$PR_NUMBER" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg base_sha "$BASE_SHA" \
+            --arg tested_sha "$TESTED_SHA" \
+            --arg source_tree "$SOURCE_TREE" \
+            '{pr_number: $pr_number, head_sha: $head_sha, base_sha: $base_sha,
+              tested_sha: $tested_sha, source_tree: $source_tree}' \
+              > "$RUNNER_TEMP/premerge-dev-snapshot.json"
+
+      - name: Upload the authorized dev snapshot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: premerge-dev-snapshot-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/premerge-dev-snapshot.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Dispatch the independent dev bridge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Never wait for dev in the stable workflow's concurrency group.
+          jq -n --arg run_id "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '{ref: "main", inputs: {bridge_run_id: $run_id, bridge_run_attempt: $attempt}}' \
+            | gh api --silent --method POST \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/internal-ci-dev.yml/dispatches" \
+              --input -
+
   dispatch:
-    name: Internal CI dispatch
+    name: Stable Internal CI dispatch
     needs:
       - authorize
       - announce
@@ -298,6 +351,8 @@ jobs:
           PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          TESTED_SHA: ${{ needs.authorize.outputs.tested_sha }}
+          SOURCE_TREE: ${{ needs.authorize.outputs.source_tree }}
         run: |
           set -euo pipefail
           [[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]
@@ -313,6 +368,8 @@ jobs:
             --arg pr_number "$PR_NUMBER" \
             --arg head_sha "$HEAD_SHA" \
             --arg base_sha "$BASE_SHA" \
+            --arg tested_sha "$TESTED_SHA" \
+            --arg source_tree "$SOURCE_TREE" \
             --arg dispatch_nonce "$dispatch_nonce" \
             '{
               ref: "main",
@@ -320,6 +377,9 @@ jobs:
                 pr_number: $pr_number,
                 head_sha: $head_sha,
                 base_sha: $base_sha,
+                tested_sha: $tested_sha,
+                source_tree: $source_tree,
+                lane: "stable",
                 dispatch_nonce: $dispatch_nonce
               }
             }' > "$payload"

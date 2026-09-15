@@ -1,0 +1,290 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: TensorRT-Model-Connect Dev CI Bridge
+
+run-name: >-
+  Dev CI · stable bridge ${{ inputs.bridge_run_id }} / ${{ inputs.bridge_run_attempt }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      bridge_run_id:
+        description: Authorized stable bridge run containing the Source snapshot
+        required: true
+        type: string
+      bridge_run_attempt:
+        description: Stable bridge run attempt that captured the Source snapshot
+        required: true
+        type: string
+
+permissions: {}
+
+# Independent from the stable bridge, including when dev never finishes.
+concurrency:
+  group: trtmc-private-dev-dispatch-${{ inputs.bridge_run_id }}
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    name: Validate dev snapshot provenance
+    if: >-
+      github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      pr_number: ${{ steps.snapshot.outputs.pr_number }}
+      head_sha: ${{ steps.snapshot.outputs.head_sha }}
+      base_sha: ${{ steps.snapshot.outputs.base_sha }}
+      tested_sha: ${{ steps.snapshot.outputs.tested_sha }}
+      source_tree: ${{ steps.snapshot.outputs.source_tree }}
+    steps:
+      - name: Verify the authorizing bridge run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRIDGE_RUN_ID: ${{ inputs.bridge_run_id }}
+          BRIDGE_RUN_ATTEMPT: ${{ inputs.bridge_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$BRIDGE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BRIDGE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$BRIDGE_RUN_ID/attempts/$BRIDGE_RUN_ATTEMPT")"
+          jq -e --argjson id "$BRIDGE_RUN_ID" --argjson attempt "$BRIDGE_RUN_ATTEMPT" \
+            '.id == $id and .run_attempt == $attempt and
+             .path == ".github/workflows/internal-ci-bridge.yml" and
+             (.event == "pull_request_target" or
+              (.event == "workflow_dispatch" and .head_branch == "main"))' \
+            <<< "$run" > /dev/null
+          actor="$(jq -er '.actor.login' <<< "$run")"
+          role="$(gh api "/repos/$GITHUB_REPOSITORY/collaborators/$actor/permission" --jq '.role_name')"
+          case "$role" in maintain|admin) ;; *) exit 1 ;; esac
+
+      - name: Download the immutable authorized snapshot
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.bridge_run_id }}
+          name: premerge-dev-snapshot-${{ inputs.bridge_run_attempt }}
+          path: ${{ runner.temp }}/premerge-dev-snapshot
+
+      - name: Validate the trusted dispatch snapshot
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT: ${{ runner.temp }}/premerge-dev-snapshot/premerge-dev-snapshot.json
+        run: |
+          set -euo pipefail
+          PR_NUMBER="$(jq -er '.pr_number' "$SNAPSHOT")"
+          HEAD_SHA="$(jq -er '.head_sha' "$SNAPSHOT")"
+          BASE_SHA="$(jq -er '.base_sha' "$SNAPSHOT")"
+          TESTED_SHA="$(jq -er '.tested_sha' "$SNAPSHOT")"
+          SOURCE_TREE="$(jq -er '.source_tree' "$SNAPSHOT")"
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          for sha in "$HEAD_SHA" "$BASE_SHA" "$TESTED_SHA" "$SOURCE_TREE"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          done
+          gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" | jq -e \
+            --arg repo "$GITHUB_REPOSITORY" --arg head "$HEAD_SHA" \
+            '.state == "open" and .base.repo.full_name == $repo and
+             .base.ref == "main" and .head.sha == $head' > /dev/null
+          gh api "/repos/$GITHUB_REPOSITORY/git/commits/$TESTED_SHA" | jq -e \
+            --arg tested "$TESTED_SHA" --arg head "$HEAD_SHA" \
+            --arg base "$BASE_SHA" --arg tree "$SOURCE_TREE" \
+            '.sha == $tested and (.parents | length) == 2 and
+             .parents[0].sha == $base and .parents[1].sha == $head and
+             .tree.sha == $tree' > /dev/null
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "head_sha=$HEAD_SHA"
+            echo "base_sha=$BASE_SHA"
+            echo "tested_sha=$TESTED_SHA"
+            echo "source_tree=$SOURCE_TREE"
+          } >> "$GITHUB_OUTPUT"
+
+  announce:
+    name: Publish pending dev result
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Publish the non-blocking dev status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=pending \
+            -f context="TRTMC Internal CI / Dev premerge (non-blocking)" \
+            -f description="Experimental CI is running; not a merge gate" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  dispatch:
+    name: Dev Internal CI dispatch
+    concurrency:
+      group: trtmc-private-dev-pr-${{ needs.authorize.outputs.pr_number }}
+      cancel-in-progress: true
+    needs:
+      - authorize
+      - announce
+    if: ${{ always() && needs.authorize.result == 'success' }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: ci-dispatch
+      deployment: false
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    outputs:
+      private_conclusion: ${{ steps.private_result.outputs.conclusion }}
+
+    steps:
+      - name: Dispatch internal premerge CI
+        id: private_run
+        env:
+          GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
+          PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          CI_REF: ${{ vars.TRTMC_PREMERGE_DEV_REF || 'main' }}
+          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          TESTED_SHA: ${{ needs.authorize.outputs.tested_sha }}
+          SOURCE_TREE: ${{ needs.authorize.outputs.source_tree }}
+        run: |
+          set -euo pipefail
+          [[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]
+          [[ "$PRIVATE_CI_REPOSITORY" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$ ]]
+
+          umask 077
+          dispatch_nonce="$(openssl rand -hex 16)"
+          [[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]
+          echo "::add-mask::$dispatch_nonce"
+          payload="$RUNNER_TEMP/internal-ci-dispatch.json"
+          trap 'rm -f "$payload"' EXIT
+          jq -n \
+            --arg ci_ref "$CI_REF" \
+            --arg pr_number "$PR_NUMBER" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg base_sha "$BASE_SHA" \
+            --arg tested_sha "$TESTED_SHA" \
+            --arg source_tree "$SOURCE_TREE" \
+            --arg dispatch_nonce "$dispatch_nonce" \
+            '{
+              ref: $ci_ref,
+              inputs: {
+                pr_number: $pr_number,
+                head_sha: $head_sha,
+                base_sha: $base_sha,
+                tested_sha: $tested_sha,
+                source_tree: $source_tree,
+                lane: "dev",
+                dispatch_nonce: $dispatch_nonce
+              }
+            }' > "$payload"
+          gh api --silent --method POST \
+            "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/dispatches" \
+            --input "$payload"
+
+          expected_title="Source PR #$PR_NUMBER · $HEAD_SHA · dispatch $dispatch_nonce"
+          run_id=""
+          for _ in $(seq 1 20); do
+            runs="$(
+              gh api --method GET \
+                "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/runs?event=workflow_dispatch&per_page=100"
+            )"
+            run_id="$(
+              jq -r \
+                --arg title "$expected_title" \
+                '[
+                  .workflow_runs[]
+                  | select(.display_title == $title)
+                ]
+                | sort_by(.created_at)
+                | last
+                | .id // empty' <<<"$runs"
+            )"
+            if [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+              break
+            fi
+            sleep 3
+          done
+          if ! [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::The exact dispatched Internal CI run was not found."
+            exit 1
+          fi
+          echo "::add-mask::$run_id"
+          {
+            echo "run_id=$run_id"
+            echo "dispatch_nonce=$dispatch_nonce"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the exact Internal CI result
+        id: private_result
+        env:
+          GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
+          PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
+          RUN_ID: ${{ steps.private_run.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          # The exact private run can queue behind GPU work. Let the job-level
+          # timeout bound this wait instead of misreporting queue delay as a
+          # terminal Internal CI failure.
+          while true; do
+            run="$(
+              gh api --method GET \
+                "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/runs/$RUN_ID"
+            )"
+            status="$(jq -er '.status' <<<"$run")"
+            if [ "$status" = "completed" ]; then
+              conclusion="$(jq -r '.conclusion // "unknown"' <<<"$run")"
+              case "$conclusion" in
+                success|failure|cancelled|timed_out|skipped|neutral|action_required) ;;
+                *) conclusion=unknown ;;
+              esac
+              echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+
+  publish:
+    name: Publish non-blocking dev result
+    needs: [authorize, announce, dispatch]
+    if: ${{ always() && needs.authorize.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Publish the terminal dev status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          DISPATCH_RESULT: ${{ needs.dispatch.result }}
+          PRIVATE_CONCLUSION: ${{ needs.dispatch.outputs.private_conclusion }}
+        run: |
+          set -euo pipefail
+          state=failure
+          description="Experimental CI did not pass; not a merge gate"
+          if [ "$DISPATCH_RESULT" = success ] && [ "$PRIVATE_CONCLUSION" = success ]; then
+            state=success
+            description="Experimental CI passed; not a merge gate"
+          fi
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$state" \
+            -f context="TRTMC Internal CI / Dev premerge (non-blocking)" \
+            -f description="$description" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          test "$state" = success

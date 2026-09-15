@@ -715,6 +715,7 @@ esac
     if expected_returncode == 0:
         assert github_output.read_text(encoding="utf-8") == (
             f"trigger_authorized=true\npr_number=17\nhead_sha={head_sha}\nbase_sha={base_sha}\n"
+            f"tested_sha={live_merge_sha}\nsource_tree={merge_tree_sha}\n"
         )
     elif candidate_identity.endswith("-api-error"):
         assert "Community CPU / Required must pass" not in result.stdout + result.stderr

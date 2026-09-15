@@ -259,6 +259,9 @@ already-present label does not create a new trigger event.
 Wait for `TRTMC Internal CI / Automated premerge gate` to pass on the exact
 pull-request head SHA. This is an automated test result, not a request for an
 individual maintainer review.
+The separate `TRTMC Internal CI / Dev premerge (non-blocking)` result evaluates
+experimental CI and is not required for merge. Maintainers configure and promote
+CI implementations using the [premerge lane guide](.github/premerge-lanes.md).
 If you push another commit, the previous result no longer validates the current
 head; finish the update, wait for the automatic Community CPU stage, and
 mention `@yifeif-nv` once to request a new protected run. Private runner details,
