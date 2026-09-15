@@ -930,33 +930,56 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         request.config.sampling_steps =
             int_option(command, "--num-steps", request.config.sampling_steps, 1);
         request.config.seed = int_option(command, "--seed", request.config.seed);
-
         auto& predictor = require_interface<IStructurePrediction>(task);
         const auto result = predictor.predict_structure(request);
 
         const fs::path structure_path = require_option(command, "--output");
-        if (!structure_path.parent_path().empty())
-            fs::create_directories(structure_path.parent_path());
-        std::ofstream structure(structure_path, std::ios::binary);
-        structure.write(result.structure.data(),
-                        static_cast<std::streamsize>(result.structure.size()));
-        if (!structure)
-            throw std::runtime_error("failed to write structure output: " +
-                                     structure_path.string());
         const fs::path metadata_path = has_option(command, "--output-json")
                                            ? command.options.at("--output-json")
                                            : structure_path.string() + ".metadata.json";
-        std::ofstream metadata(metadata_path, std::ios::binary);
-        metadata.write(result.metadata_json.data(),
-                       static_cast<std::streamsize>(result.metadata_json.size()));
-        if (!metadata)
-            throw std::runtime_error("failed to write structure metadata: " +
-                                     metadata_path.string());
-        write_json(output, {{"structure_path", structure_path.string()},
-                            {"metadata_path", metadata_path.string()},
-                            {"confidence_score", result.confidence.confidence_score},
-                            {"complex_plddt", result.confidence.complex_plddt},
-                            {"ptm", result.confidence.ptm}});
+        auto indexed_path = [](const fs::path& path, std::size_t index) {
+            if (index == 0)
+                return path;
+            return path.parent_path() / (path.stem().string() + "_sample_" + std::to_string(index) +
+                                         path.extension().string());
+        };
+        auto write_output = [](const fs::path& path, const std::string& payload,
+                               const char* label) {
+            if (!path.parent_path().empty())
+                fs::create_directories(path.parent_path());
+            std::ofstream stream(path, std::ios::binary);
+            stream.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+            if (!stream)
+                throw std::runtime_error(std::string("failed to write ") + label + ": " +
+                                         path.string());
+        };
+        nlohmann::json sample_outputs = nlohmann::json::array();
+        auto append_sample = [&](std::size_t index, const std::string& structure,
+                                 const std::string& metadata,
+                                 const StructureConfidence& confidence) {
+            const auto current_structure = indexed_path(structure_path, index);
+            const auto current_metadata =
+                has_option(command, "--output-json")
+                    ? indexed_path(metadata_path, index)
+                    : fs::path(current_structure.string() + ".metadata.json");
+            write_output(current_structure, structure, "structure output");
+            write_output(current_metadata, metadata, "structure metadata");
+            sample_outputs.push_back({{"structure_path", current_structure.string()},
+                                      {"metadata_path", current_metadata.string()},
+                                      {"confidence_score", confidence.confidence_score},
+                                      {"complex_plddt", confidence.complex_plddt},
+                                      {"ptm", confidence.ptm}});
+        };
+        if (result.samples.empty())
+            append_sample(0, result.structure, result.metadata_json, result.confidence);
+        for (std::size_t index = 0; index < result.samples.size(); ++index) {
+            const auto& sample = result.samples[index];
+            append_sample(index, sample.structure, sample.metadata_json, sample.confidence);
+        }
+        if (sample_outputs.size() == 1)
+            write_json(output, sample_outputs.front());
+        else
+            write_json(output, {{"samples", std::move(sample_outputs)}});
         return EXIT_SUCCESS;
     }
     case CommandKind::kDisparity: {

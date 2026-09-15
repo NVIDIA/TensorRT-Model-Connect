@@ -135,9 +135,9 @@ enum class StructureFormat {
 
 struct StructurePredictionConfig {
     std::int32_t recycling_steps{3};
-    std::int32_t sampling_steps{200};
-    std::int32_t diffusion_samples{1};
-    std::int32_t seed{42};
+    std::int32_t sampling_steps{0};
+    std::int32_t diffusion_samples{0};
+    std::int32_t seed{-1};
     StructureFormat output_format{StructureFormat::kMmcif};
 };
 
@@ -158,11 +158,19 @@ struct StructureConfidence {
     std::vector<float> plddt;
 };
 
+struct StructurePredictionSample {
+    std::string structure;
+    StructureFormat format{StructureFormat::kMmcif};
+    StructureConfidence confidence;
+    std::string metadata_json;
+};
+
 struct StructurePredictionResult {
     std::string structure;
     StructureFormat format{StructureFormat::kMmcif};
     StructureConfidence confidence;
     std::string metadata_json;
+    std::vector<StructurePredictionSample> samples;
 };
 
 struct GeometryResult {

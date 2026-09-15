@@ -674,7 +674,8 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
         token_count=thresholds["token_count"],
     )
 
-    from families.boltz2.request_preparation import prepare_structure_request
+    from families.boltz2.random_samples import serialize_profile_random_samples
+    from families.boltz2.request_preparation import _isolated_rng_state, prepare_structure_request
 
     bundle_stat = bundle.stat()
     bundle_identity = (
@@ -883,3 +884,81 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("request_preparation", cached)
     with evidence_stage("compare"):
         assert cached["cache_hit"] is True
+
+    variable_request = tmp_path / "biomolecular-variable.b2rq"
+    import torch
+
+    numpy_rng_state = np.random.get_state()
+    cpu_rng_state = torch.random.get_rng_state()
+    cuda_rng_states = torch.cuda.get_rng_state_all()
+    prepare_structure_request(
+        model_dir,
+        biomolecular_request,
+        variable_request,
+        cache_dir=request_cache,
+        sampling_steps=10,
+        diffusion_samples=2,
+        seed=7,
+        affinity_sampling_steps=10,
+        affinity_diffusion_samples=1,
+    )
+    restored_numpy_state = np.random.get_state()
+    assert numpy_rng_state[0] == restored_numpy_state[0]
+    assert np.array_equal(numpy_rng_state[1], restored_numpy_state[1])
+    assert numpy_rng_state[2:] == restored_numpy_state[2:]
+    assert torch.equal(cpu_rng_state, torch.random.get_rng_state())
+    assert all(
+        torch.equal(expected, actual)
+        for expected, actual in zip(cuda_rng_states, torch.cuda.get_rng_state_all(), strict=True)
+    )
+    payload = variable_request.read_bytes()
+    _, request_size, feature_size, random_size, _ = struct.unpack_from("<I4Q", payload, 4)
+    random_offset = 4 + struct.calcsize("<I4Q") + request_size + feature_size
+    embedded_random = payload[random_offset : random_offset + random_size]
+    with _isolated_rng_state():
+        repeated_random = serialize_profile_random_samples(
+            seed=7,
+            atom_count=928,
+            structure_sampling_steps=10,
+            structure_sample_count=2,
+            affinity_sampling_steps=10,
+            affinity_sample_count=1,
+        )
+    assert embedded_random == repeated_random
+    variable_structure = tmp_path / "biomolecular-variable.cif"
+    variable_metadata = tmp_path / "biomolecular-variable.json"
+    completed = subprocess.run(
+        [
+            str(binary),
+            "predict-structure",
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            "--input",
+            str(variable_request),
+            "--output",
+            str(variable_structure),
+            "--output-json",
+            str(variable_metadata),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=1800,
+    )
+    sample_outputs = _last_json(completed.stdout)["samples"]
+    assert len(sample_outputs) == 2
+    sample_metadata = [
+        json.loads(Path(sample["metadata_path"]).read_text(encoding="utf-8"))
+        for sample in sample_outputs
+    ]
+    assert [
+        (item["seed"], item["sampling_steps"], item["diffusion_samples"])
+        for item in sample_metadata
+    ] == [(7, 10, 2), (7, 10, 2)]
+    assert sorted(item["sample_rank"] for item in sample_metadata) == [0, 1]
+    assert (
+        Path(sample_outputs[0]["structure_path"]).read_bytes()
+        != Path(sample_outputs[1]["structure_path"]).read_bytes()
+    )

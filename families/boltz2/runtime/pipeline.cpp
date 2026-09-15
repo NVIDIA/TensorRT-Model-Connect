@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <limits>
 #include <nlohmann/json.hpp>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -423,10 +424,39 @@ void requireStream(const std::unique_ptr<ITrtModule>& module, cudaStream_t strea
         throw std::invalid_argument("Boltz-2 engines must be valid on one CUDA stream");
 }
 
-bool matchesRandomProfile(const RandomSamples& samples, int32_t seed, int32_t sampling_steps,
-                          int atom_count) {
-    return samples.seed == seed && samples.sampling_steps == sampling_steps &&
-           samples.atom_count == atom_count && samples.sample_count == 6;
+bool matchesRandomProfile(const RandomSamples& samples, int atom_count) {
+    return samples.atom_count == atom_count;
+}
+
+StructurePredictionConfig resolveRandomControls(const StructurePredictionConfig& requested,
+                                                const RandomSamples& random) {
+    auto result = requested;
+    if (result.sampling_steps == 0)
+        result.sampling_steps = random.structure.sampling_steps;
+    if (result.diffusion_samples == 0)
+        result.diffusion_samples = random.structure.sample_count;
+    if (result.seed == -1)
+        result.seed = random.seed;
+    return result;
+}
+
+void validateStructureControls(const StructurePredictionConfig& cfg, const RandomSamples& random) {
+    if (cfg.recycling_steps < 1 || cfg.recycling_steps > 10)
+        throw std::invalid_argument("Boltz-2 recycling steps must be in [1, 10]");
+    if (cfg.sampling_steps != random.structure.sampling_steps)
+        throw std::invalid_argument(
+            "Boltz-2 sampling steps differ from the prepared request random stream");
+    if (cfg.diffusion_samples != random.structure.sample_count)
+        throw std::invalid_argument(
+            "Boltz-2 structure sample count differs from the prepared request random stream");
+    if (cfg.seed != random.seed)
+        throw std::invalid_argument(
+            "Boltz-2 request seed differs from the prepared request random stream");
+}
+
+void validateOutputFormat(StructureFormat format) {
+    if (format != StructureFormat::kMmcif)
+        throw std::invalid_argument("Boltz-2 output format must be mmCIF");
 }
 
 bool hasTemplates(const FeatureTensor& mask, int element_count) {
@@ -485,11 +515,12 @@ bool hasProteinReceptor(const FeatureTensor& mol_type, int active_count) {
     return false;
 }
 
-std::vector<Vec3> initialCoordinates(const RandomSamples& random, const std::vector<float>& sigmas,
-                                     int atom_count, int sample_index) {
+std::vector<Vec3> initialCoordinates(const RandomSampleGroup& random,
+                                     const std::vector<float>& sigmas, int atom_count,
+                                     int sample_index) {
     std::vector<Vec3> coordinates(static_cast<std::size_t>(atom_count));
     const auto sample_offset = static_cast<std::size_t>(sample_index * atom_count * 3);
-    for (int atom = 0; atom < random.atom_count; ++atom) {
+    for (int atom = 0; atom < atom_count; ++atom) {
         for (int axis = 0; axis < 3; ++axis) {
             coordinates[atom][axis] =
                 sigmas[0] *
@@ -499,17 +530,18 @@ std::vector<Vec3> initialCoordinates(const RandomSamples& random, const std::vec
     return coordinates;
 }
 
-std::vector<Vec3> addStepNoise(const std::vector<Vec3>& coordinates, const RandomSamples& random,
-                               int32_t step, float noise_scale, int sample_index) {
+std::vector<Vec3> addStepNoise(const std::vector<Vec3>& coordinates,
+                               const RandomSampleGroup& random, int atom_count, int32_t step,
+                               float noise_scale, int sample_index) {
     std::vector<Vec3> noisy = coordinates;
     const auto sample_offset =
-        static_cast<std::size_t>(sample_index * random.sampling_steps * random.atom_count * 3);
-    for (int atom = 0; atom < random.atom_count; ++atom) {
+        static_cast<std::size_t>(sample_index * random.sampling_steps * atom_count * 3);
+    for (int atom = 0; atom < atom_count; ++atom) {
         for (int axis = 0; axis < 3; ++axis) {
             noisy[atom][axis] +=
                 noise_scale *
-                random.noise[sample_offset + static_cast<std::size_t>(
-                                                 (step * random.atom_count + atom) * 3 + axis)];
+                random.noise[sample_offset +
+                             static_cast<std::size_t>((step * atom_count + atom) * 3 + axis)];
         }
     }
     return noisy;
@@ -539,9 +571,10 @@ std::vector<Vec3> denoisedCoordinates(const std::vector<Vec3>& noisy,
 }
 
 std::vector<Vec3> advanceCoordinates(std::vector<Vec3> noisy, const std::vector<Vec3>& denoised,
-                                     const float* atom_mask, float sigma_t, float t_hat) {
+                                     const float* atom_mask, float sigma_t, float t_hat,
+                                     float step_scale) {
     noisy = weightedRigidAlign(noisy, denoised, atom_mask);
-    const float scale = kStepScale * (sigma_t - t_hat) / t_hat;
+    const float scale = step_scale * (sigma_t - t_hat) / t_hat;
     std::vector<Vec3> coordinates(noisy.size());
     for (std::size_t atom = 0; atom < noisy.size(); ++atom) {
         for (int axis = 0; axis < 3; ++axis) {
@@ -1010,7 +1043,7 @@ void Boltz2Pipeline::configureProfile() {
     has_affinity_ = binder_chain != -1;
     if (has_affinity_ && !hasProteinReceptor(feature("mol_type"), active_token_count_))
         throw std::invalid_argument("Boltz-2 affinity requires an active protein receptor");
-    if (!matchesRandomProfile(artifacts_.random_samples, 42, 200, atom_count_))
+    if (!matchesRandomProfile(artifacts_.random_samples, atom_count_))
         throw std::invalid_argument("Boltz-2 random samples differ from feature atom count");
 }
 
@@ -1302,13 +1335,13 @@ std::vector<float> Boltz2Pipeline::runDiffusionScore(const std::vector<float>& m
     return update;
 }
 
-std::vector<float> Boltz2Pipeline::sampleCoordinates(int32_t seed, int32_t sampling_steps,
-                                                     int sample_index) {
+std::vector<float> Boltz2Pipeline::sampleCoordinates(const RandomSampleGroup& random,
+                                                     int32_t sampling_steps, int sample_index,
+                                                     float step_scale) {
     const auto& mask_feature = feature("atom_pad_mask");
     const auto* atom_mask = reinterpret_cast<const float*>(mask_feature.data.data());
-    const auto& random = artifacts_.random_samples;
-    if (!matchesRandomProfile(random, seed, sampling_steps, atom_count_))
-        throw std::invalid_argument("Boltz-2 request differs from bundled random samples");
+    if (sampling_steps != random.sampling_steps)
+        throw std::invalid_argument("Boltz-2 request differs from prepared random samples");
     if (sample_index < 0 || sample_index >= random.sample_count)
         throw std::invalid_argument("Boltz-2 diffusion sample index is outside its random stream");
     const auto sigmas = sigmaSchedule(sampling_steps);
@@ -1327,13 +1360,15 @@ std::vector<float> Boltz2Pipeline::sampleCoordinates(int32_t seed, int32_t sampl
         const float variance =
             kNoiseScale * kNoiseScale * std::max(0.0F, t_hat * t_hat - sigma_tm * sigma_tm);
         const float noise_scale = std::sqrt(variance);
-        auto noisy = addStepNoise(coordinates, random, step, noise_scale, sample_index);
+        auto noisy =
+            addStepNoise(coordinates, random, atom_count_, step, noise_scale, sample_index);
         const float c_in = 1.0F / std::sqrt(t_hat * t_hat + kSigmaData * kSigmaData);
         const float time_value = std::log(t_hat / kSigmaData) * 0.25F;
         const auto update = runDiffusionScore(scaledCoordinates(noisy, c_in), time_value);
         denoised = denoisedCoordinates(noisy, update, t_hat);
         has_denoised = true;
-        coordinates = advanceCoordinates(std::move(noisy), denoised, atom_mask, sigma_t, t_hat);
+        coordinates =
+            advanceCoordinates(std::move(noisy), denoised, atom_mask, sigma_t, t_hat, step_scale);
     }
     return packCoordinates(coordinates);
 }
@@ -1376,6 +1411,8 @@ StructureConfidence Boltz2Pipeline::runConfidence(const std::vector<float>& coor
     confidence_chain_pairs_ = tm.chain_pairs;
     const float ranking_tm = result.iptm > 1.0e-8F ? result.iptm : result.ptm;
     result.confidence_score = (4.0F * result.complex_plddt + ranking_tm) / 5.0F;
+    if (!std::isfinite(result.confidence_score))
+        throw std::runtime_error("Boltz-2 confidence engine produced a non-finite ranking score");
     result.plddt.resize(static_cast<std::size_t>(active_token_count_));
     return result;
 }
@@ -1405,7 +1442,7 @@ AffinityPrediction Boltz2Pipeline::runAffinity(const std::vector<float>& coordin
     return result;
 }
 
-AffinityPrediction Boltz2Pipeline::predictAffinity(int32_t seed, int32_t sampling_steps) {
+AffinityPrediction Boltz2Pipeline::predictAffinity() {
     const auto* token_mask = reinterpret_cast<const float*>(feature("token_pad_mask").data.data());
     std::vector<int64_t> affinity_method(static_cast<std::size_t>(token_count_), 0);
     for (int token = 0; token < token_count_; ++token)
@@ -1420,8 +1457,10 @@ AffinityPrediction Boltz2Pipeline::predictAffinity(int32_t seed, int32_t samplin
         runConditioning();
         float best_iptm = -std::numeric_limits<float>::infinity();
         std::vector<float> best_coordinates;
-        for (int sample = 1; sample <= 5; ++sample) {
-            auto candidate = sampleCoordinates(seed, sampling_steps, sample);
+        const auto& random = artifacts_.random_samples.affinity;
+        for (int sample = 0; sample < random.sample_count; ++sample) {
+            auto candidate = sampleCoordinates(artifacts_.random_samples.affinity,
+                                               random.sampling_steps, sample, kStepScale);
             const auto candidate_confidence = runConfidence(candidate);
             if (candidate_confidence.iptm > best_iptm) {
                 best_iptm = candidate_confidence.iptm;
@@ -1452,10 +1491,10 @@ std::string Boltz2Pipeline::writeStructure(const std::vector<float>& coordinates
                                            : writeMmcif(rows, coordinates, confidence);
 }
 
-std::string
-Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
-                               const StructureConfidence& confidence,
-                               const std::optional<AffinityPrediction>& affinity) const {
+std::string Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
+                                           const StructureConfidence& confidence,
+                                           const std::optional<AffinityPrediction>& affinity,
+                                           int sample_index, int sample_rank) const {
     nlohmann::json chains_ptm = nlohmann::json::object();
     nlohmann::json pair_chains_iptm = nlohmann::json::object();
     for (std::size_t first = 0; first < confidence_chain_ids_.size(); ++first) {
@@ -1479,7 +1518,9 @@ Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
         {"sampling_steps", cfg.sampling_steps},
         {"diffusion_samples", cfg.diffusion_samples},
         {"seed", cfg.seed},
-        {"sample_rank", 0},
+        {"step_scale", kStepScale},
+        {"sample_index", sample_index},
+        {"sample_rank", sample_rank},
         {"confidence_score", confidence.confidence_score},
         {"complex_plddt", confidence.complex_plddt},
         {"complex_iplddt", confidence.complex_iplddt},
@@ -1494,6 +1535,8 @@ Boltz2Pipeline::resultMetadata(const StructurePredictionConfig& cfg,
     };
     if (affinity.has_value()) {
         metadata["schema_version"] = 2;
+        metadata["affinity_sampling_steps"] = artifacts_.random_samples.affinity.sampling_steps;
+        metadata["affinity_diffusion_samples"] = artifacts_.random_samples.affinity.sample_count;
         metadata["affinity_pred_value"] = affinity->value;
         metadata["affinity_probability_binary"] = affinity->probability;
         metadata["affinity_pred_value1"] = affinity->member_values[0];
@@ -1514,30 +1557,59 @@ Boltz2Pipeline::predict_structure(const StructurePredictionRequest& request) {
             "Boltz-2 accepts the embedded YAML or a family-prepared request with matching "
             "static profile dimensions");
     }
-    const auto& cfg = request.config;
-    if (cfg.recycling_steps != 3 || cfg.sampling_steps != 200 || cfg.diffusion_samples != 1 ||
-        cfg.seed != 42 || cfg.output_format != StructureFormat::kMmcif) {
-        throw std::invalid_argument(
-            "Boltz-2 bundle supports only recycling=3, sampling=200, samples=1, seed=42, mmCIF");
-    }
+    const auto cfg = resolveRandomControls(request.config, artifacts_.random_samples);
+    validateStructureControls(cfg, artifacts_.random_samples);
+    validateOutputFormat(cfg.output_format);
     engines_.input->forward_device_async({});
-    runTrunk(3, false, true);
+    runTrunk(cfg.recycling_steps, false, true);
     runConditioning();
-    auto coordinates = sampleCoordinates(cfg.seed, cfg.sampling_steps, 0);
-    auto confidence = runConfidence(coordinates);
-    const auto structure_chain_ids = confidence_chain_ids_;
-    const auto structure_chain_pairs = confidence_chain_pairs_;
-    std::optional<AffinityPrediction> affinity;
-    if (has_affinity_) {
-        affinity = predictAffinity(cfg.seed, cfg.sampling_steps);
-        confidence_chain_ids_ = structure_chain_ids;
-        confidence_chain_pairs_ = structure_chain_pairs;
+    struct Candidate {
+        std::vector<float> coordinates;
+        StructureConfidence confidence;
+        std::vector<int32_t> chain_ids;
+        std::vector<std::vector<float>> chain_pairs;
+        int rank{0};
+    };
+    std::vector<Candidate> candidates;
+    candidates.reserve(static_cast<std::size_t>(cfg.diffusion_samples));
+    for (int sample = 0; sample < cfg.diffusion_samples; ++sample) {
+        auto coordinates = sampleCoordinates(artifacts_.random_samples.structure,
+                                             cfg.sampling_steps, sample, kStepScale);
+        auto confidence = runConfidence(coordinates);
+        candidates.push_back({std::move(coordinates), std::move(confidence), confidence_chain_ids_,
+                              confidence_chain_pairs_, 0});
     }
+    std::vector<std::size_t> ranking(candidates.size());
+    std::iota(ranking.begin(), ranking.end(), 0U);
+    std::stable_sort(ranking.begin(), ranking.end(),
+                     [&candidates](std::size_t left, std::size_t right) {
+                         return candidates[left].confidence.confidence_score >
+                                candidates[right].confidence.confidence_score;
+                     });
+    for (std::size_t rank = 0; rank < ranking.size(); ++rank)
+        candidates[ranking[rank]].rank = static_cast<int>(rank);
+    std::optional<AffinityPrediction> affinity;
+    if (has_affinity_)
+        affinity = predictAffinity();
     StructurePredictionResult result;
-    result.structure = writeStructure(coordinates, cfg.output_format, confidence);
-    result.format = cfg.output_format;
-    result.confidence = std::move(confidence);
-    result.metadata_json = resultMetadata(cfg, result.confidence, affinity);
+    result.samples.reserve(candidates.size());
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        auto& candidate = candidates[index];
+        confidence_chain_ids_ = std::move(candidate.chain_ids);
+        confidence_chain_pairs_ = std::move(candidate.chain_pairs);
+        StructurePredictionSample sample;
+        sample.structure =
+            writeStructure(candidate.coordinates, cfg.output_format, candidate.confidence);
+        sample.format = cfg.output_format;
+        sample.confidence = std::move(candidate.confidence);
+        sample.metadata_json = resultMetadata(cfg, sample.confidence, affinity,
+                                              static_cast<int>(index), candidate.rank);
+        result.samples.push_back(std::move(sample));
+    }
+    result.structure = result.samples.front().structure;
+    result.format = result.samples.front().format;
+    result.confidence = result.samples.front().confidence;
+    result.metadata_json = result.samples.front().metadata_json;
     return result;
 }
 

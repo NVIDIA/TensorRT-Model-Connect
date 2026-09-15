@@ -296,10 +296,30 @@ def test_prepare_structure_dispatches_to_the_resolved_family(
         calls.append((args, kwargs))
         return {"family": "boltz2", "cache_hit": False}
 
+    def add_arguments(parser):
+        parser.add_argument("--num-steps", type=int, default=200)
+        parser.add_argument("--num-samples", type=int, default=1)
+        parser.add_argument("--seed", type=int, default=42)
+        parser.add_argument("--affinity-num-steps", type=int, default=200)
+        parser.add_argument("--affinity-num-samples", type=int, default=5)
+
+    def cli_options(args):
+        return {
+            "sampling_steps": args.num_steps,
+            "diffusion_samples": args.num_samples,
+            "seed": args.seed,
+            "affinity_sampling_steps": args.affinity_num_steps,
+            "affinity_diffusion_samples": args.affinity_num_samples,
+        }
+
     monkeypatch.setattr(
         build_cli,
         "_load_family",
-        lambda family: SimpleNamespace(prepare_structure_request=prepare),
+        lambda family: SimpleNamespace(
+            add_prepare_structure_arguments=add_arguments,
+            prepare_structure_cli_options=cli_options,
+            prepare_structure_request=prepare,
+        ),
     )
 
     assert (
@@ -313,11 +333,33 @@ def test_prepare_structure_dispatches_to_the_resolved_family(
                 str(output),
                 "--cache-dir",
                 str(cache),
+                "--num-steps",
+                "300",
+                "--num-samples",
+                "4",
+                "--seed",
+                "7",
+                "--affinity-num-steps",
+                "400",
+                "--affinity-num-samples",
+                "3",
             ]
         )
         == 0
     )
-    assert calls == [((model, request, output), {"cache_dir": cache})]
+    assert calls == [
+        (
+            (model, request, output),
+            {
+                "cache_dir": cache,
+                "sampling_steps": 300,
+                "diffusion_samples": 4,
+                "seed": 7,
+                "affinity_sampling_steps": 400,
+                "affinity_diffusion_samples": 3,
+            },
+        )
+    ]
     assert json.loads(capsys.readouterr().out) == {
         "cache_hit": False,
         "family": "boltz2",

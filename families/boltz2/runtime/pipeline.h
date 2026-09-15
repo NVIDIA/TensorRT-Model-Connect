@@ -73,15 +73,17 @@ class Boltz2Pipeline final : public IStructurePrediction {
     void runTrunk(int recycling_steps, bool affinity_input, bool apply_templates);
     void runConditioning();
     std::vector<float> runDiffusionScore(const std::vector<float>& model_input, float time_value);
-    std::vector<float> sampleCoordinates(int32_t seed, int32_t sampling_steps, int sample_index);
+    std::vector<float> sampleCoordinates(const RandomSampleGroup& random, int32_t sampling_steps,
+                                         int sample_index, float step_scale);
     StructureConfidence runConfidence(const std::vector<float>& coordinates);
     AffinityPrediction runAffinity(const std::vector<float>& coordinates);
-    AffinityPrediction predictAffinity(int32_t seed, int32_t sampling_steps);
+    AffinityPrediction predictAffinity();
     std::string writeStructure(const std::vector<float>& coordinates, StructureFormat format,
                                const StructureConfidence& confidence) const;
     std::string resultMetadata(const StructurePredictionConfig& cfg,
                                const StructureConfidence& confidence,
-                               const std::optional<AffinityPrediction>& affinity) const;
+                               const std::optional<AffinityPrediction>& affinity, int sample_index,
+                               int sample_rank) const;
 
     const FeatureTensor& feature(std::string_view name) const;
     void bindFeature(ITrtModule& module, std::string_view name);

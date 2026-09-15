@@ -14,7 +14,7 @@ from .build import BuildRequest, _load_family, build
 from .model_support import load_model_metadata, resolve_family
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(prepare_family: object | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trtmc")
     commands = parser.add_subparsers(dest="command", required=True)
     build_parser = commands.add_parser("build", help="Build one TensorRT bundle")
@@ -44,23 +44,31 @@ def _parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("-o", "--output", type=Path, required=True)
     prepare_parser.add_argument("--revision", help="Hugging Face model revision")
     prepare_parser.add_argument("--cache-dir", type=Path)
+    add_arguments = getattr(prepare_family, "add_prepare_structure_arguments", None)
+    if callable(add_arguments):
+        add_arguments(prepare_parser)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    model_dir = _resolve_model(args.model, args.revision)
+    base_parser = _parser()
+    preliminary, _ = base_parser.parse_known_args(argv)
+    model_dir = _resolve_model(preliminary.model, preliminary.revision)
     family, support = resolve_family(load_model_metadata(model_dir))
+    family_module = _load_family(family) if preliminary.command == "prepare-structure" else None
+    args = _parser(family_module).parse_args(argv)
     if args.command == "prepare-structure":
-        family_module = _load_family(family)
         prepare = getattr(family_module, "prepare_structure_request", None)
         if not callable(prepare):
             raise ValueError(f"family {family!r} does not support request preparation")
+        cli_options = getattr(family_module, "prepare_structure_cli_options", None)
+        options = cli_options(args) if callable(cli_options) else {}
         result = prepare(
             model_dir,
             args.input,
             args.output,
             cache_dir=args.cache_dir,
+            **options,
         )
         print(json.dumps(result, sort_keys=True))
         return 0

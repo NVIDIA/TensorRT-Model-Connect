@@ -9,6 +9,8 @@ import json
 import os
 import struct
 import tempfile
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Final
 
@@ -19,6 +21,7 @@ from tensorrt_model_connect.build import content_cache_key
 from .checkpoint import validate_artifact, validate_structure_checkpoint
 from .contracts import (
     INITIAL_BF16_PROFILE,
+    Boltz2Request,
     PolymerKind,
     SequenceInput,
     parse_request_yaml,
@@ -28,7 +31,12 @@ from .contracts import (
 from .feature_bundle import profile_feature_shapes, serialize_features, structure_metadata_json
 from .model_config import CHECKPOINT, MOLS, MOLS_ARCHIVE, resolve_package_root
 from .provenance import PINNED_BOLTZ2
-from .random_samples import serialize_profile_random_samples
+from .random_samples import (
+    MAX_AFFINITY_SAMPLES,
+    MAX_SAMPLING_STEPS,
+    MAX_STRUCTURE_SAMPLES,
+    serialize_profile_random_samples,
+)
 
 
 MAGIC: Final = b"B2RQ"
@@ -50,16 +58,38 @@ _TEMPLATE_FEATURES: Final = (
 )
 
 
-def _seed() -> None:
+@contextmanager
+def _isolated_rng_state() -> Iterator[None]:
+    """Keep Boltz request preparation from mutating caller-owned RNG streams."""
+
     import torch
 
-    seed = PINNED_BOLTZ2.reference_configuration.seed
+    numpy_state = np.random.get_state()
+    cpu_state = torch.random.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+    try:
+        yield
+    finally:
+        np.random.set_state(numpy_state)
+        torch.random.set_rng_state(cpu_state)
+        if cuda_states:
+            torch.cuda.set_rng_state_all(cuda_states)
+
+
+def _seed(seed: int = PINNED_BOLTZ2.reference_configuration.seed) -> None:
+    import torch
+
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
 
-def load_profile_features(processed_dir: Path, mol_dir: Path) -> dict[str, Any]:
+def load_profile_features(
+    processed_dir: Path,
+    mol_dir: Path,
+    *,
+    seed: int = PINNED_BOLTZ2.reference_configuration.seed,
+) -> dict[str, Any]:
     """Load one processed request padded to the reusable TensorRT profile."""
 
     import torch
@@ -110,7 +140,7 @@ def load_profile_features(processed_dir: Path, mol_dir: Path) -> dict[str, Any]:
         extra_mols_dir=processed_dir / "mols",
     )
     dataset.featurizer = ProfileFeaturizer()
-    _seed()
+    _seed(seed)
     features = collate([dataset[0]])
     token_mask = features["token_pad_mask"].unsqueeze(-1)
     features["profile_affinity"] = (
@@ -172,7 +202,12 @@ def _resolve_input(root: Path, relative: Path, label: str) -> tuple[Path, bytes]
 
 def _request_inputs(
     request_path: Path,
-) -> tuple[bytes, tuple[tuple[Path, bytes], ...], tuple[tuple[Path, bytes], ...]]:
+) -> tuple[
+    bytes,
+    Boltz2Request,
+    tuple[tuple[Path, bytes], ...],
+    tuple[tuple[Path, bytes], ...],
+]:
     request_bytes = request_path.read_bytes()
     try:
         request_text = request_bytes.decode("utf-8")
@@ -202,13 +237,14 @@ def _request_inputs(
         _resolve_input(request_root, Path(template.path), "template")
         for template in request.templates
     )
-    return request_bytes, tuple(msa_inputs), template_inputs
+    return request_bytes, request, tuple(msa_inputs), template_inputs
 
 
 def _cache_key(
     request: bytes,
     msa_inputs: tuple[tuple[Path, bytes], ...],
     template_inputs: tuple[tuple[Path, bytes], ...],
+    random_config: dict[str, int],
 ) -> str:
     profile = INITIAL_BF16_PROFILE
     identity = json.dumps(
@@ -220,11 +256,13 @@ def _cache_key(
             "atoms": profile.max_padded_atoms,
             "msa_depth": profile.max_msa_depth,
             "templates": profile.max_templates,
+            "metadata_schema": 2,
+            "random": random_config,
         },
         sort_keys=True,
     ).encode("utf-8")
     assets = tuple(payload for _, payload in (*msa_inputs, *template_inputs))
-    return content_cache_key("boltz2-prepared-request-v4", identity, request, *assets)
+    return content_cache_key("boltz2-prepared-request-v6", identity, request, *assets)
 
 
 def _write_atomic(path: Path, payload: bytes) -> None:
@@ -288,6 +326,11 @@ def prepare_structure_request(
     output_path: str | Path,
     *,
     cache_dir: str | Path | None = None,
+    sampling_steps: int = 200,
+    diffusion_samples: int = 1,
+    seed: int = 42,
+    affinity_sampling_steps: int = 200,
+    affinity_diffusion_samples: int = 5,
 ) -> dict[str, object]:
     """Prepare one raw YAML/JSON request without rebuilding TensorRT plans."""
 
@@ -299,8 +342,25 @@ def prepare_structure_request(
     validate_artifact(root / MOLS_ARCHIVE, PINNED_BOLTZ2.molecular_archive)
     request_path = Path(request_path).resolve(strict=True)
     output_path = Path(output_path)
-    request_bytes, msa_inputs, template_inputs = _request_inputs(request_path)
-    key = _cache_key(request_bytes, msa_inputs, template_inputs)
+    request_bytes, request, msa_inputs, template_inputs = _request_inputs(request_path)
+    if not 10 <= sampling_steps <= MAX_SAMPLING_STEPS:
+        raise ValueError(f"Boltz-2 sampling steps must be in [10, {MAX_SAMPLING_STEPS}]")
+    if not 1 <= diffusion_samples <= MAX_STRUCTURE_SAMPLES:
+        raise ValueError(f"Boltz-2 structure samples must be in [1, {MAX_STRUCTURE_SAMPLES}]")
+    if seed < 0 or seed > np.iinfo(np.int32).max:
+        raise ValueError("Boltz-2 seed is outside the INT32 range")
+    if request.affinity and not 10 <= affinity_sampling_steps <= MAX_SAMPLING_STEPS:
+        raise ValueError(f"Boltz-2 affinity sampling steps must be in [10, {MAX_SAMPLING_STEPS}]")
+    if request.affinity and not 1 <= affinity_diffusion_samples <= MAX_AFFINITY_SAMPLES:
+        raise ValueError(f"Boltz-2 affinity samples must be in [1, {MAX_AFFINITY_SAMPLES}]")
+    random_config = {
+        "sampling_steps": sampling_steps,
+        "diffusion_samples": diffusion_samples,
+        "seed": seed,
+        "affinity_sampling_steps": affinity_sampling_steps if request.affinity else 0,
+        "affinity_diffusion_samples": affinity_diffusion_samples if request.affinity else 0,
+    }
+    key = _cache_key(request_bytes, msa_inputs, template_inputs, random_config)
     cache_root = (
         Path(cache_dir)
         if cache_dir is not None
@@ -350,7 +410,8 @@ def prepare_structure_request(
         structure = processed / "structures" / f"{staged_request.stem}.npz"
         if not structure.is_file():
             raise RuntimeError("Boltz-2 preprocessing did not produce the requested structure")
-        features = load_profile_features(processed, root / MOLS)
+        with _isolated_rng_state():
+            features = load_profile_features(processed, root / MOLS, seed=seed)
         active_tokens = int(features["token_pad_mask"].sum().item())
         active_atoms = int(features["atom_pad_mask"].sum().item())
         with np.load(structure, allow_pickle=False) as archive:
@@ -364,9 +425,15 @@ def prepare_structure_request(
                 "Boltz-2 preprocessing cropped or changed the request outside the "
                 "tokens_117_atoms_928 profile"
             )
-        random_samples = serialize_profile_random_samples(
-            atom_count=INITIAL_BF16_PROFILE.max_padded_atoms,
-        )
+        with _isolated_rng_state():
+            random_samples = serialize_profile_random_samples(
+                seed=seed,
+                atom_count=INITIAL_BF16_PROFILE.max_padded_atoms,
+                structure_sampling_steps=sampling_steps,
+                structure_sample_count=diffusion_samples,
+                affinity_sampling_steps=affinity_sampling_steps,
+                affinity_sample_count=affinity_diffusion_samples if request.affinity else 0,
+            )
         payload = serialize_prepared_request(
             request_bytes,
             serialize_features(features),
@@ -381,4 +448,5 @@ def prepare_structure_request(
         "cache_key": key,
         "cache_hit": cache_hit,
         "profile": "tokens_117_atoms_928_msa_8_templates_4",
+        "random": random_config,
     }
