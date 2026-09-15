@@ -12,6 +12,7 @@ core/runtime/primitives/       libtrtmc_core.so device and engine primitives
 core/runtime/loader/           libtrtmc_runtime.so exact DSO loader
 core/runtime/tensorrt/         libtrtmc_backend_trt.so implementation
 apps/cli/                      native CLI and private image/audio file I/O
+apps/server/                   optional Python HTTP control plane and native text workers
 apps/benchmark/                benchmark application, workers, and performance policy
 tools/model_ci.py              family inventory and impact
 website/                       documentation generated from family ownership
@@ -20,3 +21,7 @@ website/                       documentation generated from family ownership
 `core/builder/` contains only Python. `core/runtime/` contains only C++ headers
 and sources. No production source lives under the retired `python/`, `src/`,
 `include/`, or `tests/` roots.
+
+Applications may depend on the public Model Connect APIs. Core and family code
+must never include or import server code; the serving integration is strictly
+`apps/server -> core/runtime public API -> selected family`.

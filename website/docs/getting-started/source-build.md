@@ -135,11 +135,15 @@ cmake -S . -B "$TRTMC_BUILD_DIR" -G Ninja \
 
 cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
   trtmc \
+  trtmc-server \
   trtmc_backend_trt \
   trtmc_model_qwen
 
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
 ```
+
+To run the optional text server from this build, install its Python control
+plane dependencies with `python -m pip install -e '.[serve]' -C py-only=true`.
 
 TensorRT-RTX is an explicit optional build. When its SDK is installed, enable
 only its backend DSO with the exact include and library directories:

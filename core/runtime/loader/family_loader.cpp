@@ -48,15 +48,31 @@ void require_safe_id(const std::string& field, const std::string& value) {
     }
 }
 
-fs::path explicit_runtime_root(const std::string& runtime_root) {
-    if (runtime_root.empty())
-        throw std::invalid_argument("runtime_root must be explicit and non-empty");
+fs::path absolute_path(const fs::path& path, const char* description) {
     std::error_code error;
-    fs::path root = fs::absolute(fs::path(runtime_root), error);
+    fs::path result = fs::absolute(path, error);
     if (error)
-        throw std::runtime_error("Unable to resolve runtime_root '" + runtime_root +
-                                 "': " + error.message());
-    return root.lexically_normal();
+        throw std::runtime_error("Unable to resolve " + std::string(description) + " '" +
+                                 path.string() + "': " + error.message());
+    return result.lexically_normal();
+}
+
+fs::path resolve_runtime_root(const std::string& runtime_root) {
+    if (!runtime_root.empty())
+        return absolute_path(runtime_root, "runtime_root");
+
+    static const char runtime_library_anchor = 0;
+    Dl_info info{};
+    if (dladdr(&runtime_library_anchor, &info) == 0 || info.dli_fname == nullptr ||
+        info.dli_fname[0] == '\0') {
+        throw std::runtime_error("Unable to locate the loaded libtrtmc_runtime shared library; "
+                                 "specify runtime_root explicitly");
+    }
+    const fs::path library = absolute_path(info.dli_fname, "loaded runtime library");
+    if (library.parent_path().empty())
+        throw std::runtime_error("Loaded runtime library has no parent directory: '" +
+                                 library.string() + "'");
+    return library.parent_path();
 }
 
 class SharedLibrary {
@@ -296,7 +312,7 @@ std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::stri
             "runtime cache and whole-graph capture require a TensorRT-RTX bundle");
     }
 
-    const fs::path root = explicit_runtime_root(runtime_root);
+    const fs::path root = resolve_runtime_root(runtime_root);
     IBackend& backend = cached_backend(root, info.backend);
     FamilyLibrary& family = cached_family(root, info.family);
     IBackend& configured_backend =

@@ -427,8 +427,21 @@ def test_applications_depend_only_on_public_model_connect_surfaces() -> None:
             source = path.read_text(encoding="utf-8", errors="ignore")
             if path.suffix in {".cpp", ".h", ".hpp", ".cu"}:
                 for include in re.findall(r'#include\s+[<"]([^>"]+)', source):
-                    if include.startswith(("apps/", "examples/")):
+                    if include.startswith(("apps/", "examples/", "server/")):
                         violations.append(f"{path.relative_to(REPO)}:reverse-include:{include}")
+            elif path.suffix == ".py":
+                tree = ast.parse(source, filename=str(path))
+                for node in ast.walk(tree):
+                    modules: list[str] = []
+                    if isinstance(node, ast.Import):
+                        modules.extend(alias.name for alias in node.names)
+                    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                        modules.append(node.module)
+                    for module in modules:
+                        if module == "trtmc_server" or module.startswith("trtmc_server."):
+                            violations.append(
+                                f"{path.relative_to(REPO)}:{node.lineno}:reverse:{module}"
+                            )
     for path in (REPO / "core/builder/tensorrt_model_connect").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -768,6 +781,7 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
     optional = pyproject.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
     assert set(re.findall(r"^([a-z][a-z0-9_-]*)\s*=", optional, re.MULTILINE)) == {
         "cutedsl",
+        "serve",
         "test",
     }
 

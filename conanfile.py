@@ -79,6 +79,8 @@ class TensorRTModelConnectConan(ConanFile):
 
         copy(self, "trtmc", src=str(build), dst=str(module_bin), keep_path=False)
         copy(self, "trtmc", src=str(build), dst=str(script_bin), keep_path=False)
+        copy(self, "trtmc-server", src=str(build), dst=str(module_bin), keep_path=False)
+        copy(self, "trtmc-server", src=str(build), dst=str(script_bin), keep_path=False)
         for destination in (module_bin, script_bin):
             for library in ("libtrtmc_core.so", "libtrtmc_runtime.so"):
                 copy(
@@ -147,6 +149,8 @@ class TensorRTModelConnectConan(ConanFile):
 
         native = module_bin / "trtmc"
         installed = script_bin / "trtmc"
+        native_server = module_bin / "trtmc-server"
+        installed_server = script_bin / "trtmc-server"
         shared_runtime = [
             destination / library
             for destination in (module_bin, script_bin)
@@ -160,6 +164,8 @@ class TensorRTModelConnectConan(ConanFile):
         if (
             not native.is_file()
             or not installed.is_file()
+            or not native_server.is_file()
+            or not installed_server.is_file()
             or not all(library.is_file() for library in shared_runtime)
             or not backend.is_file()
             or not byok.is_file()
@@ -168,7 +174,14 @@ class TensorRTModelConnectConan(ConanFile):
         ):
             raise ConanException("native runtime package is incomplete")
 
-        for executable in (native, installed, benchmark_worker, dataset_benchmark):
+        for executable in (
+            native,
+            installed,
+            native_server,
+            installed_server,
+            benchmark_worker,
+            dataset_benchmark,
+        ):
             _make_executable(executable)
             _set_runpath(executable, "$ORIGIN")
         for library in shared_runtime:

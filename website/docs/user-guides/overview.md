@@ -12,6 +12,7 @@ command as a support claim.
 | Create an artifact | [Build a Bundle](build-a-bundle.md) | A format-1 `.bundle` built by exactly one family. |
 | Diagnose an artifact | [Inspect a Bundle](inspect-a-bundle.md) | Family, task, backend, and section inventory. |
 | Execute a task | [Run Inference](run-inference.md) | Correct Task command and typed JSON/media output. |
+| Expose a text bundle | [Serve Text Generation](serve-text-generation.md) | A bounded local HTTP endpoint for one bundle. |
 | Place a setting correctly | [Configure Runtime Behavior](configure-runtime.md) | Build, load, or request input at its typed boundary. |
 | Establish evidence | [Validate & Benchmark](validate-benchmark.md) | Reproducible correctness or performance evidence. |
 
