@@ -883,3 +883,53 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("request_preparation", cached)
     with evidence_stage("compare"):
         assert cached["cache_hit"] is True
+
+    variable_request = tmp_path / "biomolecular-variable.b2rq"
+    prepare_structure_request(
+        model_dir,
+        biomolecular_request,
+        variable_request,
+        cache_dir=request_cache,
+        sampling_steps=10,
+        diffusion_samples=2,
+        seed=7,
+        affinity_sampling_steps=10,
+        affinity_diffusion_samples=1,
+    )
+    variable_structure = tmp_path / "biomolecular-variable.cif"
+    variable_metadata = tmp_path / "biomolecular-variable.json"
+    completed = subprocess.run(
+        [
+            str(binary),
+            "predict-structure",
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            "--input",
+            str(variable_request),
+            "--output",
+            str(variable_structure),
+            "--output-json",
+            str(variable_metadata),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=1800,
+    )
+    sample_outputs = _last_json(completed.stdout)["samples"]
+    assert len(sample_outputs) == 2
+    sample_metadata = [
+        json.loads(Path(sample["metadata_path"]).read_text(encoding="utf-8"))
+        for sample in sample_outputs
+    ]
+    assert [
+        (item["seed"], item["sampling_steps"], item["diffusion_samples"])
+        for item in sample_metadata
+    ] == [(7, 10, 2), (7, 10, 2)]
+    assert sorted(item["sample_rank"] for item in sample_metadata) == [0, 1]
+    assert (
+        Path(sample_outputs[0]["structure_path"]).read_bytes()
+        != Path(sample_outputs[1]["structure_path"]).read_bytes()
+    )

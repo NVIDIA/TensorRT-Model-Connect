@@ -202,7 +202,9 @@ class Boltz2Plugin:
             "_boltz2_package_root": root,
             "_boltz2_features": features,
             "_boltz2_feature_payload": serialize_features(features),
-            "_boltz2_structure_metadata": structure_metadata_json(root / STRUCTURE),
+            "_boltz2_structure_metadata": structure_metadata_json(
+                root / STRUCTURE, features.get("affinity_mw")
+            ),
         }
 
     def get_bundle_config_overrides(self, _config: Any) -> dict[str, Any]:
@@ -451,9 +453,24 @@ def prepare_structure_request(
     output_path: str | Path,
     *,
     cache_dir: str | Path | None = None,
+    sampling_steps: int = 200,
+    diffusion_samples: int = 1,
+    seed: int = 42,
+    affinity_sampling_steps: int = 200,
+    affinity_diffusion_samples: int = 5,
 ) -> dict[str, object]:
     """Prepare one raw request for an existing reusable Boltz-2 bundle."""
 
     from .request_preparation import prepare_structure_request as prepare
 
-    return prepare(model_dir, request_path, output_path, cache_dir=cache_dir)
+    return prepare(
+        model_dir,
+        request_path,
+        output_path,
+        cache_dir=cache_dir,
+        sampling_steps=sampling_steps,
+        diffusion_samples=diffusion_samples,
+        seed=seed,
+        affinity_sampling_steps=affinity_sampling_steps,
+        affinity_diffusion_samples=affinity_diffusion_samples,
+    )
