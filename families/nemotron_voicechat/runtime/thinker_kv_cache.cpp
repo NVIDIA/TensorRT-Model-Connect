@@ -5,13 +5,26 @@
 
 #include "families/nemotron_voicechat/runtime/thinker_kv_cache.h"
 
+#include "families/nemotron_voicechat/runtime/session_state.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <algorithm>
 #include <cstddef>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace trtmc {
+
+namespace {
+
+void require_cuda_success(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("VoiceChat thinker ") + operation +
+                                 " failed: " + cudaGetErrorString(status));
+}
+
+} // namespace
 
 VoiceChatThinkerKvCacheNames::VoiceChatThinkerKvCacheNames(int32_t num_layers) {
     cache_k.reserve(static_cast<std::size_t>(num_layers));
@@ -53,9 +66,10 @@ VoiceChatThinkerKvCache::VoiceChatThinkerKvCache(int32_t num_layers, int32_t max
 static constexpr float kMaskedScore = -1.0e4F;
 
 void VoiceChatThinkerKvCache::prepare_step(TensorMap& inputs) {
-    const int32_t valid = std::max(0, std::min(position_, max_length_));
+    const auto cache = nemotron_voicechat::rolling_cache_position(logical_position_, max_length_,
+                                                                  pinned_prefix_rows_);
     std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
-    for (int32_t i = 0; i < valid; ++i)
+    for (int32_t i = 0; i < cache.valid_rows; ++i)
         mask_buf_[static_cast<std::size_t>(i)] = 0.0f;
     mask_buf_.back() = 0.0f;
 
@@ -77,44 +91,98 @@ void VoiceChatThinkerKvCache::bind_to(ITrtModule& module) {
 }
 
 void VoiceChatThinkerKvCache::advance() {
-    // Copy present K/V (single row) into cache at current position.
-    // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
-    auto row_bytes = static_cast<std::size_t>(kv_dim_) * sizeof(float);
-
-    if (position_ < max_length_) {
-        // Normal append: write to position_ slot
-        auto offset = static_cast<std::size_t>(position_) * row_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                            present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                            present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-        }
-        ++position_;
-    } else {
-        // Cache full: shift [1..max) → [0..max-1), then write at tail
-        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
-        auto tail_offset = shift_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
-            auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-        }
-        // position_ stays at max_length_ (cache is full, all slots visible)
+    // Attention is position-free in the VoiceChat thinker, so the joint K/V
+    // row permutation of a ring is semantically invisible. A one-row ring copy
+    // also avoids the undefined overlapping device memcpy used by the prior
+    // full-cache shift.
+    const auto cache = nemotron_voicechat::rolling_cache_position(logical_position_, max_length_,
+                                                                  pinned_prefix_rows_);
+    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * sizeof(float);
+    const auto offset = static_cast<std::size_t>(cache.write_row) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        require_cuda_success(cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[layer].data()) + offset,
+                                             present_k_[layer].data(), row_bytes,
+                                             cudaMemcpyDeviceToDevice, stream_),
+                             "VoiceChat thinker K-cache append");
+        require_cuda_success(cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[layer].data()) + offset,
+                                             present_v_[layer].data(), row_bytes,
+                                             cudaMemcpyDeviceToDevice, stream_),
+                             "VoiceChat thinker V-cache append");
     }
+    ++logical_position_;
+}
+
+void VoiceChatThinkerKvCache::pin_current_prefix() {
+    if (pinned_prefix_rows_ != 0)
+        throw std::logic_error("VoiceChat thinker KV prefix is already pinned");
+    if (logical_position_ <= 0 || logical_position_ >= max_length_)
+        throw std::runtime_error(
+            "VoiceChat thinker system prompt must leave room for rolling cache rows");
+    pinned_prefix_rows_ = static_cast<int32_t>(logical_position_);
+}
+
+void VoiceChatThinkerKvCache::capture_prompt_snapshot() {
+    if (prompt_snapshot_ready_)
+        throw std::logic_error("VoiceChat thinker KV prompt snapshot is already captured");
+    if (pinned_prefix_rows_ <= 0 || logical_position_ != pinned_prefix_rows_)
+        throw std::logic_error(
+            "VoiceChat thinker KV prompt snapshot requires an exact pinned prefix");
+
+    std::vector<DeviceTensor> snapshot_k;
+    std::vector<DeviceTensor> snapshot_v;
+    snapshot_k.reserve(static_cast<std::size_t>(num_layers_));
+    snapshot_v.reserve(static_cast<std::size_t>(num_layers_));
+    const auto shape = std::vector<int64_t>{pinned_prefix_rows_, kv_dim_};
+    for (int32_t layer = 0; layer < num_layers_; ++layer) {
+        snapshot_k.emplace_back(shape, DType::kFloat32, stream_);
+        snapshot_v.emplace_back(shape, DType::kFloat32, stream_);
+        if (!snapshot_k.back().ok() || !snapshot_v.back().ok())
+            throw std::runtime_error("VoiceChat failed to allocate thinker KV prompt snapshot");
+    }
+
+    for (int32_t layer = 0; layer < num_layers_; ++layer) {
+        const auto index = static_cast<std::size_t>(layer);
+        const auto bytes = snapshot_k[index].nbytes();
+        require_cuda_success(cudaMemcpyAsync(snapshot_k[index].data(), cache_k_[index].data(),
+                                             bytes, cudaMemcpyDeviceToDevice, stream_),
+                             "KV prompt K-cache capture");
+        require_cuda_success(cudaMemcpyAsync(snapshot_v[index].data(), cache_v_[index].data(),
+                                             bytes, cudaMemcpyDeviceToDevice, stream_),
+                             "KV prompt V-cache capture");
+    }
+    require_cuda_success(cudaStreamSynchronize(stream_), "KV prompt snapshot sync");
+    prompt_snapshot_k_ = std::move(snapshot_k);
+    prompt_snapshot_v_ = std::move(snapshot_v);
+    prompt_snapshot_rows_ = pinned_prefix_rows_;
+    prompt_snapshot_ready_ = true;
+}
+
+void VoiceChatThinkerKvCache::restore_prompt_snapshot() {
+    if (!prompt_snapshot_ready_ || prompt_snapshot_rows_ <= 0)
+        throw std::logic_error("VoiceChat thinker KV prompt snapshot is unavailable");
+    for (int32_t layer = 0; layer < num_layers_; ++layer) {
+        const auto index = static_cast<std::size_t>(layer);
+        const auto bytes = prompt_snapshot_k_[index].nbytes();
+        require_cuda_success(cudaMemcpyAsync(cache_k_[index].data(),
+                                             prompt_snapshot_k_[index].data(), bytes,
+                                             cudaMemcpyDeviceToDevice, stream_),
+                             "KV prompt K-cache restore");
+        require_cuda_success(cudaMemcpyAsync(cache_v_[index].data(),
+                                             prompt_snapshot_v_[index].data(), bytes,
+                                             cudaMemcpyDeviceToDevice, stream_),
+                             "KV prompt V-cache restore");
+    }
+    require_cuda_success(cudaStreamSynchronize(stream_), "KV prompt restore sync");
+    logical_position_ = prompt_snapshot_rows_;
+    pinned_prefix_rows_ = prompt_snapshot_rows_;
 }
 
 void VoiceChatThinkerKvCache::reset() {
     // Reset only the logical sequence length. Attention masks hide every
     // stale cache row, and each present row is overwritten before use.
-    position_ = 0;
+    logical_position_ = 0;
+    pinned_prefix_rows_ = 0;
 }
 
 bool VoiceChatThinkerKvCache::ok() const {

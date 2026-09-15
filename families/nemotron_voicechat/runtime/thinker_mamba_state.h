@@ -31,12 +31,18 @@ class VoiceChatThinkerMambaState final : public VoiceChatThinkerInferenceState {
     void advance() override;
     bool ok() const override;
 
+    void capture_prompt_snapshot();
+    void restore_prompt_snapshot();
+    bool prompt_snapshot_ready() const noexcept { return prompt_snapshot_ready_; }
+
   private:
     std::vector<TensorSpec> specs_;
     std::vector<std::vector<DeviceTensor>> state_;
     std::vector<std::vector<DeviceTensor>> present_;
+    std::vector<std::vector<DeviceTensor>> prompt_snapshot_;
     int32_t num_layers_{0};
     cudaStream_t stream_{nullptr};
+    bool prompt_snapshot_ready_{false};
 };
 
 } // namespace trtmc

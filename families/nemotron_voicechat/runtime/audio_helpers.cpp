@@ -11,6 +11,7 @@
 #include <cmath>
 #include <complex>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -286,11 +287,45 @@ class IncrementalMelSpectrogram::Impl {
         }
         const int32_t last_frame = end_frame - 1;
         const int32_t required_samples =
-            last_frame * options_.hop_length + options_.n_fft - options_.n_fft / 2 + 1;
+            last_frame * options_.hop_length + options_.n_fft - options_.n_fft / 2;
         ensure_resampled_samples(required_samples, final);
         for (int32_t frame = current_frames; frame < end_frame; ++frame) {
             compute_frame(frame, final);
         }
+    }
+
+    int32_t rebase_streaming(int32_t next_frame, int32_t history_frames) {
+        if (input_sample_rate_ != options_.sample_rate) {
+            throw std::logic_error(
+                "incremental VoiceChat mel rebase requires an equal-rate input stream");
+        }
+        const int64_t guard_frames =
+            (static_cast<int64_t>(options_.n_fft) / 2 + 1 + options_.hop_length - 1) /
+            options_.hop_length;
+        const int64_t rebased_next = static_cast<int64_t>(history_frames) + guard_frames;
+        if (history_frames <= 0 || rebased_next > std::numeric_limits<int32_t>::max() ||
+            next_frame < 0 || next_frame > frame_count()) {
+            throw std::invalid_argument(
+                "incremental VoiceChat mel rebase requires computed history frames");
+        }
+        // A recovery-triggered rollover may happen before the stream has a
+        // complete history/guard prefix. Its buffers are already tiny, so
+        // preserving them verbatim is both exact and bounded.
+        if (next_frame < rebased_next)
+            return next_frame;
+        const int64_t first_frame = static_cast<int64_t>(next_frame) - rebased_next;
+        const int64_t first_sample_wide = first_frame * static_cast<int64_t>(options_.hop_length);
+        if (first_sample_wide < 0 || first_sample_wide > static_cast<int64_t>(raw_audio_.size())) {
+            throw std::out_of_range("incremental VoiceChat mel rebase exceeds retained raw audio");
+        }
+        const auto first_sample = static_cast<std::size_t>(first_sample_wide);
+
+        std::vector<float> retained_audio(
+            raw_audio_.begin() + static_cast<std::ptrdiff_t>(first_sample), raw_audio_.end());
+        raw_audio_ = std::move(retained_audio);
+        resampled_audio_.clear();
+        frames_.clear();
+        return static_cast<int32_t>(rebased_next);
     }
 
     void reset() {
@@ -348,6 +383,10 @@ void IncrementalMelSpectrogram::accept_audio(const float* samples, int32_t n_sam
 
 void IncrementalMelSpectrogram::ensure_frames(int32_t end_frame, bool final) {
     impl_->ensure_frames(end_frame, final);
+}
+
+int32_t IncrementalMelSpectrogram::rebase_streaming(int32_t next_frame, int32_t history_frames) {
+    return impl_->rebase_streaming(next_frame, history_frames);
 }
 
 void IncrementalMelSpectrogram::reset() {

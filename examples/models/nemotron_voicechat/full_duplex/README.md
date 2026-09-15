@@ -18,13 +18,33 @@ not contain the checkpoint or a bundle.
 - Linux with a current Docker Engine using BuildKit, NVIDIA Container Toolkit,
   and a compatible NVIDIA driver;
 - a local ALSA capture and playback device under `/dev/snd`;
-- one GPU with enough memory for the bundle (the repository qualification uses
-  at least 90,000 MiB of free GPU memory); and
+- one GPU with at least 24 GiB for the compressed configuration below (other
+  precision and cache configurations may require more memory); and
 - a prebuilt `nemotron_voicechat` bundle for the same GPU architecture and
   TensorRT 11.1 runtime used by this image.
 
-The qualified FP32 VoiceChat bundle is about 46.5 GB. Keep it outside the image
-and mount it read-only at runtime.
+Keep the bundle outside the image and mount it read-only at runtime.
+
+## Build a 24 GiB-class bundle
+
+The experimental compressed path applies W8A8 quantization to the static
+Thinker matrix multiplications, keeps precision-sensitive layers at higher
+precision, and builds the TTS linear layers in FP16. A cache length of 512 is
+enough because the runtime keeps the immutable prompt rows and rolls the live
+suffix in bounded storage:
+
+```bash
+python -m tensorrt_model_connect build nvidia/NVIDIA-NemotronLabs-VoiceChat-11B \
+  --revision 359ada7b1c60851e40ff08065f9b0340244f27e0 \
+  --precision fp32 \
+  --quantization int8 \
+  --max-sequence-length 512 \
+  --output nemotron-voicechat-11b-w8a8.bundle
+```
+
+Bundle size and memory residency depend on the TensorRT version, target GPU,
+and selected tactics. Build the bundle on the same GPU architecture on which
+it will run.
 
 ## Build the image once
 
@@ -41,14 +61,14 @@ docker build \
 
 For a native x86_64 build, override both the pinned architecture-specific base
 digest and the CUDA architecture. Derive the latter from the GPU that the
-bundle targets; this example shows a B200 (`sm_100`):
+bundle targets; this example shows an Ampere GPU with compute capability 8.6:
 
 ```bash
 docker build \
   --platform linux/amd64 \
   --file examples/models/nemotron_voicechat/full_duplex/Dockerfile \
   --build-arg TENSORRT_IMAGE='nvcr.io/nvidia/tensorrt:26.07-py3@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a' \
-  --build-arg TRTMC_CUDA_ARCHITECTURES=100-real \
+  --build-arg TRTMC_CUDA_ARCHITECTURES=86-real \
   --tag trtmc-voicechat-full-duplex:local \
   .
 ```
@@ -62,7 +82,7 @@ the bundle for the target GPU as well.
 After the one-time image build, each conversation starts with one `docker run`:
 
 ```bash
-VOICECHAT_BUNDLE="$(realpath nemotron-voicechat-11b.bundle)"
+VOICECHAT_BUNDLE="$(realpath nemotron-voicechat-11b-w8a8.bundle)"
 
 docker run --rm --interactive --tty \
   --network none \
@@ -90,7 +110,7 @@ docker run --rm --interactive --tty \
 Select devices explicitly when `default` is not the desired hardware endpoint:
 
 ```bash
-VOICECHAT_BUNDLE="$(realpath nemotron-voicechat-11b.bundle)"
+VOICECHAT_BUNDLE="$(realpath nemotron-voicechat-11b-w8a8.bundle)"
 
 docker run --rm --interactive --tty \
   --network none \
@@ -105,6 +125,28 @@ docker run --rm --interactive --tty \
 
 Run `docker run --rm trtmc-voicechat-full-duplex:local --help` for the complete
 CLI surface.
+
+If hardware volume is insufficient, add a small digital boost such as
+`--playback-gain-db 3`. Start at 0 dB and increase it gradually: the application
+prints a per-turn pre-gain peak, RMS level, and clipped-sample count so clipping
+can be distinguished from model-level changes. It also reports playback queue
+starvation and recovered ALSA underruns.
+
+## Playback and long-session behavior
+
+- Playback uses a 160 ms startup and rebuffer threshold. This absorbs ordinary
+  producer jitter without inserting short gaps between generated audio frames,
+  while flush requests from barge-in remain immediate.
+- The ALSA playback stream stays continuously clocked and mono model audio is
+  duplicated to both hardware channels. This avoids device and resampler
+  restarts between turns.
+- The runtime transparently rolls recurrent generation state at a safe
+  conversation boundary after roughly 90 seconds of model timeline. It restores
+  the immutable system and speaker prompts and carries a bounded text memory
+  into the next segment. A rollover does not invalidate audio already published
+  to the playback queue.
+- Repetition detection can request the same safe rollover path, allowing a
+  session to continue without retaining an indefinitely growing model context.
 
 ## Audio and container boundaries
 

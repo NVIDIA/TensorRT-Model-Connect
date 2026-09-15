@@ -50,6 +50,10 @@ class IncrementalMelSpectrogram {
 
     void accept_audio(const float* samples, int32_t n_samples);
     void ensure_frames(int32_t end_frame, bool final);
+    // Rebase an equal-rate live stream around its next unconsumed frame while
+    // retaining enough aligned raw audio to recompute the overlapping mel
+    // history and all future centered-STFT frames without a discontinuity.
+    int32_t rebase_streaming(int32_t next_frame, int32_t history_frames);
     void reset();
 
     int32_t available_frames() const;

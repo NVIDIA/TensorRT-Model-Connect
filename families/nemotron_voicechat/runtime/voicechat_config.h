@@ -73,6 +73,8 @@ struct Config {
     int32_t tts_head_dim{72};
     int32_t tts_kv_width{1152};
     int32_t tts_max_cache_length{7500};
+    int32_t tts_sliding_window_pattern{6};
+    int32_t tts_max_position_embeddings{131072};
     int32_t tts_num_quantizers{31};
     int32_t tts_codebook_size{1024};
     int32_t tts_mog_num_predictions{1024};
@@ -99,6 +101,13 @@ struct Config {
     int32_t max_pending_input_ms{30000};
     int32_t max_pending_events{4096};
     int32_t stream_tick_ms{80};
+
+    // The checkpoint is trained for roughly two minutes of audio context.
+    // Rebuild recurrent generation state before that quality horizon and seed
+    // it with a small, bounded text memory retained outside the model.
+    int32_t context_rollover_soft_frames{1125}; // 90 seconds at 12.5 Hz.
+    int32_t context_rollover_hard_frames{1375}; // 110 seconds at 12.5 Hz.
+    int32_t context_memory_max_tokens{96};
 
     std::string default_system_prompt{
         "You are an AI voice assistant developed by NVIDIA. Your name is NVIDIA Voice Chat. "
