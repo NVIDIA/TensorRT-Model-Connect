@@ -367,12 +367,15 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     assert "community-ci.yml/runs?event=pull_request&head_sha=$head_sha" in internal_bridge
     assert "community-cpu.yml" not in internal_bridge
     assert "/actions/runs/$candidate_run/jobs?filter=latest&per_page=100" in internal_bridge
-    assert 'name == "Community CPU / Required" and .conclusion == "success"' in internal_bridge
+    assert 'name == "Community CPU / Required"' in internal_bridge
+    assert '[ "$cpu_status" = "completed" ] && [ "$cpu_conclusion" = "success" ]' in internal_bridge
     assert "select(.display_title | startswith($title_prefix))" in internal_bridge
-    assert '[.id, .merge_sha]' in internal_bridge
-    assert '[ "$candidate_base" != "$base_sha" ]' in internal_bridge
+    assert "[.id, .merge_sha]" in internal_bridge
+    assert "/compare/$candidate_base...$base_sha?per_page=1" in internal_bridge
+    assert '.status == "ahead" and .merge_base_commit.sha == $base' in internal_bridge
+    assert '[ "$candidate_base" = "$base_sha" ]' in internal_bridge
     assert '[ "$candidate_head" != "$head_sha" ]' in internal_bridge
-    assert '[ "$candidate_tree" != "$merge_tree" ]' in internal_bridge
+    assert '[ "$candidate_tree" = "$merge_tree" ] || continue' in internal_bridge
 
     docs = jobs["docs"]
     assert "if" not in docs
@@ -538,20 +541,39 @@ def test_public_required_job_fails_closed(
 
 
 @pytest.mark.parametrize(
-    ("combined_cpu_job_id", "candidate_identity", "expected_returncode"),
+    ("cpu_state", "candidate_identity", "expected_returncode"),
     [
-        ("33", "exact", 0),
-        ("33", "regenerated", 0),
-        ("", "regenerated", 1),
-        ("33", "stale-base", 1),
-        ("33", "stale-head", 1),
-        ("33", "different-tree", 1),
-        ("33", "invalid-title", 1),
+        ("success", "exact", 0),
+        ("success", "regenerated", 0),
+        ("success", "advanced-base", 0),
+        ("success", "older-base-same-tree", 0),
+        ("missing", "regenerated", 1),
+        ("in_progress", "advanced-base", 1),
+        ("failure", "advanced-base", 1),
+        ("cancelled", "advanced-base", 1),
+        ("skipped", "advanced-base", 1),
+        ("success", "unrelated-base", 1),
+        ("success", "newer-base", 1),
+        ("success", "wrong-merge-base", 1),
+        ("success", "invalid-base", 1),
+        ("success", "invalid-parents", 1),
+        ("success", "wrong-resolved", 1),
+        ("success", "missing-tree", 1),
+        ("success", "stale-head", 1),
+        ("success", "different-tree", 1),
+        ("success", "invalid-title", 1),
+        ("success", "runs-api-error", 1),
+        ("success", "merge-api-error", 1),
+        ("success", "compare-api-error", 1),
+        ("success", "jobs-api-error", 1),
+        ("success", "unauthorized-actor", 1),
+        ("success", "superseded-trigger", 1),
+        ("success", "missing-merge", 1),
     ],
 )
-def test_internal_label_bridge_accepts_only_the_equivalent_combined_cpu_gate(
+def test_internal_label_bridge_accepts_cpu_gate_across_main_advancement(
     tmp_path: Path,
-    combined_cpu_job_id: str,
+    cpu_state: str,
     candidate_identity: str,
     expected_returncode: int,
 ) -> None:
@@ -560,9 +582,52 @@ def test_internal_label_bridge_accepts_only_the_equivalent_combined_cpu_gate(
     live_merge_sha = "c" * 40
     candidate_merge_sha = live_merge_sha if candidate_identity == "exact" else "d" * 40
     merge_tree_sha = "e" * 40
-    candidate_base_sha = "f" * 40 if candidate_identity == "stale-base" else base_sha
+    older_base_cases = {
+        "advanced-base",
+        "older-base-same-tree",
+        "unrelated-base",
+        "newer-base",
+        "wrong-merge-base",
+        "compare-api-error",
+    }
+    candidate_base_sha = "f" * 40 if candidate_identity in older_base_cases else base_sha
+    if candidate_identity == "invalid-base":
+        candidate_base_sha = "invalid"
     candidate_head_sha = "f" * 40 if candidate_identity == "stale-head" else head_sha
-    candidate_tree_sha = "f" * 40 if candidate_identity == "different-tree" else merge_tree_sha
+    candidate_tree_sha = (
+        "f" * 40
+        if candidate_identity == "different-tree" or candidate_identity in older_base_cases
+        else merge_tree_sha
+    )
+    if candidate_identity == "older-base-same-tree":
+        candidate_tree_sha = merge_tree_sha
+    if candidate_identity == "missing-tree":
+        candidate_tree_sha = ""
+    candidate_parents = [{"sha": candidate_base_sha}, {"sha": candidate_head_sha}]
+    if candidate_identity == "invalid-parents":
+        candidate_parents.append({"sha": "1" * 40})
+    candidate_merge = {
+        "sha": "1" * 40 if candidate_identity == "wrong-resolved" else candidate_merge_sha,
+        "tree": {"sha": candidate_tree_sha},
+        "parents": candidate_parents,
+    }
+    comparison = {
+        "status": {"unrelated-base": "diverged", "newer-base": "behind"}.get(
+            candidate_identity, "ahead"
+        ),
+        "merge_base_commit": {
+            "sha": "1" * 40 if candidate_identity == "wrong-merge-base" else candidate_base_sha
+        },
+    }
+    cpu_job = {
+        "id": 33,
+        "name": "Community CPU / Required",
+        "status": "in_progress" if cpu_state == "in_progress" else "completed",
+        "conclusion": None if cpu_state == "in_progress" else cpu_state,
+    }
+    cpu_jobs = {
+        "jobs": [] if cpu_state == "missing" else [cpu_job],
+    }
     run_title = (
         "PR #17 · stale Community CI"
         if candidate_identity == "invalid-title"
@@ -575,7 +640,7 @@ def test_internal_label_bridge_accepts_only_the_equivalent_combined_cpu_gate(
 set -euo pipefail
 arguments="$*"
 case "$arguments" in
-  *collaborators/tester/permission*) printf '%s\n' maintain ;;
+  *collaborators/tester/permission*) printf '%s\n' "$ACTOR_ROLE" ;;
   *pulls/17*)
     printf '{"state":"open","base":{"repo":{"full_name":"example/repo"},"ref":"main","sha":"%s"},"head":{"sha":"%s"},"merge_commit_sha":"%s"}\n' "$BASE_SHA" "$HEAD_SHA" "$MERGE_SHA"
     ;;
@@ -584,16 +649,25 @@ case "$arguments" in
     if [ "$requested_sha" = "$MERGE_SHA" ]; then
       printf '{"sha":"%s","tree":{"sha":"%s"},"parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$MERGE_SHA" "$MERGE_TREE_SHA" "$BASE_SHA" "$HEAD_SHA"
     elif [ "$requested_sha" = "$CANDIDATE_MERGE_SHA" ]; then
-      printf '{"sha":"%s","tree":{"sha":"%s"},"parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$CANDIDATE_MERGE_SHA" "$CANDIDATE_TREE_SHA" "$CANDIDATE_BASE_SHA" "$CANDIDATE_HEAD_SHA"
+      [ "$CANDIDATE_IDENTITY" != merge-api-error ] || exit 1
+      printf '%s\n' "$CANDIDATE_MERGE"
     else
       printf 'unexpected merge commit: %s\n' "$requested_sha" >&2
       exit 99
     fi
     ;;
   *community-ci.yml*)
+    [ "$CANDIDATE_IDENTITY" != runs-api-error ] || exit 1
     printf '{"workflow_runs":[{"id":22,"event":"pull_request","head_sha":"%s","display_title":"%s","updated_at":"2026-01-01T00:00:00Z"}]}\n' "$HEAD_SHA" "$RUN_TITLE"
     ;;
-  *actions/runs/22/jobs*) printf '%s\n' "$COMBINED_CPU_JOB_ID" ;;
+  *compare/$CANDIDATE_BASE_SHA...$BASE_SHA?per_page=1)
+    [ "$CANDIDATE_IDENTITY" != compare-api-error ] || exit 1
+    printf '%s\n' "$COMPARISON"
+    ;;
+  *actions/runs/22/jobs*)
+    [ "$CANDIDATE_IDENTITY" != jobs-api-error ] || exit 1
+    printf '%s\n' "$CPU_JOBS" | jq "${@: -1}"
+    ;;
   *) printf 'unexpected gh call: %s\n' "$arguments" >&2; exit 99 ;;
 esac
 """,
@@ -614,20 +688,22 @@ esac
             **os.environ,
             "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
             "ACTOR": "tester",
+            "ACTOR_ROLE": "write" if candidate_identity == "unauthorized-actor" else "maintain",
             "PR_NUMBER": "17",
             "EVENT_NAME": "pull_request_target",
-            "EVENT_HEAD_SHA": head_sha,
+            "EVENT_HEAD_SHA": "1" * 40 if candidate_identity == "superseded-trigger" else head_sha,
             "GITHUB_REPOSITORY": "example/repo",
             "GITHUB_OUTPUT": str(github_output),
             "HEAD_SHA": head_sha,
             "BASE_SHA": base_sha,
-            "MERGE_SHA": live_merge_sha,
+            "MERGE_SHA": "" if candidate_identity == "missing-merge" else live_merge_sha,
             "MERGE_TREE_SHA": merge_tree_sha,
             "CANDIDATE_MERGE_SHA": candidate_merge_sha,
             "CANDIDATE_BASE_SHA": candidate_base_sha,
-            "CANDIDATE_HEAD_SHA": candidate_head_sha,
-            "CANDIDATE_TREE_SHA": candidate_tree_sha,
-            "COMBINED_CPU_JOB_ID": combined_cpu_job_id,
+            "CANDIDATE_IDENTITY": candidate_identity,
+            "CANDIDATE_MERGE": json.dumps(candidate_merge),
+            "COMPARISON": json.dumps(comparison),
+            "CPU_JOBS": json.dumps(cpu_jobs),
             "RUN_TITLE": run_title,
         },
         capture_output=True,
@@ -638,10 +714,44 @@ esac
     assert result.returncode == expected_returncode, result.stdout + result.stderr
     if expected_returncode == 0:
         assert github_output.read_text(encoding="utf-8") == (
-            f"pr_number=17\nhead_sha={head_sha}\nbase_sha={base_sha}\n"
+            f"trigger_authorized=true\npr_number=17\nhead_sha={head_sha}\nbase_sha={base_sha}\n"
         )
+    elif candidate_identity.endswith("-api-error"):
+        assert "Community CPU / Required must pass" not in result.stdout + result.stderr
+        assert "::error::Unable to" in result.stdout
+    elif candidate_identity == "unauthorized-actor":
+        assert "Only actors with maintain or admin access" in result.stdout
+        assert not github_output.exists()
+        return
+    elif candidate_identity == "superseded-trigger":
+        assert "superseded by a newer PR head" in result.stdout
+    elif candidate_identity == "missing-merge":
+        assert "has no testable merge commit" in result.stdout
     else:
         assert "Community CPU / Required must pass" in result.stdout + result.stderr
+        if cpu_state == "missing":
+            assert "status=missing" in result.stdout
+        elif cpu_state == "in_progress":
+            assert "status=in_progress" in result.stdout
+        elif cpu_state != "success":
+            assert f"conclusion={cpu_state}" in result.stdout
+    assert "trigger_authorized=true" in github_output.read_text(encoding="utf-8")
+    if expected_returncode != 0:
+        assert github_output.read_text(encoding="utf-8") == "trigger_authorized=true\n"
+
+
+def test_internal_label_bridge_consumes_authorized_trigger_after_snapshot_failure() -> None:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/internal-ci-bridge.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["authorize"]["steps"]
+    consume = next(step for step in steps if step["name"] == "Consume the trusted trigger label")
+    assert consume["if"] == (
+        "${{ always() && github.event_name == 'pull_request_target' "
+        "&& steps.snapshot.outputs.trigger_authorized == 'true' }}"
+    )
+    assert "--method DELETE" in consume["run"]
+    assert "/labels/run-internal-ci" in consume["run"]
 
 
 @pytest.mark.parametrize(
@@ -650,9 +760,7 @@ esac
         (
             "success",
             True,
-            "state=success\n"
-            "description=Automated internal CI passed\n"
-            "publish_comment=false\n",
+            "state=success\ndescription=Automated internal CI passed\npublish_comment=false\n",
         ),
         (
             "failure",

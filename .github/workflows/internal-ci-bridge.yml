@@ -76,6 +76,7 @@ jobs:
               exit 1
               ;;
           esac
+          echo "trigger_authorized=true" >> "$GITHUB_OUTPUT"
 
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
             [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -114,18 +115,20 @@ jobs:
           [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$merge_tree" =~ ^[0-9a-f]{40}$ ]]
 
-          # Keep the label path CPU-gated without waiting for the later GPU
-          # stage. GitHub may regenerate a synthetic merge commit with the
-          # same parents and tree, so match its content identity rather than
-          # requiring the ephemeral merge object SHA to remain stable.
-          community_ci_runs="$(
+          # CPU success belongs to the exact PR head. Main may advance after
+          # CPU finishes; accept an older tested base in the authorized base's
+          # history. Internal CI resolves and pins its own merge snapshot.
+          if ! community_ci_runs="$(
             gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
-              2>/dev/null || true
-          )"
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100"
+          )"; then
+            echo "::error::Unable to query Community CI runs for PR head $head_sha."
+            exit 1
+          fi
           community_ci_title_prefix="PR #$PR_NUMBER · community CI · head $head_sha · merge "
           community_ci_run=""
           community_cpu_job=""
+          cpu_reason="No eligible Community CI run was found."
           if [ -n "$community_ci_runs" ]; then
             community_ci_candidates="$(
               jq -r \
@@ -152,12 +155,13 @@ jobs:
               [[ "$candidate_run" =~ ^[1-9][0-9]*$ ]] || continue
               [[ "$candidate_merge_sha" =~ ^[0-9a-f]{40}$ ]] || continue
 
-              candidate_merge="$(
+              if ! candidate_merge="$(
                 gh api --method GET \
-                  "/repos/$GITHUB_REPOSITORY/git/commits/$candidate_merge_sha" \
-                  2>/dev/null || true
-              )"
-              [ -n "$candidate_merge" ] || continue
+                  "/repos/$GITHUB_REPOSITORY/git/commits/$candidate_merge_sha"
+              )"; then
+                echo "::error::Unable to read the merge snapshot for Community CI run $candidate_run."
+                exit 1
+              fi
               candidate_resolved="$(jq -r '.sha // empty' <<<"$candidate_merge")"
               candidate_parent_count="$(jq -r '.parents | length' <<<"$candidate_merge")"
               candidate_base="$(jq -r '.parents[0].sha // empty' <<<"$candidate_merge")"
@@ -165,26 +169,52 @@ jobs:
               candidate_tree="$(jq -r '.tree.sha // empty' <<<"$candidate_merge")"
               if [ "$candidate_resolved" != "$candidate_merge_sha" ] \
                 || [ "$candidate_parent_count" != "2" ] \
-                || [ "$candidate_base" != "$base_sha" ] \
-                || [ "$candidate_head" != "$head_sha" ] \
-                || [ "$candidate_tree" != "$merge_tree" ]; then
+                || [ "$candidate_head" != "$head_sha" ]; then
                 continue
               fi
+              [[ "$candidate_base" =~ ^[0-9a-f]{40}$ ]] || continue
+              [[ "$candidate_tree" =~ ^[0-9a-f]{40}$ ]] || continue
+              if [ "$candidate_base" = "$base_sha" ]; then
+                # Regenerating a merge with the same parents must preserve its tree.
+                [ "$candidate_tree" = "$merge_tree" ] || continue
+              else
+                if ! comparison="$(
+                  gh api --method GET \
+                    "/repos/$GITHUB_REPOSITORY/compare/$candidate_base...$base_sha?per_page=1"
+                )"; then
+                  echo "::error::Unable to verify base ancestry for Community CI run $candidate_run."
+                  exit 1
+                fi
+                if ! jq -e --arg base "$candidate_base" \
+                    '.status == "ahead" and .merge_base_commit.sha == $base' \
+                    <<<"$comparison" > /dev/null; then
+                  continue
+                fi
+              fi
 
-              candidate_cpu_job="$(
+              if ! cpu_job="$(
                 gh api --method GET \
                   "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run/jobs?filter=latest&per_page=100" \
-                  --jq '.jobs | map(select(.name == "Community CPU / Required" and .conclusion == "success")) | last | .id // empty'
-              )"
-              if [[ "$candidate_cpu_job" =~ ^[1-9][0-9]*$ ]]; then
+                  --jq '.jobs | map(select(.name == "Community CPU / Required")) | last // {}'
+              )"; then
+                echo "::error::Unable to query the CPU gate for Community CI run $candidate_run."
+                exit 1
+              fi
+              cpu_status="$(jq -r '.status // "missing"' <<<"$cpu_job")"
+              cpu_conclusion="$(jq -r '.conclusion // "none"' <<<"$cpu_job")"
+              candidate_cpu_job="$(jq -r '.id // empty' <<<"$cpu_job")"
+              cpu_reason="Run $candidate_run: CPU gate status=$cpu_status, conclusion=$cpu_conclusion."
+              if [ "$cpu_status" = "completed" ] && [ "$cpu_conclusion" = "success" ] \
+                && [[ "$candidate_cpu_job" =~ ^[1-9][0-9]*$ ]]; then
                 community_ci_run="$candidate_run"
                 community_cpu_job="$candidate_cpu_job"
+                echo "Accepted CPU run $candidate_run for head $head_sha: tested base $candidate_base, authorized base $base_sha."
                 break
               fi
             done <<<"$community_ci_candidates"
           fi
           if ! [[ "$community_cpu_job" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::Community CPU / Required must pass on the current PR head before internal CI can run."
+            echo "::error::Community CPU / Required must pass on PR head $head_sha before internal CI can run. $cpu_reason"
             exit 1
           fi
           {
@@ -194,7 +224,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Consume the trusted trigger label
-        if: ${{ success() && github.event_name == 'pull_request_target' }}
+        if: ${{ always() && github.event_name == 'pull_request_target' && steps.snapshot.outputs.trigger_authorized == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
