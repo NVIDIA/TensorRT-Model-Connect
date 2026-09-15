@@ -341,6 +341,97 @@ def test_tokenizer_bundle_does_not_mutate_model_dir(tmp_path: Path) -> None:
     assert set(model_dir.iterdir()) == original_files
 
 
+@pytest.mark.parametrize(
+    "extra_special_tokens",
+    [
+        ["<en-US>", "<de-DE>", "<existing>"],
+        {"language_token": "<en-US>"},
+        [],
+    ],
+    ids=("list", "mapping", "empty-list"),
+)
+def test_tokenizer_bundle_preserves_special_tokens(tmp_path: Path, extra_special_tokens) -> None:
+    pytest.importorskip("tensorrt")
+    tokenizers = pytest.importorskip("tokenizers")
+    from transformers import AutoTokenizer
+    from families.nemotron_speech_streaming import model as family_model
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    vocabulary = {
+        "<unk>": 0,
+        "<s>": 1,
+        "</s>": 2,
+        "hello": 3,
+        "<existing>": 4,
+        "<en-US>": 5,
+        "<de-DE>": 6,
+    }
+    tokenizer = tokenizers.Tokenizer(
+        tokenizers.models.WordLevel(vocabulary, unk_token="<unk>")
+    )
+    tokenizer.add_special_tokens([token for token in vocabulary if token != "hello"])
+    tokenizer.post_processor = tokenizers.processors.TemplateProcessing(
+        single="<s> $A </s>", special_tokens=[("<s>", 1), ("</s>", 2)]
+    )
+    tokenizer.save(str(model_dir / "tokenizer.json"))
+    (model_dir / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "tokenizer_class": "ParakeetTokenizer",
+                "unk_token": "<unk>",
+                "bos_token": "<s>",
+                "eos_token": "</s>",
+                "additional_special_tokens": (
+                    [] if isinstance(extra_special_tokens, dict) else ["<existing>"]
+                ),
+                "extra_special_tokens": extra_special_tokens,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with tarfile.open(model_dir / "checkpoint.nemo", "w"):
+        pass
+    original_files = {path.name: path.read_bytes() for path in model_dir.iterdir()}
+
+    model_dir.chmod(0o555)
+    try:
+        runtime, artifacts = family_model._tokenizer_bundle_artifacts(model_dir)
+    finally:
+        model_dir.chmod(0o755)
+
+    assert {path.name: path.read_bytes() for path in model_dir.iterdir()} == original_files
+    assert artifacts["tokenizer.json"] == original_files["tokenizer.json"]
+    assert runtime == {
+        "tokenizer_add_special_tokens": False,
+        "tokenizer_prefix_ids": [1],
+        "tokenizer_suffix_ids": [2],
+    }
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    for name, content in artifacts.items():
+        (bundle_dir / name).write_bytes(content)
+    restored = AutoTokenizer.from_pretrained(str(bundle_dir), local_files_only=True)
+    assert restored.get_vocab() == vocabulary
+    assert restored.encode("hello") == [1, 3, 2]
+    assert restored.encode("hello", add_special_tokens=False) == [3]
+    if isinstance(extra_special_tokens, dict):
+        assert artifacts["tokenizer_config.json"] == original_files["tokenizer_config.json"]
+    else:
+        assert "<existing>" in restored.all_special_tokens
+    extras = (
+        extra_special_tokens.values()
+        if isinstance(extra_special_tokens, dict)
+        else extra_special_tokens
+    )
+    for token in extras:
+        assert token in restored.all_special_tokens
+        assert restored.convert_tokens_to_ids(token) == vocabulary[token]
+        assert restored.decode([vocabulary[token]], skip_special_tokens=True) == ""
+    if isinstance(extra_special_tokens, dict):
+        assert restored.language_token == "<en-US>"
+
+
 def _native(
     binary: Path,
     runtime_root: Path,
