@@ -69,6 +69,11 @@ excluded_profiles:
     reason: *mobilenetv4_performance_exclusion
   - model: mobilenetv4-conv-large
     reason: *mobilenetv4_performance_exclusion
+  - model: qwen36-27b
+    reason: >-
+      Functional and Hugging Face reference-parity qualification is present, but
+      the release-performance workload and receipt were collected only for
+      qwen38-27b, which exercises the same builder and runtime path.
   - model: dpn92-mx-in1k
     reason: >-
       Functional and timm reference-parity qualification is present for every
