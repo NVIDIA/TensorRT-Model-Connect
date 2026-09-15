@@ -21,7 +21,9 @@ struct LoadedImage {
     bool empty() const { return pixels.empty(); }
 };
 
+// Audio input remains mono: multichannel files are averaged across channels.
 AudioResult read_wav(const std::string& path);
+// Preserve AudioResult's interleaved channels in a float32 WAV file.
 void write_wav(const AudioResult& audio, const std::string& path);
 
 LoadedImage read_image(const std::string& path);

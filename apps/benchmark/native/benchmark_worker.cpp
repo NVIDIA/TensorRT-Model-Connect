@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "audio_observation.h"
 #include "trtmc/runtime/family_loader.h"
 #include "trtmc/task.h"
 
@@ -282,8 +283,9 @@ Json measure(const Timing& timing, Invoke&& invoke, Observe&& observe) {
     for (int index = 0; index < timing.iterations; ++index) {
         const auto started = Clock::now();
         last = invoke();
+        const double runtime_e2e_wall_ms = elapsed_ms(started);
         Json observation = observe(*last);
-        observation["runtime_e2e_wall_ms"] = elapsed_ms(started);
+        observation["runtime_e2e_wall_ms"] = runtime_e2e_wall_ms;
         observations.push_back(std::move(observation));
     }
     return {{"observations", std::move(observations)},
@@ -419,17 +421,7 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
     config.seed = optional_value<std::int32_t>(request, "seed", -1);
     const std::string prompt = request.at("prompt").get<std::string>();
     return measure(
-        timing, [&]() { return interface.generate_audio(prompt, config); },
-        [](const trtmc::AudioResult& result) {
-            const double seconds =
-                result.sample_rate > 0
-                    ? static_cast<double>(result.samples.size()) / result.sample_rate
-                    : 0.0;
-            return Json{{"output_samples", result.samples.size()},
-                        {"num_samples", result.samples.size()},
-                        {"output_audio_seconds", seconds},
-                        {"sample_rate", result.sample_rate}};
-        });
+        timing, [&]() { return interface.generate_audio(prompt, config); }, audio_observation);
 }
 
 Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
@@ -456,15 +448,9 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
                 static_cast<double>(audio.samples.size()) / audio.sample_rate};
         },
         [](const auto& value) {
-            const auto& result = value.first;
-            return Json{{"input_audio_seconds", value.second},
-                        {"output_audio_seconds",
-                         result.sample_rate > 0
-                             ? static_cast<double>(result.samples.size()) / result.sample_rate
-                             : 0.0},
-                        {"output_samples", result.samples.size()},
-                        {"num_samples", result.samples.size()},
-                        {"sample_rate", result.sample_rate}};
+            auto summary = audio_observation(value.first);
+            summary["input_audio_seconds"] = value.second;
+            return summary;
         });
 }
 

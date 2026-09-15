@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -24,21 +25,36 @@ namespace trtmc::cli::io {
 void write_wav(const AudioResult& audio, const std::string& path) {
     if (audio.samples.empty())
         throw std::runtime_error("write_wav: empty audio");
+    if (audio.sample_rate <= 0 || audio.num_channels <= 0)
+        throw std::runtime_error("write_wav: sample rate and channel count must be positive");
+    if (audio.samples.size() % static_cast<std::size_t>(audio.num_channels) != 0)
+        throw std::runtime_error("write_wav: incomplete interleaved audio frame");
+    if (audio.num_samples < 0 ||
+        (audio.num_samples != 0 &&
+         static_cast<std::size_t>(audio.num_samples) != audio.samples.size()))
+        throw std::runtime_error("write_wav: sample count does not match buffer");
+
+    const std::uint64_t block_bytes = static_cast<std::uint64_t>(audio.num_channels) * 4U;
+    const std::uint64_t bytes_per_second = block_bytes * audio.sample_rate;
+    // Keep RIFF sizes within the signed range used by the existing WAV reader.
+    if (block_bytes > std::numeric_limits<std::int16_t>::max() ||
+        bytes_per_second > std::numeric_limits<std::int32_t>::max() ||
+        audio.samples.size() >
+            (static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) - 36U) / 4U)
+        throw std::runtime_error("write_wav: audio exceeds supported WAV sizes");
+    const std::int32_t sample_rate = audio.sample_rate;
+    const auto num_channels = static_cast<std::int16_t>(audio.num_channels);
+    const std::int16_t bits_per_sample = 32;
+    const auto byte_rate = static_cast<std::int32_t>(bytes_per_second);
+    const auto block_align = static_cast<std::int16_t>(block_bytes);
+    const auto data_size = static_cast<std::int32_t>(audio.samples.size() * 4U);
+    const std::int32_t chunk_size = 36 + data_size;
+    const std::int32_t format_size = 16;
+    const std::int16_t audio_format = 3;
 
     std::ofstream output(path, std::ios::binary);
     if (!output)
         throw std::runtime_error("write_wav: cannot open " + path);
-
-    const auto num_samples = static_cast<std::int32_t>(audio.samples.size());
-    const std::int32_t sample_rate = audio.sample_rate;
-    const std::int16_t num_channels = 1;
-    const std::int16_t bits_per_sample = 32;
-    const std::int32_t byte_rate = sample_rate * num_channels * (bits_per_sample / 8);
-    const auto block_align = static_cast<std::int16_t>(num_channels * (bits_per_sample / 8));
-    const std::int32_t data_size = num_samples * block_align;
-    const std::int32_t chunk_size = 36 + data_size;
-    const std::int32_t format_size = 16;
-    const std::int16_t audio_format = 3;
 
     output.write("RIFF", 4);
     output.write(reinterpret_cast<const char*>(&chunk_size), 4);
@@ -53,6 +69,9 @@ void write_wav(const AudioResult& audio, const std::string& path) {
     output.write("data", 4);
     output.write(reinterpret_cast<const char*>(&data_size), 4);
     output.write(reinterpret_cast<const char*>(audio.samples.data()), data_size);
+    output.close();
+    if (!output)
+        throw std::runtime_error("write_wav: failed to write " + path);
 }
 
 AudioResult read_wav(const std::string& path) {
