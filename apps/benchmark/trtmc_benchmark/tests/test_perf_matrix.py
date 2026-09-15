@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import sys
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import replace
+from itertools import permutations
 import json
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -512,6 +514,57 @@ def test_regression_distribution_keeps_parameter_names_and_target_axis():
     ]
     with pytest.raises(ValueError, match="parameter names"):
         task_reference._regression_summary(values, "normal", ["loc", "location"])
+
+
+@pytest.mark.parametrize("distribution,parameters", [
+    ("normal", [("location", [1.0, 2.0]), ("scale", [0.5, 0.7])]),
+    ("student_t", [("degrees_of_freedom", [4.0, 5.0]),
+                   ("location", [1.0, 2.0]), ("scale", [0.5, 0.7])]),
+    ("negative_binomial", [("total_count", [2.0, 3.0]), ("logits", [-0.1, 0.2])]),
+])
+def test_regression_distribution_parameter_order_is_not_part_of_contract(distribution, parameters):
+    entry = SimpleNamespace(spec={"baseline": {"output_contract": "regression-distribution"}})
+    value = {"distribution": distribution, "target_count": 2, "axes": ["target"],
+             "parameters": [{"name": name, "values": values} for name, values in parameters]}
+    left = {"output_summary": value}
+    for order in permutations(value["parameters"]):
+        right = {"output_summary": {**value, "parameters": list(order)}}
+        before = deepcopy((left, right))
+        assert perf._output_contract(entry, left, right) == (True, "", None)
+        assert perf._output_contract(entry, right, left) == (True, "", None)
+        assert (left, right) == before
+
+
+@pytest.mark.parametrize("changed", [
+    {"distribution": "student_t"},
+    {"distribution": "unknown"},
+    {"target_count": 1},
+    {"target_count": True},
+    {"axes": ["parameter", "target"]},
+    {"parameters": []},
+    {"parameters": [{"name": "location", "values": [1.0, 2.0]}]},
+    {"parameters": [{"name": "location", "values": [1.0, 2.0]},
+                    {"name": "other", "values": [0.5, 0.7]}]},
+    {"parameters": [{"name": "location", "values": [1.0, 2.0]},
+                    {"name": "location", "values": [0.5, 0.7]}]},
+    {"parameters": [{"name": "location", "values": [1.0]},
+                    {"name": "scale", "values": [0.5, 0.7]}]},
+    {"parameters": [{"name": "location", "values": [True, 2.0]},
+                    {"name": "scale", "values": [0.5, 0.7]}]},
+    {"parameters": [{"name": "location", "values": [float("nan"), 2.0]},
+                    {"name": "scale", "values": [0.5, 0.7]}]},
+    {"parameters": [{"name": "location", "values": [1.0, 2.0]},
+                    {"name": "scale", "values": [0.5, float("inf")]}]},
+])
+def test_regression_distribution_order_fix_retains_mismatch_rejection(changed):
+    entry = SimpleNamespace(spec={"baseline": {"output_contract": "regression-distribution"}})
+    value = {"distribution": "normal", "target_count": 2, "axes": ["target"],
+             "parameters": [{"name": "location", "values": [1.0, 2.0]},
+                            {"name": "scale", "values": [0.5, 0.7]}]}
+    valid = {"output_summary": value}
+    invalid = {"output_summary": {**value, **changed}}
+    assert not perf._output_contract(entry, valid, invalid)[0]
+    assert not perf._output_contract(entry, invalid, valid)[0]
 
 
 def test_timeseries_reference_preserves_observed_masks_and_unobserved_padding():

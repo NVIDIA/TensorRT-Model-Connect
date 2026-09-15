@@ -1468,7 +1468,7 @@ def _output_contract(
                 names.append(parameter["name"])
             if len(names) != len(set(names)):
                 return None
-            return value.get("distribution"), targets, tuple(names)
+            return value.get("distribution"), targets, tuple(sorted(names))
         left_signature, right_signature = signature(left), signature(right)
         matched = left_signature is not None and left_signature == right_signature
         return matched, "regression distribution/target axes differ" if not matched else "", None
