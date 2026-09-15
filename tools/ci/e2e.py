@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -345,6 +346,7 @@ class E2ERunner:
     def _isolated_runtime_root(self, runtime_root: Path, family: str):
         required = (
             "libtrtmc_core.so",
+            "libtrtmc_runtime.so",
             "libtrtmc_backend_trt.so",
             f"libtrtmc_model_{family}.so",
         )
@@ -357,7 +359,7 @@ class E2ERunner:
             isolated = root / "tensorrt_model_connect/bin"
             isolated.mkdir(parents=True)
             for name in required:
-                (isolated / name).symlink_to((runtime_root / name).resolve())
+                shutil.copy2(runtime_root / name, isolated / name)
 
             # Preserve only non-family wheel dependencies expected by RUNPATH.
             site_packages = runtime_root.parent.parent

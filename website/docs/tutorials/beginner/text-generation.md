@@ -13,7 +13,6 @@ reuses `./gpt2.bundle`.
 trtmc inspect ./gpt2.bundle
 
 trtmc run ./gpt2.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "Explain why KV caches help decoding." \
   --max-new-tokens 80 \
   --temperature 0.7 \

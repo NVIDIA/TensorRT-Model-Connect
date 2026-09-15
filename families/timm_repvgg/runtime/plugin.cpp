@@ -50,6 +50,8 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 } // namespace
 } // namespace trtmc::timm_repvgg
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("timm_repvgg")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("timm_repvgg does not support --kv-cache-size");

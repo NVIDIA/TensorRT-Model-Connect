@@ -208,6 +208,8 @@ ITask* create(const FamilyContext& context) {
 
 } // namespace trtmc::granite
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("granite")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("granite does not support --kv-cache-size");

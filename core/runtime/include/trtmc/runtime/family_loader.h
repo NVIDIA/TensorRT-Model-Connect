@@ -23,4 +23,9 @@ std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::stri
                                  const std::string& runtime_cache_path = {},
                                  bool cuda_graphs = false);
 
+// Load the exact-build-checked TVM-FFI runtime extension from runtime_root, then
+// publish one BYOK kernel. The extension remains resident for process lifetime.
+void load_byok_kernel_from_runtime(const std::string& runtime_root, const std::string& library,
+                                   const std::string& function, const std::string& kernel_name);
+
 } // namespace trtmc

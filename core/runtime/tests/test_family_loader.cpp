@@ -42,13 +42,17 @@ void write_bundle(const std::filesystem::path& path, const std::string& family,
     output.write("{}PLAN", 6);
 }
 
-bool load_throws(const std::filesystem::path& bundle, const std::string& runtime_root) {
+std::string load_error(const std::filesystem::path& bundle, const std::string& runtime_root) {
     try {
         (void)trtmc::load_task(bundle.string(), runtime_root);
-        return false;
-    } catch (const std::exception&) {
-        return true;
+        return {};
+    } catch (const std::exception& error) {
+        return error.what();
     }
+}
+
+bool load_throws(const std::filesystem::path& bundle, const std::string& runtime_root) {
+    return !load_error(bundle, runtime_root).empty();
 }
 
 bool rtx_options_throw(const std::filesystem::path& bundle, const std::string& runtime_root) {
@@ -87,13 +91,23 @@ void check_rtx_options(const std::filesystem::path& runtime_root,
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "usage: test_family_loader RUNTIME_ROOT\n";
+    if (argc != 2 && argc != 3) {
+        std::cerr << "usage: test_family_loader RUNTIME_ROOT [--expect-core-mismatch]\n";
         return 2;
     }
     const std::filesystem::path runtime_root(argv[1]);
     const auto bundle_path = runtime_root / "fake.bundle";
     write_bundle(bundle_path, "fake");
+
+    if (argc == 3) {
+        const std::string core_error = load_error(bundle_path, runtime_root.string());
+        check(std::string(argv[2]) == "--expect-core-mismatch" &&
+                  core_error.find("Active libtrtmc_core.so belongs to product build") !=
+                      std::string::npos,
+              "runtime rejects a core DSO from a different product build");
+        std::filesystem::remove(bundle_path);
+        return failures;
+    }
 
     auto task = trtmc::load_task(bundle_path.string(), runtime_root.string());
     auto* forecast = dynamic_cast<trtmc::ITimeSeriesForecast*>(task.get());
@@ -147,6 +161,47 @@ int main(int argc, char** argv) {
     check(load_throws(bundle_path, (runtime_root / "missing").string()),
           "loader does not search outside explicit root");
 
+    const auto wrong_backend_library = runtime_root / "libtrtmc_backend_other.so";
+    const auto wrong_backend_bundle = runtime_root / "wrong-backend.bundle";
+    std::filesystem::copy_file(runtime_root / "libtrtmc_backend_fake.so", wrong_backend_library,
+                               std::filesystem::copy_options::overwrite_existing);
+    write_bundle(wrong_backend_bundle, "fake", "time_series_forecast", "other");
+    const std::string backend_descriptor_error =
+        load_error(wrong_backend_bundle, runtime_root.string());
+    check(backend_descriptor_error.find("declares backend 'fake'; expected 'other'") !=
+              std::string::npos,
+          "explicit root validates backend plugin identity before its factory");
+
+    const auto incompatible_bundle = runtime_root / "incompatible.bundle";
+    write_bundle(incompatible_bundle, "fake", "time_series_forecast", "incompatible");
+    const std::string incompatible_build_error =
+        load_error(incompatible_bundle, runtime_root.string());
+    check(incompatible_build_error.find("belongs to product build") != std::string::npos,
+          "loader rejects a plugin from a different product build before its factory");
+
+    const auto escaped_root = runtime_root.parent_path() / "escaped-runtime-root";
+    std::filesystem::remove_all(escaped_root);
+    std::filesystem::create_directories(escaped_root);
+    std::filesystem::create_symlink(runtime_root / "libtrtmc_backend_fake.so",
+                                    escaped_root / "libtrtmc_backend_fake.so");
+    std::filesystem::create_symlink(runtime_root / "libtrtmc_model_fake.so",
+                                    escaped_root / "libtrtmc_model_fake.so");
+    const std::string escaped_root_error = load_error(bundle_path, escaped_root.string());
+    check(escaped_root_error.find("escapes the selected runtime root") != std::string::npos,
+          "explicit loading rejects a DSO symlink that escapes the selected root");
+    std::filesystem::remove_all(escaped_root);
+
+    const auto wrong_family_library = runtime_root / "libtrtmc_model_other.so";
+    const auto wrong_family_bundle = runtime_root / "wrong-family.bundle";
+    std::filesystem::copy_file(runtime_root / "libtrtmc_model_fake.so", wrong_family_library,
+                               std::filesystem::copy_options::overwrite_existing);
+    write_bundle(wrong_family_bundle, "other");
+    const std::string family_descriptor_error =
+        load_error(wrong_family_bundle, runtime_root.string());
+    check(family_descriptor_error.find("declares family 'fake'; expected 'other'") !=
+              std::string::npos,
+          "explicit root validates family plugin identity before its factory");
+
     const auto unsafe_bundle = runtime_root / "unsafe.bundle";
     write_bundle(unsafe_bundle, "../fake");
     check(load_throws(unsafe_bundle, runtime_root.string()), "unsafe family id rejected");
@@ -160,6 +215,11 @@ int main(int argc, char** argv) {
     std::filesystem::remove(unsafe_bundle);
     std::filesystem::remove(mismatch_bundle);
     std::filesystem::remove(rtx_bundle);
+    std::filesystem::remove(wrong_backend_bundle);
+    std::filesystem::remove(wrong_backend_library);
+    std::filesystem::remove(incompatible_bundle);
+    std::filesystem::remove(wrong_family_bundle);
+    std::filesystem::remove(wrong_family_library);
     std::cerr << (failures == 0 ? "ALL PASSED\n" : "SOME FAILED\n");
     return failures;
 }

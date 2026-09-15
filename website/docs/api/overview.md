@@ -20,16 +20,16 @@ The build and runtime entry points are intentionally separate. The Python
 builder resolves exactly one `families/<family>/support.py`, imports only that
 family's `model.py`, and writes a bundle. The native loader reads the bundle's
 `family`, `task`, and `backend`, then loads exactly one family DSO and one
-backend DSO from the explicit runtime root.
+backend DSO from one selected plugin root.
 
 ```text
 Hugging Face model ID or local snapshot
   -> python -m tensorrt_model_connect build
   -> model.bundle
-  -> trtmc::load_task() or trtmc TASK --runtime-root DIR
+  -> trtmc::load_task() with an explicit root, or trtmc TASK with CLI discovery
   -> task-specific output
 ```
 
 There is no Python runtime wrapper, central model registry, runtime-strategy
-switch, backend search path, or fallback runtime discovery in the current
-architecture.
+switch, sibling-family probe, or load-time fallback. CLI discovery selects one
+root before the Runtime Loader performs an exact load.
