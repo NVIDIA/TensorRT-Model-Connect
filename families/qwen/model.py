@@ -10,11 +10,12 @@ Qwen3 modes fail closed. Other Qwen variants retain their explicit graph routes.
 
 from __future__ import annotations
 
-import sys
-
 import json
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 from .config import ModelConfig
 from .parallel import ParallelConfig
@@ -75,13 +76,6 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
-
-
-# Bundle section carrying the omitted weight values; the C++ runtime
-# looks for this exact name.
-REFIT_WEIGHTS_SECTION = "refit_weights"
-# Emitted instead when the checkpoint already holds the exact bytes.
-REFIT_MANIFEST_SECTION = "refit_manifest.json"
 
 
 def _strip_weights_requested(config: ModelConfig) -> bool:
@@ -294,7 +288,10 @@ def _add_refit_weights_section(config: ModelConfig, writer: "BundleWriter") -> N
     # back to embedding the weights.
     manifest = _refit_manifest(config, merged)
     if manifest is not None:
-        writer.add_json(REFIT_MANIFEST_SECTION, manifest)
+        # Section names are the contract with the C++ runtime; they must match
+        # kQwenRefitManifestSection / kQwenRefitWeightsSection in
+        # runtime/refit_weights.h.
+        writer.add_json("refit_manifest.json", manifest)
         total = sum(e["nbytes"] for e in manifest["weights"].values())
         print(f"[trtmc build] Refit manifest: {len(manifest['weights'])} weights "
               f"({total / (1 << 20):.1f} MiB) referenced in place from the checkpoint "
@@ -302,99 +299,47 @@ def _add_refit_weights_section(config: ModelConfig, writer: "BundleWriter") -> N
         return
 
     payload = save(merged)
-    writer.add_bytes(REFIT_WEIGHTS_SECTION, payload)
+    writer.add_bytes("refit_weights", payload)
     print(f"[trtmc build] Refit weights section: {len(merged)} weights "
           f"({len(payload) / (1 << 20):.1f} MiB)", file=sys.stderr)
-
-
-# HF checkpoint tensor for each stripped weight. Only meaningful under native
-# layout, where no transform is applied; every entry is verified byte-for-byte
-# against the loaded array before the manifest is emitted, so a wrong or stale
-# mapping downgrades to embedding the weights rather than shipping bad offsets.
-_HF_PROJECTION = {
-    "w_q": "self_attn.q_proj", "w_k": "self_attn.k_proj", "w_v": "self_attn.v_proj",
-    "w_o": "self_attn.o_proj", "w_gate": "mlp.gate_proj", "w_up": "mlp.up_proj",
-    "w_down": "mlp.down_proj",
-}
-
-
-def _hf_tensor_name(name: str, tied_embeddings: bool) -> str | None:
-    if name == "embedding":
-        return "model.embed_tokens.weight"
-    if name == "w_out":
-        return "model.embed_tokens.weight" if tied_embeddings else "lm_head.weight"
-    if not name.startswith("layer."):
-        return None
-    _, index, short = name.split(".", 2)
-    hf = _HF_PROJECTION.get(short)
-    return f"model.layers.{index}.{hf}.weight" if hf else None
-
-
-def _safetensors_index(model_dir: Path) -> dict:
-    """Map tensor name -> (file, absolute byte offset, nbytes, dtype)."""
-    import struct
-
-    index: dict[str, tuple[str, int, int, str]] = {}
-    shards = sorted(model_dir.glob("*.safetensors"))
-    for shard in shards:
-        with shard.open("rb") as handle:
-            header_len = struct.unpack("<Q", handle.read(8))[0]
-            header = json.loads(handle.read(header_len))
-        data_start = 8 + header_len
-        for tensor, meta in header.items():
-            if tensor == "__metadata__":
-                continue
-            begin, end = meta["data_offsets"]
-            index[tensor] = (shard.name, data_start + begin, end - begin, meta["dtype"])
-    return index
 
 
 def _refit_manifest(config: ModelConfig, merged: dict) -> dict | None:
     """Describe where each stripped weight already lives in the checkpoint.
 
-    Returns None when any weight is not byte-identical to a checkpoint tensor,
-    in which case the caller embeds the weights instead.
+    Every value must be a TensorRef -- the loader hands one out only when the
+    weight needs no transform, so its location is the weight. Nothing has to be
+    mapped back to an HF tensor name or re-read to be checked: the offset came
+    from the file the builder read, rather than being reconstructed from a
+    parallel table that could go stale.
+
+    Returns None when any weight was materialized (an fp16 build converts, so
+    its bytes are not the checkpoint's), and the caller embeds them instead.
     """
-    if not checkpoint_mapper.native_layout():
-        return None
     model_dir = Path(str(config.raw.get("_model_dir") or ""))
     if not model_dir.is_dir():
         return None
-    try:
-        index = _safetensors_index(model_dir)
-    except (OSError, ValueError, KeyError):
-        return None
 
-    tied = "lm_head.weight" not in index
     entries: dict[str, dict] = {}
-    handles: dict[str, object] = {}
-    try:
-        for name, array in merged.items():
-            key = _hf_tensor_name(name, tied)
-            if key is None or key not in index:
-                return None
-            shard, offset, nbytes, dtype = index[key]
-            if nbytes != int(array.nbytes):
-                return None
-            handle = handles.get(shard)
-            if handle is None:
-                handle = handles[shard] = (model_dir / shard).open("rb")
-            handle.seek(offset)
-            # Byte-for-byte proof that pointing at the checkpoint is safe.
-            if handle.read(nbytes) != array.tobytes():
-                return None
-            entries[name] = {
-                "file": shard, "offset": offset, "nbytes": nbytes,
-                "dtype": dtype, "shape": [int(d) for d in array.shape],
-            }
-    finally:
-        for handle in handles.values():
-            handle.close()
+    files: dict[str, dict] = {}
+    for name, value in merged.items():
+        if not isinstance(value, checkpoint_mapper.TensorRef):
+            return None
+        dtype = checkpoint_mapper.ST_DTYPE_NAMES.get(np.dtype(value.dtype))
+        if dtype is None:
+            return None
+        try:
+            # The runtime resolves entries against checkpoint_dir, which an env
+            # override may repoint, so the manifest must name files relatively.
+            relative = value.path.relative_to(model_dir)
+        except ValueError:
+            return None
+        entries[name] = {
+            "file": str(relative), "offset": value.offset, "nbytes": value.nbytes,
+            "dtype": dtype, "shape": [int(d) for d in value.shape],
+        }
+        files.setdefault(str(relative), {"nbytes": value.path.stat().st_size})
 
-    files = {
-        shard: {"nbytes": (model_dir / shard).stat().st_size}
-        for shard in sorted({e["file"] for e in entries.values()})
-    }
     return {
         "schema_version": 1,
         "checkpoint_dir": str(model_dir),
@@ -476,6 +421,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             raise ValueError("strip_weights is not supported for quantized builds")
         if parallel.enabled:
             raise ValueError("strip_weights is not supported for tensor-parallel builds")
+        if not native_kv_architecture_capability(config).eligible:
+            # Only the native KV split path strips. Rejecting here keeps the
+            # layout switch below confined to the builder that understands it.
+            raise ValueError(
+                "strip_weights requires the native Qwen3 KV path "
+                f"({native_kv_architecture_capability(config).reason})")
     config.raw["_strip_weights"] = strip_weights
     quant_ctx = None
     if quantized:
@@ -489,8 +440,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     # bundle reference the checkpoint in place instead of carrying a copy. It
     # needs the engine dtype to equal the checkpoint dtype, so an fp16 build
     # keeps the transformed layout and ships an embedded refit section instead.
-    # Quantized and tensor-parallel builds are rejected above, so stripping
-    # here always means the single-device split path.
+    # Quantized, tensor-parallel and non-native-KV builds are rejected above,
+    # so stripping here always means the single-device split path -- the only
+    # builder that reads the layout flag.
     native_layout = strip_weights and precision == "bf16"
     checkpoint_mapper.set_native_layout(native_layout)
     try:

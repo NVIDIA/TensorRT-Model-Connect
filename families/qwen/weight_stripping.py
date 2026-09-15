@@ -41,11 +41,13 @@ class StripSession:
         self.min_bytes = int(min_bytes)
         self._entries: dict[str, np.ndarray] = {}
 
-    def should_strip(self, name: str | None, values: np.ndarray) -> bool:
-        return bool(name) and values.nbytes >= self.min_bytes
+    def should_strip(self, name: str | None, nbytes: int) -> bool:
+        """Decide from size alone, so a not-yet-read weight can be stripped."""
+        return bool(name) and nbytes >= self.min_bytes
 
-    def record(self, name: str, values: np.ndarray) -> None:
-        """Record the exact array handed to TensorRT under *name*."""
+    def record(self, name: str, values) -> None:
+        """Record what TensorRT was given under *name*: an array, or a
+        TensorRef standing in for bytes still on disk."""
         previous = self._entries.get(name)
         if previous is None:
             self._entries[name] = values

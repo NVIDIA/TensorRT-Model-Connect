@@ -33,16 +33,16 @@ def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
 
-def _placeholder_weights(values: np.ndarray) -> trt.Weights:
-    """A null (data-less) weight descriptor of the same type and count."""
+def _placeholder_weights(dtype: np.dtype, count: int) -> trt.Weights:
+    """A null (data-less) weight descriptor of the given type and count."""
     trt_dtype = {
         np.dtype(np.float32): trt.float32,
         np.dtype(np.float16): trt.float16,
         np.dtype(ml_dtypes.bfloat16): trt.bfloat16,
-    }.get(values.dtype)
+    }.get(np.dtype(dtype))
     if trt_dtype is None:
-        raise ValueError(f"weight stripping does not support dtype {values.dtype}")
-    return trt.Weights(trt_dtype, 0, values.size)
+        raise ValueError(f"weight stripping does not support dtype {dtype}")
+    return trt.Weights(trt_dtype, 0, count)
 
 
 def add_constant(
@@ -59,25 +59,34 @@ def add_constant(
     instead of being baked into the plan. ``name`` becomes the TensorRT weight
     name, so it is also the refit key.
     """
-    contiguous = np.ascontiguousarray(values, dtype=dtype)
+    # Decide from geometry alone: a stripped weight may be a TensorRef that has
+    # not been read off disk, and materializing it here would defeat the point.
+    # count/nbytes come from the declared shape and target dtype, which is
+    # exactly what would have been baked.
+    count = int(np.prod(shape)) if shape else 1
     session = weight_stripping.active()
-    if session is not None and session.should_strip(name, contiguous):
-        # What gets recorded must be exactly what would have been baked, so
-        # the conversion above must have been a no-op for this weight.
-        source = np.asarray(values)
-        if source.dtype != np.dtype(dtype) or not source.flags["C_CONTIGUOUS"]:
+    if session is not None and session.should_strip(
+            name, count * np.dtype(dtype).itemsize):
+        # What gets recorded must be exactly what would have been baked, so no
+        # conversion may still be pending for this weight.
+        if np.dtype(values.dtype) != np.dtype(dtype):
             raise RuntimeError(
                 f"weight {name!r} is not already in final form "
-                f"(dtype={source.dtype}, want {np.dtype(dtype)}; "
-                f"C_CONTIGUOUS={source.flags['C_CONTIGUOUS']}): stripping would "
-                f"record different bytes than a baked build would use")
-        layer = network.add_constant(shape, _placeholder_weights(contiguous))
+                f"(dtype={values.dtype}, want {np.dtype(dtype)}): stripping "
+                f"would record different bytes than a baked build would use")
+        if isinstance(values, np.ndarray) and not values.flags["C_CONTIGUOUS"]:
+            raise RuntimeError(
+                f"weight {name!r} is not C-contiguous: stripping would record "
+                f"different bytes than a baked build would use")
+        layer = network.add_constant(shape, _placeholder_weights(dtype, count))
         # setWeightsName needs the layer's canonical descriptor, not the
         # Weights object passed in (that one "is not used in the network").
         if not network.set_weights_name(layer.weights, name):
             raise RuntimeError(f"set_weights_name failed for weight {name!r}")
-        session.record(name, contiguous)
+        session.record(name, values)
         return layer.get_output(0)
+    # Not stripped, so the values are needed: a TensorRef reads from disk here.
+    contiguous = np.ascontiguousarray(values, dtype=dtype)
     if contiguous.dtype == np.dtype(ml_dtypes.bfloat16):
         # TensorRT's Python bindings cannot implicitly convert an ml_dtypes
         # bfloat16 array (it reads as an opaque V16 void dtype), so describe
@@ -126,7 +135,10 @@ def add_matmul_rhs_constant(
     rhs = add_constant(
         network,
         rhs_shape,
-        np.asarray(rhs_weights).reshape(rhs_shape),
+        # A TensorRef already carries the declared shape, and reshaping it
+        # through NumPy would read the whole tensor off disk.
+        rhs_weights if tuple(getattr(rhs_weights, "shape", ())) == tuple(rhs_shape)
+        else np.asarray(rhs_weights).reshape(rhs_shape),
         dtype=dtype,
         name=name,
     )

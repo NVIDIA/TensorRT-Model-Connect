@@ -160,7 +160,7 @@ def _make_matmul_fn(
             native = checkpoint_mapper.native_layout()
             # Declare the constant in the weight's own dtype so a bf16 build
             # wants bf16 -- then the checkpoint bytes need no conversion.
-            weight_dtype = np.asarray(rhs_weights).dtype if native else dtype
+            weight_dtype = rhs_weights.dtype if native else dtype
             return graph_ops.add_matmul_rhs_constant(
                 network, lhs, lhs_w, rhs_w, rhs_weights, dtype=weight_dtype,
                 name=weight_name, hf_layout=native)
@@ -500,7 +500,7 @@ def build_dual_profile_decoder_engine(
     # ---- Shared constants ------------------------------------------------
     embedding_table = _const_in_work_dtype(
         network, (vocab, hidden), weights["embedding"],
-        (np.asarray(weights["embedding"]).dtype
+        (weights["embedding"].dtype
          if checkpoint_mapper.native_layout() else work_np_dtype),
         work_trt_dtype, name="embedding")
 
@@ -837,13 +837,13 @@ def build_dual_profile_decoder_engine(
         lm_input = slicer.get_output(0)
 
     _hf_layout = checkpoint_mapper.native_layout()
-    if isinstance(weights["w_out"], np.ndarray):
+    if checkpoint_mapper.is_tensor_like(weights["w_out"]):
         # [in, out] normally; [out, in] when the checkpoint layout is kept.
         out_vocab = weights["w_out"].shape[0 if _hf_layout else 1]
     else:
         out_vocab = vocab
-    _w_out_dtype = (np.asarray(weights["w_out"]).dtype
-                    if _hf_layout and isinstance(weights["w_out"], np.ndarray)
+    _w_out_dtype = (weights["w_out"].dtype
+                    if _hf_layout and checkpoint_mapper.is_tensor_like(weights["w_out"])
                     else work_np_dtype)
     logits = graph_ops.add_matmul_rhs_constant(
         network, lm_input, hidden, out_vocab, weights["w_out"],
