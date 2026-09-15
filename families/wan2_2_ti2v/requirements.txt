@@ -4,6 +4,7 @@
 Pillow
 accelerate>=1.1.1
 dashscope
+decord2==3.4.0
 diffusers>=0.31.0
 easydict
 einops==0.8.1

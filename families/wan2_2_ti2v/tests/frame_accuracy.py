@@ -45,7 +45,9 @@ def _validated_paths(paths: Sequence[str], *, label: str) -> list[Path]:
     resolved = [Path(path) for path in paths]
     if not resolved:
         raise ValueError(f"{label} frame list is empty")
-    expected_names = [f"frame_{index:04d}.png" for index in range(len(resolved))]
+    # Native CLI and official reference use distinct fixed-width frame names.
+    separator, width = ("-", 6) if resolved[0].name.startswith("frame-") else ("_", 4)
+    expected_names = [f"frame{separator}{index:0{width}d}.png" for index in range(len(resolved))]
     names = [path.name for path in resolved]
     if names != expected_names:
         raise ValueError(
