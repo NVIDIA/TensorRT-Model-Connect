@@ -80,6 +80,7 @@ set(TRTMC_CUDA_INCLUDE_DIR ${CUDAToolkit_INCLUDE_DIRS})
 set(TRTMC_CUDART_LIBRARY CUDA::cudart)
 
 add_library(trtmc_core SHARED
+  core/runtime/cache/history_cache.cpp
   core/runtime/bundle/bundle_format.cpp
   core/runtime/primitives/cuda_common.cpp
   core/runtime/primitives/device_tensor.cpp
@@ -328,6 +329,12 @@ if(TRTMC_BUILD_EXAMPLES)
 endif()
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_history_cache core/runtime/tests/test_history_cache.cpp)
+  target_link_libraries(test_history_cache PRIVATE trtmc_core)
+  target_compile_options(test_history_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME history_cache COMMAND test_history_cache)
+  set_tests_properties(history_cache PROPERTIES LABELS cpu)
+
   add_executable(test_bundle_format_v1 core/runtime/tests/test_bundle_format_v1.cpp)
   target_include_directories(test_bundle_format_v1 PRIVATE ${PROJECT_SOURCE_DIR}/core)
   target_link_libraries(test_bundle_format_v1 PRIVATE trtmc_core)
