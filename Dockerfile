@@ -61,7 +61,7 @@ RUN python3.12 -m venv "$VIRTUAL_ENV" \
       "protobuf" \
       "pybind11==2.13.6" \
       "pybind11-stubgen==2.4.2" \
-      "pytest<9" \
+      "pytest>=7.3,<9" \
       "PyYAML>=6.0" \
       "ruff==0.16.4" \
       "safetensors>=0.4" \
