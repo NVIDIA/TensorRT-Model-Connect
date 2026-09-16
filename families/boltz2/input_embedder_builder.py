@@ -464,10 +464,9 @@ def define_input_embedder_network(
         profile_input = graph.concatenate(
             (profile_value, graph.reshape(deletion_value, (1, token_count, 1))), 2
         )
-        # Match autocast's BF16 output boundary while retaining stable accumulation
-        # for dense MSA profiles across recycling passes.
-        profile_embedding = graph.cast(
-            graph.linear(profile_input, "input_embedder.msa_profile_encoding"), bf16
+        # Match reference autocast for the projection's inputs and weights.
+        profile_embedding = graph.linear(
+            graph.cast(profile_input, bf16), "input_embedder.msa_profile_encoding"
         )
         result = graph.add(pooled, graph.cast(token_embedding, pooled.dtype))
         result = graph.add(result, graph.cast(profile_embedding, result.dtype))
