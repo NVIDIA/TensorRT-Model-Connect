@@ -81,6 +81,32 @@ test('reports an abstract task without inventing a CLI command', () => {
   assert.deepEqual(profile.cliCommands, []);
 });
 
+test('reports recommendation without inventing a Hugging Face task or shared CLI command', () => {
+  const root = repository();
+  const manifest = path.join(root, 'families', 'alpha', 'tests', 'manifests', 'small.json');
+  const payload = JSON.parse(fs.readFileSync(manifest));
+  payload.task = 'recommendation';
+  fs.writeFileSync(manifest, JSON.stringify(payload));
+  const inventory = collectModelSupportInventory(root);
+  const [task] = inventory.taskRecipes;
+  assert.equal(task.label, 'Recommendation');
+  assert.equal(task.category, 'Recommender Systems');
+  assert.equal(task.slug, 'recommendation');
+  assert.equal(task.hfUrl, null);
+  assert.equal(task.recipeCount, 1);
+  assert.equal(task.families[0].family, 'alpha');
+  assert.deepEqual(inventory.modelProfiles[0].cliCommands, []);
+});
+
+test('rejects an unknown task', () => {
+  const root = repository();
+  const manifest = path.join(root, 'families', 'alpha', 'tests', 'manifests', 'small.json');
+  const payload = JSON.parse(fs.readFileSync(manifest));
+  payload.task = 'unknown_task';
+  fs.writeFileSync(manifest, JSON.stringify(payload));
+  assert.throws(() => collectModelSupportInventory(root), /declares unknown task unknown_task/);
+});
+
 test('rejects removed strategy metadata', () => {
   const root = repository();
   const manifest = path.join(root, 'families', 'alpha', 'tests', 'manifests', 'small.json');

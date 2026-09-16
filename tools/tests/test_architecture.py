@@ -298,9 +298,11 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/primitives/trt_common.cpp",
         "core/runtime/primitives/trt_common.h",
         "core/runtime/loader/family_loader.cpp",
+        "core/runtime/cache/history_cache.cpp",
         "core/runtime/include/trtmc/byok.h",
         "core/runtime/include/trtmc/bundle.h",
         "core/runtime/include/trtmc/task.h",
+        "core/runtime/include/trtmc/history_cache.h",
         "core/runtime/include/trtmc/runtime/device_tensor.h",
         "core/runtime/include/trtmc/runtime/family_factory.h",
         "core/runtime/include/trtmc/runtime/family_loader.h",
@@ -313,6 +315,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tests/test_byok_shape_spec.cpp",
         "core/runtime/tests/test_family_loader.cpp",
         "core/runtime/tests/test_task_api.cpp",
+        "core/runtime/tests/test_history_cache.cpp",
         "core/runtime/tests/test_trt_module_dynamic_input.cpp",
     }
     expected_tools = {
@@ -633,7 +636,11 @@ def test_runtime_sized_kv_budget_is_direct_and_family_owned() -> None:
         source = plugin.read_text(encoding="utf-8")
         if "context.kv_cache_size_bytes" in source:
             handlers.append(family.name)
-        if family.name != "llama":
+        consumes_history_budget = (
+            "options.max_bytes = context.kv_cache_size_bytes;" in source
+            and "std::make_shared<trtmc::HistoryCache>" in source
+        )
+        if family.name != "llama" and not consumes_history_budget:
             assert (
                 f'throw std::invalid_argument("{family.name} does not support --kv-cache-size")'
                 in source

@@ -19,6 +19,7 @@ const TASKS = {
   object_detection: ['Object detection', 'Computer Vision', 'object-detection', 'detect'],
   pose_hypothesis_refinement: ['Pose hypothesis refinement', 'Robotics', 'robotics', null],
   prompted_segmentation: ['Prompted segmentation', 'Computer Vision', 'mask-generation', 'segment'],
+  recommendation: ['Recommendation', 'Recommender Systems', null, null],
   reranking: ['Text ranking', 'Natural Language Processing', 'text-ranking', 'rerank'],
   robot_control: ['Robot control', 'Robotics', 'robotics', 'control'],
   segmentation: ['Image segmentation', 'Computer Vision', 'image-segmentation', 'segment'],
@@ -131,7 +132,7 @@ function taskRecipe(taskName, profiles) {
     label,
     category,
     description: `Family-owned implementations of the ${label.toLowerCase()} task interface.`,
-    hfUrl: `https://huggingface.co/tasks/${hfSlug}`,
+    hfUrl: hfSlug ? `https://huggingface.co/tasks/${hfSlug}` : null,
     recipeCount: profiles.length,
     families: [...byFamily.entries()].map(([family, familyProfiles]) => ({
       family,

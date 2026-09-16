@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -43,6 +44,34 @@ def _make_executable(path: Path) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _package_native_commands(build: Path, destinations: tuple[Path, ...]) -> None:
+    """Ship root-level native commands, including family-owned trtmc-* binaries."""
+    commands = [build / "trtmc"]
+    commands.extend(
+        path for path in sorted(build.glob("trtmc-*")) if not path.suffix and not path.is_dir()
+    )
+    for command in commands:
+        try:
+            mode = command.lstat().st_mode
+            if not stat.S_ISREG(mode) or not mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                raise ConanException(f"native command is not a regular executable: {command}")
+            with command.open("rb") as source:
+                if source.read(4) != b"\x7fELF":
+                    raise ConanException(f"native command is not an ELF executable: {command}")
+            for directory in destinations:
+                directory.mkdir(parents=True, exist_ok=True)
+                target = directory / command.name
+                if target.exists() or target.is_symlink():
+                    raise ConanException(f"duplicate native command destination: {target}")
+                # Copy this exact build output; recursive basename matching can
+                # otherwise replace it with a nested target of the same name.
+                shutil.copy2(command, target)
+                _make_executable(target)
+                _set_runpath(target, "$ORIGIN")
+        except OSError as error:
+            raise ConanException(f"cannot package native command {command}: {error}") from error
+
+
 class TensorRTModelConnectConan(ConanFile):
     name = "tensorrt-model-connect"
     version = "0.1.0"
@@ -77,8 +106,7 @@ class TensorRTModelConnectConan(ConanFile):
         module_bin = package / "tensorrt_model_connect" / "bin"
         script_bin = package / f"{self.name.replace('-', '_')}-{self.version}.data" / "scripts"
 
-        copy(self, "trtmc", src=str(build), dst=str(module_bin), keep_path=False)
-        copy(self, "trtmc", src=str(build), dst=str(script_bin), keep_path=False)
+        _package_native_commands(build, (module_bin, script_bin))
         for destination in (module_bin, script_bin):
             for library in ("libtrtmc_core.so", "libtrtmc_runtime.so"):
                 copy(
@@ -168,7 +196,7 @@ class TensorRTModelConnectConan(ConanFile):
         ):
             raise ConanException("native runtime package is incomplete")
 
-        for executable in (native, installed, benchmark_worker, dataset_benchmark):
+        for executable in (benchmark_worker, dataset_benchmark):
             _make_executable(executable)
             _set_runpath(executable, "$ORIGIN")
         for library in shared_runtime:
