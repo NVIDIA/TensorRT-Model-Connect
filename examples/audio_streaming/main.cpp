@@ -3,13 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "task_runtime.h"
+#include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
+#include "trtmc/speech.hpp"
 #include "trtmc/task.h"
 
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -25,7 +29,7 @@ struct Options {
 
 void usage(const char* program) {
     std::cerr << "Usage: " << program
-              << " MODEL.bundle --runtime-root DIR [--chunk-frames N]"
+              << " MODEL.bundle [--runtime-root DIR] [--chunk-frames N]"
                  " [--max-new-tokens N]\n";
 }
 
@@ -78,8 +82,8 @@ Options parse_options(int argc, char** argv) {
     }
     if (options.bundle.empty())
         throw std::invalid_argument("a bundle is required");
-    if (options.runtime_root.empty())
-        throw std::invalid_argument("--runtime-root is required");
+    if (saw_runtime_root && options.runtime_root.empty())
+        throw std::invalid_argument("--runtime-root requires a nonempty path");
     return options;
 }
 
@@ -96,51 +100,100 @@ void write_floats(const float* values, std::size_t count) {
         throw std::runtime_error("failed to flush FP32 PCM to stdout");
 }
 
-int run(const Options& options) {
-    std::cerr << "[audio-streaming] loading bundle\n";
-    auto task = trtmc::load_task(options.bundle, options.runtime_root);
-    auto* streaming = dynamic_cast<trtmc::IStreamingAudioGeneration*>(task.get());
-    if (streaming == nullptr)
-        throw std::runtime_error("bundle does not implement streaming audio generation");
+struct AudioProgress {
+    std::uint64_t samples{0};
+    std::uint32_t sample_rate{0};
+    void append(const float* data, std::size_t count, std::uint32_t rate) {
+        if (data == nullptr || count == 0 || rate == 0)
+            throw std::runtime_error("streaming callback returned invalid audio metadata");
+        if (sample_rate != 0 && sample_rate != rate)
+            throw std::runtime_error("streaming callback changed sample rate");
+        if (count > std::numeric_limits<std::uint64_t>::max() - samples)
+            throw std::overflow_error("utterance sample count overflow");
+        sample_rate = rate;
+        write_floats(data, count);
+        samples += count;
+    }
+};
 
-    trtmc::AudioGenerationConfig config;
-    config.max_new_tokens = options.max_new_tokens;
+// Application I/O only; neither branch adapts or implements another Task API.
+template <class Generate>
+int stream_prompts(Generate generate) {
     std::cerr << "[audio-streaming] ready; reading one prompt per line\n";
-
     std::string prompt;
     std::int32_t utterance = 0;
     while (std::getline(std::cin, prompt)) {
         if (blank(prompt))
             continue;
         ++utterance;
-        std::int64_t callback_samples = 0;
-        std::int32_t sample_rate = 0;
+        AudioProgress progress;
         std::cerr << "[audio-streaming] utterance " << utterance << " start\n";
-        const auto reported_samples = streaming->generate_audio_streaming(
-            prompt, config,
-            [&](const float* samples, std::int32_t count, std::int32_t rate) {
-                if (samples == nullptr || count <= 0 || rate <= 0)
-                    throw std::runtime_error("streaming callback returned invalid audio metadata");
-                if (sample_rate != 0 && sample_rate != rate)
-                    throw std::runtime_error("streaming callback changed sample rate");
-                sample_rate = rate;
-                write_floats(samples, static_cast<std::size_t>(count));
-                callback_samples += count;
-            },
-            options.chunk_frames);
-        if (reported_samples <= 0 || callback_samples <= 0)
+        const auto reported_samples = generate(prompt, progress);
+        if (reported_samples == 0 || progress.samples == 0)
             throw std::runtime_error("streaming task produced no audio samples");
 
         const float utterance_end = 0.0F;
         write_floats(&utterance_end, 1);
         std::cerr << "[audio-streaming] utterance " << utterance
-                  << " done; samples=" << callback_samples << "; sample_rate=" << sample_rate
+                  << " done; samples=" << progress.samples
+                  << "; sample_rate=" << progress.sample_rate
                   << "; reported_samples=" << reported_samples << '\n';
     }
     if (std::cin.bad())
         throw std::runtime_error("failed to read prompts from stdin");
     std::cerr << "[audio-streaming] EOF; utterances=" << utterance << '\n';
     return 0;
+}
+
+int run(const Options& options) {
+    const auto primary = trtmc::Bundle::open(options.bundle).info().task;
+    const bool existing = trtmc::app::uses_existing_task_runtime(primary);
+    if (existing && options.runtime_root.empty())
+        throw std::invalid_argument("--runtime-root is required for an existing bundle mode");
+    std::cerr << "[audio-streaming] loading bundle\n";
+    if (existing) {
+        auto task = trtmc::load_task(options.bundle, options.runtime_root);
+        auto* streaming = dynamic_cast<trtmc::IStreamingAudioGeneration*>(task.get());
+        if (streaming == nullptr)
+            throw std::runtime_error("bundle does not implement streaming audio generation");
+        trtmc::AudioGenerationConfig config;
+        config.max_new_tokens = options.max_new_tokens;
+        return stream_prompts([&](const std::string& prompt, AudioProgress& progress) {
+            const auto reported = streaming->generate_audio_streaming(
+                prompt, config,
+                [&](const float* data, std::int32_t count, std::int32_t rate) {
+                    if (count <= 0 || rate <= 0)
+                        throw std::runtime_error(
+                            "streaming callback returned invalid audio metadata");
+                    progress.append(data, static_cast<std::size_t>(count),
+                                    static_cast<std::uint32_t>(rate));
+                },
+                options.chunk_frames);
+            if (reported <= 0)
+                throw std::runtime_error("streaming task produced no audio samples");
+            return static_cast<std::uint64_t>(reported);
+        });
+    }
+    trtmc::LoadOptions load;
+    load.runtime_root = options.runtime_root;
+    auto model = trtmc::Model::load(options.bundle, load);
+    auto streaming = model.task<trtmc::StreamingTextToSpeech>();
+    const trtmc::Config config{{"max_new_tokens", std::int64_t{options.max_new_tokens}},
+                               {"chunk_frames", std::int64_t{options.chunk_frames}}};
+    return stream_prompts([&](const std::string& prompt, AudioProgress& progress) {
+        const auto summary = streaming.run(
+            {prompt},
+            [&](const trtmc::AudioView& audio) {
+                if (audio.channels != 1 || !audio.sample_rate)
+                    throw std::runtime_error(
+                        "raw audio example requires mono PCM with a sample rate");
+                progress.append(audio.samples.data(), audio.samples.size(), *audio.sample_rate);
+            },
+            config);
+        if (summary.outcome != trtmc::AudioDeliveryOutcome::Complete)
+            throw std::runtime_error("streaming task stopped before utterance completion");
+        return summary.emitted_sample_count;
+    });
 }
 
 } // namespace

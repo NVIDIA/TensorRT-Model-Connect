@@ -23,11 +23,12 @@ export default function ModelTaskRecipePage({taskSlug}) {
         <p><Link to="/models-recipes/model-recipes">← All model recipe tasks</Link></p>
         <h1>{task.label}</h1>
         <p>{task.description}</p>
-        <p>
-          Classification follows the Hugging Face task taxonomy. See the{' '}
-          <a href={task.hfUrl}>Hugging Face {task.label} task page</a> for the
-          ecosystem-level task definition.
-        </p>
+        {task.hfUrl && (
+          <p>
+            See the <a href={task.hfUrl}>related Hugging Face task page</a> for the
+            ecosystem-level task definition.
+          </p>
+        )}
 
         <h2>Model families</h2>
         <table>

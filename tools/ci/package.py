@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import subprocess
@@ -64,6 +65,7 @@ def load_native_libraries(bin_dir: Path, families: tuple[str, ...]) -> None:
     libraries = [
         bin_dir / "libtrtmc_core.so",
         bin_dir / "libtrtmc_runtime.so",
+        bin_dir / "libtrtmc_c.so.1",
         bin_dir / "libtrtmc_backend_trt.so",
         bin_dir / "libtrtmc_byok_tvm_ffi.so",
         *(bin_dir / f"libtrtmc_model_{family}.so" for family in families),
@@ -119,6 +121,23 @@ class WheelArchiveValidator:
                 raise CiError(f"{wheel}: Python core package is missing")
             if "trtmc_benchmark/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python benchmark application is missing")
+            public_include = self.context.repository / "core/api/include"
+            sdk_headers = {
+                "tensorrt_model_connect/include/" + path.relative_to(public_include).as_posix()
+                for path in public_include.rglob("*")
+                if path.is_file()
+            }
+            sdk_required = sdk_headers | {
+                "tensorrt_model_connect/include/trtmc/trtmc.h",
+                "tensorrt_model_connect/include/trtmc/trtmc.hpp",
+                "tensorrt_model_connect/include/trtmc/runtime/span.h",
+                "tensorrt_model_connect/share/cmake/trtmc/trtmcConfig.cmake",
+                "tensorrt_model_connect/share/cmake/trtmc/trtmcConfigVersion.cmake",
+                "tensorrt_model_connect/share/cmake/trtmc/trtmcTargets.cmake",
+            }
+            missing_sdk = sorted(sdk_required - set(names))
+            if missing_sdk:
+                raise CiError(f"{wheel}: public SDK is missing: {missing_sdk}")
             source_suffixes = {
                 ".c",
                 ".cc",
@@ -234,6 +253,8 @@ class WheelArchiveValidator:
                 "trtmc",
                 "libtrtmc_core.so",
                 "libtrtmc_runtime.so",
+                "libtrtmc_c.so",
+                "libtrtmc_c.so.1",
                 "libtrtmc_backend_trt.so",
                 "libtrtmc_byok_tvm_ffi.so",
                 "trtmc_benchmark_worker",
@@ -262,21 +283,91 @@ class WheelArchiveValidator:
                 raise CiError(
                     f"{wheel}: expected only unaliased TensorRT backend DSOs, found {backend_dsos}"
                 )
-            scripts = [name for name in names if name.endswith(".data/scripts/trtmc")]
-            script_cores = [
-                name for name in names if name.endswith(".data/scripts/libtrtmc_core.so")
+            duplicated_runtime = [
+                name for name in names
+                if ".data/scripts/" in name and
+                (Path(name).name == "trtmc" or Path(name).name.startswith("libtrtmc_"))
             ]
-            script_runtimes = [
-                name for name in names if name.endswith(".data/scripts/libtrtmc_runtime.so")
-            ]
-            if len(scripts) != 1 or len(script_cores) != 1 or len(script_runtimes) != 1:
-                raise CiError(f"{wheel}: installed CLI payload is incomplete")
+            if duplicated_runtime:
+                raise CiError(f"{wheel}: native CLI/runtime must not be duplicated in scripts")
+            if "tensorrt_model_connect/__main__.py" not in names:
+                raise CiError(f"{wheel}: trtmc console launcher is missing")
             entry_points = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
-            if len(entry_points) != 1 or "trtmc-bench" not in archive.read(entry_points[0]).decode(
-                "utf-8"
-            ):
-                raise CiError(f"{wheel}: trtmc-bench console entrypoint is missing")
+            if len(entry_points) != 1:
+                raise CiError(f"{wheel}: console entrypoints are missing")
+            entries = configparser.ConfigParser(interpolation=None)
+            try:
+                entries.read_string(archive.read(entry_points[0]).decode("utf-8"))
+            except (configparser.Error, UnicodeError) as error:
+                raise CiError(f"{wheel}: invalid console entrypoints") from error
+            for command, target in {
+                "trtmc": "tensorrt_model_connect.__main__:main",
+                "trtmc-bench": "trtmc_benchmark.cli:main",
+            }.items():
+                if entries.get("console_scripts", command, fallback="") != target:
+                    raise CiError(f"{wheel}: {command} console entrypoint is missing or incorrect")
         print(f"validated wheel={wheel} families={len(expected_families)}")
+
+
+def validate_installed_sdk(prefix: Path) -> None:
+    """Compile and run C/C++ callers using only the installed public SDK."""
+
+    with tempfile.TemporaryDirectory(prefix="trtmc-installed-sdk-") as directory:
+        source = Path(directory)
+        (source / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(installed_sdk LANGUAGES C CXX)\n"
+            "find_package(trtmc CONFIG REQUIRED)\n"
+            "add_executable(c_consumer consumer.c)\n"
+            "target_compile_features(c_consumer PRIVATE c_std_11)\n"
+            "target_compile_options(c_consumer PRIVATE -pedantic-errors)\n"
+            "target_link_libraries(c_consumer PRIVATE trtmc::c)\n"
+            "add_executable(cpp_consumer consumer.cpp)\n"
+            "target_compile_features(cpp_consumer PRIVATE cxx_std_17)\n"
+            "target_compile_options(cpp_consumer PRIVATE -pedantic-errors)\n"
+            "target_link_libraries(cpp_consumer PRIVATE trtmc::c)\n",
+            encoding="utf-8",
+        )
+        for filename, header in (("consumer.c", "trtmc.h"), ("consumer.cpp", "trtmc.hpp")):
+            (source / filename).write_text(
+                f"#include <trtmc/{header}>\n"
+                "int main(void) {\n"
+                "    const trtmc_core_api_v1 *api = 0;\n"
+                "    if (trtmc_get_api(1, 0, &api) != TRTMC_OK || !api) return 1;\n"
+                "    return api->header.major != 1 || api->header.minor != 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+        build = source / "build"
+        commands = (
+            [
+                "cmake",
+                "-S",
+                str(source),
+                "-B",
+                str(build),
+                f"-DCMAKE_PREFIX_PATH={prefix}",
+                "-DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE",
+                "-DCMAKE_C_STANDARD=11",
+                "-DCMAKE_C_STANDARD_REQUIRED=ON",
+                "-DCMAKE_C_EXTENSIONS=OFF",
+                "-DCMAKE_CXX_STANDARD=17",
+                "-DCMAKE_CXX_STANDARD_REQUIRED=ON",
+                "-DCMAKE_CXX_EXTENSIONS=OFF",
+            ],
+            ["cmake", "--build", str(build), "--parallel", "2"],
+            [str(build / "c_consumer")],
+            [str(build / "cpp_consumer")],
+        )
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        for command in commands:
+            completed = subprocess.run(
+                command, cwd=source, env=environment, check=False, capture_output=True, text=True
+            )
+            if completed.returncode:
+                detail = (completed.stderr + completed.stdout).strip()
+                raise CiError(f"installed public SDK consumer failed: {detail}")
 
 
 class InstalledWheelValidator:
@@ -333,6 +424,8 @@ print(json.dumps({
             bin_dir / "trtmc",
             bin_dir / "libtrtmc_core.so",
             bin_dir / "libtrtmc_runtime.so",
+            bin_dir / "libtrtmc_c.so",
+            bin_dir / "libtrtmc_c.so.1",
             bin_dir / "libtrtmc_backend_trt.so",
             bin_dir / "libtrtmc_byok_tvm_ffi.so",
             bin_dir / "trtmc_benchmark_worker",
@@ -341,6 +434,7 @@ print(json.dumps({
         if not all(path.is_file() for path in required) or packaged != expected:
             raise CiError(f"installed wheel is incomplete: {wheel}")
         load_native_libraries(bin_dir, tuple(sorted(expected)))
+        validate_installed_sdk(bin_dir.parent)
         executable = Path(payload["scripts"]) / "trtmc"
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise CiError(f"installed trtmc CLI is missing: {executable}")
@@ -369,6 +463,12 @@ print(json.dumps({
         )
         if not version.stdout.startswith("trtmc "):
             raise CiError("installed trtmc CLI returned an invalid version")
+        build_help = subprocess.run(
+            [executable, "build", "--help"], check=True, capture_output=True, text=True,
+            cwd=Path("/tmp"), env=environment,
+        )
+        if "--max-batch-size" not in build_help.stdout or "--output" not in build_help.stdout:
+            raise CiError("installed trtmc build entrypoint returned invalid help")
         with tempfile.TemporaryDirectory(prefix="trtmc-installed-wheel-") as directory:
             bundle = Path(directory) / "inspect.bundle"
             subprocess.run(

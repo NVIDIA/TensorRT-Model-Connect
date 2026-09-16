@@ -68,6 +68,8 @@ def run_worker(case: ResolvedCase, case_dir: Path, worker: Path) -> dict[str, An
         raise BenchmarkError("worker result case_name does not match the request")
     if result.get("operation") != case.operation:
         raise BenchmarkError("worker result operation does not match the request")
+    if case.selected_task is not None and result.get("selected_task") != case.effective_task:
+        raise BenchmarkError("worker result selected_task does not match the request")
     if result.get("timing_scope") != case.measurement.timing_scope:
         raise BenchmarkError("worker result timing_scope does not match the request")
     if result.get("asset_loading_included") is not case.measurement.asset_loading_included:

@@ -21,10 +21,11 @@ add_executable(trtmc_lerobot_act_recorded_control main.cpp)
 target_compile_features(trtmc_lerobot_act_recorded_control PRIVATE cxx_std_17)
 target_compile_options(trtmc_lerobot_act_recorded_control PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(trtmc_lerobot_act_recorded_control PRIVATE
+  "${TRTMC_SOURCE_DIR}/apps"
   "${TRTMC_SOURCE_DIR}/core/runtime/include"
   "${TRTMC_SOURCE_DIR}/third_party/stb"
 )
-target_link_libraries(trtmc_lerobot_act_recorded_control PRIVATE trtmc_runtime)
+target_link_libraries(trtmc_lerobot_act_recorded_control PRIVATE trtmc_c trtmc_runtime)
 add_dependencies(trtmc_lerobot_act_recorded_control trtmc_model_lerobot_act trtmc_backend_trt)
 set_target_properties(trtmc_lerobot_act_recorded_control PROPERTIES
   BUILD_RPATH "\$ORIGIN;\$ORIGIN/trtmc"

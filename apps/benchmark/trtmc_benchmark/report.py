@@ -111,6 +111,117 @@ def _evidence(directory: Path | None, output: Path) -> str:
     return " · ".join(links) or "No case artifacts recorded"
 
 
+def _artifact_href(value: Any, directory: Path | None, output: Path, suffix: str) -> str | None:
+    if directory is None or not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if path.suffix.lower() != suffix:
+        return None
+    if not path.is_absolute():
+        path = directory / path
+    if not path.is_file() or not path.resolve().is_relative_to(directory.resolve()):
+        return None
+    return quote(Path(os.path.relpath(path, output)).as_posix(), safe="/.")
+
+
+def _audio_player(href: str, title: str) -> str:
+    return (
+        f'<p>{_escape(title)}</p><audio controls preload="none" src="{href}">'
+        f'<a href="{href}">Download WAV</a></audio>'
+    )
+
+
+def _speech_preview(result: Mapping[str, Any], directory: Path | None, output: Path) -> str:
+    events = result.get("events")
+    if not isinstance(events, list):
+        return ""
+    content = ""
+    if isinstance(result.get("system_prompt"), str):
+        content += f"<p>System prompt (effective)</p><pre>{_escape(result['system_prompt'])}</pre>"
+    if "input_audio_artifact" in result:
+        audio = _artifact_href(result["input_audio_artifact"], directory, output, ".wav")
+        content += _audio_player(audio, "Input audio") if audio else "<p>Input audio: artifact unavailable</p>"
+    paths = result.get("event_audio_artifacts")
+    paths = paths if isinstance(paths, list) else []
+    content += '<p>Speech events (original order; scroll for longer sessions)</p><ol class="speech-events">'
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            continue
+        kind = str(event.get("kind", "event")).replace("_", " ")
+        label = f"{kind} · epoch {event.get('epoch', '?')} · sequence {event.get('sequence', '?')}"
+        content += f"<li><p>{_escape(label)}</p>"
+        if isinstance(event.get("text"), str) and event["text"]:
+            content += f"<pre>{_escape(event['text'])}</pre>"
+        call = _mapping(event.get("tool_call"))
+        if call:
+            content += (
+                f"<p>Tool {_escape(call.get('name', ''))} · {_escape(call.get('call_id', ''))}"
+                f" · {_escape(call.get('state', 'unknown'))}</p>"
+                f"<pre>{_escape(call.get('arguments_json', ''))}</pre>"
+            )
+        audio = _artifact_href(paths[index] if index < len(paths) else None, directory, output, ".wav")
+        if audio:
+            content += _audio_player(audio, "Audio event")
+        elif isinstance(event.get("audio_samples"), int) and event["audio_samples"] > 0:
+            content += "<p>Audio event: artifact unavailable</p>"
+        content += "</li>"
+    return content + "</ol>"
+
+
+def _result_preview(
+    cell: Mapping[str, Any], resolved: Mapping[str, Any], directory: Path | None, output: Path
+) -> str:
+    if cell.get("status") != "completed":
+        return ""
+    result = _mapping(cell.get("output_summary"))
+    content = _speech_preview(result, directory, output)
+    if isinstance(result.get("text"), str):
+        content += f"<p>Output text</p><pre>{_escape(result['text'])}</pre>"
+    audio = _artifact_href(result.get("audio_artifact"), directory, output, ".wav")
+    if audio:
+        content += _audio_player(audio, "Output audio")
+    elif "audio_artifact" in result and result["audio_artifact"] is None and result.get("output_samples") == 0:
+        content += "<p>Output audio: empty (0 samples)</p>"
+    elif "audio_artifact" in result:
+        content += "<p>Output audio: artifact unavailable</p>"
+    for key, title in (
+        ("input_image_artifacts", "Input images"),
+        ("image_artifacts", "Output images"),
+        ("frame_artifacts", "Output video frames"),
+    ):
+        paths = result.get(key)
+        if not isinstance(paths, list):
+            continue
+        figures = []
+        times = result.get("timestamps_seconds")
+        for index, value in enumerate(paths):
+            href = _artifact_href(value, directory, output, ".png")
+            if not href:
+                continue
+            caption = f"{'Frame' if key == 'frame_artifacts' else 'Image'} {index}"
+            if key == "frame_artifacts" and isinstance(times, list) and index < len(times):
+                timestamp = times[index]
+                if not isinstance(timestamp, bool) and isinstance(timestamp, (float, int)) and math.isfinite(timestamp):
+                    caption += f" · {_number(timestamp, ' s')}"
+            figures.append(
+                f'<figure><a href="{href}"><img loading="lazy" src="{href}" alt="{caption}"></a>'
+                f"<figcaption>{caption}</figcaption></figure>"
+            )
+        if figures:
+            content += f'<p>{title}</p><div class="media">{"".join(figures)}</div>'
+        if len(figures) != len(paths):
+            content += f"<p>{title}: {len(paths) - len(figures)} artifact(s) unavailable</p>"
+    if not content:
+        return ""
+    prompt = _mapping(resolved.get("request")).get("prompt")
+    if isinstance(prompt, str):
+        content = f"<p>Input text</p><pre>{_escape(prompt)}</pre>" + content
+    elif isinstance(prompt, list) and all(isinstance(item, str) for item in prompt):
+        entries = "".join(f"<li><pre>{_escape(item)}</pre></li>" for item in prompt)
+        content = f"<p>Input text</p><ol>{entries}</ol>" + content
+    return content
+
+
 def _history_key(
     cell: Mapping[str, Any], run: Mapping[str, Any], resolved: Mapping[str, Any]
 ) -> str | None:
@@ -161,6 +272,7 @@ def _history_key(
             cell.get("model"),
             cell.get("name"),
             cell.get("operation"),
+            resolved.get("selected_task", model.get("task")),
             _scope(cell, run),
             cell.get("asset_loading_included"),
             resolved.get("request"),
@@ -206,6 +318,7 @@ def _row(
     if resolved:
         model = _mapping(resolved.get("model"))
         reproduction = {
+            "selected_task": resolved.get("selected_task", model.get("task")),
             "request": resolved.get("request"),
             "model": {
                 key: model[key]
@@ -223,12 +336,13 @@ def _row(
         _escape(cell.get("name", "")),
         _escape(cell.get("operation", "")),
         _escape(cell.get("status", "unknown")),
+        _result_preview(cell, resolved, directory, output)
+        + f"<details><summary>Evidence and reproduction</summary>{details}</details>",
         _number(latency.get("p50"), " ms"),
         _number(latency.get("p95"), " ms"),
         _task_rates(metrics),
         _escape(_scope(cell, run)),
         change,
-        f"<details><summary>Evidence and reproduction</summary>{details}</details>",
     )
     return "<tr>" + "".join(f"<td>{value}</td>" for value in values) + "</tr>"
 
@@ -261,9 +375,13 @@ def write_html_report(result: Mapping[str, Any], path: Path) -> None:
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TRTMC benchmark</title><style>
 body{font:14px system-ui,sans-serif;margin:2rem;color:#20242a}table{border-collapse:collapse;width:100%}
-th,td{border-bottom:1px solid #d8dde5;padding:.6rem;text-align:left;vertical-align:top}
+th,td{border-bottom:1px solid #d8dde5;padding:.6rem;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+td:nth-child(6){min-width:320px}td:nth-child(2),td:nth-child(3){max-width:160px}
+th,td:nth-child(5),td:nth-child(7),td:nth-child(8),td:nth-child(11){white-space:nowrap}
 th{background:#f4f6f8}pre{white-space:pre-wrap;overflow-wrap:anywhere}.failed{color:#a32626}
 input,select{font:inherit;padding:.5rem;margin:.5rem}summary{cursor:pointer}.scroll{overflow:auto}
+.media{display:flex;flex-wrap:wrap;gap:.5rem}.media figure{margin:0}.media img{width:140px;height:105px;max-width:100%;object-fit:contain}audio{max-width:100%}
+.speech-events{max-height:32rem;overflow:auto;padding-left:1.5rem}.speech-events>li{margin-bottom:.4rem}.speech-events p{margin:.2rem 0;font-size:.8rem;line-height:1.25}.speech-events pre{margin:.3rem 0}
 </style></head><body><h1>TRTMC benchmark</h1>"""
     document += f"<p>Status: <strong>{_escape(result.get('status', 'unknown'))}</strong></p>"
     document += """<p>These are performance measurements. Task quality is not evaluated; use the family correctness tests for model acceptance.
@@ -271,7 +389,7 @@ Loading and warmup are excluded where declared in the recorded timing contract. 
 <label>Filter model, case or run <input id="filter" type="search"></label>
 <label>Status <select id="status"><option value="">All</option><option>completed</option><option>failed</option><option>running</option></select></label>
 <div class="scroll"><table><thead><tr><th>Run</th><th>Model</th><th>Case</th><th>Operation</th><th>Status</th>
-<th>p50</th><th>p95</th><th>Task rate</th><th>Timing scope</th><th>p50 change</th><th>Evidence</th></tr></thead><tbody>"""
+<th>Inputs / outputs and evidence</th><th>p50</th><th>p95</th><th>Task rate</th><th>Timing scope</th><th>p50 change</th></tr></thead><tbody>"""
     document += "".join(rows) + "</tbody></table></div>"
     document += "<p>p50 change compares runs only when the schema, pinned checkpoint revision, workload, build settings, measurement settings, timing policy, and recorded GPU/software fields match. Negative is faster. This is a comparison of recorded measurements, not a correctness gate. Missing comparison evidence is shown as —; different timing scopes are never combined. Runs using local checkpoints, external bundles, or older records without a managed build identity remain readable without a historical delta.</p>"
     document += "".join(contexts)
