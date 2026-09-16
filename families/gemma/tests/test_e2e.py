@@ -133,7 +133,7 @@ def _thresholds(case_name: str) -> dict[str, float]:
     return thresholds
 
 
-def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
+def _build_bundle(manifest: dict, model_dir: Path, bundle: Path, execution=None) -> None:
     quantization = manifest.get("quantization")
     assert quantization is None or isinstance(quantization, str)
     fp32_layers = tuple(manifest.get("fp32_layers", ()))
@@ -148,7 +148,8 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             tensor_parallel_size=manifest["tensor_parallel_size"],
             quantization=quantization,
             fp32_layers=fp32_layers,
-        )
+        ),
+        execution=execution,
     )
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
 

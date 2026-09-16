@@ -66,6 +66,23 @@ long-context qualification remain outside this contract. The
 committed-token-per-forward receipt is an algorithmic diagnostic, not a
 wall-clock speedup claim.
 
+### Gemma4 paired ONNX execution
+
+The Gemma family also owns explicit Gemma4-12B target/assistant MTP and
+Gemma4-12B/DSpark block7 execution through the optional pinned native Edge-LLM
+SDK. These are text-only FP16 paired profiles, qualified on SM80; selecting a
+Gemma4 checkpoint alone does not enable them or claim standalone native support.
+
+Provision the [native SDK](../user-guides/configure-runtime.md#optional-native-edge-llm-sdk),
+then pass `--execution-variant mtp` or `--execution-variant dspark` with
+`--companion draft=/path/to/checkpoint` to the build CLI. MTP is greedy-only;
+DSpark preserves the supported sampling controls. Exact checkpoint revisions,
+capacity bounds, validation results, unsupported controls and source-faithful
+chat-template handling are documented in the
+[owning Gemma recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/gemma/EDGE_LLM.md).
+These local qualifications are separate from the registered manifest inventory
+and do not imply that CI executes the paired cases.
+
 ## Runtime and validation
 
 The directory name is also the runtime DSO identity:
