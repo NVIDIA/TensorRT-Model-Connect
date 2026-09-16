@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import os
+import platform
 import re
 import sys
 from dataclasses import dataclass
@@ -70,6 +72,42 @@ class BuildRequest:
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
             raise ValueError("graph_transform must be callable when provided")
+
+
+def cmake_prefixes() -> list[Path]:
+    """Return explicit standard CMake prefixes followed by the Python prefix."""
+    prefixes = [Path(value) for value in os.environ.get("CMAKE_PREFIX_PATH", "").split(os.pathsep) if value]
+    return [*prefixes, Path(sys.prefix)]
+
+
+def detect_local_platform() -> dict:
+    """Return executing GPU and native SDK identity without selecting a model.
+
+    Returns:
+        OS/release, CPU architecture, GPU SM, CUDA and TensorRT versions.
+
+    Raises:
+        ImportError: Native SDK Python bindings are unavailable.
+        RuntimeError: CUDA cannot identify the executing device.
+    """
+    import tensorrt as trt
+    from cuda.bindings import runtime
+
+    def checked(result):
+        if int(result[0]) != 0:
+            raise RuntimeError(f"CUDA device discovery failed: {result[0]}")
+        return result[1]
+
+    device = checked(runtime.cudaGetDevice())
+    gpu = checked(runtime.cudaGetDeviceProperties(device))
+    cuda = checked(runtime.cudaRuntimeGetVersion())
+    release = platform.freedesktop_os_release() if sys.platform == "linux" else {}
+    return {
+        "os": sys.platform, "os_version": release.get("VERSION_ID", platform.release()),
+        "arch": platform.machine(), "sm": gpu.major * 10 + gpu.minor,
+        "cuda_version": f"{cuda // 1000}.{cuda % 1000 // 10}",
+        "tensorrt_version": trt.__version__,
+    }
 
 
 def _validate_id(field: str, value: object) -> str:
