@@ -649,6 +649,16 @@ struct RecommendationFeature {
     std::vector<std::int64_t> ids;
 };
 
+struct RecommendationCacheIdentity {
+    // Empty subject_id disables cross-request history reuse for this sequence.
+    std::string subject_id;
+    std::string feature_version;
+    // Stable across append-only updates; change for a corrected/windowed lineage.
+    // The runtime also verifies the actual history rather than trusting this tag.
+    std::string history_epoch;
+    bool read_only{false};
+};
+
 struct RecommendationSequence {
     std::vector<std::int64_t> history_item_ids;
     std::vector<std::int64_t> history_action_ids;
@@ -656,10 +666,20 @@ struct RecommendationSequence {
     std::vector<std::int64_t> candidate_item_ids;
     // Seconds, one timestamp for each token in the family's encoded sequence order.
     std::vector<std::int64_t> token_timestamps;
+    RecommendationCacheIdentity cache;
 };
 
 struct RecommendationRequest {
     std::vector<RecommendationSequence> sequences;
+};
+
+struct RecommendationCacheReport {
+    std::string source;
+    std::string reason;
+    std::int32_t history_tokens{0};
+    std::int32_t reused_history_tokens{0};
+    std::int32_t computed_tokens{0};
+    bool published{false};
 };
 
 struct RecommendationSequenceResult {
@@ -678,6 +698,7 @@ struct RecommendationSequenceResult {
     std::int32_t num_candidates{0};
     std::int32_t embedding_dim{0};
     std::int32_t output_dim{0};
+    RecommendationCacheReport cache;
 };
 
 struct RecommendationResult {
@@ -689,6 +710,32 @@ class IRecommendation : public virtual ITask {
     static constexpr const char* kTask = "recommendation";
     const char* task() const noexcept override { return kTask; }
     virtual RecommendationResult recommend(const RecommendationRequest& request) = 0;
+};
+
+struct RecommendationHistoryAppend {
+    std::vector<std::int64_t> item_ids;
+    std::vector<std::int64_t> action_ids;
+    // One timestamp per appended encoded token, including actions when present.
+    std::vector<std::int64_t> token_timestamps;
+};
+
+class IRecommendationSession {
+  public:
+    virtual ~IRecommendationSession() = default;
+    virtual RecommendationSequenceResult
+    score(const std::vector<std::int64_t>& candidate_item_ids,
+          const std::vector<std::int64_t>& candidate_timestamps = {}) = 0;
+    virtual void append(const RecommendationHistoryAppend& update) = 0;
+    // Branches own their subsequent updates. Published history is never changed.
+    virtual std::unique_ptr<IRecommendationSession> branch() const = 0;
+};
+
+class IRecommendationSessionFactory {
+  public:
+    virtual ~IRecommendationSessionFactory() = default;
+    virtual std::unique_ptr<IRecommendationSession>
+    create_recommendation_session(const RecommendationSequence& initial_history,
+                                  std::size_t max_cache_bytes) = 0;
 };
 
 class IReranking : public virtual ITask {

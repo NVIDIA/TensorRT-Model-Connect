@@ -31,6 +31,7 @@ _DEFAULTS = {
     "prediction_bias": True,
     "output_postprocessor": "l2",
     "output_norm_epsilon": 1e-6,
+    "enable_history_cache": False,
 }
 _REQUIRED = {
     "hidden_size",
@@ -77,6 +78,7 @@ def parse_config(raw: dict) -> dict:
         "is_causal",
         "disable_contextual_mask",
         "prediction_bias",
+        "enable_history_cache",
     ):
         if type(config[name]) is not bool:
             raise ValueError(f"HSTU {name} must be boolean")

@@ -303,6 +303,18 @@ def _metamorphic_checks(
 def test_seeded_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
+    if "session_scenario" in case:
+        from families.hstu.tests.session_e2e import run_session_case
+
+        with evidence_stage("session_scenario"):
+            run_session_case(case_name, tmp_path, decode_steps=case["decode_steps"])
+        return
+    if "cache_scenario" in case:
+        from families.hstu.tests.cache_e2e import run_cache_case
+
+        with evidence_stage("cache_scenario"):
+            run_cache_case(case_name, tmp_path)
+        return
     binary, runtime_root, upstream = _runtime()
     thresholds = _thresholds(case_name)
     model_dir = tmp_path / "checkpoint"

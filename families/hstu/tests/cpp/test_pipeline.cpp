@@ -157,8 +157,8 @@ trtmc::hstu::RuntimeConfig configuration() {
 }
 
 trtmc::RecommendationRequest request() {
-    return {
-        {{{1, 2}, {100, 300}, {{"context", {-10, 9000}}}, {3, 4}, {}}, {{7}, {200}, {}, {8}, {}}}};
+    return {{{{1, 2}, {100, 300}, {{"context", {-10, 9000}}}, {3, 4}, {}, {}},
+             {{7}, {200}, {}, {8}, {}, {}}}};
 }
 
 void test_assembly() {
@@ -295,6 +295,23 @@ void test_runtime_config() {
     check(config.embedding_tables[0].keys == std::vector<std::int64_t>{10, 20},
           "sparse key decoding");
     check(config.output_dim == 2, "prediction head output dimension");
+    check(!config.enable_history_cache, "old bundles must default to no history cache");
+    auto invalid_cache = source;
+    invalid_cache.insert(1, "\"enable_history_cache\":1,");
+    rejects(
+        [&] {
+            trtmc::hstu::parse_runtime_config(
+                std::vector<char>(invalid_cache.begin(), invalid_cache.end()), keys);
+        },
+        "nonboolean cache flag accepted");
+    auto cached_source = source;
+    cached_source.insert(1, "\"enable_history_cache\":true,\"num_layers\":2,\"num_heads\":1,"
+                            "\"head_dim\":2,\"cache_artifact_id\":\"artifact-one\",");
+    const auto cached_config = trtmc::hstu::parse_runtime_config(
+        std::vector<char>(cached_source.begin(), cached_source.end()), keys);
+    check(cached_config.enable_history_cache && cached_config.num_layers == 2 &&
+              cached_config.cache_artifact_id == "artifact-one",
+          "native cache contract parsing");
     auto zero_scaling = source;
     const std::string scale_field = "\"scaling_seqlen\":-1";
     zero_scaling.replace(zero_scaling.find(scale_field), scale_field.size(),

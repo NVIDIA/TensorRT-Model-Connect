@@ -35,6 +35,11 @@ struct RuntimeConfig {
     std::int32_t scaling_seqlen{-1};
     bool is_causal{true};
     bool disable_contextual_mask{false};
+    bool enable_history_cache{false};
+    std::int32_t num_layers{0};
+    std::int32_t num_heads{0};
+    std::int32_t head_dim{0};
+    std::string cache_artifact_id;
     std::vector<EmbeddingTable> embedding_tables;
 };
 

@@ -30,9 +30,10 @@ applied to these scores.
 
 The bundle uses one GPU and resident embedding weights. Batch and sequence
 lengths are dynamic within the build profile. FP32, FP16, and BF16 graphs use
-explicit dtype boundaries. The implementation runs full sequences; it does not
-use upstream PyTorch, TorchRec, DynamicEmb, NVE, AOTInductor, Triton kernels,
-FlexKV, or paged KV-cache services at inference time. It does not implement
+explicit dtype boundaries. Optional native KV caching reuses a validated history
+prefix and evaluates only its appended history and current candidates. The
+deployed runtime uses Model Connect, TensorRT, CUDA, and C++; it does not load
+PyTorch, TorchRec, DynamicEmb, NVE, AOTInductor, or Python. It does not implement
 distributed training, tensor-parallel inference, dynamic table updates, ANN
 indexing, or the optional input-projection MLP preprocessing variant.
 
@@ -60,7 +61,8 @@ Prepare an explicit topology JSON matching the trained checkpoint. For example:
   "position_buckets": 512,
   "time_buckets": 0,
   "scaling_seqlen": 512,
-  "disable_contextual_mask": true
+  "disable_contextual_mask": true,
+  "enable_history_cache": true
 }
 ```
 
@@ -117,6 +119,13 @@ build(BuildRequest(
     max_sequence_length=512,
 ))
 ```
+
+Set `enable_history_cache: true` in the converted `config.json` before building
+to expose history-cache and request-local session capabilities. Its default is
+`false`. The enabled graph uses TensorRT's native KV-cache update layer and
+explicit HSTU attention operations; no ONNX intermediate or PT2 artifact is
+required. This switch applies to the supported HSTU family topology. It does
+not transform an arbitrary exported PyTorch model into a cached model.
 
 `scaling_seqlen=-1` uses the actual maximum sequence length in the request batch.
 A positive value fixes the attention divisor. The reference's `-1` means the
@@ -184,6 +193,166 @@ normalized candidate embeddings. `sequence_embeddings` contains the normalized
 HSTU outputs in token order. Keep the task loaded to reuse its engine across
 requests.
 
+## Shared history cache
+
+The serving application can attach one platform-owned cache to compatible
+native task instances on the same CUDA device. Each request identifies its
+subject, feature definition, and history lineage; the bundle contributes its
+own artifact identity.
+
+```cpp
+#include <trtmc/history_cache.h>
+#include <memory>
+
+trtmc::HistoryCacheOptions options;
+options.max_bytes = 64ULL * 1024 * 1024;
+options.max_entries = 128;
+auto cache = std::make_shared<trtmc::HistoryCache>(options);
+auto* consumer = dynamic_cast<trtmc::IHistoryCacheConsumer*>(task.get());
+if (!consumer) throw std::runtime_error("Rebuild with enable_history_cache");
+consumer->set_history_cache(cache);
+
+user.cache.subject_id = "user-42";
+user.cache.feature_version = "item-action-v1";
+user.cache.history_epoch = "history-v1";
+auto result = recommender->recommend({{user}});
+```
+
+The canonical key is `(artifact_id, feature_version, subject_id, history_epoch)`.
+A rebuild gets a new artifact identity. Keep `history_epoch` stable for an
+append-only history lineage; change it for corrections, truncation, window
+movement, or other application invalidation. Change `feature_version` when
+feature definitions change. The runtime also compares actual encoded history
+IDs, positional/time IDs, and attention scaling before using any cached KV.
+An unchanged key and matching sequence length alone never prove a hit.
+
+An empty `subject_id` disables shared history reuse for that sequence.
+`cache.read_only=true` permits a valid hit but prevents publication. Passing
+`nullptr` to `set_history_cache()` disables shared caching for the task.
+The result's `cache` report exposes the source, reuse/recomputation reason,
+history-token count, reused-token count, computed-token count, and publication
+status. Counts refer to encoded tokens: 200 items with actions represent 400
+history tokens, plus any context tokens.
+
+Persistent snapshots contain each layer's history K/V and the normalized
+history embeddings required by the public output contract. Candidate K/V is
+request-local and is never published as reusable user history. Shared readers
+hold immutable snapshots. Concurrent publications use generation checks, and
+invalidated or replaced snapshots remain alive while readers hold them.
+Pinned snapshots continue consuming the cache's byte budget.
+
+### Native CPU storage and external adapters
+
+GPU snapshots are the hot tier. An optional bounded native CPU tier stores
+host-only snapshots:
+
+```cpp
+options.storage = std::make_shared<trtmc::InMemoryHistoryCacheStorage>(
+    512ULL * 1024 * 1024, 1024);
+options.write_through = true;
+consumer->set_history_cache(std::make_shared<trtmc::HistoryCache>(options));
+```
+
+With write-through enabled, publication makes a synchronous device-to-host
+snapshot outside the cache-manager lock. This adds transfer and storage cost
+to the publishing call. CPU hits restore validated K/V to the GPU before
+execution. Without write-through, cache publication does not make this CPU copy.
+
+`IHistoryCacheStorage` defines `load`, `store`, and `erase` for a platform
+adapter. The value contains versioned format metadata and named tensors with
+shape, dtype, and host bytes. A cache miss or load failure triggers normal model
+computation. Storage failures have counters; an erase failure disables further
+lower-tier reads in that cache instance to prevent stale reuse. `invalidate(key)`
+invalidates both tiers; `clear_memory()` releases resident entries while
+preserving the lower tier. Use new key versions for model or feature rollouts.
+
+The repository supplies the CPU implementation, not a FlexKV or RecSys
+KVCache Manager adapter. SSD, remote, or FlexKV storage requires a native
+adapter and its own deployment, compatibility, and latency validation. The
+source interface version is `kHistoryCacheInterfaceVersion = 1`; this is not
+a promise of a stable C++ compiler or standard-library ABI. Build the native
+client, family library, and runtime together. The in-process cache coordinates
+its own instances; distributed invalidation across separate managers is the
+external adapter or platform's responsibility.
+
+### When history must be recomputed
+
+Exact-history reuse is available for causal ranking even with contextual
+attention. Appended histories can reuse a prefix only when its representations
+remain unchanged. The runtime recomputes when any of these conditions applies:
+
+- History/context IDs, ordering, or the context boundary changed.
+- Appended tokens affect context tokens that attend the entire history.
+- Noncausal attention makes prior tokens depend on the new suffix. Noncausal
+  ranking additionally depends on request candidates and does not persist KV.
+- Timestamp buckets or reversed positions change prior token embeddings.
+- The effective attention divisor changes, including a changed batch maximum
+  with `scaling_seqlen=-1`.
+
+These fallbacks preserve the checkpoint's semantics. Enable a fixed divisor
+or disable contextual masking only when that matches the trained model;
+neither setting should be changed just to obtain cache hits.
+
+## Request-local decoding sessions
+
+Cache-enabled HSTU tasks implement `IRecommendationSessionFactory`. A session
+starts from a history prefix, allocates reusable GPU KV buffers once, and keeps
+its subsequent appends separate from shared user history. `score()` returns the
+same logits/scores and embeddings as the ordinary recommendation API.
+
+```cpp
+auto* sessions = dynamic_cast<trtmc::IRecommendationSessionFactory*>(task.get());
+if (!sessions) throw std::runtime_error("Bundle has no recommendation sessions");
+auto history = user;
+history.candidate_item_ids.clear();
+auto session = sessions->create_recommendation_session(history, 64ULL * 1024 * 1024);
+auto first = session->score({57, 91});
+
+// The application selects an item and supplies the action expected by its model.
+trtmc::RecommendationHistoryAppend update;
+update.item_ids = {57};
+update.action_ids = {1};
+session->append(update);
+auto next = session->score({18, 29});
+auto branch = session->branch();
+```
+
+The application owns the selection policy and loop. Every history item needs
+an action when the model has an action table. Timestamp-enabled models require
+one timestamp per appended encoded token; ranking `score()` also takes candidate
+timestamps as its second argument. All tokens must fit the built sequence
+capacity. The session budget must accommodate the preallocated KV buffers for
+that capacity, rather than only the current history length.
+
+`branch()` gives a branch its own GPU buffers and committed prefix; subsequent
+appends do not change its parent or persistent user history. The native LINEAR
+layout materializes the committed context into each session or branch once;
+this is not a paged shared-context beam executor. Subsequent steps reuse those
+buffers. Failed appends leave the session history unchanged. A session retains its native runtime and
+can outlive the task object that created it. Calls sharing a task serialize
+through its execution context. This supplies native state and branch operations;
+token sampling, beam-search policy, continuous batching, and server scheduling
+remain application responsibilities.
+
+## Adoption boundaries
+
+| Requirement | Current boundary |
+| --- | --- |
+| Pure native HSTU ranking/retrieval | Model Connect + TensorRT + C++, with resident embedding tables |
+| Persistent history and request-local decode KV | Shared cache service plus separate native sessions |
+| SDPA models | Native SDPA/KV graph primitives exist; importing another model still requires its family-owned graph and cache semantics |
+| Ordinary PyTorch export or PT2 input | No automatic graph rewrite or PT2 execution path |
+| RecSys KVCache Manager / FlexKV | No linked integration; the native storage adapter boundary is available |
+| Triton or routing infrastructure | Outside this implementation |
+| Train on B200, serve on H100 | Convert weights and build/qualify TensorRT engines for the H100 deployment; a B200 engine is not H100 qualification |
+| H100 P99 below 80 ms across 20 AR steps | Not established; requires the representative checkpoint, workload, and H100 measurements |
+
+For a serving qualification, measure complete request latency and all decode
+steps separately for GPU history hits, CPU hits, misses, and appends. Include
+candidate count, model dimensions, batch size, transfers, cache publication, and
+the required output tensors in the timing boundary. Server queueing and
+transport need separate measurements when a server is added.
+
 ## Validation
 
 The family-owned E2E suite creates deterministic, non-pretrained checkpoints
@@ -191,6 +360,13 @@ and compares real TensorRT/C++ execution with the pinned original NVIDIA
 attention and layer methods. It exercises ranking, retrieval, both contextual
 mask settings, candidate groups, noncausal attention, timestamp encoding,
 learned and unlearned normalization, and all three precision choices.
+Cache cases additionally cover mixed hits/misses, invalidation, CPU-tier
+restoration, and prefix correctness. Session cases compare twenty append/score
+steps and independent branches with complete recomputation and the pinned
+reference, including 200 history items and 256 candidates.
+
+Configure the native build with `-DTRTMC_BUILD_TESTS=ON` and build
+`trtmc_model_hstu` to include the cache and session test drivers.
 
 ```bash
 git clone https://github.com/NVIDIA/recsys-examples /data/recsys-examples
@@ -198,6 +374,7 @@ git -C /data/recsys-examples checkout 97062d97eef53115105063801e35184e36186df5
 export TRTMC_HSTU_REFERENCE_ROOT=/data/recsys-examples
 export TRTMC_HSTU_BINARY="$PWD/build/trtmc-hstu"
 export TRTMC_RUNTIME_ROOT="$PWD/build"
+export TRTMC_NATIVE_BUILD_DIR="$PWD/build"
 PYTHONPATH=core/builder:. python -m pytest families/hstu/tests --e2e-model hstu -q
 ```
 

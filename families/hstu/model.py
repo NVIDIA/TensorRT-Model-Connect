@@ -10,6 +10,7 @@ examples/hstu. Python is used to build the bundle, never to execute it.
 from __future__ import annotations
 
 from pathlib import Path
+import uuid
 
 import numpy as np
 
@@ -175,7 +176,7 @@ class _Graph:
         )
         return self.binary(value, norm, "DIV", name)
 
-    def block(self, value, mask, scale, index):
+    def block(self, value, mask, scale, index, cache=None):
         c, prefix = self.config, f"blocks.{index}"
         d, h = c["head_dim"], c["num_heads"]
         x = self.norm(value, f"{prefix}.input_norm", c["learnable_input_layernorm"])
@@ -193,6 +194,14 @@ class _Graph:
             self.reshape(p, (0, 0, h, d), f"{prefix}.{name}.transpose", (0, 2, 1, 3))
             for p, name in zip(parts[1:], ("v", "q", "k"))
         ]
+        if cache is not None:
+            from .cache_graph import add_cached_kv
+
+            k, v = add_cached_kv(
+                self.trt, self.net, k, v, c["max_sequence_length"],
+                cache["write_indices"], cache["active_mask"], str(index), self.host_weights,
+                packed_rows=cache["rows"], update_lengths=cache["lengths"],
+            )
         scores = self.out(
             self.net.add_matrix_multiply(
                 q, self.trt.MatrixOperation.NONE, k, self.trt.MatrixOperation.TRANSPOSE
@@ -235,8 +244,26 @@ class _Graph:
 
     def outputs(self):
         c = self.config
+        cached = c["enable_history_cache"]
         ids = self.net.add_input("token_ids", self.trt.int32, (-1, -1))
-        mask = self.net.add_input("attention_mask", self.trt.float32, (-1, 1, -1, -1))
+        capacity = c["max_sequence_length"]
+        mask = self.net.add_input(
+            "attention_mask", self.trt.float32, (-1, 1, -1, capacity if cached else -1)
+        )
+        cache = None
+        if cached:
+            active_lengths = self.net.add_input("cache_active_lengths", self.trt.int32, (-1,))
+            active_lengths = self.reshape(active_lengths, (0, 1, 1, 1), "cache.active_lengths")
+            key_positions = self.constant(
+                np.arange(capacity, dtype=np.int32).reshape(1, 1, 1, capacity),
+                "cache.key_positions",
+            )
+            cache = {
+                "write_indices": self.net.add_input("cache_write_indices", self.trt.int32, (-1,)),
+                "rows": self.net.add_input("cache_update_rows", self.trt.int32, (-1,)),
+                "lengths": self.net.add_input("cache_update_lengths", self.trt.int32, (-1,)),
+                "active_mask": self.binary(key_positions, active_lengths, "LESS", "cache.active"),
+            }
         scale = self.reshape(
             self.net.add_input("scaling_seqlen", self.trt.float32, (1,)),
             (1, 1, 1, 1),
@@ -274,7 +301,7 @@ class _Graph:
             x = self.binary(x, positional, "SUM", "position.add")
             x = self.cast(x, self.dtype, "position.output")
         for index in range(c["num_layers"]):
-            x = self.block(x, mask, scale, index)
+            x = self.block(x, mask, scale, index, cache)
         embeddings = self.l2(x, "output.l2")
         outputs = {"embeddings": embeddings}
         if c["mode"] == "retrieval":
@@ -322,7 +349,17 @@ def _engine(config, weights, precision, max_batch_size, verbose):
         if value.name == "scaling_seqlen":
             continue
         if value.name == "attention_mask":
-            shapes = (1, 1, 1, 1), (opt_b, 1, opt_s, opt_s), (max_batch_size, 1, max_s, max_s)
+            min_k, opt_k = (max_s, max_s) if config["enable_history_cache"] else (1, opt_s)
+            shapes = (1, 1, 1, min_k), (opt_b, 1, opt_s, opt_k), (max_batch_size, 1, max_s, max_s)
+        elif value.name.startswith("cache_") and value.name.endswith(("_k", "_v")):
+            tail = (config["num_heads"], max_s, config["head_dim"])
+            shapes = (1, *tail), (opt_b, *tail), (max_batch_size, *tail)
+        elif value.name == "cache_update_rows":
+            shapes = (0,), (opt_b * opt_s,), (max_batch_size * max_s,)
+        elif value.name == "cache_update_lengths":
+            shapes = (2,), (opt_b + 1,), (max_batch_size + 1,)
+        elif value.name in ("cache_active_lengths", "cache_write_indices"):
+            shapes = (1,), (opt_b,), (max_batch_size,)
         else:
             shapes = (1, 1), (opt_b, opt_s), (max_batch_size, max_s)
         profile.set_shape(value.name, *shapes)
@@ -336,6 +373,37 @@ def _engine(config, weights, precision, max_batch_size, verbose):
     plan = builder.build_serialized_network(network, builder_config)
     if plan is None:
         raise RuntimeError("TensorRT failed to build the HSTU engine")
+    return bytes(plan)
+
+
+def _candidate_engine(config, weights, max_batch_size, verbose):
+    """Lookup-only retrieval path when an entire history is already cached."""
+    import tensorrt as trt
+
+    logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    graph = _Graph(trt, network, config, weights, "fp32")
+    ids = network.add_input("candidate_token_ids", trt.int32, (-1, -1))
+    merged = np.concatenate([
+        weights[f"embeddings.{table['name']}.weight"] for table in config["embedding_tables"]
+    ])
+    table = graph.constant(merged, "candidate.weight")
+    values = graph.out(network.add_gather(table, ids, 0), "candidate.lookup")
+    output = graph.l2(values, "candidate.l2")
+    output.name = "item_embeddings"
+    network.mark_output(output)
+    profile = builder.create_optimization_profile()
+    maximum = config["max_sequence_length"]
+    profile.set_shape("candidate_token_ids", (1, 1), (min(max_batch_size, 4), min(maximum, 256)),
+                      (max_batch_size, maximum))
+    builder_config = builder.create_builder_config()
+    builder_config.builder_optimization_level = 3
+    builder_config.clear_flag(trt.BuilderFlag.TF32)
+    builder_config.add_optimization_profile(profile)
+    plan = builder.build_serialized_network(network, builder_config)
+    if plan is None:
+        raise RuntimeError("TensorRT failed to build HSTU candidate lookup engine")
     return bytes(plan)
 
 
@@ -361,6 +429,11 @@ def build(request, writer) -> None:
         config["max_sequence_length"] = request.max_sequence_length
     weights = load_weights(Path(request.model_dir), config)
     runtime = {**config, "max_batch_size": request.max_batch_size}
+    runtime["precision"] = request.precision
+    if config["enable_history_cache"]:
+        # A bundle build is a cache namespace. Rebuilt weights/configuration can
+        # never consume another artifact's KV, even if caller labels are reused.
+        runtime["cache_artifact_id"] = uuid.uuid4().hex
     tables, key_bytes, offset, key_offset = [], [], 0, 0
     for table in config["embedding_tables"]:
         entry = {**table, "offset": offset}
@@ -376,5 +449,9 @@ def build(request, writer) -> None:
     writer.set_header(family="hstu", task=request.task, backend=request.backend)
     writer.add_json("runtime.json", runtime)
     writer.add_bytes("engine.plan", plan)
+    if config["enable_history_cache"] and config["mode"] == "retrieval":
+        writer.add_bytes("candidate.plan", _candidate_engine(
+            config, weights, request.max_batch_size, request.verbose
+        ))
     if key_bytes:
         writer.add_bytes("embedding_keys.bin", b"".join(key_bytes))

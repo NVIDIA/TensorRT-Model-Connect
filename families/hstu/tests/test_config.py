@@ -17,6 +17,7 @@ from families.hstu.tests.fixtures import make_checkpoint, tiny_config
 @pytest.mark.parametrize("changes", [
     {"schema_version": 2}, {"model_type": "bert"}, {"num_heads": 0},
     {"head_dim": True}, {"hidden_size": 1.5}, {"is_causal": "false"},
+    {"enable_history_cache": "false"},
     {"scaling_seqlen": 0}, {"scaling_seqlen": -2},
     {"layer_norm_epsilon": float("nan")}, {"output_norm_epsilon": 0},
     {"time_buckets": 8}, {"time_buckets": 2048, "position_buckets": 0},

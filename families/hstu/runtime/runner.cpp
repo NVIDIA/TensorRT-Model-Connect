@@ -50,12 +50,20 @@ std::vector<std::int64_t> read_ids(const Json& object, const char* key, bool req
 
 trtmc::RecommendationSequence read_sequence(const Json& source) {
     check_keys(source, {"history_item_ids", "history_action_ids", "contextual_features",
-                        "candidate_item_ids", "token_timestamps"});
+                        "candidate_item_ids", "token_timestamps", "cache"});
     trtmc::RecommendationSequence sequence;
     sequence.history_item_ids = read_ids(source, "history_item_ids", true);
     sequence.history_action_ids = read_ids(source, "history_action_ids");
     sequence.candidate_item_ids = read_ids(source, "candidate_item_ids", true);
     sequence.token_timestamps = read_ids(source, "token_timestamps");
+    if (source.contains("cache")) {
+        const auto& identity = source.at("cache");
+        check_keys(identity, {"subject_id", "feature_version", "history_epoch", "read_only"});
+        sequence.cache.subject_id = identity.at("subject_id").get<std::string>();
+        sequence.cache.feature_version = identity.at("feature_version").get<std::string>();
+        sequence.cache.history_epoch = identity.at("history_epoch").get<std::string>();
+        sequence.cache.read_only = identity.value("read_only", false);
+    }
     if (source.contains("contextual_features")) {
         if (!source.at("contextual_features").is_array())
             throw std::invalid_argument("hstu contextual_features must be an array");
@@ -94,7 +102,14 @@ Json output_json(const trtmc::RecommendationResult& result) {
                              {"scores", sequence.scores},
                              {"embeddings", sequence.embeddings},
                              {"sequence_embeddings", sequence.sequence_embeddings},
-                             {"sequence_length", sequence.sequence_length}});
+                             {"sequence_length", sequence.sequence_length},
+                             {"cache",
+                              {{"source", sequence.cache.source},
+                               {"reason", sequence.cache.reason},
+                               {"history_tokens", sequence.cache.history_tokens},
+                               {"reused_history_tokens", sequence.cache.reused_history_tokens},
+                               {"computed_tokens", sequence.cache.computed_tokens},
+                               {"published", sequence.cache.published}}}});
     }
     return {{"sequences", sequences}};
 }

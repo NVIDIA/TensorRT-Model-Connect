@@ -76,3 +76,66 @@ checkpoint information, a lossless `.npz` snapshot of every canonical tensor,
 source provenance, thresholds, and each comparison's
 maximum absolute/relative error and relative L2 error. Performance and trained
 checkpoint accuracy require separate qualification.
+
+## Native cache and session microbenchmark
+
+With `TRTMC_BUILD_TESTS=ON`, build `hstu_cache_benchmark` and reuse the bundle
+and `session-trace.json` from a completed session qualification. For example,
+this case prepares 200 history items and 256 candidates with a BF16 engine:
+
+```bash
+cmake --build build-hstu --target trtmc_model_hstu hstu_cache_benchmark -j 4
+TRTMC_BINARY="$PWD/build-hstu/trtmc" \
+TRTMC_RUNTIME_ROOT="$PWD/build-hstu" \
+TRTMC_E2E_ARTIFACT_DIR="$PWD/hstu-benchmark-evidence" \
+python -m pytest families/hstu/tests/test_e2e.py \
+  --e2e-model hstu-session-hundreds-bf16 \
+  --basetemp="$PWD/hstu-benchmark-fixture" -q
+```
+
+After qualification, run the native executable without other GPU workloads:
+
+```bash
+HSTU_FIXTURE="$(python -c 'from pathlib import Path; print(next(Path("hstu-benchmark-fixture").rglob("session-trace.json")).parent)')"
+build-hstu/hstu_cache_benchmark \
+  --bundle "$HSTU_FIXTURE/hstu-session-hundreds-bf16.bundle" \
+  --runtime-root "$PWD/build-hstu" \
+  --input-json "$HSTU_FIXTURE/session-trace.json" \
+  --output-json "$PWD/hstu-cache-session-benchmark.json"
+```
+
+The input accepts optional `warmups` (default 10), `iterations` (default 100),
+and `storage_max_bytes` (default `cache_max_bytes`). At least 30 measured
+iterations are needed for `performance_sample_count_met` to be true. Keep
+the fixture's `rtol` and `atol` unchanged. The benchmark requires a fixed
+sequence scale and an attention configuration allowing complete history
+reuse; assertions reject runs that do not exercise the named cache paths.
+
+By default, the comparison disables cache reuse in the same cache-enabled
+bundle. To compare against the ordinary HSTU graph, build another bundle
+from the same checkpoint weights and settings with only
+`enable_history_cache` changed to `false`, then add its path as
+`baseline_bundle` in a copy of the input JSON. The report identifies which
+baseline was used. Differences between the two graph implementations can
+change whether caching saves time.
+
+The JSON report records raw samples and nearest-rank p50/p95/p99 for full
+recomputation, a GPU history hit, native host-tier reload, a cold history
+miss with publication, and an append with publication. Both cache tiers
+use explicit budgets, and publication writes through to native host
+storage. Cache invalidation and seed setup occur outside these timings.
+
+For the 20-step greedy session, the report separates session creation and
+initial scoring from the append/score loop. `setup_plus_twenty_step_loop`
+uses each sample's paired sum, covering session setup and 21 scoring calls.
+It does not add independently calculated percentiles. Loop timings include
+greedy token selection, measurement bookkeeping, and CUDA synchronization
+before and after every step. All timings are synchronous C++ API wall
+times including host preparation, data transfers, GPU execution, and output
+processing. Loading, JSON I/O, and numerical checks are excluded.
+
+Every measured cache result is compared with full recomputation outside the
+timer. Session runs check all greedy choices, their final outputs, and each
+step's cache reuse. This is a seeded model microbenchmark, with the actual
+GPU reported in JSON; it does not measure a server, a separate optimized
+NVIDIA runtime, trained accuracy, or performance on another GPU.
