@@ -158,25 +158,29 @@ Install benchmark-only dependencies without adding them to a model family:
 python -m pip install -r apps/benchmark/performance/requirements.txt
 ```
 
-## Accuracy and Performance qualification
+## Internal Accuracy and Performance qualification
 
-CI and QA use pytest, not another benchmark CLI. A family opts in by adding one
-YAML file under `families/<family>/tests/qualification/`; the file may contain
-multiple `accuracy` and `performance` cases. Families without that file,
-including L0-only models, are not collected.
+The installed `trtmc-bench` remains a user application. Repository CI and QA
+use the separate, non-packaged `tools/model_benchmark.py` driver. A family opts
+in by adding one YAML file under `families/<family>/tests/benchmark/`; the file
+may contain multiple `accuracy` and `performance` cases. Families without that
+file, including L0-only models, are not discovered.
 
 Run every discovered case or select an exact model:
 
 ```bash
-TRTMC_QUALIFICATION=1 pytest apps/benchmark/qualification
-pytest apps/benchmark/qualification --qualification-model gpt2-125m
+python3 tools/model_benchmark.py list
+python3 tools/model_benchmark.py run --all --kind performance \
+  --runtime-root /opt/trtmc/lib --worker /opt/trtmc/bin/trtmc_benchmark_worker
+python3 tools/model_benchmark.py run --model gpt2-125m --kind accuracy \
+  --dataset mmlu-five-shot=/data/mmlu_dataset.json \
+  --runtime-root /opt/trtmc/lib --worker /opt/trtmc/bin/trtmc_benchmark_worker
 ```
 
-Accuracy additionally needs `--qualification-data-root` for staged benchmark
-data. Runtime, worker, bundle-cache, and artifact paths are pytest options or
-the existing `TRTMC_*` environment variables; model files do not select a GPU.
-The candidate always uses the public build and Task paths. Performance calls the
-installed `trtmc-bench`, tries the declared compiled reference first, and uses
-the declared eager fallback when the compiled reference fails to run or violates
-the same output contract. The eager result must independently satisfy that
-contract; fallback never relaxes the candidate's passing criteria.
+Manual or restricted datasets are supplied as `--dataset ID=PATH`; public
+download definitions may instead materialize into `--data-root`. Model files do
+not select a GPU. Both Accuracy and Performance invoke the installed
+`trtmc-bench` through its public bundle and Task path. Performance tries the
+declared compiled reference first and uses eager only when that reference fails
+to execute. A completed reference whose output disagrees with the candidate is
+a failed contract and never triggers fallback.

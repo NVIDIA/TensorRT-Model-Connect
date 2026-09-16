@@ -414,16 +414,14 @@ def test_candidate_and_reference_commands_use_current_contract(tmp_path: Path) -
     assert "--runtime-root" in candidate
     assert "--operation" in candidate
     assert "--no-build" in candidate
-    assert "request.prompt=\"Hello, I'm a language model\"" in candidate
+    assert 'request.prompt="Hello, I\'m a language model"' in candidate
     reference = perf.baseline_command(resolved, environment, tmp_path / "reference.json")
     assert "--case-name" in reference
     assert "--task" in reference
     assert ("--revision" in reference) is bool(resolved.model.hf_revision)
 
 
-def test_reference_falls_back_when_compiled_process_fails(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_reference_falls_back_when_compiled_process_fails(tmp_path: Path, monkeypatch) -> None:
     _, environment = _environment(tmp_path)
     _, entries, _ = perf.load_suite(SUITE)
     spec = next(value for value in entries if value["id"] == "gpt2.generate")
@@ -456,36 +454,29 @@ def test_reference_falls_back_when_compiled_process_fails(
     assert row["status"] in perf.TERMINAL_COMPARISONS
     assert modes == ["torch-compile", "hf-eager"]
     assert row["reference_attempts"] == [
-        {"measurement_attempt": 1, "mode": "torch-compile", "fallback": False, "exit_code": 1},
+        {
+            "measurement_attempt": 1,
+            "mode": "torch-compile",
+            "fallback": False,
+            "exit_code": 1,
+            "fallback_reason": "reference command failed",
+        },
         {"measurement_attempt": 1, "mode": "hf-eager", "fallback": True, "exit_code": 0},
     ]
     assert state["candidate_runs"] == 1
 
 
-def test_compiled_output_mismatch_falls_back_to_eager(tmp_path: Path, monkeypatch) -> None:
+def test_compiled_output_mismatch_tries_the_configured_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
     _, environment = _environment(tmp_path)
     _, entries, _ = perf.load_suite(SUITE)
     spec = next(value for value in entries if value["id"] == "gpt2.generate")
     spec = {**spec, "baseline": {**spec["baseline"], "fallback": "hf-eager"}}
     entry = perf.resolve_entries((spec,), environment)[0]
-    state, successful = _fake_measurement_runner(
-        environment, entry, candidate_tokens=([9],)
-    )
+    state, successful = _fake_measurement_runner(environment, entry, candidate_tokens=([9],))
 
-    def run_command(arguments, **kwargs):
-        result = successful(arguments, **kwargs)
-        if (
-            result["exit_code"] == 0
-            and Path(arguments[0]) != environment.trtmc_bench
-            and arguments[arguments.index("--mode") + 1] == "hf-eager"
-        ):
-            output = Path(arguments[arguments.index("--output") + 1])
-            reference = json.loads(output.read_text(encoding="utf-8"))
-            reference["output_summary"] = {"token_ids": [9], "output_tokens": 1}
-            output.write_text(json.dumps(reference), encoding="utf-8")
-        return result
-
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf, "run_command", successful)
 
     row = perf._execute_entry(
         entry,
@@ -496,7 +487,7 @@ def test_compiled_output_mismatch_falls_back_to_eager(tmp_path: Path, monkeypatc
         attempt=1,
     )
 
-    assert row["status"] in perf.TERMINAL_COMPARISONS
+    assert row["status"] == "contract-mismatch"
     reference_commands = [
         command for command in state["commands"] if Path(command[0]) != environment.trtmc_bench
     ]
@@ -504,7 +495,7 @@ def test_compiled_output_mismatch_falls_back_to_eager(tmp_path: Path, monkeypatc
         "torch-compile",
         "hf-eager",
     ]
-    assert row["reference_attempts"][0]["fallback_reason"] == "generated token count differs"
+    assert row["reference_attempts"][0]["fallback_reason"] == "output contract mismatch"
 
 
 def test_lerobot_reference_is_family_owned_and_has_a_closed_contract(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Discover family-local qualification cases without a model registry."""
+"""Discover family-local benchmark cases for internal qualification."""
 
 from __future__ import annotations
 
@@ -10,10 +10,6 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import yaml
-
-from trtmc_benchmark.catalog import ManifestCatalog
-from trtmc_benchmark.types import BenchmarkError
-
 
 SCHEMA = "trtmc.qualification/v1"
 
@@ -29,6 +25,7 @@ class QualificationCase:
     family: str
     name: str
     benchmark: str
+    candidate: Mapping[str, Any]
     values: Mapping[str, Any]
     source: Path
     reference_requirements: Path | None
@@ -41,24 +38,18 @@ class QualificationCase:
 def discover(repository: Path) -> tuple[QualificationCase, ...]:
     repository = repository.resolve()
     families = repository / "families"
-    manifests = ManifestCatalog(families)
     cases: list[QualificationCase] = []
     seen: set[str] = set()
-    pattern = "*/tests/qualification/*.yaml"
+    pattern = "*/tests/benchmark/*.yaml"
     for path in sorted(families.glob(pattern)):
         raw = _yaml_object(path, "qualification config")
         if raw.get("schema_version") != SCHEMA:
             raise QualificationError(f"{path}: schema_version must be {SCHEMA}")
         model = _string(raw.get("model"), "model", path)
-        try:
-            descriptor = manifests.resolve(model)
-        except BenchmarkError as error:
-            raise QualificationError(f"{path}: cannot resolve model {model!r}: {error}") from error
         family = path.parents[2].name
-        if descriptor.family != family:
-            raise QualificationError(
-                f"{path}: model {model!r} belongs to {descriptor.family}, not {family}"
-            )
+        if path.stem != model:
+            raise QualificationError(f"{path}: file name must match model {model!r}")
+        candidate = _candidate(raw.get("candidate"), family, path)
         requirements = _requirements(raw.get("reference_environment"), path)
         for kind in ("accuracy", "performance"):
             configured = raw.get(kind, [])
@@ -75,6 +66,7 @@ def discover(repository: Path) -> tuple[QualificationCase, ...]:
                     family=family,
                     name=name,
                     benchmark=benchmark,
+                    candidate=candidate,
                     values=dict(value),
                     source=path.resolve(),
                     reference_requirements=requirements,
@@ -89,12 +81,7 @@ def discover(repository: Path) -> tuple[QualificationCase, ...]:
 def select(
     cases: Sequence[QualificationCase], requested: Sequence[str]
 ) -> tuple[QualificationCase, ...]:
-    names = {
-        item.strip()
-        for raw in requested
-        for item in str(raw).split(",")
-        if item.strip()
-    }
+    names = {item.strip() for raw in requested for item in str(raw).split(",") if item.strip()}
     if not names:
         return tuple(cases)
     selected = tuple(
@@ -116,12 +103,33 @@ def select(
 
 
 def load_benchmark(repository: Path, case: QualificationCase) -> dict[str, Any]:
-    path = repository / "apps/benchmark/qualification/benchmarks" / f"{case.benchmark}.yaml"
+    path = repository / "tools/benchmark_qualification/benchmarks" / f"{case.benchmark}.yaml"
     value = _yaml_object(path, "benchmark definition")
     if value.get("kind") != case.kind:
         raise QualificationError(
             f"{path}: benchmark kind {value.get('kind')!r} does not match {case.kind!r}"
         )
+    return value
+
+
+def _candidate(raw: Any, family: str, path: Path) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise QualificationError(f"{path}: candidate must be an object")
+    value = dict(raw)
+    configured_family = _string(value.get("family"), "candidate.family", path)
+    if configured_family != family:
+        raise QualificationError(
+            f"{path}: candidate family {configured_family!r} does not match {family!r}"
+        )
+    for field in ("checkpoint", "task", "precision"):
+        _string(value.get(field), f"candidate.{field}", path)
+    revision = value.get("revision")
+    if revision is not None and not isinstance(revision, str):
+        raise QualificationError(f"{path}: candidate.revision must be a string")
+    build = value.get("build", {})
+    if not isinstance(build, Mapping):
+        raise QualificationError(f"{path}: candidate.build must be an object")
+    value["build"] = dict(build)
     return value
 
 

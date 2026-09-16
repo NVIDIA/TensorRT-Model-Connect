@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Model-agnostic process, bundle, and reference-environment mechanics."""
+"""Internal process, bundle, and reference-environment mechanics."""
 
 from __future__ import annotations
 
@@ -23,14 +23,14 @@ from .catalog import QualificationCase, QualificationError
 class RuntimeContext:
     repository: Path
     artifacts: Path
-    data_root: Path | None
+    data_root: Path
     environment_root: Path
     bundle_cache: Path
     bundle_roots: tuple[Path, ...]
     runtime_root: Path | None
     trtmc_bench: Path
-    trtmc: Path | None
     worker: Path | None
+    datasets: Mapping[str, Path]
     reference_pythons: Mapping[str, Path]
     no_build: bool
     verbose: bool
@@ -39,32 +39,25 @@ class RuntimeContext:
         return self.artifacts / case.model / case.kind / case.name
 
 
-def context_from_pytest(config: Any, repository: Path) -> RuntimeContext:
-    artifacts = _absolute(Path(config.getoption("--qualification-artifacts")))
-    data_value = config.getoption("--qualification-data-root")
-    data_root = _absolute(Path(data_value)) if data_value else None
-    env_value = config.getoption("--qualification-env-root")
+def context_from_args(arguments: Any, repository: Path) -> RuntimeContext:
+    artifacts = _absolute(arguments.artifacts)
+    data_value = arguments.data_root
+    data_root = _absolute(Path(data_value)) if data_value else artifacts / "datasets"
+    env_value = arguments.env_root
     environment_root = _absolute(Path(env_value)) if env_value else artifacts / "python-envs"
-    cache_value = config.getoption("--qualification-bundle-cache")
+    cache_value = arguments.bundle_cache
     bundle_cache = _absolute(Path(cache_value)) if cache_value else artifacts / "bundles"
-    runtime_value = config.getoption("--qualification-runtime-root") or os.environ.get(
+    runtime_value = arguments.runtime_root or os.environ.get(
         "TRTMC_PERF_RUNTIME_ROOT", os.environ.get("TRTMC_RUNTIME_ROOT")
     )
     runtime_root = _absolute(Path(runtime_value)) if runtime_value else None
-    bench_value = config.getoption("--qualification-trtmc-bench")
+    bench_value = arguments.trtmc_bench
     bench = _executable(bench_value, "trtmc-bench")
     if bench is None:
-        source = repository / "apps/benchmark/trtmc-bench"
-        bench = source if source.is_file() and os.access(source, os.X_OK) else None
-    if bench is None:
         raise QualificationError("qualification requires an installed trtmc-bench executable")
-    trtmc_value = config.getoption("--qualification-trtmc") or os.environ.get("TRTMC_BINARY")
-    trtmc = _executable(trtmc_value, "trtmc")
-    worker_value = config.getoption("--qualification-worker") or os.environ.get(
-        "TRTMC_PERF_WORKER"
-    )
-    worker = _executable(worker_value, "trtmc-benchmark-worker")
-    roots = [Path(value) for value in config.getoption("--qualification-bundle-root")]
+    worker_value = arguments.worker or os.environ.get("TRTMC_PERF_WORKER")
+    worker = _executable(worker_value, "trtmc_benchmark_worker")
+    roots = [Path(value) for value in arguments.bundle_root]
     roots.extend(
         Path(value)
         for value in os.environ.get("TRTMC_PERF_BUNDLE_ROOTS", "").split(os.pathsep)
@@ -79,40 +72,59 @@ def context_from_pytest(config: Any, repository: Path) -> RuntimeContext:
         bundle_roots=tuple(_absolute(path) for path in roots),
         runtime_root=runtime_root,
         trtmc_bench=bench.resolve(),
-        trtmc=trtmc.resolve() if trtmc else None,
         worker=worker.resolve() if worker else None,
-        reference_pythons=_path_assignments(
-            config.getoption("--qualification-reference-python")
-        ),
-        no_build=bool(config.getoption("--qualification-no-build")),
-        verbose=bool(config.getoption("--qualification-verbose")),
+        datasets=_path_assignments(arguments.dataset, "--dataset"),
+        reference_pythons=_path_assignments(arguments.reference_python, "--reference-python"),
+        no_build=bool(arguments.no_build),
+        verbose=bool(arguments.verbose),
     )
 
 
-def require_accuracy(context: RuntimeContext) -> tuple[Path, Path]:
+def require_candidate(context: RuntimeContext) -> tuple[Path, Path]:
     if context.runtime_root is None or not context.runtime_root.is_dir():
-        raise QualificationError("qualification requires --qualification-runtime-root")
-    if context.trtmc is None or not context.trtmc.is_file():
-        raise QualificationError("Accuracy requires --qualification-trtmc or TRTMC_BINARY")
-    return context.trtmc, context.runtime_root
-
-
-def require_performance(context: RuntimeContext) -> tuple[Path, Path]:
-    if context.runtime_root is None or not context.runtime_root.is_dir():
-        raise QualificationError("qualification requires --qualification-runtime-root")
+        raise QualificationError("qualification requires --runtime-root")
     if context.worker is None or not context.worker.is_file():
-        raise QualificationError("Performance requires --qualification-worker")
+        raise QualificationError("qualification requires --worker")
     return context.worker, context.runtime_root
 
 
-def prepare_bundle(case: QualificationCase, context: RuntimeContext, output: Path) -> Path:
+def write_model_descriptor(
+    case: QualificationCase, output: Path, request: Mapping[str, Any]
+) -> Path:
+    candidate = case.candidate
+    task = str(candidate["task"])
+    testcase: dict[str, Any] = {"name": case.name}
+    if task == "time_series_forecast":
+        testcase["inputs"] = dict(request)
+    else:
+        testcase.update(request)
+    value = {
+        "name": case.model,
+        "hf_id": str(candidate["checkpoint"]),
+        "hf_revision": str(candidate.get("revision", "")),
+        "bundle": str(candidate.get("bundle", f"{case.model}.bundle")),
+        "family": case.family,
+        "task": task,
+        "precision": str(candidate["precision"]),
+        "testcases": [testcase],
+        **dict(candidate.get("build", {})),
+    }
+    path = output / "candidate-model.json"
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def prepare_bundle(
+    case: QualificationCase,
+    context: RuntimeContext,
+    output: Path,
+    descriptor: Path,
+) -> Path:
     command = [
         str(context.trtmc_bench),
         "run",
         "--model",
-        case.model,
-        "--manifest-root",
-        str(context.repository / "families"),
+        str(descriptor),
         "--bundle-cache",
         str(context.bundle_cache),
         "--prepare-only",
@@ -154,7 +166,11 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     python = environment / "bin/python"
     stamp = environment / ".qualification-requirements.sha256"
     expected = digest.hexdigest()
-    if python.is_file() and stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == expected:
+    if (
+        python.is_file()
+        and stamp.is_file()
+        and stamp.read_text(encoding="utf-8").strip() == expected
+    ):
         return python
     environment.parent.mkdir(parents=True, exist_ok=True)
     setup_root = context.artifacts / "environment-setup" / case.family
@@ -214,21 +230,15 @@ def run_command(
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout.decode() if isinstance(error.stdout, bytes) else error.stdout or ""
         stderr = error.stderr.decode() if isinstance(error.stderr, bytes) else error.stderr or ""
-        completed = subprocess.CompletedProcess(command, 124, stdout, stderr + "\ncommand timed out\n")
+        completed = subprocess.CompletedProcess(
+            command, 124, stdout, stderr + "\ncommand timed out\n"
+        )
     (output / f"{label}.stdout.log").write_text(completed.stdout, encoding="utf-8")
     (output / f"{label}.stderr.log").write_text(completed.stderr, encoding="utf-8")
     (output / f"{label}.command.json").write_text(
         json.dumps({"argv": list(command)}, indent=2) + "\n", encoding="utf-8"
     )
     return completed
-
-
-def command_environment(runtime_root: Path) -> dict[str, str]:
-    environment = dict(os.environ)
-    environment["LD_LIBRARY_PATH"] = os.pathsep.join(
-        value for value in (str(runtime_root), environment.get("LD_LIBRARY_PATH", "")) if value
-    )
-    return environment
 
 
 def write_result(output: Path, result: Mapping[str, Any]) -> None:
@@ -238,9 +248,7 @@ def write_result(output: Path, result: Mapping[str, Any]) -> None:
     )
     rows = []
     for name, value in result.get("metrics", {}).items():
-        rows.append(
-            f"<tr><th>{html.escape(str(name))}</th><td>{html.escape(str(value))}</td></tr>"
-        )
+        rows.append(f"<tr><th>{html.escape(str(name))}</th><td>{html.escape(str(value))}</td></tr>")
     document = """<!doctype html><meta charset=\"utf-8\"><title>TRTMC qualification</title>
 <h1>{case}</h1><p>Status: <strong>{status}</strong></p><table>{rows}</table>
 <p>Machine-readable evidence: <a href=\"result.json\">result.json</a></p>
@@ -252,16 +260,14 @@ def write_result(output: Path, result: Mapping[str, Any]) -> None:
     (output / "report.html").write_text(document, encoding="utf-8")
 
 
-def _path_assignments(values: Sequence[str]) -> dict[str, Path]:
+def _path_assignments(values: Sequence[str], option: str) -> dict[str, Path]:
     result = {}
     for raw in values:
         name, separator, path = raw.partition("=")
         if not separator or not name or not path:
-            raise QualificationError(
-                "--qualification-reference-python expects MODEL_OR_FAMILY=PATH"
-            )
+            raise QualificationError(f"{option} expects NAME=PATH")
         if name in result:
-            raise QualificationError(f"duplicate reference Python for {name}")
+            raise QualificationError(f"duplicate {option} assignment for {name}")
         result[name] = _absolute(Path(path))
     return result
 

@@ -1,8 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Opts this model into internal Accuracy and Performance qualification.
 schema_version: trtmc.qualification/v1
 model: gpt2-125m
+candidate:
+  family: gpt2
+  checkpoint: openai-community/gpt2
+  task: text_generation
+  precision: fp32
+  bundle: gpt2-125m.bundle
+  build:
+    max_sequence_length: 1024
 
 accuracy:
   - name: mmlu-continuation
@@ -12,19 +21,17 @@ accuracy:
     truncation_side: left
     reference:
       precision: fp32
-    candidate:
-      testcase: gpt2-125m
-      request:
-        max_new_tokens: 64
-        temperature: 0.0
-        top_k: 1
-        top_p: 1.0
-        min_p: 0.0
-        seed: -1
-        repetition_penalty: 1.0
-        use_chat_template: false
-        enable_thinking: false
-        do_sample: false
+    request:
+      max_new_tokens: 64
+      temperature: 0.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      repetition_penalty: 1.0
+      use_chat_template: false
+      enable_thinking: false
+      do_sample: false
     gate:
       min_pass_rate: 0.9
       allowed_failures: 1
@@ -33,16 +40,14 @@ performance:
   - name: generate-64
     benchmark: text_generation_performance
     operation: generate
-    candidate:
-      testcase: gpt2-125m
-      request:
-        prompt: The capital of France is
-        max_new_tokens: 64
-        temperature: 0.0
-        top_k: 1
-        top_p: 1.0
-        seed: -1
-        repetition_penalty: 1.0
+    request:
+      prompt: The capital of France is
+      max_new_tokens: 64
+      temperature: 0.0
+      top_k: 1
+      top_p: 1.0
+      seed: -1
+      repetition_penalty: 1.0
     measurement:
       warmup: 5
       iterations: 10

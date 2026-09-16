@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Chronos-Bolt official Accuracy reference."""
+"""Chronos-Bolt official internal Accuracy reference."""
 
 from __future__ import annotations
 

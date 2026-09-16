@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Performance qualification through the installed trtmc-bench command."""
+"""Internal Performance qualification through installed trtmc-bench."""
 
 from __future__ import annotations
 
@@ -16,8 +16,9 @@ from .catalog import QualificationCase, QualificationError, load_benchmark
 from .runtime import (
     RuntimeContext,
     reference_python,
-    require_performance,
+    require_candidate,
     run_command,
+    write_model_descriptor,
     write_result,
 )
 
@@ -26,16 +27,17 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     output = context.case_artifacts(case)
     output.mkdir(parents=True, exist_ok=True)
     definition = load_benchmark(context.repository, case)
-    worker, runtime_root = require_performance(context)
+    worker, runtime_root = require_candidate(context)
     configured = case.values
-    candidate = configured.get("candidate")
+    request = configured.get("request")
     baseline = configured.get("reference")
     measurement = configured.get("measurement")
-    if not all(isinstance(value, Mapping) for value in (candidate, baseline, measurement)):
-        raise QualificationError("Performance candidate, reference, and measurement must be objects")
-    assert isinstance(candidate, Mapping)
+    if not all(isinstance(value, Mapping) for value in (request, baseline, measurement)):
+        raise QualificationError("Performance request, reference, and measurement must be objects")
+    assert isinstance(request, Mapping)
     assert isinstance(baseline, Mapping)
     assert isinstance(measurement, Mapping)
+    descriptor = write_model_descriptor(case, output, request)
     entry_id = f"qualification.{case.family}.{case.name}"
     suite = {
         "schema_version": "trtmc.perf-suite/v2",
@@ -46,9 +48,10 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
                 "family": case.family,
                 "operation": str(configured["operation"]),
                 "model": case.model,
+                "manifest": str(descriptor),
                 "workload": {
-                    "testcase": str(candidate["testcase"]),
-                    "request": dict(candidate.get("request", {})),
+                    "testcase": case.name,
+                    "request": dict(request),
                 },
                 "measurement": {
                     "warmup": int(measurement.get("warmup", 5)),
@@ -158,9 +161,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
             "reference_p50_ms": comparison.get("reference_p50_ms"),
             "reference_over_candidate_p50": comparison.get("reference_over_candidate_p50"),
         },
-        "reference_attempts": row.get("reference_attempts", [])
-        if isinstance(row, Mapping)
-        else [],
+        "reference_attempts": row.get("reference_attempts", []) if isinstance(row, Mapping) else [],
     }
     write_result(output, result)
     return result

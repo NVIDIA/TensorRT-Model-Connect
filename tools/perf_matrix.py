@@ -266,6 +266,9 @@ def _validate_entry(entry: Mapping[str, Any]) -> None:
     for field in ("id", "family", "operation", "model"):
         if not isinstance(entry.get(field), str) or not entry[field]:
             raise PerfMatrixError(f"entry requires non-empty {field}")
+    manifest = entry.get("manifest")
+    if manifest is not None and (not isinstance(manifest, str) or not manifest):
+        raise PerfMatrixError(f"entry {entry['id']} manifest must be a path")
     workload = entry.get("workload")
     baseline = entry.get("baseline")
     measurement = entry.get("measurement")
@@ -488,7 +491,7 @@ def resolve_entries(
     resolved: list[ResolvedEntry] = []
     for spec in entries:
         try:
-            model = catalog.resolve(str(spec["model"]))
+            model = catalog.resolve(str(spec.get("manifest", spec["model"])))
             if model.family != spec["family"]:
                 raise PerfMatrixError(
                     f"entry {spec['id']} family {spec['family']} does not match {model.family}"
@@ -617,28 +620,28 @@ def preflight(
 
 
 def _candidate_base(entry: ResolvedEntry, environment: Environment) -> list[str]:
+    selector = str(entry.spec.get("manifest", entry.model.name))
     arguments = [
         str(environment.trtmc_bench),
         "run",
         "--model",
-        entry.model.name,
+        selector,
         "--case",
         entry.case.testcase_name,
         "--operation",
         str(entry.spec["operation"]),
-        "--manifest-root",
-        str(MANIFEST_ROOT),
         "--bundle-cache",
         str(environment.bundle_cache),
     ]
+    if "manifest" not in entry.spec:
+        arguments.extend(("--manifest-root", str(MANIFEST_ROOT)))
     for root in environment.bundle_roots:
         arguments.extend(("--bundle-root", str(root)))
     for name, value in entry.case.request.items():
         arguments.extend(
             (
                 "--set",
-                f"request.{name}="
-                + json.dumps(value, ensure_ascii=True, separators=(",", ":")),
+                f"request.{name}=" + json.dumps(value, ensure_ascii=True, separators=(",", ":")),
             )
         )
     arguments.extend(
@@ -1517,9 +1520,7 @@ def _execute_entry(
                     measurement_dir / f"reference-{mode}.json" if is_fallback else reference_output
                 )
                 log_name = "reference-fallback" if is_fallback else "reference"
-                reference_arguments = _baseline_command(
-                    entry, environment, mode_output, mode=mode
-                )
+                reference_arguments = _baseline_command(entry, environment, mode_output, mode=mode)
                 reference_result = run_command(
                     reference_arguments,
                     timeout=environment.timeout_seconds,
@@ -1538,6 +1539,7 @@ def _execute_entry(
                 }
                 reference_attempts.append(reference_attempt)
                 if reference_result["exit_code"] != 0:
+                    reference_attempt["fallback_reason"] = "reference command failed"
                     continue
                 tentative_reference = _json_file(mode_output, "reference result")
                 if tentative_reference.get("status") != "completed":
@@ -1548,14 +1550,13 @@ def _execute_entry(
                 tentative_status, tentative_comparison = compare(
                     entry, candidate, tentative_reference
                 )
-                if tentative_status in TERMINAL_COMPARISONS or mode_index == len(modes) - 1:
-                    selected_reference = tentative_reference
-                    status = tentative_status
-                    comparison = tentative_comparison
-                    break
-                reference_attempt["fallback_reason"] = str(
-                    tentative_comparison.get("reason", "reference contract mismatch")
-                )
+                if tentative_status == "contract-mismatch" and mode_index + 1 < len(modes):
+                    reference_attempt["fallback_reason"] = "output contract mismatch"
+                    reference_attempt["comparison"] = tentative_comparison
+                    continue
+                selected_reference = tentative_reference
+                status, comparison = tentative_status, tentative_comparison
+                break
             assert reference_result is not None
             if selected_reference is None:
                 raise PerfMatrixError("reference command and configured fallback failed")

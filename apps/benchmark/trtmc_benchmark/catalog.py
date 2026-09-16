@@ -41,12 +41,16 @@ def default_manifest_root() -> Path:
 
 class ManifestCatalog:
     def __init__(self, root: Path | None = None) -> None:
-        self.root = (root or default_manifest_root()).expanduser().resolve()
+        self.root = root.expanduser().resolve() if root is not None else None
+
+    def _root(self) -> Path:
+        root = self.root or default_manifest_root()
+        if not root.is_dir():
+            raise BenchmarkError(f"manifest root does not exist: {root}")
+        return root
 
     def _manifest_paths(self) -> tuple[Path, ...]:
-        if not self.root.is_dir():
-            raise BenchmarkError(f"manifest root does not exist: {self.root}")
-        return tuple(sorted(self.root.glob("*/tests/manifests/*.json")))
+        return tuple(sorted(self._root().glob("*/tests/manifests/*.json")))
 
     def entries(self) -> tuple[CatalogEntry, ...]:
         entries: list[CatalogEntry] = []
@@ -120,7 +124,7 @@ class ManifestCatalog:
             if selector in {path.stem, model.name, model.hf_id}:
                 matches.append(model)
         if not matches:
-            raise BenchmarkError(f"unknown model {selector!r} under {self.root}")
+            raise BenchmarkError(f"unknown model {selector!r} under {self._root()}")
         if len(matches) != 1:
             paths = ", ".join(str(model.manifest_path) for model in matches)
             raise BenchmarkError(f"ambiguous model {selector!r}: {paths}")

@@ -140,6 +140,16 @@ def test_build_command_passes_manifest_backend_and_dynamic_kv_cache(tmp_path: Pa
     assert command.count("--dynamic-kv-cache") == 1
 
 
+def test_direct_model_descriptor_does_not_require_a_catalog(tmp_path: Path) -> None:
+    source = REPO / "families/gpt2/tests/manifests/gpt2-125m.json"
+    descriptor = tmp_path / "model.json"
+    descriptor.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+    model = ManifestCatalog().resolve(str(descriptor))
+
+    assert model.name == "gpt2-125m"
+
+
 def test_bundle_builder_uses_core_model_resolution(tmp_path: Path, monkeypatch) -> None:
     model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
     case = resolve_case(model, tmp_path / "model.bundle")

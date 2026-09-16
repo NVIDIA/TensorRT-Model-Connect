@@ -1,8 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Opts this model into internal Accuracy and Performance qualification.
 schema_version: trtmc.qualification/v1
 model: chronos-bolt-tiny-official
+candidate:
+  family: chronos_bolt
+  checkpoint: amazon/chronos-bolt-tiny
+  task: time_series_forecast
+  precision: fp32
+  bundle: chronos-bolt-tiny-official.bundle
 reference_environment:
   requirements: ../../requirements.txt
 
@@ -29,23 +36,21 @@ performance:
   - name: forecast-64
     benchmark: time_series_performance
     operation: solve
-    candidate:
-      testcase: chronos-bolt-tiny-official
-      request:
-        past_values:
-          - 100.1
-          - 100.15
-          - 100.18
-          - 100.22
-          - 100.21
-          - 100.27
-          - 100.31
-          - 100.35
-          - 100.37
-          - 100.4
-          - 100.44
-          - 100.5
-        frequency: 0
+    request:
+      past_values:
+        - 100.1
+        - 100.15
+        - 100.18
+        - 100.22
+        - 100.21
+        - 100.27
+        - 100.31
+        - 100.35
+        - 100.37
+        - 100.4
+        - 100.44
+        - 100.5
+      frequency: 0
     measurement:
       warmup: 5
       iterations: 10

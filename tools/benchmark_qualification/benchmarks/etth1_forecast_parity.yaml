@@ -1,15 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Internal reusable benchmark definition; it does not register a model.
 kind: accuracy
 dataset:
-  path: ETTh1/ETTh1.csv
+  id: etth1
   version: 1d16c8f4f943005d613b5bc962e9eeb06058cf07
   sha256: f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066
-  source: https://github.com/zhouhaoyi/ETDataset
+  source:
+    mode: manual
+    path: ETTh1/ETTh1.csv
+    instructions: https://github.com/zhouhaoyi/ETDataset
   license: upstream repository does not declare a license
-  availability: pre_staged
 selection:
   method: seeded_windows
   seed: 20260715
-scoring: forecast_tensor_parity
+input:
+  adapter: etth1_windows
+metric:
+  name: forecast_tensor_parity

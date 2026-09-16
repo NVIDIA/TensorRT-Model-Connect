@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Produce deterministic Hugging Face text-generation Accuracy references."""
+"""Produce deterministic Hugging Face text-generation qualification references."""
 
 from __future__ import annotations
 
