@@ -119,6 +119,8 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
         if path in SHARED_FILES or path.startswith(SHARED_PREFIXES):
             shared = True
             continue
+        if path.startswith("bindings/"):
+            continue
         if not (repo / path).exists():
             shared = True
             continue
