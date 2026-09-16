@@ -66,6 +66,22 @@ long-context qualification remain outside this contract. The
 committed-token-per-forward receipt is an algorithmic diagnostic, not a
 wall-clock speedup claim.
 
+### Qwen3.8 paired ONNX execution
+
+The Qwen3.8 family owns explicit mixed-NVFP4 target plus DSpark block7 execution
+through the optional pinned native Edge-LLM SDK. The qualified profile uses
+`RadixArk/Qwen3.8-27B-NVFP4` and `RadixArk/Qwen3.8-27B-DSpark`, text-only
+FP16 execution with the source mixed NVFP4/FP8 metadata, TP1/batch1 on SM120.
+Standalone builds retain the original native path; ordinary experimental Edge
+offload and other platform routes are not enabled by this change.
+
+Provision the [native SDK](../user-guides/configure-runtime.md#optional-native-edge-llm-sdk),
+then add `--execution-variant dspark --companion draft=/path/to/draft` to the build
+CLI. See the [owning Qwen3.8 recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_8/EDGE_LLM.md)
+for exact revisions, capacities, sampling controls and quality evidence.
+The local paired qualification is not a registered manifest case and does not
+imply CI coverage of that pair or statistical sampling equivalence.
+
 ## Runtime and validation
 
 The directory name is also the runtime DSO identity:

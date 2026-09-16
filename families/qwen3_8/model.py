@@ -148,3 +148,50 @@ def build(request, writer) -> None:
         path = model_dir / filename
         if path.is_file():
             writer.add_bytes(filename, path.read_bytes())
+
+
+def build_with_inputs(request, writer, execution) -> None:
+    """Build the retained mixed-NVFP4 Qwen3.8 / DSpark block7 pair."""
+    from . import dispatch, edge_llm
+
+    if execution.variant != "dspark" or tuple(x.role for x in execution.checkpoints) != ("draft",):
+        raise ValueError("Qwen3.8 paired execution requires variant=dspark and one draft checkpoint")
+    draft_dir = execution.checkpoints[0].model_dir
+    raw = json.loads((request.model_dir / "config.json").read_text())
+    draft = json.loads((draft_dir / "config.json").read_text())
+    if not dispatch.candidate(request, raw) or edge_llm.checkpoint_quantization(request.model_dir, raw) != "nvfp4":
+        raise ValueError("The retained Qwen3.8 DSpark pair requires a matching mixed-NVFP4 base")
+    base = raw.get("text_config", raw)
+    if not isinstance(draft, dict) or draft.get("architectures") != ["DSparkDraftModel"]:
+        raise ValueError("Expected a DSparkDraftModel companion")
+    for name in ("hidden_size", "vocab_size"):
+        if type(draft.get(name)) is not int or draft[name] != base.get(name):
+            raise ValueError(f"Qwen3.8 DSpark base and draft disagree on {name}")
+    if draft.get("num_target_layers") != base.get("num_hidden_layers"):
+        raise ValueError("Qwen3.8 DSpark target layer count differs from base")
+    config = draft.get("dspark_config")
+    if not isinstance(config, dict) or config.get("block_size", draft.get("block_size")) != 7:
+        raise ValueError("Qwen3.8 DSpark maps the upstream block7 / verify8 profile")
+    layers = config.get("target_layer_ids", draft.get("target_layer_ids"))
+    if (not isinstance(layers, list) or not layers
+            or any(type(i) is not int or not 0 <= i < base["num_hidden_layers"] for i in layers)
+            or len(set(layers)) != len(layers)):
+        raise ValueError("Invalid Qwen3.8 DSpark target layer IDs")
+    mask = config.get("mask_token_id", draft.get("mask_token_id"))
+    if type(mask) is not int or not 0 <= mask < base["vocab_size"]:
+        raise ValueError("Invalid Qwen3.8 DSpark mask token")
+    limit = request.max_sequence_length or min(base["max_position_embeddings"], 256)
+    capacity = draft.get("max_position_embeddings")
+    if type(capacity) is not int or not 8 < limit <= capacity:
+        raise ValueError("Requested context exceeds DSpark draft capacity or block minimum")
+    if draft.get("quantization_config") or any(
+        (draft_dir / name).exists()
+        for name in ("hf_quant_config.json", "quantize_config.json", "quant_config.json")
+    ):
+        raise ValueError("This Qwen3.8 DSpark profile requires unquantized draft weights")
+
+    def native_pair(original_request, original_writer):
+        # A failure must never replace the requested pair with base-only decoding.
+        raise NotImplementedError("Native Qwen3.8 does not implement the requested DSpark variant")
+
+    dispatch.build(request, writer, native_pair, draft_dir=draft_dir)
