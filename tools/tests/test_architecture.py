@@ -356,7 +356,15 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_pr_metadata.py",
         "tools/tests/test_public_source_hygiene.py",
     }
-    expected_cmake = {"cmake/trtmcConfig.cmake.in"}
+    expected_cmake = {
+        "cmake/trtmcConfig.cmake.in",
+        "cmake/EdgeLLM.cmake",
+        "cmake/edgellm/CheckNative.cmake",
+        "cmake/edgellm/EdgeLLMConfig.cmake.in",
+        "cmake/edgellm/Install.cmake.in",
+        "cmake/edgellm/Prepare.cmake.in",
+        "cmake/edgellm/README.md",
+    }
     expected_third_party = {
         "third_party/stb/stb_image.h",
         "third_party/stb/stb_image_resize2.h",
