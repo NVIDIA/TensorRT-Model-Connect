@@ -124,6 +124,63 @@ def test_bundle_config_reads_nested_pretrained_cfg(tmp_path: Path):
     assert bundle_config["num_classes"] == 5
     assert bundle_config["interpolation"] == "bicubic"
     assert bundle_config["crop_pct"] == pytest.approx(0.875)
+    assert bundle_config["vocabulary_id"] == ""
+    assert bundle_config["labels"] == []
+
+
+def test_bundle_config_preserves_checkpoint_class_identity(tmp_path: Path):
+    _write_tiny_mnv3(tmp_path)
+    cfg = ModelConfig.from_dir(tmp_path)
+    labels = ["first", "second", "third", "fourth", "fifth"]
+    cfg.raw.update(vocabulary_id="test:five-classes", label_names=labels)
+    model.load_weights(str(tmp_path), cfg, precision="fp32")
+
+    bundle_config = model.get_bundle_config_overrides(cfg)
+
+    assert bundle_config["vocabulary_id"] == "test:five-classes"
+    assert bundle_config["labels"] == labels
+
+
+@pytest.mark.parametrize("labels", [["only one"], ["one", "two", "", "four", "five"], 5])
+def test_bundle_config_rejects_incomplete_class_labels(tmp_path: Path, labels):
+    _write_tiny_mnv3(tmp_path)
+    cfg = ModelConfig.from_dir(tmp_path)
+    cfg.raw["label_names"] = labels
+    model.load_weights(str(tmp_path), cfg, precision="fp32")
+
+    with pytest.raises(ValueError, match="label_names must name every class"):
+        model.get_bundle_config_overrides(cfg)
+
+
+def test_build_exports_semantic_task_and_complete_class_metadata(tmp_path: Path, monkeypatch):
+    _write_tiny_mnv3(tmp_path)
+    monkeypatch.setattr(_TimmMobilenetv3Model, "build_engine", lambda *args, **kwargs: b"plan")
+    sections = {}
+
+    class Writer:
+        def set_header(self, **header):
+            sections["header"] = header
+
+        def add_bytes(self, name, value):
+            sections[name] = value
+
+        def add_json(self, name, value):
+            sections[name] = value
+
+    request = BuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "unused.bundle",
+        family="timm_mobilenetv3",
+        task="image_to_class_scores",
+        precision="fp32",
+    )
+    build_family(request, Writer())
+
+    assert sections["header"]["task"] == "image_to_class_scores"
+    assert sections["engine.plan"] == b"plan"
+    assert sections["runtime.json"]["num_classes"] == 5
+    assert sections["runtime.json"]["vocabulary_id"] == ""
+    assert sections["runtime.json"]["labels"] == []
 
 
 def test_bundle_config_rejects_missing_pretrained_contract(tmp_path: Path):
@@ -253,7 +310,7 @@ def test_build_rejects_unqualified_small_variant(tmp_path: Path):
         model_dir=tmp_path,
         output_path=tmp_path / "unused.bundle",
         family="timm_mobilenetv3",
-        task="classification",
+        task="image_to_class_scores",
         precision="fp16",
         max_sequence_length=1,
     )
@@ -267,7 +324,7 @@ def test_build_rejects_quantization(tmp_path: Path):
         model_dir=tmp_path,
         output_path=tmp_path / "unused.bundle",
         family="timm_mobilenetv3",
-        task="classification",
+        task="image_to_class_scores",
         precision="fp16",
         quantization="fp8",
     )
