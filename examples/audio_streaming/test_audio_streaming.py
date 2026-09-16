@@ -160,8 +160,6 @@ def example_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
             str(REPO / "core/runtime/include"),
             "-I",
             str(REPO / "core/api/include"),
-            "-I",
-            str(REPO / "apps"),
             str(EXAMPLE / "main.cpp"),
             str(fake_loader),
             "-o",
@@ -270,3 +268,24 @@ def test_cmake_links_public_sdk_and_existing_runtime_targets() -> None:
     assert "trtmc::c" in cmake
     assert "trtmc::trtmc_runtime" in cmake
     assert "families/" not in cmake + source
+
+
+@pytest.mark.parametrize(
+    "directory,helper_include",
+    [
+        ("audio_streaming", "../task_helpers/task_runtime.h"),
+        ("models/foundationpose/preprocessed_refinement", "../../../task_helpers/task_runtime.h"),
+        ("models/lerobot_act/recorded_control", "../../../task_helpers/task_runtime.h"),
+        ("models/nemotron_voicechat/full_duplex", "../../../task_helpers/task_runtime.h"),
+    ],
+)
+def test_examples_own_their_runtime_selection_helper(directory: str, helper_include: str) -> None:
+    example = REPO / "examples" / directory
+    source = (example / "main.cpp").read_text(encoding="utf-8")
+    cmake = (example / "CMakeLists.txt").read_text(encoding="utf-8")
+    helper = (example / helper_include).resolve()
+    assert helper == REPO / "examples/task_helpers/task_runtime.h"
+    assert helper.is_file()
+    assert f'#include "{helper_include}"' in source
+    assert "trtmc::example::uses_existing_task_runtime(primary)" in source
+    assert "/apps" not in cmake

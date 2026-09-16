@@ -38,6 +38,7 @@ duplicated across families until a stable model-agnostic contract exists.
 
 ```text
 applications -> public build/C Task/BYOK contracts
+applications -> header-only C++ SDK
 header-only C++ SDK -> C ABI
 C ABI implementation -> internal abstract Task contracts
 family build -> BuildRequest + BundleWriter + TensorRT build API

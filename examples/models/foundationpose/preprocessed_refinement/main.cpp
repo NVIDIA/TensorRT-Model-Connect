@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "task_runtime.h"
+#include "../../../task_helpers/task_runtime.h"
 #include "trtmc/control.hpp"
 #include "trtmc/perception.hpp"
 #include "trtmc/runtime/family_loader.h"
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
         auto observed = read_floats(input_dir / "observed_features.f32", crop_values);
 
         const auto primary = trtmc::Bundle::open(argv[1]).info().task;
-        if (trtmc::app::uses_existing_task_runtime(primary)) {
+        if (trtmc::example::uses_existing_task_runtime(primary)) {
             if (runtime_root.empty())
                 throw std::invalid_argument("runtime root is required for an existing bundle mode");
             auto task = trtmc::load_task(argv[1], runtime_root);

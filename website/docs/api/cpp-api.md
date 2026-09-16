@@ -202,6 +202,7 @@ release-coupled runtime headers:
 ```cpp
 #include <trtmc/runtime/family_loader.h>
 #include <trtmc/task.h>
+#include <stdexcept>
 
 auto task = trtmc::load_task("detr-resnet-50.bundle", "/opt/trtmc/lib");
 auto* detector = dynamic_cast<trtmc::IObjectDetection*>(task.get());

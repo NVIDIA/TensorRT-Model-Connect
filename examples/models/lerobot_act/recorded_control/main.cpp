@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "task_runtime.h"
+#include "../../../task_helpers/task_runtime.h"
 #include "trtmc/action.hpp"
 #include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
         const auto state = read_state(options.state);
 
         const auto primary = trtmc::Bundle::open(options.bundle).info().task;
-        if (trtmc::app::uses_existing_task_runtime(primary)) {
+        if (trtmc::example::uses_existing_task_runtime(primary)) {
             if (options.runtime_root.empty())
                 throw std::invalid_argument(
                     "--runtime-root is required for an existing bundle mode");

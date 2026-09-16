@@ -271,6 +271,7 @@ inline trtmc_status TRTMC_CALL pose_crop_callback(void* context,
         out->error_message = c_string(error.what());
         return error.code();
     } catch (const std::bad_alloc&) {
+        state.exception = std::current_exception();
         out->error_message = c_string("crop provider out of memory");
         return TRTMC_OUT_OF_MEMORY;
     } catch (const std::exception& error) {
@@ -278,6 +279,7 @@ inline trtmc_status TRTMC_CALL pose_crop_callback(void* context,
         out->error_message = c_string(error.what());
         return TRTMC_INTERNAL_ERROR;
     } catch (...) {
+        state.exception = std::current_exception();
         out->error_message = c_string("unknown crop provider exception");
         return TRTMC_INTERNAL_ERROR;
     }
@@ -356,6 +358,10 @@ class PoseHypothesesCropsToRefinedPoses {
         trtmc_error* error = nullptr;
         const auto status = api_->run(state_->handle, &request, &options, &raw, &error);
         detail::ResultOwner owner(state_, raw);
+        if (context.exception) {
+            state_->api.error_release(error);
+            std::rethrow_exception(context.exception);
+        }
         detail::check(state_->api, status, error);
         return RefinedPosesResult(std::move(owner), api_->result_view);
     }

@@ -3,6 +3,16 @@
 These helpers compile into your application. They do not add a runtime Task,
 load a tokenizer, call a model again, or change family configuration.
 
+## Select the existing or semantic Task path
+
+`task_runtime.h` is an example-owned helper for the family-by-family transition.
+The examples inspect the bundle's primary Task before execution, retaining the
+existing runtime path for existing Task IDs and using the SDK for semantic IDs.
+An SDK error never retries through the existing runtime. The full existing Task
+list is retained because a family may expose an example's interface as a
+secondary capability. This helper is not part of the public SDK and is removed
+with the existing example paths after the last family migration.
+
 ## Rank masked-token candidates
 
 The family supplies vocabulary logits and the selected mask positions. Pass

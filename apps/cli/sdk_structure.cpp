@@ -88,6 +88,9 @@ bool dispatch_sdk_structure(const Command& command, const Model& model, std::str
     const std::filesystem::path metadata_path = has_option(command, "--output-json")
                                                     ? require_option(command, "--output-json")
                                                     : structure_path.string() + ".metadata.json";
+    if (std::filesystem::absolute(structure_path).lexically_normal() ==
+        std::filesystem::absolute(metadata_path).lexically_normal())
+        throw std::invalid_argument("--output and --output-json must use different paths");
     write_document(structure_path, result.structure());
     write_document(metadata_path, result.metadata_json());
     const auto confidence = confidence_json(result.confidence());

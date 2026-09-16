@@ -16,6 +16,8 @@ extern "C" {
 typedef struct trtmc_asr_stream trtmc_asr_stream;
 typedef struct trtmc_speech_session trtmc_speech_session;
 
+/* channels must be positive. has_sample_rate=0 requests the family default;
+ * otherwise sample_rate must also be positive. Invalid formats are rejected. */
 typedef struct {
     uint32_t has_sample_rate, sample_rate, channels;
 } trtmc_speech_input_format_v1;

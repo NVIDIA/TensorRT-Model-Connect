@@ -197,6 +197,16 @@ void structure(const std::filesystem::path& root) {
     check(missing.status == 0 && json::parse(missing.output).at("confidence").is_null() &&
               json::parse(read_file("absent.cif.metadata.json")).at("sampling_steps") == 7,
           "family owns absent confidence and a different default; CLI does not inject defaults");
+    for (const auto& destination : {std::string("collision.cif"), std::string("./collision.cif"),
+                                    (directory / "collision.cif").string()}) {
+        write_file("collision.cif", "keep original bytes");
+        const auto collision =
+            invoke(model, prepared, {"--output", "collision.cif", "--output-json", destination});
+        check(collision.status != 0 && collision.output.empty() &&
+                  collision.error.find("different paths") != std::string::npos &&
+                  read_file("collision.cif") == "keep original bytes",
+              "equivalent structure and metadata destinations are rejected before either write");
+    }
     const auto unknown_extension = invoke(model, unknown, {"--output", "unknown.cif"});
     check(unknown_extension.status != 0 && unknown_extension.output.empty() &&
               unknown_extension.error.find("--input-encoding") != std::string::npos &&

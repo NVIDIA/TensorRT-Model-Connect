@@ -5,7 +5,7 @@ from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 
 def test_eagle_vlm_default_task_is_checkpoint_owned() -> None:
-    _, embedding = resolve_family(
+    embedding_family, embedding = resolve_family(
         ModelMetadata(
             {
                 "model_type": "llama_nemotron_vl",
@@ -14,7 +14,7 @@ def test_eagle_vlm_default_task_is_checkpoint_owned() -> None:
             {},
         )
     )
-    _, reranking = resolve_family(
+    reranking_family, reranking = resolve_family(
         ModelMetadata(
             {
                 "model_type": "llama_nemotron_vl_rerank",
@@ -24,5 +24,7 @@ def test_eagle_vlm_default_task_is_checkpoint_owned() -> None:
         )
     )
 
+    assert embedding_family == "eagle_vlm"
     assert embedding.default_task == "embedding"
+    assert reranking_family == "eagle_vlm"
     assert reranking.default_task == "reranking"

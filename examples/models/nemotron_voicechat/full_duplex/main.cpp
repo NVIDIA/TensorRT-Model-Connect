@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "../../../task_helpers/task_runtime.h"
 #include "playback_queue.h"
 #include "session_io.h"
-#include "task_runtime.h"
 #include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
 #include "trtmc/task.h"
@@ -589,7 +589,7 @@ int run(const Options& options) {
                      static_cast<unsigned int>(options.output_rate),
                      static_cast<unsigned int>(options.latency_ms));
     const auto primary = trtmc::Bundle::open(options.bundle_path).info().task;
-    if (trtmc::app::uses_existing_task_runtime(primary))
+    if (trtmc::example::uses_existing_task_runtime(primary))
         return run_existing(options, capture, playback);
     return run_sdk(options, capture, playback);
 }

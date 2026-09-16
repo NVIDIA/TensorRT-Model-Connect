@@ -761,14 +761,6 @@ def _adapter_options(entry: ResolvedEntry, environment: Environment) -> dict[str
     if not isinstance(configured, Mapping):
         raise PerfMatrixError(f"entry {entry.spec['id']} adapter_options must be an object")
     options = dict(configured)
-    if entry.spec["baseline"].get("adapter") == "upstream-sana-wm":
-        testcase = next((
-            value for value in entry.manifest.get("testcases", [])
-            if isinstance(value, Mapping) and value.get("name") == entry.case.testcase_name
-        ), {})
-        for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift", "no_action_overlay"):
-            if name in testcase:
-                options.setdefault(name, testcase[name])
     inputs = REFERENCE_INPUTS.get(str(entry.spec["baseline"].get("adapter", "")), ())
     for option_name, field in inputs:
         path = _path(environment.references[field], f"references.{field}")
@@ -879,6 +871,8 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
             str(baseline.get("padding", "longest")),
             *common,
         ]
+        if "script" not in baseline:
+            arguments.extend(("--testcase-name", entry.case.testcase_name))
         if "script" in baseline or entry.case.selected_task is not None:
             arguments.extend(("--selected-task", _effective_task(entry)))
     revision = entry.model.hf_revision

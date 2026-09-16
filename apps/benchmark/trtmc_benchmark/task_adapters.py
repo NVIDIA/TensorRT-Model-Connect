@@ -822,16 +822,15 @@ def _text_controls(case: Mapping[str, Any], *, include_defaults: bool) -> dict[s
         ("enable_thinking", True, bool),
     )
     for name, default, convert in controls:
-        source = case if name in case else inputs if name == "temperature" else {}
-        if name in source:
-            value = source[name]
-        elif include_defaults:
-            value = default
-        else:
-            continue
         # Existing paths keep their workload defaults and coercions. Semantic
         # paths preserve explicit types and use family defaults for absent keys.
-        request[name] = convert(value) if include_defaults else value
+        if include_defaults:
+            source = case if name in case else inputs if name == "temperature" else {}
+            request[name] = convert(source[name] if name in source else default)
+        else:
+            value = _explicit(case, name)
+            if value is not _MISSING:
+                request[name] = value
     if "generation_mode" in inputs:
         value = inputs["generation_mode"]
         request["text_generation_mode" if include_defaults else "generation_mode"] = str(value) if include_defaults else value

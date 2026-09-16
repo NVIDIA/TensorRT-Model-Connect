@@ -132,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup", required=True, type=int)
     parser.add_argument("--iterations", required=True, type=int)
     parser.add_argument("--case-name", required=True)
+    parser.add_argument("--testcase-name", help="Selected manifest testcase, not the performance entry ID")
     parser.add_argument("--output", required=True, type=Path)
     return parser
 
@@ -2567,6 +2568,19 @@ def _run_sana_wm(
     request: Mapping[str, Any],
     options: Mapping[str, Any],
 ) -> tuple[list[float], dict[str, Any], str, str, bool, bool]:
+    options = dict(options)
+    testcase_name = getattr(arguments, "testcase_name", None)
+    if testcase_name is not None:
+        manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+        matches = [
+            value for value in manifest.get("testcases", [])
+            if isinstance(value, Mapping) and value.get("name") == testcase_name
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"SANA-WM requires exactly one testcase named {testcase_name!r}")
+        for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift", "no_action_overlay"):
+            if name in matches[0]:
+                options.setdefault(name, matches[0][name])
     reference_repo = str(options.get("reference_repo", ""))
     if not reference_repo:
         raise ValueError("upstream-sana-wm requires baseline.adapter_options.reference_repo")

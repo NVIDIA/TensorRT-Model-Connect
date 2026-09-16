@@ -401,6 +401,7 @@ enum {
     TRTMC_BATCH_CONVERSATION_AUDIO_TEXT = 4,
     TRTMC_BATCH_CONVERSATION_IMAGE_AUDIO_TEXT = 5
 };
+/* kind is TEXT, IMAGES_TEXT, or VIDEO_TEXT from TRTMC_BATCH_CONVERSATION_*. */
 typedef struct {
     uint32_t kind;
     union {
@@ -409,6 +410,8 @@ typedef struct {
         trtmc_video_text_to_text_request_v1 video_text;
     } input;
 } trtmc_text_images_video_conversation_request_v1;
+/* kind is TEXT, IMAGES_TEXT, AUDIO_TEXT, or IMAGE_AUDIO_TEXT from
+ * TRTMC_BATCH_CONVERSATION_*. Other values are rejected before reading input. */
 typedef struct {
     uint32_t kind;
     union {

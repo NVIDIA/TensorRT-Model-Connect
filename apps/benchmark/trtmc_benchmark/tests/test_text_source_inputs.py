@@ -69,3 +69,64 @@ def test_existing_embedding_encode_operation_uses_pooled_input_contract(tmp_path
     with pytest.raises(BenchmarkError, match="embedding role"):
         resolve_task_case("text_to_embedding", {"prompt": "x", "role": "query"}, tmp_path,
                           operation="encode")
+
+
+@pytest.mark.parametrize("name", [
+    "max_new_tokens", "temperature", "top_k", "top_p", "min_p", "seed",
+    "repetition_penalty", "use_chat_template", "enable_thinking",
+])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("value", [0, False, ""])
+def test_semantic_text_controls_preserve_explicit_values(tmp_path, name, nested, value):
+    case = {"prompt": "hello", "inputs": {name: value}} if nested else {
+        "prompt": "hello", name: value,
+    }
+    resolved = resolve_task_case("text_continuation", case, tmp_path)
+    # Transport must not coerce invalid values before the family validates them.
+    assert resolved.request == {"prompt": "hello", name: value}
+    assert type(resolved.request[name]) is type(value)
+
+
+@pytest.mark.parametrize("name", [
+    "max_new_tokens", "temperature", "top_k", "top_p", "min_p", "seed",
+    "repetition_penalty", "use_chat_template", "enable_thinking",
+])
+def test_semantic_text_controls_reject_duplicate_levels(tmp_path, name):
+    case = {"prompt": "hello", name: 0, "inputs": {name: 0}}
+    with pytest.raises(BenchmarkError, match=f"duplicate input/control for {name}"):
+        resolve_task_case("text_continuation", case, tmp_path)
+
+
+def test_semantic_text_controls_do_not_inject_defaults(tmp_path):
+    assert resolve_task_case("text_continuation", {"prompt": "hello"}, tmp_path).request == {
+        "prompt": "hello",
+    }
+
+
+def test_legacy_text_controls_keep_nested_temperature_and_other_defaults(tmp_path):
+    case = {
+        "prompt": "hello",
+        "inputs": {
+            "max_new_tokens": 0, "temperature": "0.5", "top_k": 7, "top_p": 0.8,
+            "min_p": 0.1, "seed": 17, "repetition_penalty": 2.0,
+            "use_chat_template": True, "enable_thinking": False,
+        },
+    }
+    assert resolve_task_case("text_generation", case, tmp_path).request == {
+        "prompt": "hello", "max_new_tokens": 128, "temperature": 0.5, "top_k": 1,
+        "top_p": 1.0, "min_p": 0.0, "seed": -1, "repetition_penalty": 1.0,
+        "use_chat_template": False, "enable_thinking": True,
+    }
+
+
+def test_legacy_text_controls_keep_coercions_and_top_level_precedence(tmp_path):
+    case = {
+        "prompt": "hello", "max_new_tokens": "7", "temperature": "0.5", "top_k": "3",
+        "top_p": "0.8", "min_p": "0.1", "seed": "17", "repetition_penalty": "1.5",
+        "use_chat_template": 0, "enable_thinking": "", "inputs": {"temperature": "0.9"},
+    }
+    assert resolve_task_case("text_generation", case, tmp_path).request == {
+        "prompt": "hello", "max_new_tokens": 7, "temperature": 0.5, "top_k": 3,
+        "top_p": 0.8, "min_p": 0.1, "seed": 17, "repetition_penalty": 1.5,
+        "use_chat_template": False, "enable_thinking": False,
+    }

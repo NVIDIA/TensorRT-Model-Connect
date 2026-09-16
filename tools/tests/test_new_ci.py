@@ -7,6 +7,7 @@ import inspect
 import io
 import json
 import re
+import shutil
 import subprocess
 import tarfile
 import zipfile
@@ -1066,7 +1067,53 @@ def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> 
         load_native_libraries(tmp_path, ("alpha", "beta"))
 
 
-@pytest.mark.parametrize("broken", (None, "header", "cuda_dependency", "library"))
+def test_sdk_package_component_configuration(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    prefix = tmp_path / "installed"
+    config = prefix / "share/cmake/trtmc"
+    config.mkdir(parents=True)
+    (config / "trtmcTargets.cmake").write_text("add_library(trtmc::c INTERFACE IMPORTED)\n")
+    producer = tmp_path / "producer"
+    producer.mkdir()
+    (producer / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.20)\n"
+        "project(package_config LANGUAGES NONE)\n"
+        "include(CMakePackageConfigHelpers)\n"
+        "configure_package_config_file(\n"
+        f'  "{repository / "cmake/trtmcConfig.cmake.in"}"\n'
+        f'  "{config / "trtmcConfig.cmake"}"\n'
+        "  INSTALL_DESTINATION share/cmake/trtmc)\n"
+    )
+    subprocess.run(
+        ["cmake", "-S", str(producer), "-B", str(tmp_path / "producer-build")],
+        check=True, capture_output=True, text=True,
+    )
+    for component in ("", "sdk", "unknown"):
+        consumer = tmp_path / (component or "default")
+        consumer.mkdir()
+        requested = " COMPONENTS " + component if component else ""
+        (consumer / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(package_consumer LANGUAGES NONE)\n"
+            f"find_package(trtmc CONFIG REQUIRED{requested})\n"
+            "if(NOT TARGET trtmc::c)\n"
+            '  message(FATAL_ERROR "public SDK target missing")\n'
+            "endif()\n"
+        )
+        completed = subprocess.run(
+            ["cmake", "-S", str(consumer), "-B", str(consumer / "build"),
+             f"-DCMAKE_PREFIX_PATH={prefix}", "-DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE"],
+            check=False, capture_output=True, text=True,
+        )
+        if component == "unknown":
+            assert completed.returncode != 0
+        else:
+            assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize(
+    "broken", (None, "header", "cuda_dependency", "library", "cpp_wrapper", "cpp_runtime")
+)
 def test_installed_sdk_builds_plain_c_and_cpp_without_cuda(
     tmp_path: Path, broken: str | None
 ) -> None:
@@ -1076,22 +1123,25 @@ def test_installed_sdk_builds_plain_c_and_cpp_without_cuda(
     include.mkdir(parents=True)
     config.mkdir(parents=True)
     (prefix / "bin").mkdir()
-    (include / "trtmc.h").write_text(
-        "#include <stdint.h>\n"
-        '#ifdef __cplusplus\nextern "C" {\n#endif\n'
-        "enum { TRTMC_OK = 0 };\n"
-        "typedef struct { uint32_t major; uint32_t minor; } trtmc_api_header;\n"
-        "typedef struct { trtmc_api_header header; } trtmc_core_api_v1;\n"
-        "int trtmc_get_api(uint32_t, uint32_t, const trtmc_core_api_v1 **);\n"
-        "#ifdef __cplusplus\n}\n#endif\n"
+    repository = Path(__file__).resolve().parents[2]
+    shutil.copytree(repository / "core/api/include", prefix / "include", dirs_exist_ok=True)
+    (include / "runtime").mkdir()
+    shutil.copy2(
+        repository / "core/runtime/include/trtmc/runtime/span.h", include / "runtime/span.h"
     )
-    if broken != "header":
+    if broken == "header":
+        (include / "trtmc.hpp").unlink()
+    elif broken == "cpp_wrapper":
         (include / "trtmc.hpp").write_text("#include <trtmc/trtmc.h>\n")
+    version = "{0, 0}" if broken == "cpp_runtime" else '{"fixture", 7}'
     library_source = tmp_path / "api.c"
     library_source.write_text(
         "#include <trtmc/trtmc.h>\n"
-        "int trtmc_get_api(uint32_t major, uint32_t minor, const trtmc_core_api_v1 **out) {\n"
-        "    static const trtmc_core_api_v1 table = {{1, 0}};\n"
+        f"static trtmc_string_view version(void) {{ return (trtmc_string_view){version}; }}\n"
+        "trtmc_status trtmc_get_api(uint32_t major, uint32_t minor, const trtmc_core_api_v1 **out) {\n"
+        "    static trtmc_core_api_v1 table = {0};\n"
+        "    table.header.major = 1; table.header.minor = 0;\n"
+        "    table.header.byte_size = sizeof(table); table.runtime_version = version;\n"
         "    (void)major; (void)minor; *out = &table; return TRTMC_OK;\n"
         "}\n"
     )

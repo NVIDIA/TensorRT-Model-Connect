@@ -92,7 +92,7 @@ struct VideoReference {
 };
 using VideoReferenceItem = std::variant<ImageView, VideoReference, AudioView>;
 
-// Intrinsics in the SANA contracts are [1 or F,9] row-major 3x3 matrices in
+// Intrinsics are [1 or F,9] row-major 3x3 matrices in
 // initial-image pixel coordinates. Dialect, frame count, FPS and sampling
 // defaults belong to the family. A reference is not implicitly an edit source.
 // For inverse dynamics, action frame spans refer to the observed input;

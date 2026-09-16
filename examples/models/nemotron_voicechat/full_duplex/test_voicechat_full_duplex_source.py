@@ -198,3 +198,5 @@ def test_sdk_sources_and_soname_are_in_the_existing_image_contract() -> None:
     assert "!core/api/include/**" in projection
     assert "!core/api/runtime/**" in projection
     assert "!apps/task_runtime.h" in projection
+    assert "!examples/task_helpers/" in projection
+    assert "!examples/task_helpers/task_runtime.h" in projection

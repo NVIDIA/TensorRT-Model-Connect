@@ -2346,7 +2346,78 @@ def test_sana_world_request_preserves_official_camera_controls(tmp_path: Path) -
     assert request["no_action_overlay"] is True
 
 
-def test_sana_reference_options_use_resolved_testcase_and_explicit_options(tmp_path: Path) -> None:
+@pytest.mark.parametrize("route", ["builtin", "script", "hf"])
+def test_reference_testcase_name_is_only_sent_to_builtin_runner(monkeypatch, tmp_path, route):
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    entry = perf.resolve_entries(
+        [value for value in entries if value["id"] == "sana_wm.generate_image"], environment,
+    )[0]
+    baseline = dict(entry.spec["baseline"])
+    if route == "script":
+        baseline.pop("adapter")
+        baseline["script"] = "tests/reference.py"
+        monkeypatch.setattr(perf, "_family_script", lambda _: tmp_path / "reference.py")
+    elif route == "hf":
+        baseline["runner"] = "hf-transformers"
+    entry = replace(entry, spec={**entry.spec, "baseline": baseline})
+    command = perf.baseline_command(entry, environment, tmp_path / "reference.json")
+    assert command[command.index("--case-name") + 1] == entry.spec["id"]
+    if route == "builtin":
+        assert command[command.index("--testcase-name") + 1] == entry.case.testcase_name
+        parsed = task_reference.build_parser().parse_args(command[2:])
+        assert parsed.testcase_name == entry.case.testcase_name
+        index = command.index("--testcase-name")
+        direct = command[2:index] + command[index + 2:]
+        assert task_reference.build_parser().parse_args(direct).testcase_name is None
+    else:
+        assert "--testcase-name" not in command
+
+
+@pytest.mark.parametrize("selection", ["selected", "missing", "duplicate", ""])
+def test_sana_reference_resolves_only_exact_testcase_before_execution(
+    monkeypatch, tmp_path, selection,
+):
+    manifest = tmp_path / "manifest.json"
+    controls = {"translation_speed": 0.055, "rotation_speed_deg": 1.2,
+                "fps": 16, "flow_shift": 9.8, "no_action_overlay": True}
+    chosen = {"name": "selected", **controls}
+    manifest.write_text(json.dumps({"video_num_frames": 321, "testcases": [
+        {"name": "performance-entry", **dict.fromkeys(controls, "wrong testcase")},
+        chosen, *([chosen] if selection == "duplicate" else []),
+    ]}))
+    arguments = SimpleNamespace(
+        manifest=manifest, testcase_name="selected" if selection == "duplicate" else selection,
+        case_name="performance-entry", warmup=1, iterations=2,
+    )
+    assets = REPO / "families/sana_wm/tests/assets"
+    request = {"prompt": "drive forward", "image_path": str(assets / "demo_0.png"),
+               "action": "w-320", "num_steps": 60, "cfg_scale": 5.0, "seed": 42}
+    options = {"reference_repo": str(tmp_path), "model_dir": str(tmp_path / "model"),
+               "intrinsics": str(assets / "demo_0_intrinsics.npy")}
+    before = deepcopy(request), deepcopy(options), manifest.read_bytes()
+
+    def run(command, **kwargs):
+        assert selection == "selected", "invalid selection must fail before reference execution"
+        for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift"):
+            assert command[command.index("--" + name) + 1] == str(controls[name])
+        assert "--no_action_overlay" in command
+        assert command[command.index("--num_frames") + 1] == "321"
+        raise RuntimeError("captured selected reference command")
+
+    monkeypatch.setattr(task_reference.subprocess, "run", run)
+    if selection == "selected":
+        with pytest.raises(RuntimeError, match="captured selected reference command"):
+            task_reference._run_sana_wm(arguments, request, options)
+    else:
+        with pytest.raises(ValueError, match="exactly one testcase"):
+            task_reference._run_sana_wm(arguments, request, options)
+    assert (request, options, manifest.read_bytes()) == before
+
+
+def test_sana_reference_options_use_resolved_testcase_and_explicit_options(
+    monkeypatch, tmp_path: Path,
+) -> None:
     _, environment = _environment(tmp_path)
     _, entries, _ = perf.load_suite(SUITE)
     selected = [entry for entry in entries if entry["id"] == "sana_wm.generate_image"]
@@ -2358,12 +2429,35 @@ def test_sana_reference_options_use_resolved_testcase_and_explicit_options(tmp_p
                     if value["name"] == entry.case.testcase_name)
     other = {**testcase, "name": entry.spec["id"], **dict.fromkeys(original, "wrong testcase")}
     entry = replace(entry, manifest={**entry.manifest, "testcases": [other, testcase]})
+    semantic = perf.resolve_case(entry.model, tmp_path / "model.bundle", selected_task="image_text_action_to_video")
+    request = task_reference.flatten_config(semantic.request)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(entry.manifest))
+    arguments = SimpleNamespace(
+        manifest=manifest_path, testcase_name=entry.case.testcase_name, warmup=1, iterations=2,
+    )
     before = json.dumps(entry.manifest, sort_keys=True)
     options = perf._adapter_options(entry, environment)
-    assert {name: options[name] for name in original} == original
+    assert not original.keys() & options.keys()
     assert "action" not in options and "prompt" not in options
     assert options["reference_repo"] == str(Path(environment.references["sana_repo"]).resolve())
     assert options["model_dir"] == str(Path(environment.references["sana_model"]).resolve())
+    options["intrinsics"] = str(entry.model.manifest_path.parent.parent / "assets/demo_0_intrinsics.npy")
+    expected = original
+
+    def run(command, **kwargs):
+        for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift"):
+            assert command[command.index("--" + name) + 1] == str(expected[name])
+        assert ("--no_action_overlay" in command) is expected["no_action_overlay"]
+        assert command[command.index("--action") + 1] == request["action"]
+        assert Path(command[command.index("--prompt") + 1]).read_text() == request["prompt"]
+        raise RuntimeError("captured reference options")
+
+    monkeypatch.setattr(task_reference.subprocess, "run", run)
+    original_options = deepcopy(options)
+    with pytest.raises(RuntimeError, match="captured reference options"):
+        task_reference._run_sana_wm(arguments, request, options)
+    assert options == original_options
     explicit = {"translation_speed": 0.0, "rotation_speed_deg": 0.0,
                 "fps": 0, "flow_shift": 0.0, "no_action_overlay": False}
     configured = {**entry.spec["baseline"].get("adapter_options", {}), **explicit}
@@ -2371,11 +2465,21 @@ def test_sana_reference_options_use_resolved_testcase_and_explicit_options(tmp_p
     options = perf._adapter_options(entry, environment)
     assert {name: options[name] for name in original} == explicit
     assert options["no_action_overlay"] is False
+    options["intrinsics"] = original_options["intrinsics"]
+    explicit_options = deepcopy(options)
+    expected = explicit
+    with pytest.raises(RuntimeError, match="captured reference options"):
+        task_reference._run_sana_wm(arguments, request, options)
+    assert options == explicit_options
+    assert request == task_reference.flatten_config(semantic.request)
+    assert json.loads(manifest_path.read_text()) == entry.manifest
     assert json.dumps(entry.manifest, sort_keys=True) == before
     assert entry.spec["baseline"]["adapter_options"] == configured
 
 
-def test_sana_semantic_request_metadata_moves_only_to_reference_options(tmp_path: Path) -> None:
+def test_sana_semantic_request_metadata_moves_only_to_reference_options(
+    monkeypatch, tmp_path: Path,
+) -> None:
     _, environment = _environment(tmp_path)
     _, entries, _ = perf.load_suite(SUITE)
     selected = [entry for entry in entries if entry["id"] == "sana_wm.generate_image"]
@@ -2386,7 +2490,19 @@ def test_sana_semantic_request_metadata_moves_only_to_reference_options(tmp_path
     expected = {"translation_speed": 0.055, "rotation_speed_deg": 1.2,
                 "fps": 16, "flow_shift": 9.8, "no_action_overlay": True}
     assert not expected.keys() & semantic.request.keys()
-    assert {name: options[name] for name in expected} == expected
+    assert not expected.keys() & options.keys()
+    command = perf.baseline_command(entry, environment, tmp_path / "reference.json")
+    arguments = task_reference.build_parser().parse_args(command[2:])
+
+    def run(command, **kwargs):
+        for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift"):
+            assert command[command.index("--" + name) + 1] == str(expected[name])
+        assert "--no_action_overlay" in command
+        raise RuntimeError("captured reference metadata")
+
+    monkeypatch.setattr(task_reference.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="captured reference metadata"):
+        task_reference._run_sana_wm(arguments, task_reference.flatten_config(semantic.request), options)
     assert semantic.request["action"] == entry.manifest["testcases"][0]["action"]
     assert semantic.request["seed"] == 42 and semantic.request["num_steps"] == 60
     assert semantic.request["cfg_scale"] == 5.0

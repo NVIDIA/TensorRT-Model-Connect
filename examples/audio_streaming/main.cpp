@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "task_runtime.h"
+#include "../task_helpers/task_runtime.h"
 #include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
 #include "trtmc/speech.hpp"
@@ -147,7 +147,7 @@ int stream_prompts(Generate generate) {
 
 int run(const Options& options) {
     const auto primary = trtmc::Bundle::open(options.bundle).info().task;
-    const bool existing = trtmc::app::uses_existing_task_runtime(primary);
+    const bool existing = trtmc::example::uses_existing_task_runtime(primary);
     if (existing && options.runtime_root.empty())
         throw std::invalid_argument("--runtime-root is required for an existing bundle mode");
     std::cerr << "[audio-streaming] loading bundle\n";

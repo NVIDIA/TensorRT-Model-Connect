@@ -317,7 +317,7 @@ def validate_installed_sdk(prefix: Path) -> None:
         (source / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.20)\n"
             "project(installed_sdk LANGUAGES C CXX)\n"
-            "find_package(trtmc CONFIG REQUIRED)\n"
+            "find_package(trtmc CONFIG REQUIRED COMPONENTS sdk)\n"
             "add_executable(c_consumer consumer.c)\n"
             "target_compile_features(c_consumer PRIVATE c_std_11)\n"
             "target_compile_options(c_consumer PRIVATE -pedantic-errors)\n"
@@ -328,16 +328,20 @@ def validate_installed_sdk(prefix: Path) -> None:
             "target_link_libraries(cpp_consumer PRIVATE trtmc::c)\n",
             encoding="utf-8",
         )
-        for filename, header in (("consumer.c", "trtmc.h"), ("consumer.cpp", "trtmc.hpp")):
-            (source / filename).write_text(
-                f"#include <trtmc/{header}>\n"
-                "int main(void) {\n"
-                "    const trtmc_core_api_v1 *api = 0;\n"
-                "    if (trtmc_get_api(1, 0, &api) != TRTMC_OK || !api) return 1;\n"
-                "    return api->header.major != 1 || api->header.minor != 0;\n"
-                "}\n",
-                encoding="utf-8",
-            )
+        (source / "consumer.c").write_text(
+            "#include <trtmc/trtmc.h>\n"
+            "int main(void) {\n"
+            "    const trtmc_core_api_v1 *api = 0;\n"
+            "    if (trtmc_get_api(1, 0, &api) != TRTMC_OK || !api) return 1;\n"
+            "    return api->header.major != 1 || api->header.minor != 0;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (source / "consumer.cpp").write_text(
+            "#include <trtmc/trtmc.hpp>\n"
+            "int main() { return trtmc::runtime_version().empty(); }\n",
+            encoding="utf-8",
+        )
         build = source / "build"
         commands = (
             [

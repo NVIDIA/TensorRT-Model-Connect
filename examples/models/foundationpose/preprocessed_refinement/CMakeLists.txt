@@ -20,7 +20,6 @@ add_executable(trtmc_foundationpose_preprocessed main.cpp)
 target_compile_features(trtmc_foundationpose_preprocessed PRIVATE cxx_std_17)
 target_compile_options(trtmc_foundationpose_preprocessed PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(trtmc_foundationpose_preprocessed PRIVATE
-  "${TRTMC_SOURCE_DIR}/apps"
   "${TRTMC_SOURCE_DIR}/core/runtime/include"
 )
 target_link_libraries(trtmc_foundationpose_preprocessed PRIVATE trtmc_c trtmc_runtime)

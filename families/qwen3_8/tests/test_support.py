@@ -5,7 +5,7 @@ from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 
 def test_qwen38_marker_default_task_is_checkpoint_owned() -> None:
-    _, support = resolve_family(
+    family, support = resolve_family(
         ModelMetadata(
             {
                 "model_type": "qwen3_5",
@@ -14,4 +14,5 @@ def test_qwen38_marker_default_task_is_checkpoint_owned() -> None:
             {},
         )
     )
+    assert family == "qwen3_8"
     assert support.default_task == "text_generation"

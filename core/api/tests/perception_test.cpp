@@ -337,6 +337,38 @@ void pose(const trtmc::Model& model) {
     };
     rejects([&] { (void)task.run(request); }, TRTMC_INVALID_CONFIG,
             "callback exception preserves error status");
+    struct CropFailure : std::runtime_error {
+        using std::runtime_error::runtime_error;
+    };
+    request.crops = [](const auto&) -> trtmc::PoseCrops {
+        throw CropFailure("caller-specific crop failure");
+    };
+    bool original_failure = false;
+    try {
+        (void)task.run(request);
+    } catch (const CropFailure& error) {
+        original_failure = std::string_view(error.what()) == "caller-specific crop failure";
+    } catch (...) {
+    }
+    check(original_failure, "C++ crop provider retains its original exception type and message");
+    request.crops = [](const auto&) -> trtmc::PoseCrops { throw std::bad_alloc{}; };
+    bool allocation_failure = false;
+    try {
+        (void)task.run(request);
+    } catch (const std::bad_alloc&) {
+        allocation_failure = true;
+    } catch (...) {
+    }
+    check(allocation_failure, "C++ crop provider preserves an allocation exception");
+    request.crops = [](const auto&) -> trtmc::PoseCrops { throw 17; };
+    bool unknown_failure = false;
+    try {
+        (void)task.run(request);
+    } catch (int value) {
+        unknown_failure = value == 17;
+    } catch (...) {
+    }
+    check(unknown_failure, "C++ crop provider preserves a non-standard exception");
     request.crops = provider;
     check(task.run(request).view().best_index == 1,
           "failed callback releases model execution ownership");
