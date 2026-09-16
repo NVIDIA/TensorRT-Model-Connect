@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from concurrent.futures import Future
 from typing import Any
 
@@ -97,8 +99,9 @@ def make_client(
     return TestClient(app)
 
 
-def test_completion_and_chat_keep_model_semantics_in_worker() -> None:
+def test_completion_and_chat_keep_model_semantics_in_worker(caplog: Any) -> None:
     registry = FakeRegistry()
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
     with make_client(registry) as client:
         completion = client.post(
             "/v1/completions",
@@ -107,6 +110,7 @@ def test_completion_and_chat_keep_model_semantics_in_worker() -> None:
         assert completion.status_code == 200
         assert completion.json()["choices"][0]["text"] == "Paris"
         assert completion.json()["usage"]["completion_tokens"] == 1
+        completion_request_id = completion.headers["x-request-id"]
 
         chat = client.post(
             "/v1/chat/completions",
@@ -124,6 +128,19 @@ def test_completion_and_chat_keep_model_semantics_in_worker() -> None:
         assert config["use_chat_template"] is True
         assert config["system_prompt"] == "Be brief"
         assert config["max_new_tokens"] == 8
+
+    request_logs = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "uvicorn.error" and '"event":"http_request"' in record.message
+    ]
+    completion_log = next(
+        record for record in request_logs if record["request_id"] == completion_request_id
+    )
+    assert completion_log["route"] == "/v1/completions"
+    assert completion_log["status"] == 200
+    assert completion_log["duration_seconds"] >= 0
+    assert "Capital?" not in json.dumps(request_logs)
 
 
 def test_validation_overload_auth_and_metrics_are_explicit() -> None:

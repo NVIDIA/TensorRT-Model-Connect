@@ -74,21 +74,24 @@ int main() {
     check(trtmc::server::run_text_worker(task, input, output) == 0, "worker exits cleanly");
     const auto messages = records(output.str());
     check(messages.size() == 4, "worker emits ready and three responses");
-    check(messages[0]["event"] == "ready", "worker advertises readiness");
-    check(messages[0]["protocol_version"] == 1, "worker protocol is versioned");
-    check(messages[1]["id"] == "one" && messages[1]["ok"] == true,
+    if (messages.size() != 4)
+        return 1;
+    check(messages.at(0)["event"] == "ready", "worker advertises readiness");
+    check(messages.at(0)["protocol_version"] == 1, "worker protocol is versioned");
+    check(messages.at(1)["id"] == "one" && messages.at(1)["ok"] == true,
           "generate response preserves id");
-    check(messages[1]["result"]["text"] == "reply:hello", "generate returns text");
-    check(messages[1]["result"]["completion_tokens"] == 3, "generate returns token count");
+    check(messages.at(1)["result"]["text"] == "reply:hello", "generate returns text");
+    check(messages.at(1)["result"]["completion_tokens"] == 3, "generate returns token count");
     check(task.prompt_ == "hello", "worker forwards prompt");
     check(task.config_.max_new_tokens == 9, "worker forwards token limit");
     check(task.config_.top_k == 0 && task.config_.seed == 7, "worker forwards sampling");
     check(task.config_.system_prompt == "brief" && task.config_.use_chat_template,
           "worker leaves chat handling with family");
-    check(messages[2]["id"] == "bad" && messages[2]["ok"] == false, "invalid config is rejected");
-    check(messages[2]["error"]["type"] == "invalid_request_error",
+    check(messages.at(2)["id"] == "bad" && messages.at(2)["ok"] == false,
+          "invalid config is rejected");
+    check(messages.at(2)["error"]["type"] == "invalid_request_error",
           "protocol error remains client visible");
-    check(messages[3]["result"]["status"] == "shutting_down", "shutdown is acknowledged");
+    check(messages.at(3)["result"]["status"] == "shutting_down", "shutdown is acknowledged");
 
     ThrowingText throwing;
     std::istringstream failing_input("{\"id\":\"failure\",\"op\":\"generate\",\"prompt\":\"x\"}\n");
@@ -96,7 +99,10 @@ int main() {
     check(trtmc::server::run_text_worker(throwing, failing_input, failing_output) == 1,
           "runtime error retires worker");
     const auto failing_messages = records(failing_output.str());
-    check(failing_messages[1]["error"]["message"] == "native worker operation failed",
+    check(failing_messages.size() == 2, "failing worker emits ready and one error");
+    if (failing_messages.size() != 2)
+        return 1;
+    check(failing_messages.at(1)["error"]["message"] == "native worker operation failed",
           "runtime detail is redacted");
     return failures == 0 ? 0 : 1;
 }

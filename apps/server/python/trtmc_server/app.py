@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
@@ -31,6 +33,9 @@ from .protocol import chat_prompt, extract_result, generation_config, public_wor
 from .registry import ModelRegistry
 from .schemas import ChatCompletionRequest, CompletionRequest, GenerationRequest
 from .worker import WorkerSession
+
+
+_REQUEST_LOGGER = logging.getLogger("uvicorn.error")
 
 
 class ServerConfig:
@@ -141,26 +146,57 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
 
     @app.middleware("http")
     async def policy(request: Request, call_next: Any) -> Any:
-        content_length = request.headers.get("content-length")
-        if content_length is not None:
-            try:
-                if int(content_length) > config.max_body_bytes:
-                    return error_response(413, "content_too_large", "request body exceeds limit")
-            except ValueError:
-                return error_response(400, "invalid_request", "invalid Content-Length header")
-        if config.api_key is not None and request.url.path != "/health/live":
-            authorization = request.headers.get("authorization", "")
-            scheme, separator, token = authorization.partition(" ")
-            valid = (
-                bool(separator)
-                and scheme.lower() == "bearer"
-                and hmac.compare_digest(token.encode(), config.api_key.encode())
+        request_id = f"req-{uuid.uuid4().hex}"
+        request.state.request_id = request_id
+        started = time.monotonic()
+        response = None
+        try:
+            content_length = request.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > config.max_body_bytes:
+                        response = error_response(
+                            413, "content_too_large", "request body exceeds limit"
+                        )
+                        return response
+                except ValueError:
+                    response = error_response(
+                        400, "invalid_request", "invalid Content-Length header"
+                    )
+                    return response
+            if config.api_key is not None and request.url.path != "/health/live":
+                authorization = request.headers.get("authorization", "")
+                scheme, separator, token = authorization.partition(" ")
+                valid = (
+                    bool(separator)
+                    and scheme.lower() == "bearer"
+                    and hmac.compare_digest(token.encode(), config.api_key.encode())
+                )
+                if not valid:
+                    response = error_response(
+                        401, "invalid_api_key", "missing or invalid bearer token"
+                    )
+                    response.headers["WWW-Authenticate"] = "Bearer"
+                    return response
+            response = await call_next(request)
+            return response
+        finally:
+            status = response.status_code if response is not None else 500
+            if response is not None:
+                response.headers.setdefault("X-Request-ID", request_id)
+            _REQUEST_LOGGER.info(
+                json.dumps(
+                    {
+                        "duration_seconds": round(time.monotonic() - started, 6),
+                        "event": "http_request",
+                        "request_id": request_id,
+                        "route": request.url.path,
+                        "status": status,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
             )
-            if not valid:
-                response = error_response(401, "invalid_api_key", "missing or invalid bearer token")
-                response.headers["WWW-Authenticate"] = "Bearer"
-                return response
-        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, error: RequestValidationError) -> JSONResponse:
@@ -210,11 +246,11 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         request: GenerationRequest,
         prompt: str,
         *,
+        request_id: str,
         system_prompt: str = "",
         chat: bool,
         chat_max_tokens: int | None = None,
     ) -> Any:
-        request_id = f"req-{uuid.uuid4().hex}"
         if request.n != 1:
             metrics.reject(route, 400)
             return error_response(400, "unsupported_parameter", "n must be 1", param="n")
@@ -370,13 +406,17 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         )
 
     @app.post("/v1/completions")
-    async def completions(request: CompletionRequest) -> Any:
+    async def completions(http_request: Request, request: CompletionRequest) -> Any:
         return await execute(
-            "/v1/completions", request, request.prompt, chat=False
+            "/v1/completions",
+            request,
+            request.prompt,
+            request_id=http_request.state.request_id,
+            chat=False,
         )
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: ChatCompletionRequest) -> Any:
+    async def chat_completions(http_request: Request, request: ChatCompletionRequest) -> Any:
         try:
             prompt, system_prompt = chat_prompt(request)
         except ValueError as error:
@@ -393,6 +433,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             "/v1/chat/completions",
             request,
             prompt,
+            request_id=http_request.state.request_id,
             system_prompt=system_prompt,
             chat=True,
             chat_max_tokens=request.max_completion_tokens,
