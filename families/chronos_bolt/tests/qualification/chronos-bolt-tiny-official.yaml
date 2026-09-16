@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: chronos-bolt-tiny-official
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: etth1-parity
+    benchmark: etth1_forecast_parity
+    samples: 10
+    reference:
+      command: reference.py
+      precision: fp32
+    window:
+      columns: [OT]
+      context_length: 512
+      prediction_length: 64
+      stride: 24
+      test_target_start: 11520
+      test_end: 14400
+      frequency: 0
+    gate:
+      max_relative_l2: 1.0e-6
+      max_absolute_error: 8.0e-6
+
+performance:
+  - name: forecast-64
+    benchmark: time_series_performance
+    operation: solve
+    candidate:
+      testcase: chronos-bolt-tiny-official
+      request:
+        past_values:
+          - 100.1
+          - 100.15
+          - 100.18
+          - 100.22
+          - 100.21
+          - 100.27
+          - 100.31
+          - 100.35
+          - 100.37
+          - 100.4
+          - 100.44
+          - 100.5
+        frequency: 0
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      adapter: pytorch-timeseries
+      mode: torch-compile
+      fallback: pytorch-eager
+      precision: fp32
+      output_contract: forecast-parity
+      max_relative_l2: 1.0e-6
+      max_absolute_error: 8.0e-6

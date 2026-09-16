@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+kind: accuracy
+dataset:
+  path: MMLU_five_shot/mmlu_dataset.json
+  version: pre1093-mmlu-five-shot-json
+  sha256: f4f8c39761c86510888a860915e9ecbb73f418dc226c1368319630538859a470
+  source: https://github.com/hendrycks/test
+  license: MIT
+  availability: pre_staged
+selection:
+  method: first
+scoring: exact_continuation_token_parity

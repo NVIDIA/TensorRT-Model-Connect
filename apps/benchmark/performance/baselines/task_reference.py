@@ -98,6 +98,7 @@ class Session:
     timing_scope: str = "task-model-call-wall"
     input_preparation_included: bool = False
     asset_loading_included: bool = False
+    compile_evidence: dict[str, Any] | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -112,7 +113,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adapter-options-json", default="{}")
     parser.add_argument("--timing-contract-json", default="{}")
     parser.add_argument("--precision", required=True, choices=("fp16", "fp32", "bf16"))
-    parser.add_argument("--mode", required=True, choices=("hf-eager", "pytorch-eager"))
+    parser.add_argument(
+        "--mode", required=True, choices=("hf-eager", "pytorch-eager", "torch-compile")
+    )
     parser.add_argument("--padding", default="longest")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
@@ -260,6 +263,12 @@ def _tensor_summary(value: Any) -> dict[str, Any]:
         "element_count": int(value.numel()),
         "finite": bool(value.isfinite().all().item()),
     }
+
+
+def _time_series_summary(value: Any) -> dict[str, Any]:
+    result = _tensor_summary(value)
+    result["values"] = value.detach().float().cpu().reshape(-1).tolist()
+    return result
 
 
 def _task_value(
@@ -1202,6 +1211,9 @@ def _load_timeseries(
         chronos_options = _processor_kwargs(arguments)
         chronos_options.update({"device_map": str(device), "dtype": dtype})
         model = ChronosBoltPipeline.from_pretrained(arguments.model, **chronos_options)
+        compile_evidence = None
+        if arguments.mode == "torch-compile":
+            compile_evidence = _compile_forward(model.model)
         context = torch.tensor(_numeric_values(request, "past_values"), dtype=dtype, device=device)
 
         def invoke() -> Mapping[str, Any]:
@@ -1211,9 +1223,9 @@ def _load_timeseries(
                     prediction_length=model.model_prediction_length,
                     limit_prediction_length=True,
                 )
-            return _tensor_summary(value)
+            return _time_series_summary(value)
 
-        return Session(invoke, "chronos")
+        return Session(invoke, "chronos", compile_evidence=compile_evidence)
 
     config = transformers.AutoConfig.from_pretrained(
         arguments.model, **_processor_kwargs(arguments)
@@ -1249,7 +1261,7 @@ def _load_timeseries(
                 output = model._postprocess_output(
                     decoder.last_hidden_state, (decoder.loc, decoder.scale)
                 )[:, -1, : model.config.horizon_length, 0]
-            return _tensor_summary(output)
+            return _time_series_summary(output)
 
     else:
         is_mixer = arguments.family == "patchtsmixer"
@@ -1320,7 +1332,7 @@ def _load_timeseries(
                     output = getattr(outputs, output_name)
             if isinstance(output, (tuple, list)):
                 output = torch.stack(list(output), dim=-1)
-            return _tensor_summary(output)
+            return _time_series_summary(output)
 
     return Session(invoke, "transformers")
 
@@ -1791,11 +1803,48 @@ def _synchronize() -> None:
         return
 
 
+def _compile_forward(model: Any) -> dict[str, Any]:
+    import torch
+    from torch._dynamo.backends.registry import lookup_backend
+
+    evidence = {"compiled_graph_count": 0}
+    inductor = lookup_backend("inductor")
+
+    def compile_graph(graph: Any, inputs: Any, **options: Any) -> Any:
+        compiled = inductor(graph, inputs, **options)
+        evidence["compiled_graph_count"] += 1
+        return compiled
+
+    model.forward = torch.compile(
+        model.forward,
+        backend=compile_graph,
+        fullgraph=False,
+        dynamic=False,
+    )
+    evidence.update(
+        {
+            "api": "torch.compile",
+            "target": "model.forward",
+            "backend": "inductor",
+            "mode": "default",
+            "fullgraph": False,
+            "dynamic": False,
+            "applied": True,
+        }
+    )
+    return evidence
+
+
 def _measure(session: Session, warmup: int, iterations: int) -> tuple[list[float], dict[str, Any]]:
     output: Mapping[str, Any] = {}
     for _ in range(warmup):
         output = session.invoke()
         _synchronize()
+    compiled_graphs = None
+    if session.compile_evidence is not None:
+        compiled_graphs = int(session.compile_evidence["compiled_graph_count"])
+        if compiled_graphs < 1:
+            raise RuntimeError("warmup did not execute a compiled graph")
     samples = []
     for _ in range(iterations):
         _synchronize()
@@ -1803,6 +1852,11 @@ def _measure(session: Session, warmup: int, iterations: int) -> tuple[list[float
         output = session.invoke()
         _synchronize()
         samples.append((time.perf_counter() - started) * 1000.0)
+    if (
+        compiled_graphs is not None
+        and int(session.compile_evidence["compiled_graph_count"]) != compiled_graphs
+    ):
+        raise RuntimeError("model compilation occurred inside timed samples")
     return samples, dict(output)
 
 
@@ -2196,8 +2250,13 @@ def run(arguments: argparse.Namespace) -> int:
     if arguments.warmup < 0 or arguments.iterations <= 0:
         raise ValueError("warmup must be non-negative and iterations must be positive")
     expected_mode = "pytorch-eager" if arguments.adapter in PYTORCH_ADAPTERS else "hf-eager"
-    if arguments.mode != expected_mode:
-        raise ValueError(f"adapter {arguments.adapter} requires mode {expected_mode}")
+    supported_modes = {expected_mode}
+    if arguments.adapter == "pytorch-timeseries" and arguments.family == "chronos_bolt":
+        supported_modes.add("torch-compile")
+    if arguments.mode not in supported_modes:
+        raise ValueError(
+            f"adapter {arguments.adapter} requires one of {sorted(supported_modes)}"
+        )
     request = _json_object(arguments.request_json, "--request-json")
     options = _json_object(arguments.adapter_options_json, "--adapter-options-json")
     configured_timing = _json_object(arguments.timing_contract_json, "--timing-contract-json")
@@ -2220,6 +2279,7 @@ def run(arguments: argparse.Namespace) -> int:
         )
     load_started = time.perf_counter()
     load_seconds: float | None = None
+    compile_evidence: dict[str, Any] | None = None
     if arguments.adapter == "upstream-elf":
         samples, output_summary, framework, timing_scope, input_included = _run_elf(
             arguments, request, options
@@ -2250,6 +2310,7 @@ def run(arguments: argparse.Namespace) -> int:
         ) = _run_sana_wm(arguments, request, options)
     else:
         session = LOADERS[arguments.adapter](arguments, request, options)
+        compile_evidence = session.compile_evidence
         load_seconds = time.perf_counter() - load_started
         framework = session.framework
         timing_scope = session.timing_scope
@@ -2299,8 +2360,8 @@ def run(arguments: argparse.Namespace) -> int:
         "precision": arguments.precision,
         "padding": arguments.padding,
         "experts_implementation": None,
-        "compile_scope": None,
-        "compile_evidence": None,
+        "compile_scope": "model.forward" if arguments.mode == "torch-compile" else None,
+        "compile_evidence": compile_evidence,
         "timing_scope": timing_scope,
         "input_preparation_included": input_included,
         "asset_loading_included": asset_included,
@@ -2317,6 +2378,7 @@ def run(arguments: argparse.Namespace) -> int:
             "input_preparation_included": input_included,
             "asset_loading_included": asset_included,
             "model_load_excluded": True,
+            "compile_excluded": True,
             "warmup_excluded": True,
             "output_materialization_included": True,
         },
@@ -2334,6 +2396,9 @@ def run(arguments: argparse.Namespace) -> int:
         "environment": _environment(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    if compile_evidence is not None:
+        compile_evidence["warmup_completed"] = True
+        compile_evidence["timed_callable_uses_compiled_target"] = True
     if not all(math.isfinite(float(value)) and float(value) > 0.0 for value in samples):
         raise RuntimeError("reference produced an invalid timing sample")
     arguments.output.parent.mkdir(parents=True, exist_ok=True)

@@ -42,6 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--rebuild", action="store_true")
     run.add_argument("--manifest-root", type=Path)
     run.add_argument("--case", action="append", default=[])
+    run.add_argument(
+        "--data",
+        action="append",
+        default=[],
+        metavar="[MODEL=]PATH",
+        help="Use public Task request JSON or JSONL instead of the manifest testcase input",
+    )
     run.add_argument("--operation")
     run.add_argument("--set", dest="sets", action="append", default=[], metavar="FIELD=VALUE")
     run.add_argument("--sweep", action="append", default=[], metavar="FIELD=V1,V2")
@@ -203,6 +210,7 @@ def _resolve_cases(
 ) -> tuple[ResolvedCase, ...]:
     entries = _model_entries(arguments.model, spec)
     bundles = _path_arguments(arguments.bundle)
+    data_paths = _path_arguments(arguments.data)
     configured_roots = spec.get("bundle_roots", [])
     if not isinstance(configured_roots, list):
         raise BenchmarkError("bundle_roots must be a list")
@@ -224,6 +232,8 @@ def _resolve_cases(
         selector = str(entry["model"])
         model = catalog.resolve(selector)
         explicit = _entry_path(entry.get("bundle"), selector, bundles, len(entries))
+        data_path = _entry_path(entry.get("data"), selector, data_paths, len(entries))
+        data_requests = _load_data_requests(data_path) if data_path is not None else ()
         bundle = find_bundle(model, explicit=explicit, roots=roots)
         if bundle is None:
             bundle = builder.provisional_path(model)
@@ -251,7 +261,24 @@ def _resolve_cases(
                 overrides=overrides,
             ).with_values(name=display, runtime_root=runtime_root)
             sweeps = _merge_sweeps(case_spec.get("sweep", {}), cli_sweeps)
-            resolved.extend(expand_sweeps(base, sweeps))
+            swept = expand_sweeps(base, sweeps)
+            if not data_requests:
+                resolved.extend(swept)
+                continue
+            for swept_case in swept:
+                for data_name, request in data_requests:
+                    merged = {**swept_case.request, **request}
+                    sources = {
+                        **swept_case.sources,
+                        **{name: f"data file {data_path}" for name in request},
+                    }
+                    resolved.append(
+                        swept_case.with_values(
+                            name=f"{swept_case.name}/{data_name}",
+                            request=merged,
+                            sources=sources,
+                        )
+                    )
     if selected_names and arguments.config:
         missing = selected_names - matched_names
         if missing:
@@ -376,6 +403,67 @@ def _path_arguments(values: list[str]) -> dict[str, Path]:
             raise BenchmarkError(f"duplicate path for {key or 'default model'}")
         result[key] = Path(raw)
     return result
+
+
+def _load_data_requests(path: Path) -> tuple[tuple[str, dict[str, Any]], ...]:
+    path = _absolute(path)
+    if not path.is_file():
+        raise BenchmarkError(f"benchmark data does not exist: {path}")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise BenchmarkError(f"cannot read benchmark data {path}: {error}") from error
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        values = []
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                values.append(json.loads(line))
+            except json.JSONDecodeError as error:
+                raise BenchmarkError(
+                    f"benchmark data {path}:{line_number} is not valid JSON: {error}"
+                ) from error
+    else:
+        values = parsed if isinstance(parsed, list) else [parsed]
+    if not values:
+        raise BenchmarkError(f"benchmark data contains no requests: {path}")
+
+    requests = []
+    seen: set[str] = set()
+    for index, value in enumerate(values, start=1):
+        if not isinstance(value, Mapping):
+            raise BenchmarkError(f"benchmark data request {index} must be an object")
+        raw_request = value.get("request", value)
+        if not isinstance(raw_request, Mapping):
+            raise BenchmarkError(f"benchmark data request {index}.request must be an object")
+        raw_name = value.get("name") if "request" in value else None
+        name = str(raw_name or f"data-{index:04d}")
+        if not name or name in seen:
+            raise BenchmarkError(f"benchmark data request name is empty or repeated: {name!r}")
+        seen.add(name)
+        request = _resolve_data_paths(dict(raw_request), path.parent)
+        requests.append((name, request))
+    return tuple(requests)
+
+
+def _resolve_data_paths(value: Any, root: Path) -> Any:
+    if isinstance(value, Mapping):
+        result = {}
+        for name, nested in value.items():
+            if isinstance(nested, str) and str(name).endswith("_path"):
+                candidate = Path(nested).expanduser()
+                result[str(name)] = str(
+                    candidate if candidate.is_absolute() else (root / candidate).resolve()
+                )
+            else:
+                result[str(name)] = _resolve_data_paths(nested, root)
+        return result
+    if isinstance(value, list):
+        return [_resolve_data_paths(item, root) for item in value]
+    return value
 
 
 def _entry_path(

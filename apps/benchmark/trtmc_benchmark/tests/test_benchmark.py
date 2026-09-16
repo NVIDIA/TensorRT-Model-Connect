@@ -16,7 +16,7 @@ from trtmc_benchmark.catalog import (
     default_manifest_root,
     resolve_case,
 )
-from trtmc_benchmark.cli import main
+from trtmc_benchmark.cli import _load_data_requests, main
 from trtmc_benchmark.metrics import reduce_metrics
 from trtmc_benchmark.report import generate_collection_report
 from trtmc_benchmark.service import BenchmarkService
@@ -53,6 +53,40 @@ def test_forecast_case_uses_public_forecast_request(tmp_path: Path) -> None:
     case = resolve_case(model, tmp_path / "model.bundle")
     assert case.operation == "solve"
     assert case.request["past_values"][:2] == [100.1, 100.15]
+
+
+def test_data_file_accepts_named_public_task_requests(tmp_path: Path) -> None:
+    image = tmp_path / "input.png"
+    image.write_bytes(b"image")
+    data = tmp_path / "requests.jsonl"
+    data.write_text(
+        "\n".join(
+            (
+                json.dumps({"name": "first", "request": {"prompt": "hello"}}),
+                json.dumps({"name": "second", "request": {"image_path": "input.png"}}),
+            )
+        )
+    )
+
+    requests = _load_data_requests(data)
+
+    assert requests[0] == ("first", {"prompt": "hello"})
+    assert requests[1] == ("second", {"image_path": str(image.resolve())})
+
+
+def test_data_file_rejects_duplicate_case_names(tmp_path: Path) -> None:
+    data = tmp_path / "requests.json"
+    data.write_text(
+        json.dumps(
+            [
+                {"name": "same", "request": {"prompt": "one"}},
+                {"name": "same", "request": {"prompt": "two"}},
+            ]
+        )
+    )
+
+    with pytest.raises(BenchmarkError, match="empty or repeated"):
+        _load_data_requests(data)
 
 
 def test_stereo_benchmark_uses_family_owned_images(tmp_path: Path) -> None:

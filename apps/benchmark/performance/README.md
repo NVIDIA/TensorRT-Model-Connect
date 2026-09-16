@@ -26,6 +26,16 @@ trtmc-bench run --model distilgpt2 --runtime-root /opt/trtmc/lib -o results/dist
 trtmc-bench run apps/benchmark/example.yaml -o results/example
 ```
 
+Without another workload, `--model` uses that model's E2E testcase. To benchmark
+user input, pass public Task request JSON or JSONL. Each JSONL row may be a raw
+request or `{"name": "case-name", "request": {...}}`; relative `*_path` values
+are resolved from the data file.
+
+```bash
+trtmc-bench run --model gpt2-125m --data requests.jsonl \
+  --runtime-root /opt/trtmc/lib -o results/gpt2-data
+```
+
 Missing bundles are built through the public build command and cached. Pass
 `--no-build` when every selected bundle must already exist.
 
@@ -147,3 +157,26 @@ Install benchmark-only dependencies without adding them to a model family:
 ```bash
 python -m pip install -r apps/benchmark/performance/requirements.txt
 ```
+
+## Accuracy and Performance qualification
+
+CI and QA use pytest, not another benchmark CLI. A family opts in by adding one
+YAML file under `families/<family>/tests/qualification/`; the file may contain
+multiple `accuracy` and `performance` cases. Families without that file,
+including L0-only models, are not collected.
+
+Run every discovered case or select an exact model:
+
+```bash
+TRTMC_QUALIFICATION=1 pytest apps/benchmark/qualification
+pytest apps/benchmark/qualification --qualification-model gpt2-125m
+```
+
+Accuracy additionally needs `--qualification-data-root` for staged benchmark
+data. Runtime, worker, bundle-cache, and artifact paths are pytest options or
+the existing `TRTMC_*` environment variables; model files do not select a GPU.
+The candidate always uses the public build and Task paths. Performance calls the
+installed `trtmc-bench`, tries the declared compiled reference first, and uses
+the declared eager fallback when the compiled reference fails to run or violates
+the same output contract. The eager result must independently satisfy that
+contract; fallback never relaxes the candidate's passing criteria.

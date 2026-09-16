@@ -78,10 +78,14 @@ testpaths = [
     "examples/models/cosmos3/dual_spark/test_cosmos3_dual_spark_source.py",
     "examples/models/nemotron_voicechat/full_duplex/test_voicechat_full_duplex_source.py",
     "tools/tests",
+    "apps/benchmark/qualification",
 ]
 markers = [
     "gpu: tests requiring a CUDA GPU",
     "trt: tests requiring TensorRT and CUDA",
     "e2e: end-to-end tests requiring checkpoints and native runtime",
     "unit: unit tests that do not require a GPU",
+    "qualification: auto-discovered family Accuracy and Performance qualification",
+    "accuracy: converted TRTMC output compared with an independent reference",
+    "performance: TRTMC and independent-reference performance comparison",
 ]

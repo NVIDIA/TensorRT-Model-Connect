@@ -719,7 +719,8 @@ Json run_solve(trtmc::ITask& task, const Json& request, const Timing& timing) {
         [](const trtmc::ForecastResult& result) {
             return Json{{"windows", 1},
                         {"forecast_elements", result.values.size()},
-                        {"shape", result.shape}};
+                        {"shape", result.shape},
+                        {"values", result.values}};
         });
 }
 

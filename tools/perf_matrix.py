@@ -67,6 +67,7 @@ OUTPUT_CONTRACTS = {
     "exact-text",
     "exact-token-ids",
     "forecast-shape",
+    "forecast-parity",
     "generated-token-count",
     "image-features-shape",
     "localization",
@@ -121,6 +122,7 @@ class Environment:
     local_files_only: bool
     timeout_seconds: int
     references: Mapping[str, str]
+    reference_python: Path = Path(sys.executable)
     storage_root: Path | None = None
     hf_cache_mode: str = "shared"
     hf_cache_retention: str = "retain"
@@ -147,6 +149,11 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--model", action="append", default=[])
         command.add_argument("--model-selection", type=Path)
         command.add_argument("--verbose", action="store_true")
+        command.add_argument(
+            "--allow-partial",
+            action="store_true",
+            help="skip release-catalog coverage checks for a selected QA suite",
+        )
         if name == "prepare":
             command.add_argument("--output", required=True, type=Path)
         if name == "run":
@@ -271,6 +278,9 @@ def _validate_entry(entry: Mapping[str, Any]) -> None:
         raise PerfMatrixError(f"entry {entry['id']} has an invalid baseline runner")
     if baseline["runner"] == "task-reference" and not isinstance(baseline.get("adapter"), str):
         raise PerfMatrixError(f"entry {entry['id']} requires baseline.adapter")
+    fallback = baseline.get("fallback")
+    if fallback is not None and (not isinstance(fallback, str) or not fallback):
+        raise PerfMatrixError(f"entry {entry['id']} baseline.fallback must be a mode")
     if not isinstance(measurement, Mapping):
         raise PerfMatrixError(f"entry {entry['id']} requires measurement")
     warmup = measurement.get("warmup")
@@ -294,6 +304,13 @@ def _expand(value: str, field: str) -> str:
 def _path(value: str, field: str) -> Path:
     expanded = Path(_expand(value, field)).expanduser()
     return expanded.resolve() if expanded.is_absolute() else (REPOSITORY / expanded).resolve()
+
+
+def _python_path(value: str, field: str) -> Path:
+    expanded = Path(_expand(value, field)).expanduser()
+    if not expanded.is_absolute():
+        expanded = REPOSITORY / expanded
+    return Path(os.path.abspath(expanded))
 
 
 def _path_list(value: Any, field: str) -> tuple[Path, ...]:
@@ -373,6 +390,9 @@ def load_environment(path: Path) -> Environment:
         worker=_path(str(tools["trtmc_worker"]), "tools.trtmc_worker"),
         hf_runner=_path(str(tools["hf_transformers_runner"]), "tools.hf_transformers_runner"),
         task_runner=_path(str(tools["task_reference_runner"]), "tools.task_reference_runner"),
+        reference_python=_python_path(
+            str(tools.get("reference_python", sys.executable)), "tools.reference_python"
+        ),
         results_root=_path(str(storage["results_root"]), "storage.results_root"),
         scratch_root=_path(str(storage["scratch_root"]), "storage.scratch_root"),
         bundle_cache=_path(str(storage["bundle_cache"]), "storage.bundle_cache"),
@@ -544,6 +564,7 @@ def preflight(
 ) -> list[ResolvedEntry]:
     files = (
         ("trtmc-bench", environment.trtmc_bench),
+        ("reference Python", environment.reference_python),
         ("HF reference runner", environment.hf_runner),
         ("task reference runner", environment.task_runner),
     )
@@ -612,6 +633,14 @@ def _candidate_base(entry: ResolvedEntry, environment: Environment) -> list[str]
     ]
     for root in environment.bundle_roots:
         arguments.extend(("--bundle-root", str(root)))
+    for name, value in entry.case.request.items():
+        arguments.extend(
+            (
+                "--set",
+                f"request.{name}="
+                + json.dumps(value, ensure_ascii=True, separators=(",", ":")),
+            )
+        )
     arguments.extend(
         (
             "--warmup",
@@ -701,8 +730,19 @@ def _validate_reference_path(entry: ResolvedEntry, field: str, path: Path) -> No
 
 
 def baseline_command(entry: ResolvedEntry, environment: Environment, output: Path) -> list[str]:
+    return _baseline_command(entry, environment, output)
+
+
+def _baseline_command(
+    entry: ResolvedEntry,
+    environment: Environment,
+    output: Path,
+    *,
+    mode: str | None = None,
+) -> list[str]:
     baseline = entry.spec["baseline"]
     runner = str(baseline["runner"])
+    selected_mode = str(mode or baseline.get("mode", "torch-compile"))
     request = json.dumps(entry.case.request, ensure_ascii=True, separators=(",", ":"))
     common = [
         "--model",
@@ -712,7 +752,7 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
         "--precision",
         entry.reference_precision,
         "--mode",
-        str(baseline.get("mode", "torch-compile")),
+        selected_mode,
         "--warmup",
         str(entry.case.measurement.warmup),
         "--iterations",
@@ -724,7 +764,7 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
     ]
     if runner == "hf-transformers":
         arguments = [
-            sys.executable,
+            str(environment.reference_python),
             str(environment.hf_runner),
             "--task",
             str(baseline.get("task", _baseline_task(entry))),
@@ -742,7 +782,7 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
             arguments.extend(("--generation-method", str(baseline["generation_method"])))
         if baseline.get("experts_implementation"):
             arguments.extend(("--experts-implementation", str(baseline["experts_implementation"])))
-        if baseline.get("mode") == "torch-compile":
+        if selected_mode == "torch-compile":
             arguments.extend(("--compile-mode", str(baseline.get("compile_mode", "default"))))
             if bool(baseline.get("fullgraph", False)):
                 arguments.append("--compile-fullgraph")
@@ -750,7 +790,7 @@ def baseline_command(entry: ResolvedEntry, environment: Environment, output: Pat
                 arguments.append("--compile-dynamic")
     else:
         arguments = [
-            sys.executable,
+            str(environment.reference_python),
             str(environment.task_runner),
             "--adapter",
             str(baseline["adapter"]),
@@ -1199,6 +1239,45 @@ def _output_contract(
             and sorted(left_shape) == sorted(right_shape)
         )
         return matched, "forecast output shape differs" if not matched else "", None
+    if contract == "forecast-parity":
+        left_values = left.get("values")
+        right_values = right.get("values")
+        if (
+            not isinstance(left_values, list)
+            or not isinstance(right_values, list)
+            or not left_values
+            or len(left_values) != len(right_values)
+        ):
+            return False, "forecast output values are missing or differ in length", None
+        try:
+            candidate_values = [float(value) for value in left_values]
+            reference_values = [float(value) for value in right_values]
+        except (TypeError, ValueError):
+            return False, "forecast output values are not numeric", None
+        if not all(math.isfinite(value) for value in (*candidate_values, *reference_values)):
+            return False, "forecast output values are not finite", None
+        difference = math.sqrt(
+            sum(
+                (candidate - reference) ** 2
+                for candidate, reference in zip(candidate_values, reference_values, strict=True)
+            )
+        )
+        reference_norm = math.sqrt(sum(value**2 for value in reference_values))
+        relative_l2 = difference / max(reference_norm, 1.0e-12)
+        max_absolute_error = max(
+            abs(candidate - reference)
+            for candidate, reference in zip(candidate_values, reference_values, strict=True)
+        )
+        relative_limit = float(entry.spec["baseline"]["max_relative_l2"])
+        absolute_limit = float(entry.spec["baseline"]["max_absolute_error"])
+        evidence = {
+            "relative_l2": relative_l2,
+            "max_relative_l2": relative_limit,
+            "max_absolute_error": max_absolute_error,
+            "max_allowed_absolute_error": absolute_limit,
+        }
+        matched = relative_l2 <= relative_limit and max_absolute_error <= absolute_limit
+        return matched, "forecast values exceed parity thresholds" if not matched else "", evidence
     raise PerfMatrixError(f"output contract is not implemented: {contract}")
 
 
@@ -1392,6 +1471,7 @@ def _execute_entry(
     commands: dict[str, Any] = {}
     measurement_attempts: list[dict[str, Any]] = []
     measurement_stability: dict[str, Any] | None = None
+    reference_attempts: list[dict[str, Any]] = []
     candidate: dict[str, Any] = {}
     reference: dict[str, Any] = {}
     status = "white"
@@ -1424,23 +1504,62 @@ def _execute_entry(
                 raise PerfMatrixError("candidate command failed")
             candidate = _candidate_result(candidate_output)
 
-            reference_arguments = baseline_command(entry, environment, reference_output)
-            reference_result = run_command(
-                reference_arguments,
-                timeout=environment.timeout_seconds,
-                stdout_path=logs / "reference.stdout.log",
-                stderr_path=logs / "reference.stderr.log",
-                verbose=verbose,
-                env=command_environment,
-            )
-            commands["reference" + suffix] = reference_result
-            if reference_result["exit_code"] != 0:
-                raise PerfMatrixError("reference command failed")
-            reference = _json_file(reference_output, "reference result")
-            if reference.get("status") != "completed":
-                raise PerfMatrixError(str(reference.get("error", "reference failed")))
-
-            status, comparison = compare(entry, candidate, reference)
+            preferred_mode = str(entry.spec["baseline"].get("mode", "torch-compile"))
+            fallback = entry.spec["baseline"].get("fallback")
+            modes = [preferred_mode]
+            if isinstance(fallback, str) and fallback and fallback != preferred_mode:
+                modes.append(fallback)
+            reference_result = None
+            selected_reference: dict[str, Any] | None = None
+            for mode_index, mode in enumerate(modes):
+                is_fallback = mode_index > 0
+                mode_output = (
+                    measurement_dir / f"reference-{mode}.json" if is_fallback else reference_output
+                )
+                log_name = "reference-fallback" if is_fallback else "reference"
+                reference_arguments = _baseline_command(
+                    entry, environment, mode_output, mode=mode
+                )
+                reference_result = run_command(
+                    reference_arguments,
+                    timeout=environment.timeout_seconds,
+                    stdout_path=logs / f"{log_name}.stdout.log",
+                    stderr_path=logs / f"{log_name}.stderr.log",
+                    verbose=verbose,
+                    env=command_environment,
+                )
+                command_name = ("reference_fallback" if is_fallback else "reference") + suffix
+                commands[command_name] = reference_result
+                reference_attempt = {
+                    "measurement_attempt": measurement_attempt,
+                    "mode": mode,
+                    "fallback": is_fallback,
+                    "exit_code": reference_result["exit_code"],
+                }
+                reference_attempts.append(reference_attempt)
+                if reference_result["exit_code"] != 0:
+                    continue
+                tentative_reference = _json_file(mode_output, "reference result")
+                if tentative_reference.get("status") != "completed":
+                    reference_attempt["fallback_reason"] = str(
+                        tentative_reference.get("error", "reference failed")
+                    )
+                    continue
+                tentative_status, tentative_comparison = compare(
+                    entry, candidate, tentative_reference
+                )
+                if tentative_status in TERMINAL_COMPARISONS or mode_index == len(modes) - 1:
+                    selected_reference = tentative_reference
+                    status = tentative_status
+                    comparison = tentative_comparison
+                    break
+                reference_attempt["fallback_reason"] = str(
+                    tentative_comparison.get("reason", "reference contract mismatch")
+                )
+            assert reference_result is not None
+            if selected_reference is None:
+                raise PerfMatrixError("reference command and configured fallback failed")
+            reference = selected_reference
             if status not in TERMINAL_COMPARISONS:
                 measurement_stability = None
                 break
@@ -1494,6 +1613,7 @@ def _execute_entry(
         "bundle_cleanup": cleanup,
         "hf_cache_cleanup": cache_cleanup,
         "commands": commands,
+        "reference_attempts": reference_attempts,
     }
     if measurement_stability is not None:
         row["measurement_stability"] = measurement_stability
@@ -1904,7 +2024,8 @@ def _common(
         model_selection=arguments.model_selection,
     )
     environment = load_environment(environment_path)
-    _coverage(all_entries, excluded)
+    if not arguments.allow_partial:
+        _coverage(all_entries, excluded)
     resolved = preflight(
         selected,
         environment,

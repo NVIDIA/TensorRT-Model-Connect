@@ -168,6 +168,22 @@ def test_environment_enforces_storage_root_and_per_entry_cache_policy(tmp_path: 
         perf.preflight((), environment, require_runtime=False)
 
 
+def test_environment_preserves_reference_virtualenv_symlink(tmp_path: Path) -> None:
+    environment_path, _ = _environment(tmp_path)
+    value = yaml.safe_load(environment_path.read_text(encoding="utf-8"))
+    virtualenv = tmp_path / "reference-venv"
+    (virtualenv / "bin").mkdir(parents=True)
+    python = virtualenv / "bin/python"
+    python.symlink_to(Path(sys.executable))
+    value["tools"]["reference_python"] = str(python)
+    environment_path.write_text(yaml.safe_dump(value), encoding="utf-8")
+
+    environment = perf.load_environment(environment_path)
+
+    assert environment.reference_python == python
+    assert environment.reference_python.is_symlink()
+
+
 def test_per_entry_hf_cache_is_private_and_follows_retention(tmp_path: Path, monkeypatch) -> None:
     environment_path, _ = _environment(tmp_path)
     value = yaml.safe_load(environment_path.read_text(encoding="utf-8"))
@@ -398,10 +414,97 @@ def test_candidate_and_reference_commands_use_current_contract(tmp_path: Path) -
     assert "--runtime-root" in candidate
     assert "--operation" in candidate
     assert "--no-build" in candidate
+    assert "request.prompt=\"Hello, I'm a language model\"" in candidate
     reference = perf.baseline_command(resolved, environment, tmp_path / "reference.json")
     assert "--case-name" in reference
     assert "--task" in reference
     assert ("--revision" in reference) is bool(resolved.model.hf_revision)
+
+
+def test_reference_falls_back_when_compiled_process_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(value for value in entries if value["id"] == "gpt2.generate")
+    spec = {**spec, "baseline": {**spec["baseline"], "fallback": "hf-eager"}}
+    entry = perf.resolve_entries((spec,), environment)[0]
+    state, successful = _fake_measurement_runner(environment, entry)
+    modes = []
+
+    def run_command(arguments, **kwargs):
+        if Path(arguments[0]) != environment.trtmc_bench:
+            mode = arguments[arguments.index("--mode") + 1]
+            modes.append(mode)
+            if mode == "torch-compile":
+                kwargs["stdout_path"].parent.mkdir(parents=True, exist_ok=True)
+                kwargs["stdout_path"].write_text("", encoding="utf-8")
+                kwargs["stderr_path"].write_text("compile failed", encoding="utf-8")
+                return {"argv": list(arguments), "exit_code": 1}
+        return successful(arguments, **kwargs)
+
+    monkeypatch.setattr(perf, "run_command", run_command)
+    row = perf._execute_entry(
+        entry,
+        environment,
+        tmp_path / "run",
+        no_build=True,
+        verbose=False,
+        attempt=1,
+    )
+
+    assert row["status"] in perf.TERMINAL_COMPARISONS
+    assert modes == ["torch-compile", "hf-eager"]
+    assert row["reference_attempts"] == [
+        {"measurement_attempt": 1, "mode": "torch-compile", "fallback": False, "exit_code": 1},
+        {"measurement_attempt": 1, "mode": "hf-eager", "fallback": True, "exit_code": 0},
+    ]
+    assert state["candidate_runs"] == 1
+
+
+def test_compiled_output_mismatch_falls_back_to_eager(tmp_path: Path, monkeypatch) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    spec = next(value for value in entries if value["id"] == "gpt2.generate")
+    spec = {**spec, "baseline": {**spec["baseline"], "fallback": "hf-eager"}}
+    entry = perf.resolve_entries((spec,), environment)[0]
+    state, successful = _fake_measurement_runner(
+        environment, entry, candidate_tokens=([9],)
+    )
+
+    def run_command(arguments, **kwargs):
+        result = successful(arguments, **kwargs)
+        if (
+            result["exit_code"] == 0
+            and Path(arguments[0]) != environment.trtmc_bench
+            and arguments[arguments.index("--mode") + 1] == "hf-eager"
+        ):
+            output = Path(arguments[arguments.index("--output") + 1])
+            reference = json.loads(output.read_text(encoding="utf-8"))
+            reference["output_summary"] = {"token_ids": [9], "output_tokens": 1}
+            output.write_text(json.dumps(reference), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(perf, "run_command", run_command)
+
+    row = perf._execute_entry(
+        entry,
+        environment,
+        tmp_path / "run",
+        no_build=True,
+        verbose=False,
+        attempt=1,
+    )
+
+    assert row["status"] in perf.TERMINAL_COMPARISONS
+    reference_commands = [
+        command for command in state["commands"] if Path(command[0]) != environment.trtmc_bench
+    ]
+    assert [command[command.index("--mode") + 1] for command in reference_commands] == [
+        "torch-compile",
+        "hf-eager",
+    ]
+    assert row["reference_attempts"][0]["fallback_reason"] == "generated token count differs"
 
 
 def test_lerobot_reference_is_family_owned_and_has_a_closed_contract(tmp_path: Path) -> None:

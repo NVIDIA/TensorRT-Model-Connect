@@ -36,3 +36,34 @@ def pytest_addoption(parser):
         default=None,
         help="Select names listed one per line in a file",
     )
+    group = parser.getgroup("qualification")
+    group.addoption(
+        "--qualification-model",
+        action="append",
+        default=[],
+        help="Select an exact family, model, or qualification case; repeat or comma-separate",
+    )
+    group.addoption("--qualification-data-root", help="Root containing staged Accuracy datasets")
+    group.addoption(
+        "--qualification-artifacts",
+        default="artifacts/qualification",
+        help="Directory for qualification evidence and reports",
+    )
+    group.addoption("--qualification-env-root", help="Cache for family reference environments")
+    group.addoption("--qualification-bundle-cache", help="Managed TRTMC bundle cache")
+    group.addoption(
+        "--qualification-bundle-root", action="append", default=[], help="Existing bundle root"
+    )
+    group.addoption("--qualification-runtime-root", help="Installed TRTMC runtime library directory")
+    group.addoption("--qualification-trtmc-bench", help="Installed trtmc-bench executable")
+    group.addoption("--qualification-trtmc", help="Installed trtmc executable")
+    group.addoption("--qualification-worker", help="Installed trtmc benchmark worker")
+    group.addoption(
+        "--qualification-reference-python",
+        action="append",
+        default=[],
+        metavar="MODEL_OR_FAMILY=PATH",
+        help="Use an existing reference environment instead of creating the declared one",
+    )
+    group.addoption("--qualification-no-build", action="store_true")
+    group.addoption("--qualification-verbose", action="store_true")
