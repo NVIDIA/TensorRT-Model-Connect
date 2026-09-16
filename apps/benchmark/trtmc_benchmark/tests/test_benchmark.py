@@ -714,18 +714,23 @@ def test_catalog_keeps_semantic_requests_separate_from_build_dimensions(
     assert model.build_settings == {"image_height": 704, "image_width": 1280, "video_num_frames": 321}
 
 
-@pytest.mark.parametrize("selector", [
-    "pixart-sigma-1024-l0", "qwen-image-edit-2511", "flux-schnell-l0-batch2", "sana-wm-bidirectional",
+@pytest.mark.parametrize("selector,legacy_task", [
+    ("pixart-sigma-1024-l0", "image_generation"),
+    ("qwen-image-edit-2511", "image_edit"),
+    ("flux-schnell-l0-batch2", "image_generation_batch"),
+    ("sana-wm-bidirectional", "world_model_generation"),
 ])
-def test_catalog_preserves_legacy_media_build_workload(tmp_path: Path, selector: str) -> None:
-    model = ManifestCatalog(REPO / "families").resolve(selector)
+def test_catalog_preserves_legacy_media_build_workload(
+    tmp_path: Path, selector: str, legacy_task: str,
+) -> None:
+    model = replace(ManifestCatalog(REPO / "families").resolve(selector), task=legacy_task)
     expected = dict(resolve_task_case(
         model.task, model.testcases[0], model.manifest_path.parent.parent,
     ).request)
     expected.update(height=model.build_settings["image_height"], width=model.build_settings["image_width"])
     if "video_num_frames" in model.build_settings:
         expected.update(num_frames=model.build_settings["video_num_frames"], media_type="video")
-    assert resolve_case(model, tmp_path / "model.bundle").request == expected
+    assert resolve_case(model, tmp_path / "model.bundle", selected_task=legacy_task).request == expected
 
 
 def test_catalog_detection_keeps_image_input_without_build_dimensions(tmp_path: Path) -> None:

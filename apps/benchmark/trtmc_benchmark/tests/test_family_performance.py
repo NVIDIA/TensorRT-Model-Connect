@@ -162,6 +162,243 @@ def test_family_reference_minimal_real_subprocess(repository, tmp_path):
     assert perf._output_contract(entry, {"output_summary": {"token_ids": [5]}}, result)[0]
 
 
+@pytest.mark.parametrize("entry_id", ["sample.generate", "unrelated.workload"])
+def test_family_reference_takes_over_own_canonical_entry(repository, tmp_path, entry_id):
+    legacy = _entry("sample", "sample-model", script=True, entry_id=entry_id)
+    legacy["baseline"].pop("script")
+    legacy["baseline"].update(adapter="hf-transformers-vlm", output_contract="exact-token-ids",
+                              adapter_options={"legacy_only": True})
+    legacy["equivalence_margin_percent"] = 1.25
+    _write_suite(repository.canonical, [legacy, _entry("other", "other-model")])
+    central_bytes = repository.canonical.read_bytes()
+    original, = perf.resolve_entries(
+        [perf._load_suite_file(repository.canonical)[1][0]], repository.environment,
+    )
+
+    owned = _entry("sample", "sample-model", script=True, entry_id=entry_id)
+    owned["baseline"]["output_contract"] = "exact-token-ids"
+    owned["equivalence_margin_percent"] = 1.25
+    _write_suite(repository.owned_suite, [owned])
+    _, specs, excluded = perf.load_suite(repository.canonical)
+    assert [item["id"] for item in specs] == [entry_id, "other.generate"]
+    assert excluded == set()
+    perf._coverage(specs, excluded)
+    assert specs[0] == perf._load_suite_file(repository.owned_suite, owner="sample")[1][0]
+    assert "adapter" not in specs[0]["baseline"]
+    assert "adapter_options" not in specs[0]["baseline"]
+    entry, = perf.resolve_entries([specs[0]], repository.environment)
+    assert entry.case.testcase_name == original.case.testcase_name
+    assert entry.case.request == original.case.request
+    assert entry.case.measurement == original.case.measurement
+    assert entry.spec["equivalence_margin_percent"] == original.spec["equivalence_margin_percent"]
+    assert entry.spec["baseline"]["output_contract"] == original.spec["baseline"]["output_contract"]
+    output = tmp_path / "owned-reference.json"
+    command = perf.baseline_command(entry, repository.environment, output)
+    assert Path(command[1]) == repository.script and "--adapter" not in command
+    process = perf.run_command(command, timeout=10, stdout_path=tmp_path / "stdout.log",
+                               stderr_path=tmp_path / "stderr.log", verbose=False)
+    assert process["exit_code"] == 0
+    result = perf._json_file(output, "owned fixture reference")
+    perf._validate_script_result(entry, repository.environment, result)
+    assert result["output_summary"] == {
+        "token_ids": [5], "text": "fixture", "loaded_models": 1, "invocations": 5,
+    }
+    assert len(result["samples_ms"]) == 3
+    assert perf._output_contract(entry, {"output_summary": {"token_ids": [5]}}, result)[0]
+    assert repository.canonical.read_bytes() == central_bytes
+
+
+def test_family_takeover_is_complete_and_keeps_other_rows_in_place(repository):
+    legacy = _entry("sample", "sample-model")
+    legacy["baseline"]["adapter_options"] = {"central_only": True}
+    _write_suite(repository.canonical, [legacy, _entry("other", "other-model")],
+                 defaults={"measurement": {"warmup": 11, "iterations": 13},
+                           "equivalence_margin_percent": 0.5},
+                 additional_profiles=[{"inherit": "sample.generate", "model": "sample-model"}],
+                 excluded_profiles=[{"model": "existing-exclusion", "reason": "existing policy"}])
+    central_bytes = repository.canonical.read_bytes()
+    original = perf._load_suite_file(repository.canonical)[1]
+    owned = _entry("sample", "sample-model", script=True)
+    owned["baseline"]["adapter_options"] = {"owned_only": False}
+    added = {**deepcopy(owned), "id": "sample.additional"}
+    _write_suite(repository.owned_suite, [added, owned])
+    _, rows, excluded = perf.load_suite(repository.canonical)
+    assert [row["id"] for row in rows] == [
+        "sample.generate", "other.generate", "sample.generate@sample-model", "sample.additional",
+    ]
+    assert rows[0] == perf._load_suite_file(repository.owned_suite, owner="sample")[1][1]
+    assert rows[0]["measurement"] == {"warmup": 2, "iterations": 3}
+    assert rows[0]["equivalence_margin_percent"] == 5.0
+    assert rows[0]["baseline"]["adapter_options"] == {"owned_only": False}
+    assert rows[1:3] == original[1:3]
+    assert excluded == {"existing-exclusion"}
+    assert repository.canonical.read_bytes() == central_bytes
+
+
+def test_family_takeover_uses_owner_not_entry_id_prefix(repository):
+    central = _entry("other", "other-model", entry_id="sample.generate")
+    _write_suite(repository.canonical, [central])
+    with pytest.raises(perf.PerfMatrixError, match="duplicate suite entry"):
+        perf.load_suite(repository.canonical)
+
+
+@pytest.mark.parametrize("canonical", [False, True])
+def test_family_suite_rejects_duplicate_derived_ids(repository, canonical):
+    profile = {"inherit": "sample.generate", "model": "sample-model"}
+    _write_suite(repository.owned_suite, [_entry("sample", "sample-model", script=True)],
+                 additional_profiles=[profile, profile])
+    with pytest.raises(perf.PerfMatrixError, match="duplicate suite entry"):
+        perf.load_suite(repository.canonical if canonical else repository.owned_suite)
+
+
+def test_family_additional_profiles_preserve_existing_chained_inheritance(repository):
+    _write_suite(repository.owned_suite, [_entry("sample", "sample-model", script=True)],
+                 additional_profiles=[
+                     {"inherit": "sample.generate", "model": "sample-model"},
+                     {"inherit": "sample.generate@sample-model", "model": "sample-model"},
+                 ])
+    rows = perf.load_suite(repository.canonical)[1]
+    assert [row["id"] for row in rows] == [
+        "other.generate", "sample.generate", "sample.generate@sample-model",
+        "sample.generate@sample-model@sample-model",
+    ]
+    assert rows[-1]["baseline"] == rows[-2]["baseline"] == rows[-3]["baseline"]
+    assert rows[-1]["workload"] == {"testcase": "sample-model"}
+    assert rows[-1]["measurement"] == {"warmup": 2, "iterations": 3}
+
+
+def test_family_can_take_over_parent_and_derived_entry(repository, tmp_path):
+    owned = _entry("sample", "sample-model", script=True)
+    owned["equivalence_margin_percent"] = 1.25
+    owned["baseline"]["output_contract"] = "exact-token-ids"
+    legacy = deepcopy(owned)
+    legacy["baseline"].pop("script")
+    legacy["baseline"]["adapter"] = "hf-transformers-vlm"
+    profiles = [{"inherit": "sample.generate", "model": "sample-model"}]
+    _write_suite(repository.canonical, [legacy, _entry("other", "other-model")],
+                 additional_profiles=profiles)
+    central_bytes = repository.canonical.read_bytes()
+    original = perf.resolve_entries(perf._load_suite_file(repository.canonical)[1], repository.environment)
+    _write_suite(repository.owned_suite, [owned], additional_profiles=profiles)
+    _, rows, excluded = perf.load_suite(repository.canonical)
+    assert [row["id"] for row in rows] == ["sample.generate", "other.generate", "sample.generate@sample-model"]
+    perf._coverage(rows, excluded)
+    actual = perf.resolve_entries(rows, repository.environment)
+    for index in (0, 2):
+        entry = actual[index]
+        assert entry.case.request == original[index].case.request
+        assert entry.case.testcase_name == original[index].case.testcase_name
+        assert entry.case.measurement == original[index].case.measurement
+        assert entry.spec["equivalence_margin_percent"] == 1.25
+        assert entry.spec["baseline"]["output_contract"] == "exact-token-ids"
+        assert "adapter" not in entry.spec["baseline"]
+        output = tmp_path / f"reference-{index}.json"
+        command = perf.baseline_command(entry, repository.environment, output)
+        assert Path(command[1]) == repository.script
+        process = perf.run_command(command, timeout=10, stdout_path=tmp_path / f"stdout-{index}.log",
+                                   stderr_path=tmp_path / f"stderr-{index}.log", verbose=False)
+        assert process["exit_code"] == 0
+        result = perf._json_file(output, "owned parent/derived reference")
+        perf._validate_script_result(entry, repository.environment, result)
+        assert result["output_summary"] == {
+            "token_ids": [5], "text": "fixture", "loaded_models": 1, "invocations": 5,
+        }
+        assert len(result["samples_ms"]) == 3
+        assert perf._output_contract(entry, {"output_summary": {"token_ids": [5]}}, result)[0]
+    assert repository.canonical.read_bytes() == central_bytes
+
+
+def test_different_family_suites_cannot_claim_the_same_new_id(repository):
+    _write_suite(repository.owned_suite, [
+        _entry("sample", "sample-model", script=True, entry_id="new.workload"),
+    ])
+    _write_suite(repository.families / "other/tests/performance.yaml", [
+        _entry("other", "other-model", entry_id="new.workload"),
+    ])
+    with pytest.raises(perf.PerfMatrixError, match="duplicate suite entry"):
+        perf.load_suite(repository.canonical)
+
+
+def test_family_takeover_cannot_hide_missing_ready_model_coverage(repository):
+    _write_suite(repository.canonical, [_entry("sample", "sample-model"), _entry("other", "other-model")])
+    path = repository.families / "sample/tests/manifests/alternate.json"
+    value = json.loads(path.with_name("sample.json").read_text())
+    value.update(name="sample-alternate", testcases=[{"name": "sample-alternate", "prompt": "Hello"}])
+    path.write_text(json.dumps(value))
+    _write_suite(repository.owned_suite, [
+        _entry("sample", "sample-alternate", script=True, entry_id="sample.generate"),
+    ])
+    _, rows, excluded = perf.load_suite(repository.canonical)
+    with pytest.raises(perf.PerfMatrixError, match="omits ready models: sample-model"):
+        perf._coverage(rows, excluded)
+
+
+def test_owned_reference_activates_only_its_declared_excluded_model(repository, tmp_path):
+    manifest = repository.families / "sample/tests/manifests/still-excluded.json"
+    value = json.loads(manifest.with_name("sample.json").read_text())
+    value.update(name="sample-still-excluded",
+                 testcases=[{"name": "sample-still-excluded", "prompt": "Hello"}])
+    manifest.write_text(json.dumps(value))
+    _write_suite(repository.canonical, [_entry("other", "other-model")], excluded_profiles=[
+        {"model": "sample-model", "reason": "no reference workload yet"},
+        {"model": "sample-still-excluded", "reason": "independent existing exclusion"},
+    ])
+    central_bytes = repository.canonical.read_bytes()
+    owned = _entry("sample", "sample-model", script=True)
+    owned["baseline"]["output_contract"] = "exact-token-ids"
+    owned["equivalence_margin_percent"] = 1.25
+    _write_suite(repository.owned_suite, [owned])
+    _, rows, excluded = perf.load_suite(repository.canonical)
+    assert excluded == {"sample-still-excluded"}
+    perf._coverage(rows, excluded)
+    entry, = perf.resolve_entries([rows[-1]], repository.environment)
+    assert entry.model.name == "sample-model"
+    assert entry.case.request == {"prompt": "Hello"}
+    assert entry.case.measurement.warmup == 2 and entry.case.measurement.iterations == 3
+    assert entry.spec["equivalence_margin_percent"] == 1.25
+    output = tmp_path / "activated-reference.json"
+    command = perf.baseline_command(entry, repository.environment, output)
+    assert Path(command[1]) == repository.script
+    process = perf.run_command(command, timeout=10, stdout_path=tmp_path / "stdout.log",
+                               stderr_path=tmp_path / "stderr.log", verbose=False)
+    assert process["exit_code"] == 0
+    result = perf._json_file(output, "activated owned reference")
+    perf._validate_script_result(entry, repository.environment, result)
+    assert result["output_summary"] == {
+        "token_ids": [5], "text": "fixture", "loaded_models": 1, "invocations": 5,
+    }
+    assert len(result["samples_ms"]) == 3
+    assert perf._output_contract(entry, {"output_summary": {"token_ids": [5]}}, result)[0]
+    assert repository.canonical.read_bytes() == central_bytes
+    repository.owned_suite.unlink()
+    _, rows, excluded = perf.load_suite(repository.canonical)
+    assert excluded == {"sample-model", "sample-still-excluded"}
+    perf._coverage(rows, excluded)
+    assert repository.canonical.read_bytes() == central_bytes
+
+
+def test_owned_entry_cannot_activate_another_familys_excluded_model(repository):
+    _write_suite(repository.canonical, [_entry("sample", "sample-model")], excluded_profiles=[
+        {"model": "other-model", "reason": "existing exclusion"},
+    ])
+    central_bytes = repository.canonical.read_bytes()
+    _write_suite(repository.owned_suite, [_entry("sample", "other-model", script=True)])
+    with pytest.raises(perf.PerfMatrixError, match="another family's manifest"):
+        perf.load_suite(repository.canonical)
+    assert repository.canonical.read_bytes() == central_bytes
+
+
+def test_central_configured_and_excluded_model_still_fails_without_owned_entry(repository):
+    repository.owned_suite.unlink()
+    _write_suite(repository.canonical, [
+        _entry("sample", "sample-model"), _entry("other", "other-model"),
+    ], excluded_profiles=[{"model": "sample-model", "reason": "conflicting central policy"}])
+    _, rows, excluded = perf.load_suite(repository.canonical)
+    assert excluded == {"sample-model"}
+    with pytest.raises(perf.PerfMatrixError, match="both configured and excluded: sample-model"):
+        perf._coverage(rows, excluded)
+
+
 def _resolved(repository):
     _, entries, _ = perf.load_suite(repository.canonical)
     entry, = perf.resolve_entries([entries[-1]], repository.environment)

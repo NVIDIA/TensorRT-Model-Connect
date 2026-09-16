@@ -94,9 +94,17 @@ judge text or audio accuracy; `text_parity_checked` and
 The canonical release suite also reads optional
 `families/<family>/tests/performance.yaml` files using the same
 `trtmc.perf-suite/v2` format. Each file may name only that family's manifests and
-testcases. Entry IDs must be globally unique; family files cannot replace central
-entries or add exclusions. A standalone user suite does not implicitly include
-other suites. Check, prepare, run and resume use the same composition.
+testcases. An owned entry with the same ID and family replaces a central entry
+in place; other new IDs are appended. Replacement uses the complete owned
+declaration and its own defaults, not a partial merge with the old entry. Retain
+the original workload, measurement and comparison criteria explicitly when
+migrating a reference. Already-expanded additional profiles require their own
+exact-ID replacements. Cross-family ID conflicts, repeated IDs within a family
+file and family exclusions remain errors. A standalone user suite does not
+implicitly include other suites. Check, prepare, run and resume use the same
+composition.
+An accepted owned declaration activates only its explicitly named model from
+central exclusions for validation; it does not establish qualification.
 
 Use an existing reference adapter when it implements the actual workload.
 Otherwise declare a Python script relative to the owning family directory:

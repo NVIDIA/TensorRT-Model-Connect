@@ -1417,11 +1417,15 @@ def test_release_suite_expands_profiles_and_covers_ready_catalog() -> None:
     }
     vision_entries = {entry["id"]: entry for entry in entries if entry["id"] in vision_ids}
     assert set(vision_entries) == vision_ids
+    perf._coverage(entries, excluded)
+    # Adapter identity belongs to the builtin fixture, not an owned replacement.
+    _, builtin_entries, _ = perf._load_suite_file(SUITE)
+    builtin_vision = {entry["id"]: entry for entry in builtin_entries if entry["id"] in vision_ids}
+    assert set(builtin_vision) == vision_ids
     assert all(
         entry["baseline"]["adapter"] == "hf-transformers-vision"
-        for entry in vision_entries.values()
+        for entry in builtin_vision.values()
     )
-    perf._coverage(entries, excluded)
 
 
 @pytest.mark.parametrize(
@@ -1593,7 +1597,8 @@ def test_lerobot_reference_is_family_owned_and_has_a_closed_contract(tmp_path: P
     entrypoint = source / "lerobot/common/policies/act/modeling_act.py"
     entrypoint.parent.mkdir(parents=True)
     entrypoint.write_text("", encoding="utf-8")
-    _, entries, _ = perf.load_suite(SUITE)
+    # Exercise the builtin adapter's parser and source-root contract explicitly.
+    _, entries, _ = perf._load_suite_file(SUITE)
     selected = [entry for entry in entries if entry["id"] == "lerobot_act.control"]
     resolved = perf.resolve_entries(selected, environment)[0]
     command = perf.baseline_command(resolved, environment, tmp_path / "reference.json")
@@ -2209,7 +2214,8 @@ def test_lance_command_requires_explicit_checkout_without_a_commit_gate(
     _, environment = _environment(tmp_path)
     checkout = Path(environment.references["lance_repo"])
     (checkout / "inference_lance.py").write_text("", encoding="utf-8")
-    _, entries, _ = perf.load_suite(SUITE)
+    # This checkout requirement belongs to the existing builtin Lance adapter.
+    _, entries, _ = perf._load_suite_file(SUITE)
     selected = [entry for entry in entries if entry["id"] == "lance.generate"]
     resolved = perf.resolve_entries(selected, environment)[0]
     command = perf.baseline_command(resolved, environment, tmp_path / "reference.json")
@@ -2254,11 +2260,23 @@ def test_check_fails_fast_when_selected_reference_input_is_missing(
     value["references"]["lance_repo"] = "${TRTMC_TEST_UNSET_LANCE_REPO}"
     environment_path.write_text(yaml.safe_dump(value), encoding="utf-8")
     monkeypatch.delenv("TRTMC_TEST_UNSET_LANCE_REPO", raising=False)
+    # Keep effective coverage; only this test's Lance route must stay builtin.
+    _, entries, excluded = perf.load_suite(SUITE)
+    _, builtin_entries, _ = perf._load_suite_file(SUITE)
+    builtin = next(entry for entry in builtin_entries if entry["id"] == "lance.generate")
+    builtin_suite = tmp_path / "builtin-release.yaml"
+    builtin_suite.write_text(yaml.safe_dump({
+        "schema_version": perf.SUITE_SCHEMA, "name": "builtin-lance-fixture",
+        "entries": [builtin if entry["id"] == builtin["id"] else entry for entry in entries],
+        "excluded_profiles": [
+            {"model": model, "reason": "existing effective exclusion"} for model in sorted(excluded)
+        ],
+    }))
     assert (
         perf.main(
             [
                 "check",
-                str(SUITE),
+                str(builtin_suite),
                 "--environment",
                 str(environment_path),
                 "--entry",
@@ -2291,7 +2309,8 @@ def test_timeseries_entries_use_current_forecast_request_schema(tmp_path: Path) 
 
 def test_qwen3_omni_uses_the_text_generation_contract(tmp_path: Path) -> None:
     _, environment = _environment(tmp_path)
-    _, entries, _ = perf.load_suite(SUITE)
+    # Check the builtin text-only adapter, independently of the active owned route.
+    _, entries, _ = perf._load_suite_file(SUITE)
     selected = [entry for entry in entries if entry["id"] == "qwen3_omni.generate"]
     resolved = perf.resolve_entries(selected, environment)[0]
     assert resolved.spec["operation"] == "generate"
@@ -2335,10 +2354,13 @@ def test_sana_reference_reports_materialized_video_shape() -> None:
 
 
 def test_sana_world_request_preserves_official_camera_controls(tmp_path: Path) -> None:
-    _, environment = _environment(tmp_path)
-    _, entries, _ = perf.load_suite(SUITE)
-    selected = [entry for entry in entries if entry["id"] == "sana_wm.generate_image"]
-    request = perf.resolve_entries(selected, environment)[0].case.request
+    model = replace(
+        perf.ManifestCatalog(REPO / "families").resolve("sana-wm-bidirectional"),
+        task="world_model_generation",
+    )
+    request = perf.resolve_case(
+        model, tmp_path / "model.bundle", selected_task="world_model_generation",
+    ).request
     assert request["translation_speed"] == 0.055
     assert request["rotation_speed_deg"] == 1.2
     assert request["fps"] == 16
@@ -2349,7 +2371,8 @@ def test_sana_world_request_preserves_official_camera_controls(tmp_path: Path) -
 @pytest.mark.parametrize("route", ["builtin", "script", "hf"])
 def test_reference_testcase_name_is_only_sent_to_builtin_runner(monkeypatch, tmp_path, route):
     _, environment = _environment(tmp_path)
-    _, entries, _ = perf.load_suite(SUITE)
+    # Exercise explicit runner fixtures, not a family's active owned replacement.
+    _, entries, _ = perf._load_suite_file(SUITE)
     entry = perf.resolve_entries(
         [value for value in entries if value["id"] == "sana_wm.generate_image"], environment,
     )[0]
@@ -2419,7 +2442,8 @@ def test_sana_reference_options_use_resolved_testcase_and_explicit_options(
     monkeypatch, tmp_path: Path,
 ) -> None:
     _, environment = _environment(tmp_path)
-    _, entries, _ = perf.load_suite(SUITE)
+    # This tests the existing builtin adapter even after an owned script takes over.
+    _, entries, _ = perf._load_suite_file(SUITE)
     selected = [entry for entry in entries if entry["id"] == "sana_wm.generate_image"]
     entry = perf.resolve_entries(selected, environment)[0]
     original = {"translation_speed": 0.055, "rotation_speed_deg": 1.2,
@@ -2481,7 +2505,8 @@ def test_sana_semantic_request_metadata_moves_only_to_reference_options(
     monkeypatch, tmp_path: Path,
 ) -> None:
     _, environment = _environment(tmp_path)
-    _, entries, _ = perf.load_suite(SUITE)
+    # Keep the builtin reference contract independent of canonical script selection.
+    _, entries, _ = perf._load_suite_file(SUITE)
     selected = [entry for entry in entries if entry["id"] == "sana_wm.generate_image"]
     entry = perf.resolve_entries(selected, environment)[0]
     semantic = perf.resolve_case(entry.model, tmp_path / "model.bundle", selected_task="image_text_action_to_video")

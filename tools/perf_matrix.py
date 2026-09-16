@@ -203,16 +203,21 @@ def load_suite(path: Path) -> tuple[str, list[dict[str, Any]], set[str]]:
     canonical = REPOSITORY / "apps/benchmark/performance/release.yaml"
     if path.resolve() != canonical.resolve():
         return name, entries, excluded
-    ids = {entry["id"] for entry in entries}
+    positions = {entry["id"]: index for index, entry in enumerate(entries)}
     for family_suite in sorted(MANIFEST_ROOT.glob("*/tests/performance.yaml")):
         owner = family_suite.parents[1].name
         _family_file(owner, "tests/performance.yaml", "performance suite")
         _, owned_entries, _ = _load_suite_file(family_suite, owner=owner)
         for entry in owned_entries:
-            if entry["id"] in ids:
+            position = positions.get(entry["id"])
+            if position is None:
+                positions[entry["id"]] = len(entries)
+                entries.append(entry)
+            elif entries[position]["family"] == owner:
+                entries[position] = entry
+            else:
                 raise PerfMatrixError(f"duplicate suite entry {entry['id']!r}")
-            ids.add(entry["id"])
-            entries.append(entry)
+            excluded.discard(entry["model"])
     return name, entries, excluded
 
 
