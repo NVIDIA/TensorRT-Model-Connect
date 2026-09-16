@@ -238,8 +238,9 @@ branch so the new exact merge is validated.
 A successful automatic Community CPU run also starts the self-service
 [Community premerge path](.github/community-premerge.md). It runs full units,
 native packaging, and selected GPU cases on disposable Brev instances. Stable
-uses the main workflow implementation; dev is a separate, non-blocking CI
-experiment. Authors start this path by opening or updating their pull request.
+uses the main workflow implementation. Maintainers can enable dev comparison
+for all new premerges with `TRTMC_COMMUNITY_CI_DUAL_RUN=true`; the default runs
+stable only. Authors start this path by opening or updating their pull request.
 
 Internal premerge remains the required gate during Community premerge
 qualification. Follow the existing maintainer-triggered process below until

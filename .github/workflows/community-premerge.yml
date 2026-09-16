@@ -27,7 +27,20 @@ jobs:
       pr_number: ${{ steps.snapshot.outputs.pr_number }}
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
       source_snapshot: ${{ steps.snapshot.outputs.source_snapshot }}
+      lanes: ${{ steps.lanes.outputs.lanes }}
     steps:
+      - name: Select the enabled premerge lanes
+        id: lanes
+        env:
+          DUAL_RUN: ${{ vars.TRTMC_COMMUNITY_CI_DUAL_RUN }}
+        run: |
+          set -euo pipefail
+          lanes='["stable"]'
+          if [ "$DUAL_RUN" = true ]; then
+            lanes='["stable","dev"]'
+          fi
+          echo "lanes=$lanes" >> "$GITHUB_OUTPUT"
+
       # Read GitHub metadata only. Never execute or restore files from the
       # preceding pull-request workflow in this privileged controller.
       - name: Verify the CPU run and capture one live PR merge
@@ -81,7 +94,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [stable, dev]
+        lane: ${{ fromJSON(needs.snapshot.outputs.lanes) }}
     # Dev cannot cancel or queue a stable lane from another PR trigger.
     concurrency:
       group: community-premerge-${{ matrix.lane }}-${{ needs.snapshot.outputs.pr_number }}

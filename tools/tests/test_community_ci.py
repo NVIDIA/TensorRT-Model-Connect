@@ -1261,7 +1261,10 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     control = yaml.safe_load((REPO_ROOT / ".github/workflows/community-premerge.yml").read_text())
     executor = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     execute = control["jobs"]["execute"]
-    assert execute["strategy"] == {"fail-fast": False, "matrix": {"lane": ["stable", "dev"]}}
+    assert execute["strategy"] == {
+        "fail-fast": False,
+        "matrix": {"lane": "${{ fromJSON(needs.snapshot.outputs.lanes) }}"},
+    }
     assert "matrix.lane" in execute["concurrency"]["group"]
     assert "concurrency" not in control
     assert "github.event.workflow_run.event == 'pull_request'" in control["jobs"]["snapshot"]["if"]
@@ -1283,6 +1286,41 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert "refs/pull/$PR_NUMBER/merge" not in test["run"]
     assert "TRTMC_PREMERGE_UNIT_SCOPE=all" in test["run"]
     assert "gpu-ci-dev-dispatch" in gpu["environment"]["name"]
+
+
+@pytest.mark.parametrize(
+    "dual_run,expected_lanes",
+    [
+        ("", ["stable"]),
+        ("false", ["stable"]),
+        ("true", ["stable", "dev"]),
+        ("TRUE", ["stable"]),
+        ("1", ["stable"]),
+        ('["stable","dev"]', ["stable"]),
+    ],
+)
+def test_community_dual_run_switch_controls_job_allocation(tmp_path, dual_run, expected_lanes):
+    control = yaml.safe_load((REPO_ROOT / ".github/workflows/community-premerge.yml").read_text())
+    snapshot = control["jobs"]["snapshot"]
+    selector = next(step for step in snapshot["steps"] if step.get("id") == "lanes")
+    assert selector["env"] == {"DUAL_RUN": "${{ vars.TRTMC_COMMUNITY_CI_DUAL_RUN }}"}
+    assert snapshot["outputs"]["lanes"] == "${{ steps.lanes.outputs.lanes }}"
+    assert control["jobs"]["execute"]["strategy"]["matrix"]["lane"] == (
+        "${{ fromJSON(needs.snapshot.outputs.lanes) }}"
+    )
+
+    output = tmp_path / "output"
+    result = subprocess.run(
+        ["bash", "-c", selector["run"]],
+        env={**os.environ, "DUAL_RUN": dual_run, "GITHUB_OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    # This output is the actual job matrix. With the switch off there is no
+    # dev job to publish a status, request credentials, or provision a VM.
+    assert json.loads(values["lanes"]) == expected_lanes
 
 
 @pytest.mark.parametrize("fault", ["", "cpu", "head", "parent", "event", "workflow"])

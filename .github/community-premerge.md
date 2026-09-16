@@ -14,13 +14,14 @@ rename that gate.
 
 Opening or updating a pull request runs the existing public CPU checks. When
 they pass, the trusted `community-premerge.yml` controller captures the current
-PR merge from GitHub and starts stable and dev Community CI runs. The author
+PR merge from GitHub and starts stable Community CI. A repository-wide switch
+optionally adds a dev run for every subsequent premerge. The author
 does not need an internal CI label or maintainer dispatch to start these public
 runs. Pushing another commit automatically starts a new attempt.
 
-Both lanes rerun the CPU stages on the captured merge, then use disposable Brev
-instances to run the complete unit stage, build/install/load the native wheel,
-and execute the selected family premerge cases. Qwen remains a baseline for
+Each enabled lane reruns the CPU stages on the captured merge, then uses
+disposable Brev instances to run the complete unit stage, build/install/load
+the native wheel, and execute the selected family premerge cases. Qwen remains a baseline for
 every premerge, including documentation changes. The protected base's existing
 premerge cases cannot disappear from a selected family's test plan. Skipped
 stages and incomplete GPU results fail the executor.
@@ -37,9 +38,25 @@ fetches that exact merge object, not a later moving PR merge ref.
 | Stable | Source `main` | `TRTMC Community CI / Premerge` |
 | Dev | `TRTMC_COMMUNITY_CI_DEV_REF`, default `main` | `TRTMC Community CI / Dev premerge (non-blocking)` |
 
-Set `TRTMC_COMMUNITY_CI_DEV_REF` in Source **Settings > Secrets and variables >
-Actions > Variables** to a trusted development branch containing the new
-dispatch contract. Leave it unset for main/main comparison. Stable and dev use
+In Source **Settings > Secrets and variables > Actions > Variables**, configure:
+
+| Variable | Value | Effect |
+| --- | --- | --- |
+| `TRTMC_COMMUNITY_CI_DUAL_RUN` | Unset or `false` (default) | Stable only; no new dev job, dispatch, status, or Brev instance |
+| `TRTMC_COMMUNITY_CI_DUAL_RUN` | `true` | Stable and dev for every new premerge controller run |
+| `TRTMC_COMMUNITY_CI_DEV_REF` | A trusted CI branch, e.g. `ci/developer` | Selects the test implementation when dual running is enabled; defaults to `main` |
+
+Only the exact value `true` enables dual running. Other values keep stable
+running alone. Setting a dev ref does not enable dual running by itself, and
+stable always uses `main`.
+
+The switch is captured once per controller run, before its job matrix is
+created. Turning it off makes subsequent controller runs stable-only. Controllers
+that already selected their lanes retain that selection, including queued jobs;
+running executors finish normally. No workflow edit or per-PR label is needed
+to turn the comparison period on or off.
+
+Leave the dev ref unset for main/main comparison. Stable and dev use
 separate workflow concurrency groups, statuses, and GPU environments. Stable
 publication does not wait for the dev result.
 
@@ -55,15 +72,19 @@ families that require different capacity.
 
 ## Qualification and promotion
 
-1. Merge the workflow change and configure the dev GPU environment. Both CI
-   implementations initially come from `main`.
-2. Collect paired results on representative Source pull requests, including
+1. Merge the workflow change. With the switch unset, premerge runs stable only.
+   Configure the dev GPU environment before starting a comparison period.
+2. Set `TRTMC_COMMUNITY_CI_DEV_REF` to the CI development branch and set
+   `TRTMC_COMMUNITY_CI_DUAL_RUN=true`. Leave the dev ref unset if first comparing
+   main/main. All newly triggered premerges now run both implementations.
+3. Collect paired results over the next one or two days of pull requests, including
    unit, package, GPU inference, failure reporting, and Brev cleanup evidence.
-3. Develop CI settings on a separate Source branch selected by the dev ref.
-   Promote a validated implementation through a reviewed Source pull request
-   to `main`; reset the dev ref to `main` afterward. Roll back through a revert
-   pull request. Keep dev outside the required checks.
-4. Only after Community premerge is qualified should a separate reviewed
+4. Promote the validated CI implementation through a reviewed Source pull
+   request to `main`, then set `TRTMC_COMMUNITY_CI_DUAL_RUN=false` (or delete the
+   variable). Future premerges use the promoted main implementation with no dev
+   resource cost. The dev ref may stay configured while the switch is off.
+   Roll back through a revert pull request. Keep dev outside the required checks.
+5. Only after Community premerge is qualified should a separate reviewed
    rollout make its stable status required and retire internal premerge.
 
 Public premerge never forwards Hub, Brev, or repository credentials into PR
