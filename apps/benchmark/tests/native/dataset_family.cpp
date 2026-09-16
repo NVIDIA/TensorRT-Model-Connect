@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "trtmc/internal/language.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/internal/text.h"
 #include "trtmc/runtime/family_factory.h"
@@ -36,17 +37,48 @@ Json json_value(const ConfigValue& value) {
 
 class DatasetFixture final : public IModel,
                              public ITextContinuation,
+                             public IConditionalTextGeneration,
+                             public ITextTranslation,
+                             public IImagesTextToText,
                              public trtmc::ITextGeneration {
   public:
-    explicit DatasetFixture(std::string mode) : mode_(std::move(mode)) {}
+    DatasetFixture(std::string mode, bool multiple, bool text)
+        : mode_(std::move(mode)), multiple_(multiple), text_(text) {}
     const char* task() const noexcept override { return mode_.c_str(); }
     std::int32_t default_max_new_tokens() const override { return 5; }
     std::vector<TaskInstance> task_bindings() override {
-        return {bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask))};
+        std::vector<TaskInstance> tasks;
+        if (text_)
+            tasks.push_back(bind<ITextContinuation>(*this, fields_for(ITextContinuation::kTask)));
+        if (mode_ == IImagesTextToText::kTask)
+            tasks.push_back(bind<IImagesTextToText>(*this));
+        if (mode_ == IConditionalTextGeneration::kTask ||
+            (text_ && (multiple_ || mode_ == ITextTranslation::kTask)))
+            tasks.push_back(bind<IConditionalTextGeneration>(
+                *this, fields_for(IConditionalTextGeneration::kTask)));
+        if (mode_ == ITextTranslation::kTask)
+            tasks.push_back(bind<ITextTranslation>(*this, fields_for(ITextTranslation::kTask)));
+        return tasks;
+    }
+    TextResult run(const ImagesTextToTextRequest&, ConfigView) override {
+        throw std::logic_error("dataset must select the bound text-only Task before execution");
+    }
+    TextResult run(const ConditionalTextGenerationRequest& input, ConfigView config) override {
+        auto result = run(TextContinuationRequest{input.source}, config);
+        result.text = "conditioned:" + result.text;
+        return result;
+    }
+    TextResult run(const TextTranslationRequest& input, ConfigView config) override {
+        if (input.source_language || input.target_language)
+            throw std::logic_error("absent dataset languages must reach the family as absent");
+        auto result = run(TextContinuationRequest{input.source_text}, config);
+        result.text = "translated:" + result.text;
+        return result;
     }
     trtmc::Span<const ConfigField> fields_for(std::string_view id) const {
-        if (id != ITextContinuation::kTask)
-            throw UnsupportedTask("fixture only supports continuation");
+        if (id != ITextContinuation::kTask && id != IConditionalTextGeneration::kTask &&
+            id != ITextTranslation::kTask)
+            throw UnsupportedTask("fixture does not support this text Task");
         static const ConfigField declared[] = {
             {"max_new_tokens", ConfigKind::I64, ConfigValue{std::int64_t{5}}, "Token limit"},
             {"temperature", ConfigKind::F64, ConfigValue{0.75}, "Temperature"},
@@ -115,11 +147,16 @@ class DatasetFixture final : public IModel,
 
   private:
     std::string mode_;
+    bool multiple_;
+    bool text_;
 };
 } // namespace
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "dataset_fixture")
         throw std::runtime_error("wrong fixture family");
-    return new DatasetFixture(context.reader.info().task);
+    const auto plan = context.reader.read_section("engine.plan");
+    return new DatasetFixture(context.reader.info().task,
+                              plan == std::vector<char>{'B', 'O', 'T', 'H'},
+                              plan != std::vector<char>{'N', 'O', 'N', 'E'});
 }

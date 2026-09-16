@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
@@ -28,7 +29,8 @@ std::string quote(const std::string& value) {
     return output + "'";
 }
 void bundle(const std::filesystem::path& path, const std::string& task,
-            const std::string& family = "dataset_fixture") {
+            const std::string& family = "dataset_fixture", bool multiple = false,
+            bool text = true) {
     const auto header = Json{{"format", 1},
                              {"family", family},
                              {"task", task},
@@ -40,7 +42,7 @@ void bundle(const std::filesystem::path& path, const std::string& task,
     const std::uint64_t size = header.size();
     for (int shift = 0; shift < 64; shift += 8)
         output.put(static_cast<char>((size >> shift) & 255));
-    output << header << "PLAN";
+    output << header << (!text ? "NONE" : multiple ? "BOTH" : "PLAN");
     if (!output)
         throw std::runtime_error("cannot write bundle");
 }
@@ -54,6 +56,11 @@ std::vector<Json> results(const std::filesystem::path& path) {
 Json config(const Json& row) {
     const auto text = row.at("text").get<std::string>();
     return Json::parse(text.substr(text.rfind('\n') + 1));
+}
+bool error_contains(const std::filesystem::path& path, const std::string& expected) {
+    std::ifstream input(path);
+    const std::string text{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    return text.find(expected) != std::string::npos;
 }
 } // namespace
 
@@ -157,6 +164,85 @@ int main(int argc, char** argv) {
             check(std::system(command.c_str()) != 0, "invalid explicit config rejected");
             check(results(output).empty(), "failed first sample is not reported as a result");
         }
+        bundle(model, "images_text_to_text");
+        for (const bool explicit_task : {false, true}) {
+            std::filesystem::remove(output);
+            check((explicit_task ? invoke({"--task", "text_continuation"}) : invoke({})) == 0,
+                  "multimodal primary retains its bound prompt-only dataset Task");
+            rows = results(output);
+            check(rows.size() == 2, "secondary Task returns every dataset sample");
+            if (rows.size() == 2)
+                check(rows[0].at("task") == "text_continuation" &&
+                          rows[0].at("bundle_task") == "images_text_to_text" &&
+                          rows[0].at("generated_token_ids") == Json::array({100, 101}) &&
+                          rows[0].at("pred_answer") == "42" &&
+                          config(rows[0]).at("max_new_tokens") == 12000,
+                      "selected secondary Task preserves full output and workload");
+        }
+        for (const auto* invalid_task :
+             {"unknown_task", "images_text_to_text", "conditional_text_generation", ""}) {
+            std::filesystem::remove(output);
+            check(invoke({"--task", invalid_task}) != 0,
+                  "unknown, incomplete, unbound and empty Task selections fail");
+            check(results(output).empty(), "invalid selection produces no sample result");
+            const std::string id = invalid_task;
+            const auto message = id.empty() ? "--task requires a nonempty Task ID"
+                                 : id == "conditional_text_generation"
+                                     ? "model does not bind"
+                                     : "dataset prompt is not a complete input";
+            check(error_contains(root / "stderr.txt", message),
+                  "invalid selection fails in the selector, not in a family call");
+        }
+        check(invoke({"--task", "text_continuation", "--task", "text_continuation"}) != 0,
+              "duplicate Task selection fails");
+        std::filesystem::remove(output);
+        check(invoke({"--task", "text_continuation", "--max-new-tokens", "30000"}) != 0,
+              "selected Task failure never retries the legacy implementation");
+        check(results(output).empty(), "failed selected call has no legacy result");
+        bundle(model, "images_text_to_text", "dataset_fixture", true);
+        std::filesystem::remove(output);
+        check(invoke({}) != 0 && results(output).empty(),
+              "ambiguous prompt-only Tasks require an explicit selection");
+        check(error_contains(root / "stderr.txt", "multiple dataset Tasks are available"),
+              "ambiguous selection is rejected before any family call");
+        check(invoke({"--task", "conditional_text_generation"}) == 0,
+              "explicit selection resolves multiple bound prompt Tasks");
+        rows = results(output);
+        check(rows.size() == 2 && rows[0].at("task") == "conditional_text_generation" &&
+                  rows[0].at("bundle_task") == "images_text_to_text" &&
+                  rows[0].at("text").get<std::string>().find("conditioned:First question") == 0 &&
+                  rows[0].at("generated_token_ids") == Json::array({100, 101}),
+              "conditional Task receives the original prompt and preserves all token IDs");
+        bundle(model, "text_continuation", "dataset_fixture", true);
+        check(invoke({}) == 0, "compatible primary takes precedence over other prompt Tasks");
+        rows = results(output);
+        check(rows.size() == 2 && rows[0].at("task") == "text_continuation",
+              "compatible primary identity is preserved");
+        check(invoke({"--task", "conditional_text_generation"}) == 0,
+              "explicit selection can override a compatible primary");
+        rows = results(output);
+        check(rows.size() == 2 && rows[0].at("task") == "conditional_text_generation" &&
+                  rows[0].at("bundle_task") == "text_continuation",
+              "explicit override does not change physical bundle identity");
+        bundle(model, "images_text_to_text", "dataset_fixture", false, false);
+        std::filesystem::remove(output);
+        check(invoke({}) != 0 && results(output).empty() &&
+                  error_contains(root / "stderr.txt", "model has no Task that accepts"),
+              "model without a prompt-only Task is rejected before family execution");
+        bundle(model, "text_translation", "dataset_fixture", false, false);
+        for (const bool explicit_task : {false, true}) {
+            std::filesystem::remove(output);
+            check((explicit_task ? invoke({"--task", "text_translation"}) : invoke({})) == 0,
+                  "translation dataset uses the family's declared language defaults");
+            rows = results(output);
+            check(rows.size() == 2 && rows[0].at("task") == "text_translation" &&
+                      rows[0].at("bundle_task") == "text_translation" &&
+                      rows[0].at("text").get<std::string>().find("translated:First question") ==
+                          0 &&
+                      rows[0].at("generated_token_ids") == Json::array({100, 101}) &&
+                      rows[0].at("prefill_ms") == 2 && rows[0].at("decode_ms") == 4,
+                  "translation preserves complete prompt/output/timing without invented languages");
+        }
         bundle(model, "text_generation");
         check(invoke({"--seed", "10"}) == 0, "existing family path still succeeds");
         rows = results(output);
@@ -165,6 +251,9 @@ int main(int argc, char** argv) {
               "existing workload and per-row seeding unchanged");
         check(invoke({"--set", "seed=10"}) != 0,
               "new controls cannot be silently ignored by old path");
+        std::filesystem::remove(output);
+        check(invoke({"--task", "text_continuation"}) != 0 && results(output).empty(),
+              "explicit semantic selection never enters the legacy path");
         bundle(model, "text_continuation");
         {
             std::ofstream file(dataset);

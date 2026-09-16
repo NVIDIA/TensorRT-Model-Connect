@@ -41,6 +41,7 @@ struct Options {
     std::string dataset;
     std::string output;
     std::string runtime_root;
+    std::string selected_task;
     std::int64_t max_new_tokens{12000};
     double temperature{1.0};
     std::int64_t top_k{1};
@@ -67,7 +68,8 @@ std::string trim(std::string value) {
 
 void usage() {
     std::cerr << "Usage: trtmc_dataset_benchmark BUNDLE DATASET.jsonl OUTPUT.jsonl "
-                 "[--runtime-root PATH] [--max-new-tokens N] [--temperature F] [--top-k N] "
+                 "[--runtime-root PATH] [--task TASK_ID] [--max-new-tokens N] [--temperature F] "
+                 "[--top-k N] "
                  "[--top-p F] [--min-p F] [--seed N] [--chat-template] [--no-thinking] "
                  "[--stop-on-answer] [--stop-check-interval N] [--set NAME=VALUE]\n";
 }
@@ -93,7 +95,13 @@ Options parse_options(int argc, char** argv) {
         };
         if (argument == "--runtime-root")
             options.runtime_root = value();
-        else if (argument == "--max-new-tokens")
+        else if (argument == "--task") {
+            if (!options.selected_task.empty())
+                throw std::invalid_argument("--task may be specified only once");
+            options.selected_task = value();
+            if (options.selected_task.empty())
+                throw std::invalid_argument("--task requires a nonempty Task ID");
+        } else if (argument == "--max-new-tokens")
             options.max_new_tokens = typed(trtmc::ConfigKind::I64).get<std::int64_t>();
         else if (argument == "--temperature")
             options.temperature = typed(trtmc::ConfigKind::F64).get<double>();
@@ -121,7 +129,7 @@ Options parse_options(int argc, char** argv) {
             options.config_entries.emplace_back(entry.substr(0, equals), entry.substr(equals + 1));
         } else
             throw std::invalid_argument("unknown argument: " + argument);
-        if (argument != "--runtime-root" && argument != "--set") {
+        if (argument != "--runtime-root" && argument != "--set" && argument != "--task") {
             std::string name = argument.substr(2);
             std::replace(name.begin(), name.end(), '-', '_');
             if (name == "chat_template")
@@ -295,7 +303,8 @@ trtmc::Config benchmark_config(const Options& options,
 
 template <class Task, class Request>
 void run_sdk(const Task& task, Request make_request, const Options& options,
-             const std::vector<Sample>& samples, std::ostream& output) {
+             const std::vector<Sample>& samples, std::ostream& output,
+             std::string_view bundle_task) {
     const auto fields = task.config_fields();
     for (std::size_t index = 0; index < samples.size(); ++index) {
         const auto& sample = samples[index];
@@ -310,11 +319,47 @@ void run_sdk(const Task& task, Request make_request, const Options& options,
         Json submitted = Json::object();
         for (const auto& entry : config.entries())
             submitted[entry.name] = trtmc::app::config_value_json(entry.value);
-        write_sample(
-            output, sample, result.text(), result.token_ids(), result.setup_ms(),
-            result.prefill_ms(), result.decode_ms(), wall_ms,
-            {{"task", std::string(Task::kTask)}, {"submitted_config", std::move(submitted)}});
+        write_sample(output, sample, result.text(), result.token_ids(), result.setup_ms(),
+                     result.prefill_ms(), result.decode_ms(), wall_ms,
+                     {{"task", std::string(Task::kTask)},
+                      {"bundle_task", std::string(bundle_task)},
+                      {"submitted_config", std::move(submitted)}});
     }
+}
+
+std::string dataset_task(const trtmc::Model& model, const Options& options) {
+    const auto accepts_prompt = [](std::string_view id) {
+        return id == trtmc::TextContinuation::kTask ||
+               id == trtmc::ConditionalTextGeneration::kTask ||
+               id == trtmc::CorruptedTextReconstruction::kTask ||
+               id == trtmc::TextSummarization::kTask || id == trtmc::TextTranslation::kTask;
+    };
+    const auto tasks = model.tasks();
+    std::string selected = options.selected_task;
+    const auto primary = model.info().bundle_task;
+    if (selected.empty() && accepts_prompt(primary))
+        selected = primary;
+    if (!selected.empty()) {
+        if (!accepts_prompt(selected))
+            throw std::invalid_argument("dataset prompt is not a complete input for Task '" +
+                                        selected + "'");
+        if (std::none_of(tasks.begin(), tasks.end(),
+                         [&](const auto& task) { return task.id == selected; }))
+            throw std::invalid_argument("model does not bind selected Task '" + selected + "'");
+        return selected;
+    }
+    // Resolve an unambiguous prompt-only capability before any execution. A
+    // failed call never retries another Task or the existing family path.
+    for (const auto& task : tasks) {
+        if (!accepts_prompt(task.id))
+            continue;
+        if (!selected.empty())
+            throw std::invalid_argument("multiple dataset Tasks are available; specify --task");
+        selected = task.id;
+    }
+    if (selected.empty())
+        throw std::invalid_argument("model has no Task that accepts a dataset prompt");
+    return selected;
 }
 
 } // namespace
@@ -328,46 +373,52 @@ int main(int argc, char** argv) {
             trtmc::LoadOptions load;
             load.runtime_root = options.runtime_root;
             const auto model = trtmc::Model::load(options.bundle, load);
+            const auto selected = dataset_task(model, options);
             std::ofstream output(options.output);
             if (!output)
                 throw std::runtime_error("cannot write " + options.output);
-            if (primary == trtmc::TextContinuation::kTask)
+            if (selected == trtmc::TextContinuation::kTask)
                 run_sdk(
                     model.task<trtmc::TextContinuation>(),
                     [](const std::string& prompt) {
                         return trtmc::TextContinuationRequest{prompt};
                     },
-                    options, samples, output);
-            else if (primary == trtmc::ConditionalTextGeneration::kTask)
+                    options, samples, output, primary);
+            else if (selected == trtmc::ConditionalTextGeneration::kTask)
                 run_sdk(
                     model.task<trtmc::ConditionalTextGeneration>(),
                     [](const std::string& prompt) {
                         return trtmc::ConditionalTextGenerationRequest{prompt};
                     },
-                    options, samples, output);
-            else if (primary == trtmc::CorruptedTextReconstruction::kTask)
+                    options, samples, output, primary);
+            else if (selected == trtmc::CorruptedTextReconstruction::kTask)
                 run_sdk(
                     model.task<trtmc::CorruptedTextReconstruction>(),
                     [](const std::string& prompt) {
                         return trtmc::CorruptedTextReconstructionRequest{prompt};
                     },
-                    options, samples, output);
-            else if (primary == trtmc::TextSummarization::kTask)
+                    options, samples, output, primary);
+            else if (selected == trtmc::TextSummarization::kTask)
                 run_sdk(
                     model.task<trtmc::TextSummarization>(),
                     [](const std::string& prompt) {
                         return trtmc::TextSummarizationRequest{prompt};
                     },
-                    options, samples, output);
+                    options, samples, output, primary);
+            else if (selected == trtmc::TextTranslation::kTask)
+                run_sdk(
+                    model.task<trtmc::TextTranslation>(),
+                    [](const std::string& prompt) { return trtmc::TextTranslationRequest{prompt}; },
+                    options, samples, output, primary);
             else
                 throw std::invalid_argument("dataset prompt is not a complete input for Task '" +
-                                            primary + "'");
+                                            selected + "'");
             return 0;
         }
         if (options.runtime_root.empty())
             throw std::invalid_argument("--runtime-root is required for an existing bundle mode");
-        if (!options.config_entries.empty())
-            throw std::invalid_argument("--set requires a semantic Task bundle");
+        if (!options.config_entries.empty() || !options.selected_task.empty())
+            throw std::invalid_argument("--task and --set require a semantic Task bundle");
         if (options.max_new_tokens < 1 || options.top_k < 1 || options.stop_check_interval < 1)
             throw std::invalid_argument("existing integer generation limits must be positive");
         auto task = trtmc::load_task(options.bundle, options.runtime_root);

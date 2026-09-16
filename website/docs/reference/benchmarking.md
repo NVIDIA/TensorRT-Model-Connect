@@ -227,6 +227,21 @@ application workload choices, not shared runtime or QuickStart defaults.
 bundles, using the same text parser as the CLI. Each successful sample records
 the exact `submitted_config`; absent, family-computed values are not fabricated.
 
+Use `--task TASK_ID` to select a bound prompt-only Task, including a secondary
+text capability of a multimodal bundle. Without it, the dataset benchmark uses
+a prompt-compatible primary Task, or the sole bound prompt-compatible Task.
+Multiple candidates require an explicit selection. Unknown, unbound or
+incomplete-input Tasks fail; a failed call never retries another Task or the
+existing family path. The result's `task` identifies the executed Task and
+`bundle_task` retains the bundle's primary identity. Existing bundle modes reject
+`--task`, just as they reject `--set`.
+
+Translation passes the prompt as source text, leaving source and target languages
+absent so the family can use its declared bundle defaults. A family without an
+applicable default rejects the request; the benchmark does not invent a language.
+Tasks needing additional inputs, such as images or latent tensors, are not
+complete dataset-prompt requests and are not synthesized from the prompt.
+
 For nonnegative base seeds, both dataset paths add `seed_index` when present,
 otherwise the sample's zero-based row index. Overflow fails instead of wrapping.
 Dataset timing ends before answer extraction and JSON output. Preserve the
