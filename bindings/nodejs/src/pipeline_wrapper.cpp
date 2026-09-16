@@ -4,6 +4,7 @@
  */
 
 #include "pipeline_wrapper.h"
+#include <trtmc/runtime/family_loader.h>
 
 Napi::Object PipelineWrapper::Init(Napi::Env env, Napi::Object exports) {
     Napi::Function func = DefineClass(env, "Pipeline",
@@ -33,17 +34,21 @@ Napi::Value PipelineWrapper::Load(const Napi::CallbackInfo& info) {
     }
 
     std::string path = info[0].As<Napi::String>().Utf8Value();
+    std::string runtime_root = "";
+    if (info.Length() > 1 && info[1].IsString()) {
+        runtime_root = info[1].As<Napi::String>().Utf8Value();
+    }
 
     try {
-        // Load the actual TRTMC Pipeline
-        std::unique_ptr<trtmc::IPipeline> pipeline = trtmc::load(path);
+        // Load the actual TRTMC Task
+        std::unique_ptr<trtmc::ITask> task = trtmc::load_task(path, runtime_root);
 
         Napi::FunctionReference* constructor = env.GetInstanceData<Napi::FunctionReference>();
         Napi::Object obj = constructor->New({});
 
-        // Unwrap and set the native pipeline pointer
+        // Unwrap and set the native task pointer
         PipelineWrapper* wrapper = Napi::ObjectWrap<PipelineWrapper>::Unwrap(obj);
-        wrapper->pipeline_ = std::move(pipeline);
+        wrapper->task_ = std::move(task);
 
         return obj;
     } catch (const std::exception& e) {
@@ -60,7 +65,7 @@ Napi::Value PipelineWrapper::Generate(const Napi::CallbackInfo& info) {
     }
 
     std::string prompt = info[0].As<Napi::String>().Utf8Value();
-    trtmc::GenerateConfig config;
+    trtmc::TextGenerationConfig config;
 
     // Optional Config argument parsing (basic)
     if (info.Length() > 1 && info[1].IsObject()) {
@@ -78,7 +83,11 @@ Napi::Value PipelineWrapper::Generate(const Napi::CallbackInfo& info) {
 
     try {
         // Call the C++ engine
-        trtmc::TextResult result = pipeline_->generate(prompt, config);
+        auto* text_gen = dynamic_cast<trtmc::ITextGeneration*>(task_.get());
+        if (!text_gen) {
+            throw std::runtime_error("Loaded task does not support text generation");
+        }
+        trtmc::TextResult result = text_gen->generate(prompt, config);
 
         // Construct the JS return object
         Napi::Object ret = Napi::Object::New(env);

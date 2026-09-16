@@ -8,7 +8,7 @@
 #include <memory>
 #include <napi.h>
 #include <string>
-#include <trtmc/pipeline.h>
+#include <trtmc/task.h>
 
 class PipelineWrapper : public Napi::ObjectWrap<PipelineWrapper> {
   public:
@@ -19,5 +19,5 @@ class PipelineWrapper : public Napi::ObjectWrap<PipelineWrapper> {
   private:
     Napi::Value Generate(const Napi::CallbackInfo& info);
 
-    std::unique_ptr<trtmc::IPipeline> pipeline_;
+    std::unique_ptr<trtmc::ITask> task_;
 };

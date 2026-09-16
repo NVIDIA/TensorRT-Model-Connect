@@ -29,7 +29,6 @@ MODEL_PROOF_NEUTRAL_FILES = {
 SHARED_PREFIXES = (
     ".github/",
     "apps/",
-    "bindings/",
     "cmake/",
     "core/",
     "examples/",
