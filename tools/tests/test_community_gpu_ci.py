@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,81 @@ def test_shared_gpu_plan_includes_direct_and_new_families() -> None:
     assert selected == tuple(
         sorted((*community_gpu_ci.SHARED_SMOKE_FAMILIES, "llama", "new_family"))
     )
+
+
+@pytest.mark.parametrize(
+    "scope,families,direct,expected",
+    [
+        ("docs", "[]", "[]", ("qwen",)),
+        ("none", "[]", "[]", ("qwen",)),
+        ("families", '["bert"]', '["bert"]', ("bert", "qwen")),
+    ],
+)
+def test_complete_premerge_retains_the_qwen_baseline(scope, families, direct, expected):
+    assert (
+        community_gpu_ci.selected_families(scope, families, direct, "[]", premerge=True) == expected
+    )
+
+
+@pytest.mark.parametrize("remove_protected_case", [False, True])
+def test_premerge_preserves_base_cases_before_gpu_execution(
+    tmp_path, monkeypatch, remove_protected_case
+):
+    manifest = {
+        "family": "qwen",
+        "testcases": [{"name": "protected", "premerge": True}],
+    }
+    family = _family(tmp_path, "qwen", [manifest])
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    }
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=tmp_path, env=git_env, check=True, capture_output=True, text=True
+        )
+
+    git("init")
+    git("add", ".")
+    git("-c", "core.hooksPath=/dev/null", "commit", "-m", "protected cases")
+    base = git("rev-parse", "HEAD").stdout.strip()
+    manifest["testcases"] = [
+        {"name": "protected", "premerge": not remove_protected_case},
+        {"name": "new", "premerge": True},
+    ]
+    (family / "tests/manifests/0.json").write_text(json.dumps(manifest))
+
+    class Context:
+        def __init__(self, repository, env):
+            self.repository, self.env = repository, env
+
+        def run(self, command, **kwargs):
+            if command[0] == "git":
+                return git(*command[1:])
+            raise CiError("reached GPU execution")
+
+    monkeypatch.setattr(community_gpu_ci, "CiContext", Context)
+    reason = (
+        "removed protected premerge cases: protected"
+        if remove_protected_case
+        else "reached GPU execution"
+    )
+    with pytest.raises(CiError, match=reason):
+        community_gpu_ci.run(
+            tmp_path,
+            {
+                "TRTMC_GPU_PREMERGE": "true",
+                "TRTMC_GPU_BASE_SHA": base,
+                "TRTMC_GPU_SCOPE": "docs",
+                "TRTMC_GPU_FAMILIES": "[]",
+                "TRTMC_GPU_DIRECT_FAMILIES": "[]",
+                "TRTMC_GPU_ADDED_FAMILIES": "[]",
+            },
+        )
 
 
 @pytest.mark.parametrize(

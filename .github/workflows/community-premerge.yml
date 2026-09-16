@@ -1,0 +1,241 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Community premerge
+
+on:
+  workflow_run:
+    workflows: [Community CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  snapshot:
+    name: Capture the Community premerge snapshot
+    if: >-
+      github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      pr_number: ${{ steps.snapshot.outputs.pr_number }}
+      head_sha: ${{ steps.snapshot.outputs.head_sha }}
+      source_snapshot: ${{ steps.snapshot.outputs.source_snapshot }}
+      lanes: ${{ steps.lanes.outputs.lanes }}
+    steps:
+      - name: Select the enabled premerge lanes
+        id: lanes
+        env:
+          DUAL_RUN: ${{ vars.TRTMC_COMMUNITY_CI_DUAL_RUN }}
+        run: |
+          set -euo pipefail
+          lanes='["stable"]'
+          if [ "$DUAL_RUN" = true ]; then
+            lanes='["stable","dev"]'
+          fi
+          echo "lanes=$lanes" >> "$GITHUB_OUTPUT"
+
+      # Read GitHub metadata only. Never execute or restore files from the
+      # preceding pull-request workflow in this privileged controller.
+      - name: Verify the CPU run and capture one live PR merge
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CPU_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          [[ "$CPU_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$CPU_RUN_ID")"
+          jq -e '.event == "pull_request" and .conclusion == "success" and
+            .path == ".github/workflows/community-ci.yml"' <<< "$run" > /dev/null
+          title="$(jq -er '.display_title' <<< "$run")"
+          pattern='^PR #([1-9][0-9]*) · community CI · head ([0-9a-f]{40}) · merge ([0-9a-f]{40})$'
+          [[ "$title" =~ $pattern ]]
+          pr_number="${BASH_REMATCH[1]}"
+          head_sha="${BASH_REMATCH[2]}"
+          test "$(jq -er '.head_sha' <<< "$run")" = "$head_sha"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$CPU_RUN_ID/jobs?filter=latest&per_page=100" \
+            | jq -e '[.jobs[] | select(.name == "Community CPU / Required")]
+              | length == 1 and .[0].conclusion == "success"' > /dev/null
+          pull="$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$pr_number")"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg head "$head_sha" \
+            '.state == "open" and .base.repo.full_name == $repo and
+             .base.ref == "main" and .head.sha == $head' <<< "$pull" > /dev/null
+          # The prior workflow's title is untrusted. Capture the actual merge
+          # from GitHub, then rerun the CPU stages from the chosen CI revision.
+          merge_sha="$(jq -er '.merge_commit_sha' <<< "$pull")"
+          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
+          merge="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$merge_sha")"
+          jq -e --arg head "$head_sha" --arg merge "$merge_sha" \
+            '.sha == $merge and (.parents | length) == 2 and .parents[1].sha == $head' \
+            <<< "$merge" > /dev/null
+          base_sha="$(jq -er '.parents[0].sha' <<< "$merge")"
+          tree="$(jq -er '.tree.sha' <<< "$merge")"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]]
+          snapshot="$(jq -cn --arg head "$head_sha" --arg base "$base_sha" \
+            --arg merge "$merge_sha" --arg tree "$tree" \
+            '{head_sha:$head,base_sha:$base,merge_sha:$merge,source_tree:$tree}')"
+          {
+            echo "pr_number=$pr_number"
+            echo "head_sha=$head_sha"
+            echo "source_snapshot=$snapshot"
+          } >> "$GITHUB_OUTPUT"
+
+  execute:
+    name: Community premerge / ${{ matrix.lane }}
+    needs: snapshot
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.snapshot.outputs.lanes) }}
+    # Dev cannot cancel or queue a stable lane from another PR trigger.
+    concurrency:
+      group: community-premerge-${{ matrix.lane }}-${{ needs.snapshot.outputs.pr_number }}
+      cancel-in-progress: false
+    continue-on-error: ${{ matrix.lane == 'dev' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      actions: write
+      statuses: write
+    env:
+      STATUS_CONTEXT: ${{ matrix.lane == 'stable' && 'TRTMC Community CI / Premerge' || 'TRTMC Community CI / Dev premerge (non-blocking)' }}
+    steps:
+      - name: Publish the pending lane status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=pending -f context="$STATUS_CONTEXT" \
+            -f description="Community premerge is running" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Dispatch the selected Community CI implementation
+        id: execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.snapshot.outputs.pr_number }}
+          CI_REF: ${{ matrix.lane == 'stable' && 'main' || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}
+          LANE: ${{ matrix.lane }}
+          SOURCE_SNAPSHOT: ${{ needs.snapshot.outputs.source_snapshot }}
+          HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          umask 077
+          dispatch_nonce="$(openssl rand -hex 16)"
+          [[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]
+          payload="$RUNNER_TEMP/community-premerge-dispatch.json"
+          trap 'rm -f "$payload"' EXIT
+          jq -n \
+            --arg pr_number "$PR_NUMBER" \
+            --arg ref "$CI_REF" \
+            --arg lane "$LANE" \
+            --arg snapshot "$SOURCE_SNAPSHOT" \
+            --arg dispatch_nonce "$dispatch_nonce" \
+            '{
+              ref: $ref,
+              inputs: {
+                pr_number: $pr_number,
+                premerge_lane: $lane,
+                source_snapshot: $snapshot,
+                request_id: $dispatch_nonce
+              }
+            }' > "$payload"
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/dispatches" \
+            --input "$payload"
+
+          expected_title="PR #$PR_NUMBER · community $LANE · request $dispatch_nonce"
+          run_id=""
+          for _ in $(seq 1 20); do
+            runs="$(
+              gh api --method GET \
+                "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=workflow_dispatch&per_page=100"
+            )"
+            run_id="$(
+              jq -r \
+                --arg title "$expected_title" \
+                '[
+                  .workflow_runs[]
+                  | select(.display_title == $title)
+                ]
+                | sort_by(.created_at)
+                | last
+                | .id // empty' <<<"$runs"
+            )"
+            if [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+              break
+            fi
+            sleep 3
+          done
+          if ! [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::The exact dispatched Community CI run was not found."
+            exit 1
+          fi
+          {
+            echo "run_id=$run_id"
+            echo "dispatch_nonce=$dispatch_nonce"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the exact Community CI result
+        id: result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.execution.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          # The exact Community run can queue behind GPU work. Let the job-level
+          # timeout bound this wait instead of misreporting queue delay as a
+          # terminal Community CI failure.
+          while true; do
+            run="$(
+              gh api --method GET \
+                "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
+            )"
+            status="$(jq -er '.status' <<<"$run")"
+            if [ "$status" = "completed" ]; then
+              conclusion="$(jq -r '.conclusion // "unknown"' <<<"$run")"
+              case "$conclusion" in
+                success|failure|cancelled|timed_out|skipped|neutral|action_required) ;;
+                *) conclusion=unknown ;;
+              esac
+              echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+
+      - name: Publish the terminal lane status
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
+          JOB_STATUS: ${{ job.status }}
+          CONCLUSION: ${{ steps.result.outputs.conclusion }}
+          EXECUTOR_RUN_ID: ${{ steps.execution.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          state=failure
+          description="Community premerge did not pass"
+          if [ "$JOB_STATUS" = success ] && [ "$CONCLUSION" = success ]; then
+            state=success
+            description="Community premerge passed"
+          fi
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$state" -f context="$STATUS_CONTEXT" \
+            -f description="$description" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/${EXECUTOR_RUN_ID:-$GITHUB_RUN_ID}"
+          test "$state" = success

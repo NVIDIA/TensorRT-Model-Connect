@@ -4,7 +4,7 @@
 name: Community CI
 
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && format('Manual PR #{0} · community CI', inputs.pr_number) || format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) }}
+  ${{ inputs.premerge_lane && inputs.premerge_lane != 'off' && format('PR #{0} · community {1} · request {2}', inputs.pr_number, inputs.premerge_lane, inputs.request_id) || github.event_name == 'workflow_dispatch' && format('Manual PR #{0} · community CI', inputs.pr_number) || format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) }}
 
 # Community CI is one ordered pull-request pipeline: the public CPU gate runs
 # first, followed by trusted GPU authorization and impact classification.
@@ -30,6 +30,23 @@ on:
         default: false
         type: boolean
 
+      premerge_lane:
+        description: Trusted Community premerge lane; off preserves the manual smoke entrypoint
+        required: false
+        default: "off"
+        type: choice
+        options: ["off", stable, dev]
+      source_snapshot:
+        description: Exact head/base/merge/tree captured by the Community premerge dispatcher
+        required: false
+        default: ""
+        type: string
+      request_id:
+        description: Unique Community premerge dispatch correlation
+        required: false
+        default: ""
+        type: string
+
 permissions: {}
 
 # Temporary automatic rollout policy. Change this only through review after
@@ -39,7 +56,7 @@ env:
   COMMUNITY_GPU_EXECUTION_ENABLED: "false"
 
 concurrency:
-  group: community-ci-${{ github.event.pull_request.number || inputs.pr_number }}
+  group: community-ci-${{ inputs.premerge_lane || 'off' }}-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
@@ -54,7 +71,7 @@ jobs:
         ) ||
         (
           github.event_name == 'workflow_dispatch' &&
-          github.ref == 'refs/heads/main'
+          (github.ref == 'refs/heads/main' || inputs.premerge_lane == 'dev')
         )
       )
     runs-on: ubuntu-24.04
@@ -81,11 +98,14 @@ jobs:
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_MERGE_SHA: ${{ github.sha }}
+          PREMERGE_LANE: ${{ inputs.premerge_lane || 'off' }}
+          SOURCE_SNAPSHOT: ${{ inputs.source_snapshot }}
+          REQUEST_ID: ${{ inputs.request_id }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
 
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$PREMERGE_LANE" = off ]; then
             actor_role="$(
               gh api --method GET \
                 "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
@@ -111,7 +131,18 @@ jobs:
           test "$base_repo" = "$GITHUB_REPOSITORY"
           test "$base_ref" = "main"
           [[ "$live_head_sha" =~ ^[0-9a-f]{40}$ ]]
-          if [ "$EVENT_NAME" = "pull_request" ]; then
+          if [ "$PREMERGE_LANE" != off ]; then
+            case "$PREMERGE_LANE" in stable|dev) ;; *) exit 1 ;; esac
+            [[ "$REQUEST_ID" =~ ^[0-9a-f]{32}$ ]]
+            head_sha="$(jq -er '.head_sha' <<< "$SOURCE_SNAPSHOT")"
+            merge_sha="$(jq -er '.merge_sha' <<< "$SOURCE_SNAPSHOT")"
+            approved_base="$(jq -er '.base_sha' <<< "$SOURCE_SNAPSHOT")"
+            approved_tree="$(jq -er '.source_tree' <<< "$SOURCE_SNAPSHOT")"
+            for sha in "$head_sha" "$merge_sha" "$approved_base" "$approved_tree"; do
+              [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+            done
+            test "$head_sha" = "$live_head_sha"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
             [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$EVENT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$EVENT_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -143,6 +174,10 @@ jobs:
           test "$merge_head" = "$head_sha"
           base_sha="$merge_base"
           [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$PREMERGE_LANE" != off ]; then
+            test "$base_sha" = "$approved_base"
+            test "$(jq -er '.tree.sha' <<< "$merge")" = "$approved_tree"
+          fi
 
           {
             echo "pr_number=$PR_NUMBER"
@@ -343,7 +378,8 @@ jobs:
         env:
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
-          GPU_EXECUTION_ENABLED: ${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}
+          GPU_EXECUTION_ENABLED: ${{ inputs.premerge_lane && inputs.premerge_lane != 'off' || env.COMMUNITY_GPU_EXECUTION_ENABLED }}
+          PREMERGE_MODE: ${{ inputs.premerge_lane && inputs.premerge_lane != 'off' || false }}
           MANUAL_GPU_EXECUTION_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.run_gpu_smoke || false }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -361,6 +397,7 @@ jobs:
           summary = json.loads(
               (Path(os.environ["RUNNER_TEMP"]) / "trtmc-gpu-impact.json").read_text()
           )
+          premerge = os.environ.get("PREMERGE_MODE", "false").lower() == "true"
           gpu_enabled = os.environ["GPU_EXECUTION_ENABLED"].lower() == "true"
           manual_gpu_enabled = (
               os.environ["EVENT_NAME"] == "workflow_dispatch"
@@ -408,7 +445,7 @@ jobs:
                   "run_gpu="
                   + (
                       "true"
-                      if gpu_enabled and summary["scope"] in {"all", "families"}
+                      if gpu_enabled and (premerge or summary["scope"] in {"all", "families"})
                       else "false"
                   ),
                   file=output,
@@ -422,6 +459,7 @@ jobs:
           DIRECT_FAMILIES: ${{ steps.impact.outputs.direct_families }}
           ADDED_FAMILIES: ${{ steps.impact.outputs.added_families }}
           SCOPE: ${{ steps.impact.outputs.scope }}
+          PREMERGE_MODE: ${{ inputs.premerge_lane && inputs.premerge_lane != 'off' || false }}
           GPU_ENABLED: ${{ steps.impact.outputs.gpu_enabled }}
           RUN_GPU: ${{ steps.impact.outputs.run_gpu }}
         run: |
@@ -444,7 +482,10 @@ jobs:
               raise SystemExit(f"invalid GPU execution policy: {gpu_enabled!r}")
           if run_gpu not in {"true", "false"}:
               raise SystemExit(f"invalid GPU run decision: {run_gpu!r}")
-          expected_run_gpu = gpu_enabled == "true" and scope in {"all", "families"}
+          expected_run_gpu = gpu_enabled == "true" and (
+              os.environ.get("PREMERGE_MODE", "false").lower() == "true"
+              or scope in {"all", "families"}
+          )
           if (run_gpu == "true") != expected_run_gpu:
               raise SystemExit("GPU run decision does not match policy and impact")
           if not isinstance(families, list) or not all(
@@ -479,6 +520,7 @@ jobs:
 
       - name: Report the GPU execution policy
         env:
+          PREMERGE_MODE: ${{ inputs.premerge_lane && inputs.premerge_lane != 'off' || false }}
           GPU_ENABLED: ${{ steps.impact.outputs.gpu_enabled }}
           RUN_GPU: ${{ steps.impact.outputs.run_gpu }}
           SCOPE: ${{ steps.impact.outputs.scope }}
@@ -494,6 +536,9 @@ jobs:
             exit 0
           fi
           message="Experimental Community GPU smoke was manually enabled; it is not a merge gate."
+          if [ "$PREMERGE_MODE" = true ]; then
+            message="Community premerge runs complete units, native packaging, and selected GPU cases on Brev."
+          fi
           echo "::notice::$message"
           printf '## Community GPU\n\n%s\n\nRun decision: `%s`.\n' \
             "$message" "$RUN_GPU" >> "$GITHUB_STEP_SUMMARY"
@@ -501,7 +546,7 @@ jobs:
   announce:
     name: Community GPU / Publish pending result
     needs: gpu-authorize
-    if: ${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}
+    if: ${{ needs.gpu-authorize.outputs.run_gpu == 'true' && (!inputs.premerge_lane || inputs.premerge_lane == 'off') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -527,16 +572,16 @@ jobs:
     if: >-
       ${{ always() && needs.gpu-authorize.result == 'success' &&
       needs.gpu-authorize.outputs.run_gpu == 'true' &&
-      needs.announce.result == 'success' }}
+      (needs.announce.result == 'success' || (inputs.premerge_lane && inputs.premerge_lane != 'off')) }}
     runs-on: ubuntu-24.04
     environment:
-      name: gpu-ci-dispatch
+      name: ${{ inputs.premerge_lane == 'dev' && 'gpu-ci-dev-dispatch' || 'gpu-ci-dispatch' }}
       deployment: false
     # Upper runtime bound for one externally reserved GPU instance. The
     # separate cleanup job remains eligible if this job times out.
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.premerge_lane && inputs.premerge_lane != 'off' && 360 || 60 }}
     concurrency:
-      group: trtmc-community-gpu
+      group: trtmc-community-gpu-${{ inputs.premerge_lane || 'off' }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -547,7 +592,7 @@ jobs:
       - name: Check out trusted GPU orchestration
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.gpu-authorize.outputs.base_sha }}
+          ref: ${{ inputs.premerge_lane && inputs.premerge_lane != 'off' && github.sha || needs.gpu-authorize.outputs.base_sha }}
           persist-credentials: false
 
       - name: Install the Brev CLI
@@ -573,13 +618,15 @@ jobs:
 
       - name: Reserve a GPU instance
         id: reserve
+        env:
+          GPU_TYPE: ${{ vars.TRTMC_COMMUNITY_GPU_TYPE || 'L40' }}
         run: |
           set -euo pipefail
           instance_name="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # Publish the deterministic name before creation so a timeout after
           # allocation cannot suppress best-effort cleanup.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
-          brev create "$instance_name" -g L40 --timeout 600
+          brev create "$instance_name" -g "$GPU_TYPE" --timeout 600
 
       - name: Build the GPU image, check out the exact PR merge, and run the smoke test
         id: test
@@ -591,10 +638,13 @@ jobs:
           DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
           ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
           SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ (!inputs.premerge_lane || inputs.premerge_lane == 'off') && secrets.HF_TOKEN || '' }}
+          PREMERGE_MODE: ${{ inputs.premerge_lane && inputs.premerge_lane != 'off' || false }}
+          BASE_SHA: ${{ needs.gpu-authorize.outputs.base_sha }}
+          CUDA_ARCHITECTURES: ${{ vars.TRTMC_COMMUNITY_CUDA_ARCHITECTURES || '89' }}
         run: |
           set -euo pipefail
-          brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin refs/pull/$PR_NUMBER/merge && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
+          brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
           # A freshly created instance's SSH session may not have its Docker
           # group membership yet. The first live GPU run reached this point
           # and failed on docker.sock, so do not depend on propagation timing.
@@ -604,13 +654,17 @@ jobs:
           # selected family DSOs, and configured CTest tree. It then stages
           # checkpoint revisions and uses E2ERunner's explicit premerge case
           # selection plus JUnit validation, which rejects skips and omissions.
-          # HF_TOKEN: some premerge checkpoints (e.g. sam3) are gated and
-          # fail to download without authorization. huggingface_hub reads
-          # HF_TOKEN from the environment automatically (verified directly
-          # against huggingface_hub.get_token()); no code change is needed
-          # in tools.community_gpu_ci to consume it. GitHub Actions masks
-          # the secret value everywhere it appears, including here.
+          # Only the legacy maintainer-authorized smoke path receives its
+          # existing Hub credential. Self-service premerge uses public assets
+          # and must never receive credentials through contributor code.
           echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
+          command=(python3.12 -m tools.community_gpu_ci)
+          if [ "$PREMERGE_MODE" = true ]; then
+            # Public premerge receives no model/provider/repository credential.
+            # A gated checkpoint without public access fails instead of skipping.
+            test -z "$HF_TOKEN"
+            command=(bash -ec 'python3.12 -m tools.ci pipeline premerge-unit; python3.12 -m tools.ci pipeline package; python3.12 -m tools.community_gpu_ci')
+          fi
           python3 -m tools.brev_exec \
             --instance "$INSTANCE_NAME" \
             --log /tmp/gpu-ci-output.log \
@@ -622,8 +676,11 @@ jobs:
             -e "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
             -e "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
             -e "HF_TOKEN=$HF_TOKEN" \
-            -e CMAKE_CUDA_ARCHITECTURES=89 \
-            trtmc-quickstart-gpu python3.12 -m tools.community_gpu_ci
+            -e "TRTMC_GPU_PREMERGE=$PREMERGE_MODE" \
+            -e "TRTMC_GPU_BASE_SHA=$BASE_SHA" \
+            -e TRTMC_PREMERGE_UNIT_SCOPE=all \
+            -e "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
+            trtmc-quickstart-gpu "${command[@]}"
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
@@ -669,7 +726,7 @@ jobs:
       needs.gpu-authorize.outputs.run_gpu == 'true' }}
     runs-on: ubuntu-24.04
     environment:
-      name: gpu-ci-dispatch
+      name: ${{ inputs.premerge_lane == 'dev' && 'gpu-ci-dev-dispatch' || 'gpu-ci-dispatch' }}
       deployment: false
     timeout-minutes: 10
     permissions: {}
@@ -705,7 +762,8 @@ jobs:
     if: >-
       ${{ always() && needs.authorize.result == 'success' &&
       needs.gpu-authorize.result == 'success' &&
-      needs.gpu-authorize.outputs.gpu_enabled == 'true' }}
+      needs.gpu-authorize.outputs.gpu_enabled == 'true' &&
+      (!inputs.premerge_lane || inputs.premerge_lane == 'off') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -743,3 +801,25 @@ jobs:
             -f description="$description" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           test "$state" = success
+
+  premerge-required:
+    name: Community premerge executor result
+    needs: [authorize, required, gpu-authorize, provision-and-test, cleanup]
+    if: ${{ always() && inputs.premerge_lane && inputs.premerge_lane != 'off' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require CPU, complete GPU premerge, and cleanup
+        env:
+          AUTHORIZED: ${{ needs.authorize.result }}
+          CPU: ${{ needs.required.result }}
+          GPU_AUTHORIZED: ${{ needs.gpu-authorize.result }}
+          GPU: ${{ needs.provision-and-test.result }}
+          TEST: ${{ needs.provision-and-test.outputs.conclusion }}
+          CLEANUP: ${{ needs.cleanup.result }}
+        run: |
+          set -euo pipefail
+          for result in "$AUTHORIZED" "$CPU" "$GPU_AUTHORIZED" "$GPU" "$TEST" "$CLEANUP"; do
+            test "$result" = success
+          done

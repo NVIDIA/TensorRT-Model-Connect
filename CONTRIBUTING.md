@@ -235,6 +235,17 @@ branch so the new exact merge is validated.
 
 ### 10. Ask a maintainer to trigger protected CI
 
+A successful automatic Community CPU run also starts the self-service
+[Community premerge path](.github/community-premerge.md). It runs full units,
+native packaging, and selected GPU cases on disposable Brev instances. Stable
+uses the main workflow implementation. Maintainers can enable dev comparison
+for all new premerges with `TRTMC_COMMUNITY_CI_DUAL_RUN=true`; the default runs
+stable only. Authors start this path by opening or updating their pull request.
+
+Internal premerge remains the required gate during Community premerge
+qualification. Follow the existing maintainer-triggered process below until
+the separate gate migration is complete.
+
 Opening a pull request or pushing to your fork does **not** start the protected
 premerge suite. After public CPU validation passes and the pull request is
 ready for protected CI, mention the repository maintainer in a pull-request
