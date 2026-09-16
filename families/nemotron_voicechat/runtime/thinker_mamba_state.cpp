@@ -9,10 +9,21 @@
 
 #include <cstddef>
 #include <cuda_runtime_api.h>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
 namespace trtmc {
+
+namespace {
+
+void require_cuda_success(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("VoiceChat thinker ") + operation +
+                                 " failed: " + cudaGetErrorString(status));
+}
+
+} // namespace
 
 VoiceChatThinkerMambaState::VoiceChatThinkerMambaState(int32_t num_layers,
                                                        std::vector<TensorSpec> specs,
@@ -72,6 +83,49 @@ void VoiceChatThinkerMambaState::reset() {
         }
     }
     cudaStreamSynchronize(stream_);
+}
+
+void VoiceChatThinkerMambaState::capture_prompt_snapshot() {
+    if (prompt_snapshot_ready_)
+        throw std::logic_error("VoiceChat thinker Mamba prompt snapshot is already captured");
+    std::vector<std::vector<DeviceTensor>> snapshot(specs_.size());
+    for (std::size_t spec = 0; spec < specs_.size(); ++spec) {
+        snapshot[spec].reserve(static_cast<std::size_t>(num_layers_));
+        for (int32_t layer = 0; layer < num_layers_; ++layer) {
+            snapshot[spec].emplace_back(specs_[spec].shape, DType::kFloat32, stream_);
+            if (!snapshot[spec].back().ok())
+                throw std::runtime_error(
+                    "VoiceChat failed to allocate thinker Mamba prompt snapshot");
+        }
+    }
+
+    for (std::size_t spec = 0; spec < specs_.size(); ++spec) {
+        for (int32_t layer = 0; layer < num_layers_; ++layer) {
+            const auto index = static_cast<std::size_t>(layer);
+            require_cuda_success(
+                cudaMemcpyAsync(snapshot[spec][index].data(), state_[spec][index].data(),
+                                state_[spec][index].nbytes(), cudaMemcpyDeviceToDevice, stream_),
+                "Mamba prompt-state capture");
+        }
+    }
+    require_cuda_success(cudaStreamSynchronize(stream_), "Mamba prompt snapshot sync");
+    prompt_snapshot_ = std::move(snapshot);
+    prompt_snapshot_ready_ = true;
+}
+
+void VoiceChatThinkerMambaState::restore_prompt_snapshot() {
+    if (!prompt_snapshot_ready_)
+        throw std::logic_error("VoiceChat thinker Mamba prompt snapshot is unavailable");
+    for (std::size_t spec = 0; spec < specs_.size(); ++spec) {
+        for (int32_t layer = 0; layer < num_layers_; ++layer) {
+            const auto index = static_cast<std::size_t>(layer);
+            require_cuda_success(
+                cudaMemcpyAsync(state_[spec][index].data(), prompt_snapshot_[spec][index].data(),
+                                state_[spec][index].nbytes(), cudaMemcpyDeviceToDevice, stream_),
+                "Mamba prompt-state restore");
+        }
+    }
+    require_cuda_success(cudaStreamSynchronize(stream_), "Mamba prompt restore sync");
 }
 
 bool VoiceChatThinkerMambaState::ok() const {

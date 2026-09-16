@@ -14,6 +14,33 @@ from . import graph_ops
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
+    from .quantization import VoiceChatQuantContext
+
+
+def _projection_matmul(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    lhs_width: int,
+    rhs_width: int,
+    rhs_weights: np.ndarray,
+    weight_name: str,
+    *,
+    dtype: np.dtype,
+    quant_ctx: VoiceChatQuantContext | None,
+) -> trt.ITensor:
+    if quant_ctx is not None:
+        return quant_ctx.maybe_quantized_matmul(
+            network,
+            lhs,
+            lhs_width,
+            rhs_width,
+            rhs_weights,
+            weight_name,
+            dtype=dtype,
+        )
+    return graph_ops.add_matmul_rhs_constant(
+        network, lhs, lhs_width, rhs_width, rhs_weights, dtype=dtype
+    )
 
 
 def infer_kv_attention_size(
@@ -51,6 +78,7 @@ def add_attention_block(
     max_cache_length: int,
     eps_tensor: trt.ITensor,
     dtype: np.dtype = np.float32,
+    quant_ctx: VoiceChatQuantContext | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add the pinned Nemotron-H RMSNorm/GQA attention block."""
     normed = graph_ops.add_rms_norm(
@@ -61,14 +89,17 @@ def add_attention_block(
         eps_tensor,
         dtype=dtype,
     )
-    q = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype
+    q = _projection_matmul(
+        network, normed, hidden_size, attention_size, weights[f"{prefix}.w_q"],
+        f"{prefix}.w_q", dtype=dtype, quant_ctx=quant_ctx
     )
-    k = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"], dtype=dtype
+    k = _projection_matmul(
+        network, normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"],
+        f"{prefix}.w_k", dtype=dtype, quant_ctx=quant_ctx
     )
-    v = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"], dtype=dtype
+    v = _projection_matmul(
+        network, normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"],
+        f"{prefix}.w_v", dtype=dtype, quant_ctx=quant_ctx
     )
 
     k_row = network.add_shuffle(k)
@@ -92,7 +123,8 @@ def add_attention_block(
         kv_seq=max_cache_length + 1,
         mask=graph_ops.add_2d_mask_to_4d(network, attention_mask),
     )
-    attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context, attention_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype
+    attn_out = _projection_matmul(
+        network, context, attention_size, hidden_size, weights[f"{prefix}.w_o"],
+        f"{prefix}.w_o", dtype=dtype, quant_ctx=quant_ctx
     )
     return {"attn_out": attn_out, "present_k": k, "present_v": v}

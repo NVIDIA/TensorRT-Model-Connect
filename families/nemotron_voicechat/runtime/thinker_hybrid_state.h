@@ -24,6 +24,11 @@ class VoiceChatThinkerHybridState final : public VoiceChatThinkerInferenceState 
     void advance() override;
     bool ok() const override;
 
+    void pin_kv_prefix();
+    void capture_prompt_snapshot();
+    void restore_prompt_snapshot();
+    bool prompt_snapshot_ready() const noexcept;
+
   private:
     std::unique_ptr<VoiceChatThinkerKvCache> kv_;
     std::unique_ptr<VoiceChatThinkerMambaState> mamba_;
