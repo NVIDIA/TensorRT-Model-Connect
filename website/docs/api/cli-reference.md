@@ -5,6 +5,28 @@ title: CLI Reference
 Building and native execution use separate entry points. The Python module
 builds bundles; the `trtmc` executable inspects and runs them.
 
+## Family commands
+
+Migrated families provide their own command and option declarations. Discover
+them without loading a model:
+
+```bash
+python -m tensorrt_model_connect bert --help
+python -m tensorrt_model_connect boltz2 prepare-structure --help
+trtmc bert encode --help
+```
+
+For example, BERT owns its build options:
+
+```bash
+python -m tensorrt_model_connect bert build google-bert/bert-base-uncased \
+  --output bert.bundle --precision fp32
+```
+
+See [Family-Owned CLI Commands](../extend/family-cli.md) for the declaration
+and migration contract. The existing entry points below remain available
+during the migration.
+
 ## Build a bundle
 
 ```bash

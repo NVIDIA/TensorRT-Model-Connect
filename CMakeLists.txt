@@ -316,6 +316,19 @@ foreach(_trtmc_runtime_cmake IN LISTS _trtmc_family_runtime_cmake)
   )
 endforeach()
 
+# Family command descriptions are data: help must not load a model or backend.
+file(GLOB _trtmc_cli_descriptions CONFIGURE_DEPENDS
+  "${PROJECT_SOURCE_DIR}/families/*/cli.json"
+)
+foreach(_trtmc_description IN LISTS _trtmc_cli_descriptions)
+  get_filename_component(_trtmc_description_dir "${_trtmc_description}" DIRECTORY)
+  get_filename_component(_trtmc_description_family "${_trtmc_description_dir}" NAME)
+  configure_file("${_trtmc_description}"
+    "${CMAKE_BINARY_DIR}/families/${_trtmc_description_family}/cli.json" COPYONLY)
+  install(FILES "${_trtmc_description}"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/trtmc/families/${_trtmc_description_family}")
+endforeach()
+
 add_library(trtmc_media_io STATIC apps/cli/io.cpp)
 target_include_directories(trtmc_media_io PRIVATE
   ${PROJECT_SOURCE_DIR}/apps
@@ -326,6 +339,7 @@ target_compile_options(trtmc_media_io PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(trtmc_cli STATIC
   apps/cli/cli.cpp
+  apps/cli/family_cli.cpp
   apps/cli/sdk_features.cpp
   apps/cli/sdk_action.cpp
   apps/cli/sdk_replay.cpp
@@ -493,6 +507,28 @@ if(TRTMC_BUILD_TESTS)
     target_compile_options(test_server_worker PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME server_worker COMMAND test_server_worker)
   endif()
+
+  add_library(trtmc_test_cli_fixture SHARED apps/cli/tests/test_family_cli.cpp)
+  target_compile_definitions(trtmc_test_cli_fixture PRIVATE TRTMC_FAMILY_CLI_FIXTURE)
+  target_include_directories(trtmc_test_cli_fixture PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(trtmc_test_cli_fixture PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(trtmc_test_cli_fixture PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+  add_executable(test_family_cli
+    apps/cli/tests/test_family_cli.cpp
+    apps/cli/family_cli.cpp
+  )
+  target_include_directories(test_family_cli PRIVATE
+    ${PROJECT_SOURCE_DIR}/apps
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(test_family_cli PRIVATE nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS})
+  target_compile_options(test_family_cli PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_dependencies(test_family_cli trtmc_test_cli_fixture)
+  add_test(NAME family_cli COMMAND test_family_cli $<TARGET_FILE:trtmc_test_cli_fixture>)
+  set_tests_properties(family_cli PROPERTIES LABELS cpu)
 
   set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
   add_library(trtmc_test_backend_fake SHARED core/runtime/tests/fake_backend.cpp)

@@ -17,6 +17,7 @@ from pathlib import Path
 from tools import test_impact
 
 from .context import CiContext
+from .package import native_cli_library
 from .process import CiError
 
 
@@ -366,6 +367,19 @@ class E2ERunner:
             byok = runtime_root / "libtrtmc_byok_tvm_ffi.so"
             if byok.is_file():
                 (isolated / byok.name).symlink_to(byok.resolve())
+            declaration = runtime_root / "families" / family / "cli.json"
+            if (
+                self.context.repository / "families" / family / "cli.json"
+            ).is_file() and not declaration.is_file():
+                raise CiError(f"TRTMC_RUNTIME_ROOT has no CLI declaration for {family}")
+            if declaration.is_file():
+                destination = isolated / "families" / family / "cli.json"
+                destination.parent.mkdir(parents=True)
+                destination.symlink_to(declaration.resolve())
+                if library := native_cli_library(declaration):
+                    if not (runtime_root / library).is_file():
+                        raise CiError(f"TRTMC_RUNTIME_ROOT has no {library}")
+                    (isolated / library).symlink_to((runtime_root / library).resolve())
 
             # Preserve only non-family wheel dependencies expected by RUNPATH.
             site_packages = runtime_root.parent.parent

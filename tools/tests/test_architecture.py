@@ -17,6 +17,7 @@ ALLOWED_CORE_IMPORTS = {
     "tensorrt_model_connect.byok",
     "tensorrt_model_connect.bundle_writer",
     "tensorrt_model_connect.model_support",
+    "tensorrt_model_connect.graph_transform",
 }
 PUBLIC_APPLICATION_IMPORTS = {
     "trtmc_benchmark",
@@ -25,12 +26,23 @@ PUBLIC_APPLICATION_IMPORTS = {
     "tensorrt_model_connect.bundle_writer",
     "tensorrt_model_connect.byok",
     "tensorrt_model_connect.graph_transform",
+    "tensorrt_model_connect.family_cli",
 }
 
 
 def family_dirs() -> list[Path]:
     return sorted(
         path for path in FAMILIES.iterdir() if path.is_dir() and not path.name.startswith("_")
+    )
+
+
+def _has_owned_build(family: Path) -> bool:
+    from tensorrt_model_connect.family_cli import load_family_cli
+
+    declaration = load_family_cli(family.name)
+    return declaration is not None and any(
+        command["name"] == "build" and command["executor"] == "python"
+        for command in declaration["commands"]
     )
 
 
@@ -267,6 +279,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/builder/tensorrt_model_connect/byok.py",
         "core/builder/tensorrt_model_connect/bundle_writer.py",
         "core/builder/tensorrt_model_connect/graph_transform.py",
+        "core/builder/tensorrt_model_connect/family_cli.py",
         "core/builder/tensorrt_model_connect/model_support.py",
         "core/builder/tests/__init__.py",
         "core/builder/tests/test_build.py",
@@ -275,6 +288,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/builder/tests/test_bundle_writer.py",
         "core/builder/tests/test_byok.py",
         "core/builder/tests/test_graph_transform.py",
+        "core/builder/tests/test_family_cli.py",
         "core/builder/tests/test_model_support.py",
     }
     expected_native = {
@@ -302,6 +316,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/bundle.h",
         "core/runtime/include/trtmc/task.h",
         "core/runtime/include/trtmc/internal/config.h",
+        "core/runtime/include/trtmc/internal/cli.h",
         "core/runtime/include/trtmc/internal/action.h",
         "core/runtime/include/trtmc/internal/audio.h",
         "core/runtime/include/trtmc/internal/features.h",
@@ -687,7 +702,7 @@ def test_builders_publish_the_explicit_task_without_guessing() -> None:
     assert violations == []
 
 
-def test_every_builder_handles_every_family_owned_request_field() -> None:
+def test_legacy_builders_handle_every_shared_request_field() -> None:
     build_api = REPO / "core/builder/tensorrt_model_connect/build.py"
     build_api_tree = ast.parse(build_api.read_text(encoding="utf-8"), filename=str(build_api))
     request_class = next(
@@ -710,6 +725,8 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
 
     violations: list[str] = []
     for family in family_dirs():
+        if _has_owned_build(family):
+            continue
         model = family / "model.py"
         tree = ast.parse(model.read_text(encoding="utf-8"), filename=str(model))
         build = next(
@@ -726,6 +743,25 @@ def test_every_builder_handles_every_family_owned_request_field() -> None:
         }
         for field in sorted(family_owned_fields - handled):
             violations.append(f"{family.name}:{field}")
+    assert violations == []
+
+
+def test_declared_builders_do_not_depend_on_the_shared_request_union() -> None:
+    owners = [family for family in family_dirs() if _has_owned_build(family)]
+    assert owners
+    violations: list[str] = []
+    for family in owners:
+        for path in family.rglob("*.py"):
+            if "tests" in path.relative_to(family).parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module in {"tensorrt_model_connect", "tensorrt_model_connect.build"}
+                    and any(alias.name == "BuildRequest" for alias in node.names)
+                ):
+                    violations.append(f"{path.relative_to(REPO)}:{node.lineno}")
     assert violations == []
 
 
@@ -749,6 +785,8 @@ def test_runtime_sized_kv_build_flag_is_direct_and_family_owned() -> None:
 
     owners: list[str] = []
     for family in family_dirs():
+        if _has_owned_build(family):
+            continue
         model = family / "model.py"
         source = model.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(model))
@@ -765,7 +803,7 @@ def test_runtime_sized_kv_build_flag_is_direct_and_family_owned() -> None:
                 f'raise NotImplementedError("{family.name} does not support dynamic_kv_cache")'
                 in source
             )
-    assert owners == [family.name for family in family_dirs()]
+    assert owners == [family.name for family in family_dirs() if not _has_owned_build(family)]
 
 
 def test_runtime_sized_kv_budget_is_direct_and_family_owned() -> None:

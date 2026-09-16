@@ -139,6 +139,18 @@ def load_model_metadata(model_dir: str | Path) -> ModelMetadata:
     return ModelMetadata(config=config, model_index=model_index, files=files)
 
 
+def resolve_model(model: str, revision: str | None = None) -> Path:
+    """Resolve a local directory or download one explicit checkpoint revision."""
+    local = Path(model)
+    if local.is_dir():
+        return local
+    if local.exists():
+        raise ValueError(f"model path is not a directory: {local}")
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(repo_id=model, revision=revision))
+
+
 def _family_directories() -> list[Path]:
     package = importlib.import_module("families")
     root = Path(next(iter(package.__path__)))

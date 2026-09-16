@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .build import BuildRequest, _load_family, build
-from .model_support import load_model_metadata, resolve_family
+from .model_support import load_model_metadata, resolve_family, resolve_model
 
 
 def _parser(prepare_family: object | None = None) -> argparse.ArgumentParser:
@@ -105,12 +105,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _resolve_model(model: str, revision: str | None) -> Path:
-    local = Path(model)
-    if local.is_dir():
-        return local
-    if local.exists():
-        raise ValueError(f"model path is not a directory: {local}")
-
-    from huggingface_hub import snapshot_download
-
-    return Path(snapshot_download(repo_id=model, revision=revision))
+    return resolve_model(model, revision)

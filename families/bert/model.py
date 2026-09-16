@@ -14,9 +14,9 @@ import numpy as np
 import tensorrt as trt
 from .parallel import ParallelConfig, add_all_reduce_sum
 from .config import ModelConfig
+from .cli import BuildRequest, coerce_request
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
     from .weights import WeightDict
 
@@ -870,23 +870,7 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one BERT bundle without shared model orchestration."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("bert does not support dynamic_kv_cache")
-
-    if request.image_height is not None:
-        raise NotImplementedError("bert does not support image_height")
-
-    if request.image_width is not None:
-        raise NotImplementedError("bert does not support image_width")
-
-    if request.video_num_frames is not None:
-        raise NotImplementedError("bert does not support video_num_frames")
-
-    if request.max_batch_size != 1:
-        raise NotImplementedError("bert does not support max_batch_size")
-
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
+    request = coerce_request(request)
 
     if request.task not in {"encoding", "embedding", "reranking"}:
         raise ValueError("BERT supports encoding, embedding, and reranking")
@@ -897,8 +881,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     precision = request.precision.lower()
     if precision not in {"fp16", "bf16", "fp32"}:
         raise ValueError(f"BERT does not support precision {precision!r}")
-    if request.quantization is not None:
-        raise ValueError("BERT does not support quantization")
     if request.tensor_parallel_size not in {1, 2, 4, 8}:
         raise ValueError("BERT tensor_parallel_size must be 1, 2, 4, or 8")
     if request.tensor_parallel_size > 1 and precision != "fp32":

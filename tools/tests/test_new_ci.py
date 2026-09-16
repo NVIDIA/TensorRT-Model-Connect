@@ -456,6 +456,41 @@ def test_isolated_family_runtime_preserves_installed_byok(tmp_path: Path) -> Non
         assert (isolated.parent.parent / "tvm_ffi").resolve() == ffi
 
 
+@pytest.mark.parametrize("state", ["python", "native", "missing_declaration", "missing_adapter"])
+def test_isolated_family_runtime_preserves_only_owner_cli(tmp_path: Path, state: str) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for name in (
+        "libtrtmc_core.so", "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so", "libtrtmc_model_alpha.so", "libtrtmc_cli_beta.so",
+    ):
+        (runtime / name).write_bytes(b"native")
+    source = tmp_path / "families/alpha/cli.json"
+    source.parent.mkdir(parents=True)
+    executor = "native" if state in {"native", "missing_adapter"} else "python"
+    source.write_text(json.dumps({"version": 1, "commands": [{"executor": executor}]}))
+    if state == "native":
+        (runtime / "libtrtmc_cli_alpha.so").write_bytes(b"adapter")
+    for family in ("alpha", "beta"):
+        if family == "alpha" and state == "missing_declaration":
+            continue
+        declaration = runtime / "families" / family / "cli.json"
+        declaration.parent.mkdir(parents=True)
+        declaration.write_bytes(source.read_bytes())
+    runner = E2ERunner(RecordingContext(tmp_path, {}))
+    if state.startswith("missing_"):
+        message = "no CLI declaration for alpha" if state == "missing_declaration" else "libtrtmc_cli_alpha.so"
+        with pytest.raises(CiError, match=message):
+            with runner._isolated_runtime_root(runtime, "alpha"):
+                pytest.fail("declared family CLI must be installed")
+        return
+    with runner._isolated_runtime_root(runtime, "alpha") as isolated:
+        assert (isolated / "families/alpha/cli.json").read_bytes() == source.read_bytes()
+        assert not (isolated / "families/beta").exists()
+        assert (isolated / "libtrtmc_cli_alpha.so").is_file() == (state == "native")
+        assert not (isolated / "libtrtmc_cli_beta.so").exists()
+
+
 def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
     repository = Path(__file__).resolve().parents[2]
     binary = tmp_path / "trtmc"
@@ -948,7 +983,8 @@ def test_source_archive_carries_base_and_family_requirements(tmp_path: Path) -> 
     SourceArchiveValidator(CiContext(tmp_path, {})).validate([archive_path])
 
 
-def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
+@pytest.mark.parametrize("executor", ["python", "native"])
+def test_wheel_validation_requires_exact_new_payload(tmp_path: Path, executor: str) -> None:
     family_names = ("alpha", "beta", "gamma")
     for family in family_names:
         root = tmp_path / "families" / family
@@ -1070,6 +1106,37 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
     with zipfile.ZipFile(wheel, "a") as archive:
         archive.writestr("families/alpha/requirements.txt", "family-dependency\n")
 
+    declaration = tmp_path / "families/alpha/cli.json"
+    declaration.write_text(json.dumps({"version": 1, "commands": [{"executor": executor}]}))
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr("families/alpha/cli.json", declaration.read_bytes())
+    with pytest.raises(CiError, match="family CLI declaration is missing"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr(
+            "tensorrt_model_connect/bin/families/alpha/cli.json", declaration.read_bytes()
+        )
+    if executor == "native":
+        with pytest.raises(CiError, match="family CLI adapter set does not match"):
+            WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+        with zipfile.ZipFile(wheel, "a") as archive:
+            archive.writestr("tensorrt_model_connect/bin/libtrtmc_cli_alpha.so", "adapter")
+    WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+    unexpected_cli = tmp_path / "unexpected-cli.whl"
+    shutil.copyfile(wheel, unexpected_cli)
+    with zipfile.ZipFile(unexpected_cli, "a") as archive:
+        archive.writestr("tensorrt_model_connect/bin/libtrtmc_cli_beta.so", "unexpected")
+    with pytest.raises(CiError, match="family CLI adapter set does not match"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([unexpected_cli])
+    for changed in ("families/alpha/cli.json", "tensorrt_model_connect/bin/families/alpha/cli.json"):
+        corrupt_cli = tmp_path / "corrupt-cli.whl"
+        with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(corrupt_cli, "w") as output:
+            for entry in source.infolist():
+                payload = b'{"version":2}' if entry.filename == changed else source.read(entry)
+                output.writestr(entry, payload)
+        with pytest.raises(CiError, match="family CLI declaration differs from Source"):
+            WheelArchiveValidator(CiContext(tmp_path, {})).validate([corrupt_cli])
+
     benchmark_asset = tmp_path / "families/alpha/tests/data/input.txt"
     benchmark_asset.parent.mkdir(parents=True)
     benchmark_asset.write_text("input\n")
@@ -1087,7 +1154,8 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
 
 
-def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> None:
+@pytest.mark.parametrize("library", ["libtrtmc_model_beta.so", "libtrtmc_cli_alpha.so"])
+def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path, library: str) -> None:
     def compile_library(name: str, source: str) -> None:
         source_path = tmp_path / f"{name}.c"
         source_path.write_text(source)
@@ -1103,10 +1171,14 @@ def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> 
     compile_library("libtrtmc_byok_tvm_ffi.so", "void byok_symbol(void) {}\n")
     compile_library("libtrtmc_model_alpha.so", "void alpha_symbol(void) {}\n")
     compile_library("libtrtmc_model_beta.so", "void beta_symbol(void) {}\n")
+    compile_library("libtrtmc_cli_alpha.so", "void cli_symbol(void) {}\n")
+    declaration = tmp_path / "families/alpha/cli.json"
+    declaration.parent.mkdir(parents=True)
+    declaration.write_text('{"version":1,"commands":[{"executor":"native"}]}')
     load_native_libraries(tmp_path, ("alpha", "beta"))
 
     compile_library(
-        "libtrtmc_model_beta.so",
+        library,
         "extern void missing_symbol(void); void beta_symbol(void) { missing_symbol(); }\n",
     )
     with pytest.raises(CiError, match="undefined symbol: missing_symbol"):

@@ -11,11 +11,79 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from tensorrt_model_connect import family_cli
+
 from .task_adapters import default_operation, resolve_task_case, supported_tasks
 from .types import BenchmarkError, MeasurementSpec, ModelDescriptor, ResolvedCase
 
 
 _OVERRIDE_NAMESPACES = {"request", "measurement", "telemetry"}
+_MANIFEST_METADATA_FIELDS = {
+    "name", "bundle", "family", "task", "precision", "testcases", "hf_id", "hf_revision",
+    "trust_remote_code", "hf_dependencies", "reference_precision", "external_files",
+    "base_reference_trust_remote_code", "build",
+    "tensor_parallel_size", "context_parallel_size",
+}
+
+
+def family_build_spec(family: str) -> dict[str, Any] | None:
+    """Find the selected family's build declaration without importing its builder."""
+    try:
+        descriptor = family_cli.load_family_cli(family)
+    except (OSError, ValueError) as error:
+        raise BenchmarkError(f"cannot read CLI declaration for {family}: {error}") from error
+    if descriptor is None:
+        return None
+    return next((command for command in descriptor["commands"] if command["name"] == "build"), None)
+
+
+def _family_build_settings(
+    raw: Mapping[str, Any], spec: Mapping[str, Any], path: Path,
+) -> dict[str, Any]:
+    arguments = {argument["name"]: argument for argument in spec["arguments"]}
+    unknown = sorted(raw.keys() - _MANIFEST_METADATA_FIELDS - arguments.keys())
+    if unknown:
+        raise BenchmarkError(f"undeclared build fields in {path}: {', '.join(unknown)}")
+    explicit = raw.get("build", {})
+    if not isinstance(explicit, Mapping):
+        raise BenchmarkError(f"build must be an object in {path}")
+    unknown = sorted(explicit.keys() - arguments.keys())
+    if unknown:
+        raise BenchmarkError(f"undeclared build fields in {path}: {', '.join(unknown)}")
+    bound = {"model", "output", "task", "precision"}
+    reserved = sorted(explicit.keys() & bound)
+    if reserved:
+        raise BenchmarkError(f"build cannot override manifest fields in {path}: {', '.join(reserved)}")
+    duplicate = sorted(explicit.keys() & raw.keys())
+    if duplicate:
+        raise BenchmarkError(f"duplicate build fields in {path}: {', '.join(duplicate)}")
+    settings = {name: raw[name] for name in arguments if name not in bound and name in raw}
+    settings.update(explicit)
+    values = dict(settings)
+    context = {
+        "model": raw.get("hf_id") or raw["name"], "output": raw["bundle"],
+        "task": raw["task"], "precision": raw["precision"],
+    }
+    values.update((name, value) for name, value in context.items() if name in arguments)
+    try:
+        family_cli.serialize_arguments(spec, values)
+    except (TypeError, ValueError) as error:
+        raise BenchmarkError(f"invalid family build arguments in {path}: {error}") from error
+    return settings
+
+
+def _parallel_sizes(model: ModelDescriptor) -> tuple[int, int]:
+    settings = dict(model.build_settings)
+    if model.parallelism is not None:
+        for name, value in zip(("tensor_parallel_size", "context_parallel_size"), model.parallelism):
+            if value is not None:
+                settings.setdefault(name, value)
+    spec = family_build_spec(model.family)
+    if spec is not None:
+        for argument in spec["arguments"]:
+            if "default" in argument:
+                settings.setdefault(argument["name"], argument["default"])
+    return int(settings.get("tensor_parallel_size", 1)), int(settings.get("context_parallel_size", 1))
 
 
 @dataclass(frozen=True)
@@ -81,8 +149,7 @@ class ManifestCatalog:
                 )
                 continue
             operation = default_operation(task)
-            tp = int(model.build_settings.get("tensor_parallel_size", 1))
-            cp = int(model.build_settings.get("context_parallel_size", 1))
+            tp, cp = _parallel_sizes(model)
             if tp > 1 or cp > 1:
                 entries.append(
                     CatalogEntry(
@@ -151,26 +218,36 @@ class ManifestCatalog:
             or not all(isinstance(value, Mapping) for value in testcases)
         ):
             raise BenchmarkError(f"model manifest must contain testcase objects: {path}")
-        settings = {
-            key: raw[key]
-            for key in (
-                "max_sequence_length",
-                "image_height",
-                "image_width",
-                "video_num_frames",
-                "max_batch_size",
-                "tensor_parallel_size",
-                "context_parallel_size",
-                "quantization",
-                "fp32_layers",
-                "backend",
-                "dynamic_kv_cache",
-            )
-            if key in raw
-        }
-        settings.setdefault("max_batch_size", 1)
-        settings.setdefault("tensor_parallel_size", 1)
-        settings.setdefault("context_parallel_size", 1)
+        parallelism = tuple(raw.get(name) for name in ("tensor_parallel_size", "context_parallel_size"))
+        for name in ("tensor_parallel_size", "context_parallel_size"):
+            if name in raw and (type(raw[name]) is not int or raw[name] < 1):
+                raise BenchmarkError(f"{name} must be a positive integer in {path}")
+        spec = family_build_spec(_string(raw["family"], "family", path))
+        if spec is not None:
+            settings = _family_build_settings(raw, spec, path)
+        else:
+            if "build" in raw:
+                raise BenchmarkError(f"family {raw['family']!r} does not declare build arguments")
+            settings = {
+                key: raw[key]
+                for key in (
+                    "max_sequence_length",
+                    "image_height",
+                    "image_width",
+                    "video_num_frames",
+                    "max_batch_size",
+                    "tensor_parallel_size",
+                    "context_parallel_size",
+                    "quantization",
+                    "fp32_layers",
+                    "backend",
+                    "dynamic_kv_cache",
+                )
+                if key in raw
+            }
+            settings.setdefault("max_batch_size", 1)
+            settings.setdefault("tensor_parallel_size", 1)
+            settings.setdefault("context_parallel_size", 1)
         return ModelDescriptor(
             name=_string(raw["name"], "name", path),
             hf_id=_optional_string(raw.get("hf_id", ""), "hf_id", path),
@@ -182,6 +259,7 @@ class ManifestCatalog:
             manifest_path=path.resolve(),
             testcases=tuple(testcases),
             build_settings=settings,
+            parallelism=parallelism if any(size is not None for size in parallelism) else None,
         )
 
 
@@ -198,8 +276,7 @@ def _optional_string(value: object, field: str, path: Path) -> str:
 
 
 def _require_single_process(model: ModelDescriptor) -> None:
-    tp = int(model.build_settings.get("tensor_parallel_size", 1))
-    cp = int(model.build_settings.get("context_parallel_size", 1))
+    tp, cp = _parallel_sizes(model)
     if tp > 1 or cp > 1:
         raise BenchmarkError(
             f"model {model.name!r} is distributed; the benchmark worker is single-process"

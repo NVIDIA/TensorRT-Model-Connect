@@ -22,6 +22,16 @@ from .process import CiError
 WHEEL_STATE = "wheel.json"
 
 
+def native_cli_library(declaration: Path) -> str | None:
+    """Return the adapter required by one owner's native command declarations."""
+    try:
+        commands = json.loads(declaration.read_text(encoding="utf-8"))["commands"]
+        native = any(command["executor"] == "native" for command in commands)
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise CiError(f"invalid CLI declaration {declaration}: {error}") from error
+    return f"libtrtmc_cli_{declaration.parent.name}.so" if native else None
+
+
 def family_ids(repository: Path) -> tuple[str, ...]:
     families = tuple(
         sorted(path.parent.name for path in (repository / "families").glob("*/model.py"))
@@ -70,6 +80,11 @@ def load_native_libraries(bin_dir: Path, families: tuple[str, ...]) -> None:
         bin_dir / "libtrtmc_byok_tvm_ffi.so",
         *(bin_dir / f"libtrtmc_model_{family}.so" for family in families),
     ]
+    libraries.extend(
+        bin_dir / library
+        for declaration in sorted((bin_dir / "families").glob("*/cli.json"))
+        if (library := native_cli_library(declaration)) is not None
+    )
     rtx_backend = bin_dir / "libtrtmc_backend_trt_rtx.so"
     if rtx_backend.is_file():
         libraries.append(rtx_backend)
@@ -260,6 +275,18 @@ class WheelArchiveValidator:
             missing_family_data = sorted(expected_family_data - packaged_names)
             if missing_family_data:
                 raise CiError(f"{wheel}: family build data is missing: {missing_family_data}")
+            expected_cli_libraries = set()
+            for declaration in sorted(
+                (self.context.repository / "families").glob("*/cli.json")
+            ):
+                if library := native_cli_library(declaration):
+                    expected_cli_libraries.add(library)
+                owner_path = f"families/{declaration.parent.name}/cli.json"
+                for name in (owner_path, f"tensorrt_model_connect/bin/{owner_path}"):
+                    if name not in packaged_names:
+                        raise CiError(f"{wheel}: family CLI declaration is missing: {name}")
+                    if archive.read(name) != declaration.read_bytes():
+                        raise CiError(f"{wheel}: family CLI declaration differs from Source: {name}")
 
             expected_plugin_sources = {
                 path.relative_to(self.context.repository).as_posix()
@@ -278,6 +305,13 @@ class WheelArchiveValidator:
             module_bins = {
                 Path(name).name for name in names if name.startswith("tensorrt_model_connect/bin/")
             }
+            cli_libraries = {
+                Path(name).name for name in names
+                if Path(name).parent.as_posix() == "tensorrt_model_connect/bin"
+                and Path(name).name.startswith("libtrtmc_cli_")
+            }
+            if cli_libraries != expected_cli_libraries:
+                raise CiError(f"{wheel}: family CLI adapter set does not match declarations")
             required = {
                 "trtmc",
                 "trtmc-server",

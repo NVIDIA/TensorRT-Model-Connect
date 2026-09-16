@@ -84,6 +84,41 @@ def test_managed_bundle_reuses_only_matching_recorded_build(tmp_path, monkeypatc
     assert str(tmp_path) not in sidecar.read_text()
 
 
+def test_family_cli_default_change_invalidates_managed_bundle(tmp_path, monkeypatch):
+    builder, case, source, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    # Keep argv unchanged: an omitted option still changes behavior when its
+    # family-owned default changes.
+    monkeypatch.setattr(
+        builder_module, "_build_command",
+        lambda _model, _checkpoint, bundle, _cases: ("builder", "-o", str(bundle)),
+    )
+    declaration = source.parent / "cli.json"
+    descriptor = {
+        "version": 1,
+        "commands": [{
+            "name": "build", "help": "Build one example", "executor": "python",
+            "handler": "model:build",
+            "arguments": [{"name": "batch", "flags": ["--batch"], "type": "int", "default": 1}],
+        }],
+    }
+    declaration.write_text(json.dumps(descriptor))
+    builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
+
+    sibling = tmp_path / "other_family" / "cli.json"
+    sibling.parent.mkdir()
+    sibling.write_text(json.dumps(descriptor))
+    _, reused = builder.prepare([case], allow_build=False, rebuild=False, dry_run=False)
+    assert reused[0].status == "reused"
+
+    descriptor["commands"][0]["arguments"][0]["default"] = 2
+    declaration.write_text(json.dumps(descriptor))
+    with pytest.raises(BenchmarkError, match="no matching immutable build identity"):
+        builder.prepare([case], allow_build=False, rebuild=False, dry_run=False)
+    _, rebuilt = builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
+    assert rebuilt[0].status == "built"
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize(
     "change", ["manifest", "options", "source", "checkpoint", "bundle", "bundle_preserved_mtime"]
 )

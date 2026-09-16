@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -117,6 +118,23 @@ class TensorRTModelConnectConan(ConanFile):
             dst=str(module_bin),
             keep_path=False,
         )
+        copy(self, "libtrtmc_cli_*.so", src=str(build), dst=str(module_bin), keep_path=False)
+        expected_cli_libraries = set()
+        for declaration in sorted((source / "families").glob("*/cli.json")):
+            copy(
+                self,
+                declaration.name,
+                src=str(declaration.parent),
+                dst=str(module_bin / "families" / declaration.parent.name),
+                keep_path=False,
+            )
+            if any(
+                command["executor"] == "native"
+                for command in json.loads(declaration.read_text(encoding="utf-8"))["commands"]
+            ):
+                expected_cli_libraries.add(f"libtrtmc_cli_{declaration.parent.name}.so")
+        if {path.name for path in module_bin.glob("libtrtmc_cli_*.so")} != expected_cli_libraries:
+            raise ConanException("family CLI adapter set does not match CLI declarations")
         catalog = package / "trtmc_benchmark" / "_catalog"
         source_suffixes = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".py", ".pyc"}
         for asset in sorted((source / "families").glob("*/tests/**/*")):
@@ -190,6 +208,7 @@ class TensorRTModelConnectConan(ConanFile):
         for library in (
             *backends,
             *module_bin.glob("libtrtmc_model_*.so"),
+            *module_bin.glob("libtrtmc_cli_*.so"),
         ):
             runpaths = ["$ORIGIN", "$ORIGIN/../../tensorrt_libs", "/usr/local/cuda/lib64"]
             if any(

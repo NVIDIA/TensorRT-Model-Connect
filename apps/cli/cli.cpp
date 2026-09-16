@@ -5,6 +5,7 @@
 
 #include "cli/cli.h"
 
+#include "cli/family_cli.h"
 #include "cli/io.h"
 #include "cli/sdk_dispatch.h"
 #include "config.h"
@@ -1617,6 +1618,13 @@ void print_usage(std::ostream& output) {
 }
 
 int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
+    if (const auto status = run_family_cli(argc, argv, output, error))
+        return *status;
+    if (argc < 2 ||
+        (argc == 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h"))) {
+        print_usage(output);
+        return EXIT_SUCCESS;
+    }
     try {
         const Command command = parse_args(argc, argv);
         if (command.kind == CommandKind::kHelp) {

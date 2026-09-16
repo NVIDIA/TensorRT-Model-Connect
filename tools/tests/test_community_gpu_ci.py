@@ -121,22 +121,66 @@ def test_family_plan_rejects_missing_or_duplicate_premerge_cases(
         community_gpu_ci.family_plan(tmp_path, "alpha")
 
 
-def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("missing", [None, "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1"])
+def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, missing: str | None) -> None:
     """The E2E runtime tree contains core, backend, and the selected family DSO."""
     build = tmp_path / "build"
     build.mkdir()
     plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
     required = (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
         "libtrtmc_backend_trt.so",
         "libtrtmc_model_alpha.so",
     )
     for name in required:
-        (build / name).write_bytes(b"native")
+        if name != missing:
+            (build / name).write_bytes(b"native")
+
+    if missing:
+        with pytest.raises(CiError, match=missing):
+            community_gpu_ci._runtime_root(build, plan)
+        return
 
     runtime = community_gpu_ci._runtime_root(build, plan)
 
     assert all((runtime / name).is_symlink() for name in required)
+
+
+@pytest.mark.parametrize("state", ["python", "native", "missing_declaration", "missing_adapter"])
+def test_runtime_root_preserves_only_selected_family_cli(tmp_path: Path, state: str) -> None:
+    build = tmp_path / "build"
+    build.mkdir()
+    plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
+    for name in (
+        "libtrtmc_core.so", "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so", "libtrtmc_model_alpha.so", "libtrtmc_cli_beta.so",
+    ):
+        (build / name).write_bytes(b"native")
+    source = tmp_path / "families/alpha/cli.json"
+    source.parent.mkdir(parents=True)
+    executor = "native" if state in {"native", "missing_adapter"} else "python"
+    source.write_text(json.dumps({"version": 1, "commands": [{"executor": executor}]}))
+    if state == "native":
+        (build / "libtrtmc_cli_alpha.so").write_bytes(b"adapter")
+    for family in ("alpha", "beta"):
+        if family == "alpha" and state == "missing_declaration":
+            continue
+        declaration = build / "families" / family / "cli.json"
+        declaration.parent.mkdir(parents=True)
+        declaration.write_bytes(source.read_bytes())
+    if state.startswith("missing_"):
+        message = "no CLI declaration for alpha" if state == "missing_declaration" else "libtrtmc_cli_alpha.so"
+        with pytest.raises(CiError, match=message):
+            community_gpu_ci._runtime_root(build, plan, tmp_path)
+        return
+    runtime = community_gpu_ci._runtime_root(build, plan, tmp_path)
+    assert (runtime / "families/alpha/cli.json").read_bytes() == source.read_bytes()
+    assert not (runtime / "families/beta").exists()
+    assert (runtime / "libtrtmc_cli_alpha.so").is_file() == (state == "native")
+    assert not (runtime / "libtrtmc_cli_beta.so").exists()
 
 
 def test_checkpoint_staging_verifies_the_resolved_revision(
@@ -182,9 +226,11 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
         community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
 
 
+@pytest.mark.parametrize("executor", [None, "python", "native"])
 def test_gpu_run_builds_native_contract_before_family_e2e(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    executor: str | None,
 ) -> None:
     """The entrypoint supplies every native path required by E2ERunner."""
     _family(
@@ -192,6 +238,13 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         "alpha",
         [{"family": "alpha", "testcases": [{"name": "alpha-smoke", "premerge": True}]}],
     )
+    if executor is not None:
+        (tmp_path / "families/alpha/cli.json").write_text(
+            json.dumps({"version": 1, "commands": [{"executor": executor}]})
+        )
+    other = tmp_path / "families/beta/cli.json"
+    other.parent.mkdir()
+    other.write_text('{"version":1,"commands":[{"executor":"native"}]}')
     build = Path("/tmp") / f"{tmp_path.name}-native-build"
     commands: list[list[str]] = []
     e2e_calls: list[tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]] = []
@@ -223,7 +276,7 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     monkeypatch.setattr(
         community_gpu_ci,
         "_runtime_root",
-        lambda native_build, _plans: native_build / "runtime",
+        lambda native_build, _plans, _repository: native_build / "runtime",
     )
 
     community_gpu_ci.run(
@@ -241,7 +294,10 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     native_builds = [command for command in commands if command[:2] == ["cmake", "--build"]]
     assert "trtmc" in native_builds[0]
     assert "trtmc_backend_trt" in native_builds[0]
-    assert native_builds[1][-1] == "trtmc_model_alpha"
+    expected_targets = ["trtmc_model_alpha"]
+    if executor == "native":
+        expected_targets.append("trtmc_cli_alpha")
+    assert native_builds[1][native_builds[1].index("--target") + 1:] == expected_targets
     assert len(e2e_calls) == 1
     runtime, families, testcases = e2e_calls[0]
     assert families == ("alpha",)
@@ -298,7 +354,7 @@ def test_gpu_run_continues_after_one_family_fails(
     monkeypatch.setattr(
         community_gpu_ci,
         "_runtime_root",
-        lambda native_build, plan: native_build / plan.family / "runtime",
+        lambda native_build, plan, _repository: native_build / plan.family / "runtime",
     )
 
     with pytest.raises(CiError, match="alpha: alpha exploded"):

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from tensorrt_model_connect import BuildRequest, build
+from families.boltz2.cli import BuildRequest, build_bundle
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 
@@ -608,16 +608,15 @@ def test_model_e2e(case_name: str, tmp_path: Path) -> None:
 
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
-        build(
+        assert manifest["tensor_parallel_size"] == 1
+        build_bundle(
             BuildRequest(
                 model_dir=model_dir,
-                output_path=bundle,
-                family=FAMILY,
                 task=manifest["task"],
                 precision=manifest["precision"],
                 max_sequence_length=manifest["max_sequence_length"],
-                tensor_parallel_size=manifest["tensor_parallel_size"],
-            )
+            ),
+            bundle,
         )
     structure = tmp_path / "prediction.cif"
     metadata = tmp_path / "prediction.json"

@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 import pytest
 import numpy as np
-from tensorrt_model_connect import BuildRequest, build
+from families.bert.cli import BuildRequest, build_bundle
 
 FAMILY = "bert"
 TASKS = frozenset({"embedding", "encoding"})
@@ -127,22 +127,16 @@ def _runtime(manifest: dict) -> tuple[Path, Path]:
 
 
 def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
-    build(
+    build_bundle(
         BuildRequest(
             model_dir=model_dir,
-            output_path=bundle,
-            family=FAMILY,
             task=manifest["task"],
             precision=manifest["precision"],
             max_sequence_length=manifest.get("max_sequence_length"),
-            image_height=manifest.get("image_height"),
-            image_width=manifest.get("image_width"),
-            video_num_frames=manifest.get("video_num_frames"),
-            max_batch_size=int(manifest.get("max_batch_size", 1)),
             tensor_parallel_size=int(manifest["tensor_parallel_size"]),
-            quantization=manifest.get("quantization"),
             fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
-        )
+        ),
+        bundle,
     )
 
 
@@ -157,6 +151,7 @@ def _run_json(
 ) -> dict:
     invocation = [
         str(binary),
+        FAMILY,
         command,
         str(bundle),
         "--runtime-root",

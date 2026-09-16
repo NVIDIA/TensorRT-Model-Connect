@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one boltz2 TensorRT bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "Hugging Face model ID or local snapshot"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "task", "flags": ["--task"], "type": "string", "choices": ["structure_prediction"], "default": "structure_prediction"},
+        {"name": "precision", "flags": ["--precision"], "type": "string", "choices": ["bf16"], "default": "bf16"},
+        {"name": "backend", "flags": ["--backend"], "type": "string", "choices": ["trt"], "default": "trt"},
+        {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int", "choices": [117], "default": 117},
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+      ]
+    },
+    {
+      "name": "prepare-structure",
+      "help": "Prepare a biomolecular request for a reusable Boltz-2 bundle",
+      "executor": "python",
+      "handler": "cli:prepare_structure",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "Local model package or Hugging Face model ID"},
+        {"name": "input", "flags": ["--input"], "type": "path", "required": true},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "cache_dir", "flags": ["--cache-dir"], "type": "path"}
+      ]
+    }
+  ]
+}

@@ -115,9 +115,11 @@ def _load_family(family: str) -> ModuleType:
         raise
 
 
-def _select_backend(backend: str) -> None:
+def select_backend(backend: str) -> None:
     """Bind the explicit build backend before importing a family builder."""
 
+    if backend not in {"trt", "trt_rtx"}:
+        raise ValueError("backend must be 'trt' or 'trt_rtx'")
     loaded = sys.modules.get("tensorrt")
     if backend == "trt":
         if sys.modules.get("tensorrt_rtx") is not None:
@@ -128,6 +130,9 @@ def _select_backend(backend: str) -> None:
     if loaded is not None and loaded is not rtx:
         raise RuntimeError("TensorRT is already loaded in this process")
     sys.modules["tensorrt"] = rtx
+
+
+_select_backend = select_backend  # Compatibility for existing Python callers.
 
 
 def build(request: BuildRequest) -> None:

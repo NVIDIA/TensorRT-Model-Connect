@@ -158,6 +158,7 @@ module.exports = {
             'extend/overview',
             'extend/contributing',
             'extend/add-model-family',
+            'extend/family-cli',
             'extend/add-runtime-strategy',
             'extend/add-optimized-runtime',
             'extend/add-config-schema',

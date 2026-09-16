@@ -60,6 +60,8 @@ class ModelDescriptor:
     manifest_path: Path
     testcases: tuple[Mapping[str, Any], ...]
     build_settings: Mapping[str, Any]
+    # Manifest TP/CP requirements describe benchmark execution, not CLI options.
+    parallelism: tuple[int | None, int | None] | None = None
 
     def summary(self) -> dict[str, Any]:
         value = {
@@ -73,6 +75,12 @@ class ModelDescriptor:
             "manifest_path": str(self.manifest_path),
             "build": dict(self.build_settings),
         }
+        if self.parallelism is not None:
+            value["parallelism"] = {
+                name: size for name, size in zip(
+                    ("tensor_parallel_size", "context_parallel_size"), self.parallelism,
+                ) if size is not None
+            }
         return value
 
 

@@ -18,6 +18,7 @@ from typing import Any
 
 from tools.ci.context import CiContext
 from tools.ci.e2e import E2ERunner
+from tools.ci.package import native_cli_library
 from tools.ci.process import CiError
 
 
@@ -176,12 +177,15 @@ def _install_family_requirements(context: CiContext, plans: tuple[FamilyPlan, ..
             )
 
 
-def _runtime_root(build: Path, plan: FamilyPlan) -> Path:
+def _runtime_root(build: Path, plan: FamilyPlan, repository: Path | None = None) -> Path:
     """Create one family-local runtime tree expected by E2ERunner."""
     runtime = build.parent / f"trtmc-community-runtime-{plan.family}/tensorrt_model_connect/bin"
     runtime.mkdir(parents=True)
     names = (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
         "libtrtmc_backend_trt.so",
         f"libtrtmc_model_{plan.family}.so",
     )
@@ -190,6 +194,21 @@ def _runtime_root(build: Path, plan: FamilyPlan) -> Path:
         if not source.is_file():
             raise CiError(f"native Community GPU build is missing {source}")
         (runtime / name).symlink_to(source.resolve())
+    declaration = build / "families" / plan.family / "cli.json"
+    if (
+        repository is not None
+        and (repository / "families" / plan.family / "cli.json").is_file()
+        and not declaration.is_file()
+    ):
+        raise CiError(f"native Community GPU build has no CLI declaration for {plan.family}")
+    if declaration.is_file():
+        destination = runtime / "families" / plan.family / "cli.json"
+        destination.parent.mkdir(parents=True)
+        destination.symlink_to(declaration.resolve())
+        if library := native_cli_library(declaration):
+            if not (build / library).is_file():
+                raise CiError(f"native Community GPU build is missing {library}")
+            (runtime / library).symlink_to((build / library).resolve())
 
     site_packages = runtime.parent.parent
     for package_name in ("tensorrt_libs", "torch"):
@@ -279,6 +298,10 @@ def run(repository: Path, env: dict[str, str]) -> None:
         print(f"Running Community GPU E2E: {plan.family} ({', '.join(plan.testcases)})")
         try:
             _install_family_requirements(context, (plan,))
+            targets = [f"trtmc_model_{plan.family}"]
+            declaration = repository / "families" / plan.family / "cli.json"
+            if declaration.is_file() and native_cli_library(declaration) is not None:
+                targets.append(f"trtmc_cli_{plan.family}")
             context.run(
                 [
                     "cmake",
@@ -287,11 +310,11 @@ def run(repository: Path, env: dict[str, str]) -> None:
                     "--parallel",
                     "8",
                     "--target",
-                    f"trtmc_model_{plan.family}",
+                    *targets,
                 ],
                 limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
             )
-            runtime_root = _runtime_root(build, plan)
+            runtime_root = _runtime_root(build, plan, repository)
             _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
             runtime_env = {
                 **checkpoint_env,

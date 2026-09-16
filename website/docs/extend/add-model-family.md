@@ -20,6 +20,11 @@ families/my_family/
     └── thresholds/<testcase>.json  # optional numeric override
 ```
 
+Families can also own their complete CLI through `cli.json` and lazy handlers.
+See [Family-Owned CLI Commands](./family-cli.md). This is independent of the
+runtime's semantic Task migration; neither migration requires another family's
+implementation or a central list of migrated families.
+
 `support.py` owns checkpoint identity and task capabilities without importing
 the family implementation or its dependencies:
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import trt_compat
+from .cli import BuildRequest, coerce_request
 
 from .checkpoint import (
     validate_affinity_checkpoint,
@@ -406,29 +407,9 @@ class Boltz2Plugin:
         return sections
 
 
-def build(request: Any, writer: Any) -> None:
+def build(request: BuildRequest, writer: Any) -> None:
     """Build the bounded BF16 biomolecular structure-prediction profile."""
-
-    if request.backend != "trt":
-        raise NotImplementedError("boltz2 supports only the TensorRT backend")
-    if request.task != "structure_prediction":
-        raise ValueError("boltz2 supports only task=structure_prediction")
-    if request.precision != _PRECISION:
-        raise ValueError("boltz2 supports only bf16 precision")
-    if request.max_batch_size != 1:
-        raise NotImplementedError("boltz2 supports only max_batch_size=1")
-    if request.tensor_parallel_size != 1 or request.context_parallel_size != 1:
-        raise NotImplementedError("boltz2 does not support distributed builds")
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("boltz2 does not support dynamic_kv_cache")
-    if request.quantization not in {None, "none"} or request.fp32_layers:
-        raise NotImplementedError("boltz2 does not support quantization or fp32 layer overrides")
-    if request.image_height is not None or request.image_width is not None:
-        raise NotImplementedError("boltz2 does not accept image dimensions")
-    if request.video_num_frames is not None:
-        raise NotImplementedError("boltz2 does not accept video dimensions")
-    if request.max_sequence_length not in {None, _TOKEN_COUNT}:
-        raise NotImplementedError("boltz2 max_sequence_length must match the 117-token profile")
+    request = coerce_request(request)
 
     family = Boltz2Plugin()
     weights = family.load_weights(str(request.model_dir), None, precision=request.precision)

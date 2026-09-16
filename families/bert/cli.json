@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one bert TensorRT bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "Hugging Face model ID or local snapshot"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "task", "flags": ["--task"], "type": "string", "choices": ["encoding", "embedding", "reranking"], "default": "encoding"},
+        {"name": "precision", "flags": ["--precision"], "type": "string", "choices": ["fp16", "bf16", "fp32"], "default": "fp32"},
+        {"name": "backend", "flags": ["--backend"], "type": "string", "choices": ["trt", "trt_rtx"], "default": "trt"},
+        {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int"},
+        {"name": "tensor_parallel_size", "flags": ["--tensor-parallel-size"], "type": "int", "choices": [1, 2, 4, 8], "default": 1},
+        {"name": "fp32_layers", "flags": ["--fp32-layer"], "type": "int", "action": "append", "default": []},
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+      ]
+    },
+    {
+      "name": "encode",
+      "help": "Encode text using a BERT bundle",
+      "executor": "native",
+      "handler": "encode",
+      "arguments": [
+        {"name": "bundle", "type": "path", "help": "BERT bundle path"},
+        {"name": "text", "flags": ["--text"], "type": "string", "required": true},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path", "help": "Override the installed task runtime directory"}
+      ]
+    },
+    {
+      "name": "embed",
+      "help": "Embed text using a BERT bundle",
+      "executor": "native",
+      "handler": "embed",
+      "arguments": [
+        {"name": "bundle", "type": "path", "help": "BERT bundle path"},
+        {"name": "text", "flags": ["--text"], "type": "string", "required": true},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path", "help": "Override the installed task runtime directory"}
+      ]
+    },
+    {
+      "name": "rerank",
+      "help": "Score a query and document using a BERT bundle",
+      "executor": "native",
+      "handler": "rerank",
+      "arguments": [
+        {"name": "bundle", "type": "path", "help": "BERT bundle path"},
+        {"name": "query", "flags": ["--query"], "type": "string", "required": true},
+        {"name": "document", "flags": ["--document"], "type": "string", "required": true},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path", "help": "Override the installed task runtime directory"}
+      ]
+    }
+  ]
+}

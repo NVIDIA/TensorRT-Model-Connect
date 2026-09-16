@@ -20,4 +20,5 @@ describe = family_support(
     ),
     tasks=("structure_prediction",),
     default_task="structure_prediction",
+    default_precision="bf16",
 )
