@@ -74,6 +74,15 @@ excluded_profiles:
       Functional and Hugging Face reference-parity qualification is present, but
       the release-performance workload and receipt were collected only for
       qwen38-27b, which exercises the same builder and runtime path.
+  - model: qwen35-0.8b
+    reason: &qwen35_width_performance_exclusion >-
+      Functional and Hugging Face reference-parity qualification is present for
+      every published dense Qwen3.5 width, but the release-performance workload
+      and receipt were collected only for the 9B.
+  - model: qwen35-2b
+    reason: *qwen35_width_performance_exclusion
+  - model: qwen35-4b
+    reason: *qwen35_width_performance_exclusion
   - model: dpn92-mx-in1k
     reason: >-
       Functional and timm reference-parity qualification is present for every
