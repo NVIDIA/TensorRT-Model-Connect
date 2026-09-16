@@ -235,6 +235,16 @@ branch so the new exact merge is validated.
 
 ### 10. Ask a maintainer to trigger protected CI
 
+A successful automatic Community CPU run also starts the self-service
+[Community premerge path](.github/community-premerge.md). It runs full units,
+native packaging, and selected GPU cases on disposable Brev instances. Stable
+uses the main workflow implementation; dev is a separate, non-blocking CI
+experiment. Authors start this path by opening or updating their pull request.
+
+Internal premerge remains the required gate during Community premerge
+qualification. Follow the existing maintainer-triggered process below until
+the separate gate migration is complete.
+
 Opening a pull request or pushing to your fork does **not** start the protected
 premerge suite. After public CPU validation passes and the pull request is
 ready for protected CI, mention the repository maintainer in a pull-request
@@ -259,9 +269,6 @@ already-present label does not create a new trigger event.
 Wait for `TRTMC Internal CI / Automated premerge gate` to pass on the exact
 pull-request head SHA. This is an automated test result, not a request for an
 individual maintainer review.
-The separate `TRTMC Internal CI / Dev premerge (non-blocking)` result evaluates
-experimental CI and is not required for merge. Maintainers configure and promote
-CI implementations using the [premerge lane guide](.github/premerge-lanes.md).
 If you push another commit, the previous result no longer validates the current
 head; finish the update, wait for the automatic Community CPU stage, and
 mention `@yifeif-nv` once to request a new protected run. Private runner details,

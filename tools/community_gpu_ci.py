@@ -54,6 +54,8 @@ def selected_families(
     families: str,
     direct_families: str,
     added_families: str,
+    *,
+    premerge: bool = False,
 ) -> tuple[str, ...]:
     """Resolve the family jobs without reading contributor-controlled shell text."""
     selected = _family_list(families, "TRTMC_GPU_FAMILIES")
@@ -68,7 +70,9 @@ def selected_families(
     if scope == "families":
         if not selected or direct != selected or added:
             raise CiError("family scope requires existing families only")
-        return selected
+        return tuple(sorted(set(selected) | {"qwen"})) if premerge else selected
+    if premerge and scope in {"docs", "none"} and not (selected or direct or added):
+        return ("qwen",)
     raise CiError(f"GPU execution received non-GPU scope: {scope!r}")
 
 
@@ -204,11 +208,13 @@ def _runtime_root(build: Path, plan: FamilyPlan) -> Path:
 def run(repository: Path, env: dict[str, str]) -> None:
     """Build native contracts, stage checkpoints, and execute selected E2E cases."""
     repository = repository.resolve()
+    premerge = env.get("TRTMC_GPU_PREMERGE", "false") == "true"
     selected = selected_families(
         env.get("TRTMC_GPU_SCOPE", ""),
         env.get("TRTMC_GPU_FAMILIES", ""),
         env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
         env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
+        premerge=premerge,
     )
     failures: list[tuple[str, str]] = []
     plans: list[FamilyPlan] = []
@@ -229,6 +235,32 @@ def run(repository: Path, env: dict[str, str]) -> None:
         "CMAKE_CUDA_ARCHITECTURES": env.get("CMAKE_CUDA_ARCHITECTURES", "89"),
     }
     context = CiContext(repository, build_env)
+    if premerge:
+        base_sha = env.get("TRTMC_GPU_BASE_SHA", "")
+        if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+            raise CiError("Community premerge requires the exact protected base SHA")
+        for plan in plans:
+            directory = f"families/{plan.family}/tests/manifests"
+            files = context.run(
+                ["git", "ls-tree", "-r", "--name-only", base_sha, "--", directory],
+                capture_output=True,
+            ).stdout.splitlines()
+            protected_cases: set[str] = set()
+            for path in files:
+                if not path.endswith(".json"):
+                    continue
+                manifest = json.loads(
+                    context.run(["git", "show", f"{base_sha}:{path}"], capture_output=True).stdout
+                )
+                protected_cases.update(
+                    case["name"] for case in manifest["testcases"] if case.get("premerge") is True
+                )
+            missing_cases = protected_cases - set(plan.testcases)
+            if missing_cases:
+                raise CiError(
+                    f"{plan.family} removed protected premerge cases: "
+                    + ", ".join(sorted(missing_cases))
+                )
     context.run(
         [
             sys.executable,

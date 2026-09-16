@@ -39,6 +39,7 @@ RUN python3.12 -m venv --system-site-packages ${VIRTUAL_ENV} && \
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 COPY community-ci.txt /tmp/trtmc-community-ci.txt
+COPY base.txt /tmp/trtmc-base-requirements.txt
 
 RUN pip install -U pip && \
     pip install \
@@ -57,8 +58,9 @@ RUN pip install -U pip && \
       "torchaudio==${TORCHAUDIO_VERSION}" \
       --index-url "${TORCH_CUDA_INDEX}" && \
     pip install "setuptools>=80,<82" && \
+    pip install --requirement /tmp/trtmc-base-requirements.txt && \
     pip install --requirement /tmp/trtmc-community-ci.txt && \
-    rm -f /tmp/trtmc-community-ci.txt
+    rm -f /tmp/trtmc-community-ci.txt /tmp/trtmc-base-requirements.txt
 
 ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu
 ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu

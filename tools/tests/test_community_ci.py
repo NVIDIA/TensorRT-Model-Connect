@@ -295,7 +295,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     gpu_authorize_steps = {step["name"]: step for step in gpu_authorize["steps"]}
     impact_step = gpu_authorize_steps["Resolve the changed model families"]
     assert impact_step["env"]["GPU_EXECUTION_ENABLED"] == (
-        "${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}"
+        "${{ inputs.premerge_lane && inputs.premerge_lane != 'off' || env.COMMUNITY_GPU_EXECUTION_ENABLED }}"
     )
     assert impact_step["env"]["MANUAL_GPU_EXECUTION_ENABLED"] == (
         "${{ github.event_name == 'workflow_dispatch' && inputs.run_gpu_smoke || false }}"
@@ -308,15 +308,18 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     )
     assert "Experimental Community GPU smoke was manually enabled" in policy_step["run"]
     assert jobs["announce"]["needs"] == "gpu-authorize"
-    assert jobs["announce"]["if"] == "${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}"
+    assert jobs["announce"]["if"] == (
+        "${{ needs.gpu-authorize.outputs.run_gpu == 'true' && "
+        "(!inputs.premerge_lane || inputs.premerge_lane == 'off') }}"
+    )
     assert jobs["provision-and-test"]["needs"] == ["gpu-authorize", "announce"]
     assert jobs["provision-and-test"]["environment"] == {
-        "name": "gpu-ci-dispatch",
+        "name": "${{ inputs.premerge_lane == 'dev' && 'gpu-ci-dev-dispatch' || 'gpu-ci-dispatch' }}",
         "deployment": False,
     }
     assert jobs["provision-and-test"]["permissions"] == {"contents": "read"}
     assert jobs["provision-and-test"]["concurrency"] == {
-        "group": "trtmc-community-gpu",
+        "group": "trtmc-community-gpu-${{ inputs.premerge_lane || 'off' }}",
         "cancel-in-progress": False,
     }
     assert jobs["publish"]["needs"] == [
@@ -330,7 +333,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     assert "needs.gpu-authorize.outputs.gpu_enabled == 'true'" in jobs["publish"]["if"]
     assert jobs["cleanup"]["needs"] == ["gpu-authorize", "provision-and-test"]
     assert jobs["cleanup"]["environment"] == {
-        "name": "gpu-ci-dispatch",
+        "name": "${{ inputs.premerge_lane == 'dev' && 'gpu-ci-dev-dispatch' || 'gpu-ci-dispatch' }}",
         "deployment": False,
     }
     gpu_test = {step["name"]: step for step in jobs["provision-and-test"]["steps"]}[
@@ -340,14 +343,14 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
         "Check out trusted GPU orchestration"
     ]
     assert trusted_checkout["with"] == {
-        "ref": "${{ needs.gpu-authorize.outputs.base_sha }}",
+        "ref": "${{ inputs.premerge_lane && inputs.premerge_lane != 'off' && github.sha || needs.gpu-authorize.outputs.base_sha }}",
         "persist-credentials": False,
     }
     assert gpu_test["env"]["MERGE_SHA"] == "${{ needs.gpu-authorize.outputs.merge_sha }}"
     assert gpu_test["env"]["DIRECT_FAMILIES"] == (
         "${{ needs.gpu-authorize.outputs.direct_families }}"
     )
-    assert "refs/pull/$PR_NUMBER/merge" in gpu_test["run"]
+    assert "git fetch --depth 2 origin $MERGE_SHA" in gpu_test["run"]
     assert r"\$(git rev-parse FETCH_HEAD)" in gpu_test["run"]
     assert '= $MERGE_SHA && git checkout --detach $MERGE_SHA"' in gpu_test["run"]
     assert "python3.12 -m tools.community_gpu_ci" in gpu_test["run"]
@@ -470,6 +473,7 @@ esac
             "ACTOR": "tester",
             "PR_NUMBER": "17",
             "EVENT_NAME": event_name,
+            "PREMERGE_LANE": "off",
             "EVENT_HEAD_SHA": head_sha,
             "EVENT_BASE_SHA": stale_rest_base_sha,
             "EVENT_MERGE_SHA": event_merge_sha,
@@ -715,7 +719,6 @@ esac
     if expected_returncode == 0:
         assert github_output.read_text(encoding="utf-8") == (
             f"trigger_authorized=true\npr_number=17\nhead_sha={head_sha}\nbase_sha={base_sha}\n"
-            f"tested_sha={live_merge_sha}\nsource_tree={merge_tree_sha}\n"
         )
     elif candidate_identity.endswith("-api-error"):
         assert "Community CPU / Required must pass" not in result.stdout + result.stderr
@@ -1211,6 +1214,7 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
         "BREV_CALLS": str(calls),
         "CREATE_EXITCODE": str(create_exitcode),
+        "GPU_TYPE": "L40",
         "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "2",
         "GITHUB_OUTPUT": str(output),
@@ -1251,3 +1255,295 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
         f"create {instance_name} -g L40 --timeout 600",
         f"delete {instance_name}",
     ]
+
+
+def test_community_premerge_has_independent_lanes_and_public_only_execution():
+    control = yaml.safe_load((REPO_ROOT / ".github/workflows/community-premerge.yml").read_text())
+    executor = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    execute = control["jobs"]["execute"]
+    assert execute["strategy"] == {"fail-fast": False, "matrix": {"lane": ["stable", "dev"]}}
+    assert "matrix.lane" in execute["concurrency"]["group"]
+    assert "concurrency" not in control
+    assert "github.event.workflow_run.event == 'pull_request'" in control["jobs"]["snapshot"]["if"]
+    assert "actions/checkout" not in json.dumps(control)
+    assert "TRTMC Internal CI" not in json.dumps(control)
+    dispatch = next(step for step in execute["steps"] if step.get("id") == "execution")
+    assert dispatch["env"]["CI_REF"] == (
+        "${{ matrix.lane == 'stable' && 'main' || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}"
+    )
+    assert "/actions/workflows/community-ci.yml/dispatches" in dispatch["run"]
+    gpu = executor["jobs"]["provision-and-test"]
+    test = next(step for step in gpu["steps"] if step.get("id") == "test")
+    assert test["env"]["HF_TOKEN"] == (
+        "${{ (!inputs.premerge_lane || inputs.premerge_lane == 'off') && secrets.HF_TOKEN || '' }}"
+    )
+    assert "pipeline premerge-unit; python3.12 -m tools.ci pipeline package;" in test["run"]
+    assert 'test -z "$HF_TOKEN"' in test["run"]
+    assert "git fetch --depth 2 origin $MERGE_SHA" in test["run"]
+    assert "refs/pull/$PR_NUMBER/merge" not in test["run"]
+    assert "TRTMC_PREMERGE_UNIT_SCOPE=all" in test["run"]
+    assert "gpu-ci-dev-dispatch" in gpu["environment"]["name"]
+
+
+@pytest.mark.parametrize("fault", ["", "cpu", "head", "parent", "event", "workflow"])
+def test_community_premerge_uses_github_merge_instead_of_upstream_title(tmp_path, fault):
+    head, base, merge, tree = (value * 40 for value in "abcd")
+    fake = tmp_path / "gh"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport json,os,sys\n"
+        "endpoint=next(arg for arg in sys.argv if arg.startswith('/repos/'))\n"
+        "data=json.loads(os.environ['RESPONSES'])\n"
+        "print(json.dumps(next(value for suffix,value in data.items() if endpoint.endswith(suffix))))\n"
+    )
+    fake.chmod(0o755)
+    # A contributor-controlled title claims a different merge. The controller
+    # must use GitHub's current synthetic merge and rerun its CPU stages.
+    responses = {
+        "/actions/runs/42": {
+            "event": "workflow_dispatch" if fault == "event" else "pull_request",
+            "conclusion": "success",
+            "head_sha": head,
+            "path": ".github/workflows/other.yml"
+            if fault == "workflow"
+            else ".github/workflows/community-ci.yml",
+            "display_title": f"PR #17 · community CI · head {head} · merge {'f' * 40}",
+        },
+        "/actions/runs/42/jobs?filter=latest&per_page=100": {
+            "jobs": [
+                {
+                    "name": "Community CPU / Required",
+                    "conclusion": "failure" if fault == "cpu" else "success",
+                }
+            ]
+        },
+        "/pulls/17": {
+            "state": "open",
+            "base": {"repo": {"full_name": "example/source"}, "ref": "main"},
+            "head": {"sha": "e" * 40 if fault == "head" else head},
+            "merge_commit_sha": merge,
+        },
+        f"/git/commits/{merge}": {
+            "sha": merge,
+            "parents": [{"sha": base}, {"sha": "e" * 40 if fault == "parent" else head}],
+            "tree": {"sha": tree},
+        },
+    }
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-premerge.yml",
+                "snapshot",
+                "Verify the CPU run and capture one live PR merge",
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "CPU_RUN_ID": "42",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(output),
+            "RESPONSES": json.dumps(responses),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is (not fault), result.stderr
+    if not fault:
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        assert values["pr_number"] == "17" and values["head_sha"] == head
+        assert json.loads(values["source_snapshot"]) == {
+            "head_sha": head,
+            "base_sha": base,
+            "merge_sha": merge,
+            "source_tree": tree,
+        }
+    else:
+        assert not output.exists()
+
+
+@pytest.mark.parametrize("failed", ["", "CPU", "GPU", "TEST", "CLEANUP"])
+def test_complete_community_premerge_rejects_any_missing_stage(tmp_path, failed):
+    results = dict.fromkeys(
+        ("AUTHORIZED", "CPU", "GPU_AUTHORIZED", "GPU", "TEST", "CLEANUP"), "success"
+    )
+    if failed:
+        results[failed] = "skipped"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml",
+                "premerge-required",
+                "Require CPU, complete GPU premerge, and cleanup",
+            ),
+        ],
+        env={**os.environ, **results},
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is (not failed), result.stderr
+
+
+@pytest.mark.parametrize("lane,ref", [("stable", "main"), ("dev", "main"), ("dev", "ci/developer")])
+def test_community_lane_dispatch_preserves_snapshot_and_request_identity(tmp_path, lane, ref):
+    fake = tmp_path / "gh"
+    fake.write_text(
+        """#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+args=sys.argv[1:]
+record=Path(os.environ['PAYLOAD'])
+if '--input' in args:
+    record.write_text(Path(args[args.index('--input')+1]).read_text())
+else:
+    data=json.loads(record.read_text())['inputs']
+    title=f"PR #{data['pr_number']} · community {data['premerge_lane']} · request {data['request_id']}"
+    print(json.dumps({'workflow_runs': [
+        {'id':42,'display_title':title,'created_at':'2026-01-01'},
+        {'id':99,'display_title':title+'-unrelated','created_at':'2026-01-02'}
+    ]}))
+"""
+    )
+    fake.chmod(0o755)
+    output = tmp_path / "output"
+    snapshot = json.dumps(
+        {"head_sha": "a" * 40, "base_sha": "b" * 40, "merge_sha": "c" * 40, "source_tree": "d" * 40}
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-premerge.yml",
+                "execute",
+                "Dispatch the selected Community CI implementation",
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "PR_NUMBER": "17",
+            "HEAD_SHA": "a" * 40,
+            "LANE": lane,
+            "CI_REF": ref,
+            "SOURCE_SNAPSHOT": snapshot,
+            "GITHUB_REPOSITORY": "example/source",
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(output),
+            "PAYLOAD": str(tmp_path / "payload"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "payload").read_text())
+    assert payload["ref"] == ref
+    assert payload["inputs"]["premerge_lane"] == lane
+    assert payload["inputs"]["source_snapshot"] == snapshot
+    assert payload["inputs"]["pr_number"] == "17"
+    assert len(payload["inputs"]["request_id"]) == 32
+    assert "run_id=42\n" in output.read_text()
+
+
+@pytest.mark.parametrize(
+    "job,conclusion,expected",
+    [
+        ("success", "success", "success"),
+        ("success", "failure", "failure"),
+        ("success", "cancelled", "failure"),
+        ("success", "timed_out", "failure"),
+        ("failure", "success", "failure"),
+        ("cancelled", "", "failure"),
+    ],
+)
+def test_community_terminal_status_cannot_pass_incomplete_runs(tmp_path, job, conclusion, expected):
+    fake = tmp_path / "gh"
+    fake.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$CALLS"\n')
+    fake.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-premerge.yml", "execute", "Publish the terminal lane status"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "HEAD_SHA": "a" * 40,
+            "JOB_STATUS": job,
+            "CONCLUSION": conclusion,
+            "GITHUB_RUN_ID": "42",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": "example/source",
+            "STATUS_CONTEXT": "TRTMC Community CI / Dev premerge (non-blocking)",
+            "CALLS": str(tmp_path / "calls"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == (0 if expected == "success" else 1), result.stderr
+    arguments = (tmp_path / "calls").read_text().splitlines()
+    assert f"state={expected}" in arguments
+    assert "context=TRTMC Community CI / Dev premerge (non-blocking)" in arguments
+    assert "context=TRTMC Community CI / Premerge" not in arguments
+
+
+@pytest.mark.parametrize("fault", ["", "head", "base", "tree"])
+def test_community_executor_keeps_the_captured_snapshot_when_merge_ref_advances(tmp_path, fault):
+    head, base, merge, tree = (value * 40 for value in "abcd")
+    snapshot = {"head_sha": head, "base_sha": base, "merge_sha": merge, "source_tree": tree}
+    if fault in {"base", "tree"}:
+        snapshot["base_sha" if fault == "base" else "source_tree"] = "f" * 40
+    fake = tmp_path / "gh"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport os,sys\n"
+        "key='PULL' if any('/pulls/' in arg for arg in sys.argv) else 'MERGE'\n"
+        "print(os.environ[key])\n"
+    )
+    fake.chmod(0o755)
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "authorize", "Capture the exact pull-request snapshot"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "EVENT_NAME": "workflow_dispatch",
+            "PREMERGE_LANE": "stable",
+            "PR_NUMBER": "17",
+            "REQUEST_ID": "1" * 32,
+            "SOURCE_SNAPSHOT": json.dumps(snapshot),
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(output),
+            "PULL": json.dumps(
+                {
+                    "state": "open",
+                    "base": {"repo": {"full_name": "example/source"}, "ref": "main"},
+                    "head": {"sha": "f" * 40 if fault == "head" else head},
+                    "merge_commit_sha": "e" * 40,
+                }
+            ),
+            "MERGE": json.dumps(
+                {"sha": merge, "parents": [{"sha": base}, {"sha": head}], "tree": {"sha": tree}}
+            ),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is (not fault), result.stderr
+    if not fault:
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        assert values == {"pr_number": "17", "head_sha": head, "base_sha": base, "merge_sha": merge}
+    else:
+        assert not output.exists()
