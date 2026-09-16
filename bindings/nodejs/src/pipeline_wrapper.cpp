@@ -4,6 +4,7 @@
  */
 
 #include "pipeline_wrapper.h"
+
 #include <trtmc/runtime/family_loader.h>
 
 Napi::Object PipelineWrapper::Init(Napi::Env env, Napi::Object exports) {
