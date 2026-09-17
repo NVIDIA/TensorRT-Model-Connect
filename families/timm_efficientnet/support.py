@@ -28,6 +28,6 @@ describe = family_support(
         "efficientnet_b6",
         "efficientnet_b7",
     ),
-    tasks=("classification",),
-    default_task="classification",
+    tasks=("image_to_class_scores",),
+    default_task="image_to_class_scores",
 )

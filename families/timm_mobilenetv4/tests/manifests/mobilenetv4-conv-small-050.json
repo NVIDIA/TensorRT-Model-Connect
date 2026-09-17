@@ -3,7 +3,7 @@
   "hf_id": "timm/mobilenetv4_conv_small_050.e3000_r224_in1k",
   "bundle": "mobilenetv4-conv-small-050.bundle",
   "family": "timm_mobilenetv4",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

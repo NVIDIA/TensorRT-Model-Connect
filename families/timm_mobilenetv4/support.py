@@ -17,6 +17,6 @@ describe = family_support(
         "mobilenetv4_conv_medium",
         "mobilenetv4_conv_large",
     ),
-    tasks=("classification",),
-    default_task="classification",
+    tasks=("image_to_class_scores",),
+    default_task="image_to_class_scores",
 )

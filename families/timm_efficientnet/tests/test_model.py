@@ -17,7 +17,8 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 try:
     from safetensors.numpy import save_file
     from families.timm_efficientnet.config import ModelConfig
-    from families.timm_efficientnet.model import _TimmEfficientnetModel
+    from families.timm_efficientnet.model import _TimmEfficientnetModel, build as build_family
+    from tensorrt_model_connect import BuildRequest
     from families.timm_efficientnet.support import describe
     from tensorrt_model_connect.model_support import ModelMetadata
 except (ImportError, ModuleNotFoundError):
@@ -30,7 +31,7 @@ model = _TimmEfficientnetModel()
 @pytest.mark.parametrize("model_type", ["efficientnet_b0", "efficientnet_b3", "timm_efficientnet"])
 def test_support_matches_efficientnet_variants(model_type: str) -> None:
     metadata = ModelMetadata(config={"model_type": model_type}, model_index={})
-    assert describe(metadata).tasks == ("classification",)
+    assert describe(metadata).tasks == ("image_to_class_scores",)
 
 
 @pytest.mark.parametrize("model_type", ["resnet50", "vgg16", "mobilenetv3_large_100", ""])
@@ -160,3 +161,58 @@ def test_build_engine_rejects_quantized_context(tmp_path: Path):
 
     with pytest.raises(NotImplementedError, match="quantized"):
         model.build_engine(cfg, weights, 0, quant_ctx=object())
+
+
+def test_bundle_config_preserves_checkpoint_class_identity(tmp_path: Path):
+    _write_tiny_effnet(tmp_path)
+    cfg = ModelConfig.from_dir(tmp_path)
+    labels = ["first", "second", "third", "fourth", "fifth"]
+    cfg.raw.update(vocabulary_id="test:five-classes", label_names=labels)
+    model.load_weights(str(tmp_path), cfg, precision="fp32")
+
+    bundle_config = model.get_bundle_config_overrides(cfg)
+
+    assert bundle_config["vocabulary_id"] == "test:five-classes"
+    assert bundle_config["labels"] == labels
+
+
+@pytest.mark.parametrize("labels", [["only one"], ["one", "two", "", "four", "five"], 5])
+def test_bundle_config_rejects_incomplete_class_labels(tmp_path: Path, labels):
+    _write_tiny_effnet(tmp_path)
+    cfg = ModelConfig.from_dir(tmp_path)
+    cfg.raw["label_names"] = labels
+    model.load_weights(str(tmp_path), cfg, precision="fp32")
+
+    with pytest.raises(ValueError, match="label_names must name every class"):
+        model.get_bundle_config_overrides(cfg)
+
+
+def test_build_exports_semantic_task_and_complete_class_metadata(tmp_path: Path, monkeypatch):
+    _write_tiny_effnet(tmp_path)
+    monkeypatch.setattr(_TimmEfficientnetModel, "build_engine", lambda *args, **kwargs: b"plan")
+    sections = {}
+
+    class Writer:
+        def set_header(self, **header):
+            sections["header"] = header
+
+        def add_bytes(self, name, value):
+            sections[name] = value
+
+        def add_json(self, name, value):
+            sections[name] = value
+
+    request = BuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "unused.bundle",
+        family="timm_efficientnet",
+        task="image_to_class_scores",
+        precision="fp32",
+    )
+    build_family(request, Writer())
+
+    assert sections["header"]["task"] == "image_to_class_scores"
+    assert sections["engine.plan"] == b"plan"
+    assert sections["runtime.json"]["num_classes"] == 5
+    assert sections["runtime.json"]["vocabulary_id"] == ""
+    assert sections["runtime.json"]["labels"] == []

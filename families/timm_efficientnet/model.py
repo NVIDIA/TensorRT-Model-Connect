@@ -408,11 +408,27 @@ class _TimmEfficientnetModel:
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         cfg = config.raw.get("_timm_efficientnet_config") or _resolve_config(config.raw)
+        # Only publish checkpoint-supplied identity; absent metadata means
+        # model-local class ordinals, not an inferred cross-model vocabulary.
+        vocabulary_id = config.raw.get("vocabulary_id", "")
+        labels = config.raw.get("label_names", [])
+        if not isinstance(vocabulary_id, str):
+            raise ValueError("timm EfficientNet vocabulary_id must be a string")
+        if not isinstance(labels, list) or (
+            labels
+            and (
+                len(labels) != cfg["num_classes"]
+                or any(not isinstance(label, str) or not label for label in labels)
+            )
+        ):
+            raise ValueError("timm EfficientNet label_names must name every class in order")
         return {
             "model_type": config.model_type,
             "input_image_h": cfg["image_size_h"],
             "input_image_w": cfg["image_size_w"],
             "num_classes": cfg["num_classes"],
+            "vocabulary_id": vocabulary_id,
+            "labels": labels,
             "image_mean": cfg["mean"],
             "image_std": cfg["std"],
             "crop_pct": cfg["crop_pct"],
@@ -449,8 +465,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_efficientnet does not support tensor parallelism")
     if request.context_parallel_size != 1:
         raise NotImplementedError("timm_efficientnet does not support context parallelism")
-    if request.task != "classification":
-        raise ValueError("timm_efficientnet supports only task=classification")
+    if request.task != "image_to_class_scores":
+        raise ValueError("timm_efficientnet supports only task=image_to_class_scores")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("timm_efficientnet does not support quantization")
     if request.fp32_layers:
@@ -489,6 +505,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 "interpolation",
                 "image_mean",
                 "image_std",
+                "num_classes",
+                "vocabulary_id",
+                "labels",
             )
         },
     )

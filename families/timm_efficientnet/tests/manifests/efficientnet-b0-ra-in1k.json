@@ -3,7 +3,7 @@
   "hf_id": "timm/efficientnet_b0.ra_in1k",
   "bundle": "efficientnet-b0-ra-in1k.bundle",
   "family": "timm_efficientnet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

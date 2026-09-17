@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from tools.e2e_evidence import evidence_stage, record_evidence
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -14,7 +15,7 @@ import pytest
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "timm_mobilenetv4"
-TASKS = frozenset({"classification"})
+TASKS = frozenset({"image_to_class_scores"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 
@@ -239,6 +240,75 @@ def _assert_parity(actual, expected) -> None:
     assert int(actual["top_class"]) == expected
 
 
+def _assert_sdk_consumers(
+    runtime_root: Path, bundle: Path, case: dict, model_config: dict, expected: int, tmp_path: Path
+) -> None:
+    import numpy as np
+    from PIL import Image
+
+    native_build = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    image = np.asarray(Image.open(_asset(case["test_image"])).convert("RGB"), dtype=np.float32)
+    image /= np.float32(255.0)
+    raw_image = tmp_path / "sdk-input.rgb.f32"
+    image.tofile(raw_image)
+    outputs = []
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_timm_mobilenetv4_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [
+                str(consumer),
+                str(bundle),
+                str(runtime_root),
+                str(raw_image),
+                str(image.shape[0]),
+                str(image.shape[1]),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        payloads = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"SDK {language} consumer must return one result"
+        actual = payloads[0]
+        record_evidence(f"sdk_{language}", actual)
+        assert actual["task"] == "image_to_class_scores"
+        assert actual["kind"] == "logit" and actual["score_kind"] == 1
+        assert actual["score_count"] == len(actual["scores"]) == int(model_config["num_classes"])
+        assert all(math.isfinite(value) for value in actual["scores"])
+        assert actual["top_class"] == expected
+        assert actual["top_score"] == max(actual["scores"])
+        assert actual["vocabulary_id"] == model_config.get("vocabulary_id", "")
+        assert actual["labels"] == model_config.get("label_names", [])
+        outputs.append(actual)
+    # Both SDKs receive identical pixels. The original CLI test above keeps
+    # its JPEG decoder and the unchanged top-1 timm oracle.
+    assert outputs[0] == outputs[1]
+
+
+def _assert_semantic_results(
+    actual: dict, expected, model_dir: Path, runtime_root: Path,
+    bundle: Path, case: dict, tmp_path: Path,
+) -> None:
+    model_config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    assert actual["score_kind"] == "logit"
+    assert actual["scores"] == actual["logits"]
+    assert len(actual["logits"]) == int(model_config["num_classes"])
+    assert all(math.isfinite(value) for value in actual["logits"])
+    assert actual["top_score"] == max(actual["logits"])
+    assert actual["vocabulary_id"] == model_config.get("vocabulary_id", "")
+    assert actual["labels"] == model_config.get("label_names", [])
+    _assert_sdk_consumers(
+        runtime_root, bundle, case, model_config, expected, tmp_path
+    )
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
@@ -264,3 +334,22 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("reference", expected)
     with evidence_stage("compare"):
         _assert_parity(actual, expected)
+    with evidence_stage("sdk"):
+        _assert_semantic_results(actual, expected, model_dir, runtime_root, bundle, case, tmp_path)
+
+
+def test_official_checkpoint_e2e_invokes_public_sdk_checks(tmp_path: Path, monkeypatch):
+    actual = {"top_class": 0}
+    expected = 0
+    calls = []
+    monkeypatch.setitem(globals(), "_model_dir", lambda manifest: tmp_path)
+    monkeypatch.setitem(globals(), "_runtime", lambda: (tmp_path / "trtmc", tmp_path))
+    monkeypatch.setitem(globals(), "_build", lambda *args: None)
+    monkeypatch.setitem(globals(), "_native", lambda *args: actual)
+    monkeypatch.setitem(globals(), "_official_reference", lambda *args: expected)
+    monkeypatch.setitem(globals(), "_assert_semantic_results", lambda *args: calls.append(args))
+    name = next(iter(CASES))
+    _, manifest, case = CASES[name]
+    test_official_checkpoint_e2e(name, tmp_path)
+    assert calls == [(actual, expected, tmp_path, tmp_path, tmp_path / manifest["bundle"],
+                      case, tmp_path)]
