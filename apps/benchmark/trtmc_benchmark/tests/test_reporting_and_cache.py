@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -101,10 +102,13 @@ def test_changed_inputs_cannot_reuse_managed_bundle(tmp_path, monkeypatch, chang
         monkeypatch.setattr(builder_module, "_resolve_model", lambda *_: checkpoint)
     elif change == "bundle_preserved_mtime":
         original = case.bundle_path.stat()
+        # Cross the filesystem timestamp tick so ctime changes deterministically.
+        time.sleep(0.01)
         case.bundle_path.write_bytes(b"x" * original.st_size)
         os.utime(case.bundle_path, ns=(original.st_atime_ns, original.st_mtime_ns))
         assert case.bundle_path.stat().st_size == original.st_size
         assert case.bundle_path.stat().st_mtime_ns == original.st_mtime_ns
+        assert case.bundle_path.stat().st_ctime_ns != original.st_ctime_ns
     else:
         case.bundle_path.write_bytes(b"replacement bundle")
     with pytest.raises(BenchmarkError, match="no matching immutable build identity"):
