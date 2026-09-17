@@ -33,12 +33,16 @@ def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
     assert {
         "bloom-560m",
         "chronos-bolt-tiny-official",
+        "falcon-rw-1b",
         "gpt-neo-125m",
         "gpt2-125m",
         "mamba-130m",
         "mixtral-stories-15m",
+        "olmo-1b",
         "opt-125m",
         "pythia-70m",
+        "rwkv-169m",
+        "xglm-564m",
     } <= set(kinds_by_model)
     assert all(kinds == {"accuracy", "performance"} for kinds in kinds_by_model.values())
     assert not any("l0" in case.model.lower() for case in cases)
@@ -63,6 +67,7 @@ def test_opt_uses_validated_profile_and_pre_refactor_performance_length() -> Non
 
     assert accuracy.candidate["build"]["max_sequence_length"] == 256
     assert accuracy.values["prompt_token_limit"] == 192
+    assert performance.name == "generate-10"
     assert performance.values["request"]["max_new_tokens"] == 10
 
 

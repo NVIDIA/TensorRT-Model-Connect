@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: trtmc.qualification/v1
-model: opt-125m
+model: rwkv-169m
 candidate:
-  family: opt
-  checkpoint: facebook/opt-125m
+  family: rwkv
+  checkpoint: RWKV/rwkv-4-169m-pile
   task: text_generation
-  precision: fp16
-  bundle: opt-125m.bundle
+  precision: fp32
+  bundle: rwkv-169m.bundle
   build:
     max_sequence_length: 256
 

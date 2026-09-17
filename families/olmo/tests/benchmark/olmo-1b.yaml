@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: trtmc.qualification/v1
-model: opt-125m
+model: olmo-1b
 candidate:
-  family: opt
-  checkpoint: facebook/opt-125m
+  family: olmo
+  checkpoint: allenai/OLMo-1B-hf
   task: text_generation
   precision: fp16
-  bundle: opt-125m.bundle
+  bundle: olmo-1b.bundle
   build:
     max_sequence_length: 256
 
@@ -36,13 +36,13 @@ accuracy:
       allowed_failures: 1
 
 performance:
-  - name: generate-10
+  - name: generate-20
     benchmark: text_generation_performance
     operation: generate
     request:
       <<: *greedy-generation
       prompt: The capital of France is
-      max_new_tokens: 10
+      max_new_tokens: 20
     measurement:
       warmup: 5
       iterations: 10
