@@ -392,115 +392,123 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one InternVL vision-language bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("internvl does not support dynamic_kv_cache")
+    """Select complete-network offload or preserve the native InternVL builder."""
+    from .dispatch import build as dispatch_build
 
-    if request.image_height is not None:
-        raise NotImplementedError("internvl does not support image_height")
+    def _build_native(request: "BuildRequest", writer: "BundleWriter") -> None:
+        """Build one InternVL vision-language bundle."""
+        if request.dynamic_kv_cache:
+            raise NotImplementedError("internvl does not support dynamic_kv_cache")
 
-    if request.image_width is not None:
-        raise NotImplementedError("internvl does not support image_width")
+        if request.image_height is not None:
+            raise NotImplementedError("internvl does not support image_height")
 
-    if request.video_num_frames is not None:
-        raise NotImplementedError("internvl does not support video_num_frames")
+        if request.image_width is not None:
+            raise NotImplementedError("internvl does not support image_width")
 
-    if request.max_batch_size != 1:
-        raise NotImplementedError("internvl does not support max_batch_size")
+        if request.video_num_frames is not None:
+            raise NotImplementedError("internvl does not support video_num_frames")
 
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
+        if request.max_batch_size != 1:
+            raise NotImplementedError("internvl does not support max_batch_size")
 
-    if request.task != "vision_language_generation":
-        raise ValueError("internvl supports only task=vision_language_generation")
-    if request.quantization not in {None, "none"} or request.fp32_layers:
-        raise NotImplementedError("InternVL supports only non-quantized uniform-precision builds")
-    model_dir = Path(request.model_dir)
-    config = ModelConfig.from_dir(model_dir)
-    if str(config.model_type).lower() not in {"internvl_chat", "internvl3", "internvl"}:
-        raise ValueError(f"InternVL does not support model_type={config.model_type!r}")
-    precision = str(request.precision).lower()
-    max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
-    parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
-    parallel.validate()
-    config.raw["_model_dir"] = str(model_dir)
-    model = _InternVLModel()
-    weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="internvl", task=request.task, backend=request.backend)
-    if parallel.enabled:
-        for rank in range(parallel.tp_size):
-            writer.add_bytes(
-                f"engine.rank{rank}.plan",
-                model.build_engine(
-                    config,
-                    weights,
-                    max_length,
-                    precision=precision,
-                    quant_ctx=None,
-                    verbose=request.verbose,
-                    parallel_config=parallel.for_rank(rank),
-                ),
+        if request.context_parallel_size != 1:
+            raise ValueError("this family does not support context parallelism")
+
+        if request.task != "vision_language_generation":
+            raise ValueError("internvl supports only task=vision_language_generation")
+        if request.quantization not in {None, "none"} or request.fp32_layers:
+            raise NotImplementedError(
+                "InternVL supports only non-quantized uniform-precision builds"
             )
-    else:
-        config.raw["_decoder_engine_role"] = "prefill"
-        prefill = model.build_engine(
-            config,
-            weights,
-            max_length,
-            precision=precision,
-            quant_ctx=None,
-            verbose=request.verbose,
-            parallel_config=parallel,
+        model_dir = Path(request.model_dir)
+        config = ModelConfig.from_dir(model_dir)
+        if str(config.model_type).lower() not in {"internvl_chat", "internvl3", "internvl"}:
+            raise ValueError(f"InternVL does not support model_type={config.model_type!r}")
+        precision = str(request.precision).lower()
+        max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
+        parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
+        parallel.validate()
+        config.raw["_model_dir"] = str(model_dir)
+        model = _InternVLModel()
+        weights = model.load_weights(str(model_dir), config)
+        writer.set_header(family="internvl", task=request.task, backend=request.backend)
+        if parallel.enabled:
+            for rank in range(parallel.tp_size):
+                writer.add_bytes(
+                    f"engine.rank{rank}.plan",
+                    model.build_engine(
+                        config,
+                        weights,
+                        max_length,
+                        precision=precision,
+                        quant_ctx=None,
+                        verbose=request.verbose,
+                        parallel_config=parallel.for_rank(rank),
+                    ),
+                )
+        else:
+            config.raw["_decoder_engine_role"] = "prefill"
+            prefill = model.build_engine(
+                config,
+                weights,
+                max_length,
+                precision=precision,
+                quant_ctx=None,
+                verbose=request.verbose,
+                parallel_config=parallel,
+            )
+            config.raw["_decoder_engine_role"] = "decode"
+            decode = model.build_engine(
+                config,
+                weights,
+                max_length,
+                precision=precision,
+                quant_ctx=None,
+                verbose=request.verbose,
+                parallel_config=parallel,
+            )
+            config.raw.pop("_decoder_engine_role", None)
+            writer.add_bytes("engine.plan", decode)
+            writer.add_bytes("prefill.plan", prefill)
+        vision = model.build_vision_engine(
+            str(model_dir), config, weights, precision=precision, verbose=request.verbose
         )
-        config.raw["_decoder_engine_role"] = "decode"
-        decode = model.build_engine(
-            config,
-            weights,
-            max_length,
-            precision=precision,
-            quant_ctx=None,
-            verbose=request.verbose,
-            parallel_config=parallel,
-        )
-        config.raw.pop("_decoder_engine_role", None)
-        writer.add_bytes("engine.plan", decode)
-        writer.add_bytes("prefill.plan", prefill)
-    vision = model.build_vision_engine(
-        str(model_dir), config, weights, precision=precision, verbose=request.verbose
-    )
-    if vision is None:
-        raise RuntimeError("InternVL vision build returned no engine")
-    vl = model.get_vl_config(config) or {}
-    runtime = {
-        "tensor_parallel_size": parallel.tp_size,
-        "num_layers": config.num_hidden_layers,
-        "max_cache_length": max_length,
-        "vocab_size": config.vocab_size,
-        "id_bos": config.bos_token_id,
-        "id_eos": config.eos_token_id,
-        "image_token_id": int(vl.get("image_token_id", -1)),
-        "vision_output_dim": int(vl.get("vision_output_dim", config.hidden_size)),
-        "prefill_max_length": int(vl.get("prefill_max_length", max_length)),
-        "io_map": {
-            "cache_k_pattern": "cache_k_{i}",
-            "cache_v_pattern": "cache_v_{i}",
-            "present_k_pattern": "present_k_{i}",
-            "present_v_pattern": "present_v_{i}",
-        },
-    }
-    runtime.update(vl)
-    writer.add_bytes("vision.plan", vision)
-    runtime.update(_tokenizer_runtime_contract(model_dir))
-    writer.add_json("runtime.json", runtime)
-    for filename in (
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "chat_template.jinja",
-        "vocab.json",
-        "merges.txt",
-        "special_tokens_map.json",
-        "tokenizer.model",
-    ):
-        path = model_dir / filename
-        if path.is_file():
-            writer.add_bytes(filename, path.read_bytes())
+        if vision is None:
+            raise RuntimeError("InternVL vision build returned no engine")
+        vl = model.get_vl_config(config) or {}
+        runtime = {
+            "tensor_parallel_size": parallel.tp_size,
+            "num_layers": config.num_hidden_layers,
+            "max_cache_length": max_length,
+            "vocab_size": config.vocab_size,
+            "id_bos": config.bos_token_id,
+            "id_eos": config.eos_token_id,
+            "image_token_id": int(vl.get("image_token_id", -1)),
+            "vision_output_dim": int(vl.get("vision_output_dim", config.hidden_size)),
+            "prefill_max_length": int(vl.get("prefill_max_length", max_length)),
+            "io_map": {
+                "cache_k_pattern": "cache_k_{i}",
+                "cache_v_pattern": "cache_v_{i}",
+                "present_k_pattern": "present_k_{i}",
+                "present_v_pattern": "present_v_{i}",
+            },
+        }
+        runtime.update(vl)
+        writer.add_bytes("vision.plan", vision)
+        runtime.update(_tokenizer_runtime_contract(model_dir))
+        writer.add_json("runtime.json", runtime)
+        for filename in (
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "chat_template.jinja",
+            "vocab.json",
+            "merges.txt",
+            "special_tokens_map.json",
+            "tokenizer.model",
+        ):
+            path = model_dir / filename
+            if path.is_file():
+                writer.add_bytes(filename, path.read_bytes())
+
+    dispatch_build(request, writer, _build_native)
