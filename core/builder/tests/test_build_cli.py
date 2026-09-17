@@ -255,7 +255,13 @@ def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_pat
     )
 
     assert build_cli._resolve_model("openai-community/gpt2", "revision-1") == tmp_path
-    assert calls == [{"repo_id": "openai-community/gpt2", "revision": "revision-1"}]
+    assert calls == [
+        {
+            "repo_id": "openai-community/gpt2",
+            "revision": "revision-1",
+            "ignore_patterns": ["flax_model.msgpack", "tf_model.h5"],
+        }
+    ]
 
 
 def test_build_command_rejects_a_task_the_family_does_not_own(monkeypatch, tmp_path: Path) -> None:
