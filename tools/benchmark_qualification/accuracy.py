@@ -33,7 +33,7 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
     metric = definition.get("metric")
     metric_name = metric.get("name") if isinstance(metric, Mapping) else None
     if metric_name == "exact_token_ids":
-        result = _mmlu(case, context, dataset, output)
+        result = _text_generation_parity(case, context, dataset, output)
     elif metric_name == "forecast_tensor_parity":
         result = _etth1(case, context, definition, dataset, output)
     else:
@@ -42,7 +42,7 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
     return result
 
 
-def _mmlu(
+def _text_generation_parity(
     case: QualificationCase,
     context: RuntimeContext,
     dataset: Dataset,
@@ -53,26 +53,36 @@ def _mmlu(
     payload = json.loads(dataset.path.read_text(encoding="utf-8"))
     requests = payload.get("requests") if isinstance(payload, Mapping) else None
     if not isinstance(requests, list) or not requests:
-        raise QualificationError("MMLU dataset must contain a non-empty requests list")
+        raise QualificationError("text-generation dataset must contain a non-empty requests list")
     selected = []
     for index, request in enumerate(requests[:sample_limit]):
         if not isinstance(request, Mapping):
-            raise QualificationError(f"MMLU request {index} must be an object")
+            raise QualificationError(f"text-generation request {index} must be an object")
         selected.append(
             {
-                "sample_id": str(request.get("id") or request.get("sample_id") or f"mmlu-{index}"),
+                "sample_id": str(request.get("id") or request.get("sample_id") or f"sample-{index}"),
                 "prompt": _prompt(request),
             }
         )
     reference = configured.get("reference", {})
     candidate_request = configured.get("request", {})
     if not isinstance(reference, Mapping) or not isinstance(candidate_request, Mapping):
-        raise QualificationError("MMLU reference and request must be objects")
+        raise QualificationError("Accuracy reference and request must be objects")
+    reference_task = str(reference.get("task", "causal-lm"))
+    if reference_task not in {"causal-lm", "seq2seq-lm"}:
+        raise QualificationError(f"unsupported Accuracy reference task {reference_task!r}")
+    output_token_policy = str(reference.get("output_token_policy", "new-tokens"))
+    if output_token_policy not in {"new-tokens", "strip-start", "strip-start-and-eos"}:
+        raise QualificationError(
+            f"unsupported Accuracy output token policy {output_token_policy!r}"
+        )
     reference_request = {
         "model": str(case.candidate["checkpoint"]),
         "revision": case.candidate.get("revision"),
         "trust_remote_code": bool(case.candidate.get("trust_remote_code", False)),
         "precision": str(reference.get("precision", "fp32")),
+        "task": reference_task,
+        "output_token_policy": output_token_policy,
         "prompt_token_limit": int(configured.get("prompt_token_limit", 192)),
         "truncation_side": str(configured.get("truncation_side", "left")),
         "generation": dict(candidate_request),
@@ -132,7 +142,7 @@ def _mmlu(
         )
     gates = configured.get("gate", {})
     if not isinstance(gates, Mapping):
-        raise QualificationError("MMLU gate must be an object")
+        raise QualificationError("Accuracy gate must be an object")
     minimum_rate = float(gates.get("min_pass_rate", 1.0))
     allowed_failures = int(gates.get("allowed_failures", 0))
     passed_count = sum(bool(row["passed"]) for row in rows)
@@ -393,7 +403,12 @@ def _prompt(request: Mapping[str, Any]) -> str:
     prompt = request.get("prompt")
     if isinstance(prompt, str) and prompt.strip():
         return prompt
-    raise QualificationError("MMLU request has neither a prompt nor a user message")
+    inputs = request.get("inputs")
+    if isinstance(inputs, Mapping):
+        prompt = inputs.get("prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt
+    raise QualificationError("text-generation request has neither a prompt nor a user message")
 
 
 def _positive_int(value: Any, name: str) -> int:

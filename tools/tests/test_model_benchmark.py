@@ -14,7 +14,12 @@ import pytest
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
 from tools.benchmark_qualification import accuracy as qualification_accuracy
-from tools.benchmark_qualification.catalog import discover, load_benchmark, select
+from tools.benchmark_qualification.catalog import (
+    QualificationCase,
+    discover,
+    load_benchmark,
+    select,
+)
 from tools.benchmark_qualification.datasets import Dataset, resolve_dataset
 from tools.benchmark_qualification.references import hf_text_generation
 from tools.benchmark_qualification.runtime import (
@@ -51,11 +56,13 @@ def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
         "granite-3.1-2b",
         "internlm2-1.8b",
         "mamba-130m",
+        "marian-en-ru",
         "minitron-4b-depth",
         "minitron-4b-width",
         "mistral-7b",
         "mixtral-stories-15m",
         "nemotron-hindi-4b",
+        "nllb-200-distilled-600m",
         "olmo-1b",
         "olmo2-1b",
         "opt-125m",
@@ -63,8 +70,10 @@ def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
         "pythia-70m",
         "qwen3-0.6b-fp16",
         "rwkv-169m",
+        "riva-translate-4b",
         "stablelm2-1.6b",
         "starcoder2-3b",
+        "t5-small",
         "xglm-564m",
     } <= set(kinds_by_model)
     assert all(kinds == {"accuracy", "performance"} for kinds in kinds_by_model.values())
@@ -105,15 +114,19 @@ def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> N
         "glm-4-9b": 20,
         "granite-3.1-2b": 20,
         "internlm2-1.8b": 20,
+        "marian-en-ru": 20,
         "minitron-4b-depth": 20,
         "minitron-4b-width": 20,
         "mistral-7b": 10,
         "nemotron-hindi-4b": 20,
+        "nllb-200-distilled-600m": 20,
         "olmo2-1b": 8,
         "phi3-mini": 10,
         "qwen3-0.6b-fp16": 10,
         "stablelm2-1.6b": 22,
         "starcoder2-3b": 20,
+        "riva-translate-4b": 20,
+        "t5-small": 20,
     }
 
     for model, tokens in expected.items():
@@ -233,6 +246,175 @@ def test_hf_accuracy_reference_uses_requested_expert_implementation(monkeypatch)
     assert hf_text_generation._precision_load_options("fp16") == {
         "torch_dtype": "fp16"
     }
+
+
+def test_accuracy_forwards_seq2seq_reference_contract_and_nested_dataset_input(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_path = tmp_path / "translation.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "requests": [
+                    {
+                        "sample_id": "translation-0",
+                        "inputs": {"prompt": "The house is wonderful."},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    case = QualificationCase(
+        kind="accuracy",
+        model="translation-model",
+        family="translation",
+        name="translation-parity",
+        benchmark="translation_parity",
+        candidate={
+            "family": "translation",
+            "checkpoint": "org/model",
+            "task": "text_generation",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={
+            "samples": 1,
+            "prompt_token_limit": 96,
+            "reference": {
+                "precision": "fp16",
+                "task": "seq2seq-lm",
+                "output_token_policy": "strip-start-and-eos",
+            },
+            "request": {
+                "max_new_tokens": 128,
+                "source_language": "eng_Latn",
+                "source_language_token_id": 256047,
+                "target_language": "fra_Latn",
+                "forced_bos_token_id": 256057,
+            },
+            "gate": {"min_pass_rate": 1.0, "allowed_failures": 0},
+        },
+        source=tmp_path / "translation.yaml",
+        reference_requirements=None,
+    )
+    dataset = Dataset("translation", dataset_path, "provided", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    captured_reference: dict[str, object] = {}
+    captured_candidate: list[dict[str, object]] = []
+
+    def reference(command, *_args, **_kwargs):
+        request = Path(command[command.index("--request") + 1])
+        output = Path(command[command.index("--output") + 1])
+        captured_reference.update(json.loads(request.read_text(encoding="utf-8")))
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {
+                            "sample_id": "translation-0",
+                            "prompt": "The house is wonderful.",
+                            "token_ids": [4, 5],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def candidate(_case, _context, _output, _operation, requests):
+        captured_candidate.extend(requests)
+        return ([{"token_ids": [4, 5]}], tmp_path / "translation.bundle")
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "exact_token_ids"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", reference)
+    monkeypatch.setattr(qualification_accuracy, "_candidate_outputs", candidate)
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert captured_reference["task"] == "seq2seq-lm"
+    assert captured_reference["output_token_policy"] == "strip-start-and-eos"
+    assert captured_reference["samples"] == [
+        {"sample_id": "translation-0", "prompt": "The house is wonderful."}
+    ]
+    assert captured_candidate[0]["request"]["forced_bos_token_id"] == 256057
+
+
+def test_hf_accuracy_reference_selects_the_seq2seq_model_class() -> None:
+    causal = object()
+    seq2seq = object()
+
+    assert hf_text_generation._model_class("causal-lm", causal, seq2seq) is causal
+    assert hf_text_generation._model_class("seq2seq-lm", causal, seq2seq) is seq2seq
+    with pytest.raises(ValueError, match="unsupported reference task"):
+        hf_text_generation._model_class("encoder", causal, seq2seq)
+
+
+def test_hf_accuracy_reference_applies_explicit_translation_languages() -> None:
+    class Tokenizer:
+        src_lang = None
+        unk_token_id = 0
+
+        @staticmethod
+        def convert_tokens_to_ids(value: str) -> int:
+            return {"eng_Latn": 256047, "fra_Latn": 256057}.get(value, 0)
+
+        @staticmethod
+        def convert_ids_to_tokens(value: int) -> str:
+            return {256047: "eng_Latn", 256057: "fra_Latn"}[value]
+
+    tokenizer = Tokenizer()
+    controls = hf_text_generation._translation_controls(
+        tokenizer,
+        {
+            "source_language": "eng_Latn",
+            "source_language_token_id": 256047,
+            "target_language": "fra_Latn",
+            "forced_bos_token_id": 256057,
+        },
+    )
+
+    assert tokenizer.src_lang == "eng_Latn"
+    assert controls == {"forced_bos_token_id": 256057}
+
+
+def test_hf_accuracy_reference_normalizes_seq2seq_control_tokens() -> None:
+    assert hf_text_generation._normalize_seq2seq_tokens(
+        [2, 256057, 1034, 248075, 2],
+        decoder_start_token_id=2,
+        eos_token_id=2,
+        policy="strip-start-and-eos",
+    ) == [256057, 1034, 248075]
+    assert hf_text_generation._normalize_seq2seq_tokens(
+        [0, 17, 1],
+        decoder_start_token_id=0,
+        eos_token_id=1,
+        policy="strip-start",
+    ) == [17, 1]
 
 
 def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
