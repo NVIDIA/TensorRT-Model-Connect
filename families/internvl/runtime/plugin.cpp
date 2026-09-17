@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#ifdef TRTMC_HAS_EDGE_LLM
+#include "families/internvl/runtime/edge_llm/adapter.h"
+#endif
+
 #include "families/internvl/runtime/cuda_stream.h"
 #include "families/internvl/runtime/distributed_runtime.h"
 #include "families/internvl/runtime/pipeline.h"
@@ -67,6 +71,13 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("internvl does not support --kv-cache-size");
     using namespace trtmc;
+    if (context.reader.find_section("edge_llm.json")) {
+#ifdef TRTMC_HAS_EDGE_LLM
+        return internvl::edge_llm::create(context.reader);
+#else
+        throw std::runtime_error("InternVL Edge bundle requires the optional Edge CMake package");
+#endif
+    }
     const std::string runtime_text = internvl_factory::section_text(context.reader, "runtime.json");
     const auto config = nlohmann::json::parse(runtime_text);
     if (!config.is_object())

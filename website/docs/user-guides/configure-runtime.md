@@ -31,3 +31,26 @@ Unsupported values fail; they are not silently ignored.
 See [Configuration and Backends](../features/config-and-backends.md),
 [Quantization](../features/quantization.md), and
 [Multi-Device Execution](../features/multi-device.md).
+
+## Optional native Edge-LLM SDK
+
+Provision Edge-LLM explicitly when building Model Connect, not during model
+builds or inference. `TRTMC_ENABLE_EDGELLM=ON` selects the public Edge-LLM
+0.10.1 snapshot at `e8b29522938901f6df19ebeedd4b69bc8edbcd97`. The default is
+`OFF`. Configure and build on the inference GPU host; cross compilation is
+rejected. The package must match the native CPU/GPU and CUDA/TensorRT stack.
+Runtime compilation must also use the exact pinned JSON dependency headers;
+the SDK rejects same-version development headers with an incompatible C++ ABI.
+
+- `TRTMC_EDGELLM_ALL_KERNELS=ON` requests all upstream operator groups supported
+  by the local GPU.
+- `TRTMC_EDGELLM_ONNX=ON` also installs the original Python exporter and native
+  C++ ONNX engine builder. It does not select a model's build flow.
+- `CMAKE_PREFIX_PATH` points builders and runtime compilation to the installed
+  SDK. Reuse fails explicitly if a requested capability is absent.
+
+Follow the repository's [pinned SDK installation instructions](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edgellm/README.md)
+for dependencies, native architecture selection and offline provisioning.
+Each family decides whether and how to use the package. Installing the SDK
+is not evidence that a model, precision, input modality or execution variant
+has passed validation. Ordinary model builds never install missing SDK tools.

@@ -29,6 +29,36 @@ resolved API directly.
 decides whether that directory is a Hugging Face snapshot or a prepared
 checkpoint; `BuildRequest` does not perform another discovery pass.
 
+## Optional execution inputs
+
+`build(request, execution=...)` accepts an optional, frozen
+`BuildExecutionInputs` descriptor. It contains a family-owned `variant` string
+and a tuple of `NamedCheckpoint(role, model_dir)` descriptors. Import these
+public types from `tensorrt_model_connect`. Companion directories must already
+exist locally; the core does not download them or infer compatible model pairs.
+Roles must be unique. Variant and role names are lowercase identifiers.
+
+Providing execution inputs requires the selected family to implement
+`build_with_inputs(request, writer, execution)`. The family validates the
+variant, checkpoint roles, compatibility and execution semantics. A missing
+hook fails before bundle creation; the core never substitutes ordinary
+base-only generation or another variant. With no execution inputs, the
+existing `build(request, writer)` family call is unchanged.
+
+The build CLI exposes the same optional contract:
+
+```text
+trtmc build LOCAL_TARGET -o model.bundle \
+  --execution-variant FAMILY_VARIANT \
+  --companion ROLE=LOCAL_COMPANION_DIR
+```
+
+Replace the uppercase placeholders with values from the selected family's
+recipe; they are not literal supported identifiers. Repeat `--companion` only
+for distinct roles. A companion requires `--execution-variant`; URLs and
+implicit companion downloads are unsupported. The generic API does not itself
+qualify any speculative algorithm or checkpoint pair.
+
 ## Optional graph transform
 
 `BuildRequest.graph_transform` is an in-place callback invoked on the completed

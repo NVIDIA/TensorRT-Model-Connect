@@ -100,3 +100,15 @@ by design so a team can implement, validate, change, and revert one family
 without modifying another. Shared code is limited to model-agnostic contracts
 and mechanics described in the
 [Architecture](../architecture/ai-native-horizontal-scaling.md).
+
+### Optional InternVL Edge execution
+
+The InternVL family can offload the recorded original-source InternVL3
+1B/2B/8B HF configurations on native x86 SM80 and 14B on native x86 SM120 to the
+pinned Edge-LLM 0.10.1 SDK. These FP16, batch-one, TP-one profiles have historical
+local public/direct/HF qualification; this is not catalog-wide or fresh-head CI
+qualification. The existing 2B/8B image-health test reads actual Edge visual
+features through a small family-owned test helper without changing its gates.
+Quantized sources, InternVL3.5, and multi-image public requests are excluded.
+See the [family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/internvl/docs/edge-llm.md)
+for exact source revisions, evidence boundaries, and replay requirements.
