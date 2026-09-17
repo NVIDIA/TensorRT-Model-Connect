@@ -110,6 +110,13 @@ def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> N
         "max_sequence_length": 131072,
         "dynamic_kv_cache": True,
     }
+    minitron_depth_cases = select(discover(REPOSITORY), ["minitron-4b-depth"])
+    minitron_depth = next(case for case in minitron_depth_cases if case.kind == "accuracy")
+    assert minitron_depth.candidate["build"]["max_sequence_length"] == (
+        minitron_depth.values["prompt_token_limit"]
+        + minitron_depth.values["request"]["max_new_tokens"]
+        + 1
+    )
 
 
 def test_mmlu_forwards_reference_model_load_options(tmp_path: Path, monkeypatch) -> None:

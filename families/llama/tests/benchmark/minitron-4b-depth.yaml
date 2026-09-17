@@ -10,7 +10,7 @@ candidate:
   precision: fp16
   bundle: minitron-4b-depth.bundle
   build:
-    max_sequence_length: 256
+    max_sequence_length: 257
 
 accuracy:
   - name: mmlu-continuation
