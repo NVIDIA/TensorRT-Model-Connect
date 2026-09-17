@@ -279,3 +279,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         path = model_dir / filename
         if path.is_file():
             writer.add_bytes(filename, path.read_bytes())
+
+
+def build_with_inputs(request, writer, execution) -> None:
+    """Forward the explicit Gemma4 MTP or DSpark pair without changing standalone builds."""
+    from .edge_llm import build as build_pair
+
+    build_pair(request, writer, execution)

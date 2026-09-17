@@ -5,6 +5,9 @@
 
 #include "families/gemma/runtime/sampler.h"
 #include "trtmc/task.h"
+#ifdef TRTMC_HAS_EDGE_LLM
+#include "families/gemma/runtime/edge_llm/request.h"
+#endif
 
 #include <iostream>
 #include <vector>
@@ -51,6 +54,39 @@ static void test_request_eos_overrides_model_defaults() {
 int main() {
     test_any_default_eos_stops_generation();
     test_request_eos_overrides_model_defaults();
+#ifdef TRTMC_HAS_EDGE_LLM
+    trtmc::TextGenerationConfig config;
+    auto request = trtmc::gemma::edge_llm::make_request("hello", config, 128);
+    check(request.maxGenerateLength == 128 && request.topK == 1,
+          "MTP preserves the default greedy request");
+    config.use_chat_template = true;
+    config.enable_thinking = false;
+    const auto chat = trtmc::gemma::edge_llm::make_request("\xe2\x80\x83hello \n", config, 128);
+    check(!chat.applyChatTemplate &&
+              chat.requests.front().messages.front().contents.front().content ==
+                  "<bos><|turn>user\nhello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+          "Gemma4 disabled thinking must match checkpoint prompt before tokenization");
+    config.enable_thinking = true;
+    const auto thought = trtmc::gemma::edge_llm::make_request("hello", config, 128);
+    check(thought.requests.front().messages.front().contents.front().content ==
+              "<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n",
+          "Gemma4 enabled thinking must match checkpoint system prefix");
+    config.use_chat_template = false;
+    const auto raw = trtmc::gemma::edge_llm::make_request(" hello ", config, 128);
+    check(raw.requests.front().messages.front().contents.front().content == " hello ",
+          "Raw Gemma4 text must remain unmodified");
+    config.top_k = 50;
+    bool rejected = false;
+    try {
+        (void)trtmc::gemma::edge_llm::make_request("hello", config, 128);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "MTP must not silently replace sampling with greedy");
+    const auto sampled = trtmc::gemma::edge_llm::make_request("hello", config, 128, true);
+    check(sampled.topK == 50 && sampled.temperature == config.temperature,
+          "DSpark must preserve supported sampling controls");
+#endif
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

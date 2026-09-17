@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import os
+import platform
 import re
 import sys
 from dataclasses import dataclass
@@ -18,6 +20,52 @@ from .graph_transform import GraphTransform, graph_transform
 
 
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
+
+
+@dataclass(frozen=True)
+class NamedCheckpoint:
+    """One explicitly named local checkpoint; the family owns role semantics."""
+
+    role: str
+    model_dir: Path
+
+    def __post_init__(self) -> None:
+        _validate_id("checkpoint role", self.role)
+        if not isinstance(self.model_dir, Path):
+            raise TypeError("checkpoint model_dir must be a Path")
+        if not self.model_dir.is_dir():
+            raise ValueError(f"checkpoint must be an existing local directory: {self.model_dir}")
+
+
+@dataclass(frozen=True)
+class BuildExecutionInputs:
+    """Optional family-owned execution variant and immutable local companions.
+
+    Core transports these inputs without interpreting variants, fetching models,
+    or inferring compatibility. A family must explicitly implement the capability.
+    """
+
+    variant: str
+    checkpoints: tuple[NamedCheckpoint, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_id("execution variant", self.variant)
+        if not isinstance(self.checkpoints, tuple) or any(
+            not isinstance(checkpoint, NamedCheckpoint) for checkpoint in self.checkpoints
+        ):
+            raise TypeError("checkpoints must be a tuple of NamedCheckpoint values")
+        roles = [checkpoint.role for checkpoint in self.checkpoints]
+        if len(roles) != len(set(roles)):
+            raise ValueError("checkpoint roles must be unique")
+        self.validate_local()
+
+    def validate_local(self) -> None:
+        """Recheck local availability before dispatch, without acquiring inputs."""
+        for checkpoint in self.checkpoints:
+            if not checkpoint.model_dir.is_dir():
+                raise ValueError(
+                    f"checkpoint must be an existing local directory: {checkpoint.model_dir}"
+                )
 
 
 @dataclass(frozen=True)
@@ -70,6 +118,61 @@ class BuildRequest:
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
             raise ValueError("graph_transform must be callable when provided")
+
+
+def subprocess_environment(overrides: dict[str, str], *,
+                           prepend_paths: dict[str, str] | None = None) -> dict[str, str]:
+    """Copy the parent environment for one child without mutating process state.
+
+    Callers own explicit tool settings; this helper only merges values and
+    prepends search paths using the executing platform's path separator.
+    """
+    environment = os.environ.copy()
+    environment.update(overrides)
+    for name, value in (prepend_paths or {}).items():
+        previous = environment.get(name)
+        environment[name] = value + (os.pathsep + previous if previous else "")
+    return environment
+
+
+def cmake_prefixes() -> list[Path]:
+    """Return explicit standard CMake prefixes followed by the Python prefix."""
+    prefixes = [
+        Path(value) for value in os.environ.get("CMAKE_PREFIX_PATH", "").split(os.pathsep) if value
+    ]
+    return [*prefixes, Path(sys.prefix)]
+
+
+def detect_local_platform() -> dict:
+    """Return executing GPU and native SDK identity without selecting a model.
+
+    Returns:
+        OS/release, CPU architecture, GPU SM, CUDA and TensorRT versions.
+
+    Raises:
+        ImportError: Native SDK Python bindings are unavailable.
+        RuntimeError: CUDA cannot identify the executing device.
+    """
+    import tensorrt as trt
+    from cuda.bindings import runtime
+
+    def checked(result):
+        if int(result[0]) != 0:
+            raise RuntimeError(f"CUDA device discovery failed: {result[0]}")
+        return result[1]
+
+    device = checked(runtime.cudaGetDevice())
+    gpu = checked(runtime.cudaGetDeviceProperties(device))
+    cuda = checked(runtime.cudaRuntimeGetVersion())
+    release = platform.freedesktop_os_release() if sys.platform == "linux" else {}
+    return {
+        "os": sys.platform,
+        "os_version": release.get("VERSION_ID", platform.release()),
+        "arch": platform.machine(),
+        "sm": gpu.major * 10 + gpu.minor,
+        "cuda_version": f"{cuda // 1000}.{cuda % 1000 // 10}",
+        "tensorrt_version": trt.__version__,
+    }
 
 
 def _validate_id(field: str, value: object) -> str:
@@ -130,16 +233,36 @@ def _select_backend(backend: str) -> None:
     sys.modules["tensorrt"] = rtx
 
 
-def build(request: BuildRequest) -> None:
-    """Run one family builder and publish its bundle on success."""
+def build(request: BuildRequest, *, execution: BuildExecutionInputs | None = None) -> None:
+    """Run one family builder and atomically publish its bundle on success.
+
+    Explicit execution inputs require the optional family build_with_inputs hook.
+    Missing support fails before constructing the writer; failures never retry a
+    different variant or silently invoke the ordinary builder.
+    """
+
+    if execution is not None:
+        if not isinstance(execution, BuildExecutionInputs):
+            raise TypeError("execution must be BuildExecutionInputs")
+        execution.validate_local()
 
     family = _resolve_family(request)
     _select_backend(request.backend)
     family_module = _load_family(family)
+    extended_build = None
+    if execution is not None:
+        extended_build = getattr(family_module, "build_with_inputs", None)
+        if not callable(extended_build):
+            raise NotImplementedError(
+                f"family {family!r} does not support explicit build execution inputs"
+            )
     writer = BundleWriter(request.output_path)
     try:
         with graph_transform(request.graph_transform):
-            family_module.build(request, writer)
+            if execution is None:
+                family_module.build(request, writer)
+            else:
+                extended_build(request, writer, execution)
         writer.finish()
     except BaseException:
         writer.abort()

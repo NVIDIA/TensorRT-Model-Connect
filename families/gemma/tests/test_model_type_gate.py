@@ -65,14 +65,15 @@ def test_the_gate_matches_what_support_claims() -> None:
 
 
 def test_a_later_gemma_generation_is_refused(tmp_path: Path) -> None:
-    """Gemma 3 and 4 need machinery this family does not have.
+    """Native standalone Gemma 3 and 4 need machinery this family does not have.
 
     Both add sliding-window attention on a 5:1 or 4:1 schedule and a second
     rope table for the local layers. Neither exists here, so a prefix check
     would let them build a full-attention graph and generate quietly wrong
-    text. The refusal names the type so the message is actionable.
+    text. Explicit paired Edge offload is a separate entrypoint. The refusal
+    names the type so the message is actionable.
     """
-    for model_type in ("gemma3", "gemma3_text", "gemma3n", "gemma4", "gemma4_text"):
+    for model_type in ("gemma3", "gemma3_text", "gemma3n", "gemma4", "gemma4_text", "gemma4_unified"):
         directory = _model_dir(tmp_path / model_type.replace("_", ""), model_type)
         with pytest.raises(ValueError, match=re.escape(f"model_type={model_type!r}")):
             _build(directory)
