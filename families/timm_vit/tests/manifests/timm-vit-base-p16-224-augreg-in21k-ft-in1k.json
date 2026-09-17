@@ -3,7 +3,7 @@
   "hf_id": "timm/vit_base_patch16_224.augreg_in21k_ft_in1k",
   "bundle": "timm-vit-base-p16-224-augreg-in21k-ft-in1k.bundle",
   "family": "timm_vit",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

@@ -4,7 +4,7 @@
   "hf_revision": "060449891838eaf301bdb3673e3daaf58e0370de",
   "bundle": "xcit-tiny-12-p16-224-fb-in1k.bundle",
   "family": "timm_xcit",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

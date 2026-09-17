@@ -23,8 +23,7 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     return bundle.read_section(name);
 }
 
-TimmVitPreprocessConfig parse_config(const std::vector<char>& data, std::int32_t& tp_size) {
-    const auto json = nlohmann::json::parse(data.begin(), data.end());
+TimmVitPreprocessConfig parse_config(const nlohmann::json& json, std::int32_t& tp_size) {
     TimmVitPreprocessConfig config;
     config.input_image_h = json.at("input_image_h").get<std::int32_t>();
     config.input_image_w = json.at("input_image_w").get<std::int32_t>();
@@ -56,7 +55,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::invalid_argument("timm_vit does not support --kv-cache-size");
     const auto& config_data = trtmc::timm_vit::require_section(context.reader, "runtime.json");
     std::int32_t tp_size = 0;
-    auto config = trtmc::timm_vit::parse_config(config_data, tp_size);
+    const auto metadata = nlohmann::json::parse(config_data.begin(), config_data.end());
+    auto config = trtmc::timm_vit::parse_config(metadata, tp_size);
     const auto group = trtmc::timm_vit::initialize_tensor_parallel_group(tp_size);
     const std::string section =
         tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(group.rank) + ".plan";
@@ -67,5 +67,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         options.distributed_owner = group.owner;
     }
     auto engine = trtmc::timm_vit::load_engine(context.backend, plan, options);
-    return new trtmc::ImageClassificationPipeline(std::move(engine), std::move(config));
+    return new trtmc::ImageClassificationPipeline(
+        std::move(engine), std::move(config), metadata.at("num_classes").get<std::int32_t>(),
+        metadata.at("vocabulary_id").get<std::string>(),
+        metadata.at("labels").get<std::vector<std::string>>());
 }

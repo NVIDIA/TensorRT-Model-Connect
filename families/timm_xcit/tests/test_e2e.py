@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -14,6 +15,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import record_evidence
 
 
 FAMILY = "timm_xcit"
@@ -26,7 +28,7 @@ def _cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted(MANIFEST_ROOT.glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == FAMILY
-        assert manifest["task"] == "classification"
+        assert manifest["task"] == "image_to_class_scores"
         for case in manifest["testcases"]:
             name = str(case["name"])
             assert name not in result
@@ -99,16 +101,73 @@ def _model_dir(manifest: dict) -> Path:
 def _asset(case: dict) -> Path:
     path = TEST_ROOT / str(case["test_image"])
     assert path.is_file(), f"selected XCiT E2E image is missing: {path}"
+    record_evidence("inputs", {"asset": path})
     return path
+
+
+def _assert_sdk_consumers(
+    runtime_root: Path, bundle: Path, case: dict, model_config: dict, expected: int, tmp_path: Path
+) -> None:
+    import numpy as np
+    from PIL import Image
+
+    native_build = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    image = np.asarray(Image.open(_asset(case)).convert("RGB"), dtype=np.float32)
+    image /= np.float32(255.0)
+    raw_image = tmp_path / "sdk-input.rgb.f32"
+    image.tofile(raw_image)
+    outputs = []
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_timm_xcit_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [
+                str(consumer),
+                str(bundle),
+                str(runtime_root),
+                str(raw_image),
+                str(image.shape[0]),
+                str(image.shape[1]),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        payloads = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"SDK {language} consumer must return one result"
+        actual = payloads[0]
+        record_evidence(f"sdk_{language}", actual)
+        assert actual["task"] == "image_to_class_scores"
+        assert actual["kind"] == "logit" and actual["score_kind"] == 1
+        assert actual["score_count"] == len(actual["scores"]) == int(model_config["num_classes"])
+        assert all(math.isfinite(value) for value in actual["scores"])
+        assert actual["top_class"] == expected
+        assert actual["top_score"] == max(actual["scores"])
+        assert actual["vocabulary_id"] == model_config.get("vocabulary_id", "")
+        assert actual["labels"] == model_config.get("label_names", [])
+        outputs.append(actual)
+    # Both SDKs receive identical pixels. The original CLI test above keeps
+    # its JPEG decoder and the unchanged top-1 timm oracle.
+    assert outputs[0] == outputs[1]
+
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("thresholds", {"top1_match": True})
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
     assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest["hf_revision"]})
     bundle = tmp_path / manifest["bundle"]
     build(
         BuildRequest(
@@ -137,6 +196,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         timeout=600,
     )
     actual = json.loads(completed.stdout)
+    record_evidence("native", actual)
 
     import timm
     import torch
@@ -156,4 +216,12 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     pixels = transform(Image.open(_asset(case)).convert("RGB")).unsqueeze(0).to("cuda")
     with torch.no_grad():
         expected = reference(pixels).float().cpu().numpy()
+    record_evidence("reference", {"top_class": int(np.argmax(expected)), "logits": expected})
     assert int(actual["top_class"]) == int(np.argmax(expected))
+    model_config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    assert len(actual["logits"]) == int(model_config["num_classes"])
+    assert actual["score_kind"] == "logit" and actual["scores"] == actual["logits"]
+    assert all(math.isfinite(value) for value in actual["scores"])
+    assert actual["vocabulary_id"] == model_config.get("vocabulary_id", "")
+    assert actual["labels"] == model_config.get("label_names", [])
+    _assert_sdk_consumers(runtime_root, bundle, case, model_config, int(np.argmax(expected)), tmp_path)

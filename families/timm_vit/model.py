@@ -444,6 +444,14 @@ class _TimmVitModel:
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         vit_cfg = config.raw.get("_timm_vit_config") or _resolve_vit_config(config.raw)
+        vocabulary_id = config.raw.get("vocabulary_id", "")
+        labels = config.raw.get("label_names", [])
+        if not isinstance(vocabulary_id, str):
+            raise ValueError("timm ViT vocabulary_id must be a string")
+        if not isinstance(labels, list) or (
+            labels and (len(labels) != vit_cfg["num_classes"] or any(not isinstance(label, str) or not label for label in labels))
+        ):
+            raise ValueError("timm ViT label_names must name every class in order")
         mean = config.raw.get("mean", [0.5, 0.5, 0.5])
         std = config.raw.get("std", [0.5, 0.5, 0.5])
         return {
@@ -454,6 +462,8 @@ class _TimmVitModel:
             "input_image_h": vit_cfg["image_size_h"],
             "input_image_w": vit_cfg["image_size_w"],
             "num_classes": vit_cfg["num_classes"],
+            "vocabulary_id": vocabulary_id,
+            "labels": labels,
             "image_mean": mean,
             "image_std": std,
             "crop_pct": float(config.raw.get("crop_pct", 0.9)),
@@ -490,8 +500,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "classification":
-        raise ValueError("timm_vit supports only task=classification")
+    if request.task != "image_to_class_scores":
+        raise ValueError("timm_vit supports only task=image_to_class_scores")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if not (
@@ -545,6 +555,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "interpolation",
             "image_mean",
             "image_std",
+            "num_classes",
+            "vocabulary_id",
+            "labels",
         )
     }
     runtime["tensor_parallel_size"] = request.tensor_parallel_size

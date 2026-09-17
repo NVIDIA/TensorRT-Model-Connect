@@ -75,7 +75,7 @@ def test_model_config_uses_timm_architecture_when_model_type_absent(tmp_path: Pa
         ModelMetadata(config={"architecture": config.model_type}, model_index={})
     )
     assert support is not None
-    assert support.tasks == ("classification",)
+    assert support.tasks == ("image_to_class_scores",)
 
 
 def test_bundle_config_preserves_image_preprocess_contract(tmp_path: Path) -> None:
@@ -100,6 +100,18 @@ def test_bundle_config_preserves_image_preprocess_contract(tmp_path: Path) -> No
     assert bundle_config["image_std"] == [0.4, 0.5, 0.6]
     assert bundle_config["crop_pct"] == pytest.approx(0.875)
     assert bundle_config["interpolation"] == "bilinear"
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_sdk_metadata_preserves_checkpoint_class_order(tmp_path: Path, named: bool) -> None:
+    _write_tiny_vit(tmp_path)
+    config = ModelConfig.from_dir(tmp_path)
+    if named:
+        config.raw.update(vocabulary_id="fixture:five", label_names=["a", "b", "c", "d", "e"])
+    metadata = model_module._TimmVitModel().get_bundle_config_overrides(config)
+    assert metadata["num_classes"] == 5
+    assert metadata["vocabulary_id"] == config.raw.get("vocabulary_id", "")
+    assert metadata["labels"] == config.raw.get("label_names", [])
 
 
 def test_load_weights_maps_timm_vit_shapes(tmp_path: Path) -> None:

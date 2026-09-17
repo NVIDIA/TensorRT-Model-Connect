@@ -9,6 +9,6 @@ from tensorrt_model_connect.model_support import family_support
 describe = family_support(
     model_types=("timm_swin", "swin_tiny_patch4_window7_224"),
     architectures=("swin_tiny_patch4_window7_224",),
-    tasks=("classification",),
-    default_task="classification",
+    tasks=("image_to_class_scores",),
+    default_task="image_to_class_scores",
 )

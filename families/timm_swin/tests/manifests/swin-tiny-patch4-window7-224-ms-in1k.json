@@ -4,7 +4,7 @@
   "hf_revision": "4cc3a7275b50b53a7bec45f32c236ebe64227cff",
   "bundle": "swin-tiny-patch4-window7-224-ms-in1k.bundle",
   "family": "timm_swin",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

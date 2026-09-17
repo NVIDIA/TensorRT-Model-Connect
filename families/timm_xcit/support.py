@@ -40,6 +40,6 @@ _ARCHITECTURES = (
 describe = family_support(
     model_types=("timm_xcit",) + _ARCHITECTURES,
     architectures=_ARCHITECTURES,
-    tasks=("classification",),
-    default_task="classification",
+    tasks=("image_to_class_scores",),
+    default_task="image_to_class_scores",
 )

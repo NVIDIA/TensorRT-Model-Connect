@@ -5,8 +5,8 @@
 
 #include "families/timm_vit/runtime/pipeline.h"
 
-#include <algorithm>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -14,28 +14,51 @@ namespace trtmc {
 
 namespace {
 
-const Tensor* find_logits_output(const TensorMap& outputs) {
+const Tensor& require_logits(const TensorMap& outputs) {
     for (const auto& [name, tensor] : outputs) {
-        if (name.find("logits") != std::string::npos || outputs.size() == 1)
-            return &tensor;
+        if (name.find("logits") == std::string::npos && outputs.size() != 1)
+            continue;
+        if (tensor.data == nullptr || tensor.dtype != DType::kFloat32 || tensor.numel() <= 0)
+            throw std::runtime_error("timm ViT engine must return nonempty float32 logits");
+        return tensor;
     }
-    return nullptr;
+    throw std::runtime_error("timm ViT engine did not return logits");
 }
 
 } // namespace
 
 ImageClassificationPipeline::ImageClassificationPipeline(std::unique_ptr<ITrtModule> model,
                                                          TimmVitPreprocessConfig preprocess_config,
-                                                         std::string model_id_str)
+                                                         std::int32_t num_classes,
+                                                         std::string vocabulary_id,
+                                                         std::vector<std::string> labels)
     : model_(std::move(model)), preprocess_config_(std::move(preprocess_config)),
-      model_id_(std::move(model_id_str)) {
+      num_classes_(num_classes), vocabulary_id_(std::move(vocabulary_id)),
+      labels_(std::move(labels)) {
     if (!model_ || !model_->ok())
         throw std::runtime_error("ImageClassificationPipeline: invalid model");
+    if (num_classes_ <= 0 ||
+        (!labels_.empty() && labels_.size() != static_cast<std::size_t>(num_classes_)))
+        throw std::runtime_error("timm ViT class metadata does not match its output size");
 }
 
-ClassificationResult ImageClassificationPipeline::classify(const float* pixels, int32_t height,
-                                                           int32_t width) {
-    auto pixel_values = preprocess_timm_vit_image(pixels, height, width, preprocess_config_);
+internal::LabelScoresResult
+ImageClassificationPipeline::run(const internal::ImageToClassScoresRequest& request,
+                                 internal::ConfigView config) {
+    if (!config.empty())
+        throw internal::ConfigError("timm ViT has no runtime configuration");
+    const auto& image = request.image;
+    if (image.format != internal::ImageFormat::Float32 || image.channels != 3 ||
+        image.data == nullptr || image.height == 0 || image.width == 0 ||
+        image.height > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
+        image.width > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
+        static_cast<std::uint64_t>(image.height) >
+            std::numeric_limits<std::size_t>::max() / image.width / 3 / sizeof(float) ||
+        image.byte_size != static_cast<std::size_t>(image.height) * image.width * 3 * sizeof(float))
+        throw std::invalid_argument("timm ViT requires contiguous float32 RGB input");
+    auto pixel_values = preprocess_timm_vit_image(
+        static_cast<const float*>(image.data), static_cast<std::int32_t>(image.height),
+        static_cast<std::int32_t>(image.width), preprocess_config_);
 
     Tensor img_t;
     img_t.data = pixel_values.data();
@@ -43,23 +66,19 @@ ClassificationResult ImageClassificationPipeline::classify(const float* pixels, 
     img_t.dtype = DType::kFloat32;
 
     auto outputs = model_->forward({{"pixel_values", img_t}});
-    ClassificationResult result;
+    internal::LabelScoresResult result;
 
-    const Tensor* logits_tensor = find_logits_output(outputs);
-    if (!logits_tensor)
-        return result;
+    const auto& logits_tensor = require_logits(outputs);
+    const auto n = logits_tensor.numel();
+    if (n != static_cast<std::size_t>(num_classes_))
+        throw std::runtime_error("timm ViT logits do not match its configured class count");
 
-    const auto n = logits_tensor->numel();
-    if (n <= 0)
-        return result;
-
-    result.logits.resize(static_cast<std::size_t>(n));
-    std::memcpy(result.logits.data(), logits_tensor->data,
+    result.scores.resize(static_cast<std::size_t>(n));
+    std::memcpy(result.scores.data(), logits_tensor.data,
                 static_cast<std::size_t>(n) * sizeof(float));
-
-    auto best = std::max_element(result.logits.begin(), result.logits.end());
-    result.top_class = static_cast<int32_t>(std::distance(result.logits.begin(), best));
-    result.top_score = (best == result.logits.end()) ? 0.0F : *best;
+    result.kind = internal::ScoreKind::Logit;
+    result.vocabulary_id = vocabulary_id_;
+    result.labels = labels_;
     return result;
 }
 
