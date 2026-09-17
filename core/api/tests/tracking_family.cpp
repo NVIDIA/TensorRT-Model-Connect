@@ -462,6 +462,8 @@ class Model final : public IModel,
     bool detected_created_{false};
 };
 } // namespace
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("tracking_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     return new Model(context.reader.info().task);
 }

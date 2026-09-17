@@ -231,6 +231,8 @@ class ExistingRecorded final : public trtmc::IRobotControl {
     int calls_{0};
 };
 } // namespace
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("action_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "action_fixture")
         throw std::runtime_error("wrong fixture family");

@@ -734,6 +734,8 @@ extern "C" int trtmc_test_speech_waiting_readers() {
 extern "C" int trtmc_test_speech_live_sessions() {
     return live_sessions.load();
 }
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("speech_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "speech_fixture")
         throw std::invalid_argument("wrong speech fixture");

@@ -521,6 +521,8 @@ extern "C" int trtmc_test_video_batch_items_executed() {
     return batch_items_executed.load();
 }
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("video_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "video_fixture")
         throw std::runtime_error("wrong fixture family");

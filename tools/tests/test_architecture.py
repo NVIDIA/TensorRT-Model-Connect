@@ -1326,6 +1326,23 @@ def test_every_runtime_exports_task_factory_and_abi_descriptor() -> None:
     assert violations == []
 
 
+def test_every_test_family_fixture_exports_abi_descriptor() -> None:
+    violations: list[str] = []
+    fixtures = 0
+    for path in REPO.rglob("*.cpp"):
+        if "tests" not in path.relative_to(REPO).parts:
+            continue
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        if 'extern "C" trtmc::ITask* trtmc_create_family' not in source:
+            continue
+        fixtures += 1
+        if "TRTMC_DEFINE_FAMILY_PLUGIN_V1" not in source:
+            violations.append(str(path.relative_to(REPO)))
+
+    assert fixtures > 0
+    assert violations == []
+
+
 def test_runtime_plugins_publish_one_exact_build_descriptor() -> None:
     descriptor = (REPO / "core/runtime/include/trtmc/runtime/plugin_abi.h").read_text(
         encoding="utf-8"

@@ -92,6 +92,8 @@ class StructureModel final : public IModel, public IMolecularDocumentToStructure
 };
 } // namespace
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("structure_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     return new StructureModel(context.reader.info().task);
 }
