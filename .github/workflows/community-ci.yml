@@ -581,7 +581,7 @@ jobs:
 
   required:
     name: Community CPU / Required
-    if: ${{ !cancelled() && needs.authorize.result == 'success' }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot != '')) }}
     needs:
       - authorize
       - source-quality

@@ -213,8 +213,13 @@ stage for GPU-impacting changes. Dev failures do not change Stable's result.
 The CPU jobs run on fresh GitHub-hosted `ubuntu-24.04` runners with read-only
 repository permission and no access to private runners, secrets, or GPUs.
 Source quality checks required SPDX headers and rejects changes to `LICENSE`
-or `NOTICE` relative to the tested merge's base. The Dev isolated GPU instance
-receives no repository, Hub, or Brev credentials.
+or `NOTICE` relative to the tested merge's base.
+
+The [Dev GPU experiment](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/ci/developer/.github/workflows/community-ci.yml)
+is maintained separately on `ci/developer`. Its isolated GPU instance receives no
+repository, Hub, or Brev credentials. Stable retains its existing manual GPU
+configuration, including the Hub credential for gated checkpoints; this PR does
+not change that configuration.
 
 Public Actions logs show the individual stages and failing commands. The
 [Community CI guide](.github/community-ci.md) explains the switch, CI branch

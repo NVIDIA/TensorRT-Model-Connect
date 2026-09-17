@@ -221,6 +221,12 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
             "fetch-depth": 0,
             "persist-credentials": False,
         }
+    # Metadata-only entry runs skip the gate; failed authorization on an
+    # executor must still run it so skipped CPU stages produce failure.
+    assert jobs["required"]["if"] == (
+        "${{ !cancelled() && (github.event_name == 'pull_request' || "
+        "(github.event_name == 'workflow_dispatch' && inputs.source_snapshot != '')) }}"
+    )
     assert jobs["required"]["needs"] == [
         "authorize",
         "source-quality",
