@@ -13,6 +13,9 @@ candidate:
   build:
     max_sequence_length: 257
 
+reference_environment:
+  requirements: ../../requirements.txt
+
 accuracy:
   - name: mmlu-continuation
     benchmark: mmlu_continuation
