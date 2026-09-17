@@ -26,13 +26,21 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 
 def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
     cases = discover(REPOSITORY)
+    kinds_by_model: dict[str, set[str]] = {}
+    for case in cases:
+        kinds_by_model.setdefault(case.model, set()).add(case.kind)
 
-    assert {(case.model, case.kind) for case in cases} == {
-        ("gpt2-125m", "accuracy"),
-        ("gpt2-125m", "performance"),
-        ("chronos-bolt-tiny-official", "accuracy"),
-        ("chronos-bolt-tiny-official", "performance"),
-    }
+    assert {
+        "bloom-560m",
+        "chronos-bolt-tiny-official",
+        "gpt-neo-125m",
+        "gpt2-125m",
+        "mamba-130m",
+        "mixtral-stories-15m",
+        "opt-125m",
+        "pythia-70m",
+    } <= set(kinds_by_model)
+    assert all(kinds == {"accuracy", "performance"} for kinds in kinds_by_model.values())
     assert not any("l0" in case.model.lower() for case in cases)
 
 
