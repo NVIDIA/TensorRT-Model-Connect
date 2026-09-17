@@ -10,6 +10,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
 from tools.benchmark_qualification import accuracy as qualification_accuracy
 from tools.benchmark_qualification.catalog import discover, load_benchmark, select
@@ -129,10 +131,22 @@ def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> N
     )
 
 
-def test_mmlu_forwards_reference_model_load_options(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("model", "expected_options"),
+    [
+        ("deepseek-v2-tiny", {"experts_implementation": "batched_mm"}),
+        ("internlm2-1.8b", {"trust_remote_code": True}),
+    ],
+)
+def test_mmlu_forwards_reference_model_load_options(
+    tmp_path: Path,
+    monkeypatch,
+    model: str,
+    expected_options: dict[str, object],
+) -> None:
     case = next(
         case
-        for case in select(discover(REPOSITORY), ["deepseek-v2-tiny"])
+        for case in select(discover(REPOSITORY), [model])
         if case.kind == "accuracy"
     )
     dataset_path = tmp_path / "mmlu.json"
@@ -188,7 +202,7 @@ def test_mmlu_forwards_reference_model_load_options(tmp_path: Path, monkeypatch)
     result = qualification_accuracy.run_accuracy(case, context)
 
     assert result["status"] == "passed"
-    assert captured["experts_implementation"] == "batched_mm"
+    assert {name: captured[name] for name in expected_options} == expected_options
 
 
 def test_hf_accuracy_reference_uses_requested_expert_implementation(monkeypatch) -> None:
@@ -200,6 +214,10 @@ def test_hf_accuracy_reference_uses_requested_expert_implementation(monkeypatch)
         "revision": "revision",
         "local_files_only": True,
         "experts_implementation": "batched_mm",
+    }
+    assert hf_text_generation._model_load_options({"trust_remote_code": True}) == {
+        "local_files_only": True,
+        "trust_remote_code": True,
     }
 
 
@@ -257,6 +275,10 @@ def test_candidate_descriptor_is_generated_from_public_build_inputs(tmp_path: Pa
     assert '"task": "text_generation"' in value
     assert '"max_sequence_length": 1024' in value
     assert "tests/manifests" not in value
+
+    internlm = select(discover(REPOSITORY), ["internlm2-1.8b"])[0]
+    descriptor = write_model_descriptor(internlm, tmp_path, {"prompt": "hello"})
+    assert json.loads(descriptor.read_text(encoding="utf-8"))["trust_remote_code"] is True
 
 
 def test_internal_subprocesses_can_import_repository_packages(tmp_path: Path) -> None:

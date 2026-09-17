@@ -32,7 +32,7 @@ def main() -> int:
     model_options = _model_load_options(request)
     tokenizer_options = {
         name: model_options[name]
-        for name in ("local_files_only", "revision")
+        for name in ("local_files_only", "revision", "trust_remote_code")
         if name in model_options
     }
     tokenizer = AutoTokenizer.from_pretrained(str(request["model"]), **tokenizer_options)
@@ -103,6 +103,11 @@ def _model_load_options(request: Mapping[str, Any]) -> dict[str, Any]:
     }
     if request.get("revision"):
         options["revision"] = request["revision"]
+    trust_remote_code = request.get("trust_remote_code")
+    if trust_remote_code is not None:
+        if not isinstance(trust_remote_code, bool):
+            raise ValueError("trust_remote_code must be a boolean")
+        options["trust_remote_code"] = trust_remote_code
     experts_implementation = request.get("experts_implementation")
     if experts_implementation is not None:
         if not isinstance(experts_implementation, str) or not experts_implementation:

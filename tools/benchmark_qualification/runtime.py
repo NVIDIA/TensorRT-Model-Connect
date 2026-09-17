@@ -109,6 +109,7 @@ def write_model_descriptor(
         "family": case.family,
         "task": task,
         "precision": str(candidate["precision"]),
+        "trust_remote_code": bool(candidate.get("trust_remote_code", False)),
         "testcases": [testcase],
         **dict(candidate.get("build", {})),
     }
