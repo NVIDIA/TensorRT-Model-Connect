@@ -937,6 +937,9 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         const fs::path metadata_path = has_option(command, "--output-json")
                                            ? command.options.at("--output-json")
                                            : structure_path.string() + ".metadata.json";
+        if (fs::absolute(structure_path).lexically_normal() ==
+            fs::absolute(metadata_path).lexically_normal())
+            throw std::invalid_argument("--output and --output-json must use different paths");
         auto indexed_path = [](const fs::path& path, std::size_t index) {
             if (index == 0)
                 return path;

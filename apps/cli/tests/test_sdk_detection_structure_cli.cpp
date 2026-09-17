@@ -249,6 +249,19 @@ void structure(const std::filesystem::path& root) {
             read_file("existing.cif") == "data_existing\n" &&
             read_file("existing.json") == "{\"existing\":true}",
         "unmigrated structure command preserves every existing explicit argument and binary input");
+    write_file("existing-collision.cif", "keep legacy bytes");
+    auto collision_command =
+        parse({"trtmc", "predict-structure", "unused.bundle", "--input", prepared.string(),
+               "--output", "existing-collision.cif", "--output-json", "./existing-collision.cif"});
+    bool collision_rejected = false;
+    try {
+        (void)trtmc::cli::dispatch(collision_command, existing, existing_output);
+    } catch (const std::invalid_argument& error) {
+        collision_rejected =
+            std::string_view(error.what()).find("different paths") != std::string_view::npos;
+    }
+    check(collision_rejected && read_file("existing-collision.cif") == "keep legacy bytes",
+          "unmigrated structure command rejects equivalent output paths before writing");
     command.options["--input-encoding"] = "b2rq";
     bool rejected = false;
     try {

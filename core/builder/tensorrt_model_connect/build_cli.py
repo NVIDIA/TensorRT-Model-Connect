@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -51,12 +52,20 @@ def _parser(prepare_family: object | None = None) -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
     base_parser = _parser()
-    preliminary, _ = base_parser.parse_known_args(argv)
+    if (
+        len(arguments) > 1
+        and arguments[0] == "prepare-structure"
+        and arguments[1] not in {"-h", "--help"}
+        and arguments[1].startswith("-")
+    ):
+        base_parser.error("MODEL must immediately follow prepare-structure")
+    preliminary, _ = base_parser.parse_known_args(arguments)
     model_dir = _resolve_model(preliminary.model, preliminary.revision)
     family, support = resolve_family(load_model_metadata(model_dir))
     family_module = _load_family(family) if preliminary.command == "prepare-structure" else None
-    args = _parser(family_module).parse_args(argv)
+    args = _parser(family_module).parse_args(arguments)
     if args.command == "prepare-structure":
         prepare = getattr(family_module, "prepare_structure_request", None)
         if not callable(prepare):

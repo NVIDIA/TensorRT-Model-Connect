@@ -366,6 +366,31 @@ def test_prepare_structure_dispatches_to_the_resolved_family(
     }
 
 
+def test_prepare_structure_requires_model_before_family_options(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        build_cli,
+        "_resolve_model",
+        lambda *_: pytest.fail("ambiguous family option value reached model resolution"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        build_cli.main(
+            [
+                "prepare-structure",
+                "--num-steps",
+                "300",
+                "model",
+                "--input",
+                "request.yaml",
+                "--output",
+                "request.b2rq",
+            ]
+        )
+
+    assert error.value.code == 2
+    assert "MODEL must immediately follow prepare-structure" in capsys.readouterr().err
+
+
 def test_prepare_structure_uses_the_family_hook_after_task_migration(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
