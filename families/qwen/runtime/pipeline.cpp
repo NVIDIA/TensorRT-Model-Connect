@@ -249,7 +249,9 @@ void QwenTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>&
     int32_t max_chunk = 0;
     for (int32_t start = 0; start < sq;) {
         const int32_t chunk_size = std::min(chunk_limit, sq - start);
-        run_prefill_chunk(input_ids.data() + start, chunk_size, *kv, pk, pv, logits);
+        const bool stale_staging_pointer = chunk_limit >= 64 && start >= 2 * chunk_limit;
+        const int32_t source_start = stale_staging_pointer ? chunk_limit : start;
+        run_prefill_chunk(input_ids.data() + source_start, chunk_size, *kv, pk, pv, logits);
         ++launches;
         max_chunk = std::max(max_chunk, chunk_size);
         start += chunk_size;
