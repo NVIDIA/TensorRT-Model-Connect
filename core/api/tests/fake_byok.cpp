@@ -3,12 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "trtmc/runtime/plugin_abi.h"
+
 #include <cstdio>
 #include <cstring>
 
 extern "C" {
 int trtmc_test_byok_calls = 0;
 }
+
+TRTMC_DEFINE_PLUGIN_DESCRIPTOR_V1(::trtmc::PluginKind::kRuntimeExtension, "tvm_ffi")
 
 extern "C" const char* trtmc_load_byok_kernel(const char* library, const char* function,
                                               const char* kernel_name) noexcept {

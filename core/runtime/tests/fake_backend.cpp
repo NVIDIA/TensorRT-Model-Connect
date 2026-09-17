@@ -54,6 +54,8 @@ extern "C" const trtmc::PluginDescriptorV1* trtmc_plugin_descriptor_v1() noexcep
         trtmc::PluginKind::kBackend, TRTMC_FAKE_BACKEND_NAME, "00000000000000000000000000000000"};
     return &descriptor;
 }
+#elif defined(TRTMC_FAKE_RUNTIME_EXTENSION)
+TRTMC_DEFINE_PLUGIN_DESCRIPTOR_V1(::trtmc::PluginKind::kRuntimeExtension, "tvm_ffi")
 #else
 TRTMC_DEFINE_BACKEND_PLUGIN_V1(TRTMC_FAKE_BACKEND_NAME)
 #endif
