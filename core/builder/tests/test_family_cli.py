@@ -55,6 +55,34 @@ def test_selected_handler_receives_declared_typed_values(declared):
     assert "verbose" not in calls[0]
 
 
+def test_new_owner_command_and_option_need_only_owner_files(declared, monkeypatch):
+    _, path, original_calls = declared
+    owner = path.parent.parent / "beta"
+    owner.mkdir()
+    command = {
+        "name": "compose", "executor": "python", "handler": "actions:combine",
+        "arguments": [
+            {"name": "policy", "flags": ["--owner-policy"], "type": "string",
+             "choices": ["exact", "fast"], "default": "exact"},
+        ],
+    }
+    (owner / "cli.json").write_text(json.dumps({"version": 1, "commands": [command]}))
+    calls = []
+    monkeypatch.setitem(sys.modules, "families.beta.actions", SimpleNamespace(
+        combine=lambda **values: calls.append(values) or 19,
+    ))
+
+    assert family_cli.main(["beta", "compose"]) == 19
+    assert family_cli.main(["beta", "compose", "--owner-policy", "fast"]) == 19
+    assert calls == [{"policy": "exact"}, {"policy": "fast"}]
+    assert original_calls == []
+    with pytest.raises(SystemExit):
+        family_cli.main(["beta", "compose", "--count", "1"])
+    assert len(calls) == 2
+    assert family_cli.main(["alpha", "execute", "input"]) == 7
+    assert original_calls[-1]["count"] == 2
+
+
 @pytest.mark.parametrize("arguments", [
     ["--missing", "1"], ["--cou", "1"], ["--count", "1", "--count", "2"],
     ["--verbose", "--verbose"], ["--active", "yes"],

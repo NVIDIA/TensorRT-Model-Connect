@@ -278,6 +278,37 @@ void installation_contract(const fs::path& root, const fs::path& fixture) {
               0,
           "wheel layout finds family declarations without importing Python");
 }
+
+void independent_owner_contract(const fs::path& root, const fs::path& fixture) {
+    const auto executable = root / "trtmc";
+    const Json owner = {
+        {"version", 1},
+        {"commands", Json::array({{{"name", "compose"},
+                                   {"executor", "native"},
+                                   {"handler", "combine"},
+                                   {"arguments", Json::array({{{"name", "policy"},
+                                                               {"flags", {"--owner-policy"}},
+                                                               {"type", "string"},
+                                                               {"choices", {"exact", "fast"}},
+                                                               {"default", "exact"}}})}}})}};
+    write_json(root / "families/another_owner/cli.json", owner);
+    fs::copy_file(fixture, root / "libtrtmc_cli_another_owner.so");
+    const auto defaults = run(executable, {"trtmc", "another_owner", "compose"});
+    const auto selected =
+        run(executable, {"trtmc", "another_owner", "compose", "--owner-policy", "fast"});
+    check(defaults.status == 0 && selected.status == 0,
+          "new family commands only require an owner description and handler library");
+    if (defaults.status == 0 && selected.status == 0) {
+        check(Json::parse(defaults.output).at("values") == Json({{"policy", "exact"}}) &&
+                  Json::parse(selected.output).at("values") == Json({{"policy", "fast"}}) &&
+                  Json::parse(selected.output).at("handler") == "combine",
+              "the host forwards the new owner's handler, defaults and opaque argument names");
+    }
+    check(run(executable, {"trtmc", "another_owner", "compose", "--count", "1"}).status == 2,
+          "one owner's options never leak into another owner's command");
+    check(run(executable, {"trtmc", "fixture", "echo", "original"}).status == 0,
+          "adding an owner preserves the original owner's command");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -289,6 +320,7 @@ int main(int argc, char** argv) {
     fs::create_directories(root);
     try {
         descriptor_contract(root, fs::absolute(argv[1]));
+        independent_owner_contract(root, fs::absolute(argv[1]));
         installation_contract(root / "layouts", fs::absolute(argv[1]));
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

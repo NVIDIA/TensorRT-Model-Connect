@@ -46,6 +46,43 @@ def _has_owned_build(family: Path) -> bool:
     )
 
 
+def test_family_cli_dispatchers_do_not_define_owner_policy() -> None:
+    owners = {family.name for family in family_dirs()}
+    paths = (
+        REPO / "core/builder/tensorrt_model_connect/family_cli.py",
+        REPO / "apps/cli/family_cli.cpp",
+    )
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        if path.suffix == ".py":
+            tree = ast.parse(source, filename=str(path))
+            strings = {
+                node.value for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            }
+            modules = {
+                node.module for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module
+            }
+            modules.update(
+                alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                for alias in node.names
+            )
+            assert not any(module.startswith("families") for module in modules), path
+        else:
+            strings = set(re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', source))
+            includes = re.findall(r'#include\s+[<"]([^>"]+)', source)
+            assert not any(
+                include.startswith("families/") or (
+                    include.startswith("trtmc/") and include != "trtmc/internal/cli.h"
+                ) for include in includes
+            ), path
+        assert not (strings & owners), path
+        options = {value for value in strings if re.fullmatch(r"--?[a-zA-Z][a-zA-Z0-9_-]*", value)}
+        # -m launches the Python module; it is not a family command option.
+        assert options <= {"--help", "-h", "-m"}, (path, options)
+
+
 def _family_module_name(family: Path, path: Path) -> str:
     parts = list(path.relative_to(family).with_suffix("").parts)
     if parts[-1] == "__init__":

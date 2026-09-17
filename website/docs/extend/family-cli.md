@@ -8,6 +8,24 @@ parse arguments and display help. The selected family owns the handler and
 the meaning of every argument. Adding a command does not require a central
 command registry or another field in the shared `BuildRequest`.
 
+## Ownership boundary
+
+The family owns the command handler as well as its declaration. It decides
+which runtime operations to call, how to compose them, how to prepare inputs
+and how to present results. A handler can reuse the existing Task SDK without
+moving these decisions into the public CLI.
+
+The shared dispatchers only discover descriptions, validate the description
+format, parse declared types, render help and invoke the selected handler.
+They must not contain family IDs, business command or option definitions,
+model defaults, or command-to-Task mappings. The native host depends on the
+generic CLI entry-point contract; Task SDK calls belong inside owner handlers.
+
+Adding a family command, option or workflow must require only the family's
+declaration, handler and tests. A new Task contract or a new generic CLI value
+type can require a separate shared-contract change. The existing flat CLI is
+a temporary compatibility path; new family features must use the owner path.
+
 ## Discover commands without loading a model
 
 ```bash
