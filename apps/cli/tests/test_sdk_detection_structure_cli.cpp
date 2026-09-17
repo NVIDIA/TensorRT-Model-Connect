@@ -119,12 +119,20 @@ void detection(const std::filesystem::path& root) {
 class ExistingStructure final : public trtmc::IStructurePrediction {
   public:
     trtmc::StructurePredictionRequest seen;
+    bool multiple_samples{false};
     trtmc::StructurePredictionResult
     predict_structure(const trtmc::StructurePredictionRequest& request) override {
         seen = request;
         trtmc::StructurePredictionResult result;
         result.structure = "data_existing\n";
         result.metadata_json = "{\"existing\":true}";
+        if (multiple_samples) {
+            result.samples.resize(2);
+            result.samples[0].structure = "data_sample_0\n";
+            result.samples[0].metadata_json = "{\"sample\":0}";
+            result.samples[1].structure = "data_sample_1\n";
+            result.samples[1].metadata_json = "{\"sample\":1}";
+        }
         return result;
     }
 };
@@ -262,6 +270,23 @@ void structure(const std::filesystem::path& root) {
     }
     check(collision_rejected && read_file("existing-collision.cif") == "keep legacy bytes",
           "unmigrated structure command rejects equivalent output paths before writing");
+    existing.multiple_samples = true;
+    write_file("cross-sample.cif", "keep metadata bytes");
+    write_file("cross-sample_sample_1.cif", "keep structure bytes");
+    collision_command =
+        parse({"trtmc", "predict-structure", "unused.bundle", "--input", prepared.string(),
+               "--output", "cross-sample_sample_1.cif", "--output-json", "cross-sample.cif"});
+    collision_rejected = false;
+    try {
+        (void)trtmc::cli::dispatch(collision_command, existing, existing_output);
+    } catch (const std::invalid_argument& error) {
+        collision_rejected =
+            std::string_view(error.what()).find("different paths") != std::string_view::npos;
+    }
+    check(collision_rejected && read_file("cross-sample.cif") == "keep metadata bytes" &&
+              read_file("cross-sample_sample_1.cif") == "keep structure bytes",
+          "all multi-sample output paths are validated before writing");
+    existing.multiple_samples = false;
     command.options["--input-encoding"] = "b2rq";
     bool rejected = false;
     try {
